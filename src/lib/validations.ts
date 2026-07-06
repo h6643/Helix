@@ -23,4 +23,6 @@ export const AgentRunRequestSchema = z.object({
 export const ApproveRequestSchema = z.object({
   approvalId: z.string().min(1),
   action: z.enum(['approve', 'reject']),
+  cache: z.boolean().optional(),
+  approveAll: z.boolean().optional(),
 })

@@ -2,9 +2,10 @@
  * IndexedDB persistence layer for Helix
  * Stores: memories, tasks, notes, checkpoints, chat history, file snapshots
  */
+import { encryptApiKey, decryptApiKey } from './crypto'
 
 const DB_NAME = 'helix-db'
-const DB_VERSION = 3
+const DB_VERSION = 4
 
 interface PersistedMemory {
   id: string
@@ -35,6 +36,14 @@ export interface PersistedChatMessage {
   sessionId?: string
   role: string
   content: string
+  images?: Array<{
+    id: string
+    dataUrl: string
+    mediaType: string
+    width?: number
+    height?: number
+    name?: string
+  }>
   timestamp: number
   isStreaming: boolean
 }
@@ -62,10 +71,35 @@ export interface PersistedProject {
   files: PersistedFileSnapshot[]
 }
 
+export interface PersistedOpenTab {
+  id: string
+  fileId?: string
+  name: string
+  language?: string
+  isDirty?: boolean
+}
+
+export type PersistedEditorTab = PersistedOpenTab
+
+export interface PersistedScheduledTask {
+  id: string
+  label: string
+  prompt: string
+  scheduleText: string
+  cronExpression?: string
+  enabled: boolean
+  lastRunAt: number | null
+  nextRunAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
 export interface PersistedSession {
   id: string
   label: string
   savedAt: number
+  isArchived?: boolean
+  workDir: string | null
   goal: string | null
   memories: PersistedMemory[]
   tasks: PersistedTask[]
@@ -73,6 +107,7 @@ export interface PersistedSession {
   checkpoints: PersistedCheckpoint[]
   chatMessages: PersistedChatMessage[]
   files: PersistedFileSnapshot[]
+  openTabs: PersistedOpenTab[]
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -318,14 +353,46 @@ export const persistence = {
 
   // --- Settings ---
   async saveSetting(key: string, value: unknown): Promise<void> {
+    let toStore = value
+    if (key === 'apiConfig' && value && typeof value === 'object' && 'apiKey' in (value as Record<string, unknown>)) {
+      const config = { ...(value as Record<string, unknown>) }
+      if (typeof config.apiKey === 'string' && config.apiKey) {
+        config.apiKey = await encryptApiKey(config.apiKey)
+      }
+      toStore = config
+    }
+    if (key === 'apiHistory' && Array.isArray(value)) {
+      toStore = await Promise.all((value as Array<Record<string, unknown>>).map(async (h) => {
+        if (typeof h.apiKey === 'string' && h.apiKey) {
+          return { ...h, apiKey: await encryptApiKey(h.apiKey) }
+        }
+        return h
+      }))
+    }
     const db = await openDB()
-    await tx(db, 'settings', 'readwrite', (store) => store.put({ key, value }))
+    await tx(db, 'settings', 'readwrite', (store) => store.put({ key, value: toStore }))
   },
 
   async loadSetting<T = unknown>(key: string): Promise<T | null> {
     const db = await openDB()
     const result = await tx<{ key: string; value: T } | undefined>(db, 'settings', 'readonly', (store) => store.get(key))
-    return result?.value ?? null
+    let value: T | null = result?.value ?? null
+    if (key === 'apiConfig' && value && typeof value === 'object' && 'apiKey' in (value as Record<string, unknown>)) {
+      const config = { ...(value as Record<string, unknown>) }
+      if (typeof config.apiKey === 'string' && config.apiKey) {
+        config.apiKey = await decryptApiKey(config.apiKey)
+      }
+      value = config as T
+    }
+    if (key === 'apiHistory' && Array.isArray(value)) {
+      value = await Promise.all((value as Array<Record<string, unknown>>).map(async (h) => {
+        if (typeof h.apiKey === 'string' && h.apiKey) {
+          return { ...h, apiKey: await decryptApiKey(h.apiKey) }
+        }
+        return h
+      })) as T
+    }
+    return value
   },
 
   // --- Full Session Save/Restore ---
@@ -337,15 +404,22 @@ export const persistence = {
     checkpoints: PersistedCheckpoint[]
     chatMessages: PersistedChatMessage[]
     files: PersistedFileSnapshot[]
+    openTabs: PersistedOpenTab[]
+    id?: string
+    savedAt?: number
     label?: string
+    workDir?: string | null
+    isArchived?: boolean
   }): Promise<string> {
     const db = await openDB()
-    const id = 'session-' + Date.now()
+    const now = Date.now()
+    const id = data.id || 'session-' + now
     const { label: dataLabel, ...rest } = data
     const session: PersistedSession = {
       id,
       label: dataLabel || new Date().toLocaleString('zh-CN'),
-      savedAt: Date.now(),
+      savedAt: data.savedAt || now,
+      workDir: data.workDir ?? null,
       ...rest,
       chatMessages: rest.chatMessages.map(m => ({ ...m, sessionId: m.sessionId || 'session-default' })),
     }
@@ -361,6 +435,16 @@ export const persistence = {
   async deleteSession(id: string): Promise<void> {
     const db = await openDB()
     await tx(db, 'sessions', 'readwrite', (store) => store.delete(id))
+  },
+
+  async updateSessionLabel(id: string, label: string): Promise<void> {
+    const db = await openDB()
+    const session = await tx<PersistedSession | undefined>(db, 'sessions', 'readonly', (store) => store.get(id))
+    if (session) {
+      session.label = label
+      session.savedAt = Date.now()
+      await tx(db, 'sessions', 'readwrite', (store) => store.put(session))
+    }
   },
 
   // --- Projects ---
@@ -413,5 +497,117 @@ export const persistence = {
 
   async loadNotes(): Promise<string> {
     return (await this.loadSetting<string>('notes')) ?? ''
+  },
+
+  // --- Scheduled Tasks ---
+  async saveScheduledTasks(tasks: PersistedScheduledTask[]): Promise<void> {
+    await this.saveSetting('scheduledTasks', tasks)
+  },
+
+  async loadScheduledTasks(): Promise<PersistedScheduledTask[]> {
+    return (await this.loadSetting<PersistedScheduledTask[]>('scheduledTasks')) ?? []
+  },
+
+  // --- Editor Theme ---
+  async saveEditorTheme(theme: string): Promise<void> {
+    await this.saveSetting('editorTheme', theme)
+  },
+
+  async loadEditorTheme(): Promise<string | null> {
+    return this.loadSetting<string>('editorTheme')
+  },
+
+  // --- Session Export/Import ---
+  async exportSessionAsJson(session: PersistedSession): Promise<string> {
+    const exportData = {
+      version: '1.0',
+      exportedAt: Date.now(),
+      type: 'helix-session',
+      session: {
+        label: session.label,
+        savedAt: session.savedAt,
+        workDir: session.workDir,
+        goal: session.goal,
+        chatMessages: session.chatMessages.map(m => ({
+          role: m.role,
+          content: m.content,
+          timestamp: m.timestamp,
+        })),
+        files: session.files,
+        openTabs: session.openTabs,
+        tasks: session.tasks,
+        memories: session.memories,
+        notes: session.notes,
+      },
+    }
+    return JSON.stringify(exportData, null, 2)
+  },
+
+  async exportSessionAsMarkdown(session: PersistedSession): Promise<string> {
+    const lines: string[] = []
+    lines.push(`# ${session.label}`)
+    lines.push(`> 导出时间: ${new Date(session.savedAt).toLocaleString('zh-CN')}`)
+    if (session.goal) lines.push(`> 目标: ${session.goal}`)
+    if (session.workDir) lines.push(`> 工作目录: ${session.workDir}`)
+    lines.push('')
+
+    const fileList = session.files || []
+    if (fileList.length > 0) {
+      lines.push('## 文件结构')
+      for (const f of fileList) {
+        lines.push(`- ${f.name}${f.type === 'folder' ? '/' : ''}`)
+      }
+      lines.push('')
+    }
+
+    const messages = session.chatMessages || []
+    if (messages.length > 0) {
+      lines.push('## 对话记录')
+      lines.push('')
+      for (const msg of messages) {
+        const role = msg.role === 'user' ? '🧑 用户' : '🤖 AI'
+        lines.push(`### ${role} (${new Date(msg.timestamp).toLocaleString('zh-CN')})`)
+        lines.push('')
+        lines.push(msg.content)
+        lines.push('')
+        lines.push('---')
+        lines.push('')
+      }
+    }
+
+    return lines.join('\n')
+  },
+
+  async importSessionFromJson(json: string): Promise<PersistedSession | null> {
+    try {
+      const data = JSON.parse(json)
+      if (data.type !== 'helix-session' && !data.session) return null
+      const s = data.session || data
+      const now = Date.now()
+      const session: PersistedSession = {
+        id: `imported-${now}`,
+        label: s.label || `导入会话 ${new Date(now).toLocaleString('zh-CN')}`,
+        savedAt: s.savedAt || now,
+        workDir: s.workDir || null,
+        goal: s.goal || null,
+        chatMessages: (s.chatMessages || []).map((m: any) => ({
+          id: `msg-${now}-${Math.random().toString(36).slice(2, 8)}`,
+          role: m.role,
+          content: m.content || '',
+          timestamp: m.timestamp || now,
+          isStreaming: false,
+        })),
+        files: s.files || [],
+        openTabs: s.openTabs || [],
+        tasks: s.tasks || [],
+        memories: s.memories || [],
+        notes: s.notes || '',
+        checkpoints: [],
+      }
+      await this.saveSession(session)
+      return session
+    } catch {
+      return null
+    }
   },
 }

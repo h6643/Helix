@@ -3,15 +3,129 @@
 import React, { useCallback, useEffect } from 'react'
 import { useHelixStore } from '@/stores/helix-store'
 
+// Parse key string like "Ctrl+Shift+X" into a normalized format
+function parseKeyString(keys: string[]): { ctrl: boolean; shift: boolean; alt: boolean; meta: boolean; key: string } {
+  let ctrl = false, shift = false, alt = false, meta = false, key = ''
+  for (const k of keys) {
+    const lower = k.toLowerCase()
+    if (lower === 'ctrl' || lower === 'control') ctrl = true
+    else if (lower === 'shift') shift = true
+    else if (lower === 'alt') alt = true
+    else if (lower === 'meta' || lower === 'cmd' || lower === 'command') meta = true
+    else key = k.length === 1 ? k.toLowerCase() : k
+  }
+  return { ctrl, shift, alt, meta, key }
+}
+
+function matchShortcut(e: KeyboardEvent, shortcutKeys: string[]): boolean {
+  const parsed = parseKeyString(shortcutKeys)
+  const isMod = e.ctrlKey || e.metaKey
+
+  // Check modifier keys
+  if (parsed.ctrl !== isMod) return false
+  if (parsed.shift !== e.shiftKey) return false
+  if (parsed.alt !== e.altKey) return false
+
+  // Check main key
+  if (!parsed.key) return false
+  const eventKey = e.key.length === 1 ? e.key.toLowerCase() : e.key
+  return eventKey === parsed.key.toLowerCase()
+}
+
+// Action handlers map
+function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
+  return {
+    // Panel toggles
+    'toggle-command-palette': () => state.toggleCommandPalette(),
+    'toggle-session-manager': () => state.toggleSessionManager(),
+    'toggle-skill-panel': () => state.toggleSkillPanel(),
+    'toggle-scheduled-tasks-panel': () => state.toggleScheduledTasksPanel(),
+    'toggle-terminal': () => state.toggleTerminal(),
+    'toggle-settings': () => state.toggleSettings(),
+
+    // Chat
+    'new-chat': () => state.clearChat(),
+    'archive-chat': () => {}, // TODO: implement archive
+    'rename-chat': () => {}, // TODO: implement rename
+    'search-chats': () => {}, // TODO: implement search
+    'next-chat': () => {}, // TODO: implement
+    'prev-chat': () => {}, // TODO: implement
+
+    // Tabs
+    'close-tab': () => { if (state.activeTabId) state.closeTab(state.activeTabId) },
+    'next-tab': () => {
+      const tabs = state.openTabs
+      if (tabs.length > 1) {
+        const idx = tabs.findIndex(t => t.id === state.activeTabId)
+        state.setActiveTab(tabs[(idx + 1) % tabs.length].id)
+      }
+    },
+    'prev-tab': () => {
+      const tabs = state.openTabs
+      if (tabs.length > 1) {
+        const idx = tabs.findIndex(t => t.id === state.activeTabId)
+        state.setActiveTab(tabs[(idx - 1 + tabs.length) % tabs.length].id)
+      }
+    },
+    'chat-1': () => { if (state.openTabs[0]) state.setActiveTab(state.openTabs[0].id) },
+    'chat-2': () => { if (state.openTabs[1]) state.setActiveTab(state.openTabs[1].id) },
+    'chat-3': () => { if (state.openTabs[2]) state.setActiveTab(state.openTabs[2].id) },
+    'chat-4': () => { if (state.openTabs[3]) state.setActiveTab(state.openTabs[3].id) },
+    'chat-5': () => { if (state.openTabs[4]) state.setActiveTab(state.openTabs[4].id) },
+    'chat-6': () => { if (state.openTabs[5]) state.setActiveTab(state.openTabs[5].id) },
+    'chat-7': () => { if (state.openTabs[6]) state.setActiveTab(state.openTabs[6].id) },
+    'chat-8': () => { if (state.openTabs[7]) state.setActiveTab(state.openTabs[7].id) },
+    'chat-9': () => { if (state.openTabs[8]) state.setActiveTab(state.openTabs[8].id) },
+
+    // File operations
+    'copy-path': () => {
+      const tab = state.openTabs.find(t => t.id === state.activeTabId)
+      if (tab) {
+        const path = state.getFilePath(tab.fileId)
+        navigator.clipboard.writeText(path)
+      }
+    },
+    'copy-workdir': () => {
+      navigator.clipboard.writeText(state.selectedWorkDir || '')
+    },
+    'copy-session-id': () => {
+      navigator.clipboard.writeText(state.currentSessionId || '')
+    },
+
+    // Model picker
+    'model-picker': () => state.toggleCommandPalette(),
+
+    // Toggle panels
+    'toggle-file-tree': () => {}, // TODO: implement
+
+    // No-op for actions not yet implemented
+    'default': () => {},
+  }
+}
+
 export function KeyboardShortcuts() {
-  const { toggleCommandPalette, activeTabId, closeTab, openTabs, setActiveTab, markTabSaved, showToast, setCommandPaletteOpen, setChatLoading } =
-    useHelixStore()
+  const storeState = useHelixStore()
+  const { toggleCommandPalette, activeTabId, closeTab, openTabs, setActiveTab, markTabSaved, showToast, setCommandPaletteOpen, customShortcuts, toggleSessionManager, toggleSkillPanel, toggleScheduledTasksPanel } =
+    storeState
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       const isMod = e.ctrlKey || e.metaKey
       const target = e.target as HTMLElement
       const isInputFocused = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+
+      // Check custom shortcuts first (always active)
+      for (const [id, shortcut] of Object.entries(customShortcuts)) {
+        if (matchShortcut(e, shortcut.keys)) {
+          e.preventDefault()
+          // Dispatch action
+          const action = shortcut.action
+          const handlerMap = createActionHandler(useHelixStore.getState())
+          const handler = handlerMap[action as keyof ReturnType<typeof createActionHandler>] || handlerMap['default']
+          handler()
+          return
+        }
+      }
 
       // Ctrl+K: Command Palette (always)
       if (isMod && e.key === 'k') {
@@ -24,6 +138,37 @@ export function KeyboardShortcuts() {
       if (isMod && e.key === 'p' && !e.shiftKey) {
         e.preventDefault()
         setCommandPaletteOpen(true)
+        return
+      }
+
+      // Ctrl+Shift+M: Toggle session manager
+      if (isMod && e.shiftKey && e.key === 'M') {
+        e.preventDefault()
+        toggleSessionManager()
+        return
+      }
+
+      // Ctrl+Shift+P: Toggle skill panel
+      if (isMod && e.shiftKey && e.key === 'P') {
+        e.preventDefault()
+        toggleSkillPanel()
+        return
+      }
+
+      // Ctrl+Shift+T: Toggle scheduled tasks panel
+      if (isMod && e.shiftKey && e.key === 'T') {
+        e.preventDefault()
+        toggleScheduledTasksPanel()
+        return
+      }
+
+      // Ctrl+L: Focus chat input
+      if (isMod && !e.shiftKey && e.key === 'l') {
+        e.preventDefault()
+        const chatInput = document.querySelector<HTMLTextAreaElement>('[data-chat-input]')
+        if (chatInput) {
+          chatInput.focus()
+        }
         return
       }
 
@@ -134,6 +279,13 @@ export function KeyboardShortcuts() {
         return
       }
 
+      // F12: Toggle DevTools
+      if (e.key === 'F12') {
+        e.preventDefault()
+        ;(window as any).electron?.window?.toggleDevTools()
+        return
+      }
+
       // Delete: Delete selected file
       if (e.key === 'Delete') {
         const state = useHelixStore.getState()
@@ -147,7 +299,7 @@ export function KeyboardShortcuts() {
         return
       }
     },
-    [toggleCommandPalette, activeTabId, closeTab, openTabs, setActiveTab, markTabSaved, showToast, setCommandPaletteOpen, setChatLoading]
+    [toggleCommandPalette, activeTabId, closeTab, openTabs, setActiveTab, markTabSaved, showToast, setCommandPaletteOpen, customShortcuts, toggleSessionManager, toggleSkillPanel, toggleScheduledTasksPanel]
   )
 
   useEffect(() => {

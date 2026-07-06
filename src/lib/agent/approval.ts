@@ -21,6 +21,28 @@ const waitingCallbacks = new Map<string, {
   reject: (error: Error) => void
 }>()
 
+let autoApproveAll = false
+
+const approvalCache = new Map<string, boolean>()
+
+export function setAutoApproveAll(): void {
+  autoApproveAll = true
+}
+
+export function getCachedApproval(key: string): boolean | undefined {
+  return approvalCache.get(key)
+}
+
+export function setCachedApproval(key: string, approved: boolean): void {
+  approvalCache.set(key, approved)
+}
+
+const PER_ACTION_TIMEOUTS: Record<string, number> = {
+  write_file: 2 * 60 * 1000,
+  edit_file: 2 * 60 * 1000,
+  run_bash: 3 * 60 * 1000,
+}
+
 /**
  * Create a new approval request
  */
@@ -43,11 +65,21 @@ export function createApprovalRequest(
 /**
  * Wait for approval (returns a promise that resolves when approved/rejected)
  */
-export function waitForApproval(approvalId: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    waitingCallbacks.set(approvalId, { resolve, reject })
+export function waitForApproval(approvalId: string, toolName?: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (autoApproveAll) {
+      const request = pendingApprovals.get(approvalId)
+      if (request) {
+        request.status = 'approved'
+        request.resolvedAt = Date.now()
+      }
+      resolve(true)
+      return
+    }
 
-    // Timeout after 5 minutes
+    waitingCallbacks.set(approvalId, { resolve, reject: (e) => resolve(false) })
+
+    const timeout = (toolName && PER_ACTION_TIMEOUTS[toolName]) || 5 * 60 * 1000
     setTimeout(() => {
       if (waitingCallbacks.has(approvalId)) {
         waitingCallbacks.delete(approvalId)
@@ -58,7 +90,7 @@ export function waitForApproval(approvalId: string): Promise<boolean> {
         }
         resolve(false)
       }
-    }, 5 * 60 * 1000)
+    }, timeout)
   })
 }
 

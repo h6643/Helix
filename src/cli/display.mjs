@@ -23,7 +23,7 @@ const TRUNCATE_LENGTH = 500
  * 显示思考过程（灰色斜体）
  */
 export function displayThinking(text) {
-  console.log(`${COLORS.dim}${COLORS.gray}💭 ${text}${COLORS.reset}`)
+  console.log(`${COLORS.dim}${COLORS.gray}${text}${COLORS.reset}`)
 }
 
 /**
@@ -31,7 +31,7 @@ export function displayThinking(text) {
  */
 export function displayToolCall(toolName, params) {
   const paramsStr = formatParams(params)
-  console.log(`${COLORS.green}🔧 ${toolName}(${paramsStr})${COLORS.reset}`)
+  console.log(`${COLORS.green}${toolName}(${paramsStr})${COLORS.reset}`)
 }
 
 /**
@@ -39,13 +39,12 @@ export function displayToolCall(toolName, params) {
  */
 export function displayToolResult(toolName, result, isError = false) {
   const color = isError ? COLORS.red : COLORS.gray
-  const prefix = isError ? '❌' : '📦'
   const lines = result.split('\n')
 
   if (lines.length <= 3 && result.length <= TRUNCATE_LENGTH) {
-    console.log(`${color}   ${prefix} ${result}${COLORS.reset}`)
+    console.log(`${color}   ${result}${COLORS.reset}`)
   } else {
-    console.log(`${color}   ${prefix} (${lines.length} lines, ${result.length} chars)${COLORS.reset}`)
+    console.log(`${color}   (${lines.length} lines, ${result.length} chars)${COLORS.reset}`)
     const truncated = result.slice(0, TRUNCATE_LENGTH)
     const truncatedLines = truncated.split('\n').slice(0, 10)
     for (const line of truncatedLines) {
@@ -61,7 +60,7 @@ export function displayToolResult(toolName, result, isError = false) {
  * 显示 Diff（红绿色标注）
  */
 export function displayDiff(oldStr, newStr, filePath) {
-  console.log(`${COLORS.cyan}📝 Diff: ${filePath}${COLORS.reset}`)
+  console.log(`${COLORS.cyan}Diff: ${filePath}${COLORS.reset}`)
 
   const oldLines = oldStr.split('\n')
   const newLines = newStr.split('\n')
@@ -105,7 +104,7 @@ export function displayResponse(text) {
  * 显示错误
  */
 export function displayError(text) {
-  console.log(`${COLORS.red}❌ Error: ${text}${COLORS.reset}`)
+  console.log(`${COLORS.red}Error: ${text}${COLORS.reset}`)
 }
 
 /**
@@ -119,14 +118,14 @@ export function displaySeparator() {
  * 显示状态
  */
 export function displayStatus(text) {
-  console.log(`${COLORS.cyan}ℹ️  ${text}${COLORS.reset}`)
+  console.log(`${COLORS.cyan}${text}${COLORS.reset}`)
 }
 
 /**
  * 显示成功
  */
 export function displaySuccess(text) {
-  console.log(`${COLORS.green}✅ ${text}${COLORS.reset}`)
+  console.log(`${COLORS.green}${text}${COLORS.reset}`)
 }
 
 /**

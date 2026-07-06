@@ -1,4 +1,8 @@
 import { create } from 'zustand'
+import { defaultFiles } from '@/lib/seed-data'
+import type { McpServerConfig } from '@/lib/helix/mcp'
+
+export type { McpServerConfig }
 
 export interface FileNode {
   id: string
@@ -9,10 +13,20 @@ export interface FileNode {
   language?: string
 }
 
+export interface ImageAttachment {
+  id: string
+  dataUrl: string      // "data:image/png;base64,..."
+  mediaType: string     // "image/png", "image/jpeg", "image/webp"
+  width?: number
+  height?: number
+  name?: string
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
+  images?: ImageAttachment[]
   timestamp: number
   isStreaming?: boolean
 }
@@ -48,32 +62,18 @@ export interface PendingChange {
   language: string
 }
 
-export type ApiProvider = 'openai' | 'deepseek' | 'mimo' | 'custom'
+export type ApiProvider = string
+export type AgentEngine = 'helix'
 
 export interface ApiConfig {
   provider: ApiProvider
   apiKey: string
   baseUrl: string
   model: string
+  engine?: AgentEngine
 }
 
-export const PROVIDER_PRESETS: Record<Exclude<ApiProvider, 'custom'>, { name: string; baseUrl: string; models: string[] }> = {
-  openai: {
-    name: 'OpenAI',
-    baseUrl: 'https://api.openai.com/v1',
-    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
-  },
-  deepseek: {
-    name: 'DeepSeek',
-    baseUrl: 'https://api.deepseek.com/v1',
-    models: ['deepseek-chat', 'deepseek-coder', 'deepseek-reasoner'],
-  },
-  mimo: {
-    name: 'MiMo',
-    baseUrl: 'https://api.mimo.ai/v1',
-    models: ['mimo-auto', 'mimo-v2-pro'],
-  },
-}
+export const PROVIDER_PRESETS: Record<string, { name: string; baseUrl: string; models: string[] }> = {}
 
 export interface Skill {
   id: string
@@ -85,10 +85,12 @@ export interface Skill {
   createdAt: number
 }
 
+export type MemoryCategory = 'user' | 'feedback' | 'project' | 'reference' | 'architecture' | 'rule' | 'decision' | 'pattern' | 'gotcha'
+
 export interface MemoryEntry {
   id: string
   content: string
-  category: 'architecture' | 'rule' | 'decision' | 'pattern' | 'gotcha'
+  category: MemoryCategory
   createdAt: number
 }
 
@@ -109,6 +111,35 @@ export interface SessionCheckpoint {
  memorySnapshot: string
 }
 
+export interface ScheduledTask {
+  id: string
+  label: string
+  prompt: string
+  scheduleText: string       // e.g. "every day at 9am" or "cron: 0 9 * * *"
+  cronExpression?: string    // parsed cron expression
+  enabled: boolean
+  lastRunAt: number | null
+  nextRunAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface Artifact {
+  id: string
+  title: string
+  content: string
+  type: 'html' | 'markdown' | 'mermaid'
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ToolCallEntry {
+  toolName: string
+  params: string
+  status: 'running' | 'success' | 'error'
+  timestamp: number
+}
+
 export interface SubAgent {
   id: string
   name: string
@@ -120,6 +151,7 @@ export interface SubAgent {
   completedAt?: number
   result?: string
   filesModified?: string[]
+  toolCalls?: ToolCallEntry[]
 }
 
 interface HelixState {
@@ -141,6 +173,7 @@ interface HelixState {
   apiHistory: ApiConfig[]
   showSettings: boolean
   availableModels: string[]
+  setAvailableModels: (models: string[]) => void
 
   // Chat
   chatMessages: ChatMessage[]
@@ -167,18 +200,52 @@ interface HelixState {
   // Tasks
   tasks: TaskNode[]
 
+  // Scheduled Tasks
+  scheduledTasks: ScheduledTask[]
+  showScheduledTasksPanel: boolean
+
+  // MCP Servers
+  mcpServers: Record<string, McpServerConfig>
+
+  // Custom Shortcuts
+  customShortcuts: Record<string, { keys: string[], action: string, description: string }>
+
+  // Artifacts
+  artifacts: Artifact[]
+  showArtifactsPanel: boolean
+
+  // Customize
+  showCustomizePanel: boolean
+
   // Agent Execution
-  agentExecutionSteps: Array<{ type: string; toolName?: string; path?: string; timestamp: number }>
+  agentExecutionSteps: Array<{ type: string; toolName?: string; path?: string; content?: string; toolParams?: Record<string, unknown>; timestamp: number }>
   accessedDirectories: string[]
+  selectedFiles: string[]
+  selectedWorkDir: string | null
+  setSelectedWorkDir: (dir: string | null) => void
   sessionSaveVersion: number
-  addExecutionStep: (step: { type: string; toolName?: string; path?: string }) => void
+  currentSessionId: string | null
+  setCurrentSessionId: (id: string | null) => void
+  addExecutionStep: (step: { type: string; toolName?: string; path?: string; content?: string; toolParams?: Record<string, unknown> }) => void
   addAccessedDirectory: (dir: string) => void
+  addSelectedFile: (filePath: string) => void
+  removeSelectedFile: (filePath: string) => void
+  clearSelectedFiles: () => void
   clearExecutionFlow: () => void
+  modelUsage: Record<string, { prompt: number; completion: number; total: number; cost: number }>
+  addModelUsage: (model: string, usage: { prompt: number; completion: number; total: number; cost: number }) => void
+  currentSessionTokens: { prompt: number; completion: number; total: number }
+  addCurrentSessionTokens: (usage: { prompt: number; completion: number; total: number }) => void
+  resetCurrentSessionTokens: () => void
   notifySessionSaved: () => void
 
   // UI
   showCommandPalette: boolean
   editorTheme: 'vs-dark' | 'light'
+  fontFamily: string
+  fontSize: number
+  interfaceFont: string
+  transcriptFontSize: number
   toasts: ToastMessage[]
   pendingChanges: PendingChange[]
   showDiffPreview: boolean
@@ -187,8 +254,27 @@ interface HelixState {
   showSubAgentPanel: boolean
   showSessionManager: boolean
 
+  // Agent Settings
+  agentMaxIterations: number
+  autoCompactContext: boolean
+  smartTruncation: boolean
+  autoSaveSession: boolean
+  temperature: number
+  maxOutputTokens: number
+  customInstructions: string
+
+  // Actions - Agent Settings
+  setAgentMaxIterations: (n: number) => void
+  setAutoCompactContext: (v: boolean) => void
+  setSmartTruncation: (v: boolean) => void
+  setAutoSaveSession: (v: boolean) => void
+  setTemperature: (v: number) => void
+  setMaxOutputTokens: (v: number) => void
+  setCustomInstructions: (v: string) => void
+
   // Actions - Files
   setFiles: (files: FileNode[]) => void
+  syncFilesFromDisk: () => Promise<void>
   selectFile: (fileId: string) => void
   toggleFolder: (folderId: string) => void
   createFile: (parentId: string | null, name: string, type: 'file' | 'folder') => void
@@ -213,6 +299,7 @@ interface HelixState {
   updateChatMessage: (messageId: string, content: string) => void
   setChatMessageStreaming: (messageId: string, isStreaming: boolean) => void
   clearChat: () => void
+  clearChatAndPersist: () => Promise<void>
   setChatLoading: (loading: boolean) => void
 
   // Actions - Editor
@@ -230,6 +317,10 @@ interface HelixState {
   toggleCommandPalette: () => void
   setCommandPaletteOpen: (open: boolean) => void
   setEditorTheme: (theme: 'vs-dark' | 'light') => void
+  setFontFamily: (font: string) => void
+  setFontSize: (size: number) => void
+  setInterfaceFont: (font: string) => void
+  setTranscriptFontSize: (size: number) => void
   showToast: (toast: Omit<ToastMessage, 'id'>) => void
   dismissToast: (id: string) => void
 
@@ -258,6 +349,30 @@ interface HelixState {
   removeTask: (taskId: string) => void
   clearCompletedTasks: () => void
 
+  // Actions - Scheduled Tasks
+  addScheduledTask: (task: Omit<ScheduledTask, 'id' | 'createdAt' | 'updatedAt'>) => string
+  updateScheduledTask: (taskId: string, updates: Partial<Omit<ScheduledTask, 'id' | 'createdAt'>>) => void
+  removeScheduledTask: (taskId: string) => void
+  toggleScheduledTask: (taskId: string) => void
+  toggleScheduledTasksPanel: () => void
+
+  // Actions - MCP Servers
+  addMcpServer: (name: string, config: McpServerConfig) => void
+  removeMcpServer: (name: string) => void
+  updateMcpServer: (name: string, config: McpServerConfig) => void
+  toggleMcpServer: (name: string) => void
+
+  // Actions - Custom Shortcuts
+  addCustomShortcut: (id: string, shortcut: { keys: string[], action: string, description: string }) => void
+  removeCustomShortcut: (id: string) => void
+  updateCustomShortcut: (id: string, shortcut: { keys: string[], action: string, description: string }) => void
+
+  // Actions - Artifacts
+  addArtifact: (a: Omit<Artifact, 'id' | 'createdAt' | 'updatedAt'>) => string
+  removeArtifact: (id: string) => void
+  toggleArtifactsPanel: () => void
+  toggleCustomizePanel: () => void
+
   // Actions - Panels
   toggleTaskPanel: () => void
   toggleMemoryPanel: () => void
@@ -278,6 +393,23 @@ interface HelixState {
   failSubAgent: (agentId: string, error?: string) => void
   cancelSubAgent: (agentId: string) => void
   clearCompletedSubAgents: () => void
+  addSubAgentToolCall: (agentId: string, toolCall: { toolName: string; params: string; status: 'running' | 'success' | 'error' }) => void
+
+  // Git
+  gitAutoCommit: boolean
+  gitAutoPush: boolean
+  gitPushConfirm: boolean
+  gitAutoBranch: boolean
+  gitRemoteUrl: string
+  gitCommitTemplate: string
+  gitBranchPrefix: string
+  setGitAutoCommit: (v: boolean) => void
+  setGitAutoPush: (v: boolean) => void
+  setGitPushConfirm: (v: boolean) => void
+  setGitAutoBranch: (v: boolean) => void
+  setGitRemoteUrl: (v: string) => void
+  setGitCommitTemplate: (v: string) => void
+  setGitBranchPrefix: (v: string) => void
 
   // Actions - Persistence
   persistToStorage: () => Promise<void>
@@ -311,64 +443,7 @@ function getLanguageFromName(name: string): string {
   return langMap[ext] || 'plaintext'
 }
 
-const defaultFiles: FileNode[] = [
-  {
-    id: 'root-src',
-    name: 'src',
-    type: 'folder',
-    children: [
-      {
-        id: 'file-app',
-        name: 'App.tsx',
-        type: 'file',
-        language: 'typescript',
-        content: `import React from 'react';\nimport { Counter } from './components/Counter';\n\nexport default function App() {\n  return (\n    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">\n      <header className="bg-white dark:bg-gray-800 shadow-sm">\n        <div className="max-w-7xl mx-auto px-4 py-4">\n          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">\n            My App\n          </h1>\n        </div>\n      </header>\n      <main className="max-w-7xl mx-auto px-4 py-8">\n        <Counter />\n      </main>\n    </div>\n  );\n}`,
-      },
-      {
-        id: 'folder-components',
-        name: 'components',
-        type: 'folder',
-        children: [
-          {
-            id: 'file-counter',
-            name: 'Counter.tsx',
-            type: 'file',
-            language: 'typescript',
-            content: `import React, { useState } from 'react';\n\ninterface CounterProps {\n  initialValue?: number;\n}\n\nexport function Counter({ initialValue = 0 }: CounterProps) {\n  const [count, setCount] = useState(initialValue);\n\n  return (\n    <div className="flex flex-col items-center gap-4">\n      <span className="text-5xl font-bold text-gray-800 dark:text-gray-200">\n        {count}\n      </span>\n      <div className="flex gap-3">\n        <button\n          onClick={() => setCount(c => c - 1)}\n          className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"\n        >\n          -1\n        </button>\n        <button\n          onClick={() => setCount(0)}\n          className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition"\n        >\n          Reset\n        </button>\n        <button\n          onClick={() => setCount(c => c + 1)}\n          className="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition"\n        >\n          +1\n        </button>\n      </div>\n    </div>\n  );\n}`,
-          },
-        ],
-      },
-      {
-        id: 'file-styles',
-        name: 'index.css',
-        type: 'file',
-        language: 'css',
-        content: `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n:root {\n  --primary: #3b82f6;\n  --primary-dark: #2563eb;\n}\n\nbody {\n  font-family: 'Inter', sans-serif;\n}`,
-      },
-    ],
-  },
-  {
-    id: 'file-package',
-    name: 'package.json',
-    type: 'file',
-    language: 'json',
-    content: `{\n  "name": "my-project",\n  "version": "1.0.0",\n  "private": true,\n  "scripts": {\n    "dev": "next dev",\n    "build": "next build",\n    "start": "next start"\n  },\n  "dependencies": {\n    "react": "^19.0.0",\n    "react-dom": "^19.0.0",\n    "next": "^16.0.0"\n  }\n}`,
-  },
-  {
-    id: 'file-readme',
-    name: 'README.md',
-    type: 'file',
-    language: 'markdown',
-    content: `# My Project\n\nA modern web application built with React and Next.js.\n\n## Getting Started\n\n\`\`\`bash\nnpm install\nnpm run dev\n\`\`\`\n\nOpen [http://localhost:3000](http://localhost:3000) to view it in the browser.`,
-  },
-  {
-    id: 'file-gitignore',
-    name: '.gitignore',
-    type: 'file',
-    language: 'plaintext',
-    content: `node_modules\n.next\n.env.local\n*.log`,
-  },
-]
+
 
 function findFileById(nodes: FileNode[], id: string): FileNode | null {
   for (const node of nodes) {
@@ -439,6 +514,118 @@ function collectAllFileIds(nodes: FileNode[]): string[] {
   return ids
 }
 
+// Debounced chat persistence: saves to IndexedDB after messages change
+let sessionPersistTimer: ReturnType<typeof setTimeout> | null = null
+function collectFiles(nodes: FileNode[]) {
+  return nodes.map(n => ({
+    id: n.id, name: n.name, type: n.type,
+    content: n.content, language: n.language,
+    children: n.children ? collectFiles(n.children) : undefined,
+  }))
+}
+function scheduleSessionPersist() {
+  if (sessionPersistTimer) clearTimeout(sessionPersistTimer)
+  sessionPersistTimer = setTimeout(async () => {
+    sessionPersistTimer = null
+    try {
+      const { persistence } = await import('@/lib/persist')
+      const state = useHelixStore.getState()
+      if (state.chatMessages.length === 0) return
+      const sessionId = state.currentSessionId || 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
+      const firstUser = state.chatMessages.find(m => m.role === 'user')
+      const label = firstUser ? firstUser.content.slice(0, 50) : new Date().toLocaleString('zh-CN')
+      await persistence.saveSession({
+        id: sessionId,
+        label,
+        workDir: state.selectedWorkDir,
+        goal: state.goal,
+        memories: state.memories,
+        tasks: state.tasks,
+        notes: state.notes,
+        checkpoints: state.checkpoints,
+        chatMessages: state.chatMessages.map(m => ({
+          id: m.id, sessionId, role: m.role,
+          content: m.content, images: m.images, timestamp: m.timestamp, isStreaming: m.isStreaming ?? false,
+        })),
+        files: collectFiles(state.files),
+        openTabs: state.openTabs.map(tab => ({
+          id: tab.id, fileId: tab.fileId, name: tab.name, language: tab.language, isDirty: tab.isDirty,
+        })),
+      })
+      if (!state.currentSessionId) {
+        useHelixStore.setState({ currentSessionId: sessionId })
+      }
+    } catch (e) {
+      console.error('Failed to persist session:', e)
+    }
+  }, 1000)
+}
+
+export const DEFAULT_SHORTCUTS: Record<string, { keys: string[]; action: string; description: string }> = {
+  'archive-chat': { keys: ['Ctrl', 'Shift', 'A'], action: 'archive-chat', description: '归档聊天' },
+  'new-chat': { keys: ['Ctrl', 'N'], action: 'new-chat', description: '新对话' },
+  'side-chat': { keys: ['Ctrl', 'Alt', 'S'], action: 'side-chat', description: '打开侧边聊天' },
+  'quick-chat': { keys: ['Ctrl', 'Alt', 'N'], action: 'quick-chat', description: '新建快速对话' },
+  'toggle-pin': { keys: ['Ctrl', 'Alt', 'P'], action: 'toggle-pin', description: '切换置顶状态' },
+  'search-chat': { keys: ['Ctrl', 'F'], action: 'search-chat', description: '查找' },
+  'focus-address': { keys: ['Ctrl', 'L'], action: 'focus-address', description: '聚焦浏览器地址栏' },
+  'go-back': { keys: ['Ctrl', '['], action: 'go-back', description: '返回' },
+  'go-forward': { keys: ['Ctrl', ']'], action: 'go-forward', description: '前进' },
+  'next-recent-chat': { keys: ['Ctrl', 'Tab'], action: 'next-recent-chat', description: '下一个最近查看的聊天' },
+  'prev-recent-chat': { keys: ['Ctrl', 'Shift', 'Tab'], action: 'prev-recent-chat', description: '上一个最近查看的聊天' },
+  'next-tab': { keys: ['Ctrl', 'Shift', ']'], action: 'next-tab', description: '下一个标签页' },
+  'prev-tab-1': { keys: ['Ctrl', 'Shift', '['], action: 'prev-tab', description: '上一个标签页' },
+  'next-tab-pg': { keys: ['Ctrl', 'PageDown'], action: 'next-tab', description: '下一个标签页' },
+  'prev-tab-pg': { keys: ['Ctrl', 'PageUp'], action: 'prev-tab', description: '上一个标签页' },
+  'next-chat': { keys: ['Ctrl', 'Shift', ']'], action: 'next-chat', description: '下一个聊天' },
+  'prev-chat': { keys: ['Ctrl', 'Shift', '['], action: 'prev-chat', description: '上一个聊天' },
+  'new-browser-tab': { keys: ['Ctrl', 'T'], action: 'new-browser-tab', description: '打开浏览器标签页' },
+  'open-review': { keys: ['Ctrl', 'Shift', 'G'], action: 'open-review', description: '打开审查选项卡' },
+  'toggle-bottom-panel': { keys: ['Ctrl', 'J'], action: 'toggle-bottom-panel', description: '切换底部面板' },
+  'toggle-browser-panel': { keys: ['Ctrl', 'Shift', 'B'], action: 'toggle-browser-panel', description: '显示/隐藏浏览器面板' },
+  'toggle-sidebar': { keys: ['Ctrl', 'B'], action: 'toggle-sidebar', description: '切换边栏' },
+  'toggle-side-panel': { keys: ['Ctrl', 'Alt', 'B'], action: 'toggle-side-panel', description: '切换侧边面板' },
+  'toggle-terminal': { keys: ['Ctrl', '`'], action: 'toggle-terminal', description: '打开终端' },
+  'env-action-1': { keys: ['Shift', 'Win', 'D'], action: 'env-action-1', description: '环境操作 1' },
+  'open-folder': { keys: ['Ctrl', 'O'], action: 'open-folder', description: '打开文件夹' },
+  'force-reload': { keys: ['Ctrl', 'Shift', 'R'], action: 'force-reload', description: '强制重新加载技能' },
+  'browser-back': { keys: ['Alt', 'ArrowLeft'], action: 'browser-back', description: '浏览器返回' },
+  'browser-forward': { keys: ['Alt', 'ArrowRight'], action: 'browser-forward', description: '浏览器前进' },
+  'new-window': { keys: ['Ctrl', 'Shift', 'N'], action: 'new-window', description: '新建窗口' },
+  'command-palette': { keys: ['Ctrl', 'K'], action: 'command-palette', description: '打开命令面板' },
+  'command-palette-2': { keys: ['Ctrl', 'Shift', 'P'], action: 'command-palette', description: '打开命令面板' },
+  'reload-page': { keys: ['Ctrl', 'R'], action: 'reload-page', description: '重新加载页面' },
+  'rename-chat': { keys: ['Ctrl', 'Alt', 'R'], action: 'rename-chat', description: '重命名聊天' },
+  'search-chats': { keys: ['Ctrl', 'G'], action: 'search-chats', description: '搜索聊天' },
+  'search-files': { keys: ['Ctrl', 'P'], action: 'search-files', description: '搜索文件' },
+  'show-shortcuts': { keys: ['Ctrl', 'Shift', '/'], action: 'show-shortcuts', description: '显示键盘快捷键' },
+  'settings': { keys: ['Ctrl', ','], action: 'settings', description: '设置' },
+  'approve-request': { keys: ['Enter'], action: 'approve-request', description: '批准请求' },
+  'decline-request': { keys: ['Escape'], action: 'decline-request', description: '拒绝请求' },
+  'close-tab': { keys: ['Ctrl', 'W'], action: 'close-tab', description: '关闭标签页' },
+  'close-tab-2': { keys: ['Ctrl', 'F4'], action: 'close-tab', description: '关闭标签页' },
+  'close-window': { keys: ['Ctrl', 'W'], action: 'close-window', description: '关闭窗口' },
+  'close-window-2': { keys: ['Ctrl', 'F4'], action: 'close-window', description: '关闭窗口' },
+  'model-picker': { keys: ['Ctrl', 'Shift', 'M'], action: 'model-picker', description: '打开模型选择器' },
+  'start-dictation': { keys: ['Ctrl', 'Shift', 'D'], action: 'start-dictation', description: '开始听写' },
+  'toggle-voice': { keys: ['Ctrl', 'Shift', 'V'], action: 'toggle-voice', description: '切换语音模式' },
+  'copy-path': { keys: ['Ctrl', 'Alt', 'Shift', 'C'], action: 'copy-path', description: '复制路径' },
+  'copy-deeplink': { keys: ['Ctrl', 'Alt', 'L'], action: 'copy-deeplink', description: '复制深度链接' },
+  'copy-session-id': { keys: ['Ctrl', 'Alt', 'C'], action: 'copy-session-id', description: '复制会话 ID' },
+  'copy-workdir': { keys: ['Ctrl', 'Shift', 'C'], action: 'copy-workdir', description: '复制工作目录' },
+  'trace-recording': { keys: ['Ctrl', 'Shift', 'S'], action: 'trace-recording', description: '开始录制追踪' },
+  'chat-1': { keys: ['Ctrl', '1'], action: 'chat-1', description: '转到聊天 1' },
+  'chat-2': { keys: ['Ctrl', '2'], action: 'chat-2', description: '转到聊天 2' },
+  'chat-3': { keys: ['Ctrl', '3'], action: 'chat-3', description: '转到聊天 3' },
+  'chat-4': { keys: ['Ctrl', '4'], action: 'chat-4', description: '转到聊天 4' },
+  'chat-5': { keys: ['Ctrl', '5'], action: 'chat-5', description: '转到聊天 5' },
+  'chat-6': { keys: ['Ctrl', '6'], action: 'chat-6', description: '转到聊天 6' },
+  'chat-7': { keys: ['Ctrl', '7'], action: 'chat-7', description: '转到聊天 7' },
+  'chat-8': { keys: ['Ctrl', '8'], action: 'chat-8', description: '转到聊天 8' },
+  'chat-9': { keys: ['Ctrl', '9'], action: 'chat-9', description: '转到聊天 9' },
+  'toggle-file-tree': { keys: ['Ctrl', 'Shift', 'E'], action: 'toggle-file-tree', description: '切换文件树' },
+}
+
 export const useHelixStore = create<HelixState>((set, get) => ({
   // File system
   files: defaultFiles,
@@ -453,30 +640,16 @@ export const useHelixStore = create<HelixState>((set, get) => ({
   cursorPosition: { line: 1, column: 1 },
 
   // Chat
-  chatMessages: [
-    {
-      id: 'welcome-msg',
-      role: 'assistant',
-      content: '你好！有什么我可以帮你的吗？',
-      timestamp: Date.now(),
-    },
-  ],
+  chatMessages: [],
   isChatLoading: false,
 
   // Skills
-  skills: [
-    { id: 'explain', name: '解释代码', description: '解释选中的代码', prompt: '请解释以下代码的功能和逻辑：\n\n{code}', icon: '📖', isBuiltin: true, createdAt: Date.now() },
-    { id: 'refactor', name: '重构代码', description: '优化代码结构', prompt: '请重构以下代码，使其更清晰、更高效：\n\n{code}', icon: '🔄', isBuiltin: true, createdAt: Date.now() },
-    { id: 'test', name: '生成测试', description: '为代码生成单元测试', prompt: '请为以下代码生成完整的单元测试：\n\n{code}', icon: '🧪', isBuiltin: true, createdAt: Date.now() },
-    { id: 'doc', name: '生成文档', description: '为代码生成文档注释', prompt: '请为以下代码生成详细的文档注释：\n\n{code}', icon: '📝', isBuiltin: true, createdAt: Date.now() },
-    { id: 'fix', name: '修复错误', description: '分析并修复代码错误', prompt: '请分析以下代码并修复其中的错误：\n\n{code}\n\n错误信息：{error}', icon: '🔧', isBuiltin: true, createdAt: Date.now() },
-  ],
+  skills: [],
   showSkillPanel: false,
 
   // Terminal
   terminalOutput: [
-    '\x1b[32m$ Helix v1.0.0\x1b[0m',
-    'AI 编程助手已就绪。在下方输入你的需求，或直接编辑代码。',
+    'Helix v1.0.0 ready — type help for commands',
     '',
   ],
   isTerminalOpen: true,
@@ -486,6 +659,10 @@ export const useHelixStore = create<HelixState>((set, get) => ({
   // UI
   showCommandPalette: false,
   editorTheme: 'vs-dark' as const,
+  fontFamily: "'Geist Mono', 'Fira Code', 'Consolas', monospace" as const,
+  fontSize: 14 as const,
+  interfaceFont: 'var(--font-geist-sans)' as const,
+  transcriptFontSize: 14,
   toasts: [],
   pendingChanges: [],
   showDiffPreview: false,
@@ -495,9 +672,23 @@ export const useHelixStore = create<HelixState>((set, get) => ({
   // Agent Execution
   agentExecutionSteps: [],
   accessedDirectories: [],
+  selectedFiles: [],
+  selectedWorkDir: null,
   sessionSaveVersion: 0,
+  currentSessionId: null,
   showSubAgentPanel: false,
+  modelUsage: {},
+  currentSessionTokens: { prompt: 0, completion: 0, total: 0 },
   showSessionManager: false,
+
+  // Agent Settings
+  agentMaxIterations: 50,
+  autoCompactContext: true,
+  smartTruncation: true,
+  autoSaveSession: false,
+  temperature: 0.7,
+  maxOutputTokens: 4096,
+  customInstructions: '',
 
   // Sub-agents
   subAgents: [],
@@ -513,6 +704,22 @@ export const useHelixStore = create<HelixState>((set, get) => ({
   showSettings: false,
   availableModels: [],
 
+  // Git
+  gitAutoCommit: false,
+  gitAutoPush: false,
+  gitPushConfirm: true,
+  gitAutoBranch: false,
+  gitRemoteUrl: '',
+  gitCommitTemplate: 'chore: auto-commit changes',
+  gitBranchPrefix: 'feature/',
+  setGitAutoCommit: (v) => set({ gitAutoCommit: v }),
+  setGitAutoPush: (v) => set({ gitAutoPush: v }),
+  setGitPushConfirm: (v) => set({ gitPushConfirm: v }),
+  setGitAutoBranch: (v) => set({ gitAutoBranch: v }),
+  setGitRemoteUrl: (v) => set({ gitRemoteUrl: v }),
+  setGitCommitTemplate: (v) => set({ gitCommitTemplate: v }),
+  setGitBranchPrefix: (v) => set({ gitBranchPrefix: v }),
+
   // Goal
   goal: null,
 
@@ -524,8 +731,94 @@ export const useHelixStore = create<HelixState>((set, get) => ({
   // Tasks
   tasks: [],
 
+  // Scheduled Tasks
+  scheduledTasks: [],
+  showScheduledTasksPanel: false,
+
+  // MCP Servers
+  mcpServers: {
+    tavily: {
+      type: 'local',
+      command: ['npx', '-y', 'tavily-mcp'],
+      enabled: true,
+      environment: {
+        TAVILY_API_KEY: '',
+      },
+    },
+    github: {
+      type: 'local',
+      command: ['npx', '-y', '@modelcontextprotocol/server-github'],
+      enabled: true,
+      environment: {
+        GITHUB_PERSONAL_ACCESS_TOKEN: '',
+      },
+    },
+  },
+
+  // Custom Shortcuts
+  customShortcuts: { ...DEFAULT_SHORTCUTS },
+
+  // Artifacts
+  artifacts: [],
+  showArtifactsPanel: false,
+
+  // Customize
+  showCustomizePanel: false,
+
   // Actions - Files
   setFiles: (files) => set({ files }),
+  syncFilesFromDisk: async () => {
+    try {
+      const workDir = (globalThis as any).__helixWorkDir || process.cwd()
+      const response = await fetch('/api/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workDir }),
+      })
+      if (!response.ok) return
+      const data = await response.json()
+      if (!data.structure) return
+
+      // Parse the text structure into FileNode tree
+      const lines: string[] = data.structure.split('\n')
+      const root: FileNode[] = []
+      const stack: { indent: number; node: FileNode }[] = []
+
+      for (const line of lines) {
+        if (!line.trim()) continue
+        const indent = line.search(/\S/)
+        const name = line.trim().replace(/\/$/, '')
+        const isDir = line.trim().endsWith('/')
+        const node: FileNode = {
+          id: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name,
+          type: isDir ? 'folder' : 'file',
+          content: '',
+          children: isDir ? [] : undefined,
+        }
+
+        while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
+          stack.pop()
+        }
+
+        if (stack.length === 0) {
+          root.push(node)
+        } else {
+          const parent = stack[stack.length - 1].node
+          if (!parent.children) parent.children = []
+          parent.children.push(node)
+        }
+
+        if (isDir) {
+          stack.push({ indent, node })
+        }
+      }
+
+      set({ files: root })
+    } catch (err) {
+      console.error('[Sync] Failed to sync files from disk:', err)
+    }
+  },
   selectFile: (fileId) => set({ selectedFileId: fileId }),
   toggleFolder: (folderId) =>
     set((state) => {
@@ -687,15 +980,18 @@ export const useHelixStore = create<HelixState>((set, get) => ({
     set((state) => ({
       chatMessages: [...state.chatMessages, { ...message, id, timestamp: Date.now() }],
     }))
+    scheduleSessionPersist()
     return id
   },
 
-  updateChatMessage: (messageId, content) =>
+  updateChatMessage: (messageId, content) => {
     set((state) => ({
       chatMessages: state.chatMessages.map((m) =>
         m.id === messageId ? { ...m, content } : m
       ),
-    })),
+    }))
+    scheduleSessionPersist()
+  },
 
   setChatMessageStreaming: (messageId, isStreaming) =>
     set((state) => ({
@@ -704,17 +1000,22 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       ),
     })),
 
-  clearChat: () =>
+  clearChat: () => {
+    if (sessionPersistTimer) clearTimeout(sessionPersistTimer)
+    const prevId = get().currentSessionId
     set({
-      chatMessages: [
-        {
-          id: 'welcome-msg',
-          role: 'assistant',
-          content: '你好！有什么我可以帮你的吗？',
-          timestamp: Date.now(),
-        },
-      ],
-    }),
+      chatMessages: [],
+      currentSessionId: null,
+      selectedWorkDir: null,
+      currentSessionTokens: { prompt: 0, completion: 0, total: 0 },
+    })
+    if (prevId) {
+      import('@/lib/persist').then(({ persistence }) => {
+        persistence.deleteChatMessagesBySession(prevId)
+        persistence.deleteChatMessagesBySession('current-session')
+      })
+    }
+  },
   clearChatAndPersist: async () => {
     get().clearChat()
   },
@@ -755,6 +1056,28 @@ export const useHelixStore = create<HelixState>((set, get) => ({
     set((state) => ({ showCommandPalette: !state.showCommandPalette })),
   setCommandPaletteOpen: (open) => set({ showCommandPalette: open }),
   setEditorTheme: (theme) => set({ editorTheme: theme }),
+  setFontFamily: (fontFamily) => {
+    set({ fontFamily })
+    document.documentElement.style.setProperty('--helix-font-family', fontFamily)
+    document.body.style.fontFamily = fontFamily
+    localStorage.setItem('helix-font-family', fontFamily)
+  },
+  setFontSize: (fontSize) => {
+    set({ fontSize })
+    document.documentElement.style.setProperty('--helix-font-size', `${fontSize}px`)
+    localStorage.setItem('helix-font-size', String(fontSize))
+  },
+  setInterfaceFont: (font) => {
+    set({ interfaceFont: font })
+    document.documentElement.style.setProperty('--helix-interface-font', font)
+    document.body.style.fontFamily = font
+    localStorage.setItem('helix-interface-font', font)
+  },
+  setTranscriptFontSize: (size) => {
+    set({ transcriptFontSize: size })
+    document.documentElement.style.setProperty('--helix-transcript-size', `${size}px`)
+    localStorage.setItem('helix-transcript-size', String(size))
+  },
 
   showToast: (toast) => {
     const id = generateId()
@@ -767,6 +1090,15 @@ export const useHelixStore = create<HelixState>((set, get) => ({
   dismissToast: (id) =>
     set((state) => ({ toasts: state.toasts.filter(t => t.id !== id) })),
 
+  // Actions - Agent Settings
+  setAgentMaxIterations: (n) => set({ agentMaxIterations: n }),
+  setAutoCompactContext: (v) => set({ autoCompactContext: v }),
+  setSmartTruncation: (v) => set({ smartTruncation: v }),
+  setAutoSaveSession: (v) => set({ autoSaveSession: v }),
+  setTemperature: (v) => set({ temperature: v }),
+  setMaxOutputTokens: (v) => set({ maxOutputTokens: v }),
+  setCustomInstructions: (v) => set({ customInstructions: v }),
+
   // Actions - Agent Execution
   addExecutionStep: (step) =>
     set((state) => ({
@@ -777,8 +1109,45 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       if (state.accessedDirectories.includes(dir)) return state
       return { accessedDirectories: [...state.accessedDirectories, dir] }
     }),
+  addSelectedFile: (filePath) =>
+    set((state) => {
+      if (state.selectedFiles.includes(filePath)) return state
+      return { selectedFiles: [...state.selectedFiles, filePath] }
+    }),
+  removeSelectedFile: (filePath) =>
+    set((state) => ({ selectedFiles: state.selectedFiles.filter(p => p !== filePath) })),
+  clearSelectedFiles: () =>
+    set({ selectedFiles: [] }),
+  setSelectedWorkDir: (dir: string | null) =>
+    set({ selectedWorkDir: dir }),
   clearExecutionFlow: () =>
     set({ agentExecutionSteps: [], accessedDirectories: [] }),
+  addModelUsage: (model, usage) =>
+    set((state) => {
+      const existing = state.modelUsage[model] || { prompt: 0, completion: 0, total: 0, cost: 0 }
+      return {
+        modelUsage: {
+          ...state.modelUsage,
+          [model]: {
+            prompt: existing.prompt + usage.prompt,
+            completion: existing.completion + usage.completion,
+            total: existing.total + usage.total,
+            cost: existing.cost + usage.cost,
+          },
+        },
+      }
+    }),
+  addCurrentSessionTokens: (usage) =>
+    set((state) => ({
+      currentSessionTokens: {
+        prompt: state.currentSessionTokens.prompt + usage.prompt,
+        completion: state.currentSessionTokens.completion + usage.completion,
+        total: state.currentSessionTokens.total + usage.total,
+      }
+    })),
+  resetCurrentSessionTokens: () =>
+    set({ currentSessionTokens: { prompt: 0, completion: 0, total: 0 } }),
+  setCurrentSessionId: (id) => set({ currentSessionId: id }),
   notifySessionSaved: () =>
     set((state) => ({ sessionSaveVersion: state.sessionSaveVersion + 1 })),
 
@@ -964,6 +1333,95 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       tasks: state.tasks.filter(t => t.status !== 'done'),
     })),
 
+  // Actions - Scheduled Tasks
+  addScheduledTask: (task) => {
+    const id = generateId()
+    set((state) => ({
+      scheduledTasks: [...state.scheduledTasks, {
+        ...task,
+        id,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }],
+    }))
+    return id
+  },
+  updateScheduledTask: (taskId, updates) =>
+    set((state) => ({
+      scheduledTasks: state.scheduledTasks.map(t =>
+        t.id === taskId ? { ...t, ...updates, updatedAt: Date.now() } : t
+      ),
+    })),
+  removeScheduledTask: (taskId) =>
+    set((state) => ({
+      scheduledTasks: state.scheduledTasks.filter(t => t.id !== taskId),
+    })),
+  toggleScheduledTask: (taskId) =>
+    set((state) => ({
+      scheduledTasks: state.scheduledTasks.map(t =>
+        t.id === taskId ? { ...t, enabled: !t.enabled, updatedAt: Date.now() } : t
+      ),
+    })),
+  toggleScheduledTasksPanel: () =>
+    set((s) => ({ showScheduledTasksPanel: !s.showScheduledTasksPanel })),
+
+  // Actions - MCP Servers
+  addMcpServer: (name, config) =>
+    set((state) => ({
+      mcpServers: { ...state.mcpServers, [name]: config },
+    })),
+  removeMcpServer: (name) =>
+    set((state) => {
+      const { [name]: _, ...rest } = state.mcpServers
+      return { mcpServers: rest }
+    }),
+  updateMcpServer: (name, config) =>
+    set((state) => ({
+      mcpServers: { ...state.mcpServers, [name]: config },
+    })),
+  toggleMcpServer: (name) =>
+    set((state) => ({
+      mcpServers: {
+        ...state.mcpServers,
+        [name]: {
+          ...state.mcpServers[name],
+          enabled: !state.mcpServers[name]?.enabled,
+        },
+      },
+    })),
+
+  // Actions - Custom Shortcuts
+  addCustomShortcut: (id, shortcut) =>
+    set((state) => ({
+      customShortcuts: { ...state.customShortcuts, [id]: shortcut },
+    })),
+  removeCustomShortcut: (id) =>
+    set((state) => {
+      const { [id]: _, ...rest } = state.customShortcuts
+      return { customShortcuts: rest }
+    }),
+  updateCustomShortcut: (id, shortcut) =>
+    set((state) => ({
+      customShortcuts: { ...state.customShortcuts, [id]: shortcut },
+    })),
+
+  // Actions - Artifacts
+  addArtifact: (a) => {
+    const id = generateId()
+    set((state) => ({
+      artifacts: [...state.artifacts, { ...a, id, createdAt: Date.now(), updatedAt: Date.now() }],
+    }))
+    return id
+  },
+  removeArtifact: (id) =>
+    set((state) => ({
+      artifacts: state.artifacts.filter(a => a.id !== id),
+    })),
+  toggleArtifactsPanel: () =>
+    set((s) => ({ showArtifactsPanel: !s.showArtifactsPanel })),
+  toggleCustomizePanel: () =>
+    set((s) => ({ showCustomizePanel: !s.showCustomizePanel })),
+
   // Actions - Panels
   toggleTaskPanel: () => set((s) => ({ showTaskPanel: !s.showTaskPanel })),
   toggleMemoryPanel: () => set((s) => ({ showMemoryPanel: !s.showMemoryPanel })),
@@ -977,7 +1435,13 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       apiConfig: { ...state.apiConfig, ...config },
     })),
   getApiConfig: () => get().apiConfig,
-  setAvailableModels: (models) => set({ availableModels: models }),
+  setAvailableModels: (models) => {
+    set({ availableModels: models })
+    // Persist to storage so models survive restart
+    import('@/lib/persist').then(({ persistence }) => {
+      persistence.saveSetting('availableModels', models)
+    })
+  },
 
   addApiHistory: (config) =>
     set((state) => {
@@ -1049,6 +1513,15 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       subAgents: s.subAgents.filter(a => a.status === 'running'),
     })),
 
+  addSubAgentToolCall: (agentId, toolCall) =>
+    set((s) => ({
+      subAgents: s.subAgents.map(a =>
+        a.id === agentId
+          ? { ...a, toolCalls: [...(a.toolCalls || []), { ...toolCall, timestamp: Date.now() }] }
+          : a
+      ),
+    })),
+
   // Actions - Persistence
   persistToStorage: async () => {
     try {
@@ -1074,6 +1547,34 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         persistence.saveSetting('goal', state.goal),
         persistence.saveSetting('apiConfig', state.apiConfig),
         persistence.saveSetting('apiHistory', state.apiHistory),
+        persistence.saveSetting('fontFamily', state.fontFamily),
+        persistence.saveSetting('fontSize', state.fontSize),
+        persistence.saveSetting('interfaceFont', state.interfaceFont),
+        persistence.saveSetting('transcriptFontSize', state.transcriptFontSize),
+        persistence.saveScheduledTasks(state.scheduledTasks),
+        persistence.saveSetting('mcpServers', state.mcpServers),
+        // Also save MCP config to helix.json on disk
+        fetch('/api/mcp/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mcpServers: state.mcpServers }),
+        }).catch(() => {/* non-critical */}),
+        persistence.saveSetting('customShortcuts', state.customShortcuts),
+        persistence.saveSetting('agentMaxIterations', state.agentMaxIterations),
+        persistence.saveSetting('autoCompactContext', state.autoCompactContext),
+        persistence.saveSetting('smartTruncation', state.smartTruncation),
+        persistence.saveSetting('autoSaveSession', state.autoSaveSession),
+        persistence.saveSetting('temperature', state.temperature),
+        persistence.saveSetting('maxOutputTokens', state.maxOutputTokens),
+        persistence.saveSetting('customInstructions', state.customInstructions),
+        persistence.saveSetting('editorTheme', state.editorTheme),
+        persistence.saveSetting('gitAutoCommit', state.gitAutoCommit),
+        persistence.saveSetting('gitAutoPush', state.gitAutoPush),
+        persistence.saveSetting('gitPushConfirm', state.gitPushConfirm),
+        persistence.saveSetting('gitAutoBranch', state.gitAutoBranch),
+        persistence.saveSetting('gitRemoteUrl', state.gitRemoteUrl),
+        persistence.saveSetting('gitCommitTemplate', state.gitCommitTemplate),
+        persistence.saveSetting('gitBranchPrefix', state.gitBranchPrefix),
       ])
     } catch (e) {
       console.error('Failed to persist:', e)
@@ -1084,7 +1585,24 @@ export const useHelixStore = create<HelixState>((set, get) => ({
     try {
       const { persistence } = await import('@/lib/persist')
       const sessionId = 'current-session'
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory] = await Promise.all([
+
+      // Load MCP config from helix.json
+      let fileMcpConfig: Record<string, any> = {}
+      try {
+        const configRes = await fetch('/api/config/mcp')
+        const configData = await configRes.json()
+        fileMcpConfig = configData.mcpServers || {}
+      } catch {}
+
+      // Try loading the latest saved session first (full state)
+      const sessions = await persistence.loadSessions()
+      const archivedSessions = sessions.filter(s => s.isArchived)
+      const latestSession = sessions.filter(s => !s.isArchived).length > 0
+        ? sessions.filter(s => !s.isArchived).sort((a, b) => b.savedAt - a.savedAt)[0]
+        : null
+
+      // Load individual pieces for settings and non-session state
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, fontFamily, fontSize, interfaceFont, transcriptFontSize, scheduledTasks, mcpServers, customShortcuts, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -1093,29 +1611,123 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         persistence.loadSetting<string | null>('goal'),
         persistence.loadSetting<ApiConfig>('apiConfig'),
         persistence.loadSetting<ApiConfig[]>('apiHistory'),
+        persistence.loadSetting<string>('fontFamily'),
+        persistence.loadSetting<number>('fontSize'),
+        persistence.loadSetting<string>('interfaceFont'),
+        persistence.loadSetting<number>('transcriptFontSize'),
+        persistence.loadSetting<any[]>('scheduledTasks'),
+        persistence.loadSetting<Record<string, McpServerConfig>>('mcpServers'),
+        persistence.loadSetting<Record<string, { keys: string[], action: string, description: string }>>('customShortcuts'),
+        persistence.loadSetting<number>('agentMaxIterations'),
+        persistence.loadSetting<boolean>('autoCompactContext'),
+        persistence.loadSetting<boolean>('smartTruncation'),
+        persistence.loadSetting<boolean>('autoSaveSession'),
+        persistence.loadSetting<number>('temperature'),
+        persistence.loadSetting<number>('maxOutputTokens'),
+        persistence.loadSetting<string>('customInstructions'),
+        persistence.loadSetting<string[]>('availableModels'),
+        persistence.loadSetting<string>('editorTheme'),
+        persistence.loadSetting<boolean>('gitAutoCommit'),
+        persistence.loadSetting<boolean>('gitAutoPush'),
+        persistence.loadSetting<boolean>('gitPushConfirm'),
+        persistence.loadSetting<boolean>('gitAutoBranch'),
+        persistence.loadSetting<string>('gitRemoteUrl'),
+        persistence.loadSetting<string>('gitCommitTemplate'),
+        persistence.loadSetting<string>('gitBranchPrefix'),
       ])
-      // Filter out the welcome message from persisted history
-      const filteredMessages = chatMessages.filter(m =>
-        !(m.role === 'assistant' && m.content === '你好！有什么我可以帮你的吗？')
-      )
+
+      // Use latest session data if available, otherwise fall back to chatMessages table
+      const sessionMessages = latestSession?.chatMessages || []
+      const messages = sessionMessages.length > 0
+        ? sessionMessages
+        : chatMessages
+
+      const defaults = { provider: 'openai' as const, apiKey: '', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' }
       set({
-        memories: memories as MemoryEntry[],
-        tasks: tasks as TaskNode[],
-        checkpoints: checkpoints as SessionCheckpoint[],
-        notes: notes || '',
-        goal,
-        apiConfig: apiConfig || get().apiConfig,
+        memories: latestSession?.memories
+          ? (latestSession.memories as MemoryEntry[])
+          : (memories as MemoryEntry[]),
+        tasks: latestSession?.tasks
+          ? (latestSession.tasks as TaskNode[])
+          : (tasks as TaskNode[]),
+        checkpoints: latestSession?.checkpoints
+          ? (latestSession.checkpoints as SessionCheckpoint[])
+          : (checkpoints as SessionCheckpoint[]),
+        notes: latestSession?.notes || notes || '',
+        goal: latestSession?.goal ?? goal,
+        currentSessionId: latestSession?.id || null,
+        selectedWorkDir: latestSession?.workDir || get().selectedWorkDir,
+        apiConfig: apiConfig ? { ...defaults, ...apiConfig } : get().apiConfig,
         apiHistory: apiHistory || [],
-        chatMessages: filteredMessages.length > 0
-          ? filteredMessages.map(m => ({
+        chatMessages: messages.length > 0
+          ? messages.map(m => ({
               id: m.id,
               role: m.role as 'user' | 'assistant' | 'system',
               content: m.content,
+              images: m.images,
               timestamp: m.timestamp,
               isStreaming: false,
             }))
           : get().chatMessages,
+        files: latestSession?.files
+          ? (latestSession.files as FileNode[])
+          : get().files,
+        openTabs: latestSession?.openTabs
+          ? (latestSession.openTabs as any)
+          : get().openTabs,
+        fontFamily: fontFamily || (typeof localStorage !== 'undefined' ? localStorage.getItem('helix-font-family') : null) || get().fontFamily,
+        fontSize: fontSize || (typeof localStorage !== 'undefined' ? Number(localStorage.getItem('helix-font-size')) || get().fontSize : get().fontSize),
+        interfaceFont: interfaceFont || (typeof localStorage !== 'undefined' ? localStorage.getItem('helix-interface-font') : null) || get().interfaceFont,
+        transcriptFontSize: transcriptFontSize || (typeof localStorage !== 'undefined' ? Number(localStorage.getItem('helix-transcript-size')) || get().transcriptFontSize : get().transcriptFontSize),
+        scheduledTasks: scheduledTasks as ScheduledTask[],
+        mcpServers: {
+          ...fileMcpConfig,
+          ...(mcpServers || {}),
+        },
+        customShortcuts: customShortcuts && Object.keys(customShortcuts).length > 0 ? customShortcuts : { ...DEFAULT_SHORTCUTS },
+        agentMaxIterations: agentMaxIterations ?? get().agentMaxIterations,
+        autoCompactContext: autoCompactContext ?? get().autoCompactContext,
+        smartTruncation: smartTruncation ?? get().smartTruncation,
+        autoSaveSession: autoSaveSession ?? get().autoSaveSession,
+        temperature: temperature ?? get().temperature,
+        maxOutputTokens: maxOutputTokens ?? get().maxOutputTokens,
+        customInstructions: customInstructions ?? get().customInstructions,
+        availableModels: availableModels || [],
+        editorTheme: (editorTheme as 'vs-dark' | 'light') ?? get().editorTheme,
+        gitAutoCommit: gitAutoCommit ?? get().gitAutoCommit,
+        gitAutoPush: gitAutoPush ?? get().gitAutoPush,
+        gitPushConfirm: gitPushConfirm ?? get().gitPushConfirm,
+        gitAutoBranch: gitAutoBranch ?? get().gitAutoBranch,
+        gitRemoteUrl: gitRemoteUrl || get().gitRemoteUrl,
+        gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
+        gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
       })
+
+      // Auto-detect AGENTS.md / CLAUDE.md from project root as fallback
+      if (!customInstructions) {
+        try {
+          const res = await fetch('/api/instructions')
+          const data = await res.json()
+          if (data.content) {
+            get().setCustomInstructions(data.content)
+          }
+        } catch {
+          // Silently ignore — no instructions file found or API unavailable
+        }
+      }
+
+      // Set default workDir from server if none restored
+      if (!get().selectedWorkDir) {
+        try {
+          const res = await fetch('/api/init')
+          const data = await res.json()
+          if (data.workDir) {
+            get().setSelectedWorkDir(data.workDir)
+          }
+        } catch {
+          // Silently ignore
+        }
+      }
     } catch (e) {
       console.error('Failed to restore:', e)
     }
@@ -1126,9 +1738,7 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       const { persistence } = await import('@/lib/persist')
       const state = get()
       const sessionId = 'checkpoint-' + Date.now()
-      const messages = state.chatMessages.filter(m =>
-        !(m.role === 'assistant' && m.content === '你好！有什么我可以帮你的吗？')
-      )
+      const messages = state.chatMessages
       if (messages.length === 0) return
       await persistence.saveChatMessages(
         messages.map(m => ({
@@ -1208,7 +1818,7 @@ export const useHelixStore = create<HelixState>((set, get) => ({
     let ctx = '\n--- 当前任务 ---\n'
     const renderTasks = (tasks: TaskNode[], prefix = '') => {
       for (const t of tasks) {
-        const statusIcon = t.status === 'done' ? '✅' : t.status === 'in_progress' ? '🔄' : t.status === 'blocked' ? '⚠️' : '⬜'
+        const statusIcon = t.status === 'done' ? '' : t.status === 'in_progress' ? '' : t.status === 'blocked' ? '' : ''
         ctx += `${prefix}${statusIcon} ${t.label}\n`
         if (t.children) renderTasks(t.children, prefix + '  ')
       }
@@ -1221,7 +1831,7 @@ export const useHelixStore = create<HelixState>((set, get) => ({
     if (state.subAgents.length > 0) {
       ctx += '\n--- 子 Agent 状态 ---\n'
       for (const a of state.subAgents) {
-        const statusIcon = a.status === 'running' ? '🔄' : a.status === 'completed' ? '✅' : a.status === 'failed' ? '❌' : '⏹️'
+        const statusIcon = a.status === 'running' ? '' : a.status === 'completed' ? '' : a.status === 'failed' ? '' : ''
         ctx += `${statusIcon} ${a.name}: ${a.description}\n`
         if (a.result && a.status === 'completed') {
           ctx += `   结果: ${a.result.slice(0, 200)}\n`

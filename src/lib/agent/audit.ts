@@ -1,31 +1,82 @@
-/**
- * Audit logging for Agent tool executions.
- * In-memory ring buffer with configurable max entries.
- */
+import fs from 'fs'
+import path from 'path'
 
-export interface AuditEntry {
-  timestamp: number
+interface ToolExecutionLog {
   requestId?: string
   toolName: string
   params: Record<string, unknown>
-  result: string
+  result: string | undefined
   duration: number
 }
 
-const auditLog: AuditEntry[] = []
-const MAX_ENTRIES = 10000
+export interface FileChangeRecord {
+  timestamp: number
+  requestId?: string
+  filePath: string
+  changeType: 'add' | 'modify' | 'delete'
+  toolName: string
+  contentBefore?: string
+  contentAfter?: string
+  diff?: string
+  rollbackAvailable: boolean
+}
 
-export function logToolExecution(entry: Omit<AuditEntry, 'timestamp'>): void {
-  auditLog.push({
-    ...entry,
-    timestamp: Date.now(),
-  })
-  
-  if (auditLog.length > MAX_ENTRIES) {
-    auditLog.shift()
+const changeLog: FileChangeRecord[] = []
+const AUDIT_LOG_MAX = 500
+
+const SNAPSHOT_DIR = process.env.AUDIT_SNAPSHOT_DIR || '.helix-snapshots'
+
+export function logToolExecution(entry: ToolExecutionLog): void {
+  if (entry.duration > 1000) {
+    console.log(`[Audit] ${entry.toolName} (${entry.duration}ms)`)
   }
 }
 
-export function getAuditLog(limit?: number): AuditEntry[] {
-  return limit ? auditLog.slice(-limit) : [...auditLog]
+function ensureSnapshotDir(): void {
+  const dir = path.resolve(SNAPSHOT_DIR)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+}
+
+export function captureSnapshot(requestId: string | undefined, filePath: string): string | null {
+  try {
+    const resolved = path.resolve(filePath)
+    if (!fs.existsSync(resolved)) return null
+    ensureSnapshotDir()
+    const ts = Date.now()
+    const snapshotFile = path.join(SNAPSHOT_DIR, `${ts}-${path.basename(filePath)}.snap`)
+    fs.copyFileSync(resolved, snapshotFile)
+    return snapshotFile
+  } catch {
+    return null
+  }
+}
+
+export function recordFileChange(record: FileChangeRecord): void {
+  changeLog.push(record)
+  if (changeLog.length > AUDIT_LOG_MAX) {
+    changeLog.splice(0, changeLog.length - AUDIT_LOG_MAX)
+  }
+  console.log(`[Audit] ${record.changeType} ${record.filePath} (via ${record.toolName})`)
+  writeAuditEntry(record)
+}
+
+export function getChangeLog(): FileChangeRecord[] {
+  return [...changeLog]
+}
+
+export function getRecentChanges(limit: number = 20): FileChangeRecord[] {
+  return changeLog.slice(-limit).reverse()
+}
+
+function writeAuditEntry(record: FileChangeRecord): void {
+  try {
+    ensureSnapshotDir()
+    const logFile = path.join(SNAPSHOT_DIR, 'audit.jsonl')
+    const line = JSON.stringify(record) + '\n'
+    fs.appendFileSync(logFile, line, 'utf-8')
+  } catch {
+    // Non-critical
+  }
 }

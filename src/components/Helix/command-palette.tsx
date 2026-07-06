@@ -27,6 +27,7 @@ interface CommandItem {
   action: () => void
   category: 'file' | 'action'
   shortcut?: string
+  disabled?: boolean
 }
 
 export function CommandPalette() {
@@ -342,9 +343,9 @@ export function CommandPalette() {
         onClick={() => setCommandPaletteOpen(false)}
       />
       {/* Palette */}
-      <div className="relative w-full max-w-lg bg-card border border-border rounded-2xl shadow-2xl overflow-hidden">
+      <div className="relative w-full max-w-lg bg-card border border-border/60 rounded-2xl shadow-2xl overflow-hidden">
         {/* Search input */}
-        <div className="flex items-center gap-3 px-4 border-b border-border">
+        <div className="flex items-center gap-3 px-4 border-b border-border/60">
           <Search className="size-4 text-muted-foreground shrink-0" />
           <input
             ref={inputRef}
@@ -367,12 +368,12 @@ export function CommandPalette() {
           )}
           {renderSection('', fileResults, 0)}
           {fileResults.length > 0 && actionResults.length > 0 && (
-            <div className="my-1 border-t border-border/50" />
+            <div className="my-1 border-t border-border/30" />
           )}
           {renderSection('操作', actionResults, fileResults.length)}
         </div>
         {/* Footer */}
-        <div className="flex items-center gap-4 px-4 py-2 border-t border-border text-[10px] text-muted-foreground">
+        <div className="flex items-center gap-4 px-4 py-2 border-t border-border/60 text-[10px] text-muted-foreground">
           <span className="flex items-center gap-1">
             <kbd className="bg-muted px-1 py-0.5 rounded">↑↓</kbd> 导航
           </span>

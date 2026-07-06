@@ -7,8 +7,8 @@ const HelixLayout = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="h-screen w-screen flex items-center justify-center bg-[#FCFBF9]">
-        <div className="text-sm text-[#2D2A24]/40">Loading Helix...</div>
+      <div className="h-screen w-screen flex items-center justify-center bg-background">
+        <div className="text-sm text-muted-foreground">Loading Helix...</div>
       </div>
     ),
   }

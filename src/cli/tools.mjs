@@ -102,7 +102,7 @@ async function listFiles(params) {
   try {
     const entries = await fs.readdir(dir, { withFileTypes: true })
     return entries
-      .map(e => `${e.isDirectory() ? '📁' : '📄'} ${e.name}`)
+      .map(e => `${e.isDirectory() ? '' : ''} ${e.name}`)
       .join('\n')
   } catch (err) {
     return `Error: ${err.message}`

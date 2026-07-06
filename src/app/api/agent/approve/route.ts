@@ -3,7 +3,7 @@
  */
 
 import { NextRequest } from 'next/server'
-import { approveRequest, rejectRequest, getPendingApprovals } from '@/lib/agent/approval'
+import { approveRequest, rejectRequest, getPendingApprovals, setCachedApproval, setAutoApproveAll, getApprovalRequest } from '@/lib/agent/approval'
 import { validateApiToken } from '@/lib/agent/auth'
 import { ApproveRequestSchema } from '@/lib/validations'
 
@@ -27,7 +27,11 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    const { approvalId, action } = parsed.data
+    const { approvalId, action, cache, approveAll } = parsed.data
+
+    if (approveAll) {
+      setAutoApproveAll()
+    }
 
     if (action === 'approve') {
       const success = approveRequest(approvalId)
@@ -36,6 +40,13 @@ export async function POST(req: NextRequest) {
           JSON.stringify({ error: 'Approval request not found or already resolved' }),
           { status: 404, headers: { 'Content-Type': 'application/json' } }
         )
+      }
+      if (cache) {
+        const req = getApprovalRequest(approvalId)
+        if (req && req.params.path) {
+          const key = `${req.toolName}:${req.params.path as string}`
+          setCachedApproval(key, true)
+        }
       }
       return new Response(JSON.stringify({ success: true }), {
         headers: { 'Content-Type': 'application/json' },
@@ -47,6 +58,13 @@ export async function POST(req: NextRequest) {
           JSON.stringify({ error: 'Approval request not found or already resolved' }),
           { status: 404, headers: { 'Content-Type': 'application/json' } }
         )
+      }
+      if (cache) {
+        const req = getApprovalRequest(approvalId)
+        if (req && req.params.path) {
+          const key = `${req.toolName}:${req.params.path as string}`
+          setCachedApproval(key, false)
+        }
       }
       return new Response(JSON.stringify({ success: true }), {
         headers: { 'Content-Type': 'application/json' },

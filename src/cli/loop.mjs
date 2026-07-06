@@ -82,7 +82,7 @@ export async function runAgentLoop(options) {
   const openaiTools = toolsToOpenAIFunctions()
 
   displaySeparator()
-  console.log(`🤖 Agent 启动`)
+  console.log(`Agent 启动`)
   displaySeparator()
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {

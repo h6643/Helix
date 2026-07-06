@@ -1,0 +1,55 @@
+{
+  "appId": "com.helix.desktop",
+  "productName": "Helix",
+  "directories": {
+    "output": "dist-electron"
+  },
+  "files": [
+    "electron/**/*",
+    ".next/standalone/**/*",
+    ".next/static/**/*",
+    "public/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": ".next/standalone",
+      "to": ".next/standalone"
+    },
+    {
+      "from": ".next/static",
+      "to": ".next/static"
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "public/Helix.ico"
+  },
+  "mac": {
+    "target": [
+      {
+        "target": "dmg",
+        "arch": ["x64", "arm64"]
+      }
+    ],
+    "icon": "public/favicon.icns"
+  },
+  "linux": {
+    "target": [
+      {
+        "target": "AppImage",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "public/favicon.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}

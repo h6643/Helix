@@ -46,7 +46,7 @@ if (!apiConfig.apiKey) {
 }
 
 displaySeparator()
-console.log('🤖 Helix Agent v1.0.0')
+console.log('Helix Agent v1.0.0')
 displaySeparator()
 displayStatus(`工作目录: ${workDir}`)
 displayStatus(`模型: ${apiConfig.model}`)
@@ -79,7 +79,7 @@ async function runInteractive() {
   console.log('\n输入消息开始对话，输入 /quit 退出\n')
 
   const ask = () => {
-    rl.question('\x1b[36m❯ \x1b[0m', async (input) => {
+    rl.question('\x1b[36m> \x1b[0m', async (input) => {
       const trimmed = input.trim()
 
       if (!trimmed) {
@@ -88,7 +88,7 @@ async function runInteractive() {
       }
 
       if (trimmed === '/quit' || trimmed === '/exit') {
-        console.log('\n👋 再见!\n')
+        console.log('\n再见!\n')
         rl.close()
         process.exit(0)
       }
