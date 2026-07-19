@@ -37,29 +37,47 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
   return {
     // Panel toggles
     'toggle-command-palette': () => state.toggleCommandPalette(),
-    'toggle-session-manager': () => state.toggleSessionManager(),
+
     'toggle-skill-panel': () => state.toggleSkillPanel(),
     'toggle-scheduled-tasks-panel': () => state.toggleScheduledTasksPanel(),
     'toggle-terminal': () => state.toggleTerminal(),
     'toggle-settings': () => state.toggleSettings(),
+    'toggle-file-tree': () => state.toggleWorktreePanel(),
+    'settings': () => state.toggleSettings(),
+    'show-shortcuts': () => state.showToast({ type: 'info', title: '快捷键', description: 'Ctrl+Shift+/ 快捷键帮助 · Ctrl+, 设置 · Ctrl+B 侧边栏 · Ctrl+J 终端 · Ctrl+F 查找 · Ctrl+[ ] 后退/前进 · F11 全屏', duration: 5000 }),
+    'command-palette': () => state.toggleCommandPalette(),
 
     // Chat
     'new-chat': () => state.clearChat(),
-    'archive-chat': () => {}, // TODO: implement archive
-    'rename-chat': () => {}, // TODO: implement rename
-    'search-chats': () => {}, // TODO: implement search
-    'next-chat': () => {}, // TODO: implement
-    'prev-chat': () => {}, // TODO: implement
-
-    // Tabs
-    'close-tab': () => { if (state.activeTabId) state.closeTab(state.activeTabId) },
-    'next-tab': () => {
-      const tabs = state.openTabs
-      if (tabs.length > 1) {
-        const idx = tabs.findIndex(t => t.id === state.activeTabId)
-        state.setActiveTab(tabs[(idx + 1) % tabs.length].id)
+    'archive-chat': () => state.clearChat(),
+    'rename-chat': () => {
+      const sessionId = state.currentSessionId
+      if (sessionId) window.dispatchEvent(new CustomEvent('helix:rename-session', { detail: { sessionId } }))
+    },
+    'search-chats': () => state.toggleSessionManager(),
+    'prev-chat': () => state.toggleSessionManager(),
+    'go-back': () => {
+      const entry = state.navigateBack()
+      if (!entry) return
+      if (entry.type === 'chat') {
+        state.navigateSession('back')
+      } else {
+        if (!state.showSettings) state.toggleSettings(entry.page)
+        else state.setSettingsPage(entry.page)
       }
     },
+    'go-forward': () => {
+      const entry = state.navigateForward()
+      if (!entry) return
+      if (entry.type === 'chat') {
+        state.navigateSession('forward')
+      } else {
+        if (!state.showSettings) state.toggleSettings(entry.page)
+        else state.setSettingsPage(entry.page)
+      }
+    },
+
+    // Tabs
     'prev-tab': () => {
       const tabs = state.openTabs
       if (tabs.length > 1) {
@@ -67,36 +85,20 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
         state.setActiveTab(tabs[(idx - 1 + tabs.length) % tabs.length].id)
       }
     },
-    'chat-1': () => { if (state.openTabs[0]) state.setActiveTab(state.openTabs[0].id) },
-    'chat-2': () => { if (state.openTabs[1]) state.setActiveTab(state.openTabs[1].id) },
-    'chat-3': () => { if (state.openTabs[2]) state.setActiveTab(state.openTabs[2].id) },
-    'chat-4': () => { if (state.openTabs[3]) state.setActiveTab(state.openTabs[3].id) },
-    'chat-5': () => { if (state.openTabs[4]) state.setActiveTab(state.openTabs[4].id) },
-    'chat-6': () => { if (state.openTabs[5]) state.setActiveTab(state.openTabs[5].id) },
-    'chat-7': () => { if (state.openTabs[6]) state.setActiveTab(state.openTabs[6].id) },
-    'chat-8': () => { if (state.openTabs[7]) state.setActiveTab(state.openTabs[7].id) },
-    'chat-9': () => { if (state.openTabs[8]) state.setActiveTab(state.openTabs[8].id) },
 
-    // File operations
-    'copy-path': () => {
-      const tab = state.openTabs.find(t => t.id === state.activeTabId)
-      if (tab) {
-        const path = state.getFilePath(tab.fileId)
-        navigator.clipboard.writeText(path)
-      }
-    },
-    'copy-workdir': () => {
-      navigator.clipboard.writeText(state.selectedWorkDir || '')
-    },
-    'copy-session-id': () => {
-      navigator.clipboard.writeText(state.currentSessionId || '')
-    },
+    // Approve/decline
+    'approve-request': () => { window.dispatchEvent(new CustomEvent('helix:approve-request', { detail: { approved: true } })) },
+    'decline-request': () => { window.dispatchEvent(new CustomEvent('helix:approve-request', { detail: { approved: false } })) },
 
-    // Model picker
-    'model-picker': () => state.toggleCommandPalette(),
-
-    // Toggle panels
-    'toggle-file-tree': () => {}, // TODO: implement
+    // Navigation & misc
+    'quick-chat': () => state.clearChat(),
+    'search-chat': () => state.toggleCommandPalette(),
+    'next-recent-chat': () => state.toggleSessionManager(),
+    'prev-recent-chat': () => state.toggleSessionManager(),
+    'open-review': () => state.toggleCommandPalette(),
+    'force-reload': () => window.location.reload(),
+    'new-window': () => window.open(window.location.href, '_blank'),
+    'model-picker': () => state.toggleSettings('api'),
 
     // No-op for actions not yet implemented
     'default': () => {},
@@ -105,7 +107,7 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
 
 export function KeyboardShortcuts() {
   const storeState = useHelixStore()
-  const { toggleCommandPalette, activeTabId, closeTab, openTabs, setActiveTab, markTabSaved, showToast, setCommandPaletteOpen, customShortcuts, toggleSessionManager, toggleSkillPanel, toggleScheduledTasksPanel } =
+  const { activeTabId, closeTab, openTabs, setActiveTab, markTabSaved, showToast, customShortcuts, toggleSessionManager, toggleSkillPanel, toggleScheduledTasksPanel } =
     storeState
 
   const handleKeyDown = useCallback(
@@ -127,26 +129,7 @@ export function KeyboardShortcuts() {
         }
       }
 
-      // Ctrl+K: Command Palette (always)
-      if (isMod && e.key === 'k') {
-        e.preventDefault()
-        toggleCommandPalette()
-        return
-      }
 
-      // Ctrl+P: Quick file open (always)
-      if (isMod && e.key === 'p' && !e.shiftKey) {
-        e.preventDefault()
-        setCommandPaletteOpen(true)
-        return
-      }
-
-      // Ctrl+Shift+M: Toggle session manager
-      if (isMod && e.shiftKey && e.key === 'M') {
-        e.preventDefault()
-        toggleSessionManager()
-        return
-      }
 
       // Ctrl+Shift+P: Toggle skill panel
       if (isMod && e.shiftKey && e.key === 'P') {
@@ -159,16 +142,6 @@ export function KeyboardShortcuts() {
       if (isMod && e.shiftKey && e.key === 'T') {
         e.preventDefault()
         toggleScheduledTasksPanel()
-        return
-      }
-
-      // Ctrl+L: Focus chat input
-      if (isMod && !e.shiftKey && e.key === 'l') {
-        e.preventDefault()
-        const chatInput = document.querySelector<HTMLTextAreaElement>('[data-chat-input]')
-        if (chatInput) {
-          chatInput.focus()
-        }
         return
       }
 
@@ -194,49 +167,6 @@ export function KeyboardShortcuts() {
       if (isMod && e.key === 'w') {
         e.preventDefault()
         if (activeTabId) closeTab(activeTabId)
-        return
-      }
-
-      // Ctrl+Shift+N: New file
-      if (isMod && e.shiftKey && e.key === 'N') {
-        e.preventDefault()
-        const name = prompt('输入文件名：')
-        if (name?.trim()) {
-          useHelixStore.getState().createFile(null, name.trim(), 'file')
-        }
-        return
-      }
-
-      // Ctrl+Tab: Next tab
-      if (isMod && e.key === 'Tab' && !e.shiftKey) {
-        e.preventDefault()
-        const state = useHelixStore.getState()
-        const tabs = state.openTabs
-        if (tabs.length > 1) {
-          const idx = tabs.findIndex(t => t.id === state.activeTabId)
-          const next = tabs[(idx + 1) % tabs.length]
-          setActiveTab(next.id)
-        }
-        return
-      }
-
-      // Ctrl+Shift+Tab: Previous tab
-      if (isMod && e.shiftKey && e.key === 'Tab') {
-        e.preventDefault()
-        const state = useHelixStore.getState()
-        const tabs = state.openTabs
-        if (tabs.length > 1) {
-          const idx = tabs.findIndex(t => t.id === state.activeTabId)
-          const prev = tabs[(idx - 1 + tabs.length) % tabs.length]
-          setActiveTab(prev.id)
-        }
-        return
-      }
-
-      // Ctrl+`: Toggle terminal
-      if (isMod && e.key === '`') {
-        e.preventDefault()
-        useHelixStore.getState().toggleTerminal()
         return
       }
 
@@ -272,8 +202,13 @@ export function KeyboardShortcuts() {
         if (tab) {
           const newName = prompt('重命名文件：', tab.name)
           if (newName?.trim() && newName.trim() !== tab.name) {
-            state.renameFile(tab.fileId, newName.trim())
-            showToast({ type: 'info', title: '文件已重命名', description: `${tab.name} → ${newName.trim()}` })
+            state.renameFile(tab.fileId, newName.trim()).then((ok) => {
+              if (ok) {
+                showToast({ type: 'info', title: '文件已重命名', description: `${tab.name} → ${newName.trim()}` })
+              } else {
+                showToast({ type: 'error', title: '重命名失败', description: '磁盘文件重命名失败，请检查文件是否被占用' })
+              }
+            })
           }
         }
         return
@@ -299,7 +234,7 @@ export function KeyboardShortcuts() {
         return
       }
     },
-    [toggleCommandPalette, activeTabId, closeTab, openTabs, setActiveTab, markTabSaved, showToast, setCommandPaletteOpen, customShortcuts, toggleSessionManager, toggleSkillPanel, toggleScheduledTasksPanel]
+    [activeTabId, closeTab, openTabs, setActiveTab, markTabSaved, showToast, customShortcuts, toggleSessionManager, toggleSkillPanel, toggleScheduledTasksPanel]
   )
 
   useEffect(() => {

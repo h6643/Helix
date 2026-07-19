@@ -1,5 +1,5 @@
 @import "tailwindcss";
-@import "tw-animate-css";
+@import "./_tw-animate.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -68,18 +68,18 @@
   --chart-3: oklch(0.48 0.13 270);
   --chart-4: oklch(0.52 0.17 330);
   --chart-5: oklch(0.55 0.14 50);
-  --sidebar: oklch(0.975 0.004 240);
+  --sidebar: oklch(0.93 0.006 240);
   --sidebar-foreground: oklch(0.16 0.008 240);
   --sidebar-primary: oklch(0.52 0.17 245);
   --sidebar-primary-foreground: oklch(0.985 0.002 240);
-  --sidebar-accent: oklch(0.955 0.008 240);
+  --sidebar-accent: oklch(0.90 0.01 240);
   --sidebar-accent-foreground: oklch(0.18 0.008 240);
   --sidebar-border: oklch(0.92 0.01 240);
   --sidebar-ring: oklch(0.52 0.17 245);
 }
 
 .dark {
-  --background: oklch(0.105 0.012 240);
+  --background: oklch(0.085 0.012 240);
   --foreground: oklch(0.92 0.008 240);
   --card: oklch(0.13 0.014 240);
   --card-foreground: oklch(0.92 0.008 240);
@@ -89,7 +89,7 @@
   --primary-foreground: oklch(0.105 0.012 240);
   --secondary: oklch(0.18 0.012 240);
   --secondary-foreground: oklch(0.92 0.008 240);
-  --muted: oklch(0.16 0.01 240);
+  --muted: oklch(0.12 0.01 240);
   --muted-foreground: oklch(0.60 0.012 240);
   --accent: oklch(0.20 0.014 240);
   --accent-foreground: oklch(0.92 0.008 240);
@@ -102,7 +102,7 @@
   --chart-3: oklch(0.55 0.12 270);
   --chart-4: oklch(0.60 0.17 330);
   --chart-5: oklch(0.63 0.14 50);
-  --sidebar: oklch(0.115 0.01 240);
+  --sidebar: oklch(0.07 0.012 240);
   --sidebar-foreground: oklch(0.92 0.008 240);
   --sidebar-primary: oklch(0.65 0.15 245);
   --sidebar-primary-foreground: oklch(0.105 0.012 240);
@@ -170,17 +170,129 @@
 .dark .text-muted-foreground\/50 { color: oklch(0.68 0 0 / 0.62); }
 .dark .text-muted-foreground\/60 { color: oklch(0.68 0 0 / 0.68); }
 
-/* ── Prose polish ─────────────────────────────────── */
+/* ── Markdown rendering ─────────────────────────────── */
 
-.prose pre {
-  margin: 0 !important;
-  padding: 0 !important;
-  background: transparent !important;
+.helix-md {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--foreground);
+  word-wrap: break-word;
 }
 
-.prose pre > div {
-  border-radius: 0.5rem;
-  overflow: hidden;
+.helix-md p {
+  margin: 0.6em 0;
+}
+
+.helix-md p:first-child {
+  margin-top: 0;
+}
+
+.helix-md p:last-child {
+  margin-bottom: 0;
+}
+
+.helix-md h1, .helix-md h2, .helix-md h3, .helix-md h4 {
+  font-weight: 600;
+  margin: 1.2em 0 0.6em;
+  color: var(--foreground);
+  letter-spacing: -0.01em;
+}
+
+.helix-md h1 { font-size: 1.5em; }
+.helix-md h2 { font-size: 1.25em; border-bottom: 1px solid rgba(128, 128, 128, 0.15); padding-bottom: 0.35em; }
+.helix-md h3 { font-size: 1.1em; }
+.helix-md h4 { font-size: 1em; }
+
+.helix-md ul, .helix-md ol {
+  padding-left: 1.5em;
+  margin: 0.6em 0;
+}
+
+.helix-md li {
+  margin: 0.4em 0;
+}
+
+.helix-md li > p {
+  margin: 0.25em 0;
+}
+
+.helix-md code {
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.85em;
+  background: rgba(128, 128, 128, 0.08);
+  border: 1px solid rgba(128, 128, 128, 0.15);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  color: var(--foreground);
+}
+
+.helix-md pre {
+  margin: 0.75em 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+.helix-md pre > div {
+  background: rgba(128, 128, 128, 0.08);
+  border: 1px solid rgba(128, 128, 128, 0.15);
+  border-radius: 6px;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  font-size: 0.85em;
+}
+
+.helix-md pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  border: none;
+}
+
+.helix-md blockquote {
+  border-left: 3px solid rgba(128, 128, 128, 0.3);
+  padding-left: 1em;
+  margin: 0.75em 0;
+  color: var(--foreground);
+  opacity: 0.85;
+}
+
+.helix-md a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+  text-decoration-color: rgba(var(--primary), 0.3);
+}
+
+.helix-md a:hover {
+  text-decoration-color: hsl(var(--primary));
+}
+
+.helix-md strong {
+  font-weight: 600;
+}
+
+.helix-md table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  font-size: 0.9em;
+}
+
+.helix-md th, .helix-md td {
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  padding: 0.4em 0.8em;
+  text-align: left;
+}
+
+.helix-md th {
+  font-weight: 600;
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.helix-md hr {
+  border: none;
+  border-top: 1px solid rgba(128, 128, 128, 0.2);
+  margin: 1em 0;
 }
 
 .monaco-editor .margin {
@@ -320,3 +432,213 @@
 #helix-titlebar [role="button"] {
   -webkit-app-region: no-drag;
 }
+
+/* ── Helix-style Thinking Panel ───────────────────────── */
+/* Modeled after OpenAI Helix's clean terminal panel style */
+
+.helix-panel {
+  border: 1px solid #2a2a2a;
+  border-radius: 3px;
+  overflow: hidden;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+
+.helix-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: transparent;
+  border-bottom: 1px solid #2a2a2a;
+  user-select: none;
+}
+
+.helix-titlebar-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #666;
+  letter-spacing: 0.8px;
+}
+
+.helix-titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.helix-titlebar-status {
+  font-size: 10px;
+  color: #555;
+}
+
+.helix-titlebar-status--done {
+  color: #4a9;
+}
+
+.helix-titlebar-count {
+  font-size: 10px;
+  color: #555;
+  font-variant-numeric: tabular-nums;
+}
+
+.helix-copy-btn {
+  font-size: 10px;
+  color: #666;
+  background: none;
+  border: 1px solid #333;
+  border-radius: 2px;
+  padding: 1px 6px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.helix-copy-btn:hover {
+  color: #aaa;
+  border-color: #555;
+}
+
+.helix-content {
+  padding: 8px 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  line-height: 1.65;
+  color: #bbb;
+  max-height: 260px;
+  scrollbar-width: thin;
+}
+
+.helix-content::-webkit-scrollbar {
+  width: 4px;
+}
+
+.helix-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.helix-content::-webkit-scrollbar-thumb {
+  background: #ccc3;
+}
+
+.helix-content::-webkit-scrollbar-thumb:hover {
+  background: #ccc6;
+}
+
+.helix-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 1px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.helix-line:hover {
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.helix-line--enter {
+  animation: helix-fade-in 0.12s ease-out both;
+}
+
+.helix-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #444;
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+
+.helix-dot--done {
+  background: #4a9;
+}
+
+.helix-dot--running {
+  background: #e96;
+  animation: helix-pulse 1.2s ease-in-out infinite;
+}
+
+.helix-verb {
+  color: #ddd;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.helix-detail {
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes helix-fade-in {
+  from { opacity: 0; transform: translateY(-1px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes helix-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .helix-line--enter { animation: none; }
+  .helix-dot--running { animation: none; opacity: 0.8; }
+}
+
+/* Wave loader (bouncing dots) */
+@keyframes waveDot {
+  0%, 50%, 100% { transform: translateY(0); }
+  25% { transform: translateY(-7px); }
+  75% { transform: translateY(3px); }
+}
+
+/* Wave text (flowing characters) */
+@keyframes waveChar {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+.wave-char {
+  display: inline-block;
+  animation: waveChar 1.2s ease-in-out infinite;
+}
+
+/* Running session indicator — brighter breathing glow dot */
+.running-breathe {
+  animation: runningBreathe 1.6s ease-in-out infinite;
+}
+@keyframes runningBreathe {
+  0%, 100% {
+    opacity: 0.6;
+    transform: scale(0.9);
+    box-shadow: 0 0 5px 1px rgba(96, 165, 250, 0.5);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+    box-shadow: 0 0 14px 4px rgba(96, 165, 250, 0.95);
+  }
+}
+
+/* Thinking breath — neutral breathing glow (no blue) */
+.thinking-breath {
+  display: inline-block;
+  animation: thinkingBreath 1.8s ease-in-out infinite;
+}
+@keyframes thinkingBreath {
+  0%, 100% {
+    opacity: 0.4;
+    text-shadow: 0 0 4px rgba(255, 255, 255, 0.25);
+  }
+  50% {
+    opacity: 1;
+    text-shadow: 0 0 14px rgba(255, 255, 255, 0.85), 0 0 22px rgba(255, 255, 255, 0.5);
+  }
+}
+
+/* xterm.js transparent background */
+.xterm { background: transparent !important; }
+.xterm .xterm-viewport { background: transparent !important; }
+.xterm .xterm-screen { background: transparent !important; }

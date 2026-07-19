@@ -36,6 +36,8 @@ export interface PersistedChatMessage {
   sessionId?: string
   role: string
   content: string
+  reasoning?: string
+  steps?: import('@/stores/helix-store').ExecutionStep[]
   images?: Array<{
     id: string
     dataUrl: string
@@ -98,7 +100,11 @@ export interface PersistedSession {
   id: string
   label: string
   savedAt: number
+  /** Stable creation time. Never changed by load/switch/save, so the sidebar
+   *  can sort by this for a fixed order that doesn't reshuffle on click. */
+  createdAt?: number
   isArchived?: boolean
+  isPinned?: boolean
   workDir: string | null
   goal: string | null
   memories: PersistedMemory[]
@@ -110,11 +116,17 @@ export interface PersistedSession {
   openTabs: PersistedOpenTab[]
 }
 
+let dbInstance: IDBDatabase | null = null
+let dbPromise: Promise<IDBDatabase> | null = null
+
 function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbInstance) return Promise.resolve(dbInstance)
+  if (dbPromise) return dbPromise
+
+  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION)
 
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result
       if (!db.objectStoreNames.contains('memories')) {
         db.createObjectStore('memories', { keyPath: 'id' })
@@ -138,26 +150,30 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('settings')) {
         db.createObjectStore('settings', { keyPath: 'key' })
       }
-      // Migration: add sessionId index if store exists but index doesn't
+      // Migration: add sessionId index to existing chatMessages store
       if (db.objectStoreNames.contains('chatMessages')) {
-        let hasIndex = false
-        try {
-          const store = db.transaction('chatMessages', 'readwrite').objectStore('chatMessages')
-          store.index('sessionId')
-          hasIndex = true
-        } catch (_) {
-          // index doesn't exist yet
-        }
-        if (!hasIndex) {
-          const store = db.transaction('chatMessages', 'readwrite').objectStore('chatMessages')
-          store.createIndex('sessionId', 'sessionId', { unique: false })
+        const upgradeTx = (event.target as IDBOpenDBRequest | null)?.transaction ?? null
+        if (upgradeTx) {
+          const store = upgradeTx.objectStore('chatMessages')
+          if (!store.indexNames.contains('sessionId')) {
+            store.createIndex('sessionId', 'sessionId', { unique: false })
+          }
         }
       }
     }
 
-    request.onsuccess = () => resolve(request.result)
-    request.onerror = () => reject(request.error)
+    request.onsuccess = () => {
+      dbInstance = request.result
+      dbInstance.onclose = () => { dbInstance = null; dbPromise = null }
+      resolve(request.result)
+    }
+    request.onerror = () => {
+      dbPromise = null
+      reject(request.error)
+    }
   })
+
+  return dbPromise
 }
 
 function tx<T>(
@@ -369,6 +385,14 @@ export const persistence = {
         return h
       }))
     }
+    if (key === 'apiProfiles' && Array.isArray(value)) {
+      toStore = await Promise.all((value as Array<{ config?: Record<string, unknown> }>).map(async (p) => {
+        if (p.config && typeof p.config.apiKey === 'string' && p.config.apiKey) {
+          return { ...p, config: { ...p.config, apiKey: await encryptApiKey(p.config.apiKey) } }
+        }
+        return p
+      }))
+    }
     const db = await openDB()
     await tx(db, 'settings', 'readwrite', (store) => store.put({ key, value: toStore }))
   },
@@ -392,6 +416,14 @@ export const persistence = {
         return h
       })) as T
     }
+    if (key === 'apiProfiles' && Array.isArray(value)) {
+      value = await Promise.all((value as Array<{ config?: Record<string, unknown> }>).map(async (p) => {
+        if (p.config && typeof p.config.apiKey === 'string' && p.config.apiKey) {
+          return { ...p, config: { ...p.config, apiKey: await decryptApiKey(p.config.apiKey) } }
+        }
+        return p
+      })) as T
+    }
     return value
   },
 
@@ -407,6 +439,7 @@ export const persistence = {
     openTabs: PersistedOpenTab[]
     id?: string
     savedAt?: number
+    createdAt?: number
     label?: string
     workDir?: string | null
     isArchived?: boolean
@@ -415,10 +448,23 @@ export const persistence = {
     const now = Date.now()
     const id = data.id || 'session-' + now
     const { label: dataLabel, ...rest } = data
+    // Preserve createdAt for existing sessions (so switching/loading/re-saving
+    // never reshuffles the sidebar); assign it only when first created.
+    let createdAt = data.createdAt
+    if (createdAt == null) {
+      const existing = await tx<PersistedSession | undefined>(
+        db,
+        'sessions',
+        'readonly',
+        (store) => store.get(id)
+      )
+      createdAt = existing?.createdAt ?? existing?.savedAt ?? now
+    }
     const session: PersistedSession = {
       id,
       label: dataLabel || new Date().toLocaleString('zh-CN'),
       savedAt: data.savedAt || now,
+      createdAt,
       workDir: data.workDir ?? null,
       ...rest,
       chatMessages: rest.chatMessages.map(m => ({ ...m, sessionId: m.sessionId || 'session-default' })),
@@ -445,6 +491,30 @@ export const persistence = {
       session.savedAt = Date.now()
       await tx(db, 'sessions', 'readwrite', (store) => store.put(session))
     }
+  },
+
+  async toggleSessionArchived(id: string): Promise<boolean> {
+    const db = await openDB()
+    const session = await tx<PersistedSession | undefined>(db, 'sessions', 'readonly', (store) => store.get(id))
+    if (session) {
+      session.isArchived = !session.isArchived
+      session.savedAt = Date.now()
+      await tx(db, 'sessions', 'readwrite', (store) => store.put(session))
+      return session.isArchived
+    }
+    return false
+  },
+
+  async toggleSessionPinned(id: string): Promise<boolean> {
+    const db = await openDB()
+    const session = await tx<PersistedSession | undefined>(db, 'sessions', 'readonly', (store) => store.get(id))
+    if (session) {
+      session.isPinned = !session.isPinned
+      session.savedAt = Date.now()
+      await tx(db, 'sessions', 'readwrite', (store) => store.put(session))
+      return session.isPinned
+    }
+    return false
   },
 
   // --- Projects ---
@@ -477,17 +547,82 @@ export const persistence = {
   },
 
   async getProjectFolders(): Promise<string[]> {
+    // Load from the dedicated settings key for project folders
+    const folders = await this.loadSetting<string[]>('projectFolders')
+    if (folders && Array.isArray(folders)) return folders
+    // Fallback: extract from projects store
     const projects = await this.loadProjects()
-    const folders = new Set<string>()
+    const folderSet = new Set<string>()
     for (const p of projects) {
-      if (p.folder) folders.add(p.folder)
+      if (p.folder) folderSet.add(p.folder)
     }
-    return Array.from(folders).sort()
+    return Array.from(folderSet).sort()
+  },
+
+  async saveProjectFolder(folder: string): Promise<void> {
+    const folders = await this.getProjectFolders()
+    if (!folders.includes(folder)) {
+      folders.push(folder)
+      folders.sort()
+      await this.saveSetting('projectFolders', folders)
+    }
+  },
+
+  async deleteProjectFolder(folder: string): Promise<void> {
+    const folders = await this.getProjectFolders()
+    const idx = folders.indexOf(folder)
+    if (idx !== -1) {
+      folders.splice(idx, 1)
+      await this.saveSetting('projectFolders', folders)
+    }
+  },
+
+  async getPinnedProjectFolders(): Promise<string[]> {
+    return (await this.loadSetting<string[]>('pinnedProjectFolders')) ?? []
+  },
+
+  async savePinnedProjectFolders(folders: string[]): Promise<void> {
+    await this.saveSetting('pinnedProjectFolders', folders)
+  },
+
+  async togglePinnedProjectFolder(folder: string): Promise<boolean> {
+    const folders = await this.getPinnedProjectFolders()
+    const idx = folders.indexOf(folder)
+    if (idx === -1) {
+      folders.push(folder)
+    } else {
+      folders.splice(idx, 1)
+    }
+    folders.sort()
+    await this.savePinnedProjectFolders(folders)
+    return idx === -1
   },
 
   async deleteProject(id: string): Promise<void> {
     const db = await openDB()
     await tx(db, 'projects', 'readwrite', (store) => store.delete(id))
+  },
+
+  async deleteSessionsByWorkDir(workDir: string): Promise<number> {
+    const sessions = await this.loadSessions()
+    const toDelete = sessions.filter(s => s.workDir === workDir)
+    const db = await openDB()
+    for (const s of toDelete) {
+      await tx(db, 'sessions', 'readwrite', (store) => store.delete(s.id))
+    }
+    return toDelete.length
+  },
+
+  async archiveSessionsByWorkDir(workDir: string): Promise<number> {
+    const sessions = await this.loadSessions()
+    const toArchive = sessions.filter(s => s.workDir === workDir && !s.isArchived)
+    const db = await openDB()
+    for (const s of toArchive) {
+      s.isArchived = true
+      s.savedAt = Date.now()
+      await tx(db, 'sessions', 'readwrite', (store) => store.put(s))
+    }
+    return toArchive.length
   },
 
   // --- Notes ---

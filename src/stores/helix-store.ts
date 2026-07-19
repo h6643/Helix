@@ -1,160 +1,42 @@
 import { create } from 'zustand'
+import type { StateCreator } from 'zustand'
 import { defaultFiles } from '@/lib/seed-data'
-import type { McpServerConfig } from '@/lib/helix/mcp'
+import { generateId } from '@/lib/format'
+import { debug, warn, error as logError } from '@/lib/logger'
+import { isElectron, getElectronAPI, electronFS, electronApp } from '@/lib/electron-bridge'
+import type { McpServerConfig } from '@/stores/hermes-store'
+import { useHermesStore } from '@/stores/hermes-store'
+export type { McpServerConfig } from '@/stores/hermes-store'
+import type {
+  FileNode, ImageAttachment, FileAttachment, ExecutionStep,
+  StreamingResponseBlock, StreamingDraft, ConnectionNotice,
+  ChatMessage, EditorTab, CursorPosition, ToastMessage, PendingChange,
+  ApiProvider, AgentEngine, ApiConfig, ApiProfile, Skill,
+  MemoryCategory, MemoryEntry, AvailableCommand, TaskNode,
+  SessionCheckpoint, ScheduledTask,
+  ToolCallEntry, SubAgent, CustomShortcutEntry, ProviderConfig,
+} from './helix-types'
+import { PROVIDER_PRESETS, DEFAULT_SHORTCUTS } from './helix-types'
+import { createGitSlice, type GitSlice } from './slices/git-slice'
+import { createToastSlice, type ToastSlice } from './slices/toast-slice'
+import { createTerminalSlice, type TerminalSlice } from './slices/terminal-slice'
+import { createAgentSettingsSlice, type AgentSettingsSlice } from './slices/agent-settings-slice'
+import { createPanelSlice, type PanelSlice } from './slices/panel-slice'
+import { createApiConfigSlice, type ApiConfigSlice } from './slices/api-config-slice'
+import { createSkillSlice, type SkillSlice } from './slices/skill-slice'
 
-export type { McpServerConfig }
-
-export interface FileNode {
-  id: string
-  name: string
-  type: 'file' | 'folder'
-  children?: FileNode[]
-  content?: string
-  language?: string
+export type {
+  FileNode, ImageAttachment, FileAttachment, ExecutionStep,
+  StreamingResponseBlock, StreamingDraft, ConnectionNotice,
+  ChatMessage, EditorTab, CursorPosition, ToastMessage, PendingChange,
+  ApiProvider, AgentEngine, ApiConfig, ApiProfile, Skill,
+  MemoryCategory, MemoryEntry, AvailableCommand, TaskNode,
+  SessionCheckpoint, ScheduledTask,
+  SubAgent, CustomShortcutEntry, ProviderConfig,
 }
+export { PROVIDER_PRESETS, DEFAULT_SHORTCUTS }
 
-export interface ImageAttachment {
-  id: string
-  dataUrl: string      // "data:image/png;base64,..."
-  mediaType: string     // "image/png", "image/jpeg", "image/webp"
-  width?: number
-  height?: number
-  name?: string
-}
-
-export interface ChatMessage {
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  images?: ImageAttachment[]
-  timestamp: number
-  isStreaming?: boolean
-}
-
-export interface EditorTab {
-  id: string
-  fileId: string
-  name: string
-  language: string
-  isDirty: boolean
-}
-
-export interface CursorPosition {
-  line: number
-  column: number
-}
-
-export interface ToastMessage {
-  id: string
-  type: 'success' | 'error' | 'info' | 'warning'
-  title: string
-  description?: string
-  duration?: number
-}
-
-export interface PendingChange {
-  id: string
-  fileId: string
-  fileName: string
-  filePath: string
-  oldContent: string
-  newContent: string
-  language: string
-}
-
-export type ApiProvider = string
-export type AgentEngine = 'helix'
-
-export interface ApiConfig {
-  provider: ApiProvider
-  apiKey: string
-  baseUrl: string
-  model: string
-  engine?: AgentEngine
-}
-
-export const PROVIDER_PRESETS: Record<string, { name: string; baseUrl: string; models: string[] }> = {}
-
-export interface Skill {
-  id: string
-  name: string
-  description: string
-  prompt: string
-  icon?: string
-  isBuiltin?: boolean
-  createdAt: number
-}
-
-export type MemoryCategory = 'user' | 'feedback' | 'project' | 'reference' | 'architecture' | 'rule' | 'decision' | 'pattern' | 'gotcha'
-
-export interface MemoryEntry {
-  id: string
-  content: string
-  category: MemoryCategory
-  createdAt: number
-}
-
-export interface TaskNode {
-  id: string
-  label: string
-  status: 'pending' | 'in_progress' | 'done' | 'blocked'
-  children?: TaskNode[]
-  parentId: string | null
-  depth: number
-}
-
-export interface SessionCheckpoint {
-  id: string
-  label: string
-  timestamp: number
-  taskIds: string[]
- memorySnapshot: string
-}
-
-export interface ScheduledTask {
-  id: string
-  label: string
-  prompt: string
-  scheduleText: string       // e.g. "every day at 9am" or "cron: 0 9 * * *"
-  cronExpression?: string    // parsed cron expression
-  enabled: boolean
-  lastRunAt: number | null
-  nextRunAt: number | null
-  createdAt: number
-  updatedAt: number
-}
-
-export interface Artifact {
-  id: string
-  title: string
-  content: string
-  type: 'html' | 'markdown' | 'mermaid'
-  createdAt: number
-  updatedAt: number
-}
-
-export interface ToolCallEntry {
-  toolName: string
-  params: string
-  status: 'running' | 'success' | 'error'
-  timestamp: number
-}
-
-export interface SubAgent {
-  id: string
-  name: string
-  description: string
-  status: 'running' | 'completed' | 'failed' | 'cancelled'
-  parentId: string | null
-  chatMessageId: string | null
-  createdAt: number
-  completedAt?: number
-  result?: string
-  filesModified?: string[]
-  toolCalls?: ToolCallEntry[]
-}
-
-interface HelixState {
+interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsSlice, PanelSlice, ApiConfigSlice, SkillSlice {
   // File system
   files: FileNode[]
   selectedFileId: string | null
@@ -168,32 +50,23 @@ interface HelixState {
   activeTabId: string | null
   cursorPosition: CursorPosition
 
-  // API Configuration
-  apiConfig: ApiConfig
-  apiHistory: ApiConfig[]
-  showSettings: boolean
-  availableModels: string[]
-  setAvailableModels: (models: string[]) => void
+  // API Configuration — see slices/api-config-slice.ts
 
   // Chat
   chatMessages: ChatMessage[]
   isChatLoading: boolean
 
   // Skills
-  skills: Skill[]
-  showSkillPanel: boolean
+  // Skills — see slices/skill-slice.ts
 
-  // Terminal
-  terminalOutput: string[]
-  isTerminalOpen: boolean
-  terminalHistory: string[]
-  terminalHistoryIndex: number
+  // Terminal — see slices/terminal-slice.ts
 
   // Goal
   goal: string | null
 
   // Memory
   memories: MemoryEntry[]
+  userMemories: MemoryEntry[]
   notes: string
   checkpoints: SessionCheckpoint[]
 
@@ -204,29 +77,41 @@ interface HelixState {
   scheduledTasks: ScheduledTask[]
   showScheduledTasksPanel: boolean
 
+  showRuntimePanel: boolean
+
   // MCP Servers
   mcpServers: Record<string, McpServerConfig>
 
   // Custom Shortcuts
   customShortcuts: Record<string, { keys: string[], action: string, description: string }>
-
-  // Artifacts
-  artifacts: Artifact[]
-  showArtifactsPanel: boolean
+  customizedShortcutIds: Set<string>
 
   // Customize
-  showCustomizePanel: boolean
+  // showCustomizePanel — see slices/panel-slice.ts
 
   // Agent Execution
+  isAgentRunning: boolean
+  setIsAgentRunning: (v: boolean) => void
+  streamingDrafts: Record<string, StreamingDraft>
+  setStreamingDraft: (sessionId: string, draft: Partial<StreamingDraft>) => void
+  clearStreamingDraft: (sessionId: string) => void
+  connectionNotice: ConnectionNotice | null
+  setConnectionNotice: (notice: ConnectionNotice | null) => void
   agentExecutionSteps: Array<{ type: string; toolName?: string; path?: string; content?: string; toolParams?: Record<string, unknown>; timestamp: number }>
   accessedDirectories: string[]
   selectedFiles: string[]
   selectedWorkDir: string | null
   setSelectedWorkDir: (dir: string | null) => void
+  workDirEpoch: number
+  setWorkDir: (relativePath: string) => Promise<void>
   sessionSaveVersion: number
   currentSessionId: string | null
+  activeSessionWorkDir: string | null
   setCurrentSessionId: (id: string | null) => void
-  addExecutionStep: (step: { type: string; toolName?: string; path?: string; content?: string; toolParams?: Record<string, unknown> }) => void
+  sessionHistory: string[]
+  sessionHistoryIndex: number
+  navigateSession: (direction: 'back' | 'forward') => Promise<void>
+  addExecutionStep: (step: { type: string; toolName?: string; toolKind?: string; path?: string; content?: string; toolParams?: Record<string, unknown> }) => void
   addAccessedDirectory: (dir: string) => void
   addSelectedFile: (filePath: string) => void
   removeSelectedFile: (filePath: string) => void
@@ -234,43 +119,46 @@ interface HelixState {
   clearExecutionFlow: () => void
   modelUsage: Record<string, { prompt: number; completion: number; total: number; cost: number }>
   addModelUsage: (model: string, usage: { prompt: number; completion: number; total: number; cost: number }) => void
-  currentSessionTokens: { prompt: number; completion: number; total: number }
-  addCurrentSessionTokens: (usage: { prompt: number; completion: number; total: number }) => void
-  resetCurrentSessionTokens: () => void
+  contextUsage: { size: number; used: number } | null
+  setContextUsage: (size: number, used: number) => void
+  sessionUsageStats: {
+    requestCount: number
+    totalTokens: number
+    inputTokens: number
+    outputTokens: number
+    thoughtTokens: number
+    cachedReadTokens: number
+    cachedWriteTokens: number
+    totalCost: number
+  }
+  addSessionUsageStats: (
+    model: string,
+    usage: {
+      totalTokens?: number
+      inputTokens?: number
+      outputTokens?: number
+      thoughtTokens?: number
+      cachedReadTokens?: number
+      cachedWriteTokens?: number
+    }
+  ) => void
   notifySessionSaved: () => void
+  flushSessionPersist: () => void
 
   // UI
-  showCommandPalette: boolean
   editorTheme: 'vs-dark' | 'light'
   fontFamily: string
   fontSize: number
   interfaceFont: string
   transcriptFontSize: number
-  toasts: ToastMessage[]
+  // Toast — see slices/toast-slice.ts
   pendingChanges: PendingChange[]
-  showDiffPreview: boolean
-  showTaskPanel: boolean
-  showMemoryPanel: boolean
-  showSubAgentPanel: boolean
-  showSessionManager: boolean
+  // Panel toggles — see slices/panel-slice.ts
 
-  // Agent Settings
-  agentMaxIterations: number
-  autoCompactContext: boolean
-  smartTruncation: boolean
-  autoSaveSession: boolean
-  temperature: number
-  maxOutputTokens: number
-  customInstructions: string
+  // Agent Settings — see slices/agent-settings-slice.ts
 
   // Actions - Agent Settings
-  setAgentMaxIterations: (n: number) => void
-  setAutoCompactContext: (v: boolean) => void
-  setSmartTruncation: (v: boolean) => void
-  setAutoSaveSession: (v: boolean) => void
-  setTemperature: (v: number) => void
-  setMaxOutputTokens: (v: number) => void
-  setCustomInstructions: (v: string) => void
+  // (declared in slices/agent-settings-slice.ts)
 
   // Actions - Files
   setFiles: (files: FileNode[]) => void
@@ -281,18 +169,14 @@ interface HelixState {
   deleteFile: (fileId: string) => void
   updateFileContent: (fileId: string, content: string) => void
   getFileById: (fileId: string) => FileNode | null
-  renameFile: (fileId: string, newName: string) => void
+  renameFile: (fileId: string, newName: string) => Promise<boolean>
 
   // Actions - Tabs
   openFile: (fileId: string) => void
   closeTab: (tabId: string) => void
   setActiveTab: (tabId: string) => void
 
-  // Actions - Skills
-  addSkill: (skill: Omit<Skill, 'id' | 'createdAt'>) => string
-  updateSkill: (skillId: string, updates: Partial<Skill>) => void
-  removeSkill: (skillId: string) => void
-  toggleSkillPanel: () => void
+  // Actions - Skills — see slices/skill-slice.ts
 
   // Actions - Chat
   addChatMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => string
@@ -306,23 +190,16 @@ interface HelixState {
   setCursorPosition: (pos: CursorPosition) => void
   markTabSaved: (tabId: string) => void
 
-  // Actions - Terminal
-  addTerminalOutput: (output: string) => void
-  clearTerminal: () => void
-  toggleTerminal: () => void
-  pushTerminalHistory: (cmd: string) => void
-  navigateTerminalHistory: (direction: 'up' | 'down') => string
+  // Terminal actions — see slices/terminal-slice.ts
 
   // Actions - UI
-  toggleCommandPalette: () => void
-  setCommandPaletteOpen: (open: boolean) => void
+  // Panel toggles — see slices/panel-slice.ts
   setEditorTheme: (theme: 'vs-dark' | 'light') => void
   setFontFamily: (font: string) => void
   setFontSize: (size: number) => void
   setInterfaceFont: (font: string) => void
   setTranscriptFontSize: (size: number) => void
-  showToast: (toast: Omit<ToastMessage, 'id'>) => void
-  dismissToast: (id: string) => void
+  // Toast actions — see slices/toast-slice.ts
 
   // Actions - File modifications
   applyFileChange: (fileId: string, newContent: string) => void
@@ -332,14 +209,19 @@ interface HelixState {
   rejectPendingChange: (changeId: string) => void
   applyAllPendingChanges: () => void
   rejectAllPendingChanges: () => void
-  setShowDiffPreview: (show: boolean) => void
+  // setShowDiffPreview — see slices/panel-slice.ts
 
   // Actions - Goal
   setGoal: (goal: string | null) => void
 
   // Actions - Memory
-  addMemory: (entry: Omit<MemoryEntry, 'id' | 'createdAt'>) => void
-  removeMemory: (id: string) => void
+  addMemory: (entry: Omit<MemoryEntry, 'id' | 'createdAt'>) => Promise<void>
+  removeMemory: (id: string) => Promise<void>
+  loadMemories: () => Promise<void>
+  // User profile (Hermes USER.md) — separate from the agent's MEMORY.md.
+  addUserMemory: (entry: Omit<MemoryEntry, 'id' | 'createdAt'>) => Promise<void>
+  removeUserMemory: (id: string) => Promise<void>
+  loadUserMemories: () => Promise<void>
   updateNotes: (notes: string) => void
   saveCheckpoint: (label?: string) => void
 
@@ -350,11 +232,13 @@ interface HelixState {
   clearCompletedTasks: () => void
 
   // Actions - Scheduled Tasks
-  addScheduledTask: (task: Omit<ScheduledTask, 'id' | 'createdAt' | 'updatedAt'>) => string
+  addScheduledTask: (task: Omit<ScheduledTask, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }) => string
   updateScheduledTask: (taskId: string, updates: Partial<Omit<ScheduledTask, 'id' | 'createdAt'>>) => void
   removeScheduledTask: (taskId: string) => void
   toggleScheduledTask: (taskId: string) => void
   toggleScheduledTasksPanel: () => void
+
+  toggleRuntimePanel: () => void
 
   // Actions - MCP Servers
   addMcpServer: (name: string, config: McpServerConfig) => void
@@ -362,30 +246,18 @@ interface HelixState {
   updateMcpServer: (name: string, config: McpServerConfig) => void
   toggleMcpServer: (name: string) => void
 
+  // Actions - Artifacts
+  // (removed — unused)
+
   // Actions - Custom Shortcuts
   addCustomShortcut: (id: string, shortcut: { keys: string[], action: string, description: string }) => void
   removeCustomShortcut: (id: string) => void
   updateCustomShortcut: (id: string, shortcut: { keys: string[], action: string, description: string }) => void
 
-  // Actions - Artifacts
-  addArtifact: (a: Omit<Artifact, 'id' | 'createdAt' | 'updatedAt'>) => string
-  removeArtifact: (id: string) => void
-  toggleArtifactsPanel: () => void
-  toggleCustomizePanel: () => void
-
   // Actions - Panels
-  toggleTaskPanel: () => void
-  toggleMemoryPanel: () => void
-  toggleSubAgentPanel: () => void
-  toggleSessionManager: () => void
-  toggleSettings: () => void
+  // Panel toggles — see slices/panel-slice.ts
 
-  // Actions - API Config
-  setApiConfig: (config: Partial<ApiConfig>) => void
-  getApiConfig: () => ApiConfig
-  addApiHistory: (config: ApiConfig) => void
-  removeApiHistory: (index: number) => void
-  selectApiHistory: (index: number) => void
+  // API Config — see slices/api-config-slice.ts
 
   // Actions - Sub-agents
   spawnSubAgent: (name: string, description: string, parentId?: string) => string
@@ -395,21 +267,7 @@ interface HelixState {
   clearCompletedSubAgents: () => void
   addSubAgentToolCall: (agentId: string, toolCall: { toolName: string; params: string; status: 'running' | 'success' | 'error' }) => void
 
-  // Git
-  gitAutoCommit: boolean
-  gitAutoPush: boolean
-  gitPushConfirm: boolean
-  gitAutoBranch: boolean
-  gitRemoteUrl: string
-  gitCommitTemplate: string
-  gitBranchPrefix: string
-  setGitAutoCommit: (v: boolean) => void
-  setGitAutoPush: (v: boolean) => void
-  setGitPushConfirm: (v: boolean) => void
-  setGitAutoBranch: (v: boolean) => void
-  setGitRemoteUrl: (v: string) => void
-  setGitCommitTemplate: (v: string) => void
-  setGitBranchPrefix: (v: string) => void
+  // Git — see slices/git-slice.ts
 
   // Actions - Persistence
   persistToStorage: () => Promise<void>
@@ -422,10 +280,6 @@ interface HelixState {
   findFileByPath: (path: string) => FileNode | null
   getMemoryContext: () => string
   getTaskContext: () => string
-}
-
-function generateId(): string {
-  return Math.random().toString(36).substr(2, 9)
 }
 
 function getLanguageFromName(name: string): string {
@@ -523,110 +377,101 @@ function collectFiles(nodes: FileNode[]) {
     children: n.children ? collectFiles(n.children) : undefined,
   }))
 }
+// Core save logic, shared by the debounced scheduler and the synchronous flush.
+async function persistCurrentSessionNow(): Promise<void> {
+  try {
+    const { persistence } = await import('@/lib/persist')
+    const state = useHelixStore.getState()
+    const firstUser = state.chatMessages.find(m => m.role === 'user')
+    // Don't persist empty sessions (no user messages and no assistant responses).
+    // This prevents auto-creating sessions with timestamp labels when switching
+    // projects or losing focus on an empty conversation.
+    if (!firstUser && state.chatMessages.every(m => m.role !== 'assistant')) return
+    const sessionId = state.currentSessionId || 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
+    const label = firstUser ? firstUser.content.slice(0, 50) : new Date().toLocaleString('zh-CN')
+
+    // If a stream is mid-flight for this session, also persist its buffered
+    // partial text so quitting / reloading mid-generation doesn't silently
+    // drop the in-progress assistant reply. This is injected AT PERSIST TIME
+    // only — the live chatMessages array is NOT mutated, so the running stream
+    // and its eventual `done` handler are unaffected. Once the run completes,
+    // clearStreamingDraft() drops the draft and the partial stops being
+    // injected (the real message, added by done, takes its place).
+    const msgsToSave = state.chatMessages.map(m => ({
+      id: m.id, sessionId, role: m.role,
+      content: m.content, images: m.images, timestamp: m.timestamp, isStreaming: m.isStreaming ?? false,
+      reasoning: m.reasoning,
+      steps: m.steps,
+    }))
+    const draft = state.streamingDrafts[sessionId]
+    if (draft?.isAgentRunning && draft.textBuffer && draft.textBuffer.trim()) {
+      msgsToSave.push({
+        id: 'draft-partial-' + sessionId,
+        sessionId,
+        role: 'assistant',
+        content: draft.textBuffer + '\n\n*[生成中断，仅保存部分内容]*',
+        images: undefined,
+        reasoning: draft.thoughtBuffer || undefined,
+        timestamp: Date.now(),
+        isStreaming: false,
+        steps: undefined,
+      })
+    }
+
+    await persistence.saveSession({
+      id: sessionId,
+      label,
+      workDir: state.activeSessionWorkDir ?? state.selectedWorkDir,
+      goal: state.goal,
+      memories: state.memories,
+      tasks: state.tasks,
+      notes: state.notes,
+      checkpoints: state.checkpoints,
+      chatMessages: msgsToSave,
+      files: collectFiles(state.files),
+      openTabs: state.openTabs.map(tab => ({
+        id: tab.id, fileId: tab.fileId, name: tab.name, language: tab.language, isDirty: tab.isDirty,
+      })),
+    })
+    // Pin the session id so subsequent saves land on the same session,
+    // and refresh the sidebar list so the conversation shows up immediately.
+    if (!state.currentSessionId) {
+      useHelixStore.getState().setCurrentSessionId(sessionId)
+    }
+    useHelixStore.setState((st) => ({ sessionSaveVersion: st.sessionSaveVersion + 1 }))
+  } catch (e) {
+    logError('Failed to persist session:', e)
+    // Avoid toast-spam: only surface once per failure burst via getState.
+    useHelixStore.getState().showToast({ type: 'error', title: '会话保存失败', description: '当前对话未能写入本地，切换或关闭可能丢失' })
+  }
+}
+
 function scheduleSessionPersist() {
   if (sessionPersistTimer) clearTimeout(sessionPersistTimer)
-  sessionPersistTimer = setTimeout(async () => {
+  sessionPersistTimer = setTimeout(() => {
     sessionPersistTimer = null
-    try {
-      const { persistence } = await import('@/lib/persist')
-      const state = useHelixStore.getState()
-      if (state.chatMessages.length === 0) return
-      const sessionId = state.currentSessionId || 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
-      const firstUser = state.chatMessages.find(m => m.role === 'user')
-      const label = firstUser ? firstUser.content.slice(0, 50) : new Date().toLocaleString('zh-CN')
-      await persistence.saveSession({
-        id: sessionId,
-        label,
-        workDir: state.selectedWorkDir,
-        goal: state.goal,
-        memories: state.memories,
-        tasks: state.tasks,
-        notes: state.notes,
-        checkpoints: state.checkpoints,
-        chatMessages: state.chatMessages.map(m => ({
-          id: m.id, sessionId, role: m.role,
-          content: m.content, images: m.images, timestamp: m.timestamp, isStreaming: m.isStreaming ?? false,
-        })),
-        files: collectFiles(state.files),
-        openTabs: state.openTabs.map(tab => ({
-          id: tab.id, fileId: tab.fileId, name: tab.name, language: tab.language, isDirty: tab.isDirty,
-        })),
-      })
-      if (!state.currentSessionId) {
-        useHelixStore.setState({ currentSessionId: sessionId })
-      }
-    } catch (e) {
-      console.error('Failed to persist session:', e)
-    }
-  }, 1000)
+    void persistCurrentSessionNow()
+  }, 200)
 }
 
-export const DEFAULT_SHORTCUTS: Record<string, { keys: string[]; action: string; description: string }> = {
-  'archive-chat': { keys: ['Ctrl', 'Shift', 'A'], action: 'archive-chat', description: '归档聊天' },
-  'new-chat': { keys: ['Ctrl', 'N'], action: 'new-chat', description: '新对话' },
-  'side-chat': { keys: ['Ctrl', 'Alt', 'S'], action: 'side-chat', description: '打开侧边聊天' },
-  'quick-chat': { keys: ['Ctrl', 'Alt', 'N'], action: 'quick-chat', description: '新建快速对话' },
-  'toggle-pin': { keys: ['Ctrl', 'Alt', 'P'], action: 'toggle-pin', description: '切换置顶状态' },
-  'search-chat': { keys: ['Ctrl', 'F'], action: 'search-chat', description: '查找' },
-  'focus-address': { keys: ['Ctrl', 'L'], action: 'focus-address', description: '聚焦浏览器地址栏' },
-  'go-back': { keys: ['Ctrl', '['], action: 'go-back', description: '返回' },
-  'go-forward': { keys: ['Ctrl', ']'], action: 'go-forward', description: '前进' },
-  'next-recent-chat': { keys: ['Ctrl', 'Tab'], action: 'next-recent-chat', description: '下一个最近查看的聊天' },
-  'prev-recent-chat': { keys: ['Ctrl', 'Shift', 'Tab'], action: 'prev-recent-chat', description: '上一个最近查看的聊天' },
-  'next-tab': { keys: ['Ctrl', 'Shift', ']'], action: 'next-tab', description: '下一个标签页' },
-  'prev-tab-1': { keys: ['Ctrl', 'Shift', '['], action: 'prev-tab', description: '上一个标签页' },
-  'next-tab-pg': { keys: ['Ctrl', 'PageDown'], action: 'next-tab', description: '下一个标签页' },
-  'prev-tab-pg': { keys: ['Ctrl', 'PageUp'], action: 'prev-tab', description: '上一个标签页' },
-  'next-chat': { keys: ['Ctrl', 'Shift', ']'], action: 'next-chat', description: '下一个聊天' },
-  'prev-chat': { keys: ['Ctrl', 'Shift', '['], action: 'prev-chat', description: '上一个聊天' },
-  'new-browser-tab': { keys: ['Ctrl', 'T'], action: 'new-browser-tab', description: '打开浏览器标签页' },
-  'open-review': { keys: ['Ctrl', 'Shift', 'G'], action: 'open-review', description: '打开审查选项卡' },
-  'toggle-bottom-panel': { keys: ['Ctrl', 'J'], action: 'toggle-bottom-panel', description: '切换底部面板' },
-  'toggle-browser-panel': { keys: ['Ctrl', 'Shift', 'B'], action: 'toggle-browser-panel', description: '显示/隐藏浏览器面板' },
-  'toggle-sidebar': { keys: ['Ctrl', 'B'], action: 'toggle-sidebar', description: '切换边栏' },
-  'toggle-side-panel': { keys: ['Ctrl', 'Alt', 'B'], action: 'toggle-side-panel', description: '切换侧边面板' },
-  'toggle-terminal': { keys: ['Ctrl', '`'], action: 'toggle-terminal', description: '打开终端' },
-  'env-action-1': { keys: ['Shift', 'Win', 'D'], action: 'env-action-1', description: '环境操作 1' },
-  'open-folder': { keys: ['Ctrl', 'O'], action: 'open-folder', description: '打开文件夹' },
-  'force-reload': { keys: ['Ctrl', 'Shift', 'R'], action: 'force-reload', description: '强制重新加载技能' },
-  'browser-back': { keys: ['Alt', 'ArrowLeft'], action: 'browser-back', description: '浏览器返回' },
-  'browser-forward': { keys: ['Alt', 'ArrowRight'], action: 'browser-forward', description: '浏览器前进' },
-  'new-window': { keys: ['Ctrl', 'Shift', 'N'], action: 'new-window', description: '新建窗口' },
-  'command-palette': { keys: ['Ctrl', 'K'], action: 'command-palette', description: '打开命令面板' },
-  'command-palette-2': { keys: ['Ctrl', 'Shift', 'P'], action: 'command-palette', description: '打开命令面板' },
-  'reload-page': { keys: ['Ctrl', 'R'], action: 'reload-page', description: '重新加载页面' },
-  'rename-chat': { keys: ['Ctrl', 'Alt', 'R'], action: 'rename-chat', description: '重命名聊天' },
-  'search-chats': { keys: ['Ctrl', 'G'], action: 'search-chats', description: '搜索聊天' },
-  'search-files': { keys: ['Ctrl', 'P'], action: 'search-files', description: '搜索文件' },
-  'show-shortcuts': { keys: ['Ctrl', 'Shift', '/'], action: 'show-shortcuts', description: '显示键盘快捷键' },
-  'settings': { keys: ['Ctrl', ','], action: 'settings', description: '设置' },
-  'approve-request': { keys: ['Enter'], action: 'approve-request', description: '批准请求' },
-  'decline-request': { keys: ['Escape'], action: 'decline-request', description: '拒绝请求' },
-  'close-tab': { keys: ['Ctrl', 'W'], action: 'close-tab', description: '关闭标签页' },
-  'close-tab-2': { keys: ['Ctrl', 'F4'], action: 'close-tab', description: '关闭标签页' },
-  'close-window': { keys: ['Ctrl', 'W'], action: 'close-window', description: '关闭窗口' },
-  'close-window-2': { keys: ['Ctrl', 'F4'], action: 'close-window', description: '关闭窗口' },
-  'model-picker': { keys: ['Ctrl', 'Shift', 'M'], action: 'model-picker', description: '打开模型选择器' },
-  'start-dictation': { keys: ['Ctrl', 'Shift', 'D'], action: 'start-dictation', description: '开始听写' },
-  'toggle-voice': { keys: ['Ctrl', 'Shift', 'V'], action: 'toggle-voice', description: '切换语音模式' },
-  'copy-path': { keys: ['Ctrl', 'Alt', 'Shift', 'C'], action: 'copy-path', description: '复制路径' },
-  'copy-deeplink': { keys: ['Ctrl', 'Alt', 'L'], action: 'copy-deeplink', description: '复制深度链接' },
-  'copy-session-id': { keys: ['Ctrl', 'Alt', 'C'], action: 'copy-session-id', description: '复制会话 ID' },
-  'copy-workdir': { keys: ['Ctrl', 'Shift', 'C'], action: 'copy-workdir', description: '复制工作目录' },
-  'trace-recording': { keys: ['Ctrl', 'Shift', 'S'], action: 'trace-recording', description: '开始录制追踪' },
-  'chat-1': { keys: ['Ctrl', '1'], action: 'chat-1', description: '转到聊天 1' },
-  'chat-2': { keys: ['Ctrl', '2'], action: 'chat-2', description: '转到聊天 2' },
-  'chat-3': { keys: ['Ctrl', '3'], action: 'chat-3', description: '转到聊天 3' },
-  'chat-4': { keys: ['Ctrl', '4'], action: 'chat-4', description: '转到聊天 4' },
-  'chat-5': { keys: ['Ctrl', '5'], action: 'chat-5', description: '转到聊天 5' },
-  'chat-6': { keys: ['Ctrl', '6'], action: 'chat-6', description: '转到聊天 6' },
-  'chat-7': { keys: ['Ctrl', '7'], action: 'chat-7', description: '转到聊天 7' },
-  'chat-8': { keys: ['Ctrl', '8'], action: 'chat-8', description: '转到聊天 8' },
-  'chat-9': { keys: ['Ctrl', '9'], action: 'chat-9', description: '转到聊天 9' },
-  'toggle-file-tree': { keys: ['Ctrl', 'Shift', 'E'], action: 'toggle-file-tree', description: '切换文件树' },
+// Synchronously flush any pending session save (used before switching conversations
+// so unsaved messages in the current chat are not lost when state is swapped).
+function flushSessionPersist(): Promise<void> {
+  if (sessionPersistTimer) {
+    clearTimeout(sessionPersistTimer)
+    sessionPersistTimer = null
+  }
+  return persistCurrentSessionNow()
 }
 
-export const useHelixStore = create<HelixState>((set, get) => ({
+export const useHelixStore = create<HelixState>()((set, get, store) => ({
+  ...createGitSlice(set, get, store),
+  ...createToastSlice(set, get, store),
+  ...createTerminalSlice(set, get, store),
+  ...createAgentSettingsSlice(set, get, store),
+  ...createPanelSlice(set, get, store),
+  ...createApiConfigSlice(set, get, store),
+  ...createSkillSlice(set, get, store),
   // File system
   files: defaultFiles,
   selectedFileId: 'file-app',
@@ -643,88 +488,87 @@ export const useHelixStore = create<HelixState>((set, get) => ({
   chatMessages: [],
   isChatLoading: false,
 
-  // Skills
-  skills: [],
-  showSkillPanel: false,
+  // Skills — in slices/skill-slice.ts
 
-  // Terminal
-  terminalOutput: [
-    'Helix v1.0.0 ready — type help for commands',
-    '',
-  ],
-  isTerminalOpen: true,
-  terminalHistory: [],
-  terminalHistoryIndex: 0,
+  // Terminal — in slices/terminal-slice.ts
 
   // UI
-  showCommandPalette: false,
+  // Panel state — in slices/panel-slice.ts
   editorTheme: 'vs-dark' as const,
   fontFamily: "'Geist Mono', 'Fira Code', 'Consolas', monospace" as const,
   fontSize: 14 as const,
   interfaceFont: 'var(--font-geist-sans)' as const,
   transcriptFontSize: 14,
-  toasts: [],
+  // Toast — in slices/toast-slice.ts
   pendingChanges: [],
-  showDiffPreview: false,
-  showTaskPanel: false,
-  showMemoryPanel: false,
+  // Agent Settings — in slices/agent-settings-slice.ts
 
   // Agent Execution
+  isAgentRunning: false,
+  setIsAgentRunning: (v) => set({ isAgentRunning: v }),
+  streamingDrafts: {},
+  connectionNotice: null,
+  setConnectionNotice: (notice) => set({ connectionNotice: notice }),
+  setStreamingDraft: (sessionId, draft) =>
+    set((state) => {
+      const existing = state.streamingDrafts[sessionId] || {
+        responseBlocks: [],
+        streamThinking: '',
+        steps: [],
+        isAgentRunning: false,
+      }
+      return {
+        streamingDrafts: {
+          ...state.streamingDrafts,
+          [sessionId]: { ...existing, ...draft },
+        },
+      }
+    }),
+  clearStreamingDraft: (sessionId) =>
+    set((state) => {
+      const { [sessionId]: _, ...rest } = state.streamingDrafts
+      return { streamingDrafts: rest }
+    }),
   agentExecutionSteps: [],
   accessedDirectories: [],
   selectedFiles: [],
   selectedWorkDir: null,
+  workDirEpoch: 0,
   sessionSaveVersion: 0,
   currentSessionId: null,
-  showSubAgentPanel: false,
+  activeSessionWorkDir: null,
+  sessionHistory: [],
+  sessionHistoryIndex: -1,
+  // Panel state — in slices/panel-slice.ts
   modelUsage: {},
-  currentSessionTokens: { prompt: 0, completion: 0, total: 0 },
+  contextUsage: null,
+  sessionUsageStats: {
+    requestCount: 0,
+    totalTokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    thoughtTokens: 0,
+    cachedReadTokens: 0,
+    cachedWriteTokens: 0,
+    totalCost: 0,
+  },
   showSessionManager: false,
 
-  // Agent Settings
-  agentMaxIterations: 50,
-  autoCompactContext: true,
-  smartTruncation: true,
-  autoSaveSession: false,
-  temperature: 0.7,
-  maxOutputTokens: 4096,
-  customInstructions: '',
+  // Agent Settings — in slices/agent-settings-slice.ts
 
-  // Sub-agents
+  // UI — init values for non-panel UI state
   subAgents: [],
 
-  // API Configuration
-  apiConfig: {
-    provider: 'openai',
-    apiKey: '',
-    baseUrl: 'https://api.openai.com/v1',
-    model: 'gpt-4o-mini',
-  },
-  apiHistory: [],
-  showSettings: false,
-  availableModels: [],
+  // API Configuration — seeslices/api-config-slice.ts
 
-  // Git
-  gitAutoCommit: false,
-  gitAutoPush: false,
-  gitPushConfirm: true,
-  gitAutoBranch: false,
-  gitRemoteUrl: '',
-  gitCommitTemplate: 'chore: auto-commit changes',
-  gitBranchPrefix: 'feature/',
-  setGitAutoCommit: (v) => set({ gitAutoCommit: v }),
-  setGitAutoPush: (v) => set({ gitAutoPush: v }),
-  setGitPushConfirm: (v) => set({ gitPushConfirm: v }),
-  setGitAutoBranch: (v) => set({ gitAutoBranch: v }),
-  setGitRemoteUrl: (v) => set({ gitRemoteUrl: v }),
-  setGitCommitTemplate: (v) => set({ gitCommitTemplate: v }),
-  setGitBranchPrefix: (v) => set({ gitBranchPrefix: v }),
+  // Git — in slices/git-slice.ts
 
   // Goal
   goal: null,
 
   // Memory
   memories: [],
+  userMemories: [],
   notes: '',
   checkpoints: [],
 
@@ -734,6 +578,8 @@ export const useHelixStore = create<HelixState>((set, get) => ({
   // Scheduled Tasks
   scheduledTasks: [],
   showScheduledTasksPanel: false,
+
+  showRuntimePanel: false,
 
   // MCP Servers
   mcpServers: {
@@ -757,67 +603,13 @@ export const useHelixStore = create<HelixState>((set, get) => ({
 
   // Custom Shortcuts
   customShortcuts: { ...DEFAULT_SHORTCUTS },
-
-  // Artifacts
-  artifacts: [],
-  showArtifactsPanel: false,
-
-  // Customize
-  showCustomizePanel: false,
+  customizedShortcutIds: new Set<string>(),
 
   // Actions - Files
   setFiles: (files) => set({ files }),
   syncFilesFromDisk: async () => {
-    try {
-      const workDir = (globalThis as any).__helixWorkDir || process.cwd()
-      const response = await fetch('/api/init', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workDir }),
-      })
-      if (!response.ok) return
-      const data = await response.json()
-      if (!data.structure) return
-
-      // Parse the text structure into FileNode tree
-      const lines: string[] = data.structure.split('\n')
-      const root: FileNode[] = []
-      const stack: { indent: number; node: FileNode }[] = []
-
-      for (const line of lines) {
-        if (!line.trim()) continue
-        const indent = line.search(/\S/)
-        const name = line.trim().replace(/\/$/, '')
-        const isDir = line.trim().endsWith('/')
-        const node: FileNode = {
-          id: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          name,
-          type: isDir ? 'folder' : 'file',
-          content: '',
-          children: isDir ? [] : undefined,
-        }
-
-        while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
-          stack.pop()
-        }
-
-        if (stack.length === 0) {
-          root.push(node)
-        } else {
-          const parent = stack[stack.length - 1].node
-          if (!parent.children) parent.children = []
-          parent.children.push(node)
-        }
-
-        if (isDir) {
-          stack.push({ indent, node })
-        }
-      }
-
-      set({ files: root })
-    } catch (err) {
-      console.error('[Sync] Failed to sync files from disk:', err)
-    }
+    // Files are now managed by Hermes, not local API
+    set({ files: [] })
   },
   selectFile: (fileId) => set({ selectedFileId: fileId }),
   toggleFolder: (folderId) =>
@@ -890,7 +682,20 @@ export const useHelixStore = create<HelixState>((set, get) => ({
 
   getFileById: (fileId) => findFileById(get().files, fileId),
 
-  renameFile: (fileId, newName) =>
+  renameFile: async (fileId, newName) => {
+    const state = get()
+    const file = findFileById(state.files, fileId)
+    if (!file) return false
+    const relativePath = state.getFilePath(fileId)
+    if (relativePath && state.selectedWorkDir && isElectron()) {
+      const newRelativePath = relativePath.replace(/[^/]+$/, newName)
+      try {
+        await electronFS.rename(relativePath, newRelativePath)
+      } catch (err) {
+        logError('renameFile fs error:', err)
+        return false
+      }
+    }
     set((state) => ({
       files: updateFileInTree(state.files, fileId, (n) => ({
         ...n,
@@ -902,7 +707,9 @@ export const useHelixStore = create<HelixState>((set, get) => ({
           ? { ...t, name: newName, language: getLanguageFromName(newName) }
           : t
       ),
-    })),
+    }))
+    return true
+  },
 
   // Actions - Tabs
   openFile: (fileId) => {
@@ -974,12 +781,17 @@ export const useHelixStore = create<HelixState>((set, get) => ({
 
   toggleSkillPanel: () => set((s) => ({ showSkillPanel: !s.showSkillPanel })),
 
+  toggleRuntimePanel: () => set((s) => ({ showRuntimePanel: !s.showRuntimePanel })),
+
   // Actions - Chat
   addChatMessage: (message) => {
     const id = generateId()
-    set((state) => ({
-      chatMessages: [...state.chatMessages, { ...message, id, timestamp: Date.now() }],
-    }))
+    set((state) => {
+      const newState: Record<string, any> = {
+        chatMessages: [...state.chatMessages, { ...message, id, sessionId: message.sessionId || state.currentSessionId || undefined, timestamp: Date.now() }],
+      }
+      return newState
+    })
     scheduleSessionPersist()
     return id
   },
@@ -1006,14 +818,21 @@ export const useHelixStore = create<HelixState>((set, get) => ({
     set({
       chatMessages: [],
       currentSessionId: null,
+      activeSessionWorkDir: null,
       selectedWorkDir: null,
-      currentSessionTokens: { prompt: 0, completion: 0, total: 0 },
+    })
+    // Reset the Hermes backend session so a fresh ACP session is created on the
+    // next prompt. Without this the UI clears but Hermes keeps the full
+    // conversation history, so the model still answers with prior context.
+    import('@/stores/hermes-store').then(({ useHermesStore }) => {
+      useHermesStore.getState().setHermesSessionId(null)
     })
     if (prevId) {
-      import('@/lib/persist').then(({ persistence }) => {
-        persistence.deleteChatMessagesBySession(prevId)
-        persistence.deleteChatMessagesBySession('current-session')
-      })
+      // NOTE: We no longer delete chatMessages here. Since we switched to the
+      // 'sessions' object store (via persistCurrentSessionNow), clearing the
+      // legacy 'chatMessages' store would not affect session data, and doing
+      // so inside clearChat was causing a race where flushSessionPersist saved
+      // messages only for clearChat to immediately discard them.
     }
   },
   clearChatAndPersist: async () => {
@@ -1022,25 +841,7 @@ export const useHelixStore = create<HelixState>((set, get) => ({
 
   setChatLoading: (loading) => set({ isChatLoading: loading }),
 
-  // Actions - Terminal
-  addTerminalOutput: (output) =>
-    set((state) => ({ terminalOutput: [...state.terminalOutput, output] })),
-  clearTerminal: () => set({ terminalOutput: [] }),
-  toggleTerminal: () => set((state) => ({ isTerminalOpen: !state.isTerminalOpen })),
-  pushTerminalHistory: (cmd) =>
-    set((state) => ({
-      terminalHistory: [...state.terminalHistory, cmd],
-      terminalHistoryIndex: state.terminalHistory.length + 1,
-    })),
-  navigateTerminalHistory: (direction) => {
-    const state = get()
-    const history = state.terminalHistory
-    let idx = state.terminalHistoryIndex
-    if (direction === 'up' && idx > 0) idx--
-    else if (direction === 'down' && idx < history.length) idx++
-    set({ terminalHistoryIndex: idx })
-    return history[idx] || ''
-  },
+  // Terminal — in slices/terminal-slice.ts
 
   // Actions - Editor
   setCursorPosition: (pos) => set({ cursorPosition: pos }),
@@ -1052,52 +853,38 @@ export const useHelixStore = create<HelixState>((set, get) => ({
     })),
 
   // Actions - UI
-  toggleCommandPalette: () =>
-    set((state) => ({ showCommandPalette: !state.showCommandPalette })),
-  setCommandPaletteOpen: (open) => set({ showCommandPalette: open }),
+  // Panel toggles — in slices/panel-slice.ts
   setEditorTheme: (theme) => set({ editorTheme: theme }),
   setFontFamily: (fontFamily) => {
     set({ fontFamily })
     document.documentElement.style.setProperty('--helix-font-family', fontFamily)
     document.body.style.fontFamily = fontFamily
     localStorage.setItem('helix-font-family', fontFamily)
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('fontFamily', fontFamily))
   },
   setFontSize: (fontSize) => {
     set({ fontSize })
     document.documentElement.style.setProperty('--helix-font-size', `${fontSize}px`)
     localStorage.setItem('helix-font-size', String(fontSize))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('fontSize', fontSize))
   },
   setInterfaceFont: (font) => {
     set({ interfaceFont: font })
     document.documentElement.style.setProperty('--helix-interface-font', font)
     document.body.style.fontFamily = font
     localStorage.setItem('helix-interface-font', font)
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('interfaceFont', font))
   },
   setTranscriptFontSize: (size) => {
     set({ transcriptFontSize: size })
     document.documentElement.style.setProperty('--helix-transcript-size', `${size}px`)
     localStorage.setItem('helix-transcript-size', String(size))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('transcriptFontSize', size))
   },
 
-  showToast: (toast) => {
-    const id = generateId()
-    set((state) => ({ toasts: [...state.toasts, { ...toast, id }] }))
-    setTimeout(() => {
-      set((state) => ({ toasts: state.toasts.filter(t => t.id !== id) }))
-    }, toast.duration || 3000)
-  },
+  // Toast — in slices/toast-slice.ts
 
-  dismissToast: (id) =>
-    set((state) => ({ toasts: state.toasts.filter(t => t.id !== id) })),
-
-  // Actions - Agent Settings
-  setAgentMaxIterations: (n) => set({ agentMaxIterations: n }),
-  setAutoCompactContext: (v) => set({ autoCompactContext: v }),
-  setSmartTruncation: (v) => set({ smartTruncation: v }),
-  setAutoSaveSession: (v) => set({ autoSaveSession: v }),
-  setTemperature: (v) => set({ temperature: v }),
-  setMaxOutputTokens: (v) => set({ maxOutputTokens: v }),
-  setCustomInstructions: (v) => set({ customInstructions: v }),
+  // Agent Settings — in slices/agent-settings-slice.ts
 
   // Actions - Agent Execution
   addExecutionStep: (step) =>
@@ -1118,8 +905,54 @@ export const useHelixStore = create<HelixState>((set, get) => ({
     set((state) => ({ selectedFiles: state.selectedFiles.filter(p => p !== filePath) })),
   clearSelectedFiles: () =>
     set({ selectedFiles: [] }),
-  setSelectedWorkDir: (dir: string | null) =>
-    set({ selectedWorkDir: dir }),
+  setSelectedWorkDir: (dir: string | null) => {
+    const isDriveRoot = typeof dir === 'string' && /^[a-zA-Z]:[\\/]?$/.test(dir)
+    if (dir === '/' || dir === '\\' || isDriveRoot || !dir) {
+      // Let the main process decide the real project directory; the renderer's
+      // process.cwd() is unreliable (often resolves to a drive root like D:\).
+      set({ selectedWorkDir: '' })
+    } else {
+      set({ selectedWorkDir: dir })
+    }
+  },
+
+  setWorkDir: async (relativePath: string) => {
+    const isDriveRoot = typeof relativePath === 'string' && /^[a-zA-Z]:[\\/]?$/.test(relativePath)
+    if (!relativePath || relativePath === '/' || relativePath === '\\' || isDriveRoot) {
+      get().showToast({ title: '无效的工作目录，已回退到项目目录', type: 'warning' })
+      const fallbackDir = typeof process !== 'undefined' ? process.cwd() : ''
+      const info = isElectron() ? await electronApp.getInfo() : { workDir: fallbackDir }
+      set({ selectedWorkDir: info.workDir || fallbackDir, workDirEpoch: get().workDirEpoch + 1 })
+      return
+    }
+    const api = getElectronAPI()
+    if (!api) {
+      // Don't auto-save the current session when switching projects.
+      // Just clear the current session so new messages go to the new project.
+      get().setCurrentSessionId(null)
+      set({ selectedWorkDir: relativePath, workDirEpoch: get().workDirEpoch + 1 })
+      return
+    }
+    try {
+      const res = await api.app.setWorkDir(relativePath)
+      const absDir = res?.workDir || relativePath
+      // Don't auto-save the current session when switching projects.
+      // Just clear the current session so new messages go to the new project.
+      get().setCurrentSessionId(null)
+      // 先更新工作目录与 epoch，保证即使扫描失败，目录标签也是正确的。
+      set({ selectedWorkDir: absDir, workDirEpoch: get().workDirEpoch + 1 })
+      // 文件树扫描降级为尽力而为：scanTree 不可用时不影响工作目录切换。
+      try {
+        const tree = await electronFS.scanTree(absDir)
+        set({ files: tree as FileNode[] })
+      } catch (scanErr) {
+        logError('[setWorkDir] scanTree failed:', scanErr)
+      }
+    } catch (err) {
+      logError('[setWorkDir]', err)
+      get().showToast({ title: '切换工作目录失败', type: 'error' })
+    }
+  },
   clearExecutionFlow: () =>
     set({ agentExecutionSteps: [], accessedDirectories: [] }),
   addModelUsage: (model, usage) =>
@@ -1137,19 +970,138 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         },
       }
     }),
-  addCurrentSessionTokens: (usage) =>
-    set((state) => ({
-      currentSessionTokens: {
-        prompt: state.currentSessionTokens.prompt + usage.prompt,
-        completion: state.currentSessionTokens.completion + usage.completion,
-        total: state.currentSessionTokens.total + usage.total,
+  setContextUsage: (size, used) => set({ contextUsage: { size, used } }),
+  addSessionUsageStats: (model, usage) =>
+    set((state) => {
+      const input = usage.inputTokens || 0
+      const output = usage.outputTokens || 0
+      const thought = usage.thoughtTokens || 0
+      const cachedRead = usage.cachedReadTokens || 0
+      const cachedWrite = usage.cachedWriteTokens || 0
+      const total = usage.totalTokens || input + output + thought
+      const rates: Record<string, { input: number; output: number }> = {
+        'agnes-2.0-flash': { input: 0.4, output: 1.6 },
+        'agnes-2.0': { input: 0.4, output: 1.6 },
+        'claude-sonnet-4': { input: 3.0, output: 15.0 },
+        'claude-sonnet-4-20250514': { input: 3.0, output: 15.0 },
+        'gpt-4o': { input: 2.5, output: 10.0 },
+        'gpt-4o-mini': { input: 0.15, output: 0.6 },
+        'deepseek-chat': { input: 0.14, output: 0.28 },
+        'deepseek-reasoner': { input: 0.55, output: 2.19 },
+        'custom:step-3.7-flash': { input: 0.5, output: 2.0 },
+        'step-3.7-flash': { input: 0.5, output: 2.0 },
+        'custom:step-router-v1': { input: 0.5, output: 2.0 },
       }
-    })),
-  resetCurrentSessionTokens: () =>
-    set({ currentSessionTokens: { prompt: 0, completion: 0, total: 0 } }),
-  setCurrentSessionId: (id) => set({ currentSessionId: id }),
+      const rate = rates[model] || { input: 1.0, output: 5.0 }
+      const cost = (input * rate.input + output * rate.output) / 1_000_000
+      return {
+        sessionUsageStats: {
+          requestCount: state.sessionUsageStats.requestCount + 1,
+          totalTokens: state.sessionUsageStats.totalTokens + total,
+          inputTokens: state.sessionUsageStats.inputTokens + input,
+          outputTokens: state.sessionUsageStats.outputTokens + output,
+          thoughtTokens: state.sessionUsageStats.thoughtTokens + thought,
+          cachedReadTokens: state.sessionUsageStats.cachedReadTokens + cachedRead,
+          cachedWriteTokens: state.sessionUsageStats.cachedWriteTokens + cachedWrite,
+          totalCost: state.sessionUsageStats.totalCost + cost,
+        },
+      }
+    }),
+  setCurrentSessionId: (id) => set((state) => {
+    if (!id) return { currentSessionId: id, activeSessionWorkDir: null }
+    // Skip if clicking the same session that's already loaded
+    if (id === state.currentSessionId) return {}
+    const history = [...state.sessionHistory]
+    const idx = state.sessionHistoryIndex
+    // Check if the target ID already exists at the current position (deduplicate)
+    if (history[idx] === id) {
+      return { currentSessionId: id }
+    }
+    // Remove any forward history when navigating to a new session
+    const newHistory = [...history.slice(0, idx + 1), id]
+    return {
+      currentSessionId: id,
+      sessionHistory: newHistory,
+      sessionHistoryIndex: newHistory.length - 1,
+    }
+  }),
+  navigateSession: async (direction) => {
+    const state = get()
+    const { sessionHistory, sessionHistoryIndex } = state
+    if (sessionHistory.length === 0) return
+    let newIndex = sessionHistoryIndex
+    if (direction === 'back' && newIndex > 0) {
+      newIndex--
+    } else if (direction === 'forward' && newIndex < sessionHistory.length - 1) {
+      newIndex++
+    } else {
+      return
+    }
+    const targetId = sessionHistory[newIndex]
+    if (!targetId) return
+
+    // Flush current session first so we don't lose unsaved messages
+    if (state.currentSessionId) {
+      await state.flushSessionPersist()
+    }
+
+    try {
+      const { persistence } = await import('@/lib/persist')
+      const all = await persistence.loadSessions()
+      const session = all.find(s => s.id === targetId)
+      if (!session) {
+        // Session may have been deleted — just update the index
+        set({ currentSessionId: targetId, sessionHistoryIndex: newIndex })
+        return
+      }
+
+      const msgs = session.chatMessages.map(msg => ({
+        id: msg.id,
+        role: msg.role as 'user' | 'assistant' | 'system',
+        content: msg.content,
+        images: msg.images,
+        timestamp: msg.timestamp,
+        reasoning: msg.reasoning,
+        steps: msg.steps,
+      }))
+
+      useHelixStore.getState().clearExecutionFlow()
+      useHermesStore.getState().setHermesSessionId(null)
+
+      const panelState = get()
+      if (panelState.showScheduledTasksPanel || panelState.showSkillPanel) {
+        useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false })
+      }
+
+      set({
+        chatMessages: msgs,
+        selectedWorkDir: session.workDir || null,
+        activeSessionWorkDir: session.workDir ?? null,
+        currentSessionId: targetId,
+        sessionHistoryIndex: newIndex,
+      })
+
+      // Persist the updated history index
+      const { persistence: persistMod } = await import('@/lib/persist')
+      await Promise.all([
+        persistMod.saveSetting('sessionHistoryIndex', newIndex),
+        persistMod.saveSetting('sessionHistory', get().sessionHistory),
+      ])
+
+      if (session.workDir) {
+        await persistence.saveProjectFolder(session.workDir)
+      }
+    } catch (e) {
+      logError('[navigateSession] failed:', e)
+      get().showToast({ type: 'error', title: '会话加载失败' })
+    }
+  },
   notifySessionSaved: () =>
     set((state) => ({ sessionSaveVersion: state.sessionSaveVersion + 1 })),
+
+  flushSessionPersist: () => {
+    return flushSessionPersist()
+  },
 
   // Actions - File modifications
   applyFileChange: (fileId, newContent) =>
@@ -1267,18 +1219,155 @@ export const useHelixStore = create<HelixState>((set, get) => ({
 
   rejectAllPendingChanges: () => set({ pendingChanges: [] }),
 
-  setShowDiffPreview: (show) => set({ showDiffPreview: show }),
+  // setShowDiffPreview — in slices/panel-slice.ts
 
   // Actions - Goal
   setGoal: (goal) => set({ goal }),
 
   // Actions - Memory
-  addMemory: (entry) =>
+  // Helix's manual memories are synchronized with Hermes's backend memory_manager
+  // (memories/MEMORY.md). Hermes is the single source of truth; the local `memories`
+  // array is an optimistic cache re-synced from the backend so the two systems
+  // stop keeping separate copies.
+  addMemory: async (entry) => {
+    const content = entry.content.trim()
+    if (!content) return
+    // optimistic local update (category kept for display only)
     set((state) => ({
-      memories: [...state.memories, { ...entry, id: generateId(), createdAt: Date.now() }],
-    })),
-  removeMemory: (id) =>
-    set((state) => ({ memories: state.memories.filter(m => m.id !== id) })),
+      memories: [...state.memories, { ...entry, id: generateId(), createdAt: Date.now(), source: 'manual' }],
+    }))
+    if (isElectron()) {
+      try {
+        await getElectronAPI()?.hermes.addMemoryEntry('memory', content)
+        await get().loadMemories()
+      } catch (e) {
+        logError('[helix] addMemory sync failed:', e)
+      }
+    } else {
+      const { persistence } = await import('@/lib/persist')
+      persistence.saveMemories(get().memories)
+    }
+  },
+  removeMemory: async (id) => {
+    const item = get().memories.find((m) => m.id === id)
+    if (!item) return
+    set((state) => ({ memories: state.memories.filter((m) => m.id !== id) }))
+    if (isElectron()) {
+      try {
+        await getElectronAPI()?.hermes.removeMemoryEntry('memory', item.content)
+      } catch (e) {
+        logError('[helix] removeMemory sync failed:', e)
+      }
+    }
+  },
+  loadMemories: async () => {
+    if (!isElectron()) {
+      warn('[helix] loadMemories skipped: not running in Electron')
+      return
+    }
+    try {
+      const api = getElectronAPI()
+      if (!api) {
+        warn('[helix] loadMemories skipped: electron API not available (did you restart Electron?)')
+        return
+      }
+      debug('[helix] loadMemories: calling listMemories...')
+      let res = await api.hermes.listMemories()
+      debug('[helix] loadMemories: response', { memoryLen: res?.memory?.length, userLen: res?.user?.length, manualLen: res?.manual?.length })
+      if (!res) {
+        warn('[helix] loadMemories: got null/undefined response from IPC')
+        return
+      }
+      // One-time migration: if Hermes is empty but legacy local memories exist,
+      // push them into Hermes so nothing is lost on first sync.
+      if ((res.memory?.length ?? 0) === 0) {
+        const { persistence } = await import('@/lib/persist')
+        const local = await persistence.loadMemories()
+        if (local && local.length) {
+          for (const m of local) {
+            await api.hermes.addMemoryEntry('memory', m.content)
+          }
+          res = await api.hermes.listMemories()
+        }
+      }
+      const hashText = (s: string) => {
+        let h = 5381
+        for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+        return (h >>> 0).toString(36)
+      }
+      const manualSet = new Set(res.manual || [])
+      const list: MemoryEntry[] = (res.memory || []).map((text) => ({
+        id: 'hm_' + hashText(text),
+        content: text,
+        category: 'user' as MemoryCategory,
+        createdAt: 0,
+        source: manualSet.has(text) ? 'manual' : 'auto',
+      }))
+      set({ memories: list })
+    } catch (e) {
+      logError('[helix] loadMemories failed:', e)
+    }
+  },
+  // ── User profile (USER.md) ────────────────────────────────────────────────
+  // Separate from MEMORY.md: profile facts about the user that Hermes keeps in
+  // USER.md. No origin tagging here — everything in USER.md is user-provided.
+  addUserMemory: async (entry) => {
+    const content = entry.content.trim()
+    if (!content) return
+    set((state) => ({
+      userMemories: [...state.userMemories, { ...entry, id: generateId(), createdAt: Date.now() }],
+    }))
+    if (isElectron()) {
+      try {
+        await getElectronAPI()?.hermes.addMemoryEntry('user', content)
+        await get().loadUserMemories()
+      } catch (e) {
+        logError('[helix] addUserMemory sync failed:', e)
+      }
+    }
+  },
+  removeUserMemory: async (id) => {
+    const item = get().userMemories.find((m) => m.id === id)
+    if (!item) return
+    set((state) => ({ userMemories: state.userMemories.filter((m) => m.id !== id) }))
+    if (isElectron()) {
+      try {
+        await getElectronAPI()?.hermes.removeMemoryEntry('user', item.content)
+      } catch (e) {
+        logError('[helix] removeUserMemory sync failed:', e)
+      }
+    }
+  },
+  loadUserMemories: async () => {
+    if (!isElectron()) {
+      warn('[helix] loadUserMemories skipped: not running in Electron')
+      return
+    }
+    try {
+      const api = getElectronAPI()
+      if (!api) {
+        warn('[helix] loadUserMemories skipped: electron API not available')
+        return
+      }
+      debug('[helix] loadUserMemories: calling listMemories...')
+      const res = await api.hermes.listMemories()
+      debug('[helix] loadUserMemories: response', { userLen: res?.user?.length })
+      const hashText = (s: string) => {
+        let h = 5381
+        for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+        return (h >>> 0).toString(36)
+      }
+      const list: MemoryEntry[] = (res.user || []).map((text) => ({
+        id: 'up_' + hashText(text),
+        content: text,
+        category: 'user' as MemoryCategory,
+        createdAt: 0,
+      }))
+      set({ userMemories: list })
+    } catch (e) {
+      logError('[helix] loadUserMemories failed:', e)
+    }
+  },
   updateNotes: (notes) => set({ notes }),
   saveCheckpoint: (label) =>
     set((state) => ({
@@ -1335,7 +1424,7 @@ export const useHelixStore = create<HelixState>((set, get) => ({
 
   // Actions - Scheduled Tasks
   addScheduledTask: (task) => {
-    const id = generateId()
+    const id = task.id || generateId()
     set((state) => ({
       scheduledTasks: [...state.scheduledTasks, {
         ...task,
@@ -1390,6 +1479,8 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       },
     })),
 
+  // Actions - Webhooks/Artifacts — removed (unused features)
+
   // Actions - Custom Shortcuts
   addCustomShortcut: (id, shortcut) =>
     set((state) => ({
@@ -1401,71 +1492,18 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       return { customShortcuts: rest }
     }),
   updateCustomShortcut: (id, shortcut) =>
-    set((state) => ({
-      customShortcuts: { ...state.customShortcuts, [id]: shortcut },
-    })),
-
-  // Actions - Artifacts
-  addArtifact: (a) => {
-    const id = generateId()
-    set((state) => ({
-      artifacts: [...state.artifacts, { ...a, id, createdAt: Date.now(), updatedAt: Date.now() }],
-    }))
-    return id
-  },
-  removeArtifact: (id) =>
-    set((state) => ({
-      artifacts: state.artifacts.filter(a => a.id !== id),
-    })),
-  toggleArtifactsPanel: () =>
-    set((s) => ({ showArtifactsPanel: !s.showArtifactsPanel })),
-  toggleCustomizePanel: () =>
-    set((s) => ({ showCustomizePanel: !s.showCustomizePanel })),
-
-  // Actions - Panels
-  toggleTaskPanel: () => set((s) => ({ showTaskPanel: !s.showTaskPanel })),
-  toggleMemoryPanel: () => set((s) => ({ showMemoryPanel: !s.showMemoryPanel })),
-  toggleSubAgentPanel: () => set((s) => ({ showSubAgentPanel: !s.showSubAgentPanel })),
-  toggleSessionManager: () => set((s) => ({ showSessionManager: !s.showSessionManager })),
-  toggleSettings: () => set((s) => ({ showSettings: !s.showSettings })),
-
-  // Actions - API Config
-  setApiConfig: (config) =>
-    set((state) => ({
-      apiConfig: { ...state.apiConfig, ...config },
-    })),
-  getApiConfig: () => get().apiConfig,
-  setAvailableModels: (models) => {
-    set({ availableModels: models })
-    // Persist to storage so models survive restart
-    import('@/lib/persist').then(({ persistence }) => {
-      persistence.saveSetting('availableModels', models)
-    })
-  },
-
-  addApiHistory: (config) =>
     set((state) => {
-      // Deduplicate by baseUrl+apiKey+model
-      const exists = state.apiHistory.some(
-        h => h.baseUrl === config.baseUrl && h.apiKey === config.apiKey && h.model === config.model
-      )
-      if (exists) return state
-      // Keep max 20 entries, newest first
-      const newHistory = [config, ...state.apiHistory].slice(0, 20)
-      return { apiHistory: newHistory }
+      const customizedIds = new Set(state.customizedShortcutIds)
+      customizedIds.add(id)
+      return {
+        customShortcuts: { ...state.customShortcuts, [id]: shortcut },
+        customizedShortcutIds: customizedIds,
+      }
     }),
 
-  removeApiHistory: (index) =>
-    set((state) => ({
-      apiHistory: state.apiHistory.filter((_, i) => i !== index),
-    })),
+  // Actions - Webhooks/Artifacts — removed (unused features)
 
-  selectApiHistory: (index) =>
-    set((state) => {
-      const config = state.apiHistory[index]
-      if (!config) return state
-      return { apiConfig: { ...config } }
-    }),
+  // API Config — in slices/api-config-slice.ts
 
   // Actions - Sub-agents
   spawnSubAgent: (name, description, parentId) => {
@@ -1547,19 +1585,30 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         persistence.saveSetting('goal', state.goal),
         persistence.saveSetting('apiConfig', state.apiConfig),
         persistence.saveSetting('apiHistory', state.apiHistory),
+        persistence.saveSetting('apiProfiles', state.apiProfiles),
+        persistence.saveSetting('activeProfileId', state.activeProfileId),
+        persistence.saveSetting('providers', state.providers),
+        persistence.saveSetting('activeModel', state.activeModel),
         persistence.saveSetting('fontFamily', state.fontFamily),
         persistence.saveSetting('fontSize', state.fontSize),
         persistence.saveSetting('interfaceFont', state.interfaceFont),
         persistence.saveSetting('transcriptFontSize', state.transcriptFontSize),
+        persistence.saveSetting('sessionUsageStats', state.sessionUsageStats),
         persistence.saveScheduledTasks(state.scheduledTasks),
         persistence.saveSetting('mcpServers', state.mcpServers),
-        // Also save MCP config to helix.json on disk
-        fetch('/api/mcp/save', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mcpServers: state.mcpServers }),
-        }).catch(() => {/* non-critical */}),
-        persistence.saveSetting('customShortcuts', state.customShortcuts),
+        // Also sync MCP config to Hermes config.yaml for persistence
+        isElectron() && window.electron?.hermes?.setYamlKey?.('mcpServers', Object.fromEntries(
+          Object.entries(state.mcpServers).filter(([_, cfg]: any) => cfg.enabled !== false).map(([name, cfg]: any) => [name, {
+            type: cfg.type,
+            command: cfg.command,
+            url: cfg.url,
+            environment: cfg.environment,
+            cwd: cfg.cwd,
+            timeout: cfg.timeout,
+            headers: cfg.headers,
+          }])
+        )),
+        persistence.saveSetting('customizedShortcutIds', Array.from(state.customizedShortcutIds)),
         persistence.saveSetting('agentMaxIterations', state.agentMaxIterations),
         persistence.saveSetting('autoCompactContext', state.autoCompactContext),
         persistence.saveSetting('smartTruncation', state.smartTruncation),
@@ -1567,6 +1616,18 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         persistence.saveSetting('temperature', state.temperature),
         persistence.saveSetting('maxOutputTokens', state.maxOutputTokens),
         persistence.saveSetting('customInstructions', state.customInstructions),
+        persistence.saveSetting('streamingEnabled', state.streamingEnabled),
+        persistence.saveSetting('compressionEnabled', state.compressionEnabled),
+        persistence.saveSetting('toolGuardrailsEnabled', state.toolGuardrailsEnabled),
+        persistence.saveSetting('personality', state.personality),
+        persistence.saveSetting('outputStyle', state.outputStyle),
+        persistence.saveSetting('desktopNotifications', state.desktopNotifications),
+        persistence.saveSetting('soundEnabled', state.soundEnabled),
+        persistence.saveSetting('restoreLastSession', state.restoreLastSession),
+        persistence.saveSetting('defaultWorkDir', state.defaultWorkDir),
+        persistence.saveSetting('language', state.language),
+        persistence.saveSetting('confirmDangerousActions', state.confirmDangerousActions),
+        persistence.saveSetting('autoApproveRead', state.autoApproveRead),
         persistence.saveSetting('editorTheme', state.editorTheme),
         persistence.saveSetting('gitAutoCommit', state.gitAutoCommit),
         persistence.saveSetting('gitAutoPush', state.gitAutoPush),
@@ -1575,9 +1636,12 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         persistence.saveSetting('gitRemoteUrl', state.gitRemoteUrl),
         persistence.saveSetting('gitCommitTemplate', state.gitCommitTemplate),
         persistence.saveSetting('gitBranchPrefix', state.gitBranchPrefix),
+        persistence.saveSetting('sessionHistory', state.sessionHistory),
+        persistence.saveSetting('sessionHistoryIndex', state.sessionHistoryIndex),
       ])
     } catch (e) {
-      console.error('Failed to persist:', e)
+      logError('Failed to persist:', e)
+      get().showToast({ type: 'error', title: '设置保存失败', description: '配置未能写入本地存储，请重试' })
     }
   },
 
@@ -1586,13 +1650,8 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       const { persistence } = await import('@/lib/persist')
       const sessionId = 'current-session'
 
-      // Load MCP config from helix.json
+      // MCP config is now managed by Hermes
       let fileMcpConfig: Record<string, any> = {}
-      try {
-        const configRes = await fetch('/api/config/mcp')
-        const configData = await configRes.json()
-        fileMcpConfig = configData.mcpServers || {}
-      } catch {}
 
       // Try loading the latest saved session first (full state)
       const sessions = await persistence.loadSessions()
@@ -1602,7 +1661,7 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, fontFamily, fontSize, interfaceFont, transcriptFontSize, scheduledTasks, mcpServers, customShortcuts, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, streamingEnabled, compressionEnabled, toolGuardrailsEnabled, personality, outputStyle, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, language, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, providers, activeModel, savedSessionHistory, savedSessionHistoryIndex] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -1611,13 +1670,25 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         persistence.loadSetting<string | null>('goal'),
         persistence.loadSetting<ApiConfig>('apiConfig'),
         persistence.loadSetting<ApiConfig[]>('apiHistory'),
+        persistence.loadSetting<ApiProfile[]>('apiProfiles'),
         persistence.loadSetting<string>('fontFamily'),
         persistence.loadSetting<number>('fontSize'),
         persistence.loadSetting<string>('interfaceFont'),
         persistence.loadSetting<number>('transcriptFontSize'),
+        persistence.loadSetting<{
+          requestCount: number
+          totalTokens: number
+          inputTokens: number
+          outputTokens: number
+          thoughtTokens: number
+          cachedReadTokens: number
+          cachedWriteTokens: number
+          totalCost: number
+        }>('sessionUsageStats'),
         persistence.loadSetting<any[]>('scheduledTasks'),
         persistence.loadSetting<Record<string, McpServerConfig>>('mcpServers'),
         persistence.loadSetting<Record<string, { keys: string[], action: string, description: string }>>('customShortcuts'),
+        persistence.loadSetting<string[]>('customizedShortcutIds'),
         persistence.loadSetting<number>('agentMaxIterations'),
         persistence.loadSetting<boolean>('autoCompactContext'),
         persistence.loadSetting<boolean>('smartTruncation'),
@@ -1626,6 +1697,18 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         persistence.loadSetting<number>('maxOutputTokens'),
         persistence.loadSetting<string>('customInstructions'),
         persistence.loadSetting<string[]>('availableModels'),
+        persistence.loadSetting<boolean>('streamingEnabled'),
+        persistence.loadSetting<boolean>('compressionEnabled'),
+        persistence.loadSetting<boolean>('toolGuardrailsEnabled'),
+        persistence.loadSetting<string>('personality'),
+        persistence.loadSetting<string>('outputStyle'),
+        persistence.loadSetting<boolean>('desktopNotifications'),
+        persistence.loadSetting<boolean>('soundEnabled'),
+        persistence.loadSetting<boolean>('restoreLastSession'),
+        persistence.loadSetting<string>('defaultWorkDir'),
+        persistence.loadSetting<string>('language'),
+        persistence.loadSetting<boolean>('confirmDangerousActions'),
+        persistence.loadSetting<boolean>('autoApproveRead'),
         persistence.loadSetting<string>('editorTheme'),
         persistence.loadSetting<boolean>('gitAutoCommit'),
         persistence.loadSetting<boolean>('gitAutoPush'),
@@ -1634,57 +1717,157 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         persistence.loadSetting<string>('gitRemoteUrl'),
         persistence.loadSetting<string>('gitCommitTemplate'),
         persistence.loadSetting<string>('gitBranchPrefix'),
+        persistence.loadSetting<ProviderConfig[]>('providers'),
+        persistence.loadSetting<string | null>('activeModel'),
+        persistence.loadSetting<string[]>('sessionHistory'),
+        persistence.loadSetting<number>('sessionHistoryIndex'),
       ])
 
-      // Use latest session data if available, otherwise fall back to chatMessages table
-      const sessionMessages = latestSession?.chatMessages || []
-      const messages = sessionMessages.length > 0
-        ? sessionMessages
-        : chatMessages
+      // Do NOT restore the latest session's chatMessages on startup.
+      // Always start with an empty welcome screen so the user doesn't see
+      // stale/failed messages (e.g. 401 errors) from a previous run.
+      // Historical sessions remain available in the sidebar and can be
+      // opened manually.
+      const defaults = { provider: 'agnes-ai' as const, apiKey: '', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-2.0-flash' }
+      // Restore which named profile was active before the restart, so the selection
+      // survives a cold start (the profile list itself is persisted to IndexedDB).
+      const loadedActiveProfileId = await persistence.loadSetting<string | null>('activeProfileId')
 
-      const defaults = { provider: 'openai' as const, apiKey: '', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' }
+      // ── Build multi-provider config for the flattened model selector ──
+      // Prefer the explicitly-saved `providers`/`activeModel` (new format);
+      // otherwise backfill from the legacy apiProfiles / apiConfig so existing
+      // installs keep working without data loss.
+      const safeProviders = Array.isArray(providers) ? providers : []
+      const builtProviders: ProviderConfig[] =
+        safeProviders.length > 0
+          ? safeProviders
+          : (apiProfiles && apiProfiles.length > 0
+              ? apiProfiles.map((p, i) => ({
+                  id: p.id || `p-${i}`,
+                  name: p.name,
+                  baseUrl: p.config?.baseUrl || '',
+                  apiKey: p.config?.apiKey || '',
+                  models: p.models && p.models.length > 0
+                    ? p.models
+                    : p.config?.model ? [p.config.model] : [],
+                  isDefault: p.id === loadedActiveProfileId,
+                }))
+              : (apiConfig && apiConfig.baseUrl && apiConfig.model
+                  ? [{
+                      id: 'p-default',
+                      name: apiConfig.provider || 'default',
+                      baseUrl: apiConfig.baseUrl,
+                      apiKey: apiConfig.apiKey,
+                      models: [apiConfig.model],
+                      isDefault: true,
+                    }]
+                  : []))
+      const builtActiveModel: string | null =
+        activeModel && builtProviders.some((p) => p.models.includes(activeModel))
+          ? activeModel
+          : (builtProviders.length > 0
+              ? (builtProviders.find((p) => p.isDefault)?.models[0] || builtProviders[0].models[0] || null)
+              : null)
+
+      // Prune sessionHistory: remove IDs that no longer exist in IndexedDB
+      const validSessionIds = new Set(sessions.map(s => s.id))
+      const prunedHistory = Array.isArray(savedSessionHistory)
+        ? savedSessionHistory.filter(id => validSessionIds.has(id))
+        : []
+      const prunedIndex = savedSessionHistoryIndex != null && savedSessionHistoryIndex < prunedHistory.length
+        ? savedSessionHistoryIndex
+        : prunedHistory.length - 1
+
       set({
-        memories: latestSession?.memories
-          ? (latestSession.memories as MemoryEntry[])
-          : (memories as MemoryEntry[]),
-        tasks: latestSession?.tasks
-          ? (latestSession.tasks as TaskNode[])
-          : (tasks as TaskNode[]),
-        checkpoints: latestSession?.checkpoints
-          ? (latestSession.checkpoints as SessionCheckpoint[])
-          : (checkpoints as SessionCheckpoint[]),
-        notes: latestSession?.notes || notes || '',
-        goal: latestSession?.goal ?? goal,
-        currentSessionId: latestSession?.id || null,
+        // memories are global and owned by the Hermes backend (memories/MEMORY.md);
+        // do NOT overwrite them from a per-session snapshot.
+        tasks: tasks as TaskNode[],
+        checkpoints: checkpoints as SessionCheckpoint[],
+        notes: notes || '',
+        goal: goal,
+        currentSessionId: null,
+        sessionHistory: prunedHistory,
+        sessionHistoryIndex: prunedIndex,
         selectedWorkDir: latestSession?.workDir || get().selectedWorkDir,
-        apiConfig: apiConfig ? { ...defaults, ...apiConfig } : get().apiConfig,
+        apiConfig: (() => {
+          const resolve = (cfg) => {
+            // Validation gate: reject stale/bad profiles (ant-ling endpoint,
+            // ling provider, or sk-studio-* test key) so a poisoned IndexedDB
+            // entry can never re-enter the store and get pushed to Hermes.
+            if (!cfg || !cfg.baseUrl) {
+              return { ...defaults }
+            }
+            return { ...defaults, ...cfg }
+          }
+          if (loadedActiveProfileId) {
+            const prof = (apiProfiles || []).find((p) => p.id === loadedActiveProfileId)
+            if (prof && prof.config) {
+              return resolve(prof.config)
+            }
+          }
+          const p = apiConfig
+          if (!p || !p.baseUrl) {
+            return { ...defaults }
+          }
+          return resolve(p)
+        })(),
         apiHistory: apiHistory || [],
-        chatMessages: messages.length > 0
-          ? messages.map(m => ({
-              id: m.id,
-              role: m.role as 'user' | 'assistant' | 'system',
-              content: m.content,
-              images: m.images,
-              timestamp: m.timestamp,
-              isStreaming: false,
+        apiProfiles: (() => {
+          const loaded = apiProfiles || []
+          if (loaded.length > 0) {
+            // Backfill models[] for old profiles that don't have it yet.
+            // Without this, handleModelSelect can't reverse-lookup which profile
+            // owns a model, causing 401 when switching providers.
+            return loaded.map(p => ({
+              ...p,
+              models: p.models && p.models.length > 0
+                ? p.models
+                : p.config.model ? [p.config.model] : [],
             }))
-          : get().chatMessages,
-        files: latestSession?.files
-          ? (latestSession.files as FileNode[])
-          : get().files,
-        openTabs: latestSession?.openTabs
-          ? (latestSession.openTabs as any)
-          : get().openTabs,
+          }
+          if (apiHistory && apiHistory.length > 0) {
+            return apiHistory.map((h, i) => ({ id: generateId(), name: `配置 ${i + 1}`, config: { ...defaults, ...h }, models: h.model ? [h.model] : [] }))
+          }
+          return []
+        })(),
+        // Multi-provider config backing the flattened model selector.
+        providers: builtProviders,
+        activeModel: builtActiveModel,
+        activeProfileId: (() => {
+          const id = loadedActiveProfileId
+          if (!id) return null
+          const prof = (apiProfiles || []).find((p) => p.id === id)
+          if (!prof) return null
+          return id
+        })(),
+        chatMessages: [],
+        files: get().files,
+        openTabs: get().openTabs,
         fontFamily: fontFamily || (typeof localStorage !== 'undefined' ? localStorage.getItem('helix-font-family') : null) || get().fontFamily,
         fontSize: fontSize || (typeof localStorage !== 'undefined' ? Number(localStorage.getItem('helix-font-size')) || get().fontSize : get().fontSize),
         interfaceFont: interfaceFont || (typeof localStorage !== 'undefined' ? localStorage.getItem('helix-interface-font') : null) || get().interfaceFont,
         transcriptFontSize: transcriptFontSize || (typeof localStorage !== 'undefined' ? Number(localStorage.getItem('helix-transcript-size')) || get().transcriptFontSize : get().transcriptFontSize),
-        scheduledTasks: scheduledTasks as ScheduledTask[],
+        sessionUsageStats: sessionUsageStats && sessionUsageStats.requestCount >= 0 ? sessionUsageStats : get().sessionUsageStats,
+        scheduledTasks: (scheduledTasks as ScheduledTask[]) || [],
         mcpServers: {
           ...fileMcpConfig,
           ...(mcpServers || {}),
         },
-        customShortcuts: customShortcuts && Object.keys(customShortcuts).length > 0 ? customShortcuts : { ...DEFAULT_SHORTCUTS },
+        customShortcuts: (() => {
+          const customizedIds = new Set(customizedIdsArr || [])
+          const defaults = { ...DEFAULT_SHORTCUTS }
+          if (customShortcuts && Object.keys(customShortcuts).length > 0) {
+            // Only apply shortcuts the user actually customized;
+            // new defaults always take effect for the rest.
+            for (const id of Object.keys(customShortcuts)) {
+              if (customizedIds.has(id)) {
+                defaults[id] = customShortcuts[id]
+              }
+            }
+          }
+          return defaults
+        })(),
+        customizedShortcutIds: new Set(customizedIdsArr || []),
         agentMaxIterations: agentMaxIterations ?? get().agentMaxIterations,
         autoCompactContext: autoCompactContext ?? get().autoCompactContext,
         smartTruncation: smartTruncation ?? get().smartTruncation,
@@ -1692,8 +1875,20 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         temperature: temperature ?? get().temperature,
         maxOutputTokens: maxOutputTokens ?? get().maxOutputTokens,
         customInstructions: customInstructions ?? get().customInstructions,
+        streamingEnabled: streamingEnabled ?? get().streamingEnabled,
+        compressionEnabled: compressionEnabled ?? get().compressionEnabled,
+        toolGuardrailsEnabled: toolGuardrailsEnabled ?? get().toolGuardrailsEnabled,
+        personality: personality ?? get().personality,
+        outputStyle: (outputStyle as 'default' | 'concise' | 'detailed' | 'technical') ?? get().outputStyle,
+        desktopNotifications: desktopNotifications ?? get().desktopNotifications,
+        soundEnabled: soundEnabled ?? get().soundEnabled,
+        restoreLastSession: restoreLastSession ?? get().restoreLastSession,
+        defaultWorkDir: defaultWorkDir || get().defaultWorkDir,
+        language: (language as 'zh' | 'en') ?? get().language,
+        confirmDangerousActions: confirmDangerousActions ?? get().confirmDangerousActions,
+        autoApproveRead: autoApproveRead ?? get().autoApproveRead,
         availableModels: availableModels || [],
-        editorTheme: (editorTheme as 'vs-dark' | 'light') ?? get().editorTheme,
+        editorTheme: (editorTheme as 'vs-dark' | 'light' | null | undefined) ?? get().editorTheme,
         gitAutoCommit: gitAutoCommit ?? get().gitAutoCommit,
         gitAutoPush: gitAutoPush ?? get().gitAutoPush,
         gitPushConfirm: gitPushConfirm ?? get().gitPushConfirm,
@@ -1704,32 +1899,30 @@ export const useHelixStore = create<HelixState>((set, get) => ({
       })
 
       // Auto-detect AGENTS.md / CLAUDE.md from project root as fallback
-      if (!customInstructions) {
-        try {
-          const res = await fetch('/api/instructions')
-          const data = await res.json()
-          if (data.content) {
-            get().setCustomInstructions(data.content)
-          }
-        } catch {
-          // Silently ignore — no instructions file found or API unavailable
-        }
+      // Custom instructions are now managed by Hermes
+      // No local API call needed
+
+      // Set default workDir from the main process (not renderer process.cwd(),
+      // which can resolve to a bare drive root like D:\).
+      const currentDir = get().selectedWorkDir
+      const isDriveRoot = typeof currentDir === 'string' && /^[a-zA-Z]:[\\/]?$/.test(currentDir)
+      if (!currentDir || currentDir === '/' || currentDir === '\\' || isDriveRoot) {
+        const fallbackDir = typeof process !== 'undefined' ? process.cwd() : ''
+        const info = isElectron() ? await electronApp.getInfo() : { workDir: fallbackDir }
+        set({ selectedWorkDir: info.workDir || fallbackDir })
       }
 
-      // Set default workDir from server if none restored
-      if (!get().selectedWorkDir) {
-        try {
-          const res = await fetch('/api/init')
-          const data = await res.json()
-          if (data.workDir) {
-            get().setSelectedWorkDir(data.workDir)
-          }
-        } catch {
-          // Silently ignore
-        }
-      }
+      // Re-apply font CSS variables after restore so the DOM matches the
+      // persisted values (not the static defaults that ship with the bundle).
+      const s = useHelixStore.getState()
+      document.documentElement.style.setProperty('--helix-font-family', s.fontFamily)
+      document.body.style.fontFamily = s.fontFamily
+      document.documentElement.style.setProperty('--helix-font-size', `${s.fontSize}px`)
+      document.documentElement.style.setProperty('--helix-interface-font', s.interfaceFont)
+      document.documentElement.style.setProperty('--helix-transcript-size', `${s.transcriptFontSize}px`)
     } catch (e) {
-      console.error('Failed to restore:', e)
+      logError('Failed to restore:', e)
+      get().showToast({ type: 'error', title: '数据恢复失败', description: '本地存储读取异常，部分设置可能未加载' })
     }
   },
 
@@ -1752,7 +1945,7 @@ export const useHelixStore = create<HelixState>((set, get) => ({
         sessionId
       )
     } catch (e) {
-      console.error('Failed to save checkpoint:', e)
+      logError('Failed to save checkpoint:', e)
     }
   },
 

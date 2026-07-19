@@ -77,15 +77,17 @@ function ShortcutsSection() {
 
   const shortcuts = Object.entries(customShortcuts)
   const defaultIds = Object.keys(DEFAULT_SHORTCUTS)
-  const noopActions = new Set(['archive-chat', 'rename-chat', 'search-chats', 'next-chat', 'prev-chat', 'toggle-file-tree'])
+  const noopActions = new Set(['archive-chat', 'rename-chat', 'search-chats', 'next-chat', 'prev-chat'])
   const systemShortcuts = shortcuts.filter(([id]) => defaultIds.includes(id) && !noopActions.has(id)).filter(([, s]) => s.keys.length > 0)
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [recording, setRecording] = useState(false)
+  const [pendingKeys, setPendingKeys] = useState<string[]>([])
   const inputRef = React.useRef<HTMLInputElement>(null)
 
   const startRecording = (id: string) => {
     setEditingId(id)
+    setPendingKeys(customShortcuts[id]?.keys || [])
     setRecording(true)
     setTimeout(() => inputRef.current?.focus(), 50)
   }
@@ -103,18 +105,22 @@ function ShortcutsSection() {
       keys.push(key)
     }
     if (keys.length > 0) {
-      const id = editingId
-      if (id) {
-        updateCustomShortcut(id, {
-          ...customShortcuts[id],
-          keys,
-        })
-        showToast({ type: 'success', title: '快捷键已更新', description: `${keys.join(' + ')} → ${customShortcuts[id].description}` })
-      }
+      setPendingKeys(keys)
+    }
+  }, [])
+
+  const confirmRecording = () => {
+    if (editingId && pendingKeys.length > 0) {
+      updateCustomShortcut(editingId, {
+        ...customShortcuts[editingId],
+        keys: pendingKeys,
+      })
+      showToast({ type: 'success', title: '快捷键已更新', description: `${pendingKeys.join(' + ')} → ${customShortcuts[editingId].description}` })
     }
     setRecording(false)
     setEditingId(null)
-  }, [editingId, customShortcuts, updateCustomShortcut, showToast])
+    setPendingKeys([])
+  }
 
   useEffect(() => {
     if (recording) {
@@ -126,18 +132,19 @@ function ShortcutsSection() {
   const cancelRecording = () => {
     setRecording(false)
     setEditingId(null)
+    setPendingKeys([])
   }
 
   return (
     <div className="space-y-6">
       {systemShortcuts.length > 0 && (
         <section className="space-y-3">
-          <h3 className="text-base font-medium text-foreground">系统快捷键</h3>
+          <h3 className="text-base font-bold text-foreground">系统快捷键</h3>
           <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
             <div className="divide-y divide-border/50">
               {systemShortcuts.map(([id, s]) => (
                 <div key={id} className="flex items-center px-4 py-2.5 hover:bg-accent/20 transition-colors group">
-                  <span className="flex-1 text-sm text-foreground/60">{s.description}</span>
+                  <span className="flex-1 text-sm font-medium text-foreground/80">{s.description}</span>
                   <span className="text-sm font-mono text-foreground/80 bg-muted px-2 py-1 rounded">{s.keys.join(' + ')}</span>
                   <button
                     onClick={() => startRecording(id)}
@@ -166,17 +173,27 @@ function ShortcutsSection() {
                 ref={inputRef}
                 type="text"
                 readOnly
+                value={pendingKeys.length > 0 ? pendingKeys.join(' + ') : ''}
                 placeholder="按快捷键..."
                 className="bg-transparent text-center text-lg font-mono text-foreground/80 outline-none w-full"
               />
             </div>
-            <p className="text-xs text-foreground/40 text-center mb-3">按下新的按键组合，或按 Escape 取消</p>
-            <button
-              onClick={cancelRecording}
-              className="w-full py-2 text-sm text-foreground/60 hover:text-foreground rounded-lg hover:bg-muted transition-colors"
-            >
-              取消
-            </button>
+            <p className="text-xs text-foreground/40 text-center mb-3">按下新的按键组合，然后点击确定保存</p>
+            <div className="flex gap-2">
+              <button
+                onClick={cancelRecording}
+                className="flex-1 py-2 text-sm text-foreground/60 hover:text-foreground rounded-lg hover:bg-muted transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmRecording}
+                disabled={pendingKeys.length === 0}
+                className="flex-1 py-2 text-sm font-medium text-white bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
+              >
+                确定
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -254,7 +271,6 @@ function AppearanceSection() {
               value={fontFamily}
               onChange={(e) => {
                 setFontFamily(e.target.value)
-                showToast({ type: 'success', title: '字体已更新' })
               }}
               className="w-full px-3 py-2 text-sm rounded-lg border border-border/50 bg-card/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
             >
@@ -272,7 +288,6 @@ function AppearanceSection() {
               value={fontSize}
               onChange={(e) => {
                 setFontSize(Number(e.target.value))
-                showToast({ type: 'success', title: '字体大小已更新' })
               }}
               className="w-full px-3 py-2 text-sm rounded-lg border border-border/50 bg-card/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
             />
@@ -288,7 +303,6 @@ function AppearanceSection() {
             value={interfaceFont}
             onChange={(e) => {
               setInterfaceFont(e.target.value)
-              showToast({ type: 'success', title: '界面字体已更新' })
             }}
             className="w-full px-3 py-2 text-sm rounded-lg border border-border/50 bg-card/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
           >

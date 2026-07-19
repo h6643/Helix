@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react'
 import {
-  AlertTriangle,
+  ShieldCheck,
   FileEdit,
   Terminal,
   FolderOpen,
@@ -22,12 +22,12 @@ export interface ApprovalRequest {
 function getToolIcon(toolName: string) {
   switch (toolName) {
     case 'write_file':
-    case 'edit_file':
-      return <FileEdit className="size-4 text-amber-400" />
+    case 'patch':
+      return <FileEdit className="size-3.5 text-sky-500" />
     case 'run_bash':
-      return <Terminal className="size-4 text-red-400" />
+      return <Terminal className="size-3.5 text-rose-500" />
     default:
-      return <FolderOpen className="size-4 text-muted-foreground" />
+      return <FolderOpen className="size-3.5 text-muted-foreground" />
   }
 }
 
@@ -35,7 +35,7 @@ function getToolLabel(toolName: string) {
   switch (toolName) {
     case 'write_file':
       return '写入文件'
-    case 'edit_file':
+    case 'patch':
       return '编辑文件'
     case 'run_bash':
       return '执行命令'
@@ -45,9 +45,9 @@ function getToolLabel(toolName: string) {
 }
 
 function computeStats(toolName: string, params: Record<string, unknown>) {
-  if (toolName === 'edit_file') {
-    const oldStr = (params.old_string as string) || ''
-    const newStr = (params.new_string as string) || ''
+  if (toolName === 'patch') {
+    const oldStr = String(params.old_string ?? params.old_text ?? '')
+    const newStr = String(params.new_string ?? params.new_text ?? '')
     const oldLines = oldStr.split('\n').length
     const newLines = newStr.split('\n').length
     const added = Math.max(0, newLines - oldLines)
@@ -74,89 +74,77 @@ export function ApprovalDialog({ request, pendingCount = 1, onApprove, onReject,
   const stats = computeStats(request.toolName, request.params)
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[10vh] pb-8 bg-black/40">
-      <div className="w-full max-w-md bg-card border border-border/60 rounded-2xl shadow-2xl overflow-hidden max-h-[80vh] flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 backdrop-blur-sm">
+      <div className="w-full max-w-md overflow-hidden rounded-xl border border-border/60 bg-card shadow-2xl">
         {/* Header */}
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-border/60 bg-amber-500/5 shrink-0">
-          <div className="w-8 h-8 rounded-xl bg-amber-500/10 flex items-center justify-center">
-            <AlertTriangle className="size-4 text-amber-500" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-              操作确认
+        <div className="flex items-start gap-2.5 px-5 pt-4">
+          <ShieldCheck className="mt-0.5 size-4 shrink-0 text-primary" />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-medium text-foreground">操作确认</h3>
               {pendingCount > 1 && (
-                <span className="text-[10px] font-normal text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded flex items-center gap-1">
+                <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
                   <Layers className="size-3" />
-                  待审批操作: {pendingCount}
+                  待审批 {pendingCount}
                 </span>
               )}
-            </h3>
-            <p className="text-[11px] text-muted-foreground">Agent 请求执行以下操作</p>
+            </div>
           </div>
         </div>
 
         {/* Content */}
-        <div className="px-5 py-4 space-y-3 overflow-y-auto">
-          <div className="flex items-center gap-2 px-3 py-2 bg-card/50 shadow-sm rounded-lg">
-            {getToolIcon(request.toolName)}
-            <span className="text-xs font-medium text-foreground">
+        <div className="px-5 py-4">
+          {/* Tool chip + change stats */}
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <div className="inline-flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-0.5 text-xs font-medium text-foreground">
+              {getToolIcon(request.toolName)}
               {getToolLabel(request.toolName)}
-            </span>
+            </div>
+            {'added' in stats && (
+              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <span className="text-emerald-500">+{stats.added}</span>
+                <span className="text-red-500">-{stats.removed}</span>
+                <span>共 {stats.total} 行</span>
+              </div>
+            )}
+            {'total' in stats && !('added' in stats) && (
+              <span className="text-[11px] text-muted-foreground">共 {stats.total} 行</span>
+            )}
           </div>
 
-          {/* Change stats */}
-          {'added' in stats && (
-            <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-              <span className="text-emerald-500">+{stats.added} 行</span>
-              <span className="text-red-500">-{stats.removed} 行</span>
-              <span>共 {stats.total} 行</span>
-            </div>
-          )}
-          {'total' in stats && !('added' in stats) && (
-            <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-              <span>共 {stats.total} 行</span>
-            </div>
-          )}
-
           {/* Parameters */}
-          <div className="space-y-2">
+          <div className="space-y-3">
             {request.toolName === 'write_file' && (
               <>
                 <div>
-                  <span className="text-[10px] text-muted-foreground/60 uppercase">文件路径</span>
-                  <p className="text-xs text-foreground font-mono mt-0.5">{request.params.path as string}</p>
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground/70">文件路径</span>
+                  <p className="mt-0.5 break-all font-mono text-xs text-foreground">{request.params.path as string}</p>
                 </div>
                 <div>
-                  <span className="text-[10px] text-muted-foreground/60 uppercase">内容预览</span>
-                  <pre className="text-[11px] text-foreground/80 bg-muted/30 border border-border/30 rounded p-2 mt-0.5 max-h-32 overflow-auto font-mono">
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground/70">内容预览</span>
+                  <pre className="mt-1 max-h-40 overflow-auto rounded-lg bg-muted/30 p-2.5 font-mono text-[11px] text-foreground/80">
                     {(request.params.content as string)?.slice(0, 500) || '(empty)'}
                     {(request.params.content as string)?.length > 500 && '\n... (truncated)'}
                   </pre>
                 </div>
               </>
             )}
-            {request.toolName === 'edit_file' && (
+            {request.toolName === 'patch' && (
               <>
                 <div>
-                  <span className="text-[10px] text-muted-foreground/60 uppercase">文件路径</span>
-                  <p className="text-xs text-foreground font-mono mt-0.5">{request.params.path as string}</p>
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground/70">文件路径</span>
+                  <p className="mt-0.5 break-all font-mono text-xs text-foreground">{request.params.path as string}</p>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <span className="text-[10px] text-red-400/60 uppercase">查找</span>
-                    <pre className="text-[10px] text-red-400 bg-red-400/5 rounded p-1.5 mt-0.5 font-mono overflow-auto max-h-20">
+                    <span className="text-[10px] uppercase tracking-wide text-red-400/80">查找</span>
+                    <pre className="mt-1 max-h-24 overflow-auto rounded-lg bg-red-500/5 p-2 font-mono text-[10px] text-red-500/90">
                       {request.params.old_string as string}
                     </pre>
                   </div>
                   <div>
-                    <span className="text-[10px] text-red-400/60 uppercase">查找</span>
-                    <pre className="text-[10px] text-red-400 bg-red-500/5 border border-red-500/10 rounded p-1.5 mt-0.5 font-mono overflow-auto max-h-20">
-                      {request.params.old_string as string}
-                    </pre>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-emerald-400/60 uppercase">替换为</span>
-                    <pre className="text-[10px] text-emerald-400 bg-emerald-500/5 border border-emerald-500/10 rounded p-1.5 mt-0.5 font-mono overflow-auto max-h-20">
+                    <span className="text-[10px] uppercase tracking-wide text-emerald-400/80">替换为</span>
+                    <pre className="mt-1 max-h-24 overflow-auto rounded-lg bg-emerald-500/5 p-2 font-mono text-[10px] text-emerald-500/90">
                       {request.params.new_string as string}
                     </pre>
                   </div>
@@ -165,8 +153,8 @@ export function ApprovalDialog({ request, pendingCount = 1, onApprove, onReject,
             )}
             {request.toolName === 'run_bash' && (
               <div>
-                <span className="text-[10px] text-muted-foreground/60 uppercase">命令</span>
-                <pre className="text-xs text-foreground bg-muted/30 border border-border/30 rounded p-2 mt-0.5 font-mono">
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground/70">命令</span>
+                <pre className="mt-1 max-h-32 overflow-auto rounded-lg border-l-2 border-rose-500/60 bg-muted/40 p-2.5 font-mono text-[11px] text-foreground/90">
                   {request.params.command as string}
                 </pre>
               </div>
@@ -175,8 +163,8 @@ export function ApprovalDialog({ request, pendingCount = 1, onApprove, onReject,
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between gap-2 px-5 py-3 border-t border-border/60 bg-muted/10 shrink-0">
-          <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground cursor-pointer select-none">
+        <div className="flex items-center justify-between gap-2 px-5 pb-5 pt-1">
+          <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground">
             <input
               type="checkbox"
               checked={cacheDecision}
@@ -185,16 +173,16 @@ export function ApprovalDialog({ request, pendingCount = 1, onApprove, onReject,
             />
             不再询问此操作
           </label>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
             {pendingCount > 1 && onApproveAll && (
               <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
                 onClick={onApproveAll}
                 className="gap-1.5"
               >
                 <Layers className="size-3.5" />
-                一键批准全部 ({pendingCount})
+                批准全部 ({pendingCount})
               </Button>
             )}
             <Button

@@ -1,22 +1,63 @@
-/**
- * Shared ReactMarkdown components configuration
- */
+import React, { useState, useRef } from 'react'
+import { Check, Copy } from 'lucide-react'
+import 'highlight.js/styles/github-dark.css'
+import ReactMarkdown, { type Components } from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
-import React from 'react'
-import { FileCodeBlock } from './chat-panel'
+export const markdownPlugins = {
+  remarkPlugins: [remarkGfm],
+}
 
-export const markdownComponents = {
-  code({ className, children, ...props }: any) {
-    const match = /language-(\w+)/.exec(className || '')
-    const isInline = !match && !className
-    if (isInline) {
-      return <code className="bg-muted/50 border border-border/30 px-1.5 py-0.5 rounded text-xs font-mono text-primary" {...props}>{children}</code>
+// Click-to-zoom image for assistant messages (multimodal output)
+const LightboxImage = ({ src, alt }: { src?: string; alt?: string }) => {
+  const [open, setOpen] = useState(false)
+  if (!src) return null
+  return (
+    <>
+      <img
+        src={src}
+        alt={alt}
+        onClick={() => setOpen(true)}
+        className="rounded-lg max-w-full h-auto my-2 cursor-zoom-in hover:opacity-90 transition-opacity"
+      />
+      {open && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-8 cursor-zoom-out"
+          onClick={() => setOpen(false)}
+        >
+          <img src={src} alt={alt} className="max-w-full max-h-full rounded-lg" />
+        </div>
+      )}
+    </>
+  )
+}
+
+export const markdownComponents: Components = {
+  a: ({ href, children, ...props }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>
+  ),
+  img: ({ src, alt }) => <LightboxImage src={typeof src === 'string' ? src : undefined} alt={alt} />,
+  // Code block wrapper with a copy button (syntax highlighting added via rehype plugin upstream)
+  pre: ({ children }) => {
+    const ref = useRef<HTMLPreElement>(null)
+    const [copied, setCopied] = useState(false)
+    const onCopy = () => {
+      const text = ref.current?.textContent || ''
+      if (navigator.clipboard) navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
     }
-    return <FileCodeBlock language={match ? match[1] : 'text'}>{String(children)}</FileCodeBlock>
+    return (
+      <div className="relative group my-3 rounded-xl overflow-hidden border border-border/40">
+        <button
+          type="button"
+          onClick={onCopy}
+          className="absolute right-2 top-2 z-10 px-1.5 py-1 rounded bg-muted/80 text-foreground/60 opacity-0 group-hover:opacity-100 transition-opacity"
+        >
+          {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+        </button>
+        <pre ref={ref}>{children}</pre>
+      </div>
+    )
   },
-  p({ children }: any) { return <p className="mb-2 last:mb-0 text-foreground/85">{children}</p> },
-  ul({ children }: any) { return <ul className="list-disc pl-5 mb-2 text-foreground/85">{children}</ul> },
-  ol({ children }: any) { return <ol className="list-decimal pl-5 mb-2 text-foreground/85">{children}</ol> },
-  strong({ children }: any) { return <strong className="font-semibold text-foreground">{children}</strong> },
-  a({ children, href }: any) { return <span className="text-foreground/80">{children}</span> },
 }

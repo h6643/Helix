@@ -1,1069 +1,556 @@
 'use client'
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Send,
-  Loader2,
   Brain,
   Wrench,
-  CheckCircle2,
+  Circle,
   AlertCircle,
   Code2,
   FileCode,
   FileText,
   BarChart3,
   Copy,
+  Check,
   ChevronRight,
   ChevronDown,
   Terminal,
   Search,
+  Folder,
   FolderOpen,
   Pencil,
   Eye,
   ArrowDown,
-  Sparkles,
+  ArrowUp,
   RotateCcw,
-  Folder,
   X,
-  Zap,
   Square,
   Plus,
   FolderPlus,
-  Briefcase,
-  Mic,
+  Clock,
+  Loader2,
+  Hand,
+  AlertTriangle,
+  Monitor,
+  GitBranch,
+  Pause,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { generateId, timeAgo, formatTokens } from '@/lib/format'
+import { ContextUsageIndicator } from './context-usage'
+import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, stripEmoji, safeMarkdownSource, stripSystemReminders } from '@/lib/text-utils'
+import { getToolLabel, getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
+import { extractScheduledTasks } from '@/lib/schedule-utils'
+import { InlineToolGroup } from './inline-tool-group'
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion'
 import { ApprovalDialog, type ApprovalRequest } from './approval-dialog'
-import { useHelixStore, type ImageAttachment } from '@/stores/helix-store'
-import { processClipboardImage, canAddMoreImages } from '@/lib/helix/image-utils'
-import { getModels } from '@/lib/helix/providers'
-import { isElectron, electronDialog } from '@/lib/electron-bridge'
+import { useHelixStore, type ImageAttachment, type FileAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
+import { useHermesStore } from '@/stores/hermes-store'
+import { processClipboardImage, canAddMoreImages, blobToDataUrl } from '@/lib/image-utils'
+import { isElectron, electronDialog, electronHermes, electronGit } from '@/lib/electron-bridge'
 import ReactMarkdown from 'react-markdown'
-import { markdownComponents } from './markdown-components'
+import { markdownComponents, markdownPlugins } from './markdown-components'
 
-// ── Types ──────────────────────────────────────────────
+// ==== Types ============================================================================================
 
-interface FlowStep {
-  id: string
-  type: 'task' | 'thinking' | 'reasoning' | 'tool_call' | 'tool_result' | 'text' | 'error' | 'done' | 'plan' | 'usage' | 'compact' | 'file_change'
-  content: string
-  toolName?: string
-  toolParams?: Record<string, unknown>
-  fileChanges?: Array<{ path: string; type: 'add' | 'modify' | 'delete'; diff: string }>
-  timestamp: number
-  expanded?: boolean
-  planText?: string
-  taskLabel?: string
-  taskId?: string
-  finishReason?: string
+
+
+// ==== Interleaved response blocks (text -> tool groups) ====
+
+type ResponseBlock = StreamingResponseBlock
+
+// InlineToolGroup — extracted to ./inline-tool-group.tsx
+
+// ==== Helpers ========================================================================================
+
+function WaveLoader({ className = '' }: { className?: string }) {
+  return (
+    <span className={`inline-flex items-center gap-[3px] ${className}`}>
+      {[0, 1, 2, 3].map(i => (
+        <span
+          key={i}
+          className="size-[4px] rounded-full bg-current"
+          style={{ animation: `waveDot 0.9s ease-in-out ${i * 0.16}s infinite` }}
+        />
+      ))}
+    </span>
+  )
 }
 
-// ── Interleaved response blocks (text -> tool groups) ──
+const TEXTUAL_MIME_RE = /^(text\/|application\/(json|xml|javascript|typescript|x-sh|csv|yaml|toml|x-www-form-urlencoded)|image\/(svg\+xml))/
+const TEXTUAL_EXT = /\.(txt|md|markdown|mdx|json|yml|yaml|toml|csv|ts|tsx|js|jsx|py|java|c|cpp|h|hpp|go|rs|rb|php|sh|bash|zsh|sql|html|htm|css|scss|less|xml|log|env|gitignore|dockerfile|makefile|rst|tex)$/i
 
-type ResponseBlock =
-  | { type: 'text'; content: string }
-  | { type: 'tool_group'; steps: FlowStep[] }
-
-// ── Helpers ────────────────────────────────────────────
-
-function generateId(): string {
-  return Math.random().toString(36).substr(2, 9)
+function isTextualFile(file: File): boolean {
+  if (TEXTUAL_MIME_RE.test(file.type)) return true
+  return TEXTUAL_EXT.test(file.name)
 }
 
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(reader.error)
+    reader.readAsText(file)
   })
 }
 
-const TOOL_LABELS: Record<string, string> = {
-  read_file: '读取文件',
-  write_file: '写入文件',
-  edit_file: '编辑文件',
-  list_directory: '读取目录',
-  glob: '搜索文件',
-  grep: '搜索内容',
-  run_bash: '执行命令',
-  bash: '执行命令',
-  webfetch: '获取网页',
-  websearch: '搜索网页',
-  web_extractor: '获取网页',
-  question: '提问',
-  run_task: '执行任务',
-  apply_patch: '应用补丁',
-  create_artifact: '创建制品',
-  spawn_agent: '启动子代理',
-  get_sub_agent_result: '获取子代理结果',
-  memory_add: '添加记忆',
-  memory_read: '读取记忆',
-  git_status: '查看状态',
-  git_diff: '查看差异',
-  git_log: '查看日志',
-  git_branch: '查看分支',
-  git_commit: '提交代码',
-  plan_enter: '进入计划',
-  plan_exit: '退出计划',
-  task_create: '创建任务',
-  task_update: '更新任务',
-  task_complete: '完成任务',
-  todo_write: '写入待办',
-  skill: '执行技能',
-  browser_navigate: '浏览器导航',
-  browser_click: '浏览器点击',
-  browser_type: '浏览器输入',
-  browser_screenshot: '浏览器截图',
-  browser_get_html: '获取页面HTML',
-}
-
-function getToolLabel(toolName: string): string {
-  return TOOL_LABELS[toolName] || toolName
-}
-
-function getToolIcon(toolName: string) {
-  const name = toolName.toLowerCase()
-  if (name.includes('read') || name.includes('view')) return <Eye className="size-3.5" />
-  if (name.includes('write') || name.includes('create')) return <Pencil className="size-3.5" />
-  if (name.includes('edit') || name.includes('modify')) return <Pencil className="size-3.5" />
-  if (name.includes('grep') || name.includes('search')) return <Search className="size-3.5" />
-  if (name.includes('bash') || name.includes('shell') || name.includes('terminal')) return <Terminal className="size-3.5" />
-  if (name.includes('glob') || name.includes('list')) return <FolderOpen className="size-3.5" />
-  return <Wrench className="size-3.5" />
-}
-
-// WorkBuddy-style helpers
-function extractToolPath(step: FlowStep): string {
-  if (step.toolParams?.path && typeof step.toolParams.path === 'string') {
-    return step.toolParams.path as string
+// Convert a dropped/picked File into a FileAttachment (reads image preview + base64).
+async function fileToAttachment(file: File): Promise<FileAttachment> {
+  const isImage = file.type.startsWith('image/')
+  const dataUrl = await blobToDataUrl(file)
+  return {
+    id: generateId(),
+    name: file.name,
+    size: file.size,
+    mime: file.type || 'application/octet-stream',
+    kind: isImage ? 'image' : (isTextualFile(file) ? 'text' : 'file'),
+    dataUrl: isImage ? dataUrl : undefined,
+    base64: dataUrl.split(',')[1] || '',
+    // Only available in Electron (File has a `path` prop injected by Chromium)
+    path: (file as any).path,
   }
-  if (step.toolParams?.file_path && typeof step.toolParams.file_path === 'string') {
-    return step.toolParams.file_path as string
-  }
-  // Try to parse content as JSON
-  try {
-    const parsed = JSON.parse(step.content)
-    if (typeof parsed.path === 'string') return parsed.path
-    if (typeof parsed.file_path === 'string') return parsed.file_path
-    if (typeof parsed.filePath === 'string') return parsed.filePath
-  } catch {}
-  // Fallback: extract first absolute-looking path from content
-  const match = step.content.match(/[A-Za-z]:\\[^\s]+|(?:\/[^\s]+)+/)
-  return match ? match[0] : ''
 }
 
-function extractDiffStats(step: FlowStep): { add: number; del: number } | undefined {
-  if (step.fileChanges && step.fileChanges.length > 0) {
-    const total = step.fileChanges.reduce((acc, change) => {
-      if (change.diff) {
-        const lines = change.diff.split('\n')
-        acc.add += lines.filter(l => l.startsWith('+')).length
-        acc.del += lines.filter(l => l.startsWith('-')).length
-      }
-      return acc
-    }, { add: 0, del: 0 })
-    return total
-  }
-  if (step.content) {
-    const lines = step.content.split('\n')
-    const add = lines.filter(l => l.startsWith('+')).length
-    const del = lines.filter(l => l.startsWith('-')).length
-    if (add > 0 || del > 0) return { add, del }
-  }
-  return undefined
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function extractLineRange(step: FlowStep): string {
-  try {
-    const parsed = JSON.parse(step.content)
-    if (parsed.offset !== undefined && parsed.limit !== undefined) {
-      const start = parsed.offset + 1
-      const end = parsed.offset + parsed.limit
-      return `L${start}-${end}`
-    }
-  } catch {}
-  return ''
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  return s > 0 ? `${m}m ${s}s` : `${m}m`
 }
 
-// ── Deep Thinking Block (WorkBuddy style) ──────────────
+const SYSTEM_REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/gi
 
-function DeepThinkingBlock({ steps, isRunning, inline = false }: { steps: FlowStep[]; isRunning: boolean; inline?: boolean }) {
-  const [open, setOpen] = useState(true)
+// Schedule parsing — extracted to lib/schedule-utils.ts
 
-  const actions = useMemo(() => {
-    const list: Array<{
-      id: string
-      type: 'thinking' | 'read' | 'edit' | 'tool' | 'error' | 'usage'
-      icon: React.ReactNode
-      label: string
-      path?: string
-      range?: string
-      diff?: { add: number; del: number }
-    }> = []
-
-    for (const step of steps) {
-      if (step.type === 'thinking' || step.type === 'reasoning') {
-        list.push({ id: step.id, type: 'thinking', icon: <Sparkles className="size-3.5 text-foreground/50" />, label: '深度思考' })
-      } else if (step.type === 'error') {
-        list.push({ id: step.id, type: 'error', icon: <AlertCircle className="size-3.5 text-red-500" />, label: '失败' })
-      } else if (step.type === 'usage' && step.content) {
-        list.push({ id: step.id, type: 'usage', icon: <BarChart3 className="size-3.5 text-foreground/50" />, label: '已消耗', path: step.content })
-      } else if (step.type === 'tool_call' || step.type === 'tool_result') {
-        const toolName = (step.toolName || '').toLowerCase()
-        const path = extractToolPath(step)
-        if (toolName.includes('read') || toolName.includes('view')) {
-          list.push({ id: step.id, type: 'read', icon: <Eye className="size-3.5 text-blue-500" />, label: '已读取', path, range: extractLineRange(step) })        } else if (toolName.includes('write') || toolName.includes('edit') || toolName.includes('create') || toolName.includes('apply')) {
-          list.push({ id: step.id, type: 'edit', icon: <Pencil className="size-3.5 text-green-500" />, label: '编辑', path, diff: extractDiffStats(step) })
-        } else {
-          list.push({ id: step.id, type: 'tool', icon: getToolIcon(step.toolName || ''), label: getToolLabel(step.toolName || ''), path })
-        }
-      }
-    }
-    return list
-  }, [steps])
-
-  const totalTokens = useMemo(() => {
-    return steps
-      .filter(s => s.type === 'usage' && s.content)
-      .reduce((acc, s) => acc + (parseInt(s.content.replace(/\D/g, '')) || 0), 0)
-  }, [steps])
-
-  const callCount = useMemo(() => {
-    return steps.filter(s => s.type === 'tool_call').length
-  }, [steps])
-
-  const thinkingCountForBlock = useMemo(() => {
-    return steps.filter(s => s.type === 'thinking' || s.type === 'reasoning').length
-  }, [steps])
-
+function CopyButton({ text, className = '' }: { text: string; className?: string }) {
+  const [copied, setCopied] = React.useState(false)
   return (
-    <div className={inline ? 'border-b border-border/50 last:border-b-0' : 'border border-border/70 rounded-xl bg-card/50 overflow-hidden'}>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className={`w-full flex items-center justify-between hover:bg-accent/20 transition-colors ${inline ? 'px-0 py-2' : 'px-4 py-2.5'}`}
-      >
-        <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-          <Sparkles className="size-4 text-foreground/50" />
-          <span>深度思考</span>
-        </div>
-        <ChevronRight className={`size-4 text-muted-foreground transition-transform duration-200 ${open ? 'rotate-90' : ''}`} />
-      </button>
-      <div className={`overflow-hidden transition-all duration-300 ease-in-out ${open ? 'max-h-[1000px] opacity-100' : 'max-h-0 opacity-0'}`}>
-        <div className={`pt-0 ${inline ? 'px-0 pb-3' : 'px-4 pb-3'}`}>
-          <div className="space-y-1.5">
-            {actions.map(action => (
-              <div key={action.id} className="flex items-center gap-2 text-sm py-0.5">
-                {action.icon}
-                <span className="text-muted-foreground">{action.label}</span>
-                {action.path && (
-                  <span className="text-primary truncate max-w-[300px]">{action.path}</span>
-                )}
-                {action.range && (
-                  <span className="text-xs text-muted-foreground">{action.range}</span>
-                )}
-                {action.diff && (action.diff.add > 0 || action.diff.del > 0) && (
-                  <span className="text-xs">
-                    <span className="text-green-500">+{action.diff.add}</span>
-                    <span className="text-red-500 ml-1">-{action.diff.del}</span>
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-          <div className="flex items-center justify-between mt-3 pt-2 border-t border-border/50 text-xs text-muted-foreground">
-            <div className="flex items-center gap-3">
-              {isRunning ? (
-                <>
-                  <Loader2 className="size-3 animate-spin" />
-                  <span>等待模型响应</span>
-                </>
-              ) : (
-                <span>已完成</span>
-              )}
-            </div>
-            {totalTokens > 0 && (
-              <div className="flex items-center gap-2">
-                <span>已消耗◇ {totalTokens}K</span>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
+    <button
+      onClick={() => {
+        navigator.clipboard.writeText(text)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }}
+      className={`p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors ${className}`}
+      title="复制"
+    >
+      {copied ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+    </button>
   )
 }
 
-interface TaskGroup {
-  task: FlowStep | null
-  label: string
-  steps: FlowStep[]
-}
-
-function TimelineGroup({
-  group,
-  isFirst,
-  isLast,
-  isRunning,
-  defaultOpen = false,
-}: {
-  group: TaskGroup
-  isFirst: boolean
-  isLast: boolean
-  isRunning: boolean
-  defaultOpen?: boolean
-}) {
-  const [open, setOpen] = useState(defaultOpen)
-  const isActive = isRunning && isLast
-
-  // 当前任务执行时自动展开，执行完成后自动关闭
-  useEffect(() => {
-    setOpen(isActive)
-  }, [isActive])
-
-  const hasErrors = group.steps.some(s => s.type === 'error')
-  const hasToolCalls = group.steps.some(s => s.type === 'tool_call')
-  const hasPlan = group.task?.type === 'plan'
-
-  // 合并连续的 tool_call + tool_result 为同一个步骤
-  const mergedSteps = useMemo(() => {
-    const result: FlowStep[] = []
-    for (let i = 0; i < group.steps.length; i++) {
-      const current = group.steps[i]
-      const next = group.steps[i + 1]
-      if (current.type === 'tool_call' && next?.type === 'tool_result' && current.toolName === next.toolName) {
-        result.push({ ...current, content: next.content, type: 'tool_call' })
-        i++ // 跳过下一个 tool_result
-      } else {
-        result.push(current)
-      }
-    }
-    return result
-  }, [group.steps])
-
-  const icon = hasErrors
-    ? <AlertCircle className="size-4" />
-    : hasToolCalls
-    ? <Search className="size-4" />
-    : hasPlan
-    ? <Sparkles className="size-4" />
-    : <CheckCircle2 className="size-4" />
-
-  const colorClass = hasErrors
-    ? 'text-red-500 border-red-500/20 bg-red-500/5'
-    : hasToolCalls
-    ? 'text-foreground/70 border-border bg-muted'
-    : hasPlan
-    ? 'text-blue-500 border-blue-500/20 bg-blue-500/5'
-    : 'text-emerald-500 border-emerald-500/20 bg-emerald-500/5'
-
-  return (
-    <div className="relative flex gap-3 group">
-      {/* Timeline node + line */}
-      <div className="flex flex-col items-center shrink-0">
-        <div className={`w-7 h-7 rounded-full border flex items-center justify-center ${colorClass}`}>
-          {icon}
-        </div>
-        {!isLast && (
-          <div className="w-px flex-1 bg-border/50 min-h-[20px] mt-1" />
-        )}
-      </div>
-
-      {/* Group content */}
-      <div className="flex-1 min-w-0 pb-4">
-        <button
-          type="button"
-          onClick={() => setOpen(!open)}
-          className="flex items-center gap-2 text-sm font-medium text-foreground hover:text-foreground/80 transition-colors"
-        >
-          <span className="truncate">{group.label}</span>
-          {open ? <ChevronDown className="size-3.5 text-muted-foreground" /> : <ChevronRight className="size-3.5 text-muted-foreground" />}
-        </button>
-
-        {open && (
-          <div className="mt-2 space-y-0.5">
-            {mergedSteps.map((substep, si) => (
-              <SubStepItem key={substep.id} step={substep} isLast={si === mergedSteps.length - 1} />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ── Step Card ────────────────────────────────────────────
-
-function StepCard({
-  step,
-  isLast,
-  isRunning,
-  selected,
-  onSelect,
-}: {
-  step: FlowStep
-  isLast: boolean
-  isRunning: boolean
-  selected?: boolean
-  onSelect?: () => void
-}) {
-  const [expanded, setExpanded] = useState(step.type === 'tool_call' || step.type === 'tool_result' || step.type === 'thinking')
-
-  // Color scheme per type — refined for dark mode
-  const config = {
-    task: {
-      bg: 'bg-blue-500/5',
-      border: 'border-blue-500/20',
-      dot: 'bg-blue-500',
-      icon: <Sparkles className="size-4 text-blue-500" />,
-      label: '任务',
-      labelColor: 'text-blue-500',
-      line: 'border-blue-500/10',
-    },
-    plan: {
-      bg: 'bg-blue-500/5',
-      border: 'border-blue-500/20',
-      dot: 'bg-blue-500',
-      icon: <Sparkles className="size-4 text-blue-500" />,
-      label: '计划',
-      labelColor: 'text-blue-500',
-      line: 'border-blue-500/10',
-    },
-    thinking: {
-      bg: 'bg-foreground/5',
-      border: 'border-border/50',
-      dot: 'bg-foreground/30',
-      icon: <Brain className="size-4 text-foreground/40" />,
-      label: '思考',
-      labelColor: 'text-foreground/50',
-      line: 'border-border/50',
-    },
-    tool_call: {
-      bg: 'bg-emerald-500/5',
-      border: 'border-emerald-500/20',
-      dot: 'bg-emerald-500',
-      icon: getToolIcon(step.toolName || ''),
-      label: getToolLabel(step.toolName || ''),
-      labelColor: 'text-emerald-500',
-      line: 'border-emerald-500/10',
-    },
-    tool_result: {
-      bg: 'bg-emerald-500/5',
-      border: 'border-emerald-500/20',
-      dot: 'bg-emerald-400',
-      icon: <CheckCircle2 className="size-4 text-emerald-500" />,
-      label: `${getToolLabel(step.toolName || '')} 结果`,
-      labelColor: 'text-emerald-500',
-      line: 'border-emerald-500/10',
-    },
-    text: {
-      bg: 'bg-foreground/5',
-      border: 'border-border/50',
-      dot: 'bg-foreground/30',
-      icon: <CheckCircle2 className="size-4 text-foreground/40" />,
-      label: '回复',
-      labelColor: 'text-foreground/50',
-      line: 'border-border/50',
-    },
-    error: {
-      bg: 'bg-red-500/5',
-      border: 'border-red-500/20',
-      dot: 'bg-red-500',
-      icon: <AlertCircle className="size-4 text-red-500" />,
-      label: '错误',
-      labelColor: 'text-red-500',
-      line: 'border-red-500/10',
-    },
-    done: {
-      bg: 'bg-emerald-500/5',
-      border: 'border-emerald-500/20',
-      dot: 'bg-emerald-500',
-      icon: <CheckCircle2 className="size-4 text-emerald-500" />,
-      label: '完成',
-      labelColor: 'text-emerald-500',
-      line: 'border-emerald-500/10',
-    },
-    usage: {
-      bg: 'bg-amber-500/5',
-      border: 'border-amber-500/20',
-      dot: 'bg-amber-500',
-      icon: <Terminal className="size-4 text-amber-500" />,
-      label: '用量',
-      labelColor: 'text-amber-500',
-      line: 'border-amber-500/10',
-    },
-    compact: {
-      bg: 'bg-violet-500/5',
-      border: 'border-violet-500/20',
-      dot: 'bg-violet-500',
-      icon: <RotateCcw className="size-4 text-violet-500" />,
-      label: '压缩',
-      labelColor: 'text-violet-500',
-      line: 'border-violet-500/10',
-    },
-    reasoning: {
-      bg: 'bg-orange-500/5',
-      border: 'border-orange-500/20',
-      dot: 'bg-orange-500',
-      icon: <Brain className="size-4 text-orange-500" />,
-      label: '推理',
-      labelColor: 'text-orange-500',
-      line: 'border-orange-500/10',
-    },
-    file_change: {
-      bg: 'bg-teal-500/5',
-      border: 'border-teal-500/20',
-      dot: 'bg-teal-500',
-      icon: <Pencil className="size-4 text-teal-500" />,
-      label: '文件变化',
-      labelColor: 'text-teal-500',
-      line: 'border-teal-500/10',
-    },
-  }[step.type]
-
-  const hasContent = step.content && step.content.trim().length > 0
-  const showExpandToggle = step.type === 'tool_call' || step.type === 'tool_result' || step.type === 'plan' || (step.type === 'thinking' && hasContent)
-
-  return (
-    <div className={`relative flex gap-3 group step-enter`} onClick={() => onSelect?.()}>
-      {/* Timeline dot + line */}
-      <div className="flex flex-col items-center shrink-0 pt-2">
-        <div className={`w-8 h-8 rounded-full ${config.bg} ${config.border} border-2 flex items-center justify-center ${isLast && isRunning ? 'step-dot-running' : ''}`}>
-          <span className={isLast && isRunning && step.type === 'tool_call' ? 'tool-spinning' : ''}>
-            {config.icon}
-          </span>
-        </div>
-        {/* Connecting line */}
-        {!isLast && (
-          <div className={`w-0.5 flex-1 mt-1 mb-1 ${config.line} border-l-2 min-h-[16px]`} />
-        )}
-        {isLast && isRunning && (
-          <div className={`w-0.5 flex-1 mt-1 mb-1 min-h-[16px] line-active ${config.dot.replace('bg-', 'text-')}`} />
-        )}
-      </div>
-
-      {/* Card content */}
-      <div className={`flex-1 mb-2 rounded-xl ${config.bg} ${config.border} border overflow-hidden transition-all duration-150 shadow-sm ${selected ? 'ring-2 ring-primary/30' : 'hover:ring-1 hover:ring-foreground/10'}`}>
-        {/* Header */}
-        <div
-          className={`flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors ${showExpandToggle ? '' : 'cursor-default'}`}
-          onClick={(e) => { e.stopPropagation(); showExpandToggle && setExpanded(!expanded) }}
-        >
-          <div className={`w-1.5 h-1.5 rounded-full ${config.dot} shrink-0`} />
-          <span className={`text-[11px] font-semibold ${config.labelColor}`}>
-            {config.label}
-          </span>
-          {step.type === 'tool_call' && step.toolParams && Object.keys(step.toolParams).length > 0 && (
-            <span className="text-[10px] text-foreground/40 font-mono bg-muted px-1.5 py-0.5 rounded">
-              {Object.keys(step.toolParams).length} 参数
-            </span>
-          )}
-          <span className="text-[10px] text-foreground/40 ml-auto font-mono">
-            {formatTime(step.timestamp)}
-          </span>
-          {showExpandToggle && (
-            expanded
-              ? <ChevronDown className="size-3 text-foreground/40 shrink-0" />
-              : <ChevronRight className="size-3 text-foreground/40 shrink-0" />
-          )}
-        </div>
-
-        {/* Expanded content */}
-        {expanded && (
-          <div className="px-3 pb-2.5 pt-0">
-            {/* Task content */}
-            {step.type === 'task' && (
-              <p className="text-sm text-foreground/80 leading-relaxed">{step.taskLabel || step.content}</p>
-            )}
-
-            {/* Plan content */}
-            {step.type === 'plan' && (
-              <div className="space-y-2">
-                <p className="text-[11px] text-primary font-medium">模型规划</p>
-                <pre className="text-[11px] text-foreground/70 bg-card/50 rounded p-2 overflow-x-auto font-mono max-h-48 overflow-y-auto border border-border/50 whitespace-pre-wrap break-all">
-                  {step.planText || step.content}
-                </pre>
-              </div>
-            )}
-
-            {/* Thinking content */}
-            {step.type === 'thinking' && hasContent && (
-              <p className="text-xs text-foreground/50 leading-relaxed italic">{step.content}</p>
-            )}
-
-            {/* Tool call params */}
-            {step.type === 'tool_call' && step.toolParams && (
-              <div className="space-y-1.5">
-                {Object.entries(step.toolParams).map(([key, value]) => (
-                  <div key={key} className="flex flex-col">
-                    <span className="text-[10px] text-foreground/40 font-medium uppercase tracking-wide">{key}</span>
-                    <pre className="text-[11px] text-foreground/70 bg-card/50 rounded px-2 py-1.5 overflow-x-auto font-mono border border-border/50">
-                      {typeof value === 'string' ? value : JSON.stringify(value, null, 2)}
-                    </pre>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Tool result */}
-            {step.type === 'tool_result' && hasContent && (
-              <pre className="text-[11px] text-foreground/70 bg-card/50 rounded p-2 overflow-x-auto font-mono max-h-48 overflow-y-auto border border-border/50 whitespace-pre-wrap break-all">
-                {step.content}
-              </pre>
-            )}
-
-            {/* Text response */}
-            {(step.type === 'text' || step.type === 'done') && hasContent && (
-              <div>
-                <p className="text-sm text-foreground/85 leading-relaxed whitespace-pre-wrap">{step.content}</p>
-                {step.type === 'done' && step.finishReason && (
-                  <p className="text-[10px] text-muted-foreground mt-1 font-mono">finish_reason: {step.finishReason}</p>
-                )}
-              </div>
-            )}
-
-            {/* Reasoning */}
-            {step.type === 'reasoning' && hasContent && (
-              <div className="rounded-lg p-2 bg-orange-500/5 border border-orange-500/10">
-                <p className="text-[10px] text-orange-500 font-medium mb-1">推理过程</p>
-                <p className="text-xs text-foreground/60 leading-relaxed italic">{step.content}</p>
-              </div>
-            )}
-
-            {/* File changes */}
-            {step.type === 'file_change' && step.fileChanges && step.fileChanges.length > 0 && (
-              <div className="space-y-1.5">
-                {step.fileChanges.map((fc, i) => (
-                  <div key={i} className="flex items-center gap-2 text-xs">
-                    <span className={`text-[10px] px-1 py-0.5 rounded font-mono ${
-                      fc.type === 'add' ? 'bg-green-500/10 text-green-500' :
-                      fc.type === 'delete' ? 'bg-red-500/10 text-red-500' :
-                      'bg-yellow-500/10 text-yellow-500'
-                    }`}>
-                      {fc.type === 'add' ? 'ADD' : fc.type === 'delete' ? 'DEL' : 'MOD'}
-                    </span>
-                    <span className="font-mono text-foreground/70">{fc.path}</span>
-                  </div>
-                ))}
-                {step.content && (
-                  <p className="text-xs text-foreground/50 mt-1">{step.content}</p>
-                )}
-              </div>
-            )}
-
-            {/* Error */}
-            {step.type === 'error' && hasContent && (
-              <pre className="text-[11px] text-red-600 bg-red-50 rounded p-2 overflow-x-auto font-mono whitespace-pre-wrap break-all">
-                {step.content}
-              </pre>
-            )}
-          </div>
-        )}
-
-        {/* Non-expandable content (task, text, error when not expanded) */}
-        {!expanded && !showExpandToggle && hasContent && (
-          <div className="px-3 pb-2.5">
-            {step.type === 'task' && (
-              <p className="text-sm text-foreground/80 leading-relaxed">{step.taskLabel || step.content}</p>
-            )}
-            {step.type === 'plan' && (
-              <p className="text-xs text-purple-700/70 line-clamp-2">{step.planText || step.content}</p>
-            )}
-            {(step.type === 'text' || step.type === 'done') && (
-              <p className="text-sm text-foreground/80 leading-relaxed whitespace-pre-wrap">{step.content}</p>
-            )}
-            {step.type === 'error' && (
-              <pre className="text-[11px] text-red-500 bg-red-500/10 rounded p-2 overflow-x-auto font-mono whitespace-pre-wrap break-all">
-                {step.content}
-              </pre>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
+// Tool display utilities — extracted to lib/tool-display-utils.tsx
 
 
-// ── Tool Group Block (inline collapsible) ──────────────
-
-function ToolGroupBlock({ steps, isRunning }: { steps: FlowStep[]; isRunning?: boolean }) {
-  const [open, setOpen] = useState(false)
-  const readCount = steps.filter(s => {
-    const name = (s.toolName || '').toLowerCase()
-    return s.type === 'tool_call' && (name.includes('read') || name.includes('view') || name.includes('list') || name.includes('glob') || name.includes('grep'))
-  }).length
-  const editCount = steps.filter(s => {
-    const name = (s.toolName || '').toLowerCase()
-    return s.type === 'tool_call' && (name.includes('write') || name.includes('edit') || name.includes('create') || name.includes('apply'))
-  }).length
-  const otherCount = steps.filter(s => s.type === 'tool_call').length - readCount - editCount
-
-  // Check if this tool group has any pending tool calls (tool_call without matching tool_result)
-  const hasPendingCalls = useMemo(() => {
-    const toolCallIds = new Set(steps.filter(s => s.type === 'tool_call').map(s => s.toolName))
-    const completedTools = new Set(steps.filter(s => s.type === 'tool_result').map(s => s.toolName))
-    // If there are more tool_calls than tool_results, some are still pending
-    return steps.filter(s => s.type === 'tool_call').length > steps.filter(s => s.type === 'tool_result').length
-  }, [steps])
-
-  // Only show running state if global isRunning AND this group has pending calls
-  const showRunning = isRunning && hasPendingCalls
-
-  let label = '工具调用'
-  if (readCount > 0 && editCount === 0 && otherCount === 0) label = 'Read ' + readCount + ' file' + (readCount > 1 ? 's' : '')
-  else if (editCount > 0 && readCount === 0 && otherCount === 0) label = 'Edit ' + editCount + ' file' + (editCount > 1 ? 's' : '')
-  else {
-    const parts: string[] = []
-    if (readCount > 0) parts.push('Read ' + readCount)
-    if (editCount > 0) parts.push('Edit ' + editCount)
-    if (otherCount > 0) parts.push('Other ' + otherCount)
-    label = parts.join(', ')
-  }
-
-  const merged = useMemo(() => {
-    const result: FlowStep[] = []
-    for (let i = 0; i < steps.length; i++) {
-      const current = steps[i]
-      const next = steps[i + 1]
-      if (current.type === 'tool_call' && next?.type === 'tool_result' && current.toolName === next.toolName) {
-        result.push({ ...current, content: next.content, type: 'tool_call' })
-        i++
-      } else {
-        result.push(current)
-      }
-    }
-    return result
-  }, [steps])
-
-  return (
-    <div className="border border-border/40 rounded-xl bg-card/50 overflow-hidden my-3 shadow-sm">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between px-3.5 py-2 transition-colors hover:bg-accent/20"
-      >
-        <div className="flex items-center gap-2 text-sm font-medium text-foreground/80">
-          {showRunning ? (
-            <Loader2 className="size-3.5 text-foreground/40 animate-spin" />
-          ) : (
-            <CheckCircle2 className="size-3.5 text-emerald-500" />
-          )}
-          <span>{label}</span>
-          {showRunning && (
-            <span className="text-[10px] text-muted-foreground/50 font-normal">执行中...</span>
-          )}
-        </div>
-        <ChevronRight className={`size-4 text-muted-foreground transition-transform duration-200 ${open ? 'rotate-90' : ''}`} />
-      </button>
-      <div className={`overflow-hidden transition-all duration-300 ease-in-out ${open ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0'}`}>
-        <div className="px-3.5 pb-3 pt-0 space-y-1">
-          {merged.map(step => (
-            <div key={step.id} className="flex items-start gap-2 text-xs text-foreground/60">
-              <span className="text-muted-foreground/50 mt-0.5">{getToolIcon(step.toolName || '')}</span>
-              <div className="flex-1 min-w-0">
-                <span className="font-medium">{getToolLabel(step.toolName || '')}</span>
-                {extractToolPath(step) && (
-                  <span className="text-primary truncate ml-1.5">{extractToolPath(step)}</span>
-                )}
-                {step.content && (
-                  <p className="text-[10px] text-foreground/40 mt-0.5 line-clamp-2">{step.content}</p>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Sub Step Item (inside AccordionContent) ────────────
-
-const subStepConfig: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
-  thinking:     { icon: <Brain className="size-3" />, color: 'text-foreground/50', label: '思考' },
-  reasoning:    { icon: <Brain className="size-3" />, color: 'text-orange-500', label: '推理' },
-  tool_call:    { icon: <Wrench className="size-3" />, color: 'text-emerald-500', label: '工具调用' },
-  tool_result:  { icon: <FileCode className="size-3" />, color: 'text-emerald-500', label: '执行结果' },
-  text:         { icon: <CheckCircle2 className="size-3" />, color: 'text-foreground/50', label: '回复' },
-  error:        { icon: <AlertCircle className="size-3" />, color: 'text-red-500', label: '错误' },
-  done:         { icon: <CheckCircle2 className="size-3" />, color: 'text-emerald-500', label: '完成' },
-  compact:      { icon: <FolderOpen className="size-3" />, color: 'text-amber-500', label: '压缩' },
-  usage:        { icon: <BarChart3 className="size-3" />, color: 'text-foreground/40', label: '用量' },
-  file_change:  { icon: <FileCode className="size-3" />, color: 'text-teal-500', label: '文件变更' },
-}
-
-function SubStepItem({ step, isLast }: { step: FlowStep; isLast: boolean }) {
-  const [expanded, setExpanded] = useState(true)
-  let icon = subStepConfig[step.type]?.icon
-  let label = subStepConfig[step.type]?.label
-  let color = subStepConfig[step.type]?.color
-
-  if (step.type === 'tool_call') {
-    icon = getToolIcon(step.toolName || '')
-    label = getToolLabel(step.toolName || '')
-    color = 'text-emerald-600/70'
-  }
-  if (step.type === 'tool_result') {
-    icon = <CheckCircle2 className="size-3" />
-    label = `${getToolLabel(step.toolName || '')} 完成`
-    color = 'text-emerald-500/70'
-  }
-
-  const isCancelled = step.type === 'error' && step.content?.includes('取消')
-  const isError = step.type === 'error' && !isCancelled
-
-  return (
-    <div className="relative flex items-start gap-2.5 py-1.5 px-2 rounded-md hover:bg-accent/20 transition-colors group step-enter">
-      {/* Left border line */}
-      <div className={`flex shrink-0 flex-col items-center gap-0.5 ${isLast ? 'h-5' : 'self-stretch'}`}>
-        <span className={`${color}`}>{icon}</span>
-        {!isLast && <div className="w-px flex-1 bg-border/50 min-h-[12px]" />}
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 min-w-0 pt-px">
-        <button
-          type="button"
-          onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1 text-left w-full"
-        >
-          <span className={`text-[10px] font-medium ${color} truncate`}>{label}</span>
-          {expanded ? <ChevronDown className="size-3 text-muted-foreground" /> : <ChevronRight className="size-3 text-muted-foreground" />}
-          {step.toolName && step.type === 'tool_call' && (
-            <span className="text-[10px] text-muted-foreground">{getToolLabel(step.toolName)}</span>
-          )}
-          {step.toolName && step.type === 'tool_result' && (
-            <span className="text-[10px] text-muted-foreground">{getToolLabel(step.toolName)}</span>
-          )}
-          {isCancelled && (
-            <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full font-medium">已取消</span>
-          )}
-          {isError && (
-            <span className="text-[10px] text-red-500 bg-red-50 dark:bg-red-950/40 px-1.5 py-0.5 rounded-full font-medium">失败</span>
-          )}
-        </button>
-
-        {/* Content text */}
-        {expanded && step.content && !isCancelled && (
-          <p className="text-[11px] text-foreground/60 leading-relaxed mt-0.5 line-clamp-3 group-hover:line-clamp-none transition-all text-left">
-            {step.content}
-          </p>
-        )}
-        {expanded && isCancelled && (
-          <p className="text-[11px] text-muted-foreground italic mt-0.5 text-left">用户已取消</p>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ── Empty State ──────────────────────────────────────────
-
-function formatTokens(n: number): string {
-  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'K'
-  return n.toLocaleString()
-}
-
-function ContextUsageRing({ used, total = 128000 }: { used: number; total?: number }) {
-  const percentage = Math.min(Math.max((used / total) * 100, 0), 100)
-  const radius = 7
-  const circumference = 2 * Math.PI * radius
-  const strokeDashoffset = circumference - (percentage / 100) * circumference
-  const colorClass = percentage > 90 ? 'text-red-500' : percentage > 70 ? 'text-amber-500' : 'text-primary'
-
-  return (
-    <div className="relative size-5 flex items-center justify-center">
-      <svg className="size-4 -rotate-90" viewBox="0 0 20 20">
-        <circle cx="10" cy="10" r={radius} fill="none" stroke="currentColor" strokeOpacity="0.15" strokeWidth="2.5" />
-        <circle
-          cx="10"
-          cy="10"
-          r={radius}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={strokeDashoffset}
-          className={`${colorClass} transition-all duration-300`}
-        />
-      </svg>
-    </div>
-  )
-}
-
-interface ContextBreakdown {
-  label: string
-  tokens: number
-  color: string
-}
-
-function ContextUsagePanel({ used, total, breakdown, onClose }: { used: number; total: number; breakdown: ContextBreakdown[]; onClose: () => void }) {
-  const percentage = Math.min(Math.max((used / total) * 100, 0), 100)
-  const color = percentage > 90 ? 'bg-red-500' : percentage > 70 ? 'bg-amber-500' : 'bg-primary'
-
-  return (
-    <div className="absolute bottom-full right-0 mb-2 w-64 bg-card border border-border/60 rounded-xl shadow-lg p-3 z-50">
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-baseline gap-1">
-          <span className="text-sm font-semibold text-foreground">~{formatTokens(used)}</span>
-          <span className="text-[10px] text-muted-foreground">/ {formatTokens(total)}</span>
-          <span className={`text-[10px] font-medium ${percentage > 70 ? 'text-amber-500' : 'text-emerald-500'}`}>
-            {percentage.toFixed(1)}% 上下文已用
-          </span>
-        </div>
-        <button
-          onClick={onClose}
-          className="p-0.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
-        >
-          <X className="size-3" />
-        </button>
-      </div>
-      <div className="h-1 w-full bg-muted rounded-full overflow-hidden mb-2">
-        <div className={`h-full ${color} transition-all duration-300`} style={{ width: `${percentage}%` }} />
-      </div>
-      <div className="space-y-1.5">
-        {breakdown.map(item => (
-          <div key={item.label} className="flex items-center justify-between">
-            <div className="flex items-center gap-1">
-              <span className={`w-1.5 h-1.5 rounded-sm ${item.color}`} />
-              <span className="text-xs text-foreground">{item.label}</span>
-            </div>
-            <span className="text-xs text-muted-foreground">~{formatTokens(item.tokens)}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function ContextUsageIndicator() {
-  const [open, setOpen] = useState(false)
-  const chatMessages = useHelixStore(s => s.chatMessages)
-  const customInstructions = useHelixStore(s => s.customInstructions)
-  const mcpServers = useHelixStore(s => s.mcpServers)
-  const skills = useHelixStore(s => s.skills)
-  const panelRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Estimate tokens per category (chars / 3.5 as rough approximation)
-  const estimate = (text: string) => Math.max(0, Math.round(text.length / 3.5))
-
-  // System prompt (hardcoded estimate ~8K tokens for typical agent profile)
-  const systemTokens = 8000 + estimate(customInstructions)
-
-  // Tools & sub-agents estimate (~400 tokens per tool)
-  const toolsTokens = 30 * 400
-
-  // Conversation messages
-  const messagesText = chatMessages.map(m => m.content || '').join('\n')
-  const messagesTokens = estimate(messagesText)
-
-  // MCP
-  const mcpCount = Object.values(mcpServers).filter(s => s.enabled !== false).length
-  const mcpTokens = mcpCount * 30
-
-  // Skills
-  const skillsText = skills.map(s => `${s.name}: ${s.description || ''}`).join('\n')
-  const skillsTokens = estimate(skillsText)
-
-  const total = 128000
-  const used = systemTokens + toolsTokens + messagesTokens + mcpTokens + skillsTokens
-
-  const breakdown: ContextBreakdown[] = [
-    { label: '系统提示词', tokens: systemTokens, color: 'bg-gray-500' },
-    { label: '工具及子智能体', tokens: toolsTokens, color: 'bg-purple-500' },
-    { label: '对话消息', tokens: messagesTokens, color: 'bg-orange-500' },
-    { label: '连接器及MCP', tokens: mcpTokens, color: 'bg-pink-500' },
-    { label: '技能', tokens: skillsTokens, color: 'bg-sky-500' },
-  ]
-
-  if (used === 0) return null
-
-  return (
-    <div className="relative" ref={panelRef}>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="size-9 rounded-lg flex items-center justify-center text-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors"
-        title="上下文使用情况"
-      >
-        <ContextUsageRing used={used} total={total} />
-      </button>
-      {open && <ContextUsagePanel used={used} total={total} breakdown={breakdown} onClose={() => setOpen(false)} />}
-    </div>
-  )
-}
+// ==== Empty State ====================================================================================
 
 function EmptyState() {
+  return null
+}
+
+// ==== Reasoning Effort Select ==================================================================
+
+type ReasoningEffort = 'ultra_low' | 'low' | 'medium' | 'high' | 'ultra_high' | 'max'
+
+const REASONING_OPTIONS: { value: ReasoningEffort; label: string }[] = [
+  { value: 'ultra_low', label: '极低' },
+  { value: 'low', label: '轻度' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'ultra_high', label: '极高' },
+  { value: 'max', label: '最高' },
+]
+
+function ReasoningEffortControl({ value, onChange }: { value: ReasoningEffort; onChange: (v: ReasoningEffort) => void }) {
+  const idx = REASONING_OPTIONS.findIndex(o => o.value === value)
+  const safeIdx = idx < 0 ? 2 : idx
+  const current = REASONING_OPTIONS[safeIdx]
+
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({})
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (triggerRef.current?.contains(t)) return
+      if (panelRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  const toggle = () => {
+    if (!open && triggerRef.current) {
+      const r = triggerRef.current.getBoundingClientRect()
+      const panelWidth = 192 // w-48
+      let left = r.left + r.width / 2 - panelWidth / 2
+      left = Math.max(8, Math.min(left, window.innerWidth - panelWidth - 8))
+      setPanelStyle({
+        position: 'fixed',
+        left,
+        bottom: window.innerHeight - r.top + 8,
+        zIndex: 50,
+      })
+    }
+    setOpen(v => !v)
+  }
+
+  const trackRef = useRef<HTMLDivElement>(null)
+  const [isDragging, setIsDragging] = useState(false)
+
+  const handlePos = useCallback((clientX: number) => {
+    if (!trackRef.current) return
+    const r = trackRef.current.getBoundingClientRect()
+    const x = Math.min(Math.max(clientX - r.left, 0), r.width)
+    const ratio = x / r.width
+    const max = REASONING_OPTIONS.length - 1
+    const nextIdx = Math.max(0, Math.min(max, Math.round(ratio * max)))
+    const nextValue = REASONING_OPTIONS[nextIdx].value
+    if (nextValue !== value) onChange(nextValue)
+  }, [value, onChange])
+
+  const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setIsDragging(true)
+    e.currentTarget.setPointerCapture(e.pointerId)
+    handlePos(e.clientX)
+  }, [handlePos])
+
+  const onPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDragging) return
+    handlePos(e.clientX)
+  }, [isDragging, handlePos])
+
+  const onPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    setIsDragging(false)
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {}
+  }, [])
+
   return (
-    <div className="flex flex-col items-center justify-center w-full px-4 py-16">
-      <img src="/kirin.png" alt="Helix" className="w-20 h-20 mb-4 opacity-80 mt-[15px]" />
-      <h2 className="text-lg font-semibold text-foreground/70 text-center mb-1 -mt-[5px]">有什么可以帮你？</h2>
-    </div>
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={toggle}
+        className="text-xs font-medium text-foreground/70 hover:text-foreground px-2.5 py-1.5 rounded-lg border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors min-w-12 text-center"
+      >
+        {current.label}
+      </button>
+      {open && createPortal(
+        <div
+          ref={panelRef}
+          style={panelStyle}
+          className="p-3 bg-card border border-border/80 rounded-xl shadow-2xl flex flex-col gap-1.5 w-48 select-none"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-foreground/60">推理强度</span>
+            <span className="text-xs font-medium text-primary">{current.label}</span>
+          </div>
+          <div className="flex items-center justify-between text-[10px] text-foreground/40 leading-none">
+            <span>更快</span>
+            <span>更聪明</span>
+          </div>
+          <div
+            ref={trackRef}
+            className="relative h-2.5 rounded-full bg-muted/60 cursor-pointer touch-none"
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerLeave={onPointerUp}
+          >
+            {REASONING_OPTIONS.map((o, i) => {
+              const active = i === safeIdx
+              return (
+                <div
+                  key={o.value}
+                  className={`absolute top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full transition-all duration-200 ${active ? 'size-2.5 bg-primary' : 'size-1.5 bg-foreground/20'}`}
+                  style={{ left: `${(i / (REASONING_OPTIONS.length - 1)) * 100}%` }}
+                />
+              )
+            })}
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
   )
 }
 
-// ── Main Component ──────────────────────────────────────
+// ==== Main Component ============================================================================
 
 export function AgentFlowPanel() {
-  const [steps, setSteps] = useState<FlowStep[]>([])
+  const [steps, setSteps] = useState<ExecutionStep[]>([])
+  useEffect(() => { stepsRef.current = steps }, [steps])
   const [input, setInput] = useState('')
-  const [isRunning, setIsRunning] = useState(false)
-  const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null)
-  const [pendingApprovalCount, setPendingApprovalCount] = useState(0)
+  // Per-session streaming drafts let the running thinking/steps survive
+  // conversation switches. `isRunning` is derived from the current session's draft.
+  const streamingDrafts = useHelixStore(s => s.streamingDrafts)
+  const setStreamingDraft = useHelixStore(s => s.setStreamingDraft)
+  const clearStreamingDraft = useHelixStore(s => s.clearStreamingDraft)
+  const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([])
+  const approvalRequest = approvalQueue[0] || null
+  const pendingApprovalCount = approvalQueue.length
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null)
 
   const [showModelDropdown, setShowModelDropdown] = useState(false)
-  const [showSkillDropdown, setShowSkillDropdown] = useState(false)
   const [showFolderDropdown, setShowFolderDropdown] = useState(false)
+  const [showApprovalModeDropdown, setShowApprovalModeDropdown] = useState(false)
+  const [approvalMode, setApprovalMode] = useState<'default' | 'accept_edits' | 'dont_ask'>('accept_edits')
   const [showNewProjectForm, setShowNewProjectForm] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [fileSkills, setFileSkills] = useState<Array<{ name: string; description: string }>>([])
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const inputValueRef = useRef(input)
+  const setInputSynced = useCallback((value: string) => {
+    setInput(value)
+    inputValueRef.current = value
+  }, [])
+
+  // Reset input height to default
+  const resetInputHeight = useCallback(() => {
+    if (inputRef.current) {
+      inputRef.current.style.height = '48px'
+    }
+  }, [])
+
   const abortRef = useRef<AbortController | null>(null)
+  const doneProcessedRef = useRef(false)
+  const synthDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savedSessionRef = useRef(false)
   const textBufferRef = useRef<string>('')
+  const thoughtTokensRef = useRef<number>(0)
+  const usageReceivedRef = useRef(false)
+  const thoughtBufferRef = useRef<string>('')
+  const thinkingStartTimeRef = useRef<number>(0)
+  const thinkingDurationRef = useRef<number>(0)
+  const promptSentAtRef = useRef<number>(0)
+  const runStartedAtRef = useRef<number>(0)
+  const firstContentAtRef = useRef<number>(0)
+  const stepsRef = useRef<ExecutionStep[]>([])
+  const hermesSessionIdRef = useRef<string | null>(null)
+  // The gateway epoch (bumped on every restart) at the moment our current
+  // hermesSessionIdRef was created. If the live epoch is higher, the gateway
+  // restarted since → the cached session is dead and must be recreated even
+  // though hermesConnected may already be true again.
+  const sessionEpochRef = useRef<number>(0)
+  const runningSessionIdRef = useRef<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const skillUploadRef = useRef<HTMLInputElement>(null)
   const uploadFileInputRef = useRef<HTMLInputElement>(null)
   const modelDropdownRef = useRef<HTMLDivElement>(null)
-  const skillDropdownRef = useRef<HTMLDivElement>(null)
   const folderDropdownRef = useRef<HTMLDivElement>(null)
+  const approvalModeDropdownRef = useRef<HTMLDivElement>(null)
 
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([])
+  const [pendingFiles, setPendingFiles] = useState<FileAttachment[]>([])
+  const [isDraggingFile, setIsDraggingFile] = useState(false)
 
   const [responseBlocks, setResponseBlocks] = useState<ResponseBlock[]>([])
+  const responseBlocksRef = useRef<ResponseBlock[]>(responseBlocks)
+  responseBlocksRef.current = responseBlocks
+  const [streamThinking, setStreamThinking] = useState<string>('')
+  const [streamThinkingDuration, setStreamThinkingDuration] = useState<number>(0)
+  // Anchors the live timer to the moment the USER sends a question, so it keeps
+  // ticking across any sub-runs (agent tool loops) instead of resetting per run.
+  const [questionStartTs, setQuestionStartTs] = useState<number>(0)
+  const [streamThoughtTokens, setStreamThoughtTokens] = useState<number>(0)
 
-  const { apiConfig, availableModels, skills, showToast, toggleSettings, toggleSkillPanel, addExecutionStep, addAccessedDirectory, agentExecutionSteps, chatMessages, currentSessionId, clearExecutionFlow, clearSelectedFiles, notifySessionSaved, setApiConfig, transcriptFontSize, selectedWorkDir, setSelectedWorkDir } = useHelixStore()
+  const rafPendingRef = useRef(false)
+  const pendingTextRef = useRef<string | null>(null)
+  const pendingThinkingRef = useRef<string | null>(null)
+  const flushStreamRender = useCallback(() => {
+    rafPendingRef.current = false
+    if (pendingTextRef.current !== null) {
+      const t = pendingTextRef.current
+      pendingTextRef.current = null
+      setResponseBlocks(prev => {
+        const last = prev[prev.length - 1]
+        if (last?.type === 'text') return [...prev.slice(0, -1), { type: 'text', content: t }]
+        return [...prev, { type: 'text', content: t }]
+      })
+    }
+    if (pendingThinkingRef.current !== null) {
+      const th = pendingThinkingRef.current
+      pendingThinkingRef.current = null
+      setStreamThinking(th)
+    }
+  }, [setResponseBlocks, setStreamThinking])
+  const scheduleStreamRender = useCallback(() => {
+    if (rafPendingRef.current) return
+    rafPendingRef.current = true
+    requestAnimationFrame(flushStreamRender)
+  }, [flushStreamRender])
+
+  const apiConfig = useHelixStore(s => s.apiConfig)
+  const skills = useHelixStore(s => s.skills)
+  const availableCommands = useHelixStore(s => s.availableCommands)
+  const agentExecutionSteps = useHelixStore(s => s.agentExecutionSteps)
+  const chatMessages = useHelixStore(s => s.chatMessages)
+  const currentSessionId = useHelixStore(s => s.currentSessionId)
+  const sessionMessages = useMemo(() => {
+    if (!currentSessionId) return chatMessages
+    return chatMessages.filter(m => !m.sessionId || m.sessionId === currentSessionId)
+  }, [chatMessages, currentSessionId])
+  const isRunning = useMemo(() => {
+    // Check if ANY session is running, not just the current one
+    if (runningSessionIdRef.current) {
+      return !!streamingDrafts[runningSessionIdRef.current]?.isAgentRunning
+    }
+    return !!streamingDrafts[currentSessionId || '']?.isAgentRunning
+  }, [streamingDrafts, currentSessionId])
+  const isChatLoading = useHermesStore(s => s.isChatLoading)
+  const isBusy = isRunning || isChatLoading
+  const isRunningSession = currentSessionId === runningSessionIdRef.current
+  const displaySteps = useMemo(() => {
+    // Prefer live state whenever a run is active and we have content — the
+    // consumer always writes live state, so this is the most reliable source.
+    if (isRunningSession) return steps
+    if (isRunning && runningSessionIdRef.current) return streamingDrafts[runningSessionIdRef.current]?.steps || (steps.length ? steps : [])
+    if (steps.length > 0) return steps
+    return streamingDrafts[currentSessionId || '']?.steps || []
+  }, [isRunningSession, isRunning, steps, streamingDrafts, currentSessionId])
+  const displayResponseBlocks = useMemo(() => {
+    // CRITICAL: the streaming consumer writes the live `responseBlocks` state
+    // (thinking via setResponseBlocks directly, text via the RAF flush). If we
+    // gate display purely on isRunningSession / streamingDrafts divergence, a
+    // run whose currentSessionId != runningSessionIdRef (or whose draft wasn't
+    // synced in time) renders an EMPTY block even though chunks were received,
+    // parsed and enqueued — the classic "console has text, UI is blank".
+    // So: whenever a run is active and live state has content, show it directly.
+    const liveHasContent = responseBlocks.length > 0
+    if (liveHasContent && (isRunningSession || isRunning)) return responseBlocks
+    if (isRunningSession) return responseBlocks
+    if (isRunning && runningSessionIdRef.current) return streamingDrafts[runningSessionIdRef.current]?.responseBlocks || (liveHasContent ? responseBlocks : [])
+    return streamingDrafts[currentSessionId || '']?.responseBlocks || (liveHasContent ? responseBlocks : [])
+  }, [isRunningSession, isRunning, responseBlocks, streamingDrafts, currentSessionId])
+  const displayStreamThinking = useMemo(() => {
+    if (streamThinking) return streamThinking
+    if (isRunningSession) return streamThinking
+    if (isRunning && runningSessionIdRef.current) return streamingDrafts[runningSessionIdRef.current]?.streamThinking || (streamThinking || '')
+    return streamingDrafts[currentSessionId || '']?.streamThinking || (streamThinking || '')
+  }, [isRunningSession, isRunning, streamThinking, streamingDrafts, currentSessionId])
+  const isThinkingEnded = useMemo(() => {
+    const blocks = displayResponseBlocks
+    let lastThinkingIdx = -1
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      if (blocks[i].type === 'thinking') { lastThinkingIdx = i; break }
+    }
+    if (lastThinkingIdx < 0) return true
+    for (let i = lastThinkingIdx + 1; i < blocks.length; i++) {
+      if (blocks[i].type === 'text') return true
+    }
+    return false
+  }, [displayResponseBlocks])
+
+  const transcriptFontSize = useHelixStore(s => s.transcriptFontSize)
+  const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
+  const availableModels = useHelixStore(s => s.availableModels)
+  const temperature = useHelixStore(s => s.temperature)
+  const reasoningEffort = useHelixStore(s => s.reasoningEffort)
+  const personality = useHelixStore(s => s.personality)
+  const apiProfiles = useHelixStore(s => s.apiProfiles)
+  const activeProfileId = useHelixStore(s => s.activeProfileId)
+  const providers = useHelixStore(s => s.providers)
+  const [currentBranch, setCurrentBranch] = useState('main')
+  // Stable action references — these never change so getState() is safe
+  const connectionNotice = useHelixStore(s => s.connectionNotice)
+  const storeActions = useMemo(() => useHelixStore.getState(), [])
+  // Clear stale connection notices on mount
+  useEffect(() => {
+    const notice = useHelixStore.getState().connectionNotice
+    if (notice && notice.ts && Date.now() - notice.ts > 60000) {
+      useHelixStore.getState().setConnectionNotice(null)
+    }
+  }, [])
+  // Drop the cached Hermes ACP session when the project directory changes so the
+  // next prompt opens a fresh session rooted at the new cwd.
+  useEffect(() => {
+    hermesSessionIdRef.current = null
+  }, [selectedWorkDir])
+
+
+  // Clear Hermes session when switching conversations to prevent cross-session pollution
+  useEffect(() => {
+    hermesSessionIdRef.current = null
+    sessionEpochRef.current = -1
+  }, [currentSessionId])
+
+  // When the gateway restarts (e.g. provider switch), ALL Hermes ACP sessions
+  // are destroyed server-side. Clear our cached session id DIRECTLY on the
+  // event (not via a store-effect indirection) so the very next handleRun
+  // unconditionally recreates a fresh session. The store-effect approach was
+  // unreliable: handleRun only wrote hermesSessionIdRef (never the store), so
+  // the store stayed null and the [hermesSessionId] effect never re-fired on a
+  // second restart — leaving a stale id in the ref and causing prompts to hit a
+  // dead session with no output.
+  useEffect(() => {
+    const unsub = window.electron?.hermes?.onEvent?.((event: string) => {
+      if (event === 'gateway.sessionInvalidated') {
+        hermesSessionIdRef.current = null
+        // Force the next run to re-verify the gateway is fully up (it may still
+        // be recycling) rather than trusting hermesConnected which is already
+        // true after a prior restart.
+        sessionEpochRef.current = -1
+      }
+    })
+    return () => { try { unsub?.() } catch {} }
+  }, [])
+  // Resolve current git branch for the empty-state breadcrumb.
+  useEffect(() => {
+    if (!selectedWorkDir || !isElectron()) return
+    let cancelled = false
+    electronGit.branchList().then((res: { ok: boolean; branches?: string[]; error?: string }) => {
+      if (cancelled) return
+      const branches = res.ok && res.branches ? res.branches : []
+      const main = branches.find(b => b === 'main' || b === 'master') || branches[0] || 'main'
+      setCurrentBranch(main)
+    }).catch(() => {
+      if (!cancelled) setCurrentBranch('main')
+    })
+    return () => { cancelled = true }
+  }, [selectedWorkDir])
+
   const hasApiKey = !!apiConfig.apiKey
 
-  // Get available models - combine current model, fetched models, and provider presets
-  const getAvailableModels = useCallback(() => {
-    const provider = apiConfig.provider
-    const current = apiConfig.model
-    const presets = getModels(provider) || []
-    const merged = [current, ...availableModels, ...presets].filter((m): m is string => !!m && m.length > 0)
-    const unique = merged.filter((m, i) => merged.indexOf(m) === i)
-    if (unique.length === 0) {
-      return ['gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4', 'deepseek-chat']
+  // Live running-time timer — anchored to the user's question, NOT to each run.
+  // It ticks across the whole question (including agent tool-loop sub-runs) and
+  // only resets when a brand-new question is sent (questionStartTs changes).
+  useEffect(() => {
+    if (!isRunning || !questionStartTs) { return }
+    const tick = () => {
+      setStreamThinkingDuration(Math.round((Date.now() - questionStartTs) / 1000))
     }
-    return unique
-  }, [apiConfig.provider, apiConfig.model, availableModels])
+    tick()
+    const id = setInterval(tick, 200)
+    return () => clearInterval(id)
+  }, [isRunning, questionStartTs])
+
+  // Flat model list from ALL providers — the user picks any model by name,
+  // and handleModelSelect reverse-looks up the owning provider's credentials.
+  // Unified source of truth: `providers` first, legacy `apiProfiles` as fallback,
+  // then the current apiConfig.model and any backend-available models.
+  const modelList = useMemo(() => {
+    const fromProviders = providers.flatMap(p => p.models || [])
+    const fromProfiles = apiProfiles.flatMap(p => p.models || (p.config.model ? [p.config.model] : []))
+    const all = [...fromProviders, ...fromProfiles, apiConfig.model, ...availableModels]
+    return all.filter((m, i, a) => m && a.indexOf(m) === i)
+  }, [apiConfig.model, availableModels, providers, apiProfiles])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -1071,78 +558,246 @@ export function AgentFlowPanel() {
       if (modelDropdownRef.current && !modelDropdownRef.current.contains(event.target as Node)) {
         setShowModelDropdown(false)
       }
-      if (skillDropdownRef.current && !skillDropdownRef.current.contains(event.target as Node)) {
-        setShowSkillDropdown(false)
-      }
       if (folderDropdownRef.current && !folderDropdownRef.current.contains(event.target as Node)) {
         setShowFolderDropdown(false)
       }
+      if (approvalModeDropdownRef.current && !approvalModeDropdownRef.current.contains(event.target as Node)) {
+        setShowApprovalModeDropdown(false)
+      }
     }
-    if (showModelDropdown || showSkillDropdown || showFolderDropdown) {
+    if (showModelDropdown || showFolderDropdown || showApprovalModeDropdown) {
       document.addEventListener('mousedown', handleClickOutside)
       return () => document.removeEventListener('mousedown', handleClickOutside)
     }
-  }, [showModelDropdown, showSkillDropdown, showFolderDropdown])
+  }, [showModelDropdown, showFolderDropdown, showApprovalModeDropdown])
 
-  // Handle model selection
-  const handleModelSelect = useCallback((model: string) => {
-    setApiConfig({ model })
-    useHelixStore.getState().persistToStorage()
+  // Handle model selection — resolve which provider owns this model from the
+  // unified `providers` list (falling back to legacy `apiProfiles`), then fully
+  // switch credentials + model name. Always cancels in-flight requests and
+  // invalidates the live session so the next prompt rebuilds from config.yaml
+  // with the new (complete) configuration — never a stale key.
+  //
+  // State machine:
+  //   1) owner = provider whose models[] contains `model` (providers → apiProfiles)
+  //      → found:   setActiveModel(model)  ⇒ full {provider,baseUrl,apiKey,model} mirror
+  //      → missing: attach `model` to the CURRENT active provider's models, then
+  //                 setActiveModel(model) so the reverse-lookup succeeds next time
+  //                 (uses the current provider's credentials, which is correct for
+  //                 an unlisted model of the same provider)
+  //   2) session/cancel  → interrupt any in-flight request
+  //   3) setHermesSessionId(null) → force a fresh session on the next send
+  //   4) push the resolved config to the backend (setConfig → config.yaml)
+  const handleModelSelect = useCallback(async (model: string) => {
+    const store = useHelixStore.getState()
+
+    // 1) Resolve the owning provider (unified data source).
+    const ownerProvider = store.providers.find((p) => p.models.includes(model))
+    const ownerProfile = !ownerProvider ? store.findProfileByModel(model) : undefined
+
+    if (ownerProvider) {
+      // Found in the unified `providers` config — full credential switch.
+      store.setActiveModel(model)
+    } else if (ownerProfile) {
+      // Found only in the legacy `apiProfiles` structure — full credential switch.
+      const newConfig = { ...ownerProfile.config, model }
+      storeActions.setApiConfig(newConfig)
+      store.setActiveProfile(ownerProfile.id)
+      store.persistToStorage()
+    } else {
+      // No provider lists this model. Assume it belongs to the current active
+      // provider: keep its credentials, and remember the model under that
+      // provider so future switches reverse-lookup correctly.
+      const activeName = store.activeModel
+      const activeProvider =
+        (activeName && store.providers.find((p) => p.models.includes(activeName))) ||
+        store.providers[0]
+      if (!activeProvider) {
+        // No providers configured at all — legacy single-config fallback.
+        storeActions.setApiConfig({ model })
+      } else {
+        store.upsertProvider({
+          ...activeProvider,
+          id: activeProvider.id,
+          models: [...new Set([...activeProvider.models, model])],
+        })
+        store.setActiveModel(model)
+      }
+    }
+
+    // 2) Cancel any in-flight session FIRST (while the id is still valid).
+    const currentSid = hermesSessionIdRef.current
+    if (isElectron() && currentSid) {
+      try { window.electron?.hermes?.notify?.('session/cancel', { session_id: currentSid }) } catch {}
+    }
+    // 3) Invalidate the session so the next prompt rebuilds it from config.yaml.
+    useHermesStore.getState().setHermesSessionId(null)
+    hermesSessionIdRef.current = null
     setShowModelDropdown(false)
-  }, [setApiConfig])
+
+    // 4) Push the freshly-resolved config to the backend (full baseUrl+apiKey+model).
+    if (isElectron()) {
+      // Use the key that actually belongs to the resolved provider. We must
+      // NOT fall back to the in-memory apiConfig.apiKey here: after a reload the
+      // store key can be empty/stale (broken safeStorage persist), and pushing
+      // it would send the PREVIOUS provider's key — the classic swap-401.
+      // When the resolved key is genuinely empty, we push '' and let the backend
+      // (main.js) fall back to the target provider's own key already stored in
+      // config.yaml's custom_providers block (which is correct on disk).
+      const resolvedKey = ownerProvider?.apiKey || ownerProfile?.config?.apiKey || ''
+      const cfg = useHelixStore.getState().apiConfig
+      const _src = ownerProvider ? 'providers' : ownerProfile ? 'apiProfiles' : 'fallback(activeProvider)'
+      console.warn(`[handleModelSelect] resolved model="${model}" via ${_src} → provider=${cfg.provider} baseUrl=${cfg.baseUrl} apiKey=${resolvedKey ? resolvedKey.substring(0, 6) + '…' : '(EMPTY → backend falls back to target provider stored key)'}`)
+      const push = {
+        model: cfg.model,
+        provider: cfg.provider && cfg.provider !== '__custom__' ? cfg.provider : 'custom',
+        baseUrl: cfg.baseUrl,
+        apiKey: resolvedKey,
+      }
+      const hermes = window.electron?.hermes
+      const profile = window.electron?.profile
+      try {
+        if (profile?.cacheConfig) await profile.cacheConfig(push).catch(() => {})
+        if (hermes?.setConfig) await hermes.setConfig(push).catch(() => {})
+      } catch {}
+    }
+  }, [storeActions.setApiConfig])
 
   // Handle skill selection
   const handleSkillSelect = useCallback((skill: { name: string; description?: string }) => {
-    setInput(`/${skill.name} `)
+    setInputSynced(`/${skill.name} `)
     inputRef.current?.focus()
-  }, [])
+  }, [setInputSynced])
 
-  // Fetch file-based skills on mount
+  // Fetch file-based skills on mount (via Hermes skills bridge — no backend)
   useEffect(() => {
-    if (fileSkills.length === 0) {
-      fetch('/api/skills')
-        .then(r => r.json())
-        .then(data => { if (data.skills) setFileSkills(data.skills) })
-        .catch(() => {})
-    }
+    if (fileSkills.length > 0) return
+    if (typeof window === 'undefined' || !window.electron?.hermesSkills) return
+    window.electron.hermesSkills.listSkills()
+      .then((list: any) => {
+        if (Array.isArray(list)) {
+          setFileSkills(list.map((s: any) => ({ name: s.name, description: s.description || '' })))
+        }
+      })
+      .catch(() => {})
   }, [fileSkills.length])
 
-  // Reset execution-related local states when switching sessions
+  // Sync the running session's local streaming state to its per-session draft
+  // so it survives conversation switches.
   useEffect(() => {
-    setIsRunning(false)
-    setResponseBlocks([])
-    setSteps([])
-    if (abortRef.current) {
-      abortRef.current.abort()
-      abortRef.current = null
-    }
-  }, [currentSessionId])
+    const sid = runningSessionIdRef.current
+    if (!sid) return
+    setStreamingDraft(sid, {
+      responseBlocks,
+      steps,
+      streamThinking,
+      textBuffer: textBufferRef.current,
+      thoughtBuffer: thoughtBufferRef.current,
+    })
+  }, [steps, responseBlocks, streamThinking, setStreamingDraft])
 
   // Reset when chat is cleared
   useEffect(() => {
     if (chatMessages.length === 0) {
       setResponseBlocks([])
       setSteps([])
-      setInput('')
+      setInputSynced('')
+      setApprovalQueue([])
     }
-  }, [chatMessages.length])
+  }, [chatMessages.length, setInputSynced])
 
-  // Filter skills based on input
-  const allSkills = [
-    ...skills.map(s => ({ name: s.name, description: s.description, id: s.id, icon: s.icon })),
-    ...fileSkills.map(s => ({ name: s.name, description: s.description, id: s.name, icon: undefined })),
-  ]
+  // Filter skills based on input (exclude unwanted system/prompt skills)
+  const SKILL_DENYLIST = useMemo(() => new Set(['项目里面有什么']), [])
+  const allSkills = useMemo(() => [
+    ...skills.map(s => ({ name: s.name, description: s.description, id: s.id, icon: s.icon })).filter(s => !SKILL_DENYLIST.has(s.name)),
+    ...fileSkills.map(s => ({ name: s.name, description: s.description, id: s.name, icon: undefined })).filter(s => !SKILL_DENYLIST.has(s.name)),
+  ], [skills, fileSkills, SKILL_DENYLIST])
+
+  // Built-in slash commands handled on the client side (not sent to Hermes as
+  // regular prompts).  These show up in the "/" autocomplete picker alongside
+  // skills, Hermes commands, and shell commands.
+  const BUILTIN_COMMANDS = useMemo(() => [
+    { name: 'compact', description: '压缩上下文，重置对话窗口', action: 'compact' as const },
+    { name: 'clear', description: '清空当前对话', action: 'clear' as const },
+    { name: 'reset', description: '重置会话（清空对话+上下文）', action: 'reset' as const },
+    { name: 'mcp', description: '管理 MCP 服务器', action: 'mcp' as const },
+    { name: 'model', description: '切换到模型选择设置', action: 'model' as const },
+    { name: 'skill', description: '打开技能管理面板', action: 'skill' as const },
+  ], [])
+
+  // Common CLI commands surfaced in the "/" picker (filled into the input,
+  // executed as a normal shell command through Hermes).
+  const CLI_COMMANDS: { name: string; description: string; command: string }[] = useMemo(() => [
+    { name: 'ls', description: '列出当前目录文件', command: 'ls' },
+    { name: 'cd', description: '切换工作目录', command: 'cd' },
+    { name: 'pwd', description: '显示当前目录路径', command: 'pwd' },
+    { name: 'mkdir', description: '新建目录', command: 'mkdir' },
+    { name: 'rm', description: '删除文件或目录', command: 'rm' },
+    { name: 'cp', description: '复制文件或目录', command: 'cp' },
+    { name: 'mv', description: '移动/重命名文件', command: 'mv' },
+    { name: 'cat', description: '查看文件内容', command: 'cat' },
+    { name: 'grep', description: '在文件中搜索文本', command: 'grep' },
+    { name: 'find', description: '查找文件', command: 'find' },
+    { name: 'echo', description: '输出文本', command: 'echo' },
+    { name: 'touch', description: '新建空文件', command: 'touch' },
+    { name: 'head', description: '查看文件开头', command: 'head' },
+    { name: 'tail', description: '查看文件末尾/实时日志', command: 'tail' },
+    { name: 'wc', description: '统计行数/词数', command: 'wc' },
+    { name: 'git status', description: '查看 Git 工作区状态', command: 'git status' },
+    { name: 'git add', description: '暂存改动', command: 'git add' },
+    { name: 'git commit', description: '提交改动', command: 'git commit' },
+    { name: 'git push', description: '推送到远程仓库', command: 'git push' },
+    { name: 'git pull', description: '拉取远程更新', command: 'git pull' },
+    { name: 'python', description: '运行 Python 脚本', command: 'python' },
+    { name: 'pip install', description: '安装 Python 包', command: 'pip install' },
+    { name: 'node', description: '运行 Node 脚本', command: 'node' },
+    { name: 'npm install', description: '安装 npm 依赖', command: 'npm install' },
+    { name: 'code', description: '用 VS Code 打开', command: 'code' },
+  ], [])
+
+  // Merge local skills with Hermes slash commands
+  const allSlashItems = useMemo(() => {
+    const builtinCmds = BUILTIN_COMMANDS.map(c => ({
+      name: c.name,
+      description: c.description,
+      id: 'builtin:' + c.name,
+      icon: undefined as string | undefined,
+      isBuiltinCommand: true,
+      action: c.action,
+    }))
+    const hermesCmds = (availableCommands || []).map(cmd => ({
+      name: cmd.name,
+      description: cmd.description || '',
+      id: '/' + cmd.name,
+      icon: undefined as string | undefined,
+      isHermesCommand: true,
+    }))
+    const cliCmds = CLI_COMMANDS.map(c => ({
+      name: c.name,
+      description: c.description,
+      id: 'cli:' + c.command,
+      icon: undefined as string | undefined,
+      isCliCommand: true,
+      command: c.command,
+    }))
+    return [...builtinCmds, ...allSkills, ...hermesCmds, ...cliCmds]
+  }, [allSkills, availableCommands, BUILTIN_COMMANDS, CLI_COMMANDS])
+
+  const filteredSkills = useMemo(() => {
+    if (input.startsWith('/')) {
+      const query = input.slice(1).toLowerCase()
+      return allSlashItems.filter(s => s.name.toLowerCase().includes(query))
+    }
+    return allSlashItems
+  }, [allSlashItems, input])
   const showSlashSkills = input.startsWith('/')
-  const slashQuery = showSlashSkills ? input.slice(1).toLowerCase() : ''
-  const filteredSkills = showSlashSkills
-    ? allSkills.filter(s => s.name.toLowerCase().includes(slashQuery))
-    : allSkills
+  const [selectedSkillIndex, setSelectedSkillIndex] = useState(0)
 
   // Handle input change for skill detection
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value
-    setInput(value)
-  }, [])
+    setInputSynced(value)
+    setSelectedSkillIndex(0) // Reset selection when input changes
+  }, [setInputSynced])
 
   // Auto-scroll to bottom (stop when user scrolls up)
   const userScrolledUpRef = useRef(false)
@@ -1175,6 +830,23 @@ export function AgentFlowPanel() {
     if (!userScrolledUpRef.current) scrollToBottom()
   }, [steps, scrollToBottom])
 
+  // When switching to / loading a conversation, jump straight to the latest
+  // message (bottom) instead of showing it from the top.
+  useEffect(() => {
+    userScrolledUpRef.current = false
+    const viewport =
+      scrollRef.current?.querySelector('[data-radix-scroll-area-viewport]') ||
+      scrollRef.current?.querySelector('[data-slot="scroll-area-viewport"]')
+    if (!viewport) return
+    // Two rAFs to ensure the newly loaded messages are laid out first.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        viewport.scrollTop = viewport.scrollHeight
+      })
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSessionId])
+
   useEffect(() => {
     if (isRunning) {
       const interval = setInterval(scrollToBottom, 200)
@@ -1203,25 +875,52 @@ export function AgentFlowPanel() {
   // Clear flow
   const handleClear = useCallback(() => {
     setSteps([])
-    clearSelectedFiles()
-    setSelectedWorkDir(null)
-    clearExecutionFlow()
-  }, [clearExecutionFlow, clearSelectedFiles])
+    storeActions.clearSelectedFiles()
+    storeActions.setSelectedWorkDir(null)
+    storeActions.clearExecutionFlow()
+  }, [storeActions.clearExecutionFlow, storeActions.clearSelectedFiles])
 
-  // Select project directory (also clears current session to keep sidebar in sync)
-  const selectWorkDir = useCallback((dir: string | null) => {
-    useHelixStore.setState({ currentSessionId: null })
-    setSelectedWorkDir(dir)
-  }, [setSelectedWorkDir])
+  // Select project directory. Must go through setWorkDir (not just
+  // setSelectedWorkDir) so the Electron main process workDir is synced AND
+  // workDirEpoch bumps — otherwise useHermes keeps reusing the stale Hermes
+  // session rooted at the old cwd, so the UI shows the new dir while Hermes
+  // actually operates in the old one.
+  const selectWorkDir = useCallback(async (dir: string | null) => {
+    if (!dir) {
+      storeActions.setSelectedWorkDir(null)
+      return
+    }
+    useHelixStore.getState().setCurrentSessionId(null)
+    await storeActions.setWorkDir(dir)
+  }, [storeActions.setWorkDir, storeActions.setSelectedWorkDir])
 
   // Stop running agent
   const handleStop = useCallback(() => {
+    if (synthDoneTimerRef.current) {
+      clearTimeout(synthDoneTimerRef.current)
+      synthDoneTimerRef.current = null
+    }
     if (abortRef.current) {
       abortRef.current.abort()
       abortRef.current = null
     }
-    setIsRunning(false)
-  }, [])
+    const sid = runningSessionIdRef.current
+    if (sid) {
+      setStreamingDraft(sid, { isAgentRunning: false })
+    }
+    // Notify Hermes to cancel the session using the proper interrupt handler
+    try {
+      const sessionId = hermesSessionIdRef.current || sid || currentSessionId
+      if (sessionId && isElectron()) {
+        // Use the interrupt IPC handler which sends session/cancel as a notification
+        window.electron.hermes.interrupt(sessionId)
+      }
+    } catch (e) {
+      console.error('[handleStop] Failed to interrupt Hermes:', e)
+    }
+    // Don't clear runningSessionIdRef here - let the finally block in handleRun do it
+    // to avoid race conditions with the event handler cleanup
+  }, [setStreamingDraft, currentSessionId])
 
   // File picker handler
   const addSelectedFile = useHelixStore(s => s.addSelectedFile)
@@ -1229,34 +928,16 @@ export function AgentFlowPanel() {
     const files = e.target.files
     if (!files) return
 
-    // Electron: skip file input, directly open native directory dialog
-    if (isElectron()) {
-      e.target.value = ''
-      const dir = await electronDialog.openDirectory()
-      if (dir) {
-        selectWorkDir(dir)
-      }
-      return
-    }
+    // Upload selected files as pending attachments
+    const attachments = await Promise.all(
+      Array.from(files).map(f => fileToAttachment(f).catch(() => null))
+    )
+    const valid = attachments.filter((a): a is FileAttachment => a !== null)
+    if (valid.length > 0) setPendingFiles(prev => [...prev, ...valid])
 
-    // Browser: extract relative paths, let user type the full workdir manually
-    let rootDir: string | null = null
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i]
-      const relativePath = f.webkitRelativePath || f.name
-      addSelectedFile(relativePath)
-      if (!rootDir && relativePath.includes('/')) {
-        rootDir = relativePath.split('/')[0]
-      }
-    }
-    // Pre-fill with folder name as hint
-    if (rootDir && !selectedWorkDir) {
-      selectWorkDir(rootDir)
-    }
-
-    // Reset input so selecting the same folder again triggers onChange
+    // Reset input so selecting the same file again triggers onChange
     e.target.value = ''
-  }, [addSelectedFile])
+  }, [])
 
   // Handle skill file upload
   const handleSkillUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1267,17 +948,17 @@ export function AgentFlowPanel() {
       form.append('file', file)
       const res = await fetch('/api/skills', { method: 'POST', body: form })
       if (!res.ok) throw new Error('上传失败')
-      showToast({ type: 'success', title: '技能添加成功' })
+      storeActions.showToast({ type: 'success', title: '技能已添加' })
     } catch (err) {
-      showToast({ type: 'error', title: '技能上传失败', description: String(err) })
+      storeActions.showToast({ type: 'error', title: '技能上传失败', description: String(err) })
     }
     e.target.value = ''
-  }, [showToast])
+  }, [storeActions.showToast])
 
   // Handle new project creation
   const handleCreateProject = useCallback(async () => {
     if (!newProjectName.trim()) {
-      showToast({ type: 'warning', title: '请输入项目名称' })
+      storeActions.showToast({ type: 'warning', title: '请输入项目名称' })
       return
     }
 
@@ -1291,9 +972,9 @@ export function AgentFlowPanel() {
         selectWorkDir(projectPath)
           setShowNewProjectForm(false)
           setNewProjectName('')
-          showToast({ type: 'success', title: '项目已创建', description: projectPath })
+          storeActions.showToast({ type: 'success', title: '项目已创建', description: projectPath })
         } catch (err) {
-          showToast({ type: 'error', title: '创建失败', description: String(err) })
+          storeActions.showToast({ type: 'error', title: '创建失败', description: String(err) })
         }
       }
     } else {
@@ -1301,243 +982,943 @@ export function AgentFlowPanel() {
       selectWorkDir(newProjectName.trim())
       setShowNewProjectForm(false)
       setNewProjectName('')
-      showToast({ type: 'success', title: '项目已设置', description: newProjectName.trim() })
+      storeActions.showToast({ type: 'success', title: '项目已设置', description: newProjectName.trim() })
     }
-  }, [newProjectName, showToast])
+  }, [newProjectName, storeActions.showToast])
 
   // Resolve /command -> skill name + user query
-  const resolveCommand = useCallback((text: string): { skillName: string; query: string } | null => {
+  const resolveCommand = useCallback((text: string): { skillName: string; name: string; query: string } | null => {
     const match = text.match(/^\/(\S+)\s*([\s\S]*)$/)
     if (!match) return null
     const cmd = match[1].toLowerCase()
     const rest = match[2].trim()
     const skill = skills.find(s => s.id === cmd || s.name.toLowerCase() === cmd)
-    if (!skill) return null
-    return { skillName: skill.id, query: rest || text }
-  }, [skills])
+    if (skill) return { skillName: skill.id, name: skill.name, query: rest || text }
+    const fileSkill = fileSkills.find(s => s.name.toLowerCase() === cmd)
+    if (fileSkill) return { skillName: fileSkill.name, name: fileSkill.name, query: rest || text }
+    return null
+  }, [skills, fileSkills])
 
   // Run agent task
   const handleRun = useCallback(async () => {
-    const cmd = resolveCommand(input.trim())
-    const trimmed = input.trim()
-    if (!trimmed) return
+    const currentInput = inputValueRef.current
+    const cmd = resolveCommand(currentInput.trim())
+    const trimmed = currentInput.trim()
+    if (!trimmed && pendingImages.length === 0 && pendingFiles.length === 0) return
 
-    // If already running, abort current request first
-    if (isRunning && abortRef.current) {
-      abortRef.current.abort()
-      abortRef.current = null
-      setIsRunning(false)
+    // --- Built-in slash commands (handled client-side, never sent to Hermes) ---
+    const builtinMatch = trimmed.match(/^\/(\S+)/)
+    if (builtinMatch) {
+      const builtin = BUILTIN_COMMANDS.find(c => c.name === builtinMatch[1].toLowerCase())
+      if (builtin) {
+        setInputSynced('')
+        resetInputHeight()
+        switch (builtin.action) {
+          case 'compact':
+          case 'reset':
+            hermesSessionIdRef.current = null
+            storeActions.clearChat()
+            storeActions.showToast({ type: 'success', title: builtin.action === 'compact' ? '上下文已压缩' : '会话已重置' })
+            break
+          case 'clear':
+            storeActions.clearChat()
+            break
+          case 'mcp':
+            storeActions.toggleSettings('mcp')
+            break
+          case 'model':
+            storeActions.toggleSettings('api')
+            break
+        }
+        return
+      }
+    }
+
+    // Track skill invocation count
+    if (cmd) {
+      window.electron?.hermesSkills?.trackSkillCall(cmd.name).catch?.(() => {})
+    }
+
+    // If already running, stop current request
+    if (isBusy) {
+      handleStop()
+      return
     }
 
     // Check API key
     if (!hasApiKey) {
-      showToast({ type: 'warning', title: '请先配置 API Key', description: '在设置中配置模型提供商' })
-      toggleSettings()
+      storeActions.showToast({ type: 'warning', title: '请先设置 API Key', description: '请在设置中配置模型 API Key' })
+      storeActions.toggleSettings('api')
       return
     }
 
-    setInput('')
-    setIsRunning(true)
+    setInputSynced('')
+    resetInputHeight()
+    runStartedAtRef.current = Date.now()
+    setQuestionStartTs(runStartedAtRef.current)
+    let activeSessionId = currentSessionId
+    doneProcessedRef.current = false
+    if (!activeSessionId) {
+      activeSessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
+      useHelixStore.getState().setCurrentSessionId(activeSessionId)
+      useHelixStore.getState().pushNavigation({ type: 'chat', sessionId: activeSessionId })
+      useHelixStore.getState().persistToStorage()
+    }
+    runningSessionIdRef.current = activeSessionId
+    setStreamingDraft(activeSessionId, {
+      isAgentRunning: true,
+      responseBlocks: [],
+      steps: [],
+      streamThinking: '',
+      textBuffer: '',
+      thoughtBuffer: '',
+    })
     setResponseBlocks([])
     setSteps([])
-
+    stepsRef.current = []
+    setStreamThinking('')
+    textBufferRef.current = ''
+    thoughtBufferRef.current = ''
+    thinkingStartTimeRef.current = 0
+    thinkingDurationRef.current = 0
+    promptSentAtRef.current = 0
+    setStreamThoughtTokens(0)
+    setStreamThinkingDuration(0)
+    firstContentAtRef.current = 0
+    usageReceivedRef.current = false
     // Add user message to store with images
+    const imagesSnapshot = pendingImages.length > 0 ? [...pendingImages] : undefined
+    const filesSnapshot = pendingFiles.length > 0 ? [...pendingFiles] : undefined
+
     const storeState = useHelixStore.getState()
     storeState.addChatMessage({
       role: 'user',
       content: trimmed,
-      images: pendingImages.length > 0 ? [...pendingImages] : undefined,
+      images: imagesSnapshot,
+      files: filesSnapshot,
+      sessionId: activeSessionId,
     })
     setPendingImages([])
+    setPendingFiles([])
 
     const controller = new AbortController()
     abortRef.current = controller
 
+    let unsubscribe: (() => void) | null = null
     try {
       const state = useHelixStore.getState()
+      const isElectron = typeof window !== 'undefined' && !!window.electron?.isElectron
 
-      const response = await fetch('/api/agent/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: state.chatMessages.map(m => {
-            if (m.images && m.images.length > 0) {
-              return {
-                role: m.role,
-                content: [
-                  ...m.images.map(img => ({
-                    type: 'image_url',
-                    image_url: { url: img.dataUrl }
-                  })),
-                  { type: 'text', text: m.content }
-                ]
-              }
-            }
-            return { role: m.role, content: m.content }
-          }),
-          apiConfig: state.apiConfig,
-          workDir: selectedWorkDir || undefined,
-          skillName: cmd?.skillName,
-          agentType: trimmed.match(/^\/review\b/) ? 'review' : undefined,
-          mcpServers: state.mcpServers,
-        }),
-        signal: controller.signal,
-      })
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Request failed' }))
-        throw new Error(errorData.error || `请求失败 (${response.status})`)
+      if (!isElectron) {
+        throw new Error('当前环境无法连接 Hermes，与 Electron 界面端通信失败')
       }
 
-      const reader = response.body?.getReader()
-      const decoder = new TextDecoder()
+      // Config is synced by handleModelSelect (setConfig) and by handleProfileSelect
+      // (profile:cacheConfig) — both already restart Hermes if needed.  Calling
+      // setModel AGAIN here would race with those restarts and corrupt .env.
+      // session/new will pick up whatever config.yaml has on disk, so skip it.
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
+      // Wait for the gateway to be ready (alive AND not mid-restart) before
+      // creating a session. After a model switch the gateway may already report
+      // hermesConnected=true yet still be recycling — we must wait for the
+      // *fresh* gateway.ready that follows this switch's restart.
+      const hermesStore = useHermesStore.getState()
+      const liveEpoch = hermesStore.gatewayEpoch
+      const epochStale = liveEpoch > sessionEpochRef.current
+      if (!hermesStore.hermesConnected || epochStale) {
+        // If the cached session is from a previous gateway generation, drop it
+        // now so we don't send a prompt to a dead session.
+        if (epochStale) {
+          hermesSessionIdRef.current = null
+        }
+        await new Promise<boolean>((resolve) => {
+          const startEpoch = useHermesStore.getState().gatewayEpoch
+          const check = () => {
+            if (useHermesStore.getState().hermesConnected && useHermesStore.getState().gatewayEpoch > startEpoch) {
+              cleanup()
+              resolve(true)
+            }
+          }
+          const unsub = window.electron.hermes.onEvent((event: string) => {
+            if (event === 'gateway.ready') {
+              cleanup()
+              resolve(true)
+            }
+          })
+          const cleanup = () => {
+            try { unsub?.() } catch {}
+          }
+          check()
+          if (!(useHermesStore.getState().hermesConnected && useHermesStore.getState().gatewayEpoch > startEpoch)) {
+            setTimeout(() => { cleanup(); resolve(useHermesStore.getState().hermesConnected) }, 10000)
+          }
+        })
+      }
 
-          const chunk = decoder.decode(value, { stream: true })
-          const lines = chunk.split('\n')
+      // Create a Hermes ACP session if we don't already have one for this conversation.
+      let sessionId = hermesSessionIdRef.current
+      if (!sessionId) {
+        const cwd = selectedWorkDir || state.selectedWorkDir || (typeof process !== 'undefined' ? process.cwd() : '')
+        const res = await window.electron.hermes.send('session/new', {
+          cwd,
+          mcpServers: [],
+        }) as any
+        sessionId = res?._meta?.hermes?.sessionProvenance?.acpSessionId
+          || res?.session_id
+          || res?.sessionID
+          || (typeof res === 'string' ? res : null)
+        if (!sessionId) {
+          throw new Error('无法创建 Hermes 会话：session/new 缺少 session_id')
+        }
+        hermesSessionIdRef.current = sessionId
+        sessionEpochRef.current = useHermesStore.getState().gatewayEpoch
+        // Keep the store in sync so external invalidation (profile switch,
+        // gateway restart) can reliably clear this ref via its own effect.
+        try { useHermesStore.getState().setHermesSessionId(sessionId) } catch {}
+        // Auto-approve edits for this session (no manual approval UI): switch
+        // Hermes into "don't ask" mode. Hermes has no `session/approve` RPC — it
+        // waits for an approval response to a permission_request, so the only
+        // way to skip manual approval is to set the session mode here.
+        try {
+          await window.electron.hermes.send('session/set_mode', {
+            session_id: sessionId,
+            mode_id: approvalMode,
+          })
+        } catch (e) {
+          console.warn('[Helix] set_mode(' + approvalMode + ') failed:', e)
+        }
+      }
 
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6)
-              if (data === '[DONE]') continue
-              try {
-                const parsed = JSON.parse(data)
+      // Stop button -> ask Hermes to cancel the current run.
+      // session/cancel is a Hermes *notification* (no response), so send it
+      // via notify (not send, which issues a request and gets "Method not found").
+      controller.signal.addEventListener('abort', () => {
+        if (sessionId) {
+          electronHermes.notify('session/cancel', { session_id: sessionId })
+        }
+        queueDone = true
+        if (queueWaiter) { const w = queueWaiter; queueWaiter = null; w() }
+      })
 
-                if (parsed.type === 'tool_call') {
-                  // Extract file paths from tool params to track directories
-                  const params = parsed.toolParams || {}
-                  let filePath = ''
-                  if (params.path) {
-                    filePath = String(params.path)
-                    const dir = filePath.split('/').slice(0, -1).join('/') || '/'
-                    addAccessedDirectory(dir)
-                  } else if (params.command && typeof params.command === 'string') {
-                    // Track bash commands that reference paths
-                    const match = params.command.match(/[`'"]?([\w/.-]+(?:\.\w+)+)[`'"]?/g)
-                    if (match) {
-                      match.forEach(p => {
-                        const dir = p.replace(/[`'"]/g, '').split('/').slice(0, -1).join('/')
-                        if (dir) addAccessedDirectory(dir)
-                      })
-                    }
-                  }
-                  const id = generateId()
-                  const step: FlowStep = { id, type: 'tool_call', content: getToolLabel(parsed.toolName), toolName: parsed.toolName, toolParams: params, timestamp: Date.now() }
-                  setSteps(prev => [...prev, step])
-                  addExecutionStep({ type: 'tool_call', toolName: parsed.toolName, path: filePath || undefined, toolParams: params })
-                  setResponseBlocks(prev => {
-                    const last = prev[prev.length - 1]
-                    if (last?.type === 'tool_group') {
-                      return [...prev.slice(0, -1), { type: 'tool_group', steps: [...last.steps, step] }]
-                    }
-                    return [...prev, { type: 'tool_group', steps: [step] }]
-                  })
-                } else if (parsed.type === 'thinking') {
-                  const id = generateId()
-                  setSteps(prev => [...prev, { id, type: 'thinking', content: parsed.content, timestamp: Date.now() }])
-                } else if (parsed.type === 'reasoning') {
-                  const id = generateId()
-                  setSteps(prev => [...prev, { id, type: 'reasoning', content: parsed.content, timestamp: Date.now() }])
-                } else if (parsed.type === 'file_change') {
-                  const id = generateId()
-                  setSteps(prev => [...prev, { id, type: 'file_change', content: parsed.content, fileChanges: parsed.fileChanges, timestamp: Date.now() }])
-                } else if (parsed.type === 'tool_result') {
-                  const id = generateId()
-                  const step: FlowStep = { id, type: 'tool_result', content: parsed.content, toolName: parsed.toolName, timestamp: Date.now() }
-                  setSteps(prev => [...prev, step])
-                  addExecutionStep({ type: 'tool_result', toolName: parsed.toolName })
-                  setResponseBlocks(prev => {
-                    const last = prev[prev.length - 1]
-                    if (last?.type === 'tool_group') {
-                      return [...prev.slice(0, -1), { type: 'tool_group', steps: [...last.steps, step] }]
-                    }
-                    return [...prev, { type: 'tool_group', steps: [step] }]
-                  })
-                } else if (parsed.type === 'text') {
-                  textBufferRef.current += parsed.content
-                  setResponseBlocks(prev => {
-                    const last = prev[prev.length - 1]
-                    if (last?.type === 'text') {
-                      return [...prev.slice(0, -1), { type: 'text', content: last.content + parsed.content }]
-                    }
-                    return [...prev, { type: 'text', content: parsed.content }]
-                  })
-                } else if (parsed.type === 'done') {
-                  const content = textBufferRef.current
-                  textBufferRef.current = ''
-                  if (content) {
-                    const curState = useHelixStore.getState()
-                    const id = curState.addChatMessage({ role: 'assistant', content })
-                    curState.setChatMessageStreaming(id, false)
-                  }
-                  setResponseBlocks([])
-                  const id = generateId()
-                  setSteps(prev => [...prev, { id, type: 'done', content: parsed.content, finishReason: parsed.finishReason, timestamp: Date.now() }])
-                } else if (parsed.type === 'error') {
-                  const content = textBufferRef.current
-                  textBufferRef.current = ''
-                  if (content) {
-                    const curState = useHelixStore.getState()
-                    const id = curState.addChatMessage({ role: 'assistant', content })
-                    curState.setChatMessageStreaming(id, false)
-                  }
-                  setResponseBlocks([])
-                  const id = generateId()
-                  setSteps(prev => [...prev, { id, type: 'error', content: parsed.content, timestamp: Date.now() }])
-                  addExecutionStep({ type: 'error' })
-                } else if (parsed.type === 'plan') {
-                  const id = generateId()
-                  setSteps(prev => [...prev, { id, type: 'plan', content: '模型规划了以下步骤', planText: parsed.planText || parsed.content, timestamp: Date.now() }])
-                  addExecutionStep({ type: 'plan' })
-                } else if (parsed.type === 'task') {
-                  const id = generateId()
-                  setSteps(prev => [...prev, { id, type: 'task', content: parsed.content, taskLabel: parsed.taskLabel, taskId: parsed.taskId, timestamp: Date.now() }])
-                  addExecutionStep({ type: 'task' })
-                } else if (parsed.type === 'compact') {
-                  const id = generateId()
-                  setSteps(prev => [...prev, { id, type: 'compact', content: parsed.content, timestamp: Date.now() }])
-                } else if (parsed.type === 'usage' && parsed.content) {
-                  // Parse model usage: "Tokens: X total | Cost: $Y | Model: Z"
-                  const modelMatch = parsed.content.match(/Model:\s*(.+)/)
-                  const tokenMatch = parsed.content.match(/Tokens:\s*(\d+)/)
-                  const costMatch = parsed.content.match(/Cost:\s*\$([\d.]+)/)
-                  if (modelMatch && tokenMatch) {
-                    const model = modelMatch[1].trim()
-                    const total = parseInt(tokenMatch[1]) || 0
-                    const cost = costMatch ? parseFloat(costMatch[1]) : 0
-                    const prompt = Math.round(total * 0.6)
-                    const completion = Math.round(total * 0.4)
-                    addExecutionStep({ type: 'usage', content: parsed.content })
-                    useHelixStore.getState().addModelUsage(model, {
-                      prompt,
-                      completion,
-                      total,
-                      cost,
-                    })
-                    useHelixStore.getState().addCurrentSessionTokens({ prompt, completion, total })
-                  }
-                } else if (parsed.type === 'approval_request') {
-                  setApprovalRequest({
-                    id: parsed.approvalId,
-                    toolName: parsed.toolName,
-                    params: parsed.toolParams || {},
-                    timestamp: Date.now(),
-                  })
-                  setPendingApprovalCount(prev => prev + 1)
-                }
-              } catch {
-                // skip non-JSON lines
+      // Tracks whether this run has already streamed real text/thinking, so a
+      // trailing session_info_update can be dropped quietly instead of as text.
+      let streamedContent = false
+      // Translate Hermes ACP notifications into the UI event shape the parser expects.
+      const mapHermesEvent = (method: string, params: any): any => {
+        if (method === 'session/update') {
+          const u = params?.update || params
+          const su = u?.sessionUpdate
+          switch (su) {
+            case 'agent_message_chunk':
+              return { type: 'text', content: normalizeAcpContent(u.content) }
+            case 'agent_thought_chunk':
+              return { type: 'thinking', content: normalizeAcpContent(u.content) }
+            case 'tool_call': {
+              const title = typeof u.title === 'string' ? u.title : ''
+              const kind = typeof u.kind === 'string' ? u.kind : ''
+              const toolCallId = typeof u.toolCallId === 'string' ? u.toolCallId : ''
+              let args = u.rawInput
+              if (typeof args === 'string') {
+                try { args = JSON.parse(args) } catch { /* keep raw */ }
+              }
+              return {
+                type: 'tool_call',
+                toolName: title || 'tool',
+                toolKind: kind,
+                toolCallId,
+                toolParams: (args && typeof args === 'object') ? args : { raw: args },
               }
             }
+            case 'tool_call_chunk':
+              return { type: 'tool_result', toolName: '', content: normalizeAcpContent(u.content) }
+            case 'tool_call_update': {
+              const tcId = typeof u.toolCallId === 'string' ? u.toolCallId : ''
+              // Sub-agent root completion: update the parent delegate_task step status
+              if (tcId.startsWith('sa-') && tcId.endsWith('-root')) {
+                const status = u.status === 'failed' ? 'failed' : 'completed'
+                const content = normalizeAcpContent(u.content)
+                setSteps(prev => {
+                  const next = [...prev]
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    if (next[i].type === 'tool_call' && next[i].toolName?.startsWith('SubAgent')) {
+                      next[i] = { ...next[i], status, content: content || next[i].content }
+                      break
+                    }
+                  }
+                  return next
+                })
+                return null
+              }
+              // Streaming output delta: forward content to the latest tool_call step
+              if (u.status === 'in_progress' && u.content) {
+                return { type: 'tool_output_delta', toolCallId: tcId, content: normalizeAcpContent(u.content) }
+              }
+              return null
+            }
+            case 'permission_request':
+              // Forward as approval_request so the ApprovalDialog shows up
+              return {
+                type: 'approval_request',
+                approvalId: (typeof u.toolCallId === 'string' ? u.toolCallId : '') || `approval-${Date.now()}`,
+                toolName: u.toolName || u.title || 'unknown',
+                toolParams: u.toolParams || u.params || {},
+              }
+            case 'run_complete':
+              return { type: 'done', content: textBufferRef.current }
+            case 'usage_update':
+              return { type: 'usage_update', size: Number(u.size) || 0, used: Number(u.used) || 0 }
+            case 'available_commands_update':
+              return { type: 'available_commands', commands: u.commands || u.availableCommands || u.available_commands || [] }
+            case 'session_info_update': {
+              // Backends sometimes carry errors, notices, or even the final
+              // reply inside session_info_update. We used to silently drop it
+              // (default: return null), which produced a blank UI with no clue.
+              // Now we ALWAYS dump the raw payload (no DEV gate — production
+              // builds strip import.meta.env, which is exactly why we went
+              // blind before) and surface any error/text we can find.
+              const rawSiup = (() => { try { return JSON.stringify(u) } catch { return String(u) } })()
+              const err = u.error || u.errorMessage || u.err
+              if (err) {
+                return { type: 'error', content: typeof err === 'string' ? err : JSON.stringify(err) }
+              }
+              if (u.status === 'error' || u.status === 'failed') {
+                const m = u.message || u.reason || u.detail || (typeof u.content === 'string' ? u.content : '')
+                return { type: 'error', content: m || '会话返回错误状态' }
+              }
+              const msg = (typeof u.content === 'string' && u.content.trim()) ? u.content
+                : (typeof u.message === 'string' && u.message.trim()) ? u.message
+                : (typeof u.text === 'string' && u.text.trim()) ? u.text
+                : null
+              if (msg) return { type: 'text', content: msg }
+              // Couldn't classify this as error/text. If the run already
+              // streamed real content, a stray session_info_update is just
+              // trailing metadata — drop it quietly (raw already logged).
+              // If it's the ONLY thing we got, surface the raw payload so the
+              // UI is never left blank and we can see what the backend said.
+              if (!streamedContent) {
+                return { type: 'text', content: '⚠️ 该模型未返回文本流，网关仅回传了 session_info_update。原始内容：\n' + rawSiup.slice(0, 2000) }
+              }
+              return null
+            }
+            default:
+              return null
+          }
+        }
+        if (method === 'session/complete' || method === 'session/end') {
+          return { type: 'done', content: textBufferRef.current }
+        }
+        if (method === 'error') {
+          return { type: 'error', content: params?.message || 'Hermes 错误' }
+        }
+        return null
+      }
+
+      // Event-driven async queue — no polling. Producers push items and
+      // wake the consumer immediately via a resolver.
+      const queue: string[] = []
+      let queueDone = false
+      let queueWaiter: (() => void) | null = null
+      function enqueue(item: string) {
+        queue.push(item)
+        if (queueWaiter) { const w = queueWaiter; queueWaiter = null; w() }
+      }
+      function dequeue(): string | null {
+        return queue.length > 0 ? queue.shift()! : null
+      }
+      async function waitForItem(): Promise<boolean> {
+        if (queue.length > 0 || queueDone) return true
+        return new Promise<boolean>(resolve => {
+          queueWaiter = () => resolve(true)
+        })
+      }
+
+      // Fallback done timer: Hermes doesn't always emit a run_complete/session/complete
+      // for short text replies. If no real completion event arrives, synthesize one after
+      // the stream has been idle for a short while. Each real content chunk resets the timer.
+      const scheduleSynthDone = (delay: number) => {
+        if (synthDoneTimerRef.current) clearTimeout(synthDoneTimerRef.current)
+        synthDoneTimerRef.current = setTimeout(() => {
+          if (!queueDone) {
+            enqueue('data: ' + JSON.stringify({ type: 'done', content: textBufferRef.current }))
+            queueDone = true
+          }
+          synthDoneTimerRef.current = null
+        }, delay)
+      }
+
+      unsubscribe = window.electron.hermes.onEvent(async (method: string, params: any) => {
+        const now = Date.now()
+        // Track time to first token on first meaningful event
+        if (method === 'session/update' && (
+          params?.update?.sessionUpdate === 'agent_message_chunk' ||
+          params?.update?.sessionUpdate === 'agent_thought_chunk'
+        )) {
+          if (promptSentAtRef.current && !firstContentAtRef.current) {
+            firstContentAtRef.current = now
+          }
+        }
+        try {
+          // When Hermes starts retrying after a connection error, clear the
+          // accumulated text/thinking buffers so the retry response replaces
+          // (not appends to) the partial content from the failed attempt.
+          if (method === 'gateway.retry') {
+            const phase = params?.phase as string | undefined
+            if (phase === 'error') {
+              textBufferRef.current = ''
+              thoughtBufferRef.current = ''
+              pendingTextRef.current = ''
+              pendingThinkingRef.current = ''
+              setStreamThinking('')
+              useHelixStore.getState().setConnectionNotice({ phase: 'error', message: '连接中断', ts: Date.now() })
+            } else if (phase === 'retrying') {
+              textBufferRef.current = ''
+              thoughtBufferRef.current = ''
+              pendingTextRef.current = ''
+              pendingThinkingRef.current = ''
+              setStreamThinking('')
+              const attempt = params?.attempt ?? 1
+              const total = params?.total ?? 3
+              useHelixStore.getState().setConnectionNotice({ phase: 'retrying', attempt, total, message: '连接中断，正在重连... (' + attempt + '/' + total + ')', ts: Date.now() })
+            } else if (phase === 'recovered') {
+              useHelixStore.getState().setConnectionNotice({ phase: 'recovered', message: '连接已恢复', ts: Date.now() })
+              setTimeout(() => useHelixStore.getState().setConnectionNotice(null), 2000)
+            }
+            // Safety: clear stale retrying notices after 30 seconds
+            if (phase === 'retrying') {
+              setTimeout(() => {
+                const cur = useHelixStore.getState().connectionNotice
+                if (cur?.phase === 'retrying') {
+                  useHelixStore.getState().setConnectionNotice(null)
+                }
+              }, 30000)
+            }
+          }
+          const parsed = mapHermesEvent(method, params)
+          if (parsed) {
+            enqueue('data: ' + JSON.stringify(parsed))
+          }
+          if (parsed && (parsed.type === 'done' || parsed.type === 'error')) queueDone = true
+          if (parsed && (parsed.type === 'text' || parsed.type === 'thinking' || parsed.type === 'tool_call' || parsed.type === 'tool_result')) {
+            streamedContent = true
+            if (!firstContentAtRef.current) firstContentAtRef.current = Date.now()
+            scheduleSynthDone(2000)
+          }
+          // A real text chunk (or tool result) means the gateway is delivering again →
+          // clear any transient "reconnecting" notice so it doesn't linger.
+          if (parsed && (parsed.type === 'text' || parsed.type === 'tool_result')) {
+            const cur = useHelixStore.getState().connectionNotice
+            if (cur && cur.phase !== 'recovered') {
+              useHelixStore.getState().setConnectionNotice(null)
+            }
+          }
+        } catch (e) {
+          console.error('[Helix] event handling error', e)
+        }
+      })
+
+      // Build a multimodal prompt: inline text files + image attachments,
+      // then the user's text. Lets the Agent actually process dropped files.
+      const promptItems: Array<Record<string, any>> = []
+      const allImages = [
+        ...(imagesSnapshot || []).map(i => i.dataUrl).filter(Boolean),
+        ...(filesSnapshot || [])
+          .filter(f => f.kind === 'image' && f.dataUrl)
+          .map(f => f.dataUrl as string),
+      ]
+      for (const url of allImages) {
+        promptItems.push({ type: 'image_url', image_url: { url } })
+      }
+      let fileContext = ''
+      for (const f of filesSnapshot || []) {
+        if (f.kind === 'text' && f.base64) {
+          try {
+            const content = decodeBase64Utf8(f.base64)
+            fileContext += `\n\n--- 文件 ${f.name} 的内容 ---\n${content}`
+          } catch { /* skip undecodable */ }
+        } else if (f.kind === 'file') {
+          fileContext += `\n\n[已附加文件: ${f.name} (${formatBytes(f.size)})]`
+          // Inject the absolute path so the model can read it using Read tool
+          if (f.path) {
+            const normalizedPath = f.path.replace(/\\/g, '/')
+            fileContext += ` 文件路径: ${normalizedPath}`
+          }
+        }
+      }
+      const promptText = (trimmed + fileContext).trim() || trimmed
+      promptItems.push({ type: 'text', text: promptText })
+
+      // Fire the prompt — events stream back via onEvent (don't await the promise itself).
+      // ACP expects prompt as a list of content blocks, not a plain string
+      promptSentAtRef.current = Date.now()
+      window.electron.hermes.send('session/prompt', {
+        session_id: sessionId,
+        prompt: [{ type: 'text', text: promptText }],
+      }).then((result: any) => {
+        // Record real token usage from the prompt response.
+        const usage = result?.usage
+        if (usage && typeof usage === 'object') {
+          const model = useHelixStore.getState().apiConfig.model || 'unknown'
+          useHelixStore.getState().addSessionUsageStats(model, {
+            totalTokens: Number(usage.totalTokens) || undefined,
+            inputTokens: Number(usage.inputTokens) || undefined,
+            outputTokens: Number(usage.outputTokens) || undefined,
+            thoughtTokens: Number(usage.thoughtTokens) || undefined,
+            cachedReadTokens: Number(usage.cachedReadTokens) || undefined,
+            cachedWriteTokens: Number(usage.cachedWriteTokens) || undefined,
+          })
+          thoughtTokensRef.current = Number(usage.thoughtTokens) || 0
+          setStreamThoughtTokens(thoughtTokensRef.current)
+          usageReceivedRef.current = true
+        }
+        // Some providers return the entire reply in the session/prompt response
+        // instead of streaming it as agent_message_chunk (e.g. non-streaming
+        // backends). If we received no streamed text, surface that reply so the
+        // user isn't left with a blank UI.
+        const direct = result?.content || result?.message || result?.response || result?.text
+        if (typeof direct === 'string' && direct.trim() && !textBufferRef.current) {
+          enqueue('data: ' + JSON.stringify({ type: 'text', content: direct }))
+          enqueue('data: ' + JSON.stringify({ type: 'done', content: direct }))
+        }
+        // Hermes finished the turn (stopReason comes back via the prompt
+        // response). It does NOT always emit a separate run_complete /
+        // session/complete notification, so synthesize a `done` event so the
+        // assistant reply actually gets persisted into chatMessages. Without
+        // this the reply lives only in the in-memory responseBlocks and is
+        // lost when switching conversations.
+        //
+        // NOTE: session/prompt IPC returns immediately (fire-and-forget), so
+        // this .then() fires BEFORE any session/update notifications arrive.
+        //
+        // CRITICAL: this timer starts from the prompt ack, NOT from first token.
+        // Slow providers (e.g. agnes: ~5-6s of metadata probes + ~10s to first
+        // chunk) deliver their first chunk well after 8s. If synth-done fires
+        // first, the consumer loop `break`s and `finally` unsubscribes the
+        // onEvent handler — so every real chunk that arrives afterwards is
+        // dropped (symptom: event count {} while the terminal shows 36 chunks
+        // forwarded). Therefore the PRE-FIRST-TOKEN fallback must be much longer
+        // than any provider's time-to-first-token. Once the first chunk arrives,
+        // the per-chunk `scheduleSynthDone(2000)` at line ~1449 takes over and
+        // provides the quick idle flush for short replies / dropped run_complete.
+        scheduleSynthDone(90000)
+      }).catch((err: any) => {
+        console.error('[Helix] session/prompt error', err)
+        enqueue('data: ' + JSON.stringify({ type: 'error', content: err?.message || '请求失败' }))
+        queueDone = true
+      })
+
+      // Process the event queue using the existing UI parser (unchanged below).
+      while (true) {
+        const line = dequeue()
+        if (!line) {
+          if (queueDone) break
+          await waitForItem()
+          continue
+        }
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6)
+          if (data === '[DONE]') continue
+          try {
+            const parsed = JSON.parse(data)
+
+            if (parsed.type === 'tool_call') {
+              const toolCallId = parsed.toolCallId || ''
+              const isSubAgentTool = typeof toolCallId === 'string' && toolCallId.startsWith('sa-')
+
+              // Sub-agent tool calls: append as sub-step to the last delegate_task step
+              if (isSubAgentTool) {
+                const subStep: ExecutionStep = {
+                  id: generateId(), type: 'tool_call',
+                  content: getToolDisplayLabel(parsed.toolName, parsed.toolKind, undefined, parsed.toolParams),
+                  toolName: parsed.toolName,
+                  toolKind: parsed.toolKind,
+                  toolParams: parsed.toolParams,
+                  timestamp: Date.now(),
+                }
+                setSteps(prev => {
+                  const next = [...prev]
+                  // Find the last delegate_task step (running)
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    if (next[i].type === 'tool_call' && next[i].toolName?.startsWith('SubAgent')) {
+                      next[i] = { ...next[i], subSteps: [...(next[i].subSteps || []), subStep] }
+                      break
+                    }
+                  }
+                  return next
+                })
+                return
+              }
+
+              // Extract file paths from tool params to track directories
+              const params = parsed.toolParams || {}
+              const pathKeys = ['path', 'file_path', 'filepath', 'filePath', 'file', 'filename']
+              let filePath = ''
+              for (const k of pathKeys) {
+                if (params[k] && typeof params[k] === 'string') {
+                  filePath = String(params[k])
+                  break
+                }
+              }
+              if (!filePath && params.raw && typeof params.raw === 'string') {
+                try {
+                  const raw = JSON.parse(params.raw)
+                  for (const k of pathKeys) {
+                    if (raw[k] && typeof raw[k] === 'string') {
+                      filePath = String(raw[k])
+                      break
+                    }
+                  }
+                } catch {}
+              }
+              if (filePath) {
+                const dir = filePath.replace(/\\/g, '/').split('/').slice(0, -1).join('/') || '/'
+                storeActions.addAccessedDirectory(dir)
+              } else if (params.command && typeof params.command === 'string') {
+                // Track bash commands that reference paths
+                const match = params.command.match(/[`'"]?([\w/.-]+(?:\.\w+)+)[`'"]?/g)
+                if (match) {
+                  match.forEach(p => {
+                    const dir = p.replace(/[`'"]/g, '').split('/').slice(0, -1).join('/')
+                    if (dir) storeActions.addAccessedDirectory(dir)
+                  })
+                }
+              }
+              const id = generateId()
+              const isDelegateTask = parsed.toolName?.startsWith('Delegating')
+              const step: ExecutionStep = {
+                id, type: 'tool_call',
+                content: getToolDisplayLabel(parsed.toolName, parsed.toolKind, filePath, params),
+                toolName: parsed.toolName,
+                toolKind: parsed.toolKind,
+                toolParams: params,
+                timestamp: Date.now(),
+                status: isDelegateTask ? 'running' : undefined,
+                subSteps: isDelegateTask ? [] : undefined,
+              }
+              setSteps(prev => [...prev, step])
+              storeActions.addExecutionStep({ type: 'tool_call', toolName: parsed.toolName, toolKind: parsed.toolKind, path: filePath || undefined, toolParams: params })
+
+              // 修改文件时（write_file / patch）把改动写入 pendingChanges，
+              // 触发 DiffPreview 弹窗显示 diff（实现「修改文件时显示 diff」）。
+              // 注意：Hermes 的 tool_call 事件里 toolName 是人类可读标题（如 "write: …"），
+              // 不是工具原始名，所以不能用 === 'write_file' 判断。Hermes 把这两个文件工具
+              // 的 kind 都映射成 'edit'（见 acp_adapter/tools.py 的 TOOL_KIND_MAP），
+              // 因此用 toolKind==='edit' + 文件路径 + 内容参数来判定文件修改。
+              if (filePath && parsed.toolKind === 'edit') {
+                const p = params as Record<string, any>
+                let oldContent = ''
+                let newContent = ''
+                const os = p.old_string ?? p.old_text
+                const ns = p.new_string ?? p.new_text
+                if (os !== undefined || ns !== undefined) {
+                  oldContent = String(os ?? '')
+                  newContent = String(ns ?? '')
+                } else if (p.content !== undefined) {
+                  newContent = String(p.content)
+                } else if (p.patch !== undefined) {
+                  newContent = String(p.patch)
+                }
+                if (oldContent || newContent) {
+                  const fileName = filePath.split(/[/\\]/).pop() || filePath
+                  const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
+                  const langMap: Record<string, string> = {
+                    ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
+                    py: 'python', md: 'markdown', json: 'json', yml: 'yaml', yaml: 'yaml',
+                    css: 'css', html: 'html', sh: 'bash',
+                  }
+                  storeActions.addPendingChange({
+                    fileId: filePath,
+                    fileName,
+                    filePath,
+                    oldContent,
+                    newContent,
+                  language: langMap[ext] || 'plaintext',
+                })
+                }
+              }
+
+              // 每个工具调用独立成块，不再与上一个 tool_group 合并，
+              // 这样连续多个工具调用也会各自独立、可与文本交叉显示。
+              setResponseBlocks(prev => [...prev, { type: 'tool_group', steps: [step] }])
+            } else if (parsed.type === 'thinking') {
+              if (!thinkingStartTimeRef.current) thinkingStartTimeRef.current = Date.now()
+              const inc = normalizeAcpContent(parsed.content)
+              const cur = thoughtBufferRef.current
+              const curTrim = cur.trim()
+              const incTrim = inc.trim()
+              const isCumulative = curTrim && incTrim.startsWith(curTrim)
+              
+              if (isCumulative) {
+                // Hermes sent cumulative content - replace, don't append
+                thoughtBufferRef.current = inc
+              } else {
+                // Hermes sent incremental content - append
+                thoughtBufferRef.current = cur + inc
+              }
+              pendingThinkingRef.current = thoughtBufferRef.current
+              
+              // Update responseBlocks - replace if cumulative, append if incremental
+              setResponseBlocks(prev => {
+                const last = prev.length > 0 ? prev[prev.length - 1] : null
+                if (last && last.type === 'thinking') {
+                  const nb = prev.slice()
+                  if (isCumulative) {
+                    // Replace with full content
+                    nb[nb.length - 1] = { type: 'thinking', content: inc }
+                  } else {
+                    // Append incremental content
+                    nb[nb.length - 1] = { type: 'thinking', content: last.content + inc }
+                  }
+                  return nb
+                }
+                // Create a new thinking block
+                return [...prev, { type: 'thinking', content: inc }]
+              })
+              scheduleStreamRender()
+            } else if (parsed.type === 'reasoning') {
+              const id = generateId()
+              setSteps(prev => [...prev, { id, type: 'reasoning', content: normalizeAcpContent(parsed.content), timestamp: Date.now() }])
+            } else if (parsed.type === 'file_change') {
+              const id = generateId()
+              setSteps(prev => [...prev, { id, type: 'file_change', content: parsed.content, fileChanges: parsed.fileChanges, timestamp: Date.now() }])
+            } else if (parsed.type === 'tool_result') {
+              const id = generateId()
+              const step: ExecutionStep = { id, type: 'tool_result', content: parsed.content, toolName: parsed.toolName, timestamp: Date.now() }
+              setSteps(prev => [...prev, step])
+              storeActions.addExecutionStep({ type: 'tool_result', toolName: parsed.toolName })
+              // tool_result 归到第一个尚未收到结果的 tool_group 块
+              // （串行时即当前块；并行时按调用顺序依次填充，避免全堆到最后一块）。
+              setResponseBlocks(prev => {
+                const idx = prev.findIndex(b => {
+                  if (b.type !== 'tool_group') return false
+                  return !b.steps.some(s => s.type === 'tool_result' || s.type === 'error')
+                })
+                if (idx !== -1) {
+                  const cur = prev[idx] as Extract<ResponseBlock, { type: 'tool_group' }>
+                  const nb = prev.slice()
+                  nb[idx] = { type: 'tool_group', steps: [...cur.steps, step] }
+                  return nb
+                }
+                return [...prev, { type: 'tool_group', steps: [step] }]
+              })
+            } else if (parsed.type === 'tool_output_delta') {
+              // Streaming output chunk from a running tool — append to the
+              // latest tool_call step's content so the user sees output in real time.
+              const delta = normalizeAcpContent(parsed.content)
+              if (!delta) return
+              setSteps(prev => {
+                const next = [...prev]
+                for (let i = next.length - 1; i >= 0; i--) {
+                  if (next[i].type === 'tool_call' && next[i].status !== 'completed' && next[i].status !== 'failed') {
+                    next[i] = { ...next[i], content: (next[i].content || '') + delta }
+                    break
+                  }
+                }
+                return next
+              })
+              // Also append to the corresponding tool_group in responseBlocks
+              setResponseBlocks(prev => {
+                for (let i = prev.length - 1; i >= 0; i--) {
+                  const block = prev[i]
+                  if (block.type !== 'tool_group') continue
+                  const lastToolCall = [...block.steps].reverse().find(s => s.type === 'tool_call' && s.status !== 'completed' && s.status !== 'failed')
+                  if (lastToolCall) {
+                    const nb = prev.slice()
+                    nb[i] = { ...block, steps: block.steps.map(s => s.id === lastToolCall.id ? { ...s, content: (s.content || '') + delta } : s) }
+                    return nb
+                  }
+                }
+                return prev
+              })
+            } else if (parsed.type === 'text') {
+              // Hermes streams the reply as word/token chunks and ALSO re-sends
+              // the full final_response as another agent_message_chunk at the
+              // end (acp.update_agent_message_text). If the incoming chunk is the
+              // complete text, replace instead of appending — kills duplication.
+              // Also detect retry-duplicated content: when Hermes retries after an
+              // MCP failure, the model regenerates similar text which should
+              // replace (not append to) the existing buffer.
+              const incRaw = normalizeAcpContent(parsed.content)
+              const cur = textBufferRef.current
+              const curTrim = cur.trim()
+              const incTrim = incRaw.trim()
+              let newText: string
+              if (!curTrim) {
+                newText = incRaw
+              } else if (incTrim.startsWith(curTrim)) {
+                // New text is a superset of accumulated text (Hermes full resend)
+                newText = incRaw
+              } else if (curTrim.startsWith(incTrim)) {
+                // Incoming is a subset of accumulated (retry sent shorter text) — keep the
+                // more complete accumulated buffer to avoid truncation.
+                newText = cur
+              } else {
+                // Check for content overlap to avoid duplication on partial resends.
+                // For streaming tokens (chunk < 100 chars), skip expensive overlap scan —
+                // the overhead isn't worth it for normal token-by-token delivery.
+                let overlap = 0
+                if (incTrim.length < 100) {
+                  // Small chunk: just append (normal streaming path)
+                  overlap = 0
+                } else {
+                  // Large chunk (full resend / retry): check overlap but cap at
+                  // min(incoming, 500) chars to bound worst-case cost.
+                  const maxCheck = Math.min(incTrim.length, 500)
+                  for (let len = maxCheck; len > 1; len--) {
+                    if (curTrim.endsWith(incTrim.substring(0, len))) {
+                      overlap = len
+                      break
+                    }
+                  }
+                }
+                newText = overlap > 0 ? cur + incRaw.slice(overlap) : cur + incRaw
+              }
+              textBufferRef.current = newText
+              pendingTextRef.current = newText
+
+              // If the model embeds its reasoning inside <think:ID>...</think:ID> tags
+              // instead of emitting a separate thinking stream, surface it as the thinking block.
+              if (!thoughtBufferRef.current) {
+                const { content: cleaned, reasoning } = extractThinkTags(newText)
+                if (reasoning) {
+                  thoughtBufferRef.current = reasoning
+                  pendingThinkingRef.current = reasoning
+                  setStreamThinking(reasoning)
+                  // If all text was inside <think:ID> tags (e.g. DeepSeek-style
+                  // output), fall back to showing reasoning as visible content
+                  // rather than leaving the message empty.
+                  textBufferRef.current = cleaned || reasoning
+                  pendingTextRef.current = cleaned || reasoning
+                }
+              }
+
+              scheduleStreamRender()
+            } else if (parsed.type === 'done') {
+              if (doneProcessedRef.current) { queueDone = true; return }
+              // Wait for usage data if not received yet (max 500ms)
+              if (!usageReceivedRef.current) {
+                await new Promise(r => setTimeout(r, 500))
+              }
+              doneProcessedRef.current = true
+              let content = textBufferRef.current
+              let reasoning = thoughtBufferRef.current
+              const completedSteps = stepsRef.current
+              textBufferRef.current = ''
+              thoughtBufferRef.current = ''
+              pendingTextRef.current = null
+              pendingThinkingRef.current = null
+              rafPendingRef.current = false
+              setStreamThinking('')
+              if (content || reasoning || completedSteps.length > 0 || responseBlocksRef.current.length > 0) {
+                // Some models place reasoning inside <think:ID>...</think:ID> tags as part of the final text.
+                if (!reasoning) {
+                  const extracted = extractThinkTags(content)
+                  if (extracted.reasoning) {
+                    reasoning = extracted.reasoning
+                    content = extracted.content || extracted.reasoning
+                  }
+                }
+                // Auto-create scheduled tasks the assistant embedded as ```scheduled-task blocks.
+                const extracted = extractScheduledTasks(content)
+                content = extracted.cleaned
+                if (extracted.created.length > 0) {
+                  const st = useHelixStore.getState()
+                  st.showToast({ type: 'success', title: `已创建定时任务：${extracted.created.join('、')}` })
+                  if (!st.showScheduledTasksPanel) st.toggleScheduledTasksPanel()
+                }
+                const curState = useHelixStore.getState()
+                const endTs = Date.now()
+                let thinkingSecs = thinkingStartTimeRef.current
+                  ? Math.round((endTs - thinkingStartTimeRef.current) / 1000)
+                  : (firstContentAtRef.current && promptSentAtRef.current
+                      ? Math.round((firstContentAtRef.current - promptSentAtRef.current) / 1000)
+                      : 0)
+                // 极短思考（<0.5s 取整为 0）但有思考迹象时，至少记为 1s，避免“有思考却不显示”
+                if (thinkingSecs === 0 && (thinkingStartTimeRef.current || firstContentAtRef.current)) thinkingSecs = 1
+                thinkingDurationRef.current = thinkingSecs
+                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: reasoning || undefined, steps: completedSteps.length ? completedSteps : undefined, blocks: responseBlocksRef.current.length ? responseBlocksRef.current : undefined, sessionId: runningSessionIdRef.current || undefined, thoughtTokens: thoughtTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
+                thoughtTokensRef.current = 0
+                setStreamThoughtTokens(0)
+                thinkingStartTimeRef.current = 0
+                thinkingDurationRef.current = 0
+                curState.setChatMessageStreaming(msgId, false)
+              } else {
+                // 防御性兜底：run 结束但无任何可见内容（根因已修复，极少触发）。
+                const st = useHelixStore.getState()
+                const mid = st.addChatMessage({ role: 'assistant', content: '⚠️ 本轮运行已结束，但模型未返回任何可见内容。', sessionId: runningSessionIdRef.current || undefined })
+                st.setChatMessageStreaming(mid, false)
+              }
+              setResponseBlocks([])
+              const id = generateId()
+              setSteps(prev => [...prev, { id, type: 'done', content: parsed.content, finishReason: parsed.finishReason, timestamp: Date.now() }])
+            } else if (parsed.type === 'error') {
+              const content = textBufferRef.current
+              const reasoning = thoughtBufferRef.current
+              const errorSteps = stepsRef.current
+              textBufferRef.current = ''
+              thoughtBufferRef.current = ''
+              pendingTextRef.current = null
+              pendingThinkingRef.current = null
+              rafPendingRef.current = false
+              setStreamThinking('')
+              if (content || reasoning || errorSteps.length > 0 || responseBlocks.length > 0) {
+                const curState = useHelixStore.getState()
+                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: reasoning || undefined, steps: errorSteps.length ? errorSteps : undefined, blocks: responseBlocksRef.current.length ? responseBlocksRef.current : undefined, sessionId: runningSessionIdRef.current || undefined })
+                curState.setChatMessageStreaming(msgId, false)
+              } else if (parsed.content) {
+                // Pure error with no streamed content — surface it as an assistant message
+                const curState = useHelixStore.getState()
+                const msgId = curState.addChatMessage({ role: 'assistant', content: '⚠️ ' + parsed.content, sessionId: runningSessionIdRef.current || undefined })
+                curState.setChatMessageStreaming(msgId, false)
+              }
+              setResponseBlocks([])
+              const id = generateId()
+              setSteps(prev => [...prev, { id, type: 'error', content: parsed.content, timestamp: Date.now() }])
+              storeActions.addExecutionStep({ type: 'error' })
+            } else if (parsed.type === 'plan') {
+              const id = generateId()
+              setSteps(prev => [...prev, { id, type: 'plan', content: '模型已规划以下步骤', planText: parsed.planText || parsed.content, timestamp: Date.now() }])
+              storeActions.addExecutionStep({ type: 'plan' })
+            } else if (parsed.type === 'task') {
+              const id = generateId()
+              setSteps(prev => [...prev, { id, type: 'task', content: parsed.content, taskLabel: parsed.taskLabel, taskId: parsed.taskId, timestamp: Date.now() }])
+              storeActions.addExecutionStep({ type: 'task' })
+            } else if (parsed.type === 'compact') {
+              const id = generateId()
+              setSteps(prev => [...prev, { id, type: 'compact', content: parsed.content, timestamp: Date.now() }])
+            } else if (parsed.type === 'usage_update') {
+              useHelixStore.getState().setContextUsage(parsed.size, parsed.used)
+            } else if (parsed.type === 'available_commands') {
+              useHelixStore.getState().setAvailableCommands(parsed.commands)
+            } else if (parsed.type === 'approval_request') {
+              setApprovalQueue(prev => [...prev, {
+                id: parsed.approvalId,
+                toolName: parsed.toolName,
+                params: parsed.toolParams || {},
+                timestamp: Date.now(),
+              }])
+            }
+          } catch {
+            // skip non-JSON lines
           }
         }
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
+        // Save partial response before showing error
+        if (textBufferRef.current) {
+          const partialContent = textBufferRef.current
+          const partialReasoning = thoughtBufferRef.current || undefined
+          const msgId = useHelixStore.getState().addChatMessage({
+            role: 'assistant',
+            content: partialContent + '\n\n*[执行已中断]*',
+            reasoning: partialReasoning,
+            sessionId: runningSessionIdRef.current || undefined,
+          })
+          useHelixStore.getState().setChatMessageStreaming(msgId, false)
+        }
+        pendingTextRef.current = null
+        pendingThinkingRef.current = null
+        rafPendingRef.current = false
         setSteps(prev => [...prev, {
           id: generateId(),
           type: 'error',
@@ -1554,35 +1935,104 @@ export function AgentFlowPanel() {
         }])
       }
     } finally {
-      setIsRunning(false)
+      // Always unsubscribe to prevent duplicate event handlers
+      try { if (unsubscribe) unsubscribe() } catch {}
+      
+      // Cancel any pending synthetic-done timer so it can't fire after the run
+      // ended (e.g. on abort / unmount) and call setState on a dead context.
+      if (synthDoneTimerRef.current) {
+        clearTimeout(synthDoneTimerRef.current)
+        synthDoneTimerRef.current = null
+      }
+      const sid = runningSessionIdRef.current
+      if (sid) {
+        setStreamingDraft(sid, { isAgentRunning: false })
+        // Once the reply is persisted, the draft is no longer needed; clear it
+        // on the next tick so any render this cycle still sees the final steps.
+        setTimeout(() => clearStreamingDraft(sid), 0)
+      }
+      runningSessionIdRef.current = null
       abortRef.current = null
+
+      // Git auto-commit/push after agent completes
+      if (isElectron() && sid) {
+        const { gitAutoCommit, gitAutoPush, gitCommitTemplate } = useHelixStore.getState()
+        if (gitAutoCommit) {
+          try {
+            const stageResult = await window.electron.git.stage()
+            if (stageResult?.ok) {
+              const msg = gitCommitTemplate || 'chore: auto-commit changes'
+              await window.electron.git.commit(msg)
+              if (gitAutoPush) {
+                await window.electron.git.push()
+              }
+            }
+          } catch (e) {
+            console.error('[GitAutoCommit] Failed:', e)
+          }
+        }
+      }
+
       // Debounced full-session persist handles saving; mark as saved
       if (!savedSessionRef.current) {
         savedSessionRef.current = true
-        notifySessionSaved()
+        storeActions.notifySessionSaved()
       }
     }
-  }, [input, isRunning, hasApiKey, showToast, toggleSettings, resolveCommand])
+  }, [input, isBusy, hasApiKey, currentSessionId, setStreamingDraft, clearStreamingDraft, storeActions, resolveCommand, BUILTIN_COMMANDS, setInputSynced, handleStop])
+
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (showSlashSkills && filteredSkills.length > 0) {
-        if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.key === 'ArrowDown') {
           e.preventDefault()
-          handleSkillSelect(filteredSkills[0])
+          setSelectedSkillIndex(prev => Math.min(prev + 1, filteredSkills.length - 1))
+          return
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          setSelectedSkillIndex(prev => Math.max(prev - 1, 0))
+          return
+        }
+        if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+          e.preventDefault()
+          const idx = Math.min(selectedSkillIndex, filteredSkills.length - 1)
+          const selected = filteredSkills[idx] as any
+          if (!selected) return
+          // Built-in / Hermes commands: send directly through handleRun
+          if (selected.isHermesCommand || selected.isBuiltinCommand) {
+            setInputSynced(`/${selected.name}`)
+            setTimeout(() => {
+              if (isBusy) {
+                handleStop()
+              } else {
+                handleRun()
+              }
+            }, 0)
+          } else if (selected.isCliCommand) {
+            setInputSynced(selected.command || selected.name)
+            inputRef.current?.focus()
+          } else {
+            handleSkillSelect(selected)
+          }
           return
         }
         if (e.key === 'Escape') {
-          setInput('')
+          setInputSynced('')
           return
         }
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
-        handleRun()
+        if (isBusy) {
+          handleStop()
+        } else {
+          handleRun()
+        }
       }
     },
-    [handleRun, showSlashSkills, filteredSkills, handleSkillSelect]
+    [handleRun, handleStop, isBusy, showSlashSkills, filteredSkills, handleSkillSelect, selectedSkillIndex, setInputSynced]
   )
 
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
@@ -1594,7 +2044,7 @@ export function AgentFlowPanel() {
     e.preventDefault()
 
     if (!canAddMoreImages(pendingImages.length, imageItems.length)) {
-      showToast({ type: 'warning', title: `最多粘贴 5 张图片` })
+      storeActions.showToast({ type: 'warning', title: `最多粘贴 5 张图片` })
       return
     }
 
@@ -1610,78 +2060,82 @@ export function AgentFlowPanel() {
     if (newImages.length > 0) {
       setPendingImages(prev => [...prev, ...newImages])
     }
-  }, [pendingImages.length, showToast])
+  }, [pendingImages.length, storeActions.showToast])
 
   const removePendingImage = useCallback((id: string) => {
     setPendingImages(prev => prev.filter(img => img.id !== id))
   }, [])
 
+  // Turn a FileList (dropped or picked) into pending file attachments.
+  const addFiles = useCallback(async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList)
+    if (files.length === 0) return
+    const attachments = await Promise.all(files.map(f => fileToAttachment(f).catch(() => null)))
+    const valid = attachments.filter((a): a is FileAttachment => a !== null)
+    if (valid.length > 0) setPendingFiles(prev => {
+      // Deduplicate by name + size to prevent duplicates
+      const existing = new Set(prev.map(f => `${f.name}:${f.size}`))
+      const newOnes = valid.filter(f => !existing.has(`${f.name}:${f.size}`))
+      if (newOnes.length === 0) return prev
+      return [...prev, ...newOnes]
+    })
+  }, [])
+
+  const removePendingFile = useCallback((id: string) => {
+    setPendingFiles(prev => prev.filter(f => f.id !== id))
+  }, [])
+
   const handleApproval = useCallback(async (approvalId: string, approved: boolean, cacheDecision?: boolean) => {
     try {
-      await fetch('/api/agent/approve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          approvalId,
-          action: approved ? 'approve' : 'reject',
-          ...(cacheDecision ? { cache: true } : {}),
-        }),
-      })
-      setApprovalRequest(null)
-      setPendingApprovalCount(prev => Math.max(0, prev - 1))
+      const sid = hermesSessionIdRef.current
+      if (sid) {
+        await window.electron.hermes.send('session/approve', {
+          session_id: sid,
+          toolCallId: approvalId,
+          approve: approved,
+        })
+      }
+      setApprovalQueue(prev => prev.filter(r => r.id !== approvalId))
     } catch (err) {
       console.error('Approval error:', err)
     }
   }, [])
 
   const handleApproveAll = useCallback(async () => {
-    if (!approvalRequest) return
+    if (approvalQueue.length === 0) return
     try {
-      await fetch('/api/agent/approve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ approvalId: approvalRequest.id, action: 'approve', approveAll: true }),
-      })
-      setApprovalRequest(null)
-      setPendingApprovalCount(0)
+      const sid = hermesSessionIdRef.current
+      if (sid) {
+        for (const req of approvalQueue) {
+          await window.electron.hermes.send('session/approve', {
+            session_id: sid,
+            toolCallId: req.id,
+            approve: true,
+          })
+        }
+      }
+      setApprovalQueue([])
     } catch (err) {
       console.error('Approve all error:', err)
     }
-  }, [approvalRequest])
+  }, [approvalQueue])
+
+  // Listen for keyboard shortcut approve/decline events
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail
+      if (approvalQueue.length === 0) return
+      const first = approvalQueue[0]
+      handleApproval(first.id, detail.approved)
+    }
+    window.addEventListener('helix:approve-request', handler)
+    return () => window.removeEventListener('helix:approve-request', handler)
+  }, [approvalQueue, handleApproval])
 
   // Stats
-  const thinkingCount = steps.filter(s => s.type === 'thinking').length
-  const toolCallCount = steps.filter(s => s.type === 'tool_call').length
   const hasSteps = steps.length > 0
-  const hasErrors = steps.some(s => s.type === 'error')
 
-  // ── Group steps into task groups ──────────────────────
-  interface TaskGroup2 {
-    task: FlowStep | null
-    label: string
-    steps: FlowStep[]
-  }
-
-  const taskGroups: TaskGroup2[] = steps.reduce<TaskGroup2[]>((acc, step) => {
-    if (step.type === 'task' || step.type === 'plan') {
-      acc.push({
-        task: step,
-        label: step.taskLabel || step.content || (step.type === 'plan' ? '模型规划' : '任务'),
-        steps: [],
-      })
-    } else if (acc.length > 0) {
-      acc[acc.length - 1].steps.push(step)
-    } else {
-      // Steps before any task -> create a default group
-      acc.push({ task: null, label: '执行流程', steps: [step] })
-    }
-    return acc
-  }, [])
-  // If steps exist but no groups created (no task separator)
-  if (steps.length > 0 && taskGroups.length === 0) {
-    taskGroups.push({ task: null, label: '执行流程', steps: [...steps] })
-  }
-
+  
   // Highlight /command patterns in input
   const highlightedInput = useMemo(() => {
     if (!input) return null
@@ -1694,8 +2148,105 @@ export function AgentFlowPanel() {
     })
   }, [input])
 
-  const renderChatInput = () => (
-    <div className="bg-muted border border-border transition-all rounded-lg relative">
+  const renderChatInput = ({ isEmpty }: { isEmpty?: boolean } = {}) => {
+    const projectName = selectedWorkDir ? (selectedWorkDir.split(/[/\\]/).pop() || selectedWorkDir) : '选择项目'
+    const approvalModeButton = (
+      <div className="relative" ref={approvalModeDropdownRef}>
+        <button
+          type="button"
+          onClick={() => setShowApprovalModeDropdown(!showApprovalModeDropdown)}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors bg-muted/50 text-foreground/70 hover:text-foreground hover:bg-muted"
+          title="审批模式"
+        >
+          {approvalMode === 'default' && <Hand className="size-3.5" />}
+          {approvalMode === 'accept_edits' && <Clock className="size-3.5" />}
+          {approvalMode === 'dont_ask' && <AlertTriangle className="size-3.5" />}
+          <span>
+            {approvalMode === 'default' && '请求批准'}
+            {approvalMode === 'accept_edits' && '替我审批'}
+            {approvalMode === 'dont_ask' && '完全访问权限'}
+          </span>
+          <ChevronDown className="size-3" />
+        </button>
+        {showApprovalModeDropdown && (
+          <div className="absolute bottom-full left-0 mb-2 w-72 bg-background rounded-xl border border-border shadow-lg py-1 z-50">
+            {[
+              {
+                id: 'default' as const,
+                icon: Hand,
+                title: '请求批准',
+                desc: '编辑外部文件和使用互联网时始终询问',
+              },
+              {
+                id: 'accept_edits' as const,
+                icon: Clock,
+                title: '替我审批',
+                desc: '仅对检测到的风险操作请求批准',
+              },
+              {
+                id: 'dont_ask' as const,
+                icon: AlertTriangle,
+                title: '完全访问权限',
+                desc: '可不受限制地访问互联网和您电脑上的任何文件',
+              },
+            ].map((mode) => {
+              const Icon = mode.icon
+              const active = approvalMode === mode.id
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => {
+                    setApprovalMode(mode.id)
+                    setShowApprovalModeDropdown(false)
+                  }}
+                  className={`w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-muted transition-colors ${active ? 'bg-primary/5' : ''}`}
+                >
+                  <div className="mt-0.5 shrink-0 w-7 h-7 rounded-full bg-muted flex items-center justify-center">
+                    <Icon className="size-4 text-foreground/70" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-foreground">{mode.title}</div>
+                    <div className="text-xs text-muted-foreground leading-relaxed">{mode.desc}</div>
+                  </div>
+                  {active && (
+                    <div className="mt-1 shrink-0">
+                      <Check className="size-4 text-primary" />
+                    </div>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+    return (
+    <div
+      className={`border transition-all relative bg-background/80 backdrop-blur-sm border-border/30 rounded-2xl shadow-lg shadow-black/5 ${isDraggingFile ? 'ring-2 ring-primary/60 bg-primary/5' : 'hover:border-border/50 focus-within:border-primary/40 focus-within:shadow-primary/10'}`}
+      onDragOver={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        if (!isDraggingFile) setIsDraggingFile(true)
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setIsDraggingFile(false)
+      }}
+      onDrop={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setIsDraggingFile(false)
+        if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files)
+      }}
+    >
+            {/* Drag-over hint */}
+            {isDraggingFile && (
+              <div className={`absolute inset-0 z-30 flex items-center justify-center pointer-events-none bg-primary/10 text-sm font-medium text-primary rounded-2xl`}>
+                松开以添加附件
+              </div>
+            )}
             {/* Textarea handles sizing + input */}
             <textarea
               ref={inputRef}
@@ -1703,18 +2254,19 @@ export function AgentFlowPanel() {
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder="输入需求或 / 调用技能..."
-              rows={4}
-              className="w-full resize-none bg-transparent text-transparent caret-foreground text-sm text-left placeholder:text-left placeholder:text-muted-foreground outline-none min-h-[84px] max-h-[300px] leading-relaxed px-4 pt-2 relative z-10"
+              placeholder={isEmpty ? "随心输入..." : "要求后续变更..."}
+              rows={2}
+              className={`w-full resize-none bg-transparent text-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none relative z-10 text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed`}
               style={{
                 overflow: 'hidden',
-                height: '84px',
+                height: '52px',
               }}
               onInput={(e) => {
                 const target = e.target as HTMLTextAreaElement
-                target.style.height = '84px'
+                target.style.height = '52px'
                 const ch = target.scrollHeight
-                if (ch > 84) {
+                const min = 52
+                if (ch > min) {
                   target.style.height = Math.min(ch, 300) + 'px'
                 }
               }}
@@ -1722,7 +2274,7 @@ export function AgentFlowPanel() {
 
             {/* Highlighted display layer - behind transparent textarea */}
             <div
-              className="absolute inset-0 p-4 pt-2 text-sm leading-relaxed whitespace-pre-wrap break-words pointer-events-none select-none z-0 overflow-hidden"
+              className={`absolute inset-0 whitespace-pre-wrap break-words pointer-events-none select-none z-0 overflow-hidden px-4 pt-3.5 pb-1 text-sm leading-relaxed`}
               aria-hidden="true"
             >
               {highlightedInput}
@@ -1730,27 +2282,90 @@ export function AgentFlowPanel() {
 
             {/* Slash-triggered skill dropdown */}
             {showSlashSkills && filteredSkills.length > 0 && (
-              <div className="absolute bottom-full left-0 right-0 mb-1 mx-4 bg-background rounded-xl border border-border shadow-lg z-50 max-h-[200px] overflow-y-auto">
-                {filteredSkills.map(skill => (
+              <div className={`absolute bottom-full left-0 right-0 mb-2 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 z-50 max-h-[200px] overflow-y-auto mx-3`}>
+                {filteredSkills.map((skill, index) => (
                   <button
                     key={skill.id}
                     type="button"
-                    onClick={() => handleSkillSelect(skill)}
-                    className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors flex items-center gap-2.5"
+                    ref={index === selectedSkillIndex ? (el) => { if (el) el.scrollIntoView({ block: 'nearest' }) } : undefined}
+                    onClick={() => {
+                      if ((skill as any).isHermesCommand || (skill as any).isBuiltinCommand) {
+                        setInputSynced(`/${skill.name}`)
+                        setTimeout(() => {
+                          if (isBusy) {
+                            handleStop()
+                          } else {
+                            handleRun()
+                          }
+                        }, 0)
+                      } else if ((skill as any).isCliCommand) {
+                        setInputSynced((skill as any).command || skill.name)
+                        inputRef.current?.focus()
+                      } else {
+                        handleSkillSelect(skill)
+                      }
+                    }}
+                    className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 first:rounded-t-2xl last:rounded-b-2xl ${
+                      index === selectedSkillIndex
+                        ? 'bg-primary/10 text-primary'
+                        : 'hover:bg-muted/50'
+                    }`}
                   >
-                    <FileText className="size-4 text-foreground/40 shrink-0" />
-                            <span className="text-[13px] text-foreground block truncate">{skill.name}</span>
-                    {skill.description && (
-                      <span className="text-[11px] text-foreground/40 truncate ml-auto">{skill.description}</span>
+                    {(skill as any).isCliCommand
+                      ? <Terminal className="size-4 text-emerald-500/70 shrink-0" />
+                      : (skill as any).isBuiltinCommand
+                        ? <Circle className="size-3.5 text-amber-500/70 shrink-0" fill="currentColor" />
+                        : <FileText className="size-4 text-foreground/40 shrink-0" />}
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[13px] text-foreground block truncate">{skill.name}</span>
+                      {skill.description && (
+                        <span className="text-[11px] text-muted-foreground block truncate">{skill.description}</span>
+                      )}
+                    </div>
+                    {(skill as any).isCliCommand && (
+                      <span className="text-[10px] text-emerald-500/70 shrink-0">CLI</span>
+                    )}
+                    {(skill as any).isBuiltinCommand && (
+                      <span className="text-[10px] text-amber-500/70 shrink-0">CMD</span>
+                    )}
+                    {(skill as any).isHermesCommand && (
+                      <span className="text-[10px] text-muted-foreground/60 shrink-0">Hermes</span>
                     )}
                   </button>
                 ))}
               </div>
             )}
 
+            {pendingFiles.length > 0 && (
+              <div className={`flex flex-wrap gap-2 border-t border-border/20 px-4 py-2`}>
+                {pendingFiles.map(f => (
+                  <div
+                    key={f.id}
+                    className="relative flex items-center gap-2 max-w-[220px] px-2.5 py-1.5 rounded-xl border border-border/30 bg-muted/30 hover:bg-muted/50 transition-colors group"
+                  >
+                    {f.kind === 'image' && f.dataUrl ? (
+                      <img src={f.dataUrl} alt={f.name} className="size-7 rounded-lg object-cover shrink-0" />
+                    ) : (
+                      <FileText className="size-4 text-muted-foreground shrink-0" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-foreground truncate">{f.name}</p>
+                      <p className="text-[10px] text-muted-foreground/60">{formatBytes(f.size)}</p>
+                    </div>
+                    <button
+                      onClick={() => removePendingFile(f.id)}
+                      className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Image preview area */}
             {pendingImages.length > 0 && (
-              <div className="flex gap-2 px-4 py-2 overflow-x-auto border-t border-border/30">
+              <div className={`flex gap-2 overflow-x-auto border-t border-border/30 px-4 py-2`}>
                 {pendingImages.map(img => (
                   <div key={img.id} className="relative shrink-0 group">
                     <img
@@ -1769,236 +2384,281 @@ export function AgentFlowPanel() {
               </div>
             )}
 
-            {/* Icons and send button - second row */}
-            <div className="flex items-center justify-between px-4 pb-3">
-              <div className="flex items-center gap-2">
-                <div className="relative" ref={folderDropdownRef}>
-                  <button
-                    type="button"
-                    onClick={() => { setShowFolderDropdown(!showFolderDropdown) }}
-                    className="p-2 text-foreground/40 hover:text-foreground/70 hover:bg-muted rounded-lg transition-colors"
-                    title="项目目录"
-                  >
-                    <Folder className="size-4" />
-                  </button>
-                  {showFolderDropdown && (
-                    <div className="absolute bottom-full left-0 mb-2 w-48 bg-background rounded-xl border border-border shadow-lg py-1 z-50">
-                      <button
-                        onClick={async () => {
-                          setShowFolderDropdown(false)
-                          if (isElectron()) {
-                          const dir = await electronDialog.openDirectory()
-                          if (dir) selectWorkDir(dir)
-                          } else {
-                            fileInputRef.current?.click()
-                          }
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors"
-                      >
-                        <FolderOpen className="size-4 text-muted-foreground" />
-                        选择已有目录
-                      </button>
-                      <button
-                        onClick={() => { setShowNewProjectForm(true); setShowFolderDropdown(false) }}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors"
-                      >
-                        <Plus className="size-4 text-muted-foreground" />
-                        新建项目
-                      </button>
-                    </div>
-                  )}
-                </div>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  {...{ webkitdirectory: '' } as any}
-                  className="hidden"
-                  onChange={handleFileSelect}
-                />
-                {/* Skill selector - button + scrollable dropdown */}
-                <div className="relative" ref={skillDropdownRef}>
-                  <button
-                    type="button"
-                    onClick={() => setShowSkillDropdown(!showSkillDropdown)}
-                    className="relative p-2 text-foreground/40 hover:text-foreground/70 hover:bg-muted rounded-lg transition-colors"
-                    title="技能"
-                  >
-                    <Zap className="size-4" />
-                  </button>
-                  {showSkillDropdown && (
-                    <div className="absolute bottom-full left-0 mb-1 w-56 bg-background rounded-xl border border-border shadow-lg z-50">
-                      <div className="max-h-[260px] overflow-y-auto py-1">
-                        {filteredSkills.length > 0 ? filteredSkills.map(skill => (
-                          <button
-                            key={skill.id}
-                            type="button"
-                            onClick={() => { handleSkillSelect(skill); setShowSkillDropdown(false) }}
-                            className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors flex items-center gap-2.5"
-                          >
-                            <FileText className="size-4 text-foreground/40 shrink-0" />
-                    <span className="text-[13px] text-foreground block truncate">{skill.name}</span>
-                          </button>
-                        )) : (
-                          <div className="px-3 py-2 text-[11px] text-foreground/40">暂无技能</div>
-                        )}
-                      </div>
-                      <div className="border-t border-border py-1">
-                        <button
-                          type="button"
-                          onClick={() => { setShowSkillDropdown(false); toggleSkillPanel() }}
-                          className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors flex items-center gap-2.5 text-[13px] text-foreground"
-                        >
-                          <Briefcase className="size-4 text-foreground/50 shrink-0" />
-                          <span>Manage skills</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => { setShowSkillDropdown(false); skillUploadRef.current?.click() }}
-                          className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors flex items-center gap-2.5 text-[13px] text-foreground"
-                        >
-                          <Plus className="size-4 text-foreground/50 shrink-0" />
-                          <span>Add skill</span>
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  <input
-                    ref={skillUploadRef}
-                    type="file"
-                    accept=".md"
-                    className="hidden"
-                    onChange={handleSkillUpload}
-                  />
-                </div>
-
-                {/* Model selector */}
-                {hasApiKey && (
-                  <div className="relative" ref={modelDropdownRef}>
+            {/* Input toolbar */}
+            <div className={`flex items-center justify-between px-3 pb-2.5 pt-0.5`}>
+              {isEmpty ? (
+                <>
+                  <div className="flex items-center gap-1">
                     <button
                       type="button"
-                      onClick={() => setShowModelDropdown(!showModelDropdown)}
-                      className="flex items-center gap-1.5 text-xs text-foreground/60 hover:text-foreground/80 hover:bg-muted px-2.5 py-1.5 rounded-lg transition-colors"
+                      onClick={() => uploadFileInputRef.current?.click()}
+                      className="p-2 rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-muted/50 transition-all"
+                      title="上传附件"
                     >
-                      <span className="font-mono">{apiConfig.model || '选择模型'}</span>
-                      <ChevronDown className="size-3.5" />
+                      <Plus className="size-4" />
                     </button>
-                    {showModelDropdown && (
-                      <div className="absolute bottom-full left-0 mb-1 w-48 bg-background rounded-xl border border-border shadow-lg py-1 z-50">
-                        {getAvailableModels().map(model => (
-                          <button
-                            key={model}
-                            type="button"
-                            onClick={() => handleModelSelect(model)}
-                            className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-muted transition-colors ${
-                              apiConfig.model === model ? 'text-primary bg-primary/10' : 'text-foreground/70'
-                            }`}
-                          >
-                            {model}
-                          </button>
-                        ))}
-                        {getAvailableModels().length === 0 && (
-                          <div className="px-3 py-1.5 text-[11px] text-foreground/40">
-                            请在设置中配置
+                    {approvalModeButton}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {hasApiKey ? (
+                      <div className="relative" ref={modelDropdownRef}>
+                        <button
+                          type="button"
+                          onClick={() => setShowModelDropdown(!showModelDropdown)}
+                          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 px-2.5 py-1.5 rounded-xl transition-all"
+                        >
+                          <span className="font-medium text-foreground/70">
+                            {apiConfig.model || '未设置'}
+                          </span>
+                          <ChevronDown className="size-3" />
+                        </button>
+                        {showModelDropdown && (
+                          <div className="absolute bottom-full right-0 mb-2 w-52 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 py-1.5 z-50 max-h-64 overflow-y-auto">
+                            {modelList.map(m => (
+                              <button
+                                key={m}
+                                type="button"
+                                onClick={() => handleModelSelect(m)}
+                                className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-muted/50 transition-colors first:rounded-t-xl last:rounded-b-xl ${
+                                  apiConfig.model === m ? 'text-primary bg-primary/10' : 'text-foreground/70'
+                                }`}
+                              >
+                                {m}
+                              </button>
+                            ))}
+                            {modelList.length === 0 && (
+                              <div className="px-3 py-1.5 text-[11px] text-foreground/40">
+                                请在设置中配置
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => storeActions.toggleSettings('api')}
+                        className="text-xs text-foreground/50 hover:text-foreground hover:bg-muted/60 px-2.5 py-1.5 rounded-lg transition-colors"
+                      >
+                        设置模型
+                      </button>
+                    )}
+                    <ReasoningEffortControl value={reasoningEffort} onChange={(v) => storeActions.setReasoningEffort(v)} />
+                    <button
+                      type="button"
+                      onClick={isBusy ? handleStop : handleRun}
+                      disabled={!isBusy && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
+                      className={`size-9 shrink-0 rounded-xl transition-all flex items-center justify-center ${
+                        isBusy
+                          ? 'bg-amber-500 hover:bg-amber-600 shadow-sm shadow-amber-500/25'
+                          : 'bg-foreground hover:bg-foreground/90 shadow-sm shadow-foreground/25'
+                      }`}
+                      title={isBusy ? '停止' : '发送'}
+                    >
+                      {isBusy ? <Square className="size-3 text-white fill-white" /> : <ArrowUp className="size-4 text-background" />}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => uploadFileInputRef.current?.click()}
+                      className="p-2 rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-muted/50 transition-all"
+                      title="上传文件"
+                    >
+                      <Plus className="size-4" />
+                    </button>
+                    {approvalModeButton}
+                    <input
+                      ref={uploadFileInputRef}
+                      type="file"
+                      className="hidden"
+                      multiple
+                      onChange={handleFileSelect}
+                    />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {hasApiKey && (
+                      <div className="relative" ref={modelDropdownRef}>
+                        <button
+                          type="button"
+                          onClick={() => setShowModelDropdown(!showModelDropdown)}
+                          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 px-2.5 py-1.5 rounded-xl transition-all"
+                        >
+                          <span className="font-medium text-foreground/70">
+                            {apiConfig.model || '未设置'}
+                          </span>
+                          <ChevronDown className="size-3" />
+                        </button>
+                        {showModelDropdown && (
+                          <div className="absolute bottom-full right-0 mb-2 w-52 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 py-1.5 z-50 max-h-64 overflow-y-auto">
+                            {modelList.map(m => (
+                              <button
+                                key={m}
+                                type="button"
+                                onClick={() => handleModelSelect(m)}
+                                className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-muted/50 transition-colors first:rounded-t-xl last:rounded-b-xl ${
+                                  apiConfig.model === m ? 'text-primary bg-primary/10' : 'text-foreground/70'
+                                }`}
+                              >
+                                {m}
+                              </button>
+                            ))}
+                            {modelList.length === 0 && (
+                              <div className="px-3 py-1.5 text-[11px] text-foreground/40">
+                                请在设置中配置
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
                     )}
+                    <ContextUsageIndicator />
+                    <ReasoningEffortControl value={reasoningEffort} onChange={(v) => storeActions.setReasoningEffort(v)} />
+                    <button
+                      type="button"
+                      onClick={isBusy ? handleStop : handleRun}
+                      disabled={!isBusy && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
+                      className={`size-9 shrink-0 rounded-xl transition-all flex items-center justify-center ${
+                        isBusy
+                          ? 'bg-amber-500 hover:bg-amber-600 shadow-sm shadow-amber-500/25'
+                          : 'bg-foreground hover:bg-foreground/90 shadow-sm shadow-foreground/25'
+                      }`}
+                      title={isBusy ? '停止' : '发送'}
+                    >
+                      {isBusy ? <Square className="size-3 text-white fill-white" /> : <ArrowUp className="size-4 text-background" />}
+                    </button>
                   </div>
-                )}
-              </div>
-              <div className="flex items-center gap-1.5">
-                <input
-                  ref={uploadFileInputRef}
-                  type="file"
-                  className="hidden"
-                  multiple
-                  onChange={handleFileSelect}
-                />
-                <ContextUsageIndicator />
-                <button
-                  type="button"
-                  onClick={() => uploadFileInputRef.current?.click()}
-                  className="size-9 rounded-lg border border-border/60 bg-transparent hover:bg-muted transition-all flex items-center justify-center"
-                  title="上传文件"
-                >
-                  <Plus className="size-4 text-foreground/40" />
-                </button>
-                {isRunning && (
-                  <button
-                    type="button"
-                    onClick={handleStop}
-                    className="size-9 rounded-lg border border-red-500/20 bg-red-500/10 hover:bg-red-500/20 transition-all flex items-center justify-center"
-                    title="停止"
-                  >
-                    <Square className="size-3.5 text-red-500" fill="currentColor" />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={handleRun}
-                  disabled={!input.trim()}
-                  className={`size-9 rounded-lg border transition-all flex items-center justify-center ${
-                    isRunning
-                      ? 'border-amber-500/20 bg-amber-500/10 hover:bg-amber-500/20'
-                      : 'border-emerald-500/20 bg-emerald-500/10 hover:bg-emerald-500/20'
-                  } ${!input.trim() ? 'opacity-30 pointer-events-none' : ''}`}
-                  title={isRunning ? '发送新消息（中断当前）' : '发送'}
-                >
-                  {isRunning ? <Loader2 className="size-4 text-amber-500 animate-spin" /> : <Send className="size-4 text-emerald-500" />}
-                </button>
-              </div>
+                </>
+              )}
             </div>
-          </div>
-  )
+      </div>
+  )}
+
+  const renderEmptyBreadcrumb = () => {
+    const projectName = selectedWorkDir ? (selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir) : '选择项目'
+    return (
+      <div className="flex items-center justify-start gap-1 mb-3">
+        <button
+          type="button"
+          onClick={async () => {
+            if (!isElectron()) {
+              storeActions.showToast({ type: 'info', title: '请选择项目目录' })
+              return
+            }
+            const dir = await electronDialog.openDirectory()
+            if (dir) selectWorkDir(dir)
+          }}
+          className="flex items-center gap-1.5 text-[12px] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
+          title={selectedWorkDir || '选择项目目录'}
+        >
+          <Folder className="size-3.5 text-amber-500" />
+          <span className="max-w-[160px] truncate">{projectName}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => storeActions.showToast({ type: 'info', title: '当前为本地模式' })}
+          className="flex items-center gap-1.5 text-[12px] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
+        >
+          <Monitor className="size-3.5 text-blue-500" />
+          <span>本地</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => storeActions.showToast({ type: 'info', title: `当前分支：${currentBranch}` })}
+          className="flex items-center gap-1.5 text-[12px] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
+        >
+          <GitBranch className="size-3.5 text-emerald-500" />
+          <span>{currentBranch}</span>
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="h-full flex flex-col bg-transparent text-foreground">
       {/* Header bar - removed */}
 
       {/* Flow area */}
-      <ScrollArea ref={scrollRef} className="flex-1 min-h-0" hideScrollbar={chatMessages.length === 0 && !hasSteps}>
+      <ScrollArea ref={scrollRef} className="flex-1 min-h-0" hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
         <div className="max-w-[700px] mx-auto py-4 pb-4 min-h-full">
-          {chatMessages.length === 0 && !hasSteps ? (
-            <div className="flex flex-col items-center justify-start min-h-[calc(100vh-200px)] w-full" style={{ paddingTop: 'calc(30vh - 250px)' }}>
-              <EmptyState />
-              <div className="mt-0 w-full max-w-[700px] mx-auto">
-                {renderChatInput()}
+          {sessionMessages.length === 0 && !hasSteps ? (
+            <div className="flex flex-col items-center w-full pt-[25vh]">
+              <div className="w-full max-w-[700px] mx-auto">
+                <img src="/kirin.png" alt="Helix" className="w-20 h-20 mb-4 opacity-80 mx-auto" />
+                <p className="text-lg text-foreground/50 text-center mb-8 mt-2">我们需要做点什么？</p>
+                {renderEmptyBreadcrumb()}
+                {renderChatInput({ isEmpty: true })}
               </div>
             </div>
           ) : (
             <div className="space-y-4">
-              {/* Chat messages (input/output)  – completed messages only */}
-              {chatMessages.map(msg => (
+              {/* Chat messages (input/output)  — completed messages only */}
+              {sessionMessages.map(msg => (
                 <div key={msg.id} className={`flex w-full step-enter ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role === 'assistant' ? (
-                    <div className="group w-full max-w-[80%] ml-[30px]">
+                    <div className="group w-full">
                       <div className="flex-1 min-w-0">
-                        <div className="bg-card border border-border/50 rounded-xl px-4 py-3 text-foreground shadow-sm">
-                          <div className="prose prose-sm prose-invert prose-code:before:content-none prose-code:after:content-none max-w-none">
-                            <ReactMarkdown components={markdownComponents}>
-                              {msg.content}
+                        {/* Inline thinking block (collapsible) — skip if blocks already contain thinking (prevents duplicate) */}
+                        {msg.reasoning && msg.reasoning.trim().length > 0 && !(msg.blocks && msg.blocks.some(b => b.type === 'thinking')) && (
+                          <details className="mb-2 group/details">
+                            <summary className="text-sm font-medium text-foreground/40 cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none">
+                              <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                              <span>思考</span>
+                            </summary>
+                            <div className="mt-1 pl-4 text-xs text-foreground/50 whitespace-pre-wrap break-all leading-relaxed">
+                              {stripEmoji(normalizeAcpContent(msg.reasoning))}
+                            </div>
+                          </details>
+                        )}
+                        {/* Interleaved blocks: thinking, text, and tool groups in chronological order */}
+                        {(msg.blocks && msg.blocks.length > 0) ? (
+                          <div className="helix-md" style={{ fontSize: transcriptFontSize }}>
+                            {msg.blocks.map((block, idx) =>
+                              block.type === 'thinking' ? (
+                                <details key={idx} className="mb-2 group/details">
+                                  <summary className="text-sm font-medium text-foreground/40 cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none">
+                                    <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                                    <span>思考</span>
+                                  </summary>
+                                  <div className="mt-1 pl-4 text-xs text-foreground/50 whitespace-pre-wrap break-all leading-relaxed">
+                                    {stripEmoji(normalizeAcpContent(block.content))}
+                                  </div>
+                                </details>
+                              ) : block.type === 'text' ? (
+                                <ReactMarkdown
+                                  key={idx}
+                                  components={markdownComponents}
+                                  remarkPlugins={markdownPlugins.remarkPlugins}
+                                >
+                                  {safeMarkdownSource(stripEmoji(normalizeAcpContent(block.content)))}
+                                </ReactMarkdown>
+                              ) : (
+                                <InlineToolGroup key={idx} steps={block.steps} isRunning={false} />
+                              )
+                            )}
+                          </div>
+                        ) : (
+                          <div className="helix-md" style={{ fontSize: transcriptFontSize }}>
+                            <ReactMarkdown
+                              components={markdownComponents}
+                              remarkPlugins={markdownPlugins.remarkPlugins}
+                            >
+                              {safeMarkdownSource(stripEmoji(normalizeAcpContent(msg.content)))}
                             </ReactMarkdown>
                           </div>
-                        </div>
+                        )}
                         {/* Copy button */}
                         <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1">
-                          <button
-                            onClick={() => {
-                              navigator.clipboard.writeText(msg.content)
-                              showToast({ type: 'success', title: '已复制' })
-                            }}
-                            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
-                            title="复制"
-                          >
-                            <Copy className="size-3.5" />
-                          </button>
+                          <CopyButton text={stripEmoji(normalizeAcpContent(msg.content))} />
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="group max-w-[80%] mr-[30px]">
-                      <div className="px-4 py-2.5 rounded-2xl bg-primary text-primary-foreground rounded-br-md shadow-sm">
+                    <div className="group max-w-[80%]">
+                      <div className="px-4 py-2.5 rounded-2xl bg-muted text-foreground shadow-sm">
                         {msg.images && msg.images.length > 0 && (
                           <div className="flex flex-wrap gap-2 mb-2">
                             {msg.images.map(img => (
@@ -2011,85 +2671,123 @@ export function AgentFlowPanel() {
                             ))}
                           </div>
                         )}
-                        {msg.content && (
-                          <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
+                        {msg.files && msg.files.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mb-2">
+                            {msg.files.map(f => (
+                              <div
+                                key={f.id}
+                                className="flex items-center gap-2 max-w-[240px] px-2.5 py-1.5 rounded-lg border border-border/50 bg-background/60"
+                              >
+                                {f.kind === 'image' && f.dataUrl ? (
+                                  <img src={f.dataUrl} alt={f.name} className="size-8 rounded object-cover shrink-0" />
+                                ) : (
+                                  <FileText className="size-4 text-foreground/50 shrink-0" />
+                                )}
+                                <div className="min-w-0">
+                                  <p className="text-xs font-medium text-foreground truncate">{f.name}</p>
+                                  <p className="text-[10px] text-muted-foreground/70">{formatBytes(f.size)}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {normalizeAcpContent(msg.content) && (
+                          <div className="whitespace-pre-wrap leading-normal" style={{ fontSize: transcriptFontSize }}>{normalizeAcpContent(msg.content)}</div>
                         )}
                       </div>
                       {/* Copy button below message */}
                       <div className="flex justify-end opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(msg.content || '')
-                            showToast({ type: 'success', title: '已复制' })
-                          }}
-                          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
-                          title="复制"
-                        >
-                          <Copy className="size-3.5" />
-                        </button>
+                        <CopyButton text={normalizeAcpContent(msg.content)} />
                       </div>
                     </div>
                   )}
                 </div>
               ))}
 
-              {/* Streaming assistant message – placed AFTER all completed messages */}
-              {(isRunning || responseBlocks.length > 0) && (
+              {/* Streaming assistant message — placed AFTER all completed messages */}
+              {(isRunning || displayResponseBlocks.length > 0) && (
                 <div className="flex w-full justify-start transition-all duration-300 opacity-100">
-                  <div className={`w-full max-w-[80%] ml-[30px] bg-card rounded-xl px-4 py-3 text-foreground transition-all duration-300 shadow-sm ${
-                    isRunning
-                      ? 'border border-primary/30 animate-pulse-glow'
-                      : 'border border-border/50'
-                  }`}>
-                    {/* Running indicator */}
-                    {isRunning && (
-                      <div className="flex items-center gap-2 mb-2 text-xs text-primary/60">
-                        模型正在执行
+                  <div className="w-full px-1 py-1 text-foreground transition-all duration-300">
+                    {/* Loading placeholder when the model is running but has not emitted any content yet */}
+                    {isRunning && displayResponseBlocks.length === 0 && !displayStreamThinking && (
+                      <div className="flex items-center my-1 text-sm text-foreground/50">
+                        <span className="thinking-breath">正在<span className="thinking-breath">思考</span></span>
                       </div>
                     )}
 
-                    {/* Interleaved response blocks (text -> tool groups) */}
-                    {responseBlocks.length > 0 ? (
-                      <div className="prose prose-sm prose-invert prose-code:before:content-none prose-code:after:content-none max-w-none">
-                        {responseBlocks.map((block, idx) =>
-                          block.type === 'text' ? (
+                    {/* Inline thinking block (collapsible) — kept for completed messages */}
+
+                    {/* Interleaved response blocks: thinking, text, and tool groups in chronological order */}
+                    {displayResponseBlocks.length > 0 && (
+                      <div className="helix-md" style={{ fontSize: transcriptFontSize }}>
+                        {displayResponseBlocks.filter(b => !isThinkingEnded || b.type !== 'thinking').map((block, idx) =>
+                          block.type === 'thinking' ? (
+                            <details key={idx} className="mb-2 group/details">
+                              <summary className="text-sm font-medium text-foreground/40 cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none">
+                                <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                                <span className={isThinkingEnded ? '' : 'thinking-breath'}>思考</span>
+                              </summary>
+                              <div className="mt-1 pl-4 text-xs text-foreground/50 whitespace-pre-wrap break-all leading-relaxed">
+                                {stripEmoji(normalizeAcpContent(block.content))}
+                              </div>
+                            </details>
+                          ) : block.type === 'text' ? (
                             <div key={idx}>
-                              <ReactMarkdown components={markdownComponents}>
-                                {block.content}
+                              <ReactMarkdown
+                                components={markdownComponents}
+                                remarkPlugins={markdownPlugins.remarkPlugins}
+                              >
+                                {safeMarkdownSource(stripEmoji(normalizeAcpContent(block.content)))}
                               </ReactMarkdown>
                             </div>
                           ) : (
-                            <ToolGroupBlock key={idx} steps={block.steps} isRunning={isRunning} />
+                            <InlineToolGroup key={idx} steps={block.steps} isRunning={isRunning} />
                           )
                         )}
                       </div>
-                    ) : steps.length > 0 && isRunning ? (
-                      /* No text yet, only tool calls – show dynamic status while running */
-                      steps.filter(s => s.type === 'tool_call').length > 0 && (
-                        <div className="flex items-center gap-2 text-sm text-muted-foreground animate-pulse">
-                          <Loader2 className="size-3.5 animate-spin" />
-                          <span>正在读取 <span className="font-mono text-foreground/60">{steps.filter(s => s.type === 'tool_call').length}</span> 个文件<span className="inline-block animate-bounce" style={{ animationDelay: '0ms' }}>.</span><span className="inline-block animate-bounce" style={{ animationDelay: '150ms' }}>.</span><span className="inline-block animate-bounce" style={{ animationDelay: '300ms' }}>.</span></span>
-                        </div>
-                      )
-                    ) : null}
+                    )}
+
+                    {/* Live thinking duration */}
+                    {isRunning && (
+                      <div className="text-xs text-foreground/30 tabular-nums mt-1 ml-3">
+                        {streamThinkingDuration > 0 ? formatDuration(streamThinkingDuration) : '0s'}{streamThoughtTokens > 0 ? ` · ${streamThoughtTokens} tokens` : ''}
+                      </div>
+                    )}
+
                   </div>
                 </div>
               )}
 
-              {/* End of flow area – no summary */}
+              {/* End of flow area — no summary */}
 
-              {/* End of flow area – no summary */}
+              {/* End of flow area — no summary */}
             </div>
           )}
         </div>
       </ScrollArea>
 
       {/* API key warning */}
+
+      {/* Connection notice */}
+      {connectionNotice && (
+        <div className="mx-4 mb-2 px-3 py-2 rounded-xl text-xs flex items-center gap-2 border cursor-pointer hover:opacity-80 transition-opacity" style={{
+          backgroundColor: connectionNotice.phase === 'recovered' ? 'rgb(34 197 94 / 0.1)' : 'rgb(234 179 8 / 0.1)',
+          borderColor: connectionNotice.phase === 'recovered' ? 'rgb(34 197 94 / 0.2)' : 'rgb(234 179 8 / 0.2)',
+          color: connectionNotice.phase === 'recovered' ? 'rgb(34 197 94)' : 'rgb(234 179 8)',
+        }} onClick={() => useHelixStore.getState().setConnectionNotice(null)}>
+          {connectionNotice.phase !== 'recovered' && (
+            <div className="animate-spin size-3 border-2 border-current border-t-transparent rounded-full shrink-0" />
+          )}
+          <span className="flex-1">{connectionNotice.message}</span>
+          <span className="text-[10px] opacity-60">点击关闭</span>
+        </div>
+      )}
+
       {!hasApiKey && (
         <div className="mx-4 mb-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-500 flex items-center justify-between">
           <span>尚未配置 API Key</span>
           <button
-            onClick={toggleSettings}
+            onClick={() => storeActions.toggleSettings('api')}
             className="ml-2 px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 rounded text-[10px] font-medium transition-colors"
           >
             打开设置
@@ -2125,11 +2823,11 @@ export function AgentFlowPanel() {
       )}
 
       {/* Bottom input */}
-      {chatMessages.length > 0 && (
+      {sessionMessages.length > 0 && (
         <div className="bg-transparent shrink-0 mb-2 mt-2 w-full">
           <div className="w-full max-w-[700px] mx-auto">
             {renderChatInput()}
-            <p className="text-xs text-foreground/30 text-center mt-2 select-none">内容由 AI 生成，请核实重要信息</p>
+            <p className="text-xs text-foreground/50 text-center mt-3 mb-1.5 select-none">AI不是万能的，需要有自己的判断</p>
           </div>
         </div>
       )}

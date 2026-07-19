@@ -1,6 +1,4 @@
 import type { NextConfig } from "next";
-
-// Only allow localhost or 127.0.0.1 destinations for the rewrite
 function validateRewriteUrl(url: string): string {
   const allowed = ["http://localhost", "http://127.0.0.1"]
   for (const prefix of allowed) {

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Save,
   FolderOpen,
@@ -14,6 +14,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { useHelixStore } from '@/stores/helix-store'
+import { useHermesStore } from '@/stores/hermes-store'
 import { persistence, type PersistedSession } from '@/lib/persist'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -25,6 +26,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<PersistedSession | null>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const loadSessions = useCallback(async () => {
     setLoading(true)
@@ -149,6 +151,45 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
     e.target.value = ''
   }
 
+  const handleOpenSession = useCallback(async (session: PersistedSession) => {
+    try {
+      const state = useHelixStore.getState()
+      await state.flushSessionPersist()
+      state.clearExecutionFlow()
+      useHermesStore.getState().setHermesSessionId(null)
+      const all = await persistence.loadSessions()
+      const fresh = all.find(s => s.id === session.id) || session
+      const msgs = fresh.chatMessages.map(msg => ({
+        id: msg.id,
+        role: msg.role as 'user' | 'assistant' | 'system',
+        content: msg.content,
+        images: msg.images,
+        timestamp: msg.timestamp,
+        reasoning: msg.reasoning,
+        steps: msg.steps,
+      }))
+      useHelixStore.setState({
+        chatMessages: msgs,
+        selectedWorkDir: fresh.workDir || null,
+        activeSessionWorkDir: fresh.workDir ?? null,
+      })
+      useHelixStore.getState().setCurrentSessionId(session.id)
+      useHelixStore.getState().pushNavigation({ type: 'chat', sessionId: session.id })
+      await useHelixStore.getState().persistToStorage()
+      onClose()
+    } catch (e) {
+      console.error('Failed to open session:', e)
+      useHelixStore.getState().showToast({ type: 'error', title: '加载失败' })
+    }
+  }, [onClose])
+
+  useEffect(() => {
+    if (sessions.length > 0) {
+      const t = setTimeout(() => searchInputRef.current?.focus(), 50)
+      return () => clearTimeout(t)
+    }
+  }, [sessions.length])
+
   const filteredSessions = sessions.filter(s => {
     if (!searchQuery.trim()) return true
     const q = searchQuery.toLowerCase()
@@ -198,10 +239,11 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
               <input
+                ref={searchInputRef}
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="搜索会话..."
+                placeholder="搜索会话（按名称或内容）..."
                 className="w-full pl-8 pr-3 py-1.5 text-xs bg-muted/50 border border-border/50 rounded-lg focus:outline-none focus:ring-1 focus:ring-ring"
               />
             </div>
@@ -231,7 +273,8 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
               {filteredSessions.map(session => (
                 <div
                   key={session.id}
-                  className="group flex items-center gap-3 px-3 py-2.5 hover:bg-accent/30 rounded-xl transition-colors"
+                  onClick={() => handleOpenSession(session)}
+                  className="group flex items-center gap-3 px-3 py-2.5 hover:bg-accent/30 rounded-xl transition-colors cursor-pointer"
                 >
                   <div className="w-8 h-8 rounded-xl bg-amber-500/10 flex items-center justify-center shrink-0">
                     <Bot className="size-4 text-amber-400" />
@@ -249,7 +292,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                     variant="ghost"
                     size="icon"
                     className="size-6 opacity-0 group-hover:opacity-100 transition-opacity"
-                    onClick={() => handleExportSession(session)}
+                    onClick={(e) => { e.stopPropagation(); handleExportSession(session) }}
                     title="导出"
                   >
                     <Download className="size-3 text-muted-foreground" />
@@ -258,7 +301,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                     variant="ghost"
                     size="icon"
                     className="size-6 opacity-0 group-hover:opacity-100 transition-opacity"
-                    onClick={() => setDeleteTarget(session)}
+                    onClick={(e) => { e.stopPropagation(); setDeleteTarget(session) }}
                     title="删除"
                   >
                     <Trash2 className="size-3 text-destructive/60" />

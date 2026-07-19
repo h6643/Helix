@@ -73,8 +73,10 @@ helix.json
 .helix-snapshots/
 .env*
 
-# Mimocode AI tool
+AI tool
 .mimocode/
+.claude/
+
 
 # Backup files
 original.txt
@@ -86,3 +88,5 @@ release/
 skills/
 
 AGENTS.md
+
+.playwright-mcp/

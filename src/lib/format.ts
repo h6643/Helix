@@ -14,14 +14,21 @@ export function timeAgo(ts: number): string {
 }
 
 /**
- * Format timestamp to short relative time string
+ * Format timestamp to compact Chinese relative time (matches WorkBuddy sidebar)
  */
-export function timeAgoShort(ts: number): string {
+export function timeAgoCompact(ts: number): string {
   const diff = Date.now() - ts
+  const minutes = Math.floor(diff / 60000)
+  const hours = Math.floor(diff / 3600000)
+  const days = Math.floor(diff / 86400000)
+  const weeks = Math.floor(days / 7)
+  const months = Math.floor(days / 30)
   if (diff < 60000) return '刚刚'
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}s`
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}m`
-  return `${Math.floor(diff / 86400000)}h`
+  if (diff < 3600000) return `${minutes}分`
+  if (diff < 86400000) return `${hours}小时`
+  if (days < 7) return `${days}天`
+  if (months < 1) return `${weeks}周`
+  return `${months}月`
 }
 
 /**
@@ -32,41 +39,10 @@ export function generateId(): string {
 }
 
 /**
- * Get language from file name
+ * Format token count for display (e.g. 1500 -> "1.5K", 2000000 -> "2.0M")
  */
-export function getLanguageFromFileName(name: string): string {
-  const ext = name.split('.').pop()?.toLowerCase() || ''
-  const langMap: Record<string, string> = {
-    ts: 'typescript',
-    tsx: 'typescript',
-    js: 'javascript',
-    jsx: 'javascript',
-    py: 'python',
-    java: 'java',
-    cpp: 'cpp',
-    c: 'c',
-    cs: 'csharp',
-    go: 'go',
-    rs: 'rust',
-    rb: 'ruby',
-    php: 'php',
-    swift: 'swift',
-    kt: 'kotlin',
-    json: 'json',
-    yaml: 'yaml',
-    yml: 'yaml',
-    md: 'markdown',
-    css: 'css',
-    scss: 'scss',
-    html: 'html',
-    xml: 'xml',
-    sql: 'sql',
-    sh: 'bash',
-    bash: 'bash',
-    zsh: 'bash',
-    ps1: 'powershell',
-    bat: 'batch',
-    cmd: 'batch',
-  }
-  return langMap[ext] || ext || 'text'
+export function formatTokens(n: number): string {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K'
+  return n.toLocaleString()
 }

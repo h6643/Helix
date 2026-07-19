@@ -18,6 +18,12 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { useHelixStore, type FileNode } from '@/stores/helix-store'
+import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
+
+function getShortcutLabel(id: string, customShortcuts: Record<string, { keys: string[] }>): string {
+  const entry = customShortcuts[id] || DEFAULT_SHORTCUTS[id]
+  return entry?.keys?.join('+') || ''
+}
 
 interface CommandItem {
   id: string
@@ -47,6 +53,7 @@ export function CommandPalette() {
     setEditorTheme,
     getAllFiles,
     getFilePath,
+    customShortcuts,
   } = useHelixStore()
 
   const [query, setQuery] = useState('')
@@ -125,7 +132,7 @@ export function CommandPalette() {
         icon: <Terminal className="size-4 text-amber-400" />,
         action: toggleTerminal,
         category: 'action',
-        shortcut: 'Ctrl+`',
+        shortcut: getShortcutLabel('toggle-terminal', customShortcuts),
       },
       {
         id: 'action-clear-chat',
@@ -188,14 +195,14 @@ export function CommandPalette() {
         description: '查看所有可用的快捷键',
         icon: <Keyboard className="size-4 text-cyan-400" />,
         action: () => {
-          showToast({ type: 'info', title: '快捷键', description: 'Ctrl+K 命令面板 | Ctrl+P 搜索 | Ctrl+S 保存 | Ctrl+W 关闭 | Ctrl+` 终端', duration: 5000 })
+          showToast({ type: 'info', title: '快捷键', description: 'Ctrl+Shift+/ 快捷键帮助 · Ctrl+, 设置 · Ctrl+B 侧边栏 · Ctrl+J 终端 · Ctrl+F 查找 · Ctrl+[ ] 后退/前进 · F11 全屏', duration: 5000 })
         },
         category: 'action',
       },
     ]
 
     return [...fileItems, ...actionItems]
-  }, [allFiles, openFile, toggleTerminal, clearChat, createFile, files, showToast, markTabSaved, activeTabId, openTabs, editorTheme, setEditorTheme, getFilePath])
+  }, [allFiles, openFile, toggleTerminal, clearChat, createFile, files, showToast, markTabSaved, activeTabId, openTabs, editorTheme, setEditorTheme, getFilePath, customShortcuts])
 
   // Fuzzy match
   const filtered = useMemo(() => {

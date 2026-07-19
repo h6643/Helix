@@ -1,14 +1,17 @@
 {
   "appId": "com.helix.desktop",
   "productName": "Helix",
+  "asar": true,
+  "asarUnpack": [
+    "node_modules/node-pty/**",
+    "node_modules/@xterm/**"
+  ],
+  "npmRebuild": true,
   "directories": {
-    "output": "dist-electron"
+    "output": "release"
   },
   "files": [
-    "electron/**/*",
-    ".next/standalone/**/*",
-    ".next/static/**/*",
-    "public/**/*"
+    "electron/**/*"
   ],
   "extraResources": [
     {
@@ -17,35 +20,31 @@
     },
     {
       "from": ".next/static",
-      "to": ".next/static"
+      "to": ".next/standalone/.next/static"
+    },
+    {
+      "from": "public",
+      "to": ".next/standalone/public"
     }
   ],
   "win": {
+    "icon": "public/Helix.ico",
     "target": [
-      {
-        "target": "nsis",
-        "arch": ["x64"]
-      }
-    ],
-    "icon": "public/Helix.ico"
+      "nsis",
+      "portable"
+    ]
   },
   "mac": {
+    "icon": "public/Helix.ico",
     "target": [
-      {
-        "target": "dmg",
-        "arch": ["x64", "arm64"]
-      }
-    ],
-    "icon": "public/favicon.icns"
+      "dmg"
+    ]
   },
   "linux": {
+    "icon": "public/Helix.ico",
     "target": [
-      {
-        "target": "AppImage",
-        "arch": ["x64"]
-      }
-    ],
-    "icon": "public/favicon.png"
+      "AppImage"
+    ]
   },
   "nsis": {
     "oneClick": false,

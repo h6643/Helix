@@ -3,32 +3,35 @@
   "version": "0.2.0",
   "private": true,
   "main": "electron/main.js",
-  "bin": {
-    "helix": "./src/cli/index.mjs"
-  },
   "scripts": {
-    "dev": "next dev -p 3000",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
-    "lint": "echo 'No linter configured'",
-    "cli": "node src/cli/index.mjs",
+    "dev": "next dev --webpack -p 3000",
+    "build": "next build --webpack && robocopy .next\\static .next\\standalone\\.next\\static /E /NFL /NDL && robocopy public .next\\standalone\\public /E /NFL /NDL",
+    "lint": "next lint",
+    "lint:fix": "next lint --fix",
     "electron": "electron .",
-    "electron:dev": "concurrently \"next dev -p 3000\" \"wait-on http://localhost:3000 && electron .\"",
-    "electron:build": "next build && electron-builder",
-    "electron:preview": "next build && electron-builder --dir"
+    "electron:dev": "concurrently \"next dev --webpack -p 3000\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron:build": "next build --webpack && electron-builder",
+    "electron:build:fast": "next build --webpack && set CSC_IDENTITY_AUTO_DISCOVERY=false && electron-builder --win --x64",
+    "electron:preview": "next build --webpack && electron-builder --dir"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.15",
     "@radix-ui/react-scroll-area": "^1.2.9",
     "@radix-ui/react-slot": "^1.2.3",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "highlight.js": "^11.11.1",
     "lucide-react": "^0.525.0",
     "next": "^16.1.1",
-    "playwright": "^1.61.1",
+    "node-pty": "^1.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.3.1",
     "tailwindcss-animate": "^1.0.7",
     "zod": "^4.0.2",
@@ -38,9 +41,14 @@
     "@tailwindcss/postcss": "^4",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@typescript-eslint/eslint-plugin": "^8.64.0",
+    "@typescript-eslint/parser": "^8.64.0",
     "concurrently": "^10.0.3",
     "electron": "^43.0.0",
     "electron-builder": "^26.15.3",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.2.10",
+    "eslint-plugin-import": "^2.32.0",
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5",
@@ -49,13 +57,30 @@
   "build": {
     "appId": "com.helix.desktop",
     "productName": "Helix",
+    "forceCodeSigning": false,
     "directories": {
       "output": "release"
     },
+    "files": [
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": ".next/standalone"
+      },
+      {
+        "from": ".next/static",
+        "to": ".next/standalone/.next/static"
+      },
+      {
+        "from": "public",
+        "to": ".next/standalone/public"
+      }
+    ],
     "win": {
       "icon": "public/Helix.ico",
       "target": [
-        "nsis",
         "portable"
       ]
     },
