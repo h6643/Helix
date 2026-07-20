@@ -57,6 +57,7 @@ import { isElectron, electronDialog, electronHermes, electronGit } from '@/lib/e
 import ReactMarkdown from 'react-markdown'
 import { markdownComponents, markdownPlugins } from './markdown-components'
 import type { HermesTodo } from '@/stores/helix-types'
+import { TabBar } from './tab-bar'
 
 // ==== Types ============================================================================================
 
@@ -417,6 +418,8 @@ export function AgentFlowPanel() {
   const setInputSynced = useCallback((value: string) => {
     setInput(value)
     inputValueRef.current = value
+    const sid = useHelixStore.getState().currentSessionId
+    if (sid) useHelixStore.getState().setTabInput(sid, value)
   }, [])
 
   // Reset input height to default
@@ -498,6 +501,9 @@ export function AgentFlowPanel() {
   const skills = useHelixStore(s => s.skills)
   const availableCommands = useHelixStore(s => s.availableCommands)
   const agentExecutionSteps = useHelixStore(s => s.agentExecutionSteps)
+const tabInputs = useHelixStore(s => s.tabInputs)
+const setTabInput = useHelixStore(s => s.setTabInput)
+const clearTabInput = useHelixStore(s => s.clearTabInput)
   const chatMessages = useHelixStore(s => s.chatMessages)
   const currentSessionId = useHelixStore(s => s.currentSessionId)
   const sessionMessages = useMemo(() => {
@@ -1108,6 +1114,46 @@ export function AgentFlowPanel() {
 
 
   // Clear flow
+
+  // Tab management
+  const handleNewTab = useCallback(() => {
+    const state = useHelixStore.getState()
+    // Save current input before switching
+    if (state.currentSessionId) {
+      state.setTabInput(state.currentSessionId, inputValueRef.current)
+    }
+    state.clearChat()
+    state.setCurrentSessionId(null)
+  }, [])
+
+  const handleCloseTab = useCallback((sessionId: string) => {
+    const state = useHelixStore.getState()
+    const history = state.sessionHistory
+    if (history.length <= 1 && sessionId === state.currentSessionId) return // Don't close last tab
+    state.clearTabInput(sessionId)
+    state.clearStreamingDraft?.(sessionId)
+    // Remove from history
+    const newHistory = history.filter(id => id !== sessionId)
+    // If closing active tab, switch to another one
+    if (sessionId === state.currentSessionId) {
+      const next = newHistory[newHistory.length - 1] || null
+      state.setCurrentSessionId(next)
+    }
+    useHelixStore.setState({ sessionHistory: newHistory })
+  }, [])
+
+  const handleSwitchTab = useCallback((sessionId: string) => {
+    const state = useHelixStore.getState()
+    // Save current input
+    if (state.currentSessionId) {
+      state.setTabInput(state.currentSessionId, inputValueRef.current)
+    }
+    // Restore input for target session
+    const savedInput = state.tabInputs[sessionId] || ''
+    setInputSynced(savedInput)
+    state.setCurrentSessionId(sessionId)
+  }, [setInputSynced])
+
   const handleClear = useCallback(() => {
     setSteps([])
     storeActions.clearSelectedFiles()
@@ -2595,6 +2641,19 @@ export function AgentFlowPanel() {
     return () => window.removeEventListener('helix:approve-request', handler)
   }, [approvalQueue, handleApproval])
 
+  // Restore per-tab input when switching sessions
+  useEffect(() => {
+    const sid = useHelixStore.getState().currentSessionId
+    if (sid) {
+      const saved = useHelixStore.getState().tabInputs[sid]
+      if (saved !== undefined && saved !== inputValueRef.current) {
+        setInputSynced(saved)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSessionId])
+
+
   // Stats
   const hasSteps = steps.length > 0
 
@@ -3048,6 +3107,13 @@ export function AgentFlowPanel() {
       {/* Header bar - removed */}
 
       {/* Flow area */}
+      <div className="flex items-center justify-between px-4 pt-2 pb-0 shrink-0">
+        <TabBar
+          onNewTab={handleNewTab}
+          onCloseTab={handleCloseTab}
+          onSwitchTab={handleSwitchTab}
+        />
+      </div>
       <ScrollArea ref={scrollRef} className="flex-1 min-h-0" hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
         <div className="max-w-[700px] mx-auto py-4 pb-4 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (

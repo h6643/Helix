@@ -1244,8 +1244,10 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
               /* History list view */
               <div className="max-w-2xl space-y-6">
                 {apiHistory.length > 0 ? (
-                  <div className="space-y-1.5 max-h-60 overflow-y-auto">
-                    {apiHistory.map((h, i) => (
+                  <div className="space-y-1.5">
+                    {apiHistory.map((h, i) => {
+                      const isActive = apiConfig.model === h.model
+                      return (
                       <div key={i} onClick={async () => {
                           setLocalConfig({ ...h })
                           setApiConfig({ ...h })
@@ -1260,9 +1262,12 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                           }
                           showToast({ type: 'success', title: `已切换到 ${h.model}` })
                         }}
-                        className="flex items-center justify-between px-3.5 py-2.5 rounded-lg border border-border/50 bg-card/50 hover:border-primary/40 cursor-pointer transition-colors group">
+                        className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group ${isActive ? 'bg-primary/5' : 'bg-card/50 hover:bg-card'}`}>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-foreground truncate">{h.model}</p>
+                          <div className="flex items-center gap-2">
+                            {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
+                            <p className={`text-sm truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
+                          </div>
                           <p className="text-xs text-muted-foreground/70 truncate mt-0.5">{h.baseUrl}</p>
                         </div>
                         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
@@ -1276,7 +1281,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                           </button>
                         </div>
                       </div>
-                    ))}
+                    )})
                   </div>
                 ) : (
                   <div className="text-center py-12 text-sm text-muted-foreground/50">
@@ -1834,7 +1839,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   <ChevronLeft className="size-4" />
                   返回
                 </button>
-                <div className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-lg bg-transparent border border-transparent transition-all duration-200 focus-within:bg-muted/25 focus-within:border-primary/20 hover:bg-muted/15">
+                <div className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-lg border border-border/50 bg-transparent">
                   <Search className="size-3.5 text-muted-foreground/25 shrink-0" />
                   <input ref={navSearchRef} value={navSearch} onChange={e => setNavSearch(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Escape') { setNavSearch(''); (e.target as HTMLInputElement).blur() } }}

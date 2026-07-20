@@ -93,6 +93,9 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsS
   isAgentRunning: boolean
   setIsAgentRunning: (v: boolean) => void
   streamingDrafts: Record<string, StreamingDraft>
+  tabInputs: Record<string, string>
+  setTabInput: (sessionId: string, text: string) => void
+  clearTabInput: (sessionId: string) => void
   setStreamingDraft: (sessionId: string, draft: Partial<StreamingDraft>) => void
   clearStreamingDraft: (sessionId: string) => void
   connectionNotice: ConnectionNotice | null
@@ -507,6 +510,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   isAgentRunning: false,
   setIsAgentRunning: (v) => set({ isAgentRunning: v }),
   streamingDrafts: {},
+  tabInputs: {} as Record<string, string>,
+  setTabInput: (sessionId: string, text: string) => set((state) => ({
+    tabInputs: { ...state.tabInputs, [sessionId]: text },
+  })),
+  clearTabInput: (sessionId: string) => set((state) => {
+    const { [sessionId]: _, ...rest } = state.tabInputs
+    return { tabInputs: rest }
+  }),
   connectionNotice: null,
   setConnectionNotice: (notice) => set({ connectionNotice: notice }),
   setStreamingDraft: (sessionId, draft) =>
