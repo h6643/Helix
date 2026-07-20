@@ -14,13 +14,10 @@ export function TabBar({ onNewTab, onCloseTab, onSwitchTab }: TabBarProps) {
   const streamingDrafts = useHelixStore(s => s.streamingDrafts)
   const chatMessages = useHelixStore(s => s.chatMessages)
 
-  // Collect unique session IDs from history + current
   const allSessions = React.useMemo(() => {
     const set = new Set<string>(sessionHistory)
     if (currentSessionId) set.add(currentSessionId)
-    // Get the first user message as tab title
     const sessions = Array.from(set).filter(Boolean)
-    // Sort: current first, then most recent first
     sessions.sort((a, b) => {
       if (a === currentSessionId) return -1
       if (b === currentSessionId) return 1
@@ -29,7 +26,8 @@ export function TabBar({ onNewTab, onCloseTab, onSwitchTab }: TabBarProps) {
     return sessions
   }, [sessionHistory, currentSessionId])
 
-  if (allSessions.length <= 1) return null
+  const hasSessions = allSessions.length > 0
+  if (!hasSessions) return null
 
   return (
     <div className="flex items-center gap-0.5 px-2 pt-1.5 pb-0 overflow-x-auto scrollbar-none border-b border-border/10">
@@ -37,7 +35,6 @@ export function TabBar({ onNewTab, onCloseTab, onSwitchTab }: TabBarProps) {
         const draft = streamingDrafts[sid]
         const isRunning = draft?.isAgentRunning
         const isActive = sid === currentSessionId
-        // Try to get a title from chat messages or use session id
         const firstMsg = chatMessages.find(m => m.sessionId === sid && m.role === 'user')
         const title = firstMsg?.content?.slice(0, 20) || sid.slice(-8)
 

@@ -1248,40 +1248,44 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                     {apiHistory.map((h, i) => {
                       const isActive = apiConfig.model === h.model
                       return (
-                      <div key={i} onClick={async () => {
-                          setLocalConfig({ ...h })
-                          setApiConfig({ ...h })
-                          await persistToStorage()
-                          if (isElectron()) {
-                            try {
-                              const cfg = { model: h.model, provider: h.provider && h.provider !== '__custom__' ? h.provider : 'custom', baseUrl: h.baseUrl, apiKey: h.apiKey }
-                              await window.electron.hermes.setConfig(cfg)
-                              await window.electron.profile.cacheConfig(cfg)
-                              useHermesStore.getState().setHermesSessionId(null)
-                            } catch {}
-                          }
-                          showToast({ type: 'success', title: `已切换到 ${h.model}` })
-                        }}
-                        className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group ${isActive ? 'bg-primary/5' : 'bg-card/50 hover:bg-card'}`}>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
-                            <p className={`text-sm truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
+                        <div
+                          key={i}
+                          onClick={async () => {
+                            setLocalConfig({ ...h })
+                            setApiConfig({ ...h })
+                            await persistToStorage()
+                            if (isElectron()) {
+                              try {
+                                const cfg = { model: h.model, provider: h.provider && h.provider !== '__custom__' ? h.provider : 'custom', baseUrl: h.baseUrl, apiKey: h.apiKey }
+                                await window.electron.hermes.setConfig(cfg)
+                                await window.electron.profile.cacheConfig(cfg)
+                                useHermesStore.getState().setHermesSessionId(null)
+                              } catch {}
+                            }
+                            showToast({ type: 'success', title: `已切换到 ${h.model}` })
+                          }}
+                          className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group ${isActive ? 'bg-primary/5' : 'bg-card/50 hover:bg-card'}`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
+                              <p className={`text-sm truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
+                            </div>
+                            <p className="text-xs text-muted-foreground/70 truncate mt-0.5">{h.baseUrl}</p>
                           </div>
-                          <p className="text-xs text-muted-foreground/70 truncate mt-0.5">{h.baseUrl}</p>
+                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+                            <button onClick={(e) => { e.stopPropagation(); setLocalConfig({ ...h }); setShowAddModelModal(true) }}
+                              className="ml-2 p-1 rounded text-muted-foreground/20 hover:text-foreground hover:bg-accent transition-all">
+                              <Pencil className="size-3.5" />
+                            </button>
+                            <button onClick={async (e) => { e.stopPropagation(); removeApiHistory(i); await persistToStorage() }}
+                              className="ml-1 p-1 rounded text-muted-foreground/20 hover:text-red-500 transition-all">
+                              <Trash2 className="size-3.5" />
+                            </button>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-                          <button onClick={(e) => { e.stopPropagation(); setLocalConfig({ ...h }); setShowAddModelModal(true) }}
-                            className="ml-2 p-1 rounded text-muted-foreground/20 hover:text-foreground hover:bg-accent transition-all">
-                            <Pencil className="size-3.5" />
-                          </button>
-                          <button onClick={async (e) => { e.stopPropagation(); removeApiHistory(i); await persistToStorage() }}
-                            className="ml-1 p-1 rounded text-muted-foreground/20 hover:text-red-500 transition-all">
-                            <Trash2 className="size-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    )})
+                      )
+                    })
                   </div>
                 ) : (
                   <div className="text-center py-12 text-sm text-muted-foreground/50">
