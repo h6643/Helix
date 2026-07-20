@@ -740,16 +740,46 @@ export function HelixLayout() {
               }}
             >
               <div ref={helpMenuRef} className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1">
-                <button
-                  className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
-                  onClick={() => {
-                    setHelpMenuOpen(false)
-                    storeActions.toggleSettings('help')
-                  }}
-                >
-                  <FileText className="size-4" />
-                  帮助页面
-                </button>
+                <div className="px-3 py-2 text-xs text-muted-foreground/60">
+                    版本 v0.2.0
+                  </div>
+                  <button
+                    className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
+                    onClick={async () => {
+                      setHelpMenuOpen(false)
+                      try {
+                        const res = await fetch('https://api.github.com/repos/NousResearch/hermes-agent/releases/latest', {
+                          signal: AbortSignal.timeout(8000),
+                        })
+                        if (!res.ok) {
+                          useHelixStore.getState().showToast({ type: 'error', title: '检查更新失败', description: '无法连接 GitHub' })
+                          return
+                        }
+                        const data = await res.json()
+                        const latest = (data.tag_name || data.name || '').replace(/^v/i, '')
+                        const current = '0.2.0'
+                        const curParts = current.split('.').map(Number)
+                        const latParts = latest.split('.').map(Number)
+                        let isNewer = false
+                        for (let i = 0; i < Math.max(curParts.length, latParts.length); i++) {
+                          const a = curParts[i] || 0
+                          const b = latParts[i] || 0
+                          if (b > a) { isNewer = true; break }
+                          if (b < a) break
+                        }
+                        if (isNewer) {
+                          useHelixStore.getState().showToast({ type: 'info', title: '有新版本可用', description: 'v' + latest + ' 已发布', duration: 8000, onClick: () => window.open('https://github.com/NousResearch/hermes-agent/releases/latest', '_blank') })
+                        } else {
+                          useHelixStore.getState().showToast({ type: 'success', title: '已是最新版本', description: 'v' + current })
+                        }
+                      } catch {
+                        useHelixStore.getState().showToast({ type: 'error', title: '检查更新失败', description: '网络异常' })
+                      }
+                    }}
+                  >
+                    <FileText className="size-4" />
+                    检查更新
+                  </button>
                 <div className="h-px bg-border/60 my-1" />
                 <button
                   className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
