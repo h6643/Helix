@@ -18,7 +18,7 @@ import {
   RotateCcw,
   MoreVertical,
   Pencil,
-  Star,
+
   AlertTriangle,
   PanelLeft,
 } from 'lucide-react'
@@ -293,7 +293,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   const [deleteTarget, setDeleteTarget] = useState<PersistedSession | null>(null)
   const [deleteProjectDir, setDeleteProjectDir] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
-  const [showFavorites, setShowFavorites] = useState(false)
+
   const [, setFavRefresh] = useState(0)
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   const [recentCollapsed, setRecentCollapsed] = useState(false)
@@ -753,49 +753,9 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             <svg className={`size-3 transition-transform ${recentCollapsed ? '' : 'rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m9 18 6-6-6-6"/></svg>
             <span>最近</span>
           </button>
-          <button
-            onClick={() => { setShowFavorites(!showFavorites); setFavRefresh(n => n + 1) }}
-            className={`p-0.5 rounded transition-colors ${showFavorites ? 'text-primary' : 'text-sidebar-foreground/25 hover:text-sidebar-foreground/60'}`}
-            title="收藏"
-          >
-            <Star className="size-3.5" />
-          </button>
         </div>
-        {!recentCollapsed && showFavorites && (
-          <div className="px-2 overflow-y-auto flex-1 min-h-0">
-            <div className="flex items-center justify-between px-2 py-1.5 mb-0.5">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-foreground/35">收藏</span>
-            </div>
-            {(() => {
-              try {
-                const favorites = JSON.parse(typeof localStorage !== "undefined" ? localStorage.getItem("helix-favorites") || "[]" : "[]")
-                if (!favorites || favorites.length === 0) {
-                  return (<div className="px-4 py-6 text-center text-[12px] text-sidebar-foreground/30">暂无收藏</div>)
-                }
-                return (
-                  <div className="space-y-1">
-                    {favorites.map((fav: { id: string; content: string; timestamp: number }, idx: number) => (
-                      <div key={fav.id || idx} className="group rounded-lg p-2.5 hover:bg-sidebar-accent/30 transition-colors">
-                        <p className="text-[12px] text-sidebar-foreground/60 leading-relaxed" style={{ display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{(fav.content || "").substring(0, 200)}</p>
-                        <div className="flex items-center justify-between mt-1.5">
-                          <span className="text-[10px] text-sidebar-foreground/25">{new Date(fav.timestamp).toLocaleDateString("zh-CN")}</span>
-                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button onClick={() => { if (navigator.clipboard) navigator.clipboard.writeText(fav.content) }} className="p-1 rounded text-sidebar-foreground/30 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors" title="复制"><svg className="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
-                            <button onClick={() => { const favs = JSON.parse(localStorage.getItem("helix-favorites") || "[]"); const updated = favs.filter((f: any) => f.id !== fav.id); localStorage.setItem("helix-favorites", JSON.stringify(updated)); setFavRefresh(n => n + 1) }} className="p-1 rounded text-sidebar-foreground/30 hover:text-destructive hover:bg-sidebar-accent/50 transition-colors" title="删除"><Trash2 className="size-3" /></button>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )
-              } catch {
-                return <div className="px-4 py-6 text-center text-[12px] text-sidebar-foreground/30">暂无收藏</div>
-              }
-            })()}
-          </div>
-        )}
         
-{!recentCollapsed && !showFavorites && (
+{!recentCollapsed && (
         <div className="px-2 overflow-y-auto min-h-0 [scrollbar-gutter:stable]">
           {loading ? (
             <div className="flex items-center justify-center py-6">

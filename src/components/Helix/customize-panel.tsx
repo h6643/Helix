@@ -249,7 +249,7 @@ function applyTheme(mode: 'light' | 'dark') {
 
 function useCurrentTheme(): 'light' | 'dark' {
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    if (typeof document === 'undefined') return 'dark'
+    if (typeof document === 'undefined') return 'light'
     return document.documentElement.classList.contains('dark') ? 'dark' : 'light'
   })
   useEffect(() => {

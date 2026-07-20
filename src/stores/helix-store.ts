@@ -497,7 +497,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
   // UI
   // Panel state — in slices/panel-slice.ts
-  editorTheme: 'vs-dark' as const,
+  editorTheme: 'light' as const,
   fontFamily: "'Geist Mono', 'Fira Code', 'Consolas', monospace" as const,
   fontSize: 14 as const,
   interfaceFont: 'var(--font-geist-sans)' as const,

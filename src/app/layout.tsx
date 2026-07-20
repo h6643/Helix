@@ -31,7 +31,7 @@ export default function RootLayout({
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem('helix-theme')||'dark';document.documentElement.classList.toggle('dark',t==='dark')}catch(e){}})()`,
+            __html: `(function(){try{var t=localStorage.getItem('helix-theme')||'light';document.documentElement.classList.toggle('dark',t==='dark')}catch(e){}})()`,
           }}
         />
       </head>

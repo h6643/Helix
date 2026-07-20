@@ -1291,6 +1291,13 @@ safeHandle('hermes:send', async (event, method, params) => {
   if (method === 'tools/list') {
     return { tools: [] }
   }
+  // The current Hermes gateway build does not implement `hermes:getTasks`
+  // (it returns -32601 Method not found). It's used as a capability probe on
+  // startup (helix-layout) and to populate the Task List panel; answer locally
+  // with an empty list so neither path 404s or surfaces a spurious error.
+  if (method === 'hermes:getTasks') {
+    return { tasks: [] }
+  }
   if (method === 'session/prompt') {
     // Send, but if the backend reports the session was not found (stale id from
     // a gateway restart the frontend hasn't caught up with), auto-create a new

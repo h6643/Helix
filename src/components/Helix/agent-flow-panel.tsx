@@ -57,7 +57,7 @@ import { isElectron, electronDialog, electronHermes, electronGit } from '@/lib/e
 import ReactMarkdown from 'react-markdown'
 import { markdownComponents, markdownPlugins } from './markdown-components'
 import type { HermesTodo } from '@/stores/helix-types'
-import { TabBar } from './tab-bar'
+// import { TabBar } from './tab-bar'  // removed
 
 // ==== Types ============================================================================================
 
@@ -2755,7 +2755,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     )
     return (
     <div
-      className={`border transition-all duration-200 relative bg-background/90 backdrop-blur-md border-border/40 rounded-2xl shadow-lg shadow-black/5 ${isDraggingFile ? 'border-primary/40' : 'hover:border-border/60 focus-within:border-primary/30'}`}
+      className={`border transition-all duration-200 relative bg-background/90 backdrop-blur-md border-border/40 rounded-2xl shadow-lg shadow-black/5 overflow-hidden ${isDraggingFile ? 'border-primary/40' : 'hover:border-border/60 focus-within:border-primary/30'}`}
       onDragOver={(e) => {
         e.preventDefault()
         e.stopPropagation()
@@ -2788,7 +2788,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               onPaste={handlePaste}
               placeholder={isEmpty ? "随心输入..." : "要求后续变更..."}
               rows={2}
-              className={`chat-input w-full resize-none bg-transparent text-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none relative z-10 text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed`}
+              className={`chat-input w-full resize-none bg-transparent text-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none relative z-10 text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed break-words [overflow-wrap:anywhere] overflow-hidden`}
               style={{
                 overflow: 'hidden',
                 height: '52px',
@@ -3107,13 +3107,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       {/* Header bar - removed */}
 
       {/* Flow area */}
-      <div className="flex items-center justify-between px-4 pt-2 pb-0 shrink-0">
-        <TabBar
-          onNewTab={handleNewTab}
-          onCloseTab={handleCloseTab}
-          onSwitchTab={handleSwitchTab}
-        />
-      </div>
       <ScrollArea ref={scrollRef} className="flex-1 min-h-0" hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
         <div className="max-w-[700px] mx-auto py-4 pb-4 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (

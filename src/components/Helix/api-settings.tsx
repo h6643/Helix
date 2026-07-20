@@ -96,6 +96,37 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ]
 
+// ─── settings search index ──────────────────────────────────────────────
+const SETTINGS_SEARCH_INDEX: { page: string; label: string; desc: string }[] = [
+  { page: 'general', label: '输出风格', desc: '简洁 / 详细 / 标准' },
+  { page: 'general', label: '自动压缩上下文', desc: '对话上下文管理' },
+  { page: 'general', label: '桌面通知', desc: '完成任务时通知' },
+  { page: 'general', label: '提示音', desc: '完成时播放提示音' },
+  { page: 'general', label: '恢复上次会话', desc: '启动时恢复' },
+  { page: 'general', label: '默认工作目录', desc: '默认工作路径' },
+  { page: 'general', label: '危险操作确认', desc: '执行前确认' },
+  { page: 'general', label: '自动批准读取', desc: '无需逐次确认' },
+  { page: 'general', label: 'Agent 预设', desc: '行为模式' },
+  { page: 'general', label: '自定义指令', desc: '系统提示词' },
+  { page: 'general', label: '数据管理', desc: '导入/导出配置' },
+  { page: 'appearance', label: '主题', desc: '深色 / 浅色' },
+  { page: 'appearance', label: '编辑器设置', desc: '代码字体字号' },
+  { page: 'appearance', label: '界面设置', desc: 'UI 字体字号' },
+  { page: 'appearance', label: '界面字体', desc: '菜单字体' },
+  { page: 'api', label: '模型配置', desc: 'API 端点' },
+  { page: 'api', label: '添加模型', desc: '新端点' },
+  { page: 'api', label: '历史记录', desc: '已保存配置' },
+  { page: 'mcp', label: 'MCP', desc: '服务器连接' },
+  { page: 'mcp', label: 'MCP 配置', desc: '添加服务器' },
+  { page: 'usage', label: 'Token 用量', desc: '统计' },
+  { page: 'usage', label: '用量详情', desc: '消耗明细' },
+  { page: 'archive', label: '历史归档', desc: '会话管理' },
+  { page: 'shortcuts', label: '快捷键', desc: '自定义' },
+  { page: 'git', label: 'Git', desc: '自动提交推送' },
+  { page: 'git', label: '自动提交', desc: 'Git 自动提交' },
+  { page: 'hook', label: 'Hooks', desc: '事件钩子' },
+]
+
 // ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel — extracted to ./usage-stats.tsx
 
 // ShortcutsPage — extracted to ./shortcuts-page.tsx
@@ -1253,6 +1284,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                           onClick={async () => {
                             setLocalConfig({ ...h })
                             setApiConfig({ ...h })
+                            setActiveModel(h.model)
                             await persistToStorage()
                             if (isElectron()) {
                               try {
@@ -1260,11 +1292,11 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                                 await window.electron.hermes.setConfig(cfg)
                                 await window.electron.profile.cacheConfig(cfg)
                                 useHermesStore.getState().setHermesSessionId(null)
-                              } catch {}
+                              } catch (e) {}
                             }
                             showToast({ type: 'success', title: `已切换到 ${h.model}` })
                           }}
-                          className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group ${isActive ? 'bg-primary/5' : 'bg-card/50 hover:bg-card'}`}
+                          className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group ${isActive ? 'bg-primary/10 ring-1 ring-primary/30' : 'bg-card/50 hover:bg-card'}`}
                         >
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
@@ -1285,7 +1317,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                           </div>
                         </div>
                       )
-                    })
+                    })}
                   </div>
                 ) : (
                   <div className="text-center py-12 text-sm text-muted-foreground/50">
@@ -1853,40 +1885,48 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
               </div>
               {(() => {
                 const q = navSearch.trim().toLowerCase()
-                const filtered = q
-                  ? NAV_GROUPS.map(g => ({ ...g, items: g.items.filter(i => i.label.toLowerCase().includes(q)) })).filter(g => g.items.length)
-                  : NAV_GROUPS
-                if (!filtered.length) return <div className="px-5 py-8 text-center text-[13px] text-muted-foreground/40">未找到匹配项</div>
+                if (!q) {
+                  return (
+                    <nav className="flex-1 overflow-y-auto py-2">
+                      {NAV_GROUPS.map(group => (
+                        <div key={group.title} className="mb-3">
+                          <p className="px-5 py-1.5 text-[10px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">{group.title}</p>
+                          {group.items.map(item => (
+                            <button key={item.id} onClick={() => { setPage(item.id); pushNavigation({ type: 'settings', page: item.id }) }}
+                              title={item.label}
+                              className={`flex items-center gap-3 w-full px-5 py-2 text-sm transition-colors ${page === item.id ? 'text-primary bg-muted/60 font-medium' : 'text-foreground/70 hover:text-foreground hover:bg-muted/40'}`}>
+                              <item.icon className="size-4 shrink-0" />
+                              <span>{item.label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ))}
+                    </nav>
+                  )
+                }
+                const searchHits = SETTINGS_SEARCH_INDEX.filter(x => x.label.includes(q) || x.desc.includes(q) || x.page.includes(q))
+                if (!searchHits.length) return <div className="px-5 py-8 text-center text-[13px] text-muted-foreground/40">未找到匹配项</div>
+                const seen = new Set<string>()
+                const uniqueHits = searchHits.filter(h => { if (seen.has(h.page)) return false; seen.add(h.page); return true })
                 return (
                   <nav className="flex-1 overflow-y-auto py-2">
-                    {filtered.map(group => (
-                      <div key={group.title} className="mb-3">
-                        <p className="px-5 py-1.5 text-[10px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
-                          {group.title}
-                        </p>
-                        {group.items.map(item => (
-                          <button
-                            key={item.id}
-                            onClick={() => {
-                              setPage(item.id)
-                              pushNavigation({ type: 'settings', page: item.id })
-                              setNavSearch('')
-                            }}
-                            className={`w-full flex items-center gap-2.5 pl-[26px] pr-4 py-2 text-sm rounded-xl transition-all ${
-                              page === item.id
-                                ? 'bg-muted font-medium'
-                                : 'hover:bg-muted/50'
-                            }`}
-                          >
-                            <item.icon className="size-4" />
-                            {item.label}
-                          </button>
-                        ))}
-                      </div>
-                    ))}
+                    {uniqueHits.map((hit, idx) => {
+                      const navItem = NAV_GROUPS.flatMap(g => g.items).find(i => i.id === hit.page)
+                      return (
+                        <button key={hit.page + idx} onClick={() => { setPage(hit.page); pushNavigation({ type: 'settings', page: hit.page }); setNavSearch('') }}
+                          className={`flex flex-col items-start gap-0.5 w-full px-5 py-2.5 text-left transition-colors rounded-lg mx-2 mb-1 ${
+                            page === hit.page ? 'bg-muted/60' : 'hover:bg-muted/30'
+                          }`}>
+                          <div className="flex items-center gap-2.5">
+                            {navItem?.icon && React.createElement(navItem.icon, { className: 'size-4 shrink-0 text-muted-foreground/50' })}
+                            <span className="text-sm font-medium text-foreground">{hit.label}</span>
+                          </div>
+                          <span className="text-xs text-muted-foreground/50 pl-6.5">{hit.desc}</span>
+                        </button>
+                      )
+                    })}
                   </nav>
-                )
-              })()}
+                )})()}
             </>
           )}
 

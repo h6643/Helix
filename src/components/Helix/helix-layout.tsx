@@ -874,7 +874,7 @@ export function HelixLayout() {
             <div className="flex-1 flex flex-col overflow-hidden">
               {/* Conversation header — only visible when messages exist */}
                 {chatMessages.length > 0 && (
-                  <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 bg-background border-b border-border/20">
+                  <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 bg-background">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <button
                         onClick={handleOpenLocation}
