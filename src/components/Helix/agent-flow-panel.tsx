@@ -53,6 +53,7 @@ import { processClipboardImage, canAddMoreImages, blobToDataUrl } from '@/lib/im
 import { isElectron, electronDialog, electronHermes, electronGit } from '@/lib/electron-bridge'
 import ReactMarkdown from 'react-markdown'
 import { markdownComponents, markdownPlugins } from './markdown-components'
+import type { HermesTodo } from '@/stores/helix-types'
 
 // ==== Types ============================================================================================
 
@@ -255,7 +256,7 @@ function ReasoningEffortControl({ value, onChange }: { value: ReasoningEffort; o
         <div
           ref={panelRef}
           style={panelStyle}
-          className="p-3 bg-card border border-border/80 rounded-xl shadow-2xl flex flex-col gap-1.5 w-48 select-none"
+          className="p-2 bg-popover border border-border/40 rounded-xl shadow-2xl flex flex-col gap-1 w-48 select-none animate-scale-in"
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-foreground/60">推理强度</span>
@@ -408,43 +409,55 @@ export function AgentFlowPanel() {
     return chatMessages.filter(m => !m.sessionId || m.sessionId === currentSessionId)
   }, [chatMessages, currentSessionId])
   const isRunning = useMemo(() => {
-    // Check if ANY session is running, not just the current one
-    if (runningSessionIdRef.current) {
+    // Only show running state if viewing the running session
+    if (runningSessionIdRef.current && runningSessionIdRef.current === currentSessionId) {
       return !!streamingDrafts[runningSessionIdRef.current]?.isAgentRunning
     }
-    return !!streamingDrafts[currentSessionId || '']?.isAgentRunning
+    return false
   }, [streamingDrafts, currentSessionId])
   const isChatLoading = useHermesStore(s => s.isChatLoading)
-  const isBusy = isRunning || isChatLoading
+  // Check if the last message indicates a queued state
+  const hasQueuedMessage = useMemo(() => {
+    const lastMsg = sessionMessages[sessionMessages.length - 1]
+    return lastMsg && lastMsg.content && /queued|排队/i.test(lastMsg.content)
+  }, [sessionMessages])
+  const isBusy = isRunning || isChatLoading || hasQueuedMessage
   const isRunningSession = currentSessionId === runningSessionIdRef.current
   const displaySteps = useMemo(() => {
-    // Prefer live state whenever a run is active and we have content — the
-    // consumer always writes live state, so this is the most reliable source.
+    // Only show live state if viewing the running session
     if (isRunningSession) return steps
-    if (isRunning && runningSessionIdRef.current) return streamingDrafts[runningSessionIdRef.current]?.steps || (steps.length ? steps : [])
-    if (steps.length > 0) return steps
     return streamingDrafts[currentSessionId || '']?.steps || []
-  }, [isRunningSession, isRunning, steps, streamingDrafts, currentSessionId])
+  }, [isRunningSession, steps, streamingDrafts, currentSessionId])
   const displayResponseBlocks = useMemo(() => {
-    // CRITICAL: the streaming consumer writes the live `responseBlocks` state
-    // (thinking via setResponseBlocks directly, text via the RAF flush). If we
-    // gate display purely on isRunningSession / streamingDrafts divergence, a
-    // run whose currentSessionId != runningSessionIdRef (or whose draft wasn't
-    // synced in time) renders an EMPTY block even though chunks were received,
-    // parsed and enqueued — the classic "console has text, UI is blank".
-    // So: whenever a run is active and live state has content, show it directly.
-    const liveHasContent = responseBlocks.length > 0
-    if (liveHasContent && (isRunningSession || isRunning)) return responseBlocks
+    // Only show live state if viewing the running session
     if (isRunningSession) return responseBlocks
-    if (isRunning && runningSessionIdRef.current) return streamingDrafts[runningSessionIdRef.current]?.responseBlocks || (liveHasContent ? responseBlocks : [])
-    return streamingDrafts[currentSessionId || '']?.responseBlocks || (liveHasContent ? responseBlocks : [])
-  }, [isRunningSession, isRunning, responseBlocks, streamingDrafts, currentSessionId])
+    return streamingDrafts[currentSessionId || '']?.responseBlocks || []
+  }, [isRunningSession, responseBlocks, streamingDrafts, currentSessionId])
   const displayStreamThinking = useMemo(() => {
-    if (streamThinking) return streamThinking
+    // Only show live state if viewing the running session
     if (isRunningSession) return streamThinking
-    if (isRunning && runningSessionIdRef.current) return streamingDrafts[runningSessionIdRef.current]?.streamThinking || (streamThinking || '')
-    return streamingDrafts[currentSessionId || '']?.streamThinking || (streamThinking || '')
-  }, [isRunningSession, isRunning, streamThinking, streamingDrafts, currentSessionId])
+    return streamingDrafts[currentSessionId || '']?.streamThinking || ''
+  }, [isRunningSession, streamThinking, streamingDrafts, currentSessionId])
+  // Currently-running tool calls, shown in the top status bar as
+  // "正在执行工具：read xxx / bash xxx" instead of a bare "正在思考".
+  const runningToolLabels = useMemo(() => {
+    if (!isRunning) return [] as string[]
+    const labels: string[] = []
+    for (const block of displayResponseBlocks) {
+      if (block.type !== 'tool_group') continue
+      const walk = (steps: ExecutionStep[]) => {
+        for (const step of steps) {
+          if (step.type === 'tool_call' && step.status === 'running') {
+            labels.push(getToolDisplayLabel(step.toolName || '', step.toolKind, undefined, step.toolParams))
+          }
+          if (step.subSteps && step.subSteps.length > 0) walk(step.subSteps)
+        }
+      }
+      walk(block.steps)
+    }
+    // De-duplicate while preserving order
+    return labels.filter((l, i, a) => a.indexOf(l) === i)
+  }, [isRunning, displayResponseBlocks])
   const isThinkingEnded = useMemo(() => {
     const blocks = displayResponseBlocks
     let lastThinkingIdx = -1
@@ -460,13 +473,14 @@ export function AgentFlowPanel() {
 
   const transcriptFontSize = useHelixStore(s => s.transcriptFontSize)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
-  const availableModels = useHelixStore(s => s.availableModels)
+  const activeProviderId = useHelixStore(s => s.activeProviderId)
+  const activeModel = useHelixStore(s => s.activeModel)
   const temperature = useHelixStore(s => s.temperature)
   const reasoningEffort = useHelixStore(s => s.reasoningEffort)
   const personality = useHelixStore(s => s.personality)
-  const apiProfiles = useHelixStore(s => s.apiProfiles)
-  const activeProfileId = useHelixStore(s => s.activeProfileId)
   const providers = useHelixStore(s => s.providers)
+  const availableModels = useHelixStore(s => s.availableModels)
+  const providerModels = useHelixStore(s => s.providerModels)
   const [currentBranch, setCurrentBranch] = useState('main')
   // Stable action references — these never change so getState() is safe
   const connectionNotice = useHelixStore(s => s.connectionNotice)
@@ -541,16 +555,35 @@ export function AgentFlowPanel() {
     return () => clearInterval(id)
   }, [isRunning, questionStartTs])
 
-  // Flat model list from ALL providers — the user picks any model by name,
-  // and handleModelSelect reverse-looks up the owning provider's credentials.
-  // Unified source of truth: `providers` first, legacy `apiProfiles` as fallback,
-  // then the current apiConfig.model and any backend-available models.
+  // Resolve the provider that owns the current backend endpoint.
+  // Primary key: apiConfig.baseUrl (what Hermes actually calls — never drifts).
+  // Fallback: activeProviderId (internal state, can desync after profile switches
+  // or setActiveModel silent-fails when a model isn't in any declared list).
+  const activeProvider = useMemo(
+    () => {
+      // 1) Match by the actual backend URL — this is the source of truth.
+      if (apiConfig?.baseUrl) {
+        const byUrl = providers.find((p) => p.baseUrl === apiConfig.baseUrl)
+        if (byUrl) return byUrl
+      }
+      // 2) Fall back to activeProviderId (may point to wrong provider).
+      return providers.find((p) => p.id === activeProviderId) || null
+    },
+    [providers, activeProviderId, apiConfig?.baseUrl],
+  )
+  // Model list for the dropdown — always scoped to the provider whose endpoint
+  // matches apiConfig.baseUrl so the list never shows a different supplier's
+  // models even when activeProviderId drifts out of sync.
   const modelList = useMemo(() => {
-    const fromProviders = providers.flatMap(p => p.models || [])
-    const fromProfiles = apiProfiles.flatMap(p => p.models || (p.config.model ? [p.config.model] : []))
-    const all = [...fromProviders, ...fromProfiles, apiConfig.model, ...availableModels]
-    return all.filter((m, i, a) => m && a.indexOf(m) === i)
-  }, [apiConfig.model, availableModels, providers, apiProfiles])
+    const pid = activeProvider?.id
+    if (pid && providerModels[pid]?.length) {
+      return [...new Set(providerModels[pid].filter(Boolean))]
+    }
+    if (activeProvider?.models?.length) {
+      return [...new Set(activeProvider.models.filter(Boolean))]
+    }
+    return []
+  }, [activeProvider, providerModels])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -571,88 +604,72 @@ export function AgentFlowPanel() {
     }
   }, [showModelDropdown, showFolderDropdown, showApprovalModeDropdown])
 
-  // Handle model selection — resolve which provider owns this model from the
-  // unified `providers` list (falling back to legacy `apiProfiles`), then fully
-  // switch credentials + model name. Always cancels in-flight requests and
-  // invalidates the live session so the next prompt rebuilds from config.yaml
-  // with the new (complete) configuration — never a stale key.
-  //
-  // State machine:
-  //   1) owner = provider whose models[] contains `model` (providers → apiProfiles)
-  //      → found:   setActiveModel(model)  ⇒ full {provider,baseUrl,apiKey,model} mirror
-  //      → missing: attach `model` to the CURRENT active provider's models, then
-  //                 setActiveModel(model) so the reverse-lookup succeeds next time
-  //                 (uses the current provider's credentials, which is correct for
-  //                 an unlisted model of the same provider)
-  //   2) session/cancel  → interrupt any in-flight request
-  //   3) setHermesSessionId(null) → force a fresh session on the next send
-  //   4) push the resolved config to the backend (setConfig → config.yaml)
-  const handleModelSelect = useCallback(async (model: string) => {
+  // Auto-correct a stale apiConfig.model — but ONLY when the model is genuinely
+  // orphaned (belongs to NO provider at all).  If the user just clicked a history
+  // entry whose endpoint doesn't have a pre-built ProviderConfig yet, the click
+  // handler creates one on-the-fly; we must not race against that and revert
+  // the selection back to the previous provider's first model.
+  useEffect(() => {
+    if (modelList.length === 0) return
     const store = useHelixStore.getState()
-
-    // 1) Resolve the owning provider (unified data source).
-    const ownerProvider = store.providers.find((p) => p.models.includes(model))
-    const ownerProfile = !ownerProvider ? store.findProfileByModel(model) : undefined
-
-    if (ownerProvider) {
-      // Found in the unified `providers` config — full credential switch.
-      store.setActiveModel(model)
-    } else if (ownerProfile) {
-      // Found only in the legacy `apiProfiles` structure — full credential switch.
-      const newConfig = { ...ownerProfile.config, model }
-      storeActions.setApiConfig(newConfig)
-      store.setActiveProfile(ownerProfile.id)
-      store.persistToStorage()
-    } else {
-      // No provider lists this model. Assume it belongs to the current active
-      // provider: keep its credentials, and remember the model under that
-      // provider so future switches reverse-lookup correctly.
-      const activeName = store.activeModel
-      const activeProvider =
-        (activeName && store.providers.find((p) => p.models.includes(activeName))) ||
-        store.providers[0]
-      if (!activeProvider) {
-        // No providers configured at all — legacy single-config fallback.
-        storeActions.setApiConfig({ model })
-      } else {
-        store.upsertProvider({
-          ...activeProvider,
-          id: activeProvider.id,
-          models: [...new Set([...activeProvider.models, model])],
-        })
-        store.setActiveModel(model)
-      }
+    const current = store.apiConfig.model
+    const active = store.activeModel
+    // If activeModel matches current, the user (or a click handler) explicitly
+    // set this model — never second-guess it even if it's not in the scoped
+    // list yet (the provider entry may have just been created).
+    if (current && current === active) return
+    // Also skip if the model lives in ANY provider's fetched/declared pool —
+    // it's valid, just scoped to a different provider right now.
+    const allModels = new Set<string>(
+      store.providers.flatMap((p) => [
+        ...(p.models || []),
+        ...(store.providerModels?.[p.id] || []),
+      ]),
+    )
+    if (current && allModels.has(current)) return
+    // Truly orphaned — snap to the current list's first model.
+    if (!current || !modelList.includes(current)) {
+      const fixed = modelList[0]
+      useHelixStore.getState().setActiveModel(fixed)
     }
+  }, [modelList, apiConfig.model])
 
-    // 2) Cancel any in-flight session FIRST (while the id is still valid).
+  // Shared tail for a model switch. Cancels the in-flight session, invalidates
+  // the cached session id, then pushes the freshly-resolved config to the
+  // backend. The ordering here is what prevents the swap-401: `cacheConfig`
+  // must run BEFORE `setConfig`, because on restart Hermes reads the cache via
+  // applyActiveProfileCache — so the cache must already hold the NEW key when
+  // setConfig restarts the gateway.
+  const syncConfigToBackend = useCallback(async () => {
+    // 1) Cancel any in-flight session FIRST (while the id is still valid).
     const currentSid = hermesSessionIdRef.current
     if (isElectron() && currentSid) {
       try { window.electron?.hermes?.notify?.('session/cancel', { session_id: currentSid }) } catch {}
     }
-    // 3) Invalidate the session so the next prompt rebuilds it from config.yaml.
+    // 2) Invalidate the session so the next prompt rebuilds it from config.yaml.
     useHermesStore.getState().setHermesSessionId(null)
     hermesSessionIdRef.current = null
-    setShowModelDropdown(false)
-
-    // 4) Push the freshly-resolved config to the backend (full baseUrl+apiKey+model).
+    // 3) Push the resolved config (provider+baseUrl+apiKey+model) to the backend.
     if (isElectron()) {
-      // Use the key that actually belongs to the resolved provider. We must
-      // NOT fall back to the in-memory apiConfig.apiKey here: after a reload the
-      // store key can be empty/stale (broken safeStorage persist), and pushing
-      // it would send the PREVIOUS provider's key — the classic swap-401.
-      // When the resolved key is genuinely empty, we push '' and let the backend
-      // (main.js) fall back to the target provider's own key already stored in
+      const store = useHelixStore.getState()
+      const cfg = store.apiConfig
+      // Use the ACTIVE provider's stored key. We must NOT fall back to a stale
+      // in-memory apiConfig.apiKey: after a reload it can be empty/stale, and
+      // pushing it would send the PREVIOUS provider's key — the classic swap-401.
+      // When the resolved key is genuinely empty, push '' and let the backend
+      // (main.js) fall back to the target provider's own key stored in
       // config.yaml's custom_providers block (which is correct on disk).
-      const resolvedKey = ownerProvider?.apiKey || ownerProfile?.config?.apiKey || ''
-      const cfg = useHelixStore.getState().apiConfig
-      const _src = ownerProvider ? 'providers' : ownerProfile ? 'apiProfiles' : 'fallback(activeProvider)'
-      console.warn(`[handleModelSelect] resolved model="${model}" via ${_src} → provider=${cfg.provider} baseUrl=${cfg.baseUrl} apiKey=${resolvedKey ? resolvedKey.substring(0, 6) + '…' : '(EMPTY → backend falls back to target provider stored key)'}`)
+      const provider = store.activeProviderId
+        ? store.providers.find((p) => p.id === store.activeProviderId)
+        : undefined
+      const resolvedKey = provider?.apiKey || cfg.apiKey || ''
       const push = {
         model: cfg.model,
         provider: cfg.provider && cfg.provider !== '__custom__' ? cfg.provider : 'custom',
         baseUrl: cfg.baseUrl,
         apiKey: resolvedKey,
       }
+      console.warn(`[config-switch] → provider=${push.provider} baseUrl=${push.baseUrl} model=${push.model} apiKey=${resolvedKey ? resolvedKey.substring(0, 6) + '…' : '(EMPTY → backend falls back to target provider stored key)'}`)
       const hermes = window.electron?.hermes
       const profile = window.electron?.profile
       try {
@@ -660,7 +677,71 @@ export function AgentFlowPanel() {
         if (hermes?.setConfig) await hermes.setConfig(push).catch(() => {})
       } catch {}
     }
-  }, [storeActions.setApiConfig])
+  }, [])
+
+  // Handle model selection within the ACTIVE provider. The provider itself is
+  // switched only on the settings page; the input bar lists just the active
+  // provider's models, so this always resolves cleanly via setActiveModel
+  // (which mirrors the resolved config into apiConfig). Shares the full
+  // cancel + invalidate + push tail so a model switch also rebuilds the
+  // session from config.yaml — never a stale key.
+  const handleModelSelect = useCallback(async (model: string) => {
+    useHelixStore.getState().setActiveModel(model)
+    setShowModelDropdown(false)
+    await syncConfigToBackend()
+  }, [syncConfigToBackend])
+
+  // Model selector for the active provider only. Rendered in BOTH input-bar
+  // layouts (empty-state and active-conversation) via this helper so the
+  // markup isn't duplicated.
+  //
+  // Display source of truth: `apiConfig.model`. This is what the Hermes backend
+  // reads and what every mutation path (click handler / applyProfile /
+  // handleSaveApi / handleModelSelect) writes. Using `activeModel` as the
+  // display source caused persistent drift because auto-correct effects and
+  // stale fallback chains could leave the button showing a PREVIOUS supplier's
+  // model name while the backend was already on the new one.
+  const renderModelSelector = () => {
+    const displayName = apiConfig.model || activeModel || (modelList[0] || null) || '选择模型'
+    return (
+    <>
+      {/* Model selector — wide button matching settings page style */}
+      <div className="relative" ref={modelDropdownRef}>
+        <button
+          type="button"
+          onClick={() => setShowModelDropdown(!showModelDropdown)}
+          className="flex items-center justify-between gap-2 min-w-[140px] max-w-[220px] px-3 py-1.5 bg-muted/30 border border-border/30 rounded-lg text-[13px] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
+        >
+          <span className="truncate">{displayName}</span>
+          <svg className={`size-3.5 text-muted-foreground transition-transform shrink-0 ${showModelDropdown ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        {showModelDropdown && (
+          <div className="absolute bottom-full right-0 mb-2 min-w-[200px] max-w-[320px] max-h-56 overflow-y-auto bg-popover border border-border/40 rounded-xl shadow-xl z-50 p-1 animate-scale-in">
+            {modelList.map(m => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => handleModelSelect(m)}
+                className={`w-full text-left px-3 py-2 rounded-md text-sm font-mono transition-colors ${
+                  m === displayName
+                    ? 'bg-primary/10 text-primary font-semibold'
+                    : 'text-foreground/70 hover:bg-muted'
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+            {modelList.length === 0 && (
+              <div className="px-3 py-2 text-sm text-foreground/40">
+                暂无可用模型
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </>
+    )
+  }
 
   // Handle skill selection
   const handleSkillSelect = useCallback((skill: { name: string; description?: string }) => {
@@ -948,7 +1029,6 @@ export function AgentFlowPanel() {
       form.append('file', file)
       const res = await fetch('/api/skills', { method: 'POST', body: form })
       if (!res.ok) throw new Error('上传失败')
-      storeActions.showToast({ type: 'success', title: '技能已添加' })
     } catch (err) {
       storeActions.showToast({ type: 'error', title: '技能上传失败', description: String(err) })
     }
@@ -958,7 +1038,6 @@ export function AgentFlowPanel() {
   // Handle new project creation
   const handleCreateProject = useCallback(async () => {
     if (!newProjectName.trim()) {
-      storeActions.showToast({ type: 'warning', title: '请输入项目名称' })
       return
     }
 
@@ -1047,7 +1126,6 @@ export function AgentFlowPanel() {
 
     // Check API key
     if (!hasApiKey) {
-      storeActions.showToast({ type: 'warning', title: '请先设置 API Key', description: '请在设置中配置模型 API Key' })
       storeActions.toggleSettings('api')
       return
     }
@@ -1086,6 +1164,9 @@ export function AgentFlowPanel() {
     setStreamThinkingDuration(0)
     firstContentAtRef.current = 0
     usageReceivedRef.current = false
+    // A fresh question starts a new todo scope — drop any stale list from the
+    // previous run so the header button hides until Hermes streams a new one.
+    useHelixStore.getState().clearHermesTodos()
     // Add user message to store with images
     const imagesSnapshot = pendingImages.length > 0 ? [...pendingImages] : undefined
     const filesSnapshot = pendingFiles.length > 0 ? [...pendingFiles] : undefined
@@ -1205,6 +1286,9 @@ export function AgentFlowPanel() {
       let streamedContent = false
       // Translate Hermes ACP notifications into the UI event shape the parser expects.
       const mapHermesEvent = (method: string, params: any): any => {
+        if (method === 'usage:prompt-complete') {
+          return { type: 'usage_prompt_complete', usage: params?.usage || null }
+        }
         if (method === 'session/update') {
           const u = params?.update || params
           const su = u?.sessionUpdate
@@ -1313,6 +1397,95 @@ export function AgentFlowPanel() {
         return null
       }
 
+      // ── Hermes todo-list extraction ──────────────────────────────────────
+      // Hermes carries an in-session todo list and streams it via session/update
+      // events whose sessionUpdate name includes "todo"/"task"/"plan" (per the
+      // user: "独立 session/update 事件"). It may also surface the full list
+      // inside a `todo_write` tool result. We try both, tolerate unknown field
+      // shapes, and normalize every item to { id, content, status, activeForm }.
+      // The captured list is pushed to the store so the header button can show
+      // it; an empty/garbage payload is ignored (button stays hidden).
+      const STATUS_MAP: Record<string, 'pending' | 'in_progress' | 'completed' | 'cancelled'> = {
+        pending: 'pending',
+        todo: 'pending',
+        not_started: 'pending',
+        queued: 'pending',
+        in_progress: 'in_progress',
+        inprogress: 'in_progress',
+        doing: 'in_progress',
+        running: 'in_progress',
+        active: 'in_progress',
+        completed: 'completed',
+        done: 'completed',
+        finished: 'completed',
+        cancelled: 'cancelled',
+        canceled: 'cancelled',
+        abandoned: 'cancelled',
+      }
+      const parseTodoItem = (raw: any): HermesTodo | null => {
+        if (!raw || typeof raw !== 'object') return null
+        const content =
+          raw.content ?? raw.title ?? raw.text ?? raw.label ?? raw.name ?? raw.task ?? ''
+        const statusRaw = String(raw.status ?? raw.state ?? 'pending').toLowerCase()
+        const status = STATUS_MAP[statusRaw] || 'pending'
+        if (typeof content !== 'string' || !content.trim()) return null
+        return {
+          id: typeof raw.id === 'string' && raw.id ? raw.id : 'todo-' + Math.abs(hashString(content + status)).toString(36),
+          content: content.trim(),
+          status,
+          activeForm: typeof raw.activeForm === 'string' ? raw.activeForm : undefined,
+        }
+      }
+      const extractTodoList = (payload: any): HermesTodo[] | null => {
+        if (!payload || typeof payload !== 'object') return null
+        // session/update wraps the list in `.update` (or `.params.update`)
+        const u = payload.update ?? payload.params?.update ?? payload
+        // Direct array on the event? ACP's native plan update uses `entries`
+        // (PlanEntry[] with content/priority/status) — see acp.schema.AgentPlanUpdate.
+        // Also accept the legacy todos/items/taskList/list field names.
+        const arr =
+          u?.entries ?? u?.todos ?? u?.items ?? u?.taskList ?? u?.list ??
+          u?.update?.entries ?? u?.update?.todos ?? u?.update?.items ??
+          payload?.entries ?? payload?.todos ?? payload?.items
+        if (Array.isArray(arr)) {
+          const items = arr.map(parseTodoItem).filter(Boolean) as HermesTodo[]
+          return items.length ? items : null
+        }
+        // tool_call with name todo_write/TodoWrite may carry `todos` in rawInput
+        const toolName = String(u?.title ?? u?.toolName ?? payload?.title ?? '').toLowerCase()
+        if (/todo_write|todowrite|todo_update|task_create|task_update/.test(toolName)) {
+          const ri = u?.rawInput
+          let parsedInput = ri
+          if (typeof ri === 'string') { try { parsedInput = JSON.parse(ri) } catch { parsedInput = null } }
+          const inner = Array.isArray(parsedInput?.todos) ? parsedInput.todos
+            : Array.isArray(parsedInput?.items) ? parsedInput.items
+            : Array.isArray(parsedInput?.taskList) ? parsedInput.taskList
+            : Array.isArray(parsedInput?.list) ? parsedInput.list
+            : null
+          if (Array.isArray(inner)) {
+            const items = inner.map(parseTodoItem).filter(Boolean) as HermesTodo[]
+            return items.length ? items : null
+          }
+        }
+        return null
+      }
+      const pushTodos = (list: HermesTodo[] | null) => {
+        if (list && list.length) {
+          useHelixStore.getState().setHermesTodos(list)
+        }
+      }
+
+      // Simple stable string hash (for deriving todo ids when the backend
+      // doesn't supply one). Defined before the todo parser uses it.
+      function hashString(s: string): number {
+        let h = 0
+        for (let i = 0; i < s.length; i++) {
+          h = (h << 5) - h + s.charCodeAt(i)
+          h |= 0
+        }
+        return h
+      }
+
       // Event-driven async queue — no polling. Producers push items and
       // wake the consumer immediately via a resolver.
       const queue: string[] = []
@@ -1396,6 +1569,15 @@ export function AgentFlowPanel() {
           const parsed = mapHermesEvent(method, params)
           if (parsed) {
             enqueue('data: ' + JSON.stringify(parsed))
+          }
+          // Capture Hermes's in-session todo list from dedicated todo/plan
+          // session/update events (or todo_write tool results) so the header
+          // button can surface it. Silently ignored when no list is present.
+          if (method === 'session/update') {
+            const su = params?.update?.sessionUpdate || params?.update?.type || ''
+            if (/todo|task|plan/i.test(String(su))) {
+              pushTodos(extractTodoList(params))
+            }
           }
           if (parsed && (parsed.type === 'done' || parsed.type === 'error')) queueDone = true
           if (parsed && (parsed.type === 'text' || parsed.type === 'thinking' || parsed.type === 'tool_call' || parsed.type === 'tool_result')) {
@@ -1584,6 +1766,9 @@ export function AgentFlowPanel() {
               }
               const id = generateId()
               const isDelegateTask = parsed.toolName?.startsWith('Delegating')
+              // All tool_calls start as 'running' so the top status bar can surface
+              // "正在执行工具：read xxx / bash xxx". They'll be marked
+              // completed/failed when a matching tool_result or error arrives.
               const step: ExecutionStep = {
                 id, type: 'tool_call',
                 content: getToolDisplayLabel(parsed.toolName, parsed.toolKind, filePath, params),
@@ -1591,7 +1776,7 @@ export function AgentFlowPanel() {
                 toolKind: parsed.toolKind,
                 toolParams: params,
                 timestamp: Date.now(),
-                status: isDelegateTask ? 'running' : undefined,
+                status: 'running',
                 subSteps: isDelegateTask ? [] : undefined,
               }
               setSteps(prev => [...prev, step])
@@ -1685,6 +1870,19 @@ export function AgentFlowPanel() {
               const step: ExecutionStep = { id, type: 'tool_result', content: parsed.content, toolName: parsed.toolName, timestamp: Date.now() }
               setSteps(prev => [...prev, step])
               storeActions.addExecutionStep({ type: 'tool_result', toolName: parsed.toolName })
+              // Mark the matching tool_call step as completed so the top status
+              // bar stops showing it in "正在执行工具". We match by the last
+              // unfinished tool_call (serial execution) or any running one.
+              setSteps(prev => {
+                const next = [...prev]
+                for (let i = next.length - 1; i >= 0; i--) {
+                  if (next[i].type === 'tool_call' && next[i].status === 'running') {
+                    next[i] = { ...next[i], status: 'completed' as const }
+                    break
+                  }
+                }
+                return next
+              })
               // tool_result 归到第一个尚未收到结果的 tool_group 块
               // （串行时即当前块；并行时按调用顺序依次填充，避免全堆到最后一块）。
               setResponseBlocks(prev => {
@@ -1817,6 +2015,13 @@ export function AgentFlowPanel() {
                     content = extracted.content || extracted.reasoning
                   }
                 }
+                // If the model only emitted thinking tokens and no visible text,
+                // surface the reasoning as the message content so the user sees
+                // something useful instead of a blank reply.
+                if (!content && reasoning) {
+                  content = reasoning
+                  reasoning = ''
+                }
                 // Auto-create scheduled tasks the assistant embedded as ```scheduled-task blocks.
                 const extracted = extractScheduledTasks(content)
                 content = extracted.cleaned
@@ -1832,10 +2037,17 @@ export function AgentFlowPanel() {
                   : (firstContentAtRef.current && promptSentAtRef.current
                       ? Math.round((firstContentAtRef.current - promptSentAtRef.current) / 1000)
                       : 0)
-                // 极短思考（<0.5s 取整为 0）但有思考迹象时，至少记为 1s，避免“有思考却不显示”
+                // 极短思考（<0.5s 取整为 0）但有思考迹象时，至少记为 1s，避免"有思考却不显示"
                 if (thinkingSecs === 0 && (thinkingStartTimeRef.current || firstContentAtRef.current)) thinkingSecs = 1
                 thinkingDurationRef.current = thinkingSecs
-                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: reasoning || undefined, steps: completedSteps.length ? completedSteps : undefined, blocks: responseBlocksRef.current.length ? responseBlocksRef.current : undefined, sessionId: runningSessionIdRef.current || undefined, thoughtTokens: thoughtTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
+                // If responseBlocks only has thinking (no text block) but content
+                // is non-empty, discard blocks so the renderer falls back to
+                // rendering msg.content — prevents "only thinking, no result".
+                let finalBlocks = responseBlocksRef.current.length ? responseBlocksRef.current : undefined
+                if (finalBlocks && content && !finalBlocks.some(b => b.type === 'text')) {
+                  finalBlocks = undefined
+                }
+                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: reasoning || undefined, steps: completedSteps.length ? completedSteps : undefined, blocks: finalBlocks, sessionId: runningSessionIdRef.current || undefined, thoughtTokens: thoughtTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
                 thoughtTokensRef.current = 0
                 setStreamThoughtTokens(0)
                 thinkingStartTimeRef.current = 0
@@ -1847,9 +2059,22 @@ export function AgentFlowPanel() {
                 const mid = st.addChatMessage({ role: 'assistant', content: '⚠️ 本轮运行已结束，但模型未返回任何可见内容。', sessionId: runningSessionIdRef.current || undefined })
                 st.setChatMessageStreaming(mid, false)
               }
+              // Hermes' ACP adapter only emits a `tool_call` (tool.started) event
+              // and NOT a matching completion/failure event (see backend
+              // _tool_progress: `if event_type != "tool.started": return`). So a
+              // tool_call step we created as `running` would otherwise stay stuck
+              // in "正在执行工具" forever. On done, flush any lingering running
+              // tool calls to completed so the status bar clears and the tool
+              // card shows a finished state.
+              setSteps(prev => {
+                const next = prev.map(s =>
+                  s.type === 'tool_call' && s.status === 'running'
+                    ? { ...s, status: 'completed' as const }
+                    : s
+                )
+                return [...next, { id: generateId(), type: 'done', content: parsed.content, finishReason: parsed.finishReason, timestamp: Date.now() }]
+              })
               setResponseBlocks([])
-              const id = generateId()
-              setSteps(prev => [...prev, { id, type: 'done', content: parsed.content, finishReason: parsed.finishReason, timestamp: Date.now() }])
             } else if (parsed.type === 'error') {
               const content = textBufferRef.current
               const reasoning = thoughtBufferRef.current
@@ -1871,8 +2096,17 @@ export function AgentFlowPanel() {
                 curState.setChatMessageStreaming(msgId, false)
               }
               setResponseBlocks([])
-              const id = generateId()
-              setSteps(prev => [...prev, { id, type: 'error', content: parsed.content, timestamp: Date.now() }])
+              // Mark all running tool_calls as failed so they disappear from the
+              // "正在执行工具" status bar.
+              const errId = generateId()
+              setSteps(prev => {
+                const next = prev.map(s =>
+                  s.type === 'tool_call' && s.status === 'running'
+                    ? { ...s, status: 'failed' as const }
+                    : s
+                )
+                return [...next, { id: errId, type: 'error', content: parsed.content, timestamp: Date.now() }]
+              })
               storeActions.addExecutionStep({ type: 'error' })
             } else if (parsed.type === 'plan') {
               const id = generateId()
@@ -1887,6 +2121,22 @@ export function AgentFlowPanel() {
               setSteps(prev => [...prev, { id, type: 'compact', content: parsed.content, timestamp: Date.now() }])
             } else if (parsed.type === 'usage_update') {
               useHelixStore.getState().setContextUsage(parsed.size, parsed.used)
+            } else if (parsed.type === 'usage_prompt_complete') {
+              const u = parsed.usage
+              if (u && typeof u === 'object') {
+                const model = useHelixStore.getState().apiConfig.model || 'unknown'
+                useHelixStore.getState().addSessionUsageStats(model, {
+                  totalTokens: Number(u.totalTokens) || undefined,
+                  inputTokens: Number(u.inputTokens) || undefined,
+                  outputTokens: Number(u.outputTokens) || undefined,
+                  thoughtTokens: Number(u.thoughtTokens) || undefined,
+                  cachedReadTokens: Number(u.cachedReadTokens) || undefined,
+                  cachedWriteTokens: Number(u.cachedWriteTokens) || undefined,
+                })
+                usageReceivedRef.current = true
+                thoughtTokensRef.current = Number(u.thoughtTokens) || 0
+                setStreamThoughtTokens(thoughtTokensRef.current)
+              }
             } else if (parsed.type === 'available_commands') {
               useHelixStore.getState().setAvailableCommands(parsed.commands)
             } else if (parsed.type === 'approval_request') {
@@ -2155,7 +2405,7 @@ export function AgentFlowPanel() {
         <button
           type="button"
           onClick={() => setShowApprovalModeDropdown(!showApprovalModeDropdown)}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors bg-muted/50 text-foreground/70 hover:text-foreground hover:bg-muted"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
           title="审批模式"
         >
           {approvalMode === 'default' && <Hand className="size-3.5" />}
@@ -2169,7 +2419,7 @@ export function AgentFlowPanel() {
           <ChevronDown className="size-3" />
         </button>
         {showApprovalModeDropdown && (
-          <div className="absolute bottom-full left-0 mb-2 w-72 bg-background rounded-xl border border-border shadow-lg py-1 z-50">
+          <div className="absolute bottom-full left-0 mb-2 w-72 bg-popover rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
             {[
               {
                 id: 'default' as const,
@@ -2199,6 +2449,16 @@ export function AgentFlowPanel() {
                   onClick={() => {
                     setApprovalMode(mode.id)
                     setShowApprovalModeDropdown(false)
+                    // Immediately apply to current session if one exists
+                    const currentSessionId = hermesSessionIdRef.current
+                    if (currentSessionId) {
+                      window.electron?.hermes?.send('session/set_mode', {
+                        session_id: currentSessionId,
+                        mode_id: mode.id,
+                      }).catch((e: any) => {
+                        console.warn('[Helix] set_mode(' + mode.id + ') failed:', e)
+                      })
+                    }
                   }}
                   className={`w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-muted transition-colors ${active ? 'bg-primary/5' : ''}`}
                 >
@@ -2223,7 +2483,7 @@ export function AgentFlowPanel() {
     )
     return (
     <div
-      className={`border transition-all relative bg-background/80 backdrop-blur-sm border-border/30 rounded-2xl shadow-lg shadow-black/5 ${isDraggingFile ? 'ring-2 ring-primary/60 bg-primary/5' : 'hover:border-border/50 focus-within:border-primary/40 focus-within:shadow-primary/10'}`}
+      className={`border transition-all duration-200 relative bg-background/90 backdrop-blur-md border-border/40 rounded-2xl shadow-lg shadow-black/5 ${isDraggingFile ? 'border-primary/40' : 'hover:border-border/60 focus-within:border-primary/30'}`}
       onDragOver={(e) => {
         e.preventDefault()
         e.stopPropagation()
@@ -2256,7 +2516,7 @@ export function AgentFlowPanel() {
               onPaste={handlePaste}
               placeholder={isEmpty ? "随心输入..." : "要求后续变更..."}
               rows={2}
-              className={`w-full resize-none bg-transparent text-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none relative z-10 text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed`}
+              className={`chat-input w-full resize-none bg-transparent text-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none relative z-10 text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed`}
               style={{
                 overflow: 'hidden',
                 height: '52px',
@@ -2308,7 +2568,7 @@ export function AgentFlowPanel() {
                     className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 first:rounded-t-2xl last:rounded-b-2xl ${
                       index === selectedSkillIndex
                         ? 'bg-primary/10 text-primary'
-                        : 'hover:bg-muted/50'
+                        : 'hover:bg-muted/30'
                     }`}
                   >
                     {(skill as any).isCliCommand
@@ -2341,7 +2601,7 @@ export function AgentFlowPanel() {
                 {pendingFiles.map(f => (
                   <div
                     key={f.id}
-                    className="relative flex items-center gap-2 max-w-[220px] px-2.5 py-1.5 rounded-xl border border-border/30 bg-muted/30 hover:bg-muted/50 transition-colors group"
+                    className="relative flex items-center gap-2 max-w-[220px] px-2.5 py-1.5 rounded-xl border border-border/30 bg-muted/20 hover:bg-muted/40 hover:border-border/30 transition-all duration-200 group"
                   >
                     {f.kind === 'image' && f.dataUrl ? (
                       <img src={f.dataUrl} alt={f.name} className="size-7 rounded-lg object-cover shrink-0" />
@@ -2371,7 +2631,7 @@ export function AgentFlowPanel() {
                     <img
                       src={img.dataUrl}
                       alt={img.name}
-                      className="w-20 h-20 rounded-lg object-cover border border-border/50"
+                      className="w-20 h-20 rounded-lg object-cover border border-border/30"
                     />
                     <button
                       onClick={() => removePendingImage(img.id)}
@@ -2392,7 +2652,7 @@ export function AgentFlowPanel() {
                     <button
                       type="button"
                       onClick={() => uploadFileInputRef.current?.click()}
-                      className="p-2 rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-muted/50 transition-all"
+                      className="p-2 rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-muted/40 transition-all duration-200"
                       title="上传附件"
                     >
                       <Plus className="size-4" />
@@ -2401,39 +2661,7 @@ export function AgentFlowPanel() {
                   </div>
                   <div className="flex items-center gap-1.5">
                     {hasApiKey ? (
-                      <div className="relative" ref={modelDropdownRef}>
-                        <button
-                          type="button"
-                          onClick={() => setShowModelDropdown(!showModelDropdown)}
-                          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 px-2.5 py-1.5 rounded-xl transition-all"
-                        >
-                          <span className="font-medium text-foreground/70">
-                            {apiConfig.model || '未设置'}
-                          </span>
-                          <ChevronDown className="size-3" />
-                        </button>
-                        {showModelDropdown && (
-                          <div className="absolute bottom-full right-0 mb-2 w-52 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 py-1.5 z-50 max-h-64 overflow-y-auto">
-                            {modelList.map(m => (
-                              <button
-                                key={m}
-                                type="button"
-                                onClick={() => handleModelSelect(m)}
-                                className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-muted/50 transition-colors first:rounded-t-xl last:rounded-b-xl ${
-                                  apiConfig.model === m ? 'text-primary bg-primary/10' : 'text-foreground/70'
-                                }`}
-                              >
-                                {m}
-                              </button>
-                            ))}
-                            {modelList.length === 0 && (
-                              <div className="px-3 py-1.5 text-[11px] text-foreground/40">
-                                请在设置中配置
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
+                      renderModelSelector()
                     ) : (
                       <button
                         type="button"
@@ -2443,19 +2671,20 @@ export function AgentFlowPanel() {
                         设置模型
                       </button>
                     )}
+                    <ContextUsageIndicator />
                     <ReasoningEffortControl value={reasoningEffort} onChange={(v) => storeActions.setReasoningEffort(v)} />
                     <button
                       type="button"
                       onClick={isBusy ? handleStop : handleRun}
                       disabled={!isBusy && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
-                      className={`size-9 shrink-0 rounded-xl transition-all flex items-center justify-center ${
+                      className={`size-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center ${
                         isBusy
-                          ? 'bg-amber-500 hover:bg-amber-600 shadow-sm shadow-amber-500/25'
-                          : 'bg-foreground hover:bg-foreground/90 shadow-sm shadow-foreground/25'
+                          ? 'bg-destructive hover:bg-destructive/90 shadow-md shadow-destructive/20'
+                          : 'bg-primary hover:bg-primary/90 shadow-md shadow-primary/20'
                       }`}
                       title={isBusy ? '停止' : '发送'}
                     >
-                      {isBusy ? <Square className="size-3 text-white fill-white" /> : <ArrowUp className="size-4 text-background" />}
+                      {isBusy ? <Square className="size-3 text-white fill-white" /> : <ArrowUp className="size-4 text-primary-foreground" />}
                     </button>
                   </div>
                 </>
@@ -2465,7 +2694,7 @@ export function AgentFlowPanel() {
                     <button
                       type="button"
                       onClick={() => uploadFileInputRef.current?.click()}
-                      className="p-2 rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-muted/50 transition-all"
+                      className="p-2 rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-muted/30 transition-all"
                       title="上传文件"
                     >
                       <Plus className="size-4" />
@@ -2480,55 +2709,21 @@ export function AgentFlowPanel() {
                     />
                   </div>
                   <div className="flex items-center gap-1.5">
-                    {hasApiKey && (
-                      <div className="relative" ref={modelDropdownRef}>
-                        <button
-                          type="button"
-                          onClick={() => setShowModelDropdown(!showModelDropdown)}
-                          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 px-2.5 py-1.5 rounded-xl transition-all"
-                        >
-                          <span className="font-medium text-foreground/70">
-                            {apiConfig.model || '未设置'}
-                          </span>
-                          <ChevronDown className="size-3" />
-                        </button>
-                        {showModelDropdown && (
-                          <div className="absolute bottom-full right-0 mb-2 w-52 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 py-1.5 z-50 max-h-64 overflow-y-auto">
-                            {modelList.map(m => (
-                              <button
-                                key={m}
-                                type="button"
-                                onClick={() => handleModelSelect(m)}
-                                className={`w-full text-left px-3 py-1.5 text-[11px] font-mono hover:bg-muted/50 transition-colors first:rounded-t-xl last:rounded-b-xl ${
-                                  apiConfig.model === m ? 'text-primary bg-primary/10' : 'text-foreground/70'
-                                }`}
-                              >
-                                {m}
-                              </button>
-                            ))}
-                            {modelList.length === 0 && (
-                              <div className="px-3 py-1.5 text-[11px] text-foreground/40">
-                                请在设置中配置
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    {hasApiKey && renderModelSelector()}
                     <ContextUsageIndicator />
                     <ReasoningEffortControl value={reasoningEffort} onChange={(v) => storeActions.setReasoningEffort(v)} />
                     <button
                       type="button"
                       onClick={isBusy ? handleStop : handleRun}
                       disabled={!isBusy && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
-                      className={`size-9 shrink-0 rounded-xl transition-all flex items-center justify-center ${
+                      className={`size-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center ${
                         isBusy
-                          ? 'bg-amber-500 hover:bg-amber-600 shadow-sm shadow-amber-500/25'
-                          : 'bg-foreground hover:bg-foreground/90 shadow-sm shadow-foreground/25'
+                          ? 'bg-destructive hover:bg-destructive/90 shadow-md shadow-destructive/20'
+                          : 'bg-primary hover:bg-primary/90 shadow-md shadow-primary/20'
                       }`}
                       title={isBusy ? '停止' : '发送'}
                     >
-                      {isBusy ? <Square className="size-3 text-white fill-white" /> : <ArrowUp className="size-4 text-background" />}
+                      {isBusy ? <Square className="size-3 text-white fill-white" /> : <ArrowUp className="size-4 text-primary-foreground" />}
                     </button>
                   </div>
                 </>
@@ -2545,7 +2740,6 @@ export function AgentFlowPanel() {
           type="button"
           onClick={async () => {
             if (!isElectron()) {
-              storeActions.showToast({ type: 'info', title: '请选择项目目录' })
               return
             }
             const dir = await electronDialog.openDirectory()
@@ -2559,10 +2753,9 @@ export function AgentFlowPanel() {
         </button>
         <button
           type="button"
-          onClick={() => storeActions.showToast({ type: 'info', title: '当前为本地模式' })}
           className="flex items-center gap-1.5 text-[12px] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
         >
-          <Monitor className="size-3.5 text-blue-500" />
+          <Monitor className="size-3.5 text-primary" />
           <span>本地</span>
         </button>
         <button
@@ -2585,16 +2778,16 @@ export function AgentFlowPanel() {
       <ScrollArea ref={scrollRef} className="flex-1 min-h-0" hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
         <div className="max-w-[700px] mx-auto py-4 pb-4 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (
-            <div className="flex flex-col items-center w-full pt-[25vh]">
+            <div className="flex flex-col items-center w-full pt-[22vh]">
               <div className="w-full max-w-[700px] mx-auto">
-                <img src="/kirin.png" alt="Helix" className="w-20 h-20 mb-4 opacity-80 mx-auto" />
-                <p className="text-lg text-foreground/50 text-center mb-8 mt-2">我们需要做点什么？</p>
+                <img src="/kirin.png" alt="Helix" className="w-14 h-14 opacity-70 mx-auto mb-4" />
+                <p className="text-[15px] font-normal text-foreground/50 text-center mb-6 tracking-tight">有什么可以帮你的？</p>
                 {renderEmptyBreadcrumb()}
                 {renderChatInput({ isEmpty: true })}
               </div>
             </div>
           ) : (
-            <div className="space-y-4">
+            <div className="space-y-3">
               {/* Chat messages (input/output)  — completed messages only */}
               {sessionMessages.map(msg => (
                 <div key={msg.id} className={`flex w-full step-enter ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -2604,7 +2797,7 @@ export function AgentFlowPanel() {
                         {/* Inline thinking block (collapsible) — skip if blocks already contain thinking (prevents duplicate) */}
                         {msg.reasoning && msg.reasoning.trim().length > 0 && !(msg.blocks && msg.blocks.some(b => b.type === 'thinking')) && (
                           <details className="mb-2 group/details">
-                            <summary className="text-sm font-medium text-foreground/40 cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none">
+                            <summary className="text-xs font-medium text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors">
                               <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                               <span>思考</span>
                             </summary>
@@ -2619,7 +2812,7 @@ export function AgentFlowPanel() {
                             {msg.blocks.map((block, idx) =>
                               block.type === 'thinking' ? (
                                 <details key={idx} className="mb-2 group/details">
-                                  <summary className="text-sm font-medium text-foreground/40 cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none">
+                                  <summary className="text-xs font-medium text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors">
                                     <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                                     <span>思考</span>
                                   </summary>
@@ -2658,7 +2851,7 @@ export function AgentFlowPanel() {
                     </div>
                   ) : (
                     <div className="group max-w-[80%]">
-                      <div className="px-4 py-2.5 rounded-2xl bg-muted text-foreground shadow-sm">
+                      <div className="px-4 py-2.5 rounded-2xl rounded-br-md bg-muted/30 text-foreground shadow-sm border border-border/20">
                         {msg.images && msg.images.length > 0 && (
                           <div className="flex flex-wrap gap-2 mb-2">
                             {msg.images.map(img => (
@@ -2676,7 +2869,7 @@ export function AgentFlowPanel() {
                             {msg.files.map(f => (
                               <div
                                 key={f.id}
-                                className="flex items-center gap-2 max-w-[240px] px-2.5 py-1.5 rounded-lg border border-border/50 bg-background/60"
+                                className="flex items-center gap-2 max-w-[240px] px-2.5 py-1.5 rounded-lg border border-border/30 bg-muted/20 hover:bg-muted/40 hover:border-border/30 transition-all duration-200"
                               >
                                 {f.kind === 'image' && f.dataUrl ? (
                                   <img src={f.dataUrl} alt={f.name} className="size-8 rounded object-cover shrink-0" />
@@ -2715,23 +2908,59 @@ export function AgentFlowPanel() {
                       </div>
                     )}
 
+                    {/* Top status bar: when a tool is actively running, surface it here
+                        instead of a bare "正在思考", so the user can tell the agent
+                        is working (read / bash / search / write) rather than idling. */}
+                    {isRunning && runningToolLabels.length > 0 && (
+                      <div className="flex items-center gap-1.5 my-1 text-sm text-foreground/70 min-w-0">
+                        <Loader2 className="size-3.5 animate-spin text-primary/60 shrink-0" />
+                        <span className="text-foreground/50 shrink-0">正在执行</span>
+                        <span className="font-medium text-foreground/80 truncate" title={runningToolLabels.join(' / ')}>
+                          {runningToolLabels.slice(0, 2).join(' / ')}{runningToolLabels.length > 2 ? ` …+${runningToolLabels.length - 2}` : ''}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Show thinking content if available */}
+                    {isRunning && displayStreamThinking && (
+                      <div className="my-1 p-3 rounded-xl bg-muted/20 border border-border/30 shadow-sm thinking-card">
+                        <div className="flex items-center gap-1.5 mb-1.5">
+                          <span className="text-xs font-medium text-muted-foreground">思考中</span>
+                          <span className="text-xs text-muted-foreground/50">{streamThinkingDuration > 0 ? `· ${streamThinkingDuration}s` : ''}</span>
+                        </div>
+                        <p className="text-xs text-foreground/60 whitespace-pre-wrap break-all leading-relaxed max-h-32 overflow-y-auto">
+                          {displayStreamThinking}
+                        </p>
+                      </div>
+                    )}
+
                     {/* Inline thinking block (collapsible) — kept for completed messages */}
 
                     {/* Interleaved response blocks: thinking, text, and tool groups in chronological order */}
-                    {displayResponseBlocks.length > 0 && (
-                      <div className="helix-md" style={{ fontSize: transcriptFontSize }}>
-                        {displayResponseBlocks.filter(b => !isThinkingEnded || b.type !== 'thinking').map((block, idx) =>
-                          block.type === 'thinking' ? (
-                            <details key={idx} className="mb-2 group/details">
-                              <summary className="text-sm font-medium text-foreground/40 cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none">
-                                <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
-                                <span className={isThinkingEnded ? '' : 'thinking-breath'}>思考</span>
-                              </summary>
-                              <div className="mt-1 pl-4 text-xs text-foreground/50 whitespace-pre-wrap break-all leading-relaxed">
-                                {stripEmoji(normalizeAcpContent(block.content))}
-                              </div>
-                            </details>
-                          ) : block.type === 'text' ? (
+                    {displayResponseBlocks.length > 0 && (() => {
+                      const hasText = displayResponseBlocks.some(b => b.type === 'text')
+                      const filtered = displayResponseBlocks.filter(b => !isThinkingEnded || b.type !== 'thinking')
+                      return (
+                        <div className="helix-md" style={{ fontSize: transcriptFontSize }}>
+                          {filtered.map((block, idx) =>
+                            block.type === 'thinking' ? (
+                              hasText ? (
+                                <details key={idx} className="mb-2 group/details">
+                                  <summary className="text-xs font-medium text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors">
+                                    <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                                    <span className={isThinkingEnded ? '' : 'thinking-breath'}>思考</span>
+                                  </summary>
+                                  <div className="mt-1 pl-4 text-xs text-foreground/50 whitespace-pre-wrap break-all leading-relaxed">
+                                    {stripEmoji(normalizeAcpContent(block.content))}
+                                  </div>
+                                </details>
+                              ) : (
+                                <div key={idx} className="text-sm text-foreground/70 whitespace-pre-wrap break-all leading-relaxed mb-2">
+                                  <span className="text-xs text-foreground/40 mr-2">思考</span>
+                                  {stripEmoji(normalizeAcpContent(block.content))}
+                                </div>
+                              )
+                            ) : block.type === 'text' ? (
                             <div key={idx}>
                               <ReactMarkdown
                                 components={markdownComponents}
@@ -2743,9 +2972,10 @@ export function AgentFlowPanel() {
                           ) : (
                             <InlineToolGroup key={idx} steps={block.steps} isRunning={isRunning} />
                           )
-                        )}
+                          )}
                       </div>
-                    )}
+                      )
+                    })()}
 
                     {/* Live thinking duration */}
                     {isRunning && (
@@ -2770,10 +3000,10 @@ export function AgentFlowPanel() {
 
       {/* Connection notice */}
       {connectionNotice && (
-        <div className="mx-4 mb-2 px-3 py-2 rounded-xl text-xs flex items-center gap-2 border cursor-pointer hover:opacity-80 transition-opacity" style={{
-          backgroundColor: connectionNotice.phase === 'recovered' ? 'rgb(34 197 94 / 0.1)' : 'rgb(234 179 8 / 0.1)',
-          borderColor: connectionNotice.phase === 'recovered' ? 'rgb(34 197 94 / 0.2)' : 'rgb(234 179 8 / 0.2)',
-          color: connectionNotice.phase === 'recovered' ? 'rgb(34 197 94)' : 'rgb(234 179 8)',
+        <div className="mx-4 mb-2 px-3 py-2.5 rounded-xl text-xs flex items-center gap-2 border cursor-pointer hover:opacity-80 transition-all duration-200 shadow-sm" style={{
+          backgroundColor: connectionNotice.phase === 'recovered' ? 'oklch(0.65 0.15 145 / 0.1)' : 'oklch(0.70 0.15 65 / 0.1)',
+          borderColor: connectionNotice.phase === 'recovered' ? 'oklch(0.65 0.15 145 / 0.25)' : 'oklch(0.70 0.15 65 / 0.25)',
+          color: connectionNotice.phase === 'recovered' ? 'oklch(0.65 0.15 145)' : 'oklch(0.70 0.15 65)',
         }} onClick={() => useHelixStore.getState().setConnectionNotice(null)}>
           {connectionNotice.phase !== 'recovered' && (
             <div className="animate-spin size-3 border-2 border-current border-t-transparent rounded-full shrink-0" />
@@ -2783,21 +3013,9 @@ export function AgentFlowPanel() {
         </div>
       )}
 
-      {!hasApiKey && (
-        <div className="mx-4 mb-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-500 flex items-center justify-between">
-          <span>尚未配置 API Key</span>
-          <button
-            onClick={() => storeActions.toggleSettings('api')}
-            className="ml-2 px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 rounded text-[10px] font-medium transition-colors"
-          >
-            打开设置
-          </button>
-        </div>
-      )}
-
       {/* New project form */}
       {showNewProjectForm && (
-        <div className="max-w-[700px] mx-auto mb-2 p-3 bg-card rounded-xl border border-border/50 shadow-sm">
+        <div className="max-w-[700px] mx-auto mb-2 p-3 bg-card/30 rounded-xl border border-border/30 shadow-sm">
           <div className="flex items-center gap-2 mb-2">
             <FolderPlus className="size-4 text-primary" />
             <span className="text-sm font-medium text-foreground">新建项目</span>
@@ -2809,7 +3027,7 @@ export function AgentFlowPanel() {
               onChange={(e) => setNewProjectName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleCreateProject() }}
               placeholder="输入项目名称..."
-              className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40 transition-all duration-200"
               autoFocus
             />
             <Button size="sm" onClick={handleCreateProject} className="px-3">

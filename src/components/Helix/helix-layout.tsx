@@ -19,6 +19,11 @@ import {
   FileText,
   Keyboard,
   Globe,
+  ListTodo,
+  CheckCircle2,
+  Circle,
+  Loader2,
+  XCircle,
 } from 'lucide-react'
 import { Sidebar } from './sidebar'
 import { AgentFlowPanel } from './agent-flow-panel'
@@ -28,9 +33,19 @@ import { ContextMenuProvider } from './context-menu'
 import { ToastContainer } from './toast-container'
 import { useHelixStore, type PendingChange } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
-import { isElectron } from '@/lib/electron-bridge'
+import { useProviderStore } from '@/hermes-ui/provider-store'
+import { isElectron, electronHermes } from '@/lib/electron-bridge'
 import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
+import { toBackendReasoningEffort } from '@/stores/slices/agent-settings-slice'
 import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
+
+// Process-wide guard so the startup restore + Hermes sync runs exactly once.
+// A component-local useRef resets whenever this layout remounts (e.g. tab
+// switches that unmount/remount the tree), which would re-trigger
+// restoreFromStorage() and overwrite the user's live model/provider selection
+// with the persisted snapshot — the "sometimes stops working after a few
+// clicks" symptom.
+let startupSyncDone = false
 
 function shortcutLabel(action: string, customShortcuts?: Record<string, { keys: string[] }>): string {
   const entry = customShortcuts?.[action] || DEFAULT_SHORTCUTS[action]
@@ -44,6 +59,7 @@ const SessionManager = dynamic(() => import('./session-manager').then(m => ({ de
 const ApiSettings = dynamic(() => import('./api-settings').then(m => ({ default: m.ApiSettings })), { ssr: false })
 const SkillPanel = dynamic(() => import('./skill-panel').then(m => ({ default: m.SkillPanel })), { ssr: false })
 const ScheduledTasksPanel = dynamic(() => import('./scheduled-tasks-panel').then(m => ({ default: m.ScheduledTasksPanel })), { ssr: false })
+const TaskListPanel = dynamic(() => import('./task-list-panel').then(m => ({ default: m.TaskListPanel })), { ssr: false })
 const CustomizePanel = dynamic(() => import('./customize-panel').then(m => ({ default: m.CustomizePanel })), { ssr: false })
 const RuntimePanel = dynamic(() => import('./runtime-panel').then(m => ({ default: m.RuntimePanel })), { ssr: false })
 const TerminalPanel = dynamic(() => import('./terminal-panel').then(m => ({ default: m.TerminalPanel })), { ssr: false })
@@ -85,6 +101,8 @@ export function HelixLayout() {
   const [isDragging, setIsDragging] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [isMaximized, setIsMaximized] = useState(false)
+  const [hasTaskList, setHasTaskList] = useState(false)
+  const [showTaskListPanel, setShowTaskListPanel] = useState(false)
   const dragStartX = useRef(0)
   const dragStartW = useRef(0)
 
@@ -162,8 +180,22 @@ export function HelixLayout() {
   const navigationHistory = useHelixStore(s => s.navigationHistory)
   const navigationIndex = useHelixStore(s => s.navigationIndex)
   const customShortcuts = useHelixStore(s => s.customShortcuts)
+  const hermesTodos = useHelixStore(s => s.hermesTodos)
   // Stable action references — these never change so getState() is safe
   const storeActions = useMemo(() => useHelixStore.getState(), [])
+  const [todoPopoverOpen, setTodoPopoverOpen] = useState(false)
+  // Close the todo popover when clicking outside of it
+  const todoPopoverRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!todoPopoverOpen) return
+    const onDocClick = (e: MouseEvent) => {
+      if (todoPopoverRef.current && !todoPopoverRef.current.contains(e.target as Node)) {
+        setTodoPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [todoPopoverOpen])
 
   const toggleTheme = useCallback(() => {
     const next = theme === 'dark' ? 'light' : 'dark'
@@ -174,19 +206,16 @@ export function HelixLayout() {
 
   const handleApplyChange = useCallback((change: PendingChange) => {
     storeActions.applyPendingChange(change.id)
-    storeActions.showToast({ type: 'success', title: '已应用', description: change.fileName })
-  }, [storeActions.applyPendingChange, storeActions.showToast])
+  }, [storeActions.applyPendingChange])
 
   const handleRejectChange = useCallback((change: PendingChange) => {
     storeActions.rejectPendingChange(change.id)
-    storeActions.showToast({ type: 'info', title: '已拒绝', description: change.fileName })
-  }, [storeActions.rejectPendingChange, storeActions.showToast])
+  }, [storeActions.rejectPendingChange])
 
   const handleApplyAll = useCallback(() => {
     storeActions.applyAllPendingChanges()
-    storeActions.showToast({ type: 'success', title: '已应用', description: `${pendingChanges.length} 个文件` })
     storeActions.setShowDiffPreview(false)
-  }, [storeActions.applyAllPendingChanges, storeActions.showToast, storeActions.setShowDiffPreview, pendingChanges.length])
+  }, [storeActions.applyAllPendingChanges, storeActions.setShowDiffPreview, pendingChanges.length])
 
   const handleRejectAll = useCallback(() => {
     storeActions.rejectAllPendingChanges()
@@ -198,22 +227,14 @@ export function HelixLayout() {
   // store rehydrates from IndexedDB: it (a) writes the active profile to the
   // cold-start cache and (b) pushes it to the running gateway. No hardcoded
   // pin — the value is whatever the user last saved (or the sensible default).
-  const didStartupSync = useRef(false)
   useEffect(() => {
+    if (startupSyncDone) return
+    startupSyncDone = true
     let cancelled = false
     ;(async () => {
       await storeActions.restoreFromStorage()
-      if (cancelled || didStartupSync.current) return
-      didStartupSync.current = true
-      // Warn if no model is configured
+      if (cancelled) return
       const st = useHelixStore.getState()
-      if (!st.apiConfig?.apiKey) {
-        setTimeout(() => {
-          if (!cancelled) {
-            storeActions.showToast({ type: 'warning', title: '尚未配置模型', description: '请在设置中配置 API Key 以使用 AI 功能', position: 'top-right' })
-          }
-        }, 1500)
-      }
       if (!isElectron()) return
       const cfg = st.apiConfig
       if (!cfg || !cfg.model) return
@@ -228,6 +249,112 @@ export function HelixLayout() {
     })()
     return () => { cancelled = true }
   }, [storeActions.restoreFromStorage])
+
+  // Sync agent behaviour settings (temperature, maxOutputTokens,
+  // customInstructions, personality) to Hermes config.yaml whenever they
+  // change. Uses a debounced IPC call to avoid restarting the gateway on every
+  // keystroke. NOTE: reasoningEffort is handled by its own instant fast path
+  // below (no restart) so the slider takes effect on the next message.
+  const agentSettingsSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (!isElectron()) return
+    const unsub = useHelixStore.subscribe((state, prevState) => {
+      const changed =
+        state.temperature !== prevState.temperature ||
+        state.maxOutputTokens !== prevState.maxOutputTokens ||
+        state.customInstructions !== prevState.customInstructions ||
+        state.personality !== prevState.personality
+      if (!changed) return
+      if (agentSettingsSyncTimer.current) clearTimeout(agentSettingsSyncTimer.current)
+      agentSettingsSyncTimer.current = setTimeout(() => {
+        const s = useHelixStore.getState()
+        window.electron?.hermes?.setAgentConfig?.({
+          temperature: s.temperature,
+          maxOutputTokens: s.maxOutputTokens,
+          customInstructions: s.customInstructions,
+          personality: s.personality,
+        }).catch(() => {})
+      }, 1500)
+    })
+    return () => {
+      unsub()
+      if (agentSettingsSyncTimer.current) clearTimeout(agentSettingsSyncTimer.current)
+    }
+  }, [])
+
+  // ── Reasoning-effort fast path ─────────────────────────────────────────
+  // The slider takes effect on the very next message, with NO 2–3s gateway
+  // restart: (1) persist agent.reasoning_effort to config.yaml via the no-
+  // restart setReasoningEffort IPC; (2) push a sentinel prompt the ACP server
+  // intercepts to update the live agent's reasoning_config in place (same
+  // session → conversation context preserved). With no active session yet,
+  // only step (1) runs — the next session reads config.yaml.
+  const reasoningFastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (!isElectron()) return
+    const unsub = useHelixStore.subscribe((state, prevState) => {
+      if (state.reasoningEffort === prevState.reasoningEffort) return
+      if (reasoningFastTimer.current) clearTimeout(reasoningFastTimer.current)
+      // Short debounce — the slider fires several values while dragging.
+      reasoningFastTimer.current = setTimeout(() => {
+        const effort = toBackendReasoningEffort(useHelixStore.getState().reasoningEffort)
+        window.electron?.hermes?.setReasoningEffort?.({ reasoningEffort: effort }).catch(() => {})
+        const sid = useHermesStore.getState().hermesSessionId
+        if (sid) {
+          // Sentinel prompt — the server returns immediately with no chat update.
+          window.electron?.hermes?.send?.('session/prompt', {
+            session_id: sid,
+            prompt: [{ type: 'text', text: `__hermes_set_reasoning__:${effort}` }],
+          }).catch(() => {})
+        }
+      }, 150)
+    })
+    return () => {
+      unsub()
+      if (reasoningFastTimer.current) clearTimeout(reasoningFastTimer.current)
+    }
+  }, [])
+
+  // ── Bridge: hermes-ui useProviderStore → Helix useHelixStore ───────────────
+  // The user can switch the active model from the hermes-ui ProviderSettings /
+  // ModelSelector panels (which write to useProviderStore and push to Hermes).
+  // Those are a SEPARATE store from useHelixStore (the one the input-bar model
+  // selector reads). Without this bridge the input bar keeps showing the old
+  // model even after a backend-side switch. Mirror the active model (and its
+  // owning provider's config) into useHelixStore whenever it changes out-of-band.
+  useEffect(() => {
+    if (!isElectron()) return
+    const unsub = useProviderStore.subscribe((state, prev) => {
+      const model = state.activeModel
+      if (model === prev.activeModel) return
+      if (!model) return
+      const helix = useHelixStore.getState()
+      // Reuse the canonical resolver so the mirrored config matches a normal
+      // in-panel switch (credentials + session invalidation handled there).
+      const provider = state.providers.find((p) => p.models.includes(model))
+      if (provider) {
+        // Mirror into Helix store via onModelSwitched so activeModel/activeProviderId
+        // and apiConfig all stay consistent and the stale session is cancelled.
+        helix.onModelSwitched(model)
+        // Keep the selected provider's credentials in sync too, in case the
+        // hermes-ui provider carries a different key/baseUrl.
+        const existing = helix.providers.find((p) => p.models.includes(model))
+        if (existing && (existing.apiKey !== provider.apiKey || existing.baseUrl !== provider.baseUrl)) {
+          useHelixStore.setState({
+            providers: helix.providers.map((p) =>
+              p.id === existing.id ? { ...p, apiKey: provider.apiKey, baseUrl: provider.baseUrl } : p,
+            ),
+          })
+        }
+      } else {
+        // Model not declared in Helix providers (e.g. fetched list only) — at
+        // least reflect it in apiConfig so the selector label updates, avoiding
+        // a frozen "always same model" display.
+        useHelixStore.setState({ apiConfig: { ...useHelixStore.getState().apiConfig, model } })
+      }
+    })
+    return () => { try { unsub() } catch {} }
+  }, [])
 
   useEffect(() => {
     if (chatMessages.length > 0) {
@@ -296,7 +423,6 @@ export function HelixLayout() {
 
   const handleOpenLocation = useCallback(async () => {
     if (!isElectron()) {
-      storeActions.showToast({ type: 'info', title: '请选择项目目录' })
       return
     }
     const { electronDialog } = await import('@/lib/electron-bridge')
@@ -439,12 +565,10 @@ export function HelixLayout() {
       }
       if (shift && !alt && e.code === 'BracketLeft') {
         e.preventDefault()
-        storeActions.showToast({ type: 'info', title: '任务导航', description: '上一个任务功能尚未实现' })
         return
       }
       if (shift && !alt && e.code === 'BracketRight') {
         e.preventDefault()
-        storeActions.showToast({ type: 'info', title: '任务导航', description: '下一个任务功能尚未实现' })
         return
       }
       // Ctrl+[ / Ctrl+] handled by keyboard-shortcuts.tsx (go-back / go-forward)
@@ -460,6 +584,20 @@ export function HelixLayout() {
 
   // Start global scheduled task runner
   useEffect(() => { startScheduledTaskRunner() }, [])
+
+  // Check if Hermes backend has a task list
+  useEffect(() => {
+    if (!isElectron()) return
+    let cancelled = false
+    electronHermes.send('hermes:getTasks').then((result: any) => {
+      if (cancelled) return
+      const list = Array.isArray(result) ? result : result?.tasks ?? result?.items ?? []
+      setHasTaskList(Array.isArray(list) && list.length > 0)
+    }).catch(() => {
+      // Backend may not support this method — silently hide the button
+    })
+    return () => { cancelled = true }
+  }, [])
 
     const windowMenuItems: (WindowMenuItem | { divider: true })[] = useMemo(() => [
     { label: '新建窗口', shortcut: 'Ctrl+Shift+N', action: () => { window.open(window.location.href, '_blank'); closeWindowMenu() } },
@@ -525,12 +663,12 @@ export function HelixLayout() {
       <ToastContainer />
 
       {/* Title bar — frameless window drag region */}
-      <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 bg-sidebar shrink-0 select-none">
+      <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 bg-sidebar shrink-0 select-none border-b border-border/20">
         {/* Left: navigation buttons */}
         <div className="flex items-center gap-0.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
           <button
             onClick={() => setShowSidebar(v => !v)}
-            className={`p-1.5 rounded-lg transition-colors ${showSidebar ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
+            className={`p-1.5 rounded-lg transition-colors ${showSidebar ? 'text-primary bg-primary/10' : 'text-foreground/40 hover:text-foreground/80 hover:bg-accent/50'}`}
             title="侧边栏"
           >
             <PanelLeft className="size-4" />
@@ -678,7 +816,7 @@ export function HelixLayout() {
             </button>
             <button
               onClick={() => (window as any).electron?.window?.close()}
-              className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-rose-500/20 hover:text-rose-400 rounded-lg transition-colors"
+              className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg transition-colors"
               title="关闭"
             >
               <X className="size-3.5" />
@@ -696,7 +834,7 @@ export function HelixLayout() {
             style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth }}
           >
             <div
-              className="h-full overflow-hidden bg-sidebar border-r border-border/40"
+              className="h-full overflow-hidden bg-sidebar border-r border-sidebar-border/60"
               style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth }}
             >
               <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(v => !v)} />
@@ -736,20 +874,78 @@ export function HelixLayout() {
             <div className="flex-1 flex flex-col overflow-hidden">
               {/* Conversation header — only visible when messages exist */}
                 {chatMessages.length > 0 && (
-                <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 bg-background">
-                <div className="flex items-center gap-1.5 min-w-0">
-                <button
-                  onClick={handleOpenLocation}
-                  className="flex items-center gap-1.5 text-[12px] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
-                  title={selectedWorkDir || '选择位置'}
-                >
-                  <Folder className="size-3.5 text-amber-500" />
-                  <span className="max-w-[200px] truncate">{selectedWorkDir ? (selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir) : '未选择位置'}</span>
-                </button>
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
+                  <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 bg-background border-b border-border/20">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <button
+                        onClick={handleOpenLocation}
+                        className="flex items-center gap-1.5 text-[12px] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
+                        title={selectedWorkDir || '选择位置'}
+                      >
+                        <Folder className="size-3.5 text-muted-foreground" />
+                        <span className="max-w-[200px] truncate">{selectedWorkDir ? (selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir) : '未选择位置'}</span>
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                  {(hermesTodos.length > 0 || hasTaskList) && (
+                    <div className="relative" ref={todoPopoverRef}>
+                      <button
+                        onClick={() => {
+                          if (hermesTodos.length > 0) setTodoPopoverOpen(o => !o)
+                          else if (hasTaskList) setShowTaskListPanel(true)
+                        }}
+                        className={`relative p-1.5 rounded-lg transition-colors ${todoPopoverOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
+                        title="任务清单"
+                      >
+                        <ListTodo className="size-4" />
+                        {hermesTodos.length > 0 && (
+                          <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[9px] font-medium flex items-center justify-center">
+                            {hermesTodos.length}
+                          </span>
+                        )}
+                      </button>
+                      {todoPopoverOpen && hermesTodos.length > 0 && (
+                        <div className="absolute right-0 top-[calc(100%+6px)] z-50 w-72 max-h-[60vh] overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-xl">
+                          <div className="sticky top-0 flex items-center justify-between px-3 py-2 border-b border-border bg-popover rounded-t-xl">
+                            <span className="text-[12px] font-semibold">任务清单</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] text-foreground/50">
+                                {hermesTodos.filter(t => t.status === 'completed').length}/{hermesTodos.length}
+                              </span>
+                              {hasTaskList && (
+                                <button
+                                  onClick={() => { setTodoPopoverOpen(false); setShowTaskListPanel(true) }}
+                                  className="text-[11px] text-primary hover:underline"
+                                  title="编辑任务"
+                                >
+                                  编辑
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <ul className="py-1">
+                            {hermesTodos.map((todo) => (
+                              <li key={todo.id} className="flex items-start gap-2 px-3 py-1.5 text-[12px]">
+                                {todo.status === 'completed' ? (
+                                  <CheckCircle2 className="size-4 text-green-500 shrink-0 mt-0.5" />
+                                ) : todo.status === 'in_progress' ? (
+                                  <Loader2 className="size-4 text-primary shrink-0 mt-0.5 animate-spin" />
+                                ) : todo.status === 'cancelled' ? (
+                                  <XCircle className="size-4 text-muted-foreground shrink-0 mt-0.5" />
+                                ) : (
+                                  <Circle className="size-4 text-foreground/40 shrink-0 mt-0.5" />
+                                )}
+                                <span className={todo.status === 'completed' ? 'line-through text-foreground/50' : todo.status === 'cancelled' ? 'line-through text-foreground/40' : 'text-foreground/90'}>
+                                  {todo.content}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <button
-                    onClick={() => { if (pendingChanges.length > 0) storeActions.setShowDiffPreview(true); else storeActions.showToast({ type: 'info', title: '暂无待处理的更改' }) }}
+                    onClick={() => { if (pendingChanges.length > 0) storeActions.setShowDiffPreview(true) }}
                     className="relative p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
                     title="文件差异"
                   >
@@ -780,6 +976,8 @@ export function HelixLayout() {
       </div>
 
       {/* Overlay panels */}
+      {showTaskListPanel && <TaskListPanel onClose={() => setShowTaskListPanel(false)} />}
+
       {showSessionManager && <SessionManager onClose={() => storeActions.toggleSessionManager()} />}
       {showCustomizePanel && <CustomizePanel onClose={() => storeActions.toggleCustomizePanel()} />}
       {showSettings && (

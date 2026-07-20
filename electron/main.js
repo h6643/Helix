@@ -577,6 +577,46 @@ function writeHermesConfig({ model, provider, baseUrl, apiKey }) {
   markOwnConfigWrite()
 }
 
+// ── Agent behaviour settings → Hermes config.yaml ──────────────────────────
+// Writes temperature, max_output_tokens, reasoning_effort, custom_instructions,
+// and system_prompt (personality) into the `agent:` block of config.yaml so the
+// Hermes backend actually uses the user's configured values.
+function writeHermesAgentConfig({ temperature, maxOutputTokens, reasoningEffort, customInstructions, personality }) {
+  try {
+    const yamlPath = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    let yaml = ''
+    try { yaml = fs.readFileSync(yamlPath, 'utf-8') } catch { return }
+    let updated = yaml
+    if (temperature !== undefined && temperature !== null) {
+      updated = setYamlKey(updated, 'agent.temperature', String(Number(temperature)))
+    }
+    if (maxOutputTokens !== undefined && maxOutputTokens !== null) {
+      updated = setYamlKey(updated, 'agent.max_output_tokens', String(Number(maxOutputTokens)))
+    }
+    if (reasoningEffort !== undefined && reasoningEffort !== null) {
+      updated = setYamlKey(updated, 'agent.reasoning_effort', String(reasoningEffort))
+    }
+    if (customInstructions !== undefined) {
+      const safe = '"' + String(customInstructions).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+      updated = setYamlKey(updated, 'agent.custom_instructions', safe)
+    }
+    if (personality !== undefined) {
+      const safe = '"' + String(personality).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+      updated = setYamlKey(updated, 'agent.system_prompt', safe)
+    } else {
+      // Default: add language matching instruction when no personality is set
+      const defaultPrompt = '"请始终使用与用户相同的语言回复。"'
+      updated = setYamlKey(updated, 'agent.system_prompt', defaultPrompt)
+    }
+    if (updated !== yaml) {
+      fs.writeFileSync(yamlPath, updated, 'utf-8')
+      console.log('[Hermes] agent config written to config.yaml')
+    }
+  } catch (e) {
+    console.warn('[Hermes] could not write agent config:', e.message)
+  }
+}
+
 // Re-assert the user's last-saved model profile into Hermes config.yaml BEFORE
 // spawning the gateway. The renderer keeps this profile in a small JSON cache
 // (userData/active-profile.json) whenever the user saves or applies a profile,
@@ -1256,6 +1296,14 @@ safeHandle('hermes:send', async (event, method, params) => {
     // a gateway restart the frontend hasn't caught up with), auto-create a new
     // session and replay the prompt — so the user never sees a silent no-output.
     sendHermesRequest(method, params)
+      .then((result) => {
+        // Forward usage data to the renderer so token stats update.
+        const usage = result?.usage
+        if (usage && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('hermes:event', 'usage:prompt-complete', { usage })
+        }
+        return result
+      })
       .catch(async (err) => {
         const msg = (err?.message || '') + ' ' + (err?.stack || '')
         if (/not found|session_not_found|no such session|unknown session/i.test(msg) && params?.session_id) {
@@ -1455,6 +1503,48 @@ safeHandle('hermes:setYamlKey', async (event, { key, value }) => {
   }
 })
 
+// ── Hermes agent config (temperature, maxTokens, reasoningEffort, etc.) ────
+// Writes all agent behaviour settings to config.yaml and restarts the gateway.
+safeHandle('hermes:setAgentConfig', async (event, params = {}) => {
+  try {
+    writeHermesAgentConfig(params)
+    if (hermesProcess) {
+      await restartGatewayDebounced('setAgentConfig')
+    }
+    return { success: true }
+  } catch (err) {
+    console.error('[Hermes] setAgentConfig failed:', err)
+    return { success: false, error: err.message }
+  }
+})
+
+// ── Reasoning fast path ──────────────────────────────────────────────────
+// Writes ONLY agent.reasoning_effort to config.yaml (persist for future
+// sessions / restarts) and deliberately does NOT restart the gateway. The
+// renderer follows up with a sentinel prompt that updates the live agent's
+// reasoning_config in place, so the slider takes effect on the very next
+// message with no 2–3s restart. We cannot reuse writeHermesAgentConfig here:
+// it clobbers agent.system_prompt with a default whenever `personality` is
+// absent, which would wipe the user's configured personality.
+safeHandle('hermes:setReasoningEffort', async (event, params = {}) => {
+  try {
+    const { reasoningEffort } = params
+    if (reasoningEffort === undefined || reasoningEffort === null) return { success: false }
+    const yamlPath = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    let yaml = ''
+    try { yaml = fs.readFileSync(yamlPath, 'utf-8') } catch { return { success: false } }
+    const updated = setYamlKey(yaml, 'agent.reasoning_effort', String(reasoningEffort))
+    if (updated !== yaml) {
+      fs.writeFileSync(yamlPath, updated, 'utf-8')
+      markOwnConfigWrite()
+    }
+    return { success: true }
+  } catch (err) {
+    console.error('[Hermes] setReasoningEffort failed:', err)
+    return { success: false, error: err.message }
+  }
+})
+
 // ── Hermes personality list ──────────────────────────────────────────────
 // Returns the predefined personalities from config.yaml (agent.personalities).
 safeHandle('hermes:listPersonalities', async () => {
@@ -1520,6 +1610,9 @@ safeHandle('hermes:setPersonality', async (event, { name, prompt } = {}) => {
     const updated = setYamlKey(yaml, 'agent.system_prompt', safe)
     fs.writeFileSync(yamlPath, updated, 'utf-8')
     console.log('[Hermes] personality set:', nameStr || '(cleared)')
+    if (hermesProcess) {
+      await restartGatewayDebounced('setPersonality')
+    }
     return { success: true }
   } catch (e) {
     return { success: false, error: e.message }

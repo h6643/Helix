@@ -6,6 +6,25 @@ import type { StateCreator } from 'zustand'
 
 export type Language = 'zh' | 'en'
 
+/** Hermes backend's `parse_reasoning_effort` only accepts
+ *  none/minimal/low/medium/high/xhigh/max/ultra. Our UI scale
+ *  (ultra_low … max) uses two names it doesn't recognise (ultra_low,
+ *  ultra_high), which `parse_reasoning_effort` silently drops → the user's
+ *  pick falls back to the default (medium), defeating fast/slow control.
+ *  Translate at the IPC boundary so every UI level actually reaches the model. */
+export function toBackendReasoningEffort(
+  v: 'ultra_low' | 'low' | 'medium' | 'high' | 'ultra_high' | 'max',
+): string {
+  switch (v) {
+    case 'ultra_low': return 'minimal'
+    case 'low': return 'low'
+    case 'medium': return 'medium'
+    case 'high': return 'high'
+    case 'ultra_high': return 'xhigh'
+    case 'max': return 'max'
+  }
+}
+
 export interface AgentSettingsSlice {
   agentMaxIterations: number
   autoCompactContext: boolean

@@ -31,6 +31,13 @@ contextBridge.exposeInMainWorld('electron', {
     // Apply a personality by writing agent.system_prompt into Hermes config.yaml
     setPersonality: (params) => ipcRenderer.invoke('hermes:setPersonality', params),
     setModel: (params) => ipcRenderer.invoke('hermes:setModel', params),
+
+    // Write agent behaviour settings (temperature, maxTokens, reasoningEffort, etc.) to config.yaml
+    setAgentConfig: (params) => ipcRenderer.invoke('hermes:setAgentConfig', params),
+
+    // Fast path: persist only agent.reasoning_effort (no gateway restart). The
+    // renderer also pushes a sentinel prompt to update the live agent in place.
+    setReasoningEffort: (params) => ipcRenderer.invoke('hermes:setReasoningEffort', params),
     
     // Fetch available models from API endpoint
     fetchModels: (params) => ipcRenderer.invoke('hermes:fetchModels', params),

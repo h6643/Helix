@@ -77,6 +77,9 @@ export interface ElectronAPI {
     listPersonalities: () => Promise<any>
     setPersonality: (params: { name: string; prompt?: string }) => Promise<any>
     setModel: (params: { model: string; baseUrl?: string; apiKey?: string; provider?: string }) => Promise<any>
+    setAgentConfig: (params: { temperature?: number; maxOutputTokens?: number; reasoningEffort?: string; customInstructions?: string; personality?: string }) => Promise<any>
+    // Fast path: persist agent.reasoning_effort without a gateway restart.
+    setReasoningEffort: (params: { reasoningEffort: string }) => Promise<any>
     fetchModels: (params: any) => Promise<any>
     onEvent: (callback: (method: any, params: any) => void) => () => void
     // ── Memory sync (Hermes backend memory_manager: MEMORY.md / USER.md) ──

@@ -44,72 +44,380 @@
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(0.985 0.004 240);
-  --foreground: oklch(0.16 0.008 240);
-  --card: oklch(1 0.002 240);
-  --card-foreground: oklch(0.16 0.008 240);
-  --popover: oklch(1 0.002 240);
-  --popover-foreground: oklch(0.16 0.008 240);
-  --primary: oklch(0.52 0.17 245);
-  --primary-foreground: oklch(0.985 0.002 240);
-  --secondary: oklch(0.96 0.006 240);
-  --secondary-foreground: oklch(0.22 0.01 240);
-  --muted: oklch(0.965 0.005 240);
-  --muted-foreground: oklch(0.45 0.01 240);
-  --accent: oklch(0.955 0.008 240);
-  --accent-foreground: oklch(0.18 0.008 240);
-  --destructive: oklch(0.58 0.20 20);
-  --border: oklch(0.92 0.01 240);
-  --input: oklch(0.95 0.006 240);
-  --ring: oklch(0.52 0.17 245);
-  --chart-1: oklch(0.52 0.17 245);
-  --chart-2: oklch(0.52 0.15 210);
-  --chart-3: oklch(0.48 0.13 270);
-  --chart-4: oklch(0.52 0.17 330);
-  --chart-5: oklch(0.55 0.14 50);
-  --sidebar: oklch(0.93 0.006 240);
-  --sidebar-foreground: oklch(0.16 0.008 240);
-  --sidebar-primary: oklch(0.52 0.17 245);
-  --sidebar-primary-foreground: oklch(0.985 0.002 240);
-  --sidebar-accent: oklch(0.90 0.01 240);
-  --sidebar-accent-foreground: oklch(0.18 0.008 240);
-  --sidebar-border: oklch(0.92 0.01 240);
-  --sidebar-ring: oklch(0.52 0.17 245);
+  --radius: 0.5rem;
+  /* ── Precision Instrument palette (light) ──
+     Background: slightly warm paper-white with a barely-there cool undertone.
+     Primary: indigo-violet — warmer than generic dev-tool blue, signals
+     intelligence + precision rather than template default. Higher chroma
+     (0.20 vs 0.16) makes the brand color stand out at all sizes. */
+  --background: oklch(0.985 0.003 250);
+  --foreground: oklch(0.128 0.012 260);
+  --card: oklch(0.994 0.002 250);
+  --card-foreground: oklch(0.128 0.012 260);
+  --popover: oklch(0.992 0.002 250);
+  --popover-foreground: oklch(0.128 0.012 260);
+  --primary: oklch(0.43 0.20 270);
+  --primary-foreground: oklch(0.985 0.002 250);
+  --secondary: oklch(0.945 0.008 255);
+  --secondary-foreground: oklch(0.20 0.012 260);
+  --muted: oklch(0.955 0.005 252);
+  --muted-foreground: oklch(0.42 0.015 260);
+  --accent: oklch(0.935 0.018 268);
+  --accent-foreground: oklch(0.15 0.015 270);
+  --destructive: oklch(0.58 0.22 22);
+  --border: oklch(0.91 0.008 255);
+  --input: oklch(0.94 0.005 252);
+  --ring: oklch(0.43 0.20 270);
+  --chart-1: oklch(0.43 0.20 270);
+  --chart-2: oklch(0.52 0.14 200);
+  --chart-3: oklch(0.48 0.13 280);
+  --chart-4: oklch(0.52 0.16 340);
+  --chart-5: oklch(0.58 0.14 55);
+  /* ── Sidebar — slightly tinted for depth ── */
+  --sidebar: oklch(0.942 0.005 252);
+  --sidebar-foreground: oklch(0.128 0.012 260);
+  --sidebar-primary: oklch(0.43 0.20 270);
+  --sidebar-primary-foreground: oklch(0.985 0.002 250);
+  --sidebar-accent: oklch(0.90 0.008 260);
+  --sidebar-accent-foreground: oklch(0.15 0.015 268);
+  --sidebar-border: oklch(0.90 0.008 258);
+  --sidebar-ring: oklch(0.43 0.20 270);
 }
 
 .dark {
-  --background: oklch(0.085 0.012 240);
-  --foreground: oklch(0.92 0.008 240);
-  --card: oklch(0.13 0.014 240);
-  --card-foreground: oklch(0.92 0.008 240);
-  --popover: oklch(0.13 0.014 240);
-  --popover-foreground: oklch(0.92 0.008 240);
-  --primary: oklch(0.65 0.15 245);
-  --primary-foreground: oklch(0.105 0.012 240);
-  --secondary: oklch(0.18 0.012 240);
-  --secondary-foreground: oklch(0.92 0.008 240);
-  --muted: oklch(0.12 0.01 240);
-  --muted-foreground: oklch(0.60 0.012 240);
-  --accent: oklch(0.20 0.014 240);
-  --accent-foreground: oklch(0.92 0.008 240);
-  --destructive: oklch(0.60 0.20 20);
-  --border: oklch(0.22 0.012 240);
-  --input: oklch(0.18 0.01 240);
-  --ring: oklch(0.65 0.15 245);
-  --chart-1: oklch(0.65 0.15 245);
-  --chart-2: oklch(0.60 0.14 210);
-  --chart-3: oklch(0.55 0.12 270);
-  --chart-4: oklch(0.60 0.17 330);
-  --chart-5: oklch(0.63 0.14 50);
-  --sidebar: oklch(0.07 0.012 240);
-  --sidebar-foreground: oklch(0.92 0.008 240);
-  --sidebar-primary: oklch(0.65 0.15 245);
-  --sidebar-primary-foreground: oklch(0.105 0.012 240);
-  --sidebar-accent: oklch(0.18 0.012 240);
-  --sidebar-accent-foreground: oklch(0.92 0.008 240);
-  --sidebar-border: oklch(0.22 0.012 240);
-  --sidebar-ring: oklch(0.65 0.15 245);
+  /* ── Precision Instrument palette (dark) ── */
+  --background: oklch(0.108 0.005 268);
+  --foreground: oklch(0.95 0.004 260);
+  --card: oklch(0.134 0.006 268);
+  --card-foreground: oklch(0.95 0.004 260);
+  --popover: oklch(0.142 0.006 268);
+  --popover-foreground: oklch(0.95 0.004 260);
+  --primary: oklch(0.68 0.17 268);
+  --primary-foreground: oklch(0.10 0.006 268);
+  --secondary: oklch(0.168 0.008 268);
+  --secondary-foreground: oklch(0.92 0.005 262);
+  --muted: oklch(0.132 0.005 268);
+  --muted-foreground: oklch(0.68 0.008 260);
+  --accent: oklch(0.188 0.018 270);
+  --accent-foreground: oklch(0.95 0.004 260);
+  --destructive: oklch(0.64 0.22 20);
+  --border: oklch(0.22 0.008 268);
+  --input: oklch(0.162 0.006 268);
+  --ring: oklch(0.68 0.17 268);
+  --chart-1: oklch(0.68 0.17 268);
+  --chart-2: oklch(0.64 0.12 200);
+  --chart-3: oklch(0.62 0.12 280);
+  --chart-4: oklch(0.64 0.16 340);
+  --chart-5: oklch(0.70 0.14 55);
+  /* ── Sidebar (dark) ── */
+  --sidebar: oklch(0.10 0.004 268);
+  --sidebar-foreground: oklch(0.93 0.005 260);
+  --sidebar-primary: oklch(0.68 0.17 268);
+  --sidebar-primary-foreground: oklch(0.10 0.006 268);
+  --sidebar-accent: oklch(0.142 0.008 270);
+  --sidebar-accent-foreground: oklch(0.93 0.005 262);
+  --sidebar-border: oklch(0.18 0.006 268);
+  --sidebar-ring: oklch(0.68 0.17 268);
+}
+
+/* ── Base & accessibility ─────────────────────────── */
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Keyboard focus ring — visible only on keyboard navigation */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Remove default outline on mouse click */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* The chat input box (transparent textarea over a highlight layer) must not
+   show the blue :focus-visible ring — it has no visible border to outline. */
+.chat-input:focus,
+.chat-input:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Selection color — primary-tinted amber glow */
+::selection {
+  background: color-mix(in oklch, var(--primary) 18%, transparent);
+  color: var(--foreground);
+}
+
+/* ── Precision surface system ───────────────────────
+   Elevation is communicated through shadow rather than heavy borders.
+   Cards sit 1px above the surface; hover lifts them slightly. */
+
+/* Quiet scrollbar — thin, low-contrast, matches the muted palette */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--muted-foreground) 22%, transparent);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--muted-foreground) 36%, transparent);
+}
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color:
+    color-mix(in oklch, var(--muted-foreground) 22%, transparent)
+    transparent;
+}
+
+html, body {
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  letter-spacing: -0.006em;
+}
+
+/* Headings: tighter tracking for cleaner hierarchy */
+h1, h2, h3, h4, h5, h6 {
+  letter-spacing: -0.02em;
+}
+
+/* Message content: balanced line height */
+.helix-md {
+  line-height: 1.65;
+  font-size: 0.9rem;
+  word-break: break-word;
+}
+
+.helix-md p {
+  margin-block: 0.5em;
+}
+
+.helix-md h1, .helix-md h2, .helix-md h3 {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin-top: 1.2em;
+  margin-bottom: 0.5em;
+}
+
+.helix-md h1 { font-size: 1.3em; }
+.helix-md h2 { font-size: 1.15em; }
+.helix-md h3 { font-size: 1.05em; }
+
+.helix-md ul, .helix-md ol {
+  padding-left: 1.4em;
+  margin-block: 0.5em;
+}
+
+.helix-md li {
+  margin-block: 0.2em;
+}
+
+.helix-md a {
+  color: var(--primary);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
+  transition: border-color 150ms ease;
+}
+
+.helix-md a:hover {
+  border-bottom-color: var(--primary);
+}
+
+.helix-md blockquote {
+  border-left: 2px solid color-mix(in oklch, var(--muted-foreground) 20%, transparent);
+  padding-left: 1em;
+  margin-block: 0.5em;
+  color: var(--muted-foreground);
+}
+
+.helix-md table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-block: 0.75em;
+  font-size: 0.85em;
+}
+
+.helix-md th, .helix-md td {
+  border: 1px solid var(--border);
+  padding: 0.4em 0.6em;
+  text-align: left;
+}
+
+.helix-md th {
+  background: color-mix(in oklch, var(--muted-foreground) 5%, transparent);
+  font-weight: 600;
+}
+
+.helix-md > *:first-child {
+  margin-top: 0;
+}
+
+.helix-md > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Smooth scrolling for in-app navigation */
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Default button transition — consistent micro-interactions */
+button, [role="button"], a, input, textarea, select {
+  transition-property: color, background-color, border-color, opacity, box-shadow, transform;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+
+/* ── Settings page premium polish ──────────────────────────────────────────── */
+
+/* Smooth collapsible section animations */
+details > summary {
+  list-style: none;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Setting row hover refinement */
+button[class*="hover:bg-"]:hover {
+  outline: none;
+}
+
+/* Premium toggle switch */
+button[class*="rounded-full"][class*="transition-colors"] {
+  box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.06);
+}
+
+/* Input focus glow — subtle, not blue */
+input:focus, textarea:focus, select:focus {
+  box-shadow: 0 0 0 3px oklch(from var(--primary) l c h / 0.06);
+}
+
+/* Select dropdown arrow refinement */
+select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px;
+}
+
+
+/* ── Premium animations & polish ───────────────────────────────────────────── */
+
+/* Smooth entrance for messages */
+@keyframes step-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.step-enter {
+  animation: step-enter 0.2s ease-out;
+}
+
+/* Fade-in for modals/dropdowns */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.15s ease-out;
+}
+
+.animate-scale-in {
+  animation: scale-in 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Collapsible section smooth expand */
+details > div, details > .details-content {
+  overflow: hidden;
+  transition: max-height 0.2s ease-out, opacity 0.15s ease-out;
+}
+
+/* Premium scrollbar for settings */
+.overflow-y-auto {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* Remove default focus outlines — we use custom focus styles */
+:focus {
+  outline: none;
+}
+
+/* Smooth color transitions for all interactive elements */
+button, a, input, textarea, select, [role="button"] {
+  outline: none;
+}
+
+/* Truncate with ellipsis — premium tooltip style */
+[data-truncate-tooltip] {
+  position: relative;
+}
+
+/* Selection color */
+::selection {
+  background: color-mix(in oklch, var(--primary) 18%, transparent);
+  color: inherit;
+}
+
+/* Drag selection disabled during resize */
+body.user-select-none {
+  user-select: none;
+  cursor: col-resize !important;
+}
+
+body.user-select-none * {
+  pointer-events: none !important;
+}
+
+/* Code syntax highlighting container */
+.helix-md pre {
+  position: relative;
+}
+
+.helix-md pre:hover .code-copy-btn {
+  opacity: 1;
+}
+
+/* Link underline animation */
+.helix-md a {
+  background-image: linear-gradient(currentColor, currentColor);
+  background-position: 0 100%;
+  background-repeat: no-repeat;
+  background-size: 0 1px;
+  transition: background-size 0.2s ease;
+  border-bottom: none !important;
+}
+
+.helix-md a:hover {
+  background-size: 100% 1px;
 }
 
 /* ── Scrollbar polish ─────────────────────────────── */
@@ -124,21 +432,21 @@
 }
 
 [data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb {
-  background: oklch(0.82 0 0);
+  background: oklch(0.85 0.004 250);
   border-radius: 3px;
   transition: background 0.15s ease;
 }
 
 [data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.72 0 0);
+  background: oklch(0.75 0.006 250);
 }
 
 .dark [data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb {
-  background: oklch(0.28 0.008 240);
+  background: oklch(0.25 0.005 260);
 }
 
 .dark [data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.38 0.01 240);
+  background: oklch(0.32 0.006 260);
 }
 
 /* ── Resizer polish ─────────────────────────────── */
@@ -165,10 +473,13 @@
 
 /* ── Low-opacity text in dark mode ───────────────── */
 
-.dark .text-foreground\/30 { color: oklch(0.85 0 0 / 0.45); }
-.dark .text-foreground\/40 { color: oklch(0.85 0 0 / 0.52); }
-.dark .text-muted-foreground\/50 { color: oklch(0.68 0 0 / 0.62); }
-.dark .text-muted-foreground\/60 { color: oklch(0.68 0 0 / 0.68); }
+/* Dark mode: boost low-opacity text for readability (WCAG AA) */
+.dark .text-foreground\/30 { color: color-mix(in oklch, var(--foreground) 50%, transparent); }
+.dark .text-foreground\/40 { color: color-mix(in oklch, var(--foreground) 58%, transparent); }
+.dark .text-foreground\/50 { color: color-mix(in oklch, var(--foreground) 65%, transparent); }
+.dark .text-muted-foreground\/40 { color: color-mix(in oklch, var(--muted-foreground) 60%, transparent); }
+.dark .text-muted-foreground\/50 { color: color-mix(in oklch, var(--muted-foreground) 70%, transparent); }
+.dark .text-muted-foreground\/60 { color: color-mix(in oklch, var(--muted-foreground) 78%, transparent); }
 
 /* ── Markdown rendering ─────────────────────────────── */
 
@@ -199,7 +510,7 @@
 }
 
 .helix-md h1 { font-size: 1.5em; }
-.helix-md h2 { font-size: 1.25em; border-bottom: 1px solid rgba(128, 128, 128, 0.15); padding-bottom: 0.35em; }
+.helix-md h2 { font-size: 1.25em; border-bottom: 1px solid color-mix(in oklch, var(--muted-foreground) 15%, transparent); padding-bottom: 0.35em; }
 .helix-md h3 { font-size: 1.1em; }
 .helix-md h4 { font-size: 1em; }
 
@@ -217,12 +528,13 @@
 }
 
 .helix-md code {
-  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'JetBrains Mono', monospace;
   font-size: 0.85em;
-  background: rgba(128, 128, 128, 0.08);
-  border: 1px solid rgba(128, 128, 128, 0.15);
-  padding: 0.15em 0.4em;
+  background: color-mix(in oklch, var(--muted-foreground) 6%, transparent);
+  border: 1px solid color-mix(in oklch, var(--muted-foreground) 12%, transparent);
+  padding: 0.1em 0.35em;
   border-radius: 4px;
+  letter-spacing: -0.01em;
   color: var(--foreground);
 }
 
@@ -235,8 +547,8 @@
 }
 
 .helix-md pre > div {
-  background: rgba(128, 128, 128, 0.08);
-  border: 1px solid rgba(128, 128, 128, 0.15);
+  background: color-mix(in oklch, var(--muted-foreground) 5%, transparent);
+  border: 1px solid color-mix(in oklch, var(--muted-foreground) 10%, transparent);
   border-radius: 6px;
   padding: 0.75em 1em;
   overflow-x: auto;
@@ -251,7 +563,7 @@
 }
 
 .helix-md blockquote {
-  border-left: 3px solid rgba(128, 128, 128, 0.3);
+  border-left: 3px solid color-mix(in oklch, var(--muted-foreground) 30%, transparent);
   padding-left: 1em;
   margin: 0.75em 0;
   color: var(--foreground);
@@ -259,13 +571,14 @@
 }
 
 .helix-md a {
-  color: hsl(var(--primary));
+  color: var(--primary);
   text-decoration: underline;
-  text-decoration-color: rgba(var(--primary), 0.3);
+  text-decoration-color: color-mix(in oklch, var(--primary) 35%, transparent);
+  transition: text-decoration-color 0.15s ease;
 }
 
 .helix-md a:hover {
-  text-decoration-color: hsl(var(--primary));
+  text-decoration-color: var(--primary);
 }
 
 .helix-md strong {
@@ -279,19 +592,19 @@
 }
 
 .helix-md th, .helix-md td {
-  border: 1px solid rgba(128, 128, 128, 0.2);
+  border: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
   padding: 0.4em 0.8em;
   text-align: left;
 }
 
 .helix-md th {
   font-weight: 600;
-  background: rgba(128, 128, 128, 0.08);
+  background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
 }
 
 .helix-md hr {
   border: none;
-  border-top: 1px solid rgba(128, 128, 128, 0.2);
+  border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
   margin: 1em 0;
 }
 
@@ -307,6 +620,39 @@
 }
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
+}
+
+
+/* ── Settings panel polish ─────────────────────────── */
+
+/* Collapsible section animation */
+details > summary {
+  list-style: none;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Smooth content reveal in collapsible sections */
+details[open] > *:not(summary) {
+  animation: cli-fade-in 0.15s ease-out;
+}
+
+/* Settings nav scroll area */
+nav::-webkit-scrollbar {
+  width: 4px;
+}
+nav::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
+  border-radius: 2px;
+}
+nav::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+}
+
+/* Sidebar section transition */
+.sidebar-section-enter {
+  animation: cli-fade-in 0.2s ease-out;
 }
 
 /* ── Animations ───────────────────────────────────── */
@@ -437,7 +783,7 @@
 /* Modeled after OpenAI Helix's clean terminal panel style */
 
 .helix-panel {
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--border);
   border-radius: 3px;
   overflow: hidden;
   font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'JetBrains Mono', monospace;
@@ -450,14 +796,14 @@
   justify-content: space-between;
   padding: 6px 12px;
   background: transparent;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid var(--border);
   user-select: none;
 }
 
 .helix-titlebar-label {
   font-size: 10px;
   font-weight: 600;
-  color: #666;
+  color: var(--muted-foreground);
   letter-spacing: 0.8px;
 }
 
@@ -469,24 +815,24 @@
 
 .helix-titlebar-status {
   font-size: 10px;
-  color: #555;
+  color: var(--muted-foreground);
 }
 
 .helix-titlebar-status--done {
-  color: #4a9;
+  color: oklch(0.65 0.15 145);
 }
 
 .helix-titlebar-count {
   font-size: 10px;
-  color: #555;
+  color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
 
 .helix-copy-btn {
   font-size: 10px;
-  color: #666;
+  color: var(--muted-foreground);
   background: none;
-  border: 1px solid #333;
+  border: 1px solid var(--border);
   border-radius: 2px;
   padding: 1px 6px;
   cursor: pointer;
@@ -495,8 +841,8 @@
 }
 
 .helix-copy-btn:hover {
-  color: #aaa;
-  border-color: #555;
+  color: color-mix(in oklch, var(--foreground) 65%, var(--muted-foreground));
+  border-color: var(--muted-foreground);
 }
 
 .helix-content {
@@ -504,7 +850,7 @@
   overflow-y: auto;
   overflow-x: hidden;
   line-height: 1.65;
-  color: #bbb;
+  color: color-mix(in oklch, var(--foreground) 75%, var(--muted-foreground));
   max-height: 260px;
   scrollbar-width: thin;
 }
@@ -518,11 +864,11 @@
 }
 
 .helix-content::-webkit-scrollbar-thumb {
-  background: #ccc3;
+  background: color-mix(in oklch, var(--muted-foreground) 30%, transparent);
 }
 
 .helix-content::-webkit-scrollbar-thumb:hover {
-  background: #ccc6;
+  background: color-mix(in oklch, var(--muted-foreground) 45%, transparent);
 }
 
 .helix-line {
@@ -536,7 +882,7 @@
 }
 
 .helix-line:hover {
-  background: rgba(128, 128, 128, 0.08);
+  background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
 }
 
 .helix-line--enter {
@@ -547,28 +893,28 @@
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #444;
+  background: var(--border);
   flex-shrink: 0;
   margin-top: 5px;
 }
 
 .helix-dot--done {
-  background: #4a9;
+  background: oklch(0.65 0.15 145);
 }
 
 .helix-dot--running {
-  background: #e96;
+  background: oklch(0.70 0.15 65);
   animation: helix-pulse 1.2s ease-in-out infinite;
 }
 
 .helix-verb {
-  color: #ddd;
+  color: var(--foreground);
   font-weight: 500;
   flex-shrink: 0;
 }
 
 .helix-detail {
-  color: #888;
+  color: var(--muted-foreground);
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -622,20 +968,39 @@
   }
 }
 
-/* Thinking breath — neutral breathing glow (no blue) */
+/* ── Thinking breath — signature primary-toned pulse ────
+   The core brand moment: when the AI is thinking, the indicator breathes
+   in the primary (indigo-violet) at low intensity. Light enough to be
+   ambient rather than distracting; distinct enough to be the page's
+   signature rather than a generic loading spinner. */
 .thinking-breath {
   display: inline-block;
   animation: thinkingBreath 1.8s ease-in-out infinite;
 }
 @keyframes thinkingBreath {
   0%, 100% {
-    opacity: 0.4;
-    text-shadow: 0 0 4px rgba(255, 255, 255, 0.25);
+    opacity: 0.45;
+    text-shadow: 0 0 4px color-mix(in oklch, var(--primary) 8%, transparent);
   }
   50% {
     opacity: 1;
-    text-shadow: 0 0 14px rgba(255, 255, 255, 0.85), 0 0 22px rgba(255, 255, 255, 0.5);
+    text-shadow:
+      0 0 12px color-mix(in oklch, var(--primary) 28%, transparent),
+      0 0 28px color-mix(in oklch, var(--primary) 12%, transparent);
   }
+}
+
+/* Thinking card — quiet, layered, no harsh border */
+.thinking-card {
+  transition: all 0.3s ease;
+  box-shadow:
+    0 1px 4px color-mix(in oklch, var(--primary) 3%, transparent),
+    inset 0 1px 0 color-mix(in oklch, var(--primary) 2%, transparent);
+}
+.thinking-card:hover {
+  box-shadow:
+    0 2px 8px color-mix(in oklch, var(--primary) 6%, transparent),
+    inset 0 1px 0 color-mix(in oklch, var(--primary) 3%, transparent);
 }
 
 /* xterm.js transparent background */
