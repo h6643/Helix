@@ -407,6 +407,11 @@ export function AgentFlowPanel() {
   const [newProjectName, setNewProjectName] = useState('')
   const [fileSkills, setFileSkills] = useState<Array<{ name: string; description: string }>>([])
   const scrollRef = useRef<HTMLDivElement>(null)
+  const [showAtRef, setShowAtRef] = useState(false)
+  const [filteredAtFiles, setFilteredAtFiles] = useState<Array<{ name: string; path: string }>>([])
+  const [selectedAtFileIndex, setSelectedAtFileIndex] = useState(0)
+  const workspaceFilesRef = useRef<Array<{ name: string; path: string }>>([])
+  const workspaceFilesLoadedRef = useRef(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const inputValueRef = useRef(input)
   const setInputSynced = useCallback((value: string) => {
@@ -972,6 +977,18 @@ export function AgentFlowPanel() {
     const value = e.target.value
     setInputSynced(value)
     setSelectedSkillIndex(0) // Reset selection when input changes
+    // Detect @ file reference trigger
+    const atIdx = value.lastIndexOf('@')
+    if (atIdx >= 0 && (atIdx === 0 || /[\s\n]/.test(value[atIdx - 1]))) {
+      const query = value.slice(atIdx + 1).toLowerCase()
+      const files = workspaceFilesRef.current
+      const filtered = files.filter(f => f.name.toLowerCase().includes(query) || f.path.toLowerCase().includes(query))
+      setFilteredAtFiles(filtered.slice(0, 12))
+      setShowAtRef(filtered.length > 0)
+      setSelectedAtFileIndex(0)
+    } else {
+      setShowAtRef(false)
+    }
   }, [setInputSynced])
 
   // Auto-scroll to bottom (stop when user scrolls up)
@@ -1046,6 +1063,49 @@ export function AgentFlowPanel() {
     }
     prevMsgLen.current = chatMessages.length
   }, [chatMessages.length])
+
+  // Scan workspace files for @ file references
+  useEffect(() => {
+    if (!window.electron?.isElectron) return
+    if (workspaceFilesLoadedRef.current) return
+    workspaceFilesLoadedRef.current = true
+    ;(async () => {
+      try {
+        // First try getting git status for most recent files
+        const gitResult = await window.electron.git.status()
+        if (gitResult?.ok) {
+          const files: Array<{ name: string; path: string }> = []
+          for (const line of gitResult.output!.split('\n')) {
+            const m = line.match(/\s+(\S+)$/)
+            if (m && !files.some(f => f.path === m[1])) {
+              const parts = m[1].split(/[/\\]/)
+              files.push({ name: parts[parts.length - 1], path: m[1] })
+            }
+          }
+          if (files.length > 0) { workspaceFilesRef.current = files; return }
+        }
+      } catch {}
+      try {
+        // Fallback: scan workspace tree
+        const tree = await window.electron.fs.scanTree('.')
+        if (Array.isArray(tree)) {
+          const files: Array<{ name: string; path: string }> = []
+          function walk(nodes: any[], prefix: string) {
+            for (const n of nodes) {
+              if (n.type === 'file') {
+                files.push({ name: n.name, path: prefix ? prefix + '/' + n.name : n.name })
+              } else if (n.type === 'folder' && n.children) {
+                walk(n.children, prefix ? prefix + '/' + n.name : n.name)
+              }
+            }
+          }
+          walk(tree, '')
+          workspaceFilesRef.current = files
+        }
+      } catch {}
+    })()
+  }, [])
+
 
   // Clear flow
   const handleClear = useCallback(() => {
@@ -2353,6 +2413,40 @@ export function AgentFlowPanel() {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (showAtRef && filteredAtFiles.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault()
+          setSelectedAtFileIndex(prev => Math.min(prev + 1, filteredAtFiles.length - 1))
+          return
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          setSelectedAtFileIndex(prev => Math.max(prev - 1, 0))
+          return
+        }
+        if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+          e.preventDefault()
+          const idx = Math.min(selectedAtFileIndex, filteredAtFiles.length - 1)
+          const selected = filteredAtFiles[idx]
+          if (!selected) return
+          // Replace @query with the selected file path
+          const atIdx = inputValueRef.current.lastIndexOf('@')
+          if (atIdx >= 0) {
+            const prefix = inputValueRef.current.slice(0, atIdx)
+            const ref = `[${selected.name}](file:///${selected.path.replace(/\\/g, '/')})`
+            const suffix = inputValueRef.current.slice(atIdx + 1).replace(/^\S+/, '')
+            setInputSynced(prefix + ref + suffix)
+          }
+          setShowAtRef(false)
+          setFilteredAtFiles([])
+          return
+        }
+        if (e.key === 'Escape') {
+          setShowAtRef(false)
+          setFilteredAtFiles([])
+          return
+        }
+      }
       if (showSlashSkills && filteredSkills.length > 0) {
         if (e.key === 'ArrowDown') {
           e.preventDefault()
@@ -2710,6 +2804,42 @@ export function AgentFlowPanel() {
                     {(skill as any).isHermesCommand && (
                       <span className="text-[10px] text-muted-foreground/60 shrink-0">Hermes</span>
                     )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+
+            {/* @-triggered file reference dropdown */}
+            {showAtRef && filteredAtFiles.length > 0 && (
+              <div className="absolute bottom-full left-0 right-0 mb-2 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 z-50 max-h-[200px] overflow-y-auto mx-3">
+                {filteredAtFiles.map((file, index) => (
+                  <button
+                    key={file.path}
+                    type="button"
+                    ref={index === selectedAtFileIndex ? (el) => { if (el) el.scrollIntoView({ block: 'nearest' }) } : undefined}
+                    onClick={() => {
+                      const atIdx = inputValueRef.current.lastIndexOf('@')
+                      if (atIdx >= 0) {
+                        const prefix = inputValueRef.current.slice(0, atIdx)
+                        const ref = `[${file.name}](file:///${file.path.replace(/\\/g, '/')})`
+                        const suffix = inputValueRef.current.slice(atIdx + 1).replace(/^\S+/, '')
+                        setInputSynced(prefix + ref + suffix)
+                      }
+                      setShowAtRef(false)
+                      setFilteredAtFiles([])
+                    }}
+                    className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 first:rounded-t-2xl last:rounded-b-2xl ${
+                      index === selectedAtFileIndex
+                        ? 'bg-primary/10 text-primary'
+                        : 'hover:bg-muted/30'
+                    }`}
+                  >
+                    <FileText className="size-4 text-foreground/40 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[13px] text-foreground block truncate">{file.name}</span>
+                      <span className="text-[11px] text-muted-foreground block truncate">{file.path}</span>
+                    </div>
                   </button>
                 ))}
               </div>

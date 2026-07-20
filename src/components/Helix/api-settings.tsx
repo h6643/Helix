@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import {
-  Settings, Sun, Moon, Plug, Archive, ChevronLeft, ChevronRight, ChevronDown,
+  Settings, Sun, Moon, Plug, Archive, ChevronLeft, ChevronRight, ChevronDown, Search,
   Save, Eye, EyeOff, Trash2, Plus, Pencil, Sparkles,
   Globe, FileText, Keyboard, Terminal, Link, Wand2,
   RefreshCw, GitBranch, GitCommit, GitPullRequest, Zap, Anchor, Check, Activity, Loader2,
@@ -159,6 +159,19 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
   const setSettingsPage = useHelixStore(s => s.setSettingsPage)
   const pushNavigation = useHelixStore(s => s.pushNavigation)
   const [page, setPage] = useState<SettingsPage>((settingsPage as SettingsPage) || 'general')
+  const [navSearch, setNavSearch] = useState('')
+  const navSearchRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k' && !e.shiftKey) {
+        e.preventDefault()
+        navSearchRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [])
 
   useEffect(() => {
     if (settingsPage) {
@@ -1813,7 +1826,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
             </div>
           ) : (
             <>
-              <div className="px-4 py-2">
+              <div className="px-4 py-2 space-y-2">
                 <button
                   onClick={() => useHelixStore.getState().toggleSettings()}
                   className="flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground/60 hover:text-foreground hover:bg-muted/80 rounded-xl transition-colors"
@@ -1821,33 +1834,50 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   <ChevronLeft className="size-4" />
                   返回
                 </button>
+                <div className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-lg bg-transparent border border-transparent transition-all duration-200 focus-within:bg-muted/25 focus-within:border-primary/20 hover:bg-muted/15">
+                  <Search className="size-3.5 text-muted-foreground/25 shrink-0" />
+                  <input ref={navSearchRef} value={navSearch} onChange={e => setNavSearch(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Escape') { setNavSearch(''); (e.target as HTMLInputElement).blur() } }}
+                    placeholder="搜索设置..." className="flex-1 bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground/30 focus:outline-none min-w-0" />
+                  {navSearch && <button onClick={() => setNavSearch('')} className="text-muted-foreground/20 hover:text-foreground/60 shrink-0"><X className="size-3" /></button>}
+                </div>
               </div>
-              <nav className="flex-1 overflow-y-auto py-2">
-                {NAV_GROUPS.map(group => (
-                  <div key={group.title} className="mb-3">
-                    <p className="px-5 py-1.5 text-[10px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
-                      {group.title}
-                    </p>
-                    {group.items.map(item => (
-                      <button
-                        key={item.id}
-                        onClick={() => {
-                          setPage(item.id)
-                          pushNavigation({ type: 'settings', page: item.id })
-                        }}
-                        className={`w-full flex items-center gap-2.5 pl-[26px] pr-4 py-2 text-sm rounded-xl transition-all ${
-                          page === item.id
-                            ? 'bg-muted font-medium'
-                            : 'hover:bg-muted/50'
-                        }`}
-                      >
-                        <item.icon className="size-4" />
-                        {item.label}
-                      </button>
+              {(() => {
+                const q = navSearch.trim().toLowerCase()
+                const filtered = q
+                  ? NAV_GROUPS.map(g => ({ ...g, items: g.items.filter(i => i.label.toLowerCase().includes(q)) })).filter(g => g.items.length)
+                  : NAV_GROUPS
+                if (!filtered.length) return <div className="px-5 py-8 text-center text-[13px] text-muted-foreground/40">未找到匹配项</div>
+                return (
+                  <nav className="flex-1 overflow-y-auto py-2">
+                    {filtered.map(group => (
+                      <div key={group.title} className="mb-3">
+                        <p className="px-5 py-1.5 text-[10px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
+                          {group.title}
+                        </p>
+                        {group.items.map(item => (
+                          <button
+                            key={item.id}
+                            onClick={() => {
+                              setPage(item.id)
+                              pushNavigation({ type: 'settings', page: item.id })
+                              setNavSearch('')
+                            }}
+                            className={`w-full flex items-center gap-2.5 pl-[26px] pr-4 py-2 text-sm rounded-xl transition-all ${
+                              page === item.id
+                                ? 'bg-muted font-medium'
+                                : 'hover:bg-muted/50'
+                            }`}
+                          >
+                            <item.icon className="size-4" />
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
                     ))}
-                  </div>
-                ))}
-              </nav>
+                  </nav>
+                )
+              })()}
             </>
           )}
 
