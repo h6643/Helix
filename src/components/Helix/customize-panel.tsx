@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useCallback, useEffect } from 'react'
-import { X, Keyboard, FileText, Palette, Pencil } from 'lucide-react'
+import { X, Keyboard, FileText, Palette, Pencil, Sun, Moon } from 'lucide-react'
 import { useHelixStore, DEFAULT_SHORTCUTS } from '@/stores/helix-store'
 import { ScrollArea } from '@/components/ui/scroll-area'
 
@@ -115,7 +115,6 @@ function ShortcutsSection() {
         ...customShortcuts[editingId],
         keys: pendingKeys,
       })
-      showToast({ type: 'success', title: '快捷键已更新', description: `${pendingKeys.join(' + ')} → ${customShortcuts[editingId].description}` })
     }
     setRecording(false)
     setEditingId(null)
@@ -213,7 +212,6 @@ function InstructionsSection() {
 
   const handleSave = () => {
     setCustomInstructions(localInstructions)
-    showToast({ type: 'success', title: '已保存', description: '自定义指令已更新' })
   }
 
   return (
@@ -244,6 +242,44 @@ function InstructionsSection() {
 
 // ─── Appearance Section ───────────────────────────────────────────────────
 
+function applyTheme(mode: 'light' | 'dark') {
+  document.documentElement.classList.toggle('dark', mode === 'dark')
+  try { localStorage.setItem('helix-theme', mode) } catch {}
+}
+
+function useCurrentTheme(): 'light' | 'dark' {
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof document === 'undefined') return 'dark'
+    return document.documentElement.classList.contains('dark') ? 'dark' : 'light'
+  })
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setTheme(document.documentElement.classList.contains('dark') ? 'dark' : 'light')
+    })
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    return () => observer.disconnect()
+  }, [])
+  return theme
+}
+
+function ThemeToggleButton({ mode }: { mode: 'light' | 'dark' }) {
+  const current = useCurrentTheme()
+  const active = current === mode
+  return (
+    <button
+      onClick={() => applyTheme(mode)}
+      className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all duration-200 ${
+        active
+          ? 'bg-primary/10 border-primary/30 text-primary shadow-sm'
+          : 'bg-card/50 border-border/40 text-muted-foreground hover:bg-muted/40 hover:text-foreground'
+      }`}
+    >
+      {mode === 'light' ? <Sun className="size-4" /> : <Moon className="size-4" />}
+      {mode === 'light' ? '亮色' : '暗色'}
+    </button>
+  )
+}
+
 function AppearanceSection() {
   const { fontFamily, setFontFamily, fontSize, setFontSize, interfaceFont, setInterfaceFont, showToast } = useHelixStore()
 
@@ -262,6 +298,15 @@ function AppearanceSection() {
 
   return (
     <div className="space-y-6">
+      {/* ── Theme ── */}
+      <section className="space-y-3">
+        <h3 className="text-base font-medium text-foreground">主题</h3>
+        <div className="flex gap-2">
+          <ThemeToggleButton mode="light" />
+          <ThemeToggleButton mode="dark" />
+        </div>
+      </section>
+
       <section className="space-y-3">
         <h3 className="text-base font-medium text-foreground">编辑器字体</h3>
         <div className="grid grid-cols-2 gap-4">
