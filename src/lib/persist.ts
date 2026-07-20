@@ -493,6 +493,23 @@ export const persistence = {
     }
   },
 
+  
+  async reorderSessions(workDir: string, orderedIds: string[]): Promise<void> {
+    // Re-save sessions with adjusted createdAt to match new order
+    const all = await this.loadSessions()
+    const sessions = all.filter(s => s.workDir === workDir)
+    const now = Date.now()
+    for (let i = 0; i < orderedIds.length; i++) {
+      const s = sessions.find(x => x.id === orderedIds[i])
+      if (s && s.createdAt !== now - i * 1000) {
+        s.createdAt = now - i * 1000
+        s.savedAt = now
+        const db = await openDB()
+        await tx(db, 'sessions', 'readwrite', (store) => store.put(s))
+      }
+    }
+  },
+
   async toggleSessionArchived(id: string): Promise<boolean> {
     const db = await openDB()
     const session = await tx<PersistedSession | undefined>(db, 'sessions', 'readonly', (store) => store.get(id))

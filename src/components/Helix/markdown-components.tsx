@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react'
-import { Check, Copy } from 'lucide-react'
+import { Check, Copy, Download } from 'lucide-react'
 import 'highlight.js/styles/github-dark.css'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'

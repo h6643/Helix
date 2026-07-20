@@ -48,7 +48,6 @@ export function ShortcutsPage() {
         ...customShortcuts[editingId],
         keys: pendingKeys,
       })
-      showToast({ type: 'success', title: '快捷键已更新', description: `${pendingKeys.join(' + ')} → ${customShortcuts[editingId].description}` })
     }
     setRecording(false)
     setEditingId(null)

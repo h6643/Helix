@@ -14,11 +14,23 @@ export interface ApiConfigSlice {
   apiProfiles: ApiProfile[]
   activeProfileId: string | null
   availableModels: string[]
+  /** Base URL the current `availableModels` was fetched from (provenance tag,
+   *  so the model dropdown never mixes one provider's models into another). */
+  availableModelsBaseUrl: string | null
+  /** Per-provider fetched model lists. Key = provider id. Clicking "获取模型列表"
+   *  for a provider stores its models here, so switching providers automatically
+   *  shows that provider's own list — no global cross-provider mixing. */
+  providerModels: Record<string, string[]>
   /** Multi-provider config backing the flattened model selector. */
   providers: ProviderConfig[]
   /** Currently selected model name (flat list item), e.g. "Ling-2.6-1T". */
   activeModel: string | null
-  setAvailableModels: (models: string[]) => void
+  /** The provider currently active in the model selector. The model dropdown
+   *  shows ONLY this provider's models (requirement: no cross-provider mixing).
+   *  Kept in sync with `activeModel` — whenever a model is selected, this is
+   *  updated to the provider that owns it. */
+  activeProviderId: string | null
+  setAvailableModels: (models: string[], baseUrl?: string, providerId?: string) => void
   setApiConfig: (config: Partial<ApiConfig>) => void
   getApiConfig: () => ApiConfig
   /** Find which profile owns a given model name (reverse-lookup). */
@@ -36,6 +48,10 @@ export interface ApiConfigSlice {
   resolveActiveApiConfig: () => ApiConfig | null
   /** Select a model: updates activeModel + mirrors the resolved config into apiConfig. */
   setActiveModel: (model: string) => void
+  /** Switch the active provider. If the current model doesn't belong to the new
+   *  provider, reselect its defaultModel (or models[0]). Mirrors the new
+   *  provider's credentials + model into apiConfig. */
+  setActiveProvider: (id: string) => void
   /** Create or update a provider (used by the Provider settings editor). */
   upsertProvider: (input: Omit<ProviderConfig, 'id'> & { id?: string }) => string
   /** Remove a provider; reselects activeModel if it belonged to the removed one. */
@@ -61,13 +77,62 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
   apiProfiles: [],
   activeProfileId: null,
   availableModels: [],
+  availableModelsBaseUrl: null,
+  providerModels: {},
   providers: [],
   activeModel: null,
+  activeProviderId: null,
 
-  setAvailableModels: (models) => {
-    set({ availableModels: models })
+  setAvailableModels: (models, baseUrl, providerId) => {
+    // Resolve the provider id that scopes this fetched list. Priority:
+    // explicit param → active provider → match by baseUrl. This guarantees
+    // the saved key equals what the model selector reads (providerModels[pid]
+    // where pid === activeProvider.id), so the list survives a restart.
+    const resolvePid = (state: any): string | undefined => {
+      if (providerId) return providerId
+      if (state.activeProviderId) return state.activeProviderId
+      if (baseUrl) {
+        const match = state.providers.find((p: any) => p.baseUrl === baseUrl)
+        if (match) return match.id
+      }
+      return undefined
+    }
+    set((state) => {
+      const pid = resolvePid(state)
+      // Only overwrite the fetched list when we actually have models. An empty
+      // array is a "reset display" signal (e.g. switching providers / profiles)
+      // and must NOT wipe the persisted fetched list, or it would be lost on the
+      // next persistToStorage / restart.
+      const providerModels = (pid && models.length > 0)
+        ? { ...state.providerModels, [pid]: models }
+        : state.providerModels
+      // NOTE: We intentionally do NOT merge fetched models into
+      // providers[].models here. The provider's `models` field is the
+      // *declared* list (static); providerModels[pid] is the *fetched*
+      // list (dynamic, per-endpoint). Merging them would pollute a
+      // single provider's model array with models from unrelated
+      // endpoints whenever the caller reuses activeProviderId as the
+      // key — which is exactly what caused "all models from every
+      // supplier showing in one dropdown". Instead, keep them separate
+      // and consult providerModels at read-time (setActiveModel /
+      // resolveActiveApiConfig / restoreFromStorage).
+      return {
+        availableModels: models,
+        availableModelsBaseUrl: baseUrl ?? null,
+        providerModels,
+      }
+    })
     import('@/lib/persist').then(({ persistence }) => {
       persistence.saveSetting('availableModels', models)
+      // Persist the per-provider fetched model lists so they survive a restart.
+      // Without this, `providerModels` resets to {} on every cold start and the
+      // selector falls back to the single `config.model`, forcing the user to
+      // re-click "获取模型列表" after each restart.
+      const pid = resolvePid(get())
+      if (pid && models.length > 0) {
+        const next = { ...get().providerModels, [pid]: models }
+        persistence.saveSetting('providerModels', next)
+      }
     })
   },
 
@@ -139,9 +204,11 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
 
   // ── Multi-provider actions ──
   resolveActiveApiConfig: () => {
-    const { activeModel, providers } = get()
+    const { activeModel, providers, providerModels } = get()
     if (!activeModel) return null
-    const provider = providers.find((p) => p.models.includes(activeModel))
+    const provider =
+      providers.find((p) => p.models.includes(activeModel)) ||
+      providers.find((p) => (providerModels[p.id] || []).includes(activeModel))
     if (!provider) return null
     return {
       provider: provider.name,
@@ -153,14 +220,43 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
 
   setActiveModel: (model) => {
     const providers = get().providers
-    const provider = providers.find((p) => p.models.includes(model))
+    // A model may live in the fetched per-provider list (providerModels[pid])
+    // rather than the provider's declared `models` array — e.g. after "获取模型列表".
+    // Resolve the owning provider from BOTH sources so selecting a fetched model
+    // works instead of silently no-op'ing (which made the input-bar selector look
+    // frozen on the previous model).
+    let provider = providers.find((p) => p.models.includes(model))
+    if (!provider) {
+      const { providerModels, activeProviderId } = get()
+      const search = (pid?: string | null) =>
+        pid && providerModels[pid]?.includes(model)
+          ? providers.find((p) => p.id === pid)
+          : undefined
+      provider =
+        search(activeProviderId) ||
+        providers.find((p) => (providerModels[p.id] || []).includes(model))
+    }
+    if (!provider) {
+      // Final fallback: match by the current backend URL. This covers models that
+      // were never fetched via "获取模型列表" and don't appear in any provider's
+      // declared list — e.g. a hand-typed model on a freshly-added endpoint.
+      // Without this fallback setActiveModel silently returns and activeProviderId
+      // drifts to whatever provider was previously active (causing the dropdown to
+      // show the wrong supplier's models while the input bar shows the right one).
+      const currentUrl = get().apiConfig?.baseUrl
+      if (currentUrl) {
+        provider = providers.find((p) => p.baseUrl === currentUrl)
+      }
+    }
     if (!provider) {
       warn('[api-config-slice] setActiveModel: 找不到包含模型', model, '的 Provider')
       return
     }
     // Mirror the resolved provider config into apiConfig (what Hermes backend reads).
+    // Keep activeProviderId in sync so the dropdown stays scoped to this provider.
     set({
       activeModel: model,
+      activeProviderId: provider.id,
       apiConfig: {
         ...get().apiConfig,
         provider: provider.name,
@@ -171,6 +267,40 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
     })
     import('@/lib/persist').then(({ persistence }) => {
       persistence.saveSetting('activeModel', model)
+      persistence.saveSetting('activeProviderId', provider.id)
+    })
+  },
+
+  setActiveProvider: (id) => {
+    const provider = get().providers.find((p) => p.id === id)
+    if (!provider) {
+      warn('[api-config-slice] setActiveProvider: 找不到 Provider', id)
+      return
+    }
+    // Keep the current model if it still belongs to the new provider; otherwise
+    // reselect the provider's default (or first) model. A provider with no models
+    // leaves activeModel null — the UI shows the "no models" placeholder.
+    // Consult the fetched list (providerModels) as well as the declared models,
+    // since a model selected from "获取模型列表" may only live in providerModels.
+    const cur = get().activeModel
+    const ownsModel = (pid: string, m?: string | null) =>
+      !!m && (provider.models.includes(m) || (get().providerModels[pid] || []).includes(m))
+    const keepModel = ownsModel(provider.id, cur)
+    const model = keepModel ? cur : (provider.defaultModel || provider.models[0] || null)
+    set({
+      activeProviderId: id,
+      activeModel: model,
+      apiConfig: {
+        ...get().apiConfig,
+        provider: provider.name,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model: model || '',
+      },
+    })
+    import('@/lib/persist').then(({ persistence }) => {
+      persistence.saveSetting('activeProviderId', id)
+      if (model) persistence.saveSetting('activeModel', model)
     })
   },
 
@@ -188,6 +318,7 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
       const def = next[idx]
       const firstModel = def?.models?.[0]
       if (firstModel) get().setActiveModel(firstModel)
+      else if (def && !get().activeProviderId) set({ activeProviderId: def.id })
     }
     import('@/lib/persist').then(({ persistence }) => {
       persistence.saveSetting('providers', next)
@@ -199,11 +330,15 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
     const providers = get().providers.filter((p) => p.id !== id)
     set({ providers })
     const active = get().activeModel
-    // If the active model belonged to the removed provider, reselect.
-    if (active && !providers.some((p) => p.models.includes(active))) {
+    const activeStillValid = !!active && providers.some((p) => p.models.includes(active))
+    if (activeStillValid) {
+      // The model survived in another provider — re-anchor activeProviderId to it.
+      const owner = providers.find((p) => p.models.includes(active!))
+      if (owner && get().activeProviderId !== owner.id) set({ activeProviderId: owner.id })
+    } else {
       const first = providers[0]
       if (first?.models?.length) get().setActiveModel(first.models[0])
-      else set({ activeModel: null })
+      else set({ activeModel: null, activeProviderId: null })
     }
     import('@/lib/persist').then(({ persistence }) => {
       persistence.saveSetting('providers', providers)

@@ -108,7 +108,6 @@ export function CommandPalette() {
           const name = prompt('输入文件名：')
           if (name?.trim()) {
             createFile(null, name.trim(), 'file')
-            showToast({ type: 'success', title: '文件已创建', description: name.trim() })
           }
         },
         category: 'action',
@@ -150,8 +149,6 @@ export function CommandPalette() {
         action: () => {
           if (activeTabId) {
             markTabSaved(activeTabId)
-            const tab = openTabs.find(t => t.id === activeTabId)
-            if (tab) showToast({ type: 'success', title: '已保存', description: tab.name })
           }
         },
         category: 'action',
@@ -169,7 +166,6 @@ export function CommandPalette() {
             if (tab) {
               const path = getFilePath(tab.fileId)
               navigator.clipboard.writeText(path)
-              showToast({ type: 'success', title: '路径已复制', description: path })
             }
           }
         },
@@ -185,7 +181,6 @@ export function CommandPalette() {
         action: () => {
           const next = editorTheme === 'vs-dark' ? 'light' : 'vs-dark'
           setEditorTheme(next)
-          showToast({ type: 'info', title: '主题已切换', description: next === 'vs-dark' ? '深色模式' : '浅色模式' })
         },
         category: 'action',
       },
@@ -194,9 +189,7 @@ export function CommandPalette() {
         label: '键盘快捷键',
         description: '查看所有可用的快捷键',
         icon: <Keyboard className="size-4 text-cyan-400" />,
-        action: () => {
-          showToast({ type: 'info', title: '快捷键', description: 'Ctrl+Shift+/ 快捷键帮助 · Ctrl+, 设置 · Ctrl+B 侧边栏 · Ctrl+J 终端 · Ctrl+F 查找 · Ctrl+[ ] 后退/前进 · F11 全屏', duration: 5000 })
-        },
+        action: () => {},
         category: 'action',
       },
     ]

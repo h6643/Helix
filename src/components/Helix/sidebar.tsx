@@ -18,6 +18,7 @@ import {
   RotateCcw,
   MoreVertical,
   Pencil,
+  Star,
   AlertTriangle,
   PanelLeft,
 } from 'lucide-react'
@@ -104,7 +105,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
             {!isArchived && onArchive && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onArchive() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <Archive className="size-3.5" />
                 归档
@@ -113,7 +114,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
             {!isArchived && onPin && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onPin() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <Pin className={`size-3.5 ${isPinned ? 'text-primary' : ''}`} />
                 {isPinned ? '取消固定' : '固定'}
@@ -122,7 +123,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
             {isArchived && onRestore && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onRestore() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <RotateCcw className="size-3.5" />
                 恢复
@@ -131,7 +132,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
             {onDelete && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onDelete() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-500 hover:bg-red-500/10"
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-destructive hover:bg-destructive/10"
               >
                 <Trash2 className="size-3.5" />
                 删除
@@ -205,7 +206,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
             {onPin && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onPin() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <Pin className={`size-3.5 ${isPinned ? 'text-primary' : ''}`} />
                 {isPinned ? '取消置顶' : '置顶'}
@@ -214,7 +215,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
             {onShowInExplorer && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onShowInExplorer() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <FolderOpen className="size-3.5" />
                 <span className="whitespace-nowrap">在资源管理器中显示</span>
@@ -223,7 +224,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
             {onArchive && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onArchive() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <Archive className="size-3.5" />
                 归档
@@ -232,7 +233,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
             {onDelete && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onDelete() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-500 hover:bg-red-500/10"
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-destructive hover:bg-destructive/10"
               >
                 <Trash2 className="size-3.5" />
                 删除
@@ -292,6 +293,8 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   const [deleteTarget, setDeleteTarget] = useState<PersistedSession | null>(null)
   const [deleteProjectDir, setDeleteProjectDir] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [showFavorites, setShowFavorites] = useState(false)
+  const [, setFavRefresh] = useState(0)
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   const [recentCollapsed, setRecentCollapsed] = useState(false)
   const [recentHovered, setRecentHovered] = useState(false)
@@ -368,10 +371,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       }
     }
     return Array.from(groups.entries())
-      // B: the active working directory (app's own cwd, defaults to the project
-      // root) is the current context, not a deletable "project" — exclude it so
-      // it doesn't reappear in the list on every startup.
-      .filter(([dir]) => dir !== selectedWorkDir)
       .map(([dir, list]) => {
         const sorted = [...list].sort((a, b) => {
           if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
@@ -388,18 +387,17 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
         return (b.sessions[0]?.savedAt || 0) - (a.sessions[0]?.savedAt || 0)
       })
-  }, [sessions, persistedFolders, pinnedProjectDirs, selectedWorkDir])
+  }, [sessions, persistedFolders, pinnedProjectDirs])
 
-  // Standalone conversations (no workDir) + the active working directory's
-  // sessions (kept visible here since the work dir is no longer a listed project)
+  // Standalone conversations (no workDir only)
   const conversations = useMemo(() => {
     return sessions
-      .filter(s => !s.isArchived && (!s.workDir || s.workDir === selectedWorkDir))
+      .filter(s => !s.isArchived && !s.workDir)
       .sort((a, b) => {
         if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
         return b.savedAt - a.savedAt
       })
-  }, [sessions, selectedWorkDir])
+  }, [sessions])
 
   const handleNewTask = useCallback(() => {
     useHelixStore.getState().flushSessionPersist()
@@ -436,7 +434,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       useHelixStore.getState().setSelectedWorkDir(dir)
       useHelixStore.getState().setCurrentSessionId(null)
       await persistence.saveProjectFolder(dir)
-      showToast({ type: 'success', title: '已创建新对话' })
     } catch (e) {
       console.error('Failed to switch project for new chat:', e)
       showToast({ type: 'error', title: '创建新对话失败' })
@@ -444,6 +441,13 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   }, [clearChat, setSelectedWorkDir, setWorkDir, showToast])
 
   const handleLoadSession = useCallback(async (session: PersistedSession) => {
+    // Confirm if agent is currently running
+    const store = useHelixStore.getState()
+    if (store.isAgentRunning || store.isChatLoading) {
+      if (!window.confirm('Agent 正在运行中，切换会话将中断当前任务。确定要切换吗？')) {
+        return
+      }
+    }
     try {
       const state = useHelixStore.getState()
       // Only persist the current session if it has already been saved at least once.
@@ -619,7 +623,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       const count = await persistence.archiveSessionsByWorkDir(dir)
       const remaining = await persistence.loadSessions()
       setSessions(sortSessions(remaining))
-      showToast({ type: 'success', title: `已归档 ${count} 个对话` })
     } catch (e) {
       console.error('Failed to archive project:', e)
       showToast({ type: 'error', title: '归档失败' })
@@ -635,8 +638,23 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
     try {
       const count = await persistence.deleteSessionsByWorkDir(deleteProjectDir)
       await persistence.deleteProjectFolder(deleteProjectDir)
+      // Drop the dir from pinned folders (if it was pinned) so it can't re-appear.
+      const pinned = await persistence.getPinnedProjectFolders()
+      if (pinned.includes(deleteProjectDir)) {
+        await persistence.savePinnedProjectFolders(pinned.filter((d) => d !== deleteProjectDir))
+      }
       const remaining = await persistence.loadSessions()
       setSessions(sortSessions(remaining))
+      // Re-sync the in-memory folder/pin sets from storage. Without this the
+      // deleted dir stays in `persistedFolders`/`pinnedProjectDirs` and the
+      // project keeps showing in the sidebar — so the delete looks like a no-op.
+      setPersistedFolders(new Set(await persistence.getProjectFolders()))
+      setPinnedProjectDirs(new Set(await persistence.getPinnedProjectFolders()))
+      setExpandedProjects((prev) => {
+        const next = new Set(prev)
+        next.delete(deleteProjectDir)
+        return next
+      })
       if (selectedWorkDir === deleteProjectDir) {
         setSelectedWorkDir(null)
       }
@@ -679,7 +697,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                 title={item.label}
                 className={`p-2.5 rounded-lg transition-colors outline-none ${
                   isActive
-                    ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                    ? 'bg-sidebar-accent/70 text-sidebar-accent-foreground'
                     : 'text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40'
                 }`}
               >
@@ -695,7 +713,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
           >
             <Settings className="size-[18px]" />
             {isElectron() && (
-              <span className={`block w-1.5 h-1.5 rounded-full mx-auto mt-1 ${hermesConnected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
+              <span className={`block w-1.5 h-1.5 rounded-full mx-auto mt-1 ${hermesConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
             )}
           </button>
         </div>
@@ -703,7 +721,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       <>
       {/* Top actions */}
       <div className="shrink-0 px-3 pt-3 pb-2">
-        <div className="flex flex-col gap-0">
+        <div className="flex flex-col gap-0.5">
           {topActions.map(item => {
             const isActive =
               (item.id === 'scheduled' && showScheduledTasksPanel) ||
@@ -727,17 +745,57 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       </div>
 
       <div className="flex-1 overflow-hidden flex flex-col min-h-0">
-        <div className="flex items-center px-4 pt-3 pb-1.5 group/section">
+        <div className="flex items-center px-4 pt-2.5 pb-1 group/section">
           <button
             onClick={() => setRecentCollapsed(prev => !prev)}
-            onMouseEnter={() => {}}
-            onMouseLeave={() => {}}
-            className="flex items-center gap-1 flex-1 text-[13px] font-medium text-sidebar-foreground/50 hover:text-sidebar-foreground/70 transition-colors"
+            className="flex items-center gap-1 flex-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-foreground/35 hover:text-sidebar-foreground/55 transition-colors"
           >
+            <svg className={`size-3 transition-transform ${recentCollapsed ? '' : 'rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m9 18 6-6-6-6"/></svg>
             <span>最近</span>
           </button>
+          <button
+            onClick={() => { setShowFavorites(!showFavorites); setFavRefresh(n => n + 1) }}
+            className={`p-0.5 rounded transition-colors ${showFavorites ? 'text-primary' : 'text-sidebar-foreground/25 hover:text-sidebar-foreground/60'}`}
+            title="收藏"
+          >
+            <Star className="size-3.5" />
+          </button>
         </div>
-        {!recentCollapsed && (
+        {!recentCollapsed && showFavorites && (
+          <div className="px-2 overflow-y-auto flex-1 min-h-0">
+            <div className="flex items-center justify-between px-2 py-1.5 mb-0.5">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-foreground/35">收藏</span>
+            </div>
+            {(() => {
+              try {
+                const favorites = JSON.parse(typeof localStorage !== "undefined" ? localStorage.getItem("helix-favorites") || "[]" : "[]")
+                if (!favorites || favorites.length === 0) {
+                  return (<div className="px-4 py-6 text-center text-[12px] text-sidebar-foreground/30">暂无收藏</div>)
+                }
+                return (
+                  <div className="space-y-1">
+                    {favorites.map((fav: { id: string; content: string; timestamp: number }, idx: number) => (
+                      <div key={fav.id || idx} className="group rounded-lg p-2.5 hover:bg-sidebar-accent/30 transition-colors">
+                        <p className="text-[12px] text-sidebar-foreground/60 leading-relaxed" style={{ display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{(fav.content || "").substring(0, 200)}</p>
+                        <div className="flex items-center justify-between mt-1.5">
+                          <span className="text-[10px] text-sidebar-foreground/25">{new Date(fav.timestamp).toLocaleDateString("zh-CN")}</span>
+                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button onClick={() => { if (navigator.clipboard) navigator.clipboard.writeText(fav.content) }} className="p-1 rounded text-sidebar-foreground/30 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors" title="复制"><svg className="size-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+                            <button onClick={() => { const favs = JSON.parse(localStorage.getItem("helix-favorites") || "[]"); const updated = favs.filter((f: any) => f.id !== fav.id); localStorage.setItem("helix-favorites", JSON.stringify(updated)); setFavRefresh(n => n + 1) }} className="p-1 rounded text-sidebar-foreground/30 hover:text-destructive hover:bg-sidebar-accent/50 transition-colors" title="删除"><Trash2 className="size-3" /></button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              } catch {
+                return <div className="px-4 py-6 text-center text-[12px] text-sidebar-foreground/30">暂无收藏</div>
+              }
+            })()}
+          </div>
+        )}
+        
+{!recentCollapsed && !showFavorites && (
         <div className="px-2 overflow-y-auto min-h-0 [scrollbar-gutter:stable]">
           {loading ? (
             <div className="flex items-center justify-center py-6">
@@ -754,15 +812,16 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                       className={`w-full flex items-center rounded-lg px-3 py-2 transition-colors ${
                         isSelectedProject
                           ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                          : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/40'
+                          : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground/90'
                       }`}
                     >
                       <div
                         onClick={() => handleSelectProject(project.dir)}
                         className="flex items-center gap-2 flex-1 cursor-pointer"
                       >
-                        <Folder className={`size-4 shrink-0 ${isSelectedProject ? 'text-primary' : 'text-sidebar-foreground/40'}`} />
-                        <span className="text-[13px] truncate flex-1">{project.label}</span>
+                        {isSelectedProject && <div className="w-[3px] h-4 bg-primary rounded-full shrink-0 -ml-1.5 mr-0.5" />}
+                        <Folder className={`size-3.5 shrink-0 ${isSelectedProject ? 'text-primary' : 'text-sidebar-foreground/30'}`} />
+                        <span className="text-[12.5px] truncate flex-1">{project.label}</span>
                       </div>
                       <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
                         <button
@@ -784,13 +843,37 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                     {isExpanded && (
                       <div className="border-t border-border/20">
                         {project.sessions.length === 0 ? (
-                          <div className="px-3 py-1.5 text-[12px] text-sidebar-foreground/30">
-                            无对话
+                          <div className="px-4 py-1.5 text-[12px] text-sidebar-foreground/30 italic">
+                            暂无对话
                           </div>
                         ) : (
-                        project.sessions.map(session => (
+                        project.sessions.map((session, sessionIdx) => (
                           <div
                             key={session.id}
+                            draggable
+                            onDragStart={(e) => {
+                              e.dataTransfer.setData('text/session-reorder', JSON.stringify({ sessionId: session.id, fromDir: project.dir, fromIdx: sessionIdx }))
+                            }}
+                            onDragOver={(e) => {
+                              const data = e.dataTransfer.types.includes('text/session-reorder')
+                              if (data) { e.preventDefault(); e.stopPropagation() }
+                            }}
+                            onDrop={async (e) => {
+                              e.preventDefault(); e.stopPropagation()
+                              const raw = e.dataTransfer.getData('text/session-reorder')
+                              if (!raw) return
+                              const { sessionId: draggedId } = JSON.parse(raw)
+                              if (draggedId === session.id) return
+                              // Reorder: move dragged session before this one
+                              const updated = project.sessions.filter((s: any) => s.id !== draggedId)
+                              const dragged = project.sessions.find((s: any) => s.id === draggedId)
+                              if (dragged) {
+                                const targetIdx = updated.findIndex((s: any) => s.id === session.id)
+                                updated.splice(targetIdx, 0, dragged)
+                                // Update order in persistence by re-saving with createdAt shuffle
+                                try { await persistence.reorderSessions(project.dir, updated.map((s: any) => s.id)) } catch {}
+                              }
+                            }}
                             onClick={() => handleLoadSession(session)}
                             className={`w-full group flex items-center gap-2 px-4 py-1 cursor-pointer transition-colors ${
                               currentSessionId === session.id
@@ -800,7 +883,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                           >
                             {streamingDrafts[session.id]?.isAgentRunning ? (
                               <div className="w-4 flex items-center justify-center shrink-0">
-                                <span className="size-2.5 rounded-full border-2 border-sky-400 border-t-transparent animate-spin" />
+                                <span className="size-2.5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
                               </div>
                             ) : (
                               <div className="w-4 shrink-0" />
@@ -853,7 +936,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         {/* Conversations */}
         {conversations.length > 0 && (
           <>
-            <div className="px-3 pt-2 pb-0 text-[11px] font-medium text-sidebar-foreground/35">
+            <div className="px-4 pt-2.5 pb-1 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
               对话
             </div>
             <div className="px-3 overflow-y-auto pb-2 [scrollbar-gutter:stable]">
@@ -870,7 +953,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                   >
                     {streamingDrafts[session.id]?.isAgentRunning ? (
                       <div className="w-4 flex items-center justify-center shrink-0">
-                        <span className="size-2.5 rounded-full border-2 border-sky-400 border-t-transparent animate-spin" />
+                        <span className="size-2.5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
                       </div>
                     ) : (
                       <div className="w-4 shrink-0" />
@@ -911,16 +994,16 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         )}
 
       </div>
-      <div className="px-2 py-2 border-t border-border/40 shrink-0 space-y-0.5">
+      <div className="px-2 py-2 border-t border-border/30 shrink-0 space-y-0.5">
         <button
           onClick={() => toggleSettings()}
-          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[13px] text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 rounded-lg transition-colors"
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12.5px] text-sidebar-foreground/60 hover:text-sidebar-foreground/90 hover:bg-sidebar-accent/40 rounded-lg transition-colors"
         >
           <Settings className="size-4 shrink-0" />
           <span>设置</span>
           {isElectron() && (
-            <span className={`ml-auto flex items-center gap-1 text-[10px] ${hermesConnected ? 'text-green-500' : 'text-yellow-500'}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${hermesConnected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`} />
+            <span className={`ml-auto flex items-center gap-1 text-[10px] ${hermesConnected ? 'text-emerald-500' : 'text-amber-500'}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${hermesConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
               {hermesConnected ? '已连接' : '连接中'}
             </span>
           )}
@@ -929,12 +1012,12 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       </>)}
       {/* Delete confirmation dialog */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-[10000] flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setDeleteTarget(null)} />
-          <div className="relative bg-card border border-border rounded-2xl shadow-2xl w-96 mx-4 p-6 space-y-4">
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center animate-fade-in">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setDeleteTarget(null)} />
+          <div className="relative bg-popover border border-border/40 rounded-2xl shadow-2xl w-96 mx-4 p-6 space-y-4 animate-scale-in">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-red-50 dark:bg-red-950/50 flex items-center justify-center shrink-0">
-                <AlertTriangle className="size-5 text-red-500" />
+              <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center shrink-0">
+                <AlertTriangle className="size-5 text-destructive" />
               </div>
               <div>
                 <h3 className="text-sm font-semibold text-foreground">删除对话</h3>
@@ -946,7 +1029,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             <div className="flex justify-between gap-2">
               <button
                 onClick={handleConfirmDelete}
-                className="px-3 py-1.5 text-[13px] text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
+                className="px-3 py-1.5 text-[13px] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
               >
                 删除
               </button>
@@ -965,8 +1048,8 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
           <div className="absolute inset-0 bg-black/40" onClick={() => setDeleteProjectDir(null)} />
           <div className="relative bg-card border border-border rounded-2xl shadow-2xl w-96 mx-4 p-6 space-y-4">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-red-50 dark:bg-red-950/50 flex items-center justify-center shrink-0">
-                <AlertTriangle className="size-5 text-red-500" />
+              <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center shrink-0">
+                <AlertTriangle className="size-5 text-destructive" />
               </div>
               <div>
                 <h3 className="text-sm font-semibold text-foreground">删除项目</h3>
@@ -978,7 +1061,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             <div className="flex justify-between gap-2">
               <button
                 onClick={handleConfirmDeleteProject}
-                className="px-3 py-1.5 text-[13px] text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
+                className="px-3 py-1.5 text-[13px] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
               >
                 删除
               </button>

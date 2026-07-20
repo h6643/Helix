@@ -44,7 +44,7 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
     'toggle-settings': () => state.toggleSettings(),
     'toggle-file-tree': () => state.toggleWorktreePanel(),
     'settings': () => state.toggleSettings(),
-    'show-shortcuts': () => state.showToast({ type: 'info', title: '快捷键', description: 'Ctrl+Shift+/ 快捷键帮助 · Ctrl+, 设置 · Ctrl+B 侧边栏 · Ctrl+J 终端 · Ctrl+F 查找 · Ctrl+[ ] 后退/前进 · F11 全屏', duration: 5000 }),
+    'show-shortcuts': () => {},
     'command-palette': () => state.toggleCommandPalette(),
 
     // Chat
@@ -157,7 +157,6 @@ export function KeyboardShortcuts() {
           const tab = state.openTabs.find(t => t.id === activeTabId)
           if (tab) {
             state.addTerminalOutput(`\x1b[32m[保存] ${tab.name} 已保存\x1b[0m`)
-            showToast({ type: 'success', title: '已保存', description: tab.name })
           }
         }
         return
@@ -178,7 +177,6 @@ export function KeyboardShortcuts() {
         if (tab) {
           const path = state.getFilePath(tab.fileId)
           navigator.clipboard.writeText(path)
-          showToast({ type: 'success', title: '路径已复制', description: path })
         }
         return
       }
@@ -202,13 +200,7 @@ export function KeyboardShortcuts() {
         if (tab) {
           const newName = prompt('重命名文件：', tab.name)
           if (newName?.trim() && newName.trim() !== tab.name) {
-            state.renameFile(tab.fileId, newName.trim()).then((ok) => {
-              if (ok) {
-                showToast({ type: 'info', title: '文件已重命名', description: `${tab.name} → ${newName.trim()}` })
-              } else {
-                showToast({ type: 'error', title: '重命名失败', description: '磁盘文件重命名失败，请检查文件是否被占用' })
-              }
-            })
+            state.renameFile(tab.fileId, newName.trim())
           }
         }
         return
@@ -228,7 +220,6 @@ export function KeyboardShortcuts() {
           const file = state.getFileById(state.selectedFileId)
           if (file && confirm(`确定要删除 ${file.name} 吗？`)) {
             state.deleteFile(state.selectedFileId)
-            showToast({ type: 'info', title: '已删除', description: file.name })
           }
         }
         return

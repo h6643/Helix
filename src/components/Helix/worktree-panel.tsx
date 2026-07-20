@@ -88,7 +88,6 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
         newBranch: createFromBranch.trim() || undefined,
       })
       if (result.ok) {
-        showToast({ type: 'success', title: 'Worktree 创建成功', description: newPath })
         setShowAddForm(false)
         setNewPath('')
         setNewBranch('')
@@ -113,7 +112,6 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
     try {
       const result = await electronGit.worktreeRemove(wt.path)
       if (result.ok) {
-        showToast({ type: 'success', title: '已删除', description: wt.path })
         await loadWorktrees()
       } else {
         showToast({ type: 'error', title: '删除失败', description: result.error })
@@ -148,7 +146,6 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
     try {
       const result = await electronGit.worktreePrune()
       if (result.ok) {
-        showToast({ type: 'success', title: '已清理过期 worktree' })
         await loadWorktrees()
       }
     } catch (e) {
@@ -161,7 +158,6 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
   const handleSwitchTo = async (wt: WorktreeInfo) => {
     try {
       await setWorkDir(wt.path)
-      showToast({ type: 'success', title: '已切换工作目录', description: wt.branch || wt.path })
     } catch (e) {
       showToast({ type: 'error', title: '切换失败', description: String(e) })
     }

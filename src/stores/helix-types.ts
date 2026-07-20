@@ -244,6 +244,26 @@ export interface ToolCallEntry {
   timestamp: number
 }
 
+/**
+ * A single task item in Hermes's in-session todo list (emitted via
+ * `session/update` with a todo/plan-style `sessionUpdate` name, or via the
+ * `todo_write` tool result). `status` mirrors Hermes's own states.
+ */
+export interface HermesTodo {
+  id: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+  activeForm?: string
+}
+
+/** Raw payload shape Hermes may use; the parser tolerates missing fields. */
+export interface HermesTodoPayload {
+  todos?: HermesTodo[]
+  items?: HermesTodo[]
+  taskList?: HermesTodo[]
+  list?: HermesTodo[]
+}
+
 export interface SubAgent {
   id: string
   name: string

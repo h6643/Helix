@@ -36,6 +36,9 @@ import {
   Monitor,
   GitBranch,
   Pause,
+  Download,
+  Trash,
+  BookOpen,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -128,6 +131,82 @@ function formatDuration(seconds: number): string {
   return s > 0 ? `${m}m ${s}s` : `${m}m`
 }
 
+// Export conversation as Markdown
+function exportConversation(messages: any[], sessionLabel: string): void {
+  const lines: string[] = []
+  lines.push('# ' + (sessionLabel || 'Helix 对话'))
+  lines.push('')
+  lines.push('> 导出时间: ' + new Date().toLocaleString('zh-CN'))
+  lines.push('')
+  lines.push('---')
+  lines.push('')
+  for (const msg of messages) {
+    if (msg.role === 'system') continue
+    lines.push('## ' + (msg.role === 'user' ? '🧑 用户' : '🤖 助手'))
+    lines.push('')
+    if (msg.blocks && msg.blocks.length > 0) {
+      for (const block of msg.blocks) {
+        if (block.type === 'thinking') {
+          lines.push('<details><summary>💭 思考</summary>')
+          lines.push('')
+          lines.push(block.content)
+          lines.push('')
+          lines.push('</details>')
+          lines.push('')
+        } else if (block.type === 'text') {
+          lines.push(block.content)
+          lines.push('')
+        }
+      }
+    } else {
+      lines.push(msg.content || '')
+      lines.push('')
+    }
+    lines.push('---')
+    lines.push('')
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = (sessionLabel || 'helix-conversation') + '-' + Date.now() + '.md'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// Export conversation as JSON
+function exportConversationJSON(messages: any[], sessionLabel: string): void {
+  const data = {
+    label: sessionLabel || 'Helix 对话',
+    exportedAt: new Date().toISOString(),
+    messages: messages.filter(m => m.role !== 'system'),
+  }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = (sessionLabel || 'helix-conversation') + '-' + Date.now() + '.json'
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// Quick command templates
+const QUICK_COMMANDS: { cmd: string; label: string; prompt: string }[] = [
+  { cmd: '/review', label: '代码审查', prompt: '请审查当前代码变更，检查安全漏洞、性能问题、代码风格，并给出改进建议。' },
+  { cmd: '/fix', label: '修复问题', prompt: '请分析并修复当前存在的问题。先定位根因，再给出最小改动方案。' },
+  { cmd: '/test', label: '编写测试', prompt: '请为当前代码编写单元测试，覆盖主要功能路径和边界情况。' },
+  { cmd: '/doc', label: '生成文档', prompt: '请为当前代码生成清晰的文档注释，包括函数说明、参数说明和示例。' },
+  { cmd: '/refactor', label: '重构优化', prompt: '请重构当前代码，提高可读性、可维护性，消除重复代码，但不改变功能。' },
+  { cmd: '/explain', label: '解释代码', prompt: '请详细解释当前代码的工作原理、设计思路和关键实现细节。' },
+  { cmd: '/security', label: '安全审查', prompt: '请对当前代码进行安全审查，检查 OWASP Top 10 漏洞、输入验证、权限控制等。' },
+  { cmd: '/optimize', label: '性能优化', prompt: '请分析当前代码的性能瓶颈，并给出具体的优化方案。' },
+  { cmd: '/summary', label: '代码总结', prompt: '请总结当前代码的功能、架构和主要模块，给出一份简洁的概述。' },
+]
+
+
+
+
+
 const SYSTEM_REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/gi
 
 // Schedule parsing — extracted to lib/schedule-utils.ts
@@ -137,8 +216,20 @@ function CopyButton({ text, className = '' }: { text: string; className?: string
   return (
     <button
       onClick={() => {
-        navigator.clipboard.writeText(text)
-        setCopied(true)
+        // Strip markdown formatting for clean copy
+        const cleanText = text
+          .replace(/\*\*(.+?)\*\*/g, "$1")
+          .replace(/\*(.+?)\*/g, "$1")
+          .replace(/`{3}[\s\S]*?\n/g, "")
+          .replace(/`(.+?)`/g, "$1")
+          .replace(/^#{1,6}\s+/gm, "")
+          .replace(/^>\s+/gm, "")
+          .replace(/^[-*+]\s+/gm, "\u2022 ")
+          .replace(/^\d+\.\s+/gm, "")
+          .replace(/\[(.+?)\]\(.+?\)/g, "$1")
+          .replace(/^---+$/gm, "")
+          .trim()
+        navigator.clipboard.writeText(cleanText)
         setTimeout(() => setCopied(false), 1500)
       }}
       className={`p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors ${className}`}
@@ -870,7 +961,10 @@ export function AgentFlowPanel() {
     }
     return allSlashItems
   }, [allSlashItems, input])
-  const showSlashSkills = input.startsWith('/')
+  const slashCmd = input.startsWith('/') ? input.slice(1).split(' ')[0].toLowerCase() : ''
+  const matchedQuickCmds = slashCmd ? QUICK_COMMANDS.filter(c => c.cmd.slice(1).startsWith(slashCmd)) : []
+  const showSlashSkills = input.startsWith('/') && filteredSkills.length > 0
+  const showQuickCmds = input.startsWith('/') && matchedQuickCmds.length > 0 && !input.includes(' ')
   const [selectedSkillIndex, setSelectedSkillIndex] = useState(0)
 
   // Handle input change for skill detection
@@ -1541,6 +1635,18 @@ export function AgentFlowPanel() {
               thoughtBufferRef.current = ''
               pendingTextRef.current = ''
               pendingThinkingRef.current = ''
+              // Strip trailing thinking/text blocks so re-streamed content
+              // replaces (not appends to) the in-progress response blocks, preventing
+              // duplicate thinking/text output after reconnect.
+              setResponseBlocks(prev => {
+                const nb = prev.slice()
+                while (nb.length > 0) {
+                  const last = nb[nb.length - 1]
+                  if (last.type === 'thinking' || last.type === 'text') nb.pop()
+                  else break
+                }
+                return nb
+              })
               setStreamThinking('')
               useHelixStore.getState().setConnectionNotice({ phase: 'error', message: '连接中断', ts: Date.now() })
             } else if (phase === 'retrying') {
@@ -1549,6 +1655,18 @@ export function AgentFlowPanel() {
               pendingTextRef.current = ''
               pendingThinkingRef.current = ''
               setStreamThinking('')
+              // Strip trailing thinking/text blocks so re-streamed content
+              // replaces (not appends to) the in-progress response blocks, preventing
+              // duplicate thinking/text output after reconnect.
+              setResponseBlocks(prev => {
+                const nb = prev.slice()
+                while (nb.length > 0) {
+                  const last = nb[nb.length - 1]
+                  if (last.type === 'thinking' || last.type === 'text') nb.pop()
+                  else break
+                }
+                return nb
+              })
               const attempt = params?.attempt ?? 1
               const total = params?.total ?? 3
               useHelixStore.getState().setConnectionNotice({ phase: 'retrying', attempt, total, message: '连接中断，正在重连... (' + attempt + '/' + total + ')', ts: Date.now() })
@@ -2203,6 +2321,7 @@ export function AgentFlowPanel() {
       }
       runningSessionIdRef.current = null
       abortRef.current = null
+      useHermesStore.setState({ isChatLoading: false })
 
       // Git auto-commit/push after agent completes
       if (isElectron() && sid) {
@@ -2596,6 +2715,30 @@ export function AgentFlowPanel() {
               </div>
             )}
 
+            {/* Quick commands dropdown */}
+            {showQuickCmds && (
+              <div className="absolute bottom-full left-0 right-0 mb-2 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 z-50 max-h-[200px] overflow-y-auto mx-3">
+                <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-muted-foreground/30 uppercase tracking-wider">快捷指令</p>
+                {matchedQuickCmds.map((qc, idx) => (
+                  <button
+                    key={qc.cmd}
+                    type="button"
+                    onClick={() => {
+                      setInputSynced(qc.prompt)
+                      inputRef.current?.focus()
+                    }}
+                    className="w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 last:rounded-b-2xl hover:bg-muted/30"
+                  >
+                    <code className="text-[12px] font-mono text-primary/70 shrink-0">{qc.cmd}</code>
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[13px] text-foreground block">{qc.label}</span>
+                      <span className="text-[11px] text-muted-foreground block truncate">{qc.prompt}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+
             {pendingFiles.length > 0 && (
               <div className={`flex flex-wrap gap-2 border-t border-border/20 px-4 py-2`}>
                 {pendingFiles.map(f => (
@@ -2844,7 +2987,7 @@ export function AgentFlowPanel() {
                           </div>
                         )}
                         {/* Copy button */}
-                        <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1">
+                        <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1 gap-0.5">
                           <CopyButton text={stripEmoji(normalizeAcpContent(msg.content))} />
                         </div>
                       </div>
@@ -2888,9 +3031,33 @@ export function AgentFlowPanel() {
                           <div className="whitespace-pre-wrap leading-normal" style={{ fontSize: transcriptFontSize }}>{normalizeAcpContent(msg.content)}</div>
                         )}
                       </div>
-                      {/* Copy button below message */}
-                      <div className="flex justify-end opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
+                      {/* Action buttons below user message */}
+                      <div className="flex justify-end items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
                         <CopyButton text={normalizeAcpContent(msg.content)} />
+                        <button
+                          onClick={() => {
+                            const newContent = window.prompt('编辑消息', normalizeAcpContent(msg.content))
+                            if (newContent !== null && newContent.trim()) {
+                              useHelixStore.getState().updateChatMessage(msg.id, newContent)
+                              // Remove all messages after this one
+                              const msgs = useHelixStore.getState().chatMessages
+                              const idx = msgs.findIndex(m => m.id === msg.id)
+                              if (idx >= 0) {
+                                const kept = msgs.slice(0, idx + 1)
+                                useHelixStore.setState({ chatMessages: kept })
+                                // Resend
+                                setTimeout(() => {
+                                  const el = document.querySelector('[data-send-btn]') as HTMLButtonElement
+                                  el?.click()
+                                }, 100)
+                              }
+                            }
+                          }}
+                          className="p-1 rounded-lg text-muted-foreground/40 hover:text-foreground hover:bg-muted/30 transition-colors"
+                          title="编辑并重发"
+                        >
+                          <Pencil className="size-3" />
+                        </button>
                       </div>
                     </div>
                   )}
@@ -2988,6 +3155,9 @@ export function AgentFlowPanel() {
                 </div>
               )}
 
+
+
+
               {/* End of flow area — no summary */}
 
               {/* End of flow area — no summary */}
@@ -3063,3 +3233,4 @@ export function AgentFlowPanel() {
     </div>
   )
 }
+

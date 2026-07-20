@@ -3,7 +3,7 @@
  * Zero business-logic cross-references; purely UI state.
  */
 import type { StateCreator } from 'zustand'
-import type { AvailableCommand } from '../helix-types'
+import type { AvailableCommand, HermesTodo } from '../helix-types'
 
 export type NavEntry =
   | { type: 'chat'; sessionId: string }
@@ -23,6 +23,12 @@ export interface PanelSlice {
   showCustomizePanel: boolean
   showWorktreePanel: boolean
   availableCommands: AvailableCommand[]
+  /**
+   * Hermes's in-session todo list, captured from `session/update` events that
+   * carry a todo/plan payload. Empty by default so the header button stays
+   * hidden until the backend actually streams a list.
+   */
+  hermesTodos: HermesTodo[]
   toggleCommandPalette: () => void
   setCommandPaletteOpen: (open: boolean) => void
   toggleTaskPanel: () => void
@@ -39,6 +45,10 @@ export interface PanelSlice {
   toggleCustomizePanel: () => void
   toggleWorktreePanel: () => void
   setAvailableCommands: (cmds: AvailableCommand[]) => void
+  /** Replace the Hermes todo list (called whenever a fresh todo payload arrives). */
+  setHermesTodos: (todos: HermesTodo[]) => void
+  /** Clear the todo list (e.g. when a run completes or the session is reset). */
+  clearHermesTodos: () => void
 }
 
 export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (set, get) => ({
@@ -54,6 +64,7 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   showCustomizePanel: false,
   showWorktreePanel: false,
   availableCommands: [],
+  hermesTodos: [],
 
   toggleCommandPalette: () =>
     set((state) => ({ showCommandPalette: !state.showCommandPalette })),
@@ -106,4 +117,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   toggleCustomizePanel: () => set((s) => ({ showCustomizePanel: !s.showCustomizePanel })),
   toggleWorktreePanel: () => set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
   setAvailableCommands: (cmds) => set({ availableCommands: cmds }),
+  setHermesTodos: (todos) => set({ hermesTodos: todos }),
+  clearHermesTodos: () => set({ hermesTodos: [] }),
 })

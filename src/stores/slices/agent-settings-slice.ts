@@ -50,6 +50,9 @@ export interface AgentSettingsSlice {
   // Security
   confirmDangerousActions: boolean
   autoApproveRead: boolean
+  // Agent presets
+  agentPresets: Record<string, { name: string; systemPrompt: string }>
+  activePreset: string | null
   setAgentMaxIterations: (n: number) => void
   setAutoCompactContext: (v: boolean) => void
   setSmartTruncation: (v: boolean) => void
@@ -70,6 +73,8 @@ export interface AgentSettingsSlice {
   setLanguage: (v: Language) => void
   setConfirmDangerousActions: (v: boolean) => void
   setAutoApproveRead: (v: boolean) => void
+  setAgentPresets: (presets: Record<string, { name: string; systemPrompt: string }>) => void
+  setActivePreset: (preset: string | null) => void
 }
 
 export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], AgentSettingsSlice> = (set) => ({
@@ -97,6 +102,9 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   // Security
   confirmDangerousActions: true,
   autoApproveRead: false,
+  // Agent presets defaults
+  agentPresets: {},
+  activePreset: null,
 
   setAgentMaxIterations: (n) => set({ agentMaxIterations: n }),
   setAutoCompactContext: (v) => set({ autoCompactContext: v }),
@@ -118,4 +126,6 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   setLanguage: (v) => set({ language: v }),
   setConfirmDangerousActions: (v) => set({ confirmDangerousActions: v }),
   setAutoApproveRead: (v) => set({ autoApproveRead: v }),
+  setAgentPresets: (presets) => set({ agentPresets: presets }),
+  setActivePreset: (preset) => set({ activePreset: preset }),
 })

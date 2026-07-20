@@ -820,6 +820,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       currentSessionId: null,
       activeSessionWorkDir: null,
       selectedWorkDir: null,
+      contextUsage: null,
     })
     // Reset the Hermes backend session so a fresh ACP session is created on the
     // next prompt. Without this the UI clears but Hermes keeps the full
@@ -1589,6 +1590,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('activeProfileId', state.activeProfileId),
         persistence.saveSetting('providers', state.providers),
         persistence.saveSetting('activeModel', state.activeModel),
+        persistence.saveSetting('activeProviderId', state.activeProviderId),
+        // Persist the per-provider fetched model lists alongside other config so
+        // they never get lost between a fetch and the next full persistToStorage.
+        persistence.saveSetting('providerModels', state.providerModels),
         persistence.saveSetting('fontFamily', state.fontFamily),
         persistence.saveSetting('fontSize', state.fontSize),
         persistence.saveSetting('interfaceFont', state.interfaceFont),
@@ -1638,6 +1643,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('gitBranchPrefix', state.gitBranchPrefix),
         persistence.saveSetting('sessionHistory', state.sessionHistory),
         persistence.saveSetting('sessionHistoryIndex', state.sessionHistoryIndex),
+        persistence.saveSetting('selectedWorkDir', state.selectedWorkDir),
       ])
     } catch (e) {
       logError('Failed to persist:', e)
@@ -1661,7 +1667,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, streamingEnabled, compressionEnabled, toolGuardrailsEnabled, personality, outputStyle, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, language, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, providers, activeModel, savedSessionHistory, savedSessionHistoryIndex] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, providerModels, streamingEnabled, compressionEnabled, toolGuardrailsEnabled, personality, outputStyle, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, language, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -1697,6 +1703,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<number>('maxOutputTokens'),
         persistence.loadSetting<string>('customInstructions'),
         persistence.loadSetting<string[]>('availableModels'),
+        persistence.loadSetting<Record<string, string[]>>('providerModels'),
         persistence.loadSetting<boolean>('streamingEnabled'),
         persistence.loadSetting<boolean>('compressionEnabled'),
         persistence.loadSetting<boolean>('toolGuardrailsEnabled'),
@@ -1719,8 +1726,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<string>('gitBranchPrefix'),
         persistence.loadSetting<ProviderConfig[]>('providers'),
         persistence.loadSetting<string | null>('activeModel'),
+        persistence.loadSetting<string | null>('activeProviderId'),
         persistence.loadSetting<string[]>('sessionHistory'),
         persistence.loadSetting<number>('sessionHistoryIndex'),
+        persistence.loadSetting<string | null>('selectedWorkDir'),
       ])
 
       // Do NOT restore the latest session's chatMessages on startup.
@@ -1734,22 +1743,47 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const loadedActiveProfileId = await persistence.loadSetting<string | null>('activeProfileId')
 
       // ── Build multi-provider config for the flattened model selector ──
-      // Prefer the explicitly-saved `providers`/`activeModel` (new format);
-      // otherwise backfill from the legacy apiProfiles / apiConfig so existing
-      // installs keep working without data loss.
-      const safeProviders = Array.isArray(providers) ? providers : []
+      // Always rebuild `builtProviders` from the authoritative declared sources
+      // (apiProfiles / apiConfig). We do NOT trust the persisted `providers`
+      // field as a source of truth — it is a *runtime output* mirror that was
+      // historically polluted by merged fetched-model lists and would re-seed
+      // the pollution on every restart. The legacy apiProfiles / apiConfig
+      // backfill keeps older installs working without data loss.
+      //
+      // SELF-HEAL for already-polluted installs: earlier builds unioned every
+      // endpoint's fetched models into a single profile's `models` (via
+      // handleSaveApi), so existing profiles in IndexedDB may carry models that
+      // don't belong to their endpoint — which is what makes the input-bar
+      // dropdown show "一堆放一起". When we have the clean per-endpoint fetched
+      // list for a profile (providerModels[pid]), we treat it as authoritative
+      // and REPLACE the profile's models with it (plus the profile's own
+      // configured model). This scrubs cross-endpoint pollution on next restart
+      // without needing the user to clear data. When no fetched list exists for a
+      // profile, we leave its declared models untouched (can't verify), but the
+      // fixed write path (handleSaveApi) will no longer re-pollute it.
+      const cleanProfileModels = (p: ApiProfile): string[] => {
+        const own = p.config?.model ? [p.config.model] : []
+        const fetched = providerModels?.[p.id]
+        if (fetched && fetched.length > 0) {
+          // Authoritative: this endpoint's own fetched list wins.
+          return Array.from(new Set([...own, ...fetched].filter(Boolean)))
+        }
+        // No fetched list available → we CANNOT verify that p.models is clean.
+        // Historical builds unioned other endpoints' models into this array
+        // (the "一堆放一起" bug), so trusting it would re-introduce pollution.
+        // Trust ONLY the explicitly-configured model. The user can click
+        // "获取模型列表" in settings, which populates providerModels[pid] and
+        // then this branch switches to the clean fetched list.
+        return Array.from(new Set(own.filter(Boolean)))
+      }
       const builtProviders: ProviderConfig[] =
-        safeProviders.length > 0
-          ? safeProviders
-          : (apiProfiles && apiProfiles.length > 0
+        (apiProfiles && apiProfiles.length > 0
               ? apiProfiles.map((p, i) => ({
                   id: p.id || `p-${i}`,
                   name: p.name,
                   baseUrl: p.config?.baseUrl || '',
                   apiKey: p.config?.apiKey || '',
-                  models: p.models && p.models.length > 0
-                    ? p.models
-                    : p.config?.model ? [p.config.model] : [],
+                  models: cleanProfileModels(p),
                   isDefault: p.id === loadedActiveProfileId,
                 }))
               : (apiConfig && apiConfig.baseUrl && apiConfig.model
@@ -1762,12 +1796,47 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
                       isDefault: true,
                     }]
                   : []))
+      // Merge the persisted per-provider fetched model lists (providerModels)
+      // into each provider's candidate `models` pool. This keeps a single source
+      // of truth so a model selected from "获取模型列表" survives a cold restart:
+      // without it, `activeModel` would be rejected by the check below (not in
+      // `providers[].models`) and silently fall back to the default model.
+      const mergedProviders: ProviderConfig[] = builtProviders.map((p) => {
+        const fetched = providerModels?.[p.id]
+        if (fetched && fetched.length > 0) {
+          const models = Array.from(new Set([...p.models, ...fetched]))
+          return { ...p, models }
+        }
+        return p
+      })
       const builtActiveModel: string | null =
-        activeModel && builtProviders.some((p) => p.models.includes(activeModel))
+        activeModel && (
+          mergedProviders.some((p) => p.models.includes(activeModel)) ||
+          Object.values(providerModels || {}).some((list) => (list || []).includes(activeModel))
+        )
           ? activeModel
-          : (builtProviders.length > 0
-              ? (builtProviders.find((p) => p.isDefault)?.models[0] || builtProviders[0].models[0] || null)
+          : (mergedProviders.length > 0
+              ? (mergedProviders.find((p) => p.isDefault)?.models[0] || mergedProviders[0].models[0] || null)
               : null)
+      // Resolve the active provider: prefer a saved id that still exists, then
+      // the owner of the active model, then the default/first provider.
+      const builtActiveProviderId: string | null = (() => {
+        if (activeProviderId && mergedProviders.some((p) => p.id === activeProviderId)) {
+          return activeProviderId
+        }
+        if (builtActiveModel) {
+          const owner = mergedProviders.find((p) => p.models.includes(builtActiveModel))
+          if (owner) return owner.id
+          // Fallback: locate the owner via providerModels when the model isn't
+          // present in the merged declared+fetched pool (e.g. providerModels
+          // loaded but not yet merged), so the active provider scope stays
+          // correct instead of drifting to the default/first provider.
+          for (const p of mergedProviders) {
+            if ((providerModels?.[p.id] || []).includes(builtActiveModel)) return p.id
+          }
+        }
+        return mergedProviders.find((p) => p.isDefault)?.id || mergedProviders[0]?.id || null
+      })()
 
       // Prune sessionHistory: remove IDs that no longer exist in IndexedDB
       const validSessionIds = new Set(sessions.map(s => s.id))
@@ -1788,16 +1857,28 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         currentSessionId: null,
         sessionHistory: prunedHistory,
         sessionHistoryIndex: prunedIndex,
-        selectedWorkDir: latestSession?.workDir || get().selectedWorkDir,
+        selectedWorkDir: savedSelectedWorkDir || latestSession?.workDir || get().selectedWorkDir,
         apiConfig: (() => {
-          const resolve = (cfg) => {
-            // Validation gate: reject stale/bad profiles (ant-ling endpoint,
-            // ling provider, or sk-studio-* test key) so a poisoned IndexedDB
+          const resolve = (cfg: any) => {
+            // Validation gate: reject stale/bad profiles so a poisoned IndexedDB
             // entry can never re-enter the store and get pushed to Hermes.
             if (!cfg || !cfg.baseUrl) {
               return { ...defaults }
             }
             return { ...defaults, ...cfg }
+          }
+          // Prefer the active provider built from providers/activeModel — this is
+          // what the model selector treats as current, so apiConfig must agree.
+          const activeProv = builtActiveProviderId
+            ? mergedProviders.find((p) => p.id === builtActiveProviderId)
+            : undefined
+          if (activeProv && activeProv.baseUrl) {
+            return resolve({
+              provider: activeProv.name,
+              baseUrl: activeProv.baseUrl,
+              apiKey: activeProv.apiKey,
+              model: builtActiveModel || activeProv.models[0] || activeProv.defaultModel || '',
+            })
           }
           if (loadedActiveProfileId) {
             const prof = (apiProfiles || []).find((p) => p.id === loadedActiveProfileId)
@@ -1815,14 +1896,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         apiProfiles: (() => {
           const loaded = apiProfiles || []
           if (loaded.length > 0) {
-            // Backfill models[] for old profiles that don't have it yet.
-            // Without this, handleModelSelect can't reverse-lookup which profile
-            // owns a model, causing 401 when switching providers.
+            // Backfill + SELF-HEAL models[] for existing profiles. We reuse
+            // cleanProfileModels() so a profile's models are scrubbed of
+            // cross-endpoint pollution (using providerModels[pid] when present)
+            // and rewritten to IndexedDB below via persistToStorage on the next
+            // save — permanently removing "一堆放一起" without user action.
             return loaded.map(p => ({
               ...p,
-              models: p.models && p.models.length > 0
-                ? p.models
-                : p.config.model ? [p.config.model] : [],
+              models: cleanProfileModels(p),
             }))
           }
           if (apiHistory && apiHistory.length > 0) {
@@ -1831,8 +1912,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           return []
         })(),
         // Multi-provider config backing the flattened model selector.
-        providers: builtProviders,
+        // Write `mergedProviders` (declared + per-provider fetched) so that each
+        // provider's `models` array survives a restart even if `providerModels`
+        // fails to load. Without this, `cleanProfileModels` falls back to
+        // [config.model] (1 item) when no fetched list exists, and the model
+        // dropdown shows only one model after every restart.
+        // The merge is strictly per-provider (providerModels[p.id] → provider p),
+        // so there is NO cross-endpoint pollution.
+        providers: mergedProviders,
         activeModel: builtActiveModel,
+        activeProviderId: builtActiveProviderId,
         activeProfileId: (() => {
           const id = loadedActiveProfileId
           if (!id) return null
@@ -1888,6 +1977,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         confirmDangerousActions: confirmDangerousActions ?? get().confirmDangerousActions,
         autoApproveRead: autoApproveRead ?? get().autoApproveRead,
         availableModels: availableModels || [],
+        providerModels: providerModels || {},
         editorTheme: (editorTheme as 'vs-dark' | 'light' | null | undefined) ?? get().editorTheme,
         gitAutoCommit: gitAutoCommit ?? get().gitAutoCommit,
         gitAutoPush: gitAutoPush ?? get().gitAutoPush,
@@ -1897,6 +1987,19 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
       })
+
+      // Permanently scrub the pollution from IndexedDB: write back the cleaned
+      // apiProfiles and the unpolluted providers list. Without this, the on-disk
+      // copies keep the old jumbled `models` and only the in-memory state would be
+      // clean until the next write. Doing it here makes the "一堆放一起" fix stick
+      // after a single restart, with no manual data clearing required.
+      try {
+        const healed = get()
+        await persistence.saveSetting('apiProfiles', healed.apiProfiles)
+        await persistence.saveSetting('providers', healed.providers)
+      } catch (persistErr) {
+        logError('Failed to persist healed model lists:', persistErr)
+      }
 
       // Auto-detect AGENTS.md / CLAUDE.md from project root as fallback
       // Custom instructions are now managed by Hermes

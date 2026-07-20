@@ -101,10 +101,46 @@ export function extractCommandSnippet(params?: Record<string, unknown>): string 
 }
 
 export function getToolDisplayLabel(toolName: string, toolKind?: string, path?: string, params?: Record<string, unknown>): string {
-  // ACP title already contains descriptive info (e.g. "read: src/app/page.tsx",
-  // "terminal: npm test", "Searching for pattern in files"). Use it directly.
+  // If toolName is a raw ACP-style string like "search: ..." or "read: src/...",
+  // try to extract a clean label from it first.
   if (toolName && toolName !== 'tool') {
-    return toolName.length > 80 ? toolName.slice(0, 77) + '…' : toolName
+    // Check if it's already a known short tool name → translate via TOOL_LABELS
+    if (TOOL_LABELS[toolName]) {
+      const label = TOOL_LABELS[toolName]
+      let snippet = ''
+      if (path && typeof path === 'string') {
+        snippet = path
+      } else {
+        const cmd = extractCommandSnippet(params)
+        if (cmd) snippet = cmd
+      }
+      if (snippet) {
+        snippet = snippet.length > 60 ? snippet.slice(0, 60) + '…' : snippet
+      }
+      return snippet ? `${label}  ${snippet}` : label
+    }
+
+    // toolName looks like "action: description" — use kind-based labels
+    const colonIdx = toolName.indexOf(':')
+    if (colonIdx > 0) {
+      const action = toolName.slice(0, colonIdx).trim().toLowerCase()
+      const desc = toolName.slice(colonIdx + 1).trim()
+      const kindLabels: Record<string, string> = {
+        read: '读取文件', write: '写入文件', edit: '编辑文件', delete: '删除文件', move: '移动文件',
+        search: '搜索', execute: '执行命令', run: '执行命令', bash: '执行命令',
+        think: '思考', fetch: '获取网页', webfetch: '获取网页',
+        switch_mode: '切换模式', terminal: '执行命令',
+        glob: '搜索文件', grep: '搜索内容',
+        browser: '浏览器操作', skill: '执行技能', task: '任务操作',
+      }
+      const baseLabel = kindLabels[action] || getToolLabel(action) || '执行工具'
+      // Truncate the long description part
+      const shortDesc = desc.length > 50 ? desc.slice(0, 50) + '…' : desc
+      return `${baseLabel}  ${shortDesc}`
+    }
+
+    // Fallback: unknown short name — truncate to prevent overflow
+    return toolName.length > 40 ? toolName.slice(0, 37) + '…' : toolName
   }
   const kindLabels: Record<string, string> = {
     read: '读取文件', write: '写入文件', edit: '编辑文件', delete: '删除文件', move: '移动文件',

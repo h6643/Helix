@@ -88,7 +88,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
         })),
       })
 
-      state.showToast({ type: 'success', title: '会话已保存', description: label })
       await loadSessions()
     } catch (e) {
       console.error('Failed to save session:', e)
@@ -127,7 +126,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
       const text = await file.text()
       const session = JSON.parse(text) as PersistedSession
       if (!session.id || !session.chatMessages) {
-        useHelixStore.getState().showToast({ type: 'error', title: '无效的会话文件' })
         return
       }
       await persistence.saveSession({

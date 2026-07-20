@@ -208,8 +208,8 @@ export function useHermes() {
         }
       }
 
-      // Call custom event handler if registered
-      eventHandlerRef.current?.(event, params)
+        // Call custom event handler if registered
+        eventHandlerRef.current?.(event, params)
     })
 
     return () => {
