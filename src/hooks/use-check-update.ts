@@ -1,10 +1,13 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { useHelixStore } from '@/stores/helix-store'
 
 const GITHUB_REPO = 'NousResearch/hermes-agent'
-const CHECK_KEY = 'update-checked-v1'
+
+// Module-level flag ensures the check runs at most ONCE per page load,
+// even if the component unmounts and remounts.
+let checked = false
 
 function parseVersion(ver: string): number[] {
   return ver.replace(/^v/i, '').split('.').map(Number)
@@ -23,14 +26,9 @@ function isNewer(current: string, latest: string): boolean {
 }
 
 export function useCheckUpdate() {
-  const checkedRef = useRef(false)
-
   useEffect(() => {
-    if (checkedRef.current) return
-    checkedRef.current = true
-
-    // Avoid re-checking in the same session
-    if (sessionStorage.getItem(CHECK_KEY)) return
+    if (checked) return
+    checked = true
 
     const check = async () => {
       try {
@@ -43,7 +41,6 @@ export function useCheckUpdate() {
         const currentVer = '0.2.0'
 
         if (latestTag && isNewer(currentVer, latestTag)) {
-          sessionStorage.setItem(CHECK_KEY, '1')
           const state = useHelixStore.getState()
           state.showToast({
             type: 'info',
@@ -52,14 +49,13 @@ export function useCheckUpdate() {
             duration: 8000,
             onClick: () => window.open(`https://github.com/${GITHUB_REPO}/releases/latest`, '_blank'),
           })
-          // Store in state so user can see it later
           state.setPendingUpdate?.(latestTag)
         }
       } catch {
-        // Silent fail — network errors should not disrupt the user
+        // Silent fail
       }
     }
-    // Delay check to not block startup
+
     const timer = setTimeout(check, 5000)
     return () => clearTimeout(timer)
   }, [])

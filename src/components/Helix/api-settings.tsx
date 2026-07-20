@@ -34,8 +34,8 @@ const ALL_PROVIDERS = getAllProviders()
 // Fallback personality presets — shown when the backend (Hermes config.yaml)
 // doesn't return any, so the dropdown is never empty.
 const BUILTIN_PERSONALITIES: Record<string, string> = {
-  温柔: '你是一位温柔、耐心、善解人意的助手。语气柔和，多用共情与鼓励。',
-  干练: '你是一位干练、利落的助手。直奔主题，结论先行，少铺垫。',
+  温柔: '你是一位温柔、耐心、善解人意的助手。语气柔和,多用共情与鼓励。',
+  干练: '你是一位干练、利落的助手。直奔主题,结论先行,少铺垫。',
 }
 
 const PERSONALITY_LABELS: Record<string, string> = {}
@@ -788,7 +788,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   <div className="grid grid-cols-2 gap-2">
                     {[
                       { value: 'default', label: '默认', desc: '平衡详细度和简洁性' },
-                      { value: 'concise', label: '简洁', desc: '精简回复，直奔主题' },
+                      { value: 'concise', label: '简洁', desc: '精简回复,直奔主题' },
                       { value: 'detailed', label: '详细', desc: '包含更多解释和背景' },
                       { value: 'technical', label: '技术性', desc: '侧重技术细节和实现' },
                     ].map(opt => (
@@ -831,7 +831,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   <SettingRow
                     icon={<Minimize2 className="size-4 text-muted-foreground" />}
                     label="自动压缩上下文"
-                    description="当对话接近上下文限制时，自动压缩历史消息以释放空间"
+                    description="当对话接近上下文限制时,自动压缩历史消息以释放空间"
                   >
                     <Toggle enabled={autoCompactContext} onToggle={() => setAutoCompactContext(!autoCompactContext)} />
                   </SettingRow>
@@ -991,7 +991,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   <SettingRow
                     icon={<Eye className="size-4 text-muted-foreground" />}
                     label="自动批准读取"
-                    description="自动批准文件读取操作，无需逐次确认"
+                    description="自动批准文件读取操作,无需逐次确认"
                   >
                     <Toggle enabled={autoApproveRead} onToggle={() => setAutoApproveRead(!autoApproveRead)} />
                   </SettingRow>
@@ -1321,7 +1321,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   </div>
                 ) : (
                   <div className="text-center py-12 text-sm text-muted-foreground/50">
-                    暂无配置，点击右上角「添加模型」
+                    暂无配置,点击右上角「添加模型」
                   </div>
                 )}
                 <ModelUsageStats />
@@ -1635,7 +1635,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   <SettingRow
                     icon={<GitCommit className="size-4 text-muted-foreground" />}
                     label="Agent 完成后自动 commit"
-                    description="Agent 完成所有任务后，自动将变更提交到当前分支"
+                    description="Agent 完成所有任务后,自动将变更提交到当前分支"
                   >
                     <Toggle enabled={gitAutoCommit} onToggle={() => setGitAutoCommit(!gitAutoCommit)} />
                   </SettingRow>
@@ -1822,6 +1822,48 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                     </Button>
                   </div>
                 </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={async () => {
+                        try {
+                          const res = await fetch('https://api.github.com/repos/NousResearch/hermes-agent/releases/latest', {
+                            signal: AbortSignal.timeout(8000),
+                          })
+                          if (!res.ok) {
+                            useHelixStore.getState().showToast({ type: 'error', title: '检查更新失败', description: '无法连接 GitHub' })
+                            return
+                          }
+                          const data = await res.json()
+                          const latest = (data.tag_name || data.name || '').replace(/^v/i, '')
+                          const current = '0.2.0'
+                          const curParts = current.split('.').map(Number)
+                          const latParts = latest.split('.').map(Number)
+                          let isNewer = false
+                          for (let i = 0; i < Math.max(curParts.length, latParts.length); i++) {
+                            const a = curParts[i] || 0
+                            const b = latParts[i] || 0
+                            if (b > a) { isNewer = true; break }
+                            if (b < a) break
+                          }
+                          if (isNewer) {
+                            useHelixStore.getState().showToast({
+                              type: 'info',
+                              title: '有新版本可用',
+                              description: `v${latest} 已发布`,
+                              duration: 8000,
+                              onClick: () => window.open('https://github.com/NousResearch/hermes-agent/releases/latest', '_blank'),
+                            })
+                          } else {
+                            useHelixStore.getState().showToast({ type: 'success', title: '已是最新版本', description: `v${current}` })
+                          }
+                        } catch {
+                          useHelixStore.getState().showToast({ type: 'error', title: '检查更新失败', description: '网络异常' })
+                        }
+                      }}
+                    >
+                      检查更新
+                    </Button>
               </div>
             </section>
           </div>
