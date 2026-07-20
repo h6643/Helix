@@ -127,6 +127,7 @@ export interface ToastMessage {
   description?: string
   duration?: number
   position?: 'bottom-right' | 'top-right'
+  onClick?: () => void
 }
 
 export interface PendingChange {

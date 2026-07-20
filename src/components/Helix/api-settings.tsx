@@ -1815,7 +1815,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                       size="sm"
                       variant="outline"
                       onClick={() => {
-                        window.open('https://github.com/helix-ai/helix', '_blank')
+                        window.open('https://github.com/NousResearch/hermes-agent', '_blank')
                       }}
                     >
                       访问 GitHub

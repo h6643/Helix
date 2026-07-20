@@ -755,7 +755,7 @@ export function HelixLayout() {
                   className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
                   onClick={() => {
                     setHelpMenuOpen(false)
-                    window.open('https://github.com/helix-ai/helix', '_blank')
+                    window.open('https://github.com/NousResearch/hermes-agent', '_blank')
                   }}
                 >
                   <Globe className="size-4" />
