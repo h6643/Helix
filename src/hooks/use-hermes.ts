@@ -12,6 +12,7 @@ import { useHermesStore } from '@/stores/hermes-store'
 import { useHelixStore } from '@/stores/helix-store'
 import { electronHermes } from '@/lib/electron-bridge'
 import { debug, warn, error as logError } from '@/lib/logger'
+import { scheduleConfigPush } from '@/lib/config-sync'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -72,11 +73,9 @@ export function useHermes() {
     setHermesConnected,
     setHermesSessionId,
     setHermesError,
-    addChatMessage,
-    setChatMessageStreaming,
-    clearChat,
-    isChatLoading,
+    bumpGatewayEpoch,
   } = useHermesStore()
+  const { isChatLoading } = useHelixStore()
   const workDirEpoch = useHelixStore(s => s.workDirEpoch)
 
   const currentMessageIdRef = useRef<string | null>(null)
@@ -193,7 +192,7 @@ export function useHermes() {
               setHermesSessionId(null)
               hermesSessionIdRef.current = null
               setHermesError(msg)
-              useHermesStore.setState({ isChatLoading: false })
+              useHelixStore.setState({ isChatLoading: false })
               useHelixStore.getState().setConnectionNotice({
                 phase: 'error',
                 message: '认证失败，请在设置中检查 API Key 是否正确，或重新选择模型',
@@ -202,7 +201,7 @@ export function useHermes() {
             }
           } else {
             setHermesError(msg)
-            useHermesStore.setState({ isChatLoading: false })
+            useHelixStore.setState({ isChatLoading: false })
           }
           break
         }
@@ -266,7 +265,7 @@ export function useHermes() {
   }, [isElectron])
 
   // Wait for the gateway to be ready (up to timeoutMs). Returns true if ready.
-  const waitForGatewayReady = useCallback((timeoutMs = 8000): Promise<boolean> => {
+  const waitForGatewayReady = useCallback((timeoutMs = 3000): Promise<boolean> => {
     return new Promise((resolve) => {
       if (useHermesStore.getState().hermesConnected) {
         resolve(true)
@@ -304,8 +303,8 @@ export function useHermes() {
     lastPromptRef.current = text
 
     // Add user message to chat
-    addChatMessage({ role: 'user', content: text })
-    useHermesStore.setState({ isChatLoading: true })
+    useHelixStore.getState().addChatMessage({ role: 'user', content: text })
+    useHelixStore.setState({ isChatLoading: true })
     currentMessageIdRef.current = null
 
     try {
@@ -366,7 +365,7 @@ export function useHermes() {
       if (!activeSessionId) {
         logError('[useHermes] No session ID available, cannot send prompt')
         setHermesError('无法创建会话')
-        useHermesStore.setState({ isChatLoading: false })
+        useHelixStore.setState({ isChatLoading: false })
         return
       }
 
@@ -392,7 +391,7 @@ export function useHermes() {
           })
         }
         // Final response received - mark loading complete
-        useHermesStore.setState({ isChatLoading: false })
+        useHelixStore.setState({ isChatLoading: false })
       }).catch((err: any) => {
         logError('[useHermes] session/prompt error:', err)
         // Don't set error here - events are still coming via notifications
@@ -407,10 +406,10 @@ export function useHermes() {
         setHermesSessionId(null)
         hermesSessionIdRef.current = null
         setHermesError(null)
-        useHermesStore.setState({ isChatLoading: false })
+        useHelixStore.setState({ isChatLoading: false })
       } else {
         setHermesError(errMsg)
-        useHermesStore.setState({ isChatLoading: false })
+        useHelixStore.setState({ isChatLoading: false })
       }
     }
   }, [isElectron, hermesSessionId])
@@ -428,10 +427,10 @@ export function useHermes() {
       // via notify, not send (which issues a request and gets "Method not found").
       electronHermes.notify('session/cancel', { session_id: hermesSessionId })
       if (currentMessageIdRef.current) {
-        setChatMessageStreaming(currentMessageIdRef.current, false)
+        useHelixStore.getState().setChatMessageStreaming(currentMessageIdRef.current, false)
         currentMessageIdRef.current = null
       }
-      useHermesStore.setState({ isChatLoading: false })
+      useHelixStore.setState({ isChatLoading: false })
     } catch (err) {
       logError('[Hermes] Failed to interrupt:', err)
     }
@@ -450,7 +449,7 @@ export function useHermes() {
       if (sessionId) {
         setHermesSessionId(sessionId)
       }
-      clearChat()
+      useHelixStore.getState().clearChat()
     } catch (err) {
       logError('[Hermes] Failed to create session:', err)
     }

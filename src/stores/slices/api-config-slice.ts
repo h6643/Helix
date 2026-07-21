@@ -350,16 +350,5 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
     get().setActiveModel(model)
     // 2) Interrupt any in-flight session so the next prompt is built fresh.
     //    (use-hermes detects the apiConfig hash change on next send → invalidate + repush.)
-    import('@/stores/hermes-store').then(({ useHermesStore }) => {
-      const sid = useHermesStore.getState().hermesSessionId
-      if (sid) {
-        try {
-          electronHermes.notify('session/cancel', { session_id: sid })
-        } catch {
-          /* noop */
-        }
-      }
-      useHermesStore.setState({ isChatLoading: false })
-    }).catch(() => {})
   },
 })

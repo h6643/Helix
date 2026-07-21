@@ -114,6 +114,12 @@ export interface PersistedSession {
   chatMessages: PersistedChatMessage[]
   files: PersistedFileSnapshot[]
   openTabs: PersistedOpenTab[]
+  /** Fork: the session this branch was forked from */
+  parentSessionId?: string
+  /** Fork: the message ID at which this branch was forked */
+  forkedFromMessageId?: string
+  /** Fork: human-readable branch name (e.g. "分支 A", "分支 B") */
+  branchName?: string
 }
 
 let dbInstance: IDBDatabase | null = null
@@ -443,6 +449,9 @@ export const persistence = {
     label?: string
     workDir?: string | null
     isArchived?: boolean
+    parentSessionId?: string
+    forkedFromMessageId?: string
+    branchName?: string
   }): Promise<string> {
     const db = await openDB()
     const now = Date.now()

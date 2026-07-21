@@ -4,8 +4,6 @@
  */
 import type { StateCreator } from 'zustand'
 
-export type Language = 'zh' | 'en'
-
 /** Hermes backend's `parse_reasoning_effort` only accepts
  *  none/minimal/low/medium/high/xhigh/max/ultra. Our UI scale
  *  (ultra_low … max) uses two names it doesn't recognise (ultra_low,
@@ -34,19 +32,17 @@ export interface AgentSettingsSlice {
   reasoningEffort: 'ultra_low' | 'low' | 'medium' | 'high' | 'ultra_high' | 'max'
   maxOutputTokens: number
   customInstructions: string
+  outputStyle: string
   streamingEnabled: boolean
   compressionEnabled: boolean
   toolGuardrailsEnabled: boolean
   personality: string
-  outputStyle: 'default' | 'concise' | 'detailed' | 'technical'
   // Notification settings
   desktopNotifications: boolean
   soundEnabled: boolean
   // Startup behavior
   restoreLastSession: boolean
   defaultWorkDir: string
-  // Language
-  language: Language
   // Security
   confirmDangerousActions: boolean
   autoApproveRead: boolean
@@ -61,16 +57,15 @@ export interface AgentSettingsSlice {
   setReasoningEffort: (v: 'ultra_low' | 'low' | 'medium' | 'high' | 'ultra_high' | 'max') => void
   setMaxOutputTokens: (n: number) => void
   setCustomInstructions: (v: string) => void
+  setOutputStyle: (v: string) => void
   setStreamingEnabled: (v: boolean) => void
   setCompressionEnabled: (v: boolean) => void
   setToolGuardrailsEnabled: (v: boolean) => void
   setPersonality: (v: string) => void
-  setOutputStyle: (v: 'default' | 'concise' | 'detailed' | 'technical') => void
   setDesktopNotifications: (v: boolean) => void
   setSoundEnabled: (v: boolean) => void
   setRestoreLastSession: (v: boolean) => void
   setDefaultWorkDir: (v: string) => void
-  setLanguage: (v: Language) => void
   setConfirmDangerousActions: (v: boolean) => void
   setAutoApproveRead: (v: boolean) => void
   setAgentPresets: (presets: Record<string, { name: string; systemPrompt: string }>) => void
@@ -78,7 +73,7 @@ export interface AgentSettingsSlice {
 }
 
 export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], AgentSettingsSlice> = (set) => ({
-  agentMaxIterations: 50,
+  agentMaxIterations: 90,
   autoCompactContext: true,
   smartTruncation: true,
   autoSaveSession: false,
@@ -86,19 +81,17 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   reasoningEffort: 'medium',
   maxOutputTokens: 4096,
   customInstructions: '',
+  outputStyle: 'default',
   streamingEnabled: true,
   compressionEnabled: true,
   toolGuardrailsEnabled: true,
   personality: '',
-  outputStyle: 'default',
   // Notification defaults
   desktopNotifications: true,
   soundEnabled: false,
   // Startup defaults
   restoreLastSession: true,
   defaultWorkDir: '',
-  // Language
-  language: 'zh',
   // Security
   confirmDangerousActions: true,
   autoApproveRead: false,
@@ -114,16 +107,15 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   setReasoningEffort: (v) => set({ reasoningEffort: v }),
   setMaxOutputTokens: (v) => set({ maxOutputTokens: v }),
   setCustomInstructions: (v) => set({ customInstructions: v }),
+  setOutputStyle: (v) => set({ outputStyle: v }),
   setStreamingEnabled: (v) => set({ streamingEnabled: v }),
   setCompressionEnabled: (v) => set({ compressionEnabled: v }),
   setToolGuardrailsEnabled: (v) => set({ toolGuardrailsEnabled: v }),
   setPersonality: (v) => set({ personality: v }),
-  setOutputStyle: (v) => set({ outputStyle: v }),
   setDesktopNotifications: (v) => set({ desktopNotifications: v }),
   setSoundEnabled: (v) => set({ soundEnabled: v }),
   setRestoreLastSession: (v) => set({ restoreLastSession: v }),
   setDefaultWorkDir: (v) => set({ defaultWorkDir: v }),
-  setLanguage: (v) => set({ language: v }),
   setConfirmDangerousActions: (v) => set({ confirmDangerousActions: v }),
   setAutoApproveRead: (v) => set({ autoApproveRead: v }),
   setAgentPresets: (presets) => set({ agentPresets: presets }),

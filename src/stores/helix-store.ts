@@ -190,6 +190,7 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsS
   clearChat: () => void
   clearChatAndPersist: () => Promise<void>
   setChatLoading: (loading: boolean) => void
+  forkConversation: (messageId: string) => Promise<string | null>
 
   // Actions - Editor
   setCursorPosition: (pos: CursorPosition) => void
@@ -856,6 +857,75 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   },
 
   setChatLoading: (loading) => set({ isChatLoading: loading }),
+
+  forkConversation: async (messageId) => {
+    const state = get()
+    if (!state.currentSessionId) {
+      state.showToast({ type: 'error', title: '无法分叉', description: '当前没有活跃的会话' })
+      return null
+    }
+
+    // Find the fork point: copy all messages up to and including this one
+    const msgs = state.chatMessages.filter(m => !m.sessionId || m.sessionId === state.currentSessionId)
+    const forkIdx = msgs.findIndex(m => m.id === messageId)
+    if (forkIdx < 0) {
+      state.showToast({ type: 'error', title: '分叉失败', description: '找不到目标消息' })
+      return null
+    }
+
+    // Copy messages up to fork point
+    const forkedMsgs = msgs.slice(0, forkIdx + 1)
+
+    // Generate new session ID
+    const newSessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
+
+    // Determine branch name: count existing forks from this parent
+    const { persistence } = await import('@/lib/persist')
+    const allSessions = await persistence.loadSessions()
+    const siblingForks = allSessions.filter(s => s.parentSessionId === state.currentSessionId)
+    const branchLabel = `分支 ${String.fromCharCode(65 + siblingForks.length)}` // A, B, C...
+
+    // Persist the new session as a fork
+    await persistence.saveSession({
+      id: newSessionId,
+      label: branchLabel,
+      workDir: state.activeSessionWorkDir ?? state.selectedWorkDir,
+      goal: state.goal,
+      memories: state.memories,
+      tasks: state.tasks,
+      notes: state.notes,
+      checkpoints: state.checkpoints,
+      chatMessages: forkedMsgs.map(m => ({
+        id: m.id,
+        sessionId: newSessionId,
+        role: m.role,
+        content: m.content,
+        images: m.images,
+        timestamp: m.timestamp,
+        isStreaming: false,
+        reasoning: m.reasoning,
+        steps: m.steps,
+      })),
+      files: collectFiles(state.files),
+      openTabs: state.openTabs.map(tab => ({
+        id: tab.id, fileId: tab.fileId, name: tab.name, language: tab.language, isDirty: tab.isDirty,
+      })),
+      parentSessionId: state.currentSessionId,
+      forkedFromMessageId: messageId,
+      branchName: branchLabel,
+    })
+
+    // Reset Hermes session for the new branch
+    useHermesStore.getState().setHermesSessionId(null)
+
+    // Switch to the new session
+    state.setCurrentSessionId(newSessionId)
+    // Increment session save version so sidebar refreshes
+    useHelixStore.setState((st) => ({ sessionSaveVersion: st.sessionSaveVersion + 1 }))
+    state.showToast({ type: 'success', title: `已创建 ${branchLabel}`, description: `从第 ${forkIdx + 1} 条消息处分叉` })
+
+    return newSessionId
+  },
 
   // Terminal — in slices/terminal-slice.ts
 
@@ -1640,13 +1710,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('compressionEnabled', state.compressionEnabled),
         persistence.saveSetting('toolGuardrailsEnabled', state.toolGuardrailsEnabled),
         persistence.saveSetting('personality', state.personality),
-        persistence.saveSetting('outputStyle', state.outputStyle),
         persistence.saveSetting('desktopNotifications', state.desktopNotifications),
         persistence.saveSetting('soundEnabled', state.soundEnabled),
         persistence.saveSetting('restoreLastSession', state.restoreLastSession),
-        persistence.saveSetting('defaultWorkDir', state.defaultWorkDir),
-        persistence.saveSetting('language', state.language),
-        persistence.saveSetting('confirmDangerousActions', state.confirmDangerousActions),
+        persistence.saveSetting('defaultWorkDir', state.defaultWorkDir),        persistence.saveSetting('confirmDangerousActions', state.confirmDangerousActions),
         persistence.saveSetting('autoApproveRead', state.autoApproveRead),
         persistence.saveSetting('editorTheme', state.editorTheme),
         persistence.saveSetting('gitAutoCommit', state.gitAutoCommit),
@@ -1682,7 +1749,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, providerModels, streamingEnabled, compressionEnabled, toolGuardrailsEnabled, personality, outputStyle, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, language, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, providerModels, streamingEnabled, compressionEnabled, toolGuardrailsEnabled, personality, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -1723,13 +1790,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<boolean>('compressionEnabled'),
         persistence.loadSetting<boolean>('toolGuardrailsEnabled'),
         persistence.loadSetting<string>('personality'),
-        persistence.loadSetting<string>('outputStyle'),
         persistence.loadSetting<boolean>('desktopNotifications'),
         persistence.loadSetting<boolean>('soundEnabled'),
         persistence.loadSetting<boolean>('restoreLastSession'),
-        persistence.loadSetting<string>('defaultWorkDir'),
-        persistence.loadSetting<string>('language'),
-        persistence.loadSetting<boolean>('confirmDangerousActions'),
+        persistence.loadSetting<string>('defaultWorkDir'),        persistence.loadSetting<boolean>('confirmDangerousActions'),
         persistence.loadSetting<boolean>('autoApproveRead'),
         persistence.loadSetting<string>('editorTheme'),
         persistence.loadSetting<boolean>('gitAutoCommit'),
@@ -1982,14 +2046,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         streamingEnabled: streamingEnabled ?? get().streamingEnabled,
         compressionEnabled: compressionEnabled ?? get().compressionEnabled,
         toolGuardrailsEnabled: toolGuardrailsEnabled ?? get().toolGuardrailsEnabled,
-        personality: personality ?? get().personality,
-        outputStyle: (outputStyle as 'default' | 'concise' | 'detailed' | 'technical') ?? get().outputStyle,
+        personality: (personality && personality !== '温柔') ? personality : '',
         desktopNotifications: desktopNotifications ?? get().desktopNotifications,
         soundEnabled: soundEnabled ?? get().soundEnabled,
         restoreLastSession: restoreLastSession ?? get().restoreLastSession,
-        defaultWorkDir: defaultWorkDir || get().defaultWorkDir,
-        language: (language as 'zh' | 'en') ?? get().language,
-        confirmDangerousActions: confirmDangerousActions ?? get().confirmDangerousActions,
+        defaultWorkDir: defaultWorkDir || get().defaultWorkDir,        confirmDangerousActions: confirmDangerousActions ?? get().confirmDangerousActions,
         autoApproveRead: autoApproveRead ?? get().autoApproveRead,
         availableModels: availableModels || [],
         providerModels: providerModels || {},

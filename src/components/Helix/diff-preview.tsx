@@ -31,18 +31,15 @@ function computeDiff(oldText: string, newText: string): DiffLine[] {
   const m = oldLines.length
   const n = newLines.length
 
-  // Build LCS table (optimized for memory)
-  const dp: number[] = new Array(n + 1).fill(0)
+  // Build LCS table
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
   for (let i = 1; i <= m; i++) {
-    let prev = 0
     for (let j = 1; j <= n; j++) {
-      const temp = dp[j]
       if (oldLines[i - 1] === newLines[j - 1]) {
-        dp[j] = prev + 1
+        dp[i][j] = dp[i - 1][j - 1] + 1
       } else {
-        dp[j] = Math.max(dp[j], dp[j - 1])
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1])
       }
-      prev = temp
     }
   }
 

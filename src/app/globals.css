@@ -46,78 +46,76 @@
 :root {
   --radius: 0.5rem;
   /* ── Precision Instrument palette (light) ──
-     Background: slightly warm paper-white with a barely-there cool undertone.
-     Primary: indigo-violet — warmer than generic dev-tool blue, signals
-     intelligence + precision rather than template default. Higher chroma
-     (0.20 vs 0.16) makes the brand color stand out at all sizes. */
+     Primary: #9acfff — light blue, signals clarity + freshness.
+     Dark variant for light bg readability. */
   --background: oklch(0.985 0.003 250);
-  --foreground: oklch(0.128 0.012 260);
+  --foreground: oklch(0.128 0.012 250);
   --card: oklch(0.994 0.002 250);
-  --card-foreground: oklch(0.128 0.012 260);
+  --card-foreground: oklch(0.128 0.012 250);
   --popover: oklch(0.992 0.002 250);
-  --popover-foreground: oklch(0.128 0.012 260);
-  --primary: oklch(0.43 0.20 270);
+  --popover-foreground: oklch(0.128 0.012 250);
+  --primary: oklch(0.47 0.18 250);
   --primary-foreground: oklch(0.985 0.002 250);
-  --secondary: oklch(0.945 0.008 255);
-  --secondary-foreground: oklch(0.20 0.012 260);
-  --muted: oklch(0.955 0.005 252);
-  --muted-foreground: oklch(0.42 0.015 260);
-  --accent: oklch(0.935 0.018 268);
-  --accent-foreground: oklch(0.15 0.015 270);
+  --secondary: oklch(0.945 0.008 250);
+  --secondary-foreground: oklch(0.20 0.012 250);
+  --muted: oklch(0.955 0.005 250);
+  --muted-foreground: oklch(0.42 0.015 250);
+  --accent: oklch(0.935 0.015 250);
+  --accent-foreground: oklch(0.15 0.015 250);
   --destructive: oklch(0.58 0.22 22);
-  --border: oklch(0.91 0.008 255);
-  --input: oklch(0.94 0.005 252);
-  --ring: oklch(0.43 0.20 270);
-  --chart-1: oklch(0.43 0.20 270);
+  --border: oklch(0.91 0.008 250);
+  --input: oklch(0.94 0.005 250);
+  --ring: oklch(0.47 0.18 250);
+  --chart-1: oklch(0.47 0.18 250);
   --chart-2: oklch(0.52 0.14 200);
-  --chart-3: oklch(0.48 0.13 280);
+  --chart-3: oklch(0.48 0.10 260);
   --chart-4: oklch(0.52 0.16 340);
   --chart-5: oklch(0.58 0.14 55);
   /* ── Sidebar — slightly tinted for depth ── */
-  --sidebar: oklch(0.942 0.005 252);
-  --sidebar-foreground: oklch(0.128 0.012 260);
-  --sidebar-primary: oklch(0.43 0.20 270);
+  --sidebar: oklch(0.942 0.005 250);
+  --sidebar-foreground: oklch(0.128 0.012 250);
+  --sidebar-primary: oklch(0.47 0.18 250);
   --sidebar-primary-foreground: oklch(0.985 0.002 250);
-  --sidebar-accent: oklch(0.90 0.008 260);
-  --sidebar-accent-foreground: oklch(0.15 0.015 268);
-  --sidebar-border: oklch(0.90 0.008 258);
-  --sidebar-ring: oklch(0.43 0.20 270);
+  --sidebar-accent: oklch(0.90 0.008 250);
+  --sidebar-accent-foreground: oklch(0.15 0.015 250);
+  --sidebar-border: oklch(0.90 0.008 250);
+  --sidebar-ring: oklch(0.47 0.18 250);
 }
 
 .dark {
   /* ── Precision Instrument palette (dark) ── */
-  --background: oklch(0.108 0.005 268);
-  --foreground: oklch(0.95 0.004 260);
-  --card: oklch(0.134 0.006 268);
-  --card-foreground: oklch(0.95 0.004 260);
-  --popover: oklch(0.142 0.006 268);
-  --popover-foreground: oklch(0.95 0.004 260);
-  --primary: oklch(0.68 0.17 268);
-  --primary-foreground: oklch(0.10 0.006 268);
-  --secondary: oklch(0.168 0.008 268);
-  --secondary-foreground: oklch(0.92 0.005 262);
-  --muted: oklch(0.132 0.005 268);
-  --muted-foreground: oklch(0.68 0.008 260);
-  --accent: oklch(0.188 0.018 270);
-  --accent-foreground: oklch(0.95 0.004 260);
+  --background: oklch(0.108 0.005 250);
+  --foreground: oklch(0.95 0.004 250);
+  --card: oklch(0.134 0.006 250);
+  --card-foreground: oklch(0.95 0.004 250);
+  --popover: oklch(0.142 0.006 250);
+  --popover-foreground: oklch(0.95 0.004 250);
+  --primary: oklch(0.78 0.14 255);
+  --primary-foreground: oklch(0.10 0.006 250);
+  --secondary: oklch(0.168 0.008 250);
+  --secondary-foreground: oklch(0.92 0.005 250);
+  --muted: oklch(0.132 0.005 250);
+  --muted-foreground: oklch(0.68 0.008 250);
+  --accent: oklch(0.188 0.018 250);
+  --accent-foreground: oklch(0.95 0.004 250);
   --destructive: oklch(0.64 0.22 20);
-  --border: oklch(0.22 0.008 268);
-  --input: oklch(0.162 0.006 268);
-  --ring: oklch(0.68 0.17 268);
-  --chart-1: oklch(0.68 0.17 268);
+  --border: oklch(0.22 0.008 250);
+  --input: oklch(0.162 0.006 250);
+  --ring: oklch(0.78 0.14 255);
+  --chart-1: oklch(0.78 0.14 255);
   --chart-2: oklch(0.64 0.12 200);
-  --chart-3: oklch(0.62 0.12 280);
+  --chart-3: oklch(0.62 0.10 260);
   --chart-4: oklch(0.64 0.16 340);
   --chart-5: oklch(0.70 0.14 55);
   /* ── Sidebar (dark) ── */
-  --sidebar: oklch(0.10 0.004 268);
-  --sidebar-foreground: oklch(0.93 0.005 260);
-  --sidebar-primary: oklch(0.68 0.17 268);
-  --sidebar-primary-foreground: oklch(0.10 0.006 268);
-  --sidebar-accent: oklch(0.142 0.008 270);
-  --sidebar-accent-foreground: oklch(0.93 0.005 262);
-  --sidebar-border: oklch(0.18 0.006 268);
-  --sidebar-ring: oklch(0.68 0.17 268);
+  --sidebar: oklch(0.10 0.004 250);
+  --sidebar-foreground: oklch(0.93 0.005 250);
+  --sidebar-primary: oklch(0.78 0.14 255);
+  --sidebar-primary-foreground: oklch(0.10 0.006 250);
+  --sidebar-accent: oklch(0.142 0.008 250);
+  --sidebar-accent-foreground: oklch(0.93 0.005 250);
+  --sidebar-border: oklch(0.18 0.006 250);
+  --sidebar-ring: oklch(0.78 0.14 255);
 }
 
 /* ── Base & accessibility ─────────────────────────── */
@@ -444,11 +442,11 @@ body.user-select-none * {
 }
 
 .dark [data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb {
-  background: oklch(0.25 0.005 260);
+  background: oklch(0.25 0.005 250);
 }
 
 .dark [data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.32 0.006 260);
+  background: oklch(0.32 0.006 250);
 }
 
 /* ── Resizer polish ─────────────────────────────── */
@@ -473,15 +471,10 @@ body.user-select-none * {
   background: var(--border);
 }
 
-/* ── Low-opacity text in dark mode ───────────────── */
-
-/* Dark mode: boost low-opacity text for readability (WCAG AA) */
-.dark .text-foreground\/30 { color: color-mix(in oklch, var(--foreground) 50%, transparent); }
-.dark .text-foreground\/40 { color: color-mix(in oklch, var(--foreground) 58%, transparent); }
-.dark .text-foreground\/50 { color: color-mix(in oklch, var(--foreground) 65%, transparent); }
-.dark .text-muted-foreground\/40 { color: color-mix(in oklch, var(--muted-foreground) 60%, transparent); }
-.dark .text-muted-foreground\/50 { color: color-mix(in oklch, var(--muted-foreground) 70%, transparent); }
-.dark .text-muted-foreground\/60 { color: color-mix(in oklch, var(--muted-foreground) 78%, transparent); }
+/* Dark-mode low-opacity text uses Tailwind's default color-mix ladder,
+   which is monotonic in the opacity %. The previous per-level boosts
+   (e.g. /30 → 50%, /50 → 65%) were removed because they made lower
+   opacity numbers render BRIGHTER than higher ones — see globals history. */
 
 /* ── Markdown rendering ─────────────────────────────── */
 
@@ -678,14 +671,14 @@ nav::-webkit-scrollbar-thumb:hover {
 .streaming-cursor::after {
   content: '█';
   animation: cursor-blink 1s step-end infinite;
-  color: oklch(0.82 0.14 230);
+  color: oklch(0.82 0.14 250);
   margin-left: 1px;
   font-size: 0.9em;
 }
 
 /* File reference link style */
 .file-ref {
-  color: oklch(0.82 0.14 230);
+  color: oklch(0.82 0.14 250);
   text-decoration: none;
   font-family: var(--font-geist-mono);
   font-size: 0.8125rem;
@@ -697,7 +690,7 @@ nav::-webkit-scrollbar-thumb:hover {
 
 /* Prompt symbol */
 .prompt-symbol {
-  color: oklch(0.82 0.14 230);
+  color: oklch(0.82 0.14 250);
   font-family: var(--font-geist-mono);
   font-weight: 600;
 }
@@ -764,12 +757,12 @@ nav::-webkit-scrollbar-thumb:hover {
 
 @keyframes pulse-glow {
   0%, 100% {
-    box-shadow: 0 0 15px -6px rgba(59, 130, 246, 0.2);
-    border-color: rgba(59, 130, 246, 0.25);
+    box-shadow: 0 0 15px -6px rgba(154, 172, 255, 0.2);
+    border-color: rgba(154, 172, 255, 0.25);
   }
   50% {
-    box-shadow: 0 0 28px -6px rgba(59, 130, 246, 0.4);
-    border-color: rgba(59, 130, 246, 0.45);
+    box-shadow: 0 0 28px -6px rgba(154, 172, 255, 0.4);
+    border-color: rgba(154, 172, 255, 0.45);
   }
 }
 
@@ -961,48 +954,13 @@ nav::-webkit-scrollbar-thumb:hover {
   0%, 100% {
     opacity: 0.6;
     transform: scale(0.9);
-    box-shadow: 0 0 5px 1px rgba(96, 165, 250, 0.5);
+    box-shadow: 0 0 5px 1px rgba(154, 172, 255, 0.5);
   }
   50% {
     opacity: 1;
     transform: scale(1.12);
-    box-shadow: 0 0 14px 4px rgba(96, 165, 250, 0.95);
+    box-shadow: 0 0 14px 4px rgba(154, 172, 255, 0.95);
   }
-}
-
-/* ── Thinking breath — signature primary-toned pulse ────
-   The core brand moment: when the AI is thinking, the indicator breathes
-   in the primary (indigo-violet) at low intensity. Light enough to be
-   ambient rather than distracting; distinct enough to be the page's
-   signature rather than a generic loading spinner. */
-.thinking-breath {
-  display: inline-block;
-  animation: thinkingBreath 1.8s ease-in-out infinite;
-}
-@keyframes thinkingBreath {
-  0%, 100% {
-    opacity: 0.45;
-    text-shadow: 0 0 4px color-mix(in oklch, var(--primary) 8%, transparent);
-  }
-  50% {
-    opacity: 1;
-    text-shadow:
-      0 0 12px color-mix(in oklch, var(--primary) 28%, transparent),
-      0 0 28px color-mix(in oklch, var(--primary) 12%, transparent);
-  }
-}
-
-/* Thinking card — quiet, layered, no harsh border */
-.thinking-card {
-  transition: all 0.3s ease;
-  box-shadow:
-    0 1px 4px color-mix(in oklch, var(--primary) 3%, transparent),
-    inset 0 1px 0 color-mix(in oklch, var(--primary) 2%, transparent);
-}
-.thinking-card:hover {
-  box-shadow:
-    0 2px 8px color-mix(in oklch, var(--primary) 6%, transparent),
-    inset 0 1px 0 color-mix(in oklch, var(--primary) 3%, transparent);
 }
 
 /* xterm.js transparent background */

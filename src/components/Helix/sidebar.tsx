@@ -18,7 +18,7 @@ import {
   RotateCcw,
   MoreVertical,
   Pencil,
-
+  GitBranch,
   AlertTriangle,
   PanelLeft,
 } from 'lucide-react'
@@ -447,6 +447,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       if (!window.confirm('Agent 正在运行中，切换会话将中断当前任务。确定要切换吗？')) {
         return
       }
+      window.dispatchEvent(new Event('helix:interrupt-request'))
     }
     try {
       const state = useHelixStore.getState()
@@ -748,7 +749,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         <div className="flex items-center px-4 pt-2.5 pb-1 group/section">
           <button
             onClick={() => setRecentCollapsed(prev => !prev)}
-            className="flex items-center gap-1 flex-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-foreground/35 hover:text-sidebar-foreground/55 transition-colors"
+            className="flex items-center gap-1 flex-1 text-[13px] font-medium tracking-normal text-sidebar-foreground/50 hover:text-sidebar-foreground/70 transition-colors"
           >
             <svg className={`size-3 transition-transform ${recentCollapsed ? '' : 'rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m9 18 6-6-6-6"/></svg>
             <span>最近</span>
@@ -803,7 +804,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                     {isExpanded && (
                       <div className="border-t border-border/20">
                         {project.sessions.length === 0 ? (
-                          <div className="px-4 py-1.5 text-[12px] text-sidebar-foreground/30 italic">
+                          <div className="px-4 py-1.5 text-[12px] text-sidebar-foreground/30">
                             暂无对话
                           </div>
                         ) : (
@@ -862,11 +863,19 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                                   className="text-[12px] w-full bg-background outline-none border border-primary rounded px-1 py-0.5"
                                 />
                               ) : (
-                                <p
-                          className="text-[12px] truncate"
-                          title="双击重命名"
-                          onDoubleClick={(e) => { e.stopPropagation(); setRenamingId(session.id) }}
-                        >{session.label}</p>
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  {session.branchName && (
+                                    <span className="shrink-0 inline-flex items-center gap-0.5 px-1 py-px rounded text-[9px] font-medium bg-blue-500/10 text-blue-500 dark:text-blue-400">
+                                      <GitBranch className="size-2" />
+                                      {session.branchName}
+                                    </span>
+                                  )}
+                                  <p
+                                    className="text-[12px] truncate flex-1"
+                                    title="双击重命名"
+                                    onDoubleClick={(e) => { e.stopPropagation(); setRenamingId(session.id) }}
+                                  >{session.label}</p>
+                                </div>
                               )}
                             </div>
                             

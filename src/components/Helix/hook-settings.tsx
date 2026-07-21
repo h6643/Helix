@@ -1,20 +1,20 @@
 'use client'
 
 import React, { useState, useEffect, useCallback } from 'react'
-import { Plus, Trash2, Save, AlertTriangle, Code2, Zap, ChevronDown, ChevronRight, RotateCw, Loader2 } from 'lucide-react'
+import { Plus, Trash2, Save, AlertTriangle, Zap, ChevronDown, ChevronRight, RotateCw, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { isElectron } from '@/lib/electron-bridge'
 import {
-  type HooksConfig,
-  type BackendHookEvent,
-  type HookHandler,
-  HOOK_EVENTS,
-  HOOK_EVENT_LABELS,
-  HOOK_EVENT_HINTS,
-  EMPTY_HOOKS_CONFIG,
+  type HookType,
+  type HookConfig,
+  type HooksSettings,
+  HOOK_META,
+  HOOK_TYPES,
+  EMPTY_HOOKS_SETTINGS,
+  generateHookId,
 } from '@/lib/hooks-config'
 
-// ── Local primitives (mirror api-settings.tsx for visual consistency) ──────
+// ── Local primitives ───────────────────────────────────────────────────────
 const SectionTitle = ({ children }: { children: React.ReactNode }) => (
   <div className="flex items-baseline gap-2 mb-4">
     <h3 className="text-lg font-semibold text-foreground">{children}</h3>
@@ -30,111 +30,112 @@ const Toggle = ({ enabled, onToggle }: { enabled: boolean; onToggle: () => void 
   </button>
 )
 
-const SettingRow = ({ icon, label, description, children }: {
-  icon: React.ReactNode; label: string; description: string; children: React.ReactNode
-}) => (
-  <div className="flex items-center justify-between px-4 py-3.5 rounded-xl border border-border/50 bg-card/50 shadow-sm gap-3">
-    <div className="flex items-center gap-3 flex-1 min-w-0">
-      <span className="text-muted-foreground shrink-0">{icon}</span>
-      <div className="min-w-0">
-        <p className="text-sm font-medium text-foreground">{label}</p>
-        <p className="text-xs text-muted-foreground/70 mt-0.5">{description}</p>
-      </div>
-    </div>
-    <div className="shrink-0">{children}</div>
-  </div>
-)
-
 export function HookSettings() {
-  const [config, setConfig] = useState<HooksConfig>(EMPTY_HOOKS_CONFIG)
+  const [settings, setSettings] = useState<HooksSettings>(EMPTY_HOOKS_SETTINGS)
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveState, setSaveState] = useState<null | 'ok' | 'err'>(null)
-  const [showJson, setShowJson] = useState(false)
-  const [jsonText, setJsonText] = useState('')
-  const [jsonError, setJsonError] = useState<string | null>(null)
-  const [collapsed, setCollapsed] = useState<Set<BackendHookEvent>>(new Set())
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   const electronReady = isElectron()
 
   useEffect(() => {
     if (!electronReady) { setLoaded(true); return }
     window.electron.hooks.getConfig()
-      .then((r) => { if (r.ok && r.config) setConfig(r.config) })
+      .then((r) => {
+        if (r.ok && r.config) {
+          // Convert legacy format if needed
+          const hooks: HookConfig[] = []
+          if (r.config.hooks && typeof r.config.hooks === 'object') {
+            // Legacy format: { enabled, hooks: { event: [{ command, matcher }] } }
+            for (const [event, handlers] of Object.entries(r.config.hooks)) {
+              if (Array.isArray(handlers)) {
+                for (const h of handlers) {
+                  hooks.push({
+                    id: generateHookId(),
+                    type: event as HookType,
+                    command: h.command || '',
+                    matcher: h.matcher || '',
+                    enabled: true,
+                  })
+                }
+              }
+            }
+          }
+          setSettings({ enabled: r.config.enabled !== false, hooks })
+        }
+      })
       .catch(() => {})
       .finally(() => setLoaded(true))
   }, [electronReady])
 
-  const setEnabled = (v: boolean) => setConfig((c) => ({ ...c, enabled: v }))
+  const setMasterEnabled = (v: boolean) => setSettings(s => ({ ...s, enabled: v }))
 
-  const handlersOf = (ev: BackendHookEvent): HookHandler[] => config.hooks?.[ev] || []
+  const hooksOfType = (type: HookType) => settings.hooks.filter(h => h.type === type)
 
-  const updateHandlers = (ev: BackendHookEvent, handlers: HookHandler[]) =>
-    setConfig((c) => ({ ...c, hooks: { ...c.hooks, [ev]: handlers } }))
+  const addHook = (type: HookType) => {
+    const newHook: HookConfig = {
+      id: generateHookId(),
+      type,
+      command: '',
+      matcher: '',
+      enabled: true,
+    }
+    setSettings(s => ({ ...s, hooks: [...s.hooks, newHook] }))
+  }
 
-  const addHandler = (ev: BackendHookEvent) =>
-    updateHandlers(ev, [...handlersOf(ev), { command: '' }])
+  const removeHook = (id: string) => {
+    setSettings(s => ({ ...s, hooks: s.hooks.filter(h => h.id !== id) }))
+  }
 
-  const removeHandler = (ev: BackendHookEvent, hi: number) =>
-    updateHandlers(ev, handlersOf(ev).filter((_, i) => i !== hi))
+  const updateHook = (id: string, patch: Partial<HookConfig>) => {
+    setSettings(s => ({
+      ...s,
+      hooks: s.hooks.map(h => h.id === id ? { ...h, ...patch } : h),
+    }))
+  }
 
-  const patchHandler = (ev: BackendHookEvent, hi: number, patch: Partial<HookHandler>) =>
-    updateHandlers(ev, handlersOf(ev).map((h, i) => (i === hi ? { ...h, ...patch } : h)))
+  const toggleHook = (id: string) => {
+    setSettings(s => ({
+      ...s,
+      hooks: s.hooks.map(h => h.id === id ? { ...h, enabled: !h.enabled } : h),
+    }))
+  }
 
   const save = useCallback(async () => {
     if (!electronReady) return
     setSaving(true)
     try {
-      const r = await window.electron.hooks.setConfig(config)
+      // Convert to backend format
+      const hooksConfig: Record<string, { command: string; matcher?: string }[]> = {}
+      for (const hook of settings.hooks) {
+        if (!hook.command.trim()) continue
+        if (!hooksConfig[hook.type]) hooksConfig[hook.type] = []
+        hooksConfig[hook.type].push({
+          command: hook.command,
+          ...(hook.matcher ? { matcher: hook.matcher } : {}),
+        })
+      }
+      const r = await window.electron.hooks.setConfig({ enabled: settings.enabled, hooks: hooksConfig })
       setSaveState(r.ok ? 'ok' : 'err')
     } catch {
       setSaveState('err')
     } finally {
       setSaving(false)
     }
-  }, [config, electronReady])
-
-  const importJson = () => {
-    setJsonError(null)
-    try {
-      const parsed = JSON.parse(jsonText)
-      if (!parsed || typeof parsed !== 'object' || typeof parsed.hooks !== 'object') {
-        setJsonError('结构无效：需要 { enabled?, hooks: { 事件名: [ { command, matcher?, timeout? } ] } }')
-        return
-      }
-      // Keep only known backend event names; drop unknowns to avoid writing
-      // something Hermes would silently ignore.
-      const cleanHooks: HooksConfig['hooks'] = {}
-      for (const ev of HOOK_EVENTS) {
-        if (Array.isArray(parsed.hooks[ev])) {
-          cleanHooks[ev] = parsed.hooks[ev]
-            .filter((h: HookHandler) => h && typeof h.command === 'string' && h.command.trim())
-            .map((h: HookHandler) => ({
-              command: h.command,
-              ...(typeof h.matcher === 'string' && h.matcher.trim() ? { matcher: h.matcher } : {}),
-              ...(typeof h.timeout === 'number' && h.timeout > 0 ? { timeout: h.timeout } : {}),
-            }))
-        }
-      }
-      setConfig({ enabled: parsed.enabled !== false, hooks: cleanHooks })
-      setShowJson(false)
-      setSaveState(null)
-    } catch (e) {
-      setJsonError('JSON 解析失败：' + (e as Error).message)
-    }
-  }
+  }, [settings, electronReady])
 
   if (!electronReady) {
     return (
-      <div className="max-w-2xl space-y-6">
+      <div className="max-w-2xl">
         <SectionTitle>Hooks</SectionTitle>
-        <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm p-4">
+        <div className="py-4 border-b border-border/30">
           <div className="flex items-center gap-2 text-amber-500 mb-2">
             <AlertTriangle className="size-5" />
             <p className="text-sm font-medium text-foreground">Hooks 需要在桌面端使用</p>
           </div>
           <p className="text-sm text-muted-foreground">
-            Hooks 由 Helix 写入外部 Hermes 后端的 config.yaml，仅在 Helix 桌面应用中可配置。当前为非桌面环境，无法配置或运行 Hooks。
+            Hooks 由 Helix 写入外部 Hermes 后端的 config.yaml，仅在 Helix 桌面应用中可配置。
           </p>
         </div>
       </div>
@@ -143,7 +144,7 @@ export function HookSettings() {
 
   if (!loaded) {
     return (
-      <div className="max-w-2xl space-y-6">
+      <div className="max-w-2xl">
         <SectionTitle>Hooks</SectionTitle>
         <p className="text-sm text-muted-foreground">加载 Hooks 配置中…</p>
       </div>
@@ -151,131 +152,91 @@ export function HookSettings() {
   }
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-2xl">
       <SectionTitle>Hooks</SectionTitle>
 
       {/* Master enable */}
-      <SettingRow
-        icon={<Zap className="size-4 text-muted-foreground" />}
-        label="启用 Hooks"
-        description="开启后，Hermes 后端会在对应的生命周期点触发你配置的命令"
-      >
-        <Toggle enabled={config.enabled !== false} onToggle={() => setEnabled(!(config.enabled !== false))} />
-      </SettingRow>
+      <div className="flex items-center justify-between py-3 gap-3 border-b border-border/30">
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+          <Zap className="size-4 text-muted-foreground shrink-0" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-foreground">启用 Hooks</p>
+          </div>
+        </div>
+        <Toggle enabled={settings.enabled} onToggle={() => setMasterEnabled(!settings.enabled)} />
+      </div>
 
-      {/* Per-event groups */}
-      <div className="space-y-4">
-        {HOOK_EVENTS.map((ev) => {
-          const handlers = handlersOf(ev)
-          const isCollapsed = collapsed.has(ev)
-          const toggle = () => setCollapsed((s) => {
-            const next = new Set(s)
-            isCollapsed ? next.delete(ev) : next.add(ev)
-            return next
-          })
-          return (
-            <div key={ev} className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-              <div
-                role="button"
-                tabIndex={0}
-                className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors cursor-pointer"
-                onClick={toggle}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggle() }}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <Zap className="size-4 text-muted-foreground shrink-0" />
-                  <span className="text-sm font-medium text-foreground truncate">{HOOK_EVENT_LABELS[ev]}</span>
-                  {handlers.length > 0 && (
-                    <span className="text-xs text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded-full">{handlers.length}</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
-                  <Button size="sm" variant="outline" onClick={() => addHandler(ev)}>
-                    <Plus className="size-3.5 mr-1" /> 添加命令
-                  </Button>
-                  {isCollapsed
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </div>
-              </div>
-              <div className={`p-4 space-y-3 ${isCollapsed ? 'hidden' : ''}`}>
-                <p className="text-xs text-muted-foreground/70">{HOOK_EVENT_HINTS[ev]}</p>
+      {/* Per-type sections */}
+      {HOOK_TYPES.map((type) => {
+        const meta = HOOK_META[type]
+        const hooks = hooksOfType(type)
+        const isCollapsed = collapsed.has(type)
+        const toggle = () => setCollapsed(s => {
+          const next = new Set(s)
+          isCollapsed ? next.delete(type) : next.add(type)
+          return next
+        })
 
-                {handlers.length === 0 && (
-                  <p className="text-xs text-muted-foreground/60 italic">暂无命令</p>
+        return (
+          <div key={type} className="border-b border-border/30">
+            <div
+              role="button"
+              tabIndex={0}
+              className="w-full py-2.5 flex items-center justify-between gap-2 pl-[22px] hover:bg-muted/20 transition-colors rounded-lg cursor-pointer"
+              onClick={toggle}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') toggle() }}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-sm font-medium text-foreground truncate">{meta.label}</span>
+                {hooks.length > 0 && (
+                  <span className="text-xs text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded-full">{hooks.length}</span>
                 )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                <Button size="sm" variant="outline" onClick={() => addHook(type)}>
+                  <Plus className="size-3.5 mr-1" /> 添加
+                </Button>
+                {isCollapsed
+                  ? <ChevronRight className="size-4 text-muted-foreground" />
+                  : <ChevronDown className="size-4 text-muted-foreground" />}
+              </div>
+            </div>
 
-                {handlers.map((h, hi) => (
-                  <div key={hi} className="rounded-lg border border-border/50 bg-muted/30 p-3 space-y-2">
+            {!isCollapsed && (
+              <div className="pb-4 pl-[22px] space-y-3">
+
+                {hooks.map((hook) => (
+                  <div key={hook.id} className="rounded-lg border border-border/50 bg-muted/30 p-3 space-y-2">
                     <div className="flex items-center gap-2">
+                      <Toggle enabled={hook.enabled} onToggle={() => toggleHook(hook.id)} />
                       <input
-                        value={h.command}
-                        onChange={(e) => patchHandler(ev, hi, { command: e.target.value })}
+                        value={hook.command}
+                        onChange={(e) => updateHook(hook.id, { command: e.target.value })}
                         placeholder="命令，如 python3 ~/.helix/hooks/notify.py"
                         className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                       />
-                      <Button size="sm" variant="ghost" onClick={() => removeHandler(ev, hi)}>
+                      <Button size="sm" variant="ghost" onClick={() => removeHook(hook.id)}>
                         <Trash2 className="size-3.5 text-destructive" />
                       </Button>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {meta.supportsMatcher && (
                       <input
-                        value={h.matcher || ''}
-                        onChange={(e) => patchHandler(ev, hi, { matcher: e.target.value })}
+                        value={hook.matcher}
+                        onChange={(e) => updateHook(hook.id, { matcher: e.target.value })}
                         placeholder="matcher 正则（工具名，留空=全部）"
-                        className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                       />
-                      <input
-                        type="number"
-                        min={1}
-                        value={h.timeout ?? ''}
-                        onChange={(e) => patchHandler(ev, hi, { timeout: e.target.value ? Number(e.target.value) : undefined })}
-                        placeholder="超时(秒)"
-                        className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </div>
+                    )}
                   </div>
                 ))}
               </div>
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Raw JSON import/export */}
-      <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-        <button
-          className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-muted/30 transition-colors"
-          onClick={() => { setShowJson((v) => !v); if (!showJson) setJsonText(JSON.stringify(config, null, 2)) }}
-        >
-          <Code2 className="size-4 text-muted-foreground" />
-          <span className="text-sm font-medium text-foreground flex-1">原始 JSON</span>
-          {showJson ? <ChevronDown className="size-4 text-muted-foreground" /> : <ChevronRight className="size-4 text-muted-foreground" />}
-        </button>
-        {showJson && (
-          <div className="p-4 border-t border-border/50 space-y-3">
-            <textarea
-              value={jsonText}
-              onChange={(e) => setJsonText(e.target.value)}
-              rows={14}
-              spellCheck={false}
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-            />
-            {jsonError && <p className="text-xs text-destructive">{jsonError}</p>}
-            <div className="flex gap-2">
-              <Button size="sm" onClick={importJson}>导入 JSON</Button>
-              <Button size="sm" variant="outline" onClick={() => setJsonText(JSON.stringify(config, null, 2))}>用当前配置刷新</Button>
-            </div>
-            <p className="text-xs text-muted-foreground/70">
-              格式对应 Hermes 的 <code className="font-mono text-[13px] bg-muted/60 px-1 py-0.5 rounded text-foreground">hooks:</code> 块：
-              <code className="font-mono text-[13px] bg-muted/60 px-1 py-0.5 rounded text-foreground">{'{ "enabled": true, "hooks": { "pre_tool_call": [ { "command": "…", "matcher": "Bash", "timeout": 30 } ] } }'}</code>。
-            </p>
+            )}
           </div>
-        )}
-      </div>
+        )
+      })}
 
       {/* Save bar */}
-      <div className="flex items-center gap-3 pt-1">
+      <div className="flex items-center gap-3 pt-3">
         <Button onClick={save} disabled={saving}>
           {saving
             ? <><Loader2 className="size-4 mr-1 animate-spin" /> 保存并重启网关…</>

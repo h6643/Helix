@@ -600,7 +600,7 @@ function writeHermesAgentConfig({ temperature, maxOutputTokens, reasoningEffort,
       const safe = '"' + String(customInstructions).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
       updated = setYamlKey(updated, 'agent.custom_instructions', safe)
     }
-    if (personality !== undefined) {
+    if (personality !== undefined && personality !== null && String(personality).trim() !== '') {
       const safe = '"' + String(personality).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
       updated = setYamlKey(updated, 'agent.system_prompt', safe)
     } else {
@@ -2173,6 +2173,20 @@ safeHandle('app:getInfo', () => ({
   workDir: workDir || app.getPath('home'),
 }))
 
+
+// Get installed Hermes backend version by running 'hermes --version'
+safeHandle('app:getHermesVersion', async () => {
+  try {
+    const hermesCmd = resolveHermesCmd()
+    if (!hermesCmd) return null
+    const { execSync } = require('child_process')
+    const out = execSync('"' + hermesCmd + '" --version', { encoding: 'utf-8', timeout: 5000 })
+    const match = out.match(/\((\d+\.\d+\.\d+(?:\.\d+)?)\)/)
+    return match ? match[1] : null
+  } catch {
+    return null
+  }
+})
 safeHandle('app:setWorkDir', (event, dir) => {
   const isDriveRoot = typeof dir === 'string' && /^[a-zA-Z]:[\/]?$/.test(dir)
   if (dir === '/' || dir === '\\' || isDriveRoot) dir = process.cwd()

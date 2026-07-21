@@ -1,7 +1,6 @@
 'use client'
 
 import React, { useState, useRef, useEffect } from 'react'
-import { X } from 'lucide-react'
 import { useHelixStore } from '@/stores/helix-store'
 import { formatTokens } from '@/lib/format'
 
@@ -70,7 +69,7 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'default': 128_000,
 }
 
-function getModelContextWindow(modelName?: string): number {
+export function getModelContextWindow(modelName?: string): number {
   if (!modelName) return MODEL_CONTEXT_WINDOWS['default']
   const lower = modelName.toLowerCase()
   // Exact match first
@@ -128,12 +127,6 @@ function ContextUsagePanel({ used, total, breakdown, onClose }: { used: number; 
             {percentage.toFixed(1)}% 上下文已用
           </span>
         </div>
-        <button
-          onClick={onClose}
-          className="p-0.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
-        >
-          <X className="size-3" />
-        </button>
       </div>
       <div className="h-1 w-full bg-muted rounded-full overflow-hidden mb-2">
         <div className={`h-full ${color} transition-all duration-300`} style={{ width: `${percentage}%` }} />
@@ -199,7 +192,7 @@ export function ContextUsageIndicator() {
 
   const breakdown: ContextBreakdown[] = [
     { label: '系统提示词', tokens: systemTokens, color: 'bg-gray-500' },
-    { label: '工具及子智能体', tokens: toolsTokens, color: 'bg-purple-500' },
+    { label: '工具及子智能体', tokens: toolsTokens, color: 'bg-blue-500' },
     { label: '对话消息', tokens: messagesTokens, color: 'bg-orange-500' },
     { label: '连接器及MCP', tokens: mcpTokens, color: 'bg-pink-500' },
     { label: '技能', tokens: skillsTokens, color: 'bg-sky-500' },

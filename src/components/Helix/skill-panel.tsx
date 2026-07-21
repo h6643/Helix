@@ -4,7 +4,6 @@ import React, { useState, useMemo, useEffect } from 'react'
 import {
   X,
   Puzzle,
-  Zap,
   BookOpen,
   ImageIcon,
   Code,
@@ -18,6 +17,7 @@ import {
   Trash2,
   RotateCcw,
   Settings,
+  Zap,
 } from 'lucide-react'
 import { useHermes } from '@/hooks/use-hermes'
 import { useHelixStore } from '@/stores/helix-store'
@@ -39,15 +39,15 @@ interface HelixSkill {
 type TabKey = 'plugins' | 'skills'
 
 const iconSet = [
-  { Icon: Puzzle, color: 'bg-purple-500', iconColor: 'text-white' },
-  { Icon: Zap, color: 'bg-amber-500', iconColor: 'text-white' },
+  { Icon: Puzzle, color: 'bg-blue-500', iconColor: 'text-white' },
+  { Icon: Sparkles, color: 'bg-amber-500', iconColor: 'text-white' },
   { Icon: BookOpen, color: 'bg-rose-500', iconColor: 'text-white' },
   { Icon: ImageIcon, color: 'bg-cyan-500', iconColor: 'text-white' },
   { Icon: Code, color: 'bg-emerald-500', iconColor: 'text-white' },
-  { Icon: Wrench, color: 'bg-indigo-500', iconColor: 'text-white' },
+  { Icon: Wrench, color: 'bg-blue-400', iconColor: 'text-white' },
   { Icon: Terminal, color: 'bg-slate-600', iconColor: 'text-white' },
   { Icon: MessageSquare, color: 'bg-blue-500', iconColor: 'text-white' },
-  { Icon: Sparkles, color: 'bg-pink-500', iconColor: 'text-white' },
+  { Icon: Zap, color: 'bg-pink-500', iconColor: 'text-white' },
 ]
 
 function getCommandStyle(name: string) {

@@ -38,6 +38,8 @@ import { isElectron, electronHermes } from '@/lib/electron-bridge'
 import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
 import { toBackendReasoningEffort } from '@/stores/slices/agent-settings-slice'
 import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
+import { useCheckUpdate } from '@/hooks/use-check-update'
+import { scheduleConfigPush } from '@/lib/config-sync'
 
 // Process-wide guard so the startup restore + Hermes sync runs exactly once.
 // A component-local useRef resets whenever this layout remounts (e.g. tab
@@ -95,6 +97,7 @@ interface WindowMenuItem {
 }
 
 export function HelixLayout() {
+  useCheckUpdate()
   const [showSidebar, setShowSidebar] = useState(true)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
@@ -238,14 +241,12 @@ export function HelixLayout() {
       if (!isElectron()) return
       const cfg = st.apiConfig
       if (!cfg || !cfg.model) return
-      const resolved = {
+      scheduleConfigPush({
         model: cfg.model,
         provider: cfg.provider && cfg.provider !== '__custom__' ? cfg.provider : 'custom',
         baseUrl: cfg.baseUrl,
         apiKey: cfg.apiKey,
-      }
-      try { await window.electron?.profile?.cacheConfig?.(resolved) } catch {}
-      try { await window.electron?.hermes?.setConfig?.(resolved) } catch {}
+      })
     })()
     return () => { cancelled = true }
   }, [storeActions.restoreFromStorage])
@@ -258,6 +259,19 @@ export function HelixLayout() {
   const agentSettingsSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!isElectron()) return
+    const pushAgentConfig = () => {
+      const s = useHelixStore.getState()
+      const langInstruction = '请始终使用简体中文回复用户。'
+      scheduleConfigPush({
+        temperature: s.temperature,
+        maxOutputTokens: s.maxOutputTokens,
+        customInstructions: [langInstruction, s.customInstructions].filter(Boolean).join('\n'),
+        personality: (s.personality && s.personality.trim() !== '') ? s.personality : undefined,
+      })
+    }
+    // Initial push so the language instruction reaches Hermes on first load
+    // (the subscription below only fires on subsequent changes).
+    pushAgentConfig()
     const unsub = useHelixStore.subscribe((state, prevState) => {
       const changed =
         state.temperature !== prevState.temperature ||
@@ -266,15 +280,7 @@ export function HelixLayout() {
         state.personality !== prevState.personality
       if (!changed) return
       if (agentSettingsSyncTimer.current) clearTimeout(agentSettingsSyncTimer.current)
-      agentSettingsSyncTimer.current = setTimeout(() => {
-        const s = useHelixStore.getState()
-        window.electron?.hermes?.setAgentConfig?.({
-          temperature: s.temperature,
-          maxOutputTokens: s.maxOutputTokens,
-          customInstructions: s.customInstructions,
-          personality: s.personality,
-        }).catch(() => {})
-      }, 1500)
+      agentSettingsSyncTimer.current = setTimeout(pushAgentConfig, 1500)
     })
     return () => {
       unsub()
@@ -298,12 +304,18 @@ export function HelixLayout() {
       // Short debounce — the slider fires several values while dragging.
       reasoningFastTimer.current = setTimeout(() => {
         const effort = toBackendReasoningEffort(useHelixStore.getState().reasoningEffort)
+        // (1) Always persist to config.yaml — survives restarts and applies
+        //     to the next session even if we skip the live update below.
         window.electron?.hermes?.setReasoningEffort?.({ reasoningEffort: effort }).catch(() => {})
-        const sid = useHermesStore.getState().hermesSessionId
-        if (sid) {
-          // Sentinel prompt — the server returns immediately with no chat update.
+        // (2) Live-update the current agent ONLY when idle. Sending a second
+        //     session/prompt while one is already running violates ACP's
+        //     one-prompt-per-session rule and aborts the in-flight turn
+        //     ("突然中断"). When busy, the persisted value is picked up on
+        //     the next turn instead.
+        const hermes = useHermesStore.getState()
+        if (hermes.hermesSessionId && !useHelixStore.getState().isChatLoading) {
           window.electron?.hermes?.send?.('session/prompt', {
-            session_id: sid,
+            session_id: hermes.hermesSessionId,
             prompt: [{ type: 'text', text: `__hermes_set_reasoning__:${effort}` }],
           }).catch(() => {})
         }
@@ -389,21 +401,33 @@ export function HelixLayout() {
     if (!isElectron()) return
     const hermes = (window as any).electron?.hermes
     if (!hermes?.status) return
+    let timer: any = null
     const unsubscribe = hermes.onEvent?.((event: string) => {
       if (event === 'gateway.ready') {
         useHermesStore.getState().setHermesConnected(true)
         useHermesStore.getState().setHermesError(null)
+        if (timer) { clearTimeout(timer); timer = null }
       } else if (event === 'gateway.disconnected') {
         useHermesStore.getState().setHermesConnected(false)
       }
     })
-    const check = () => {
-      hermes.status().then((st: { connected: boolean }) => {
-        useHermesStore.getState().setHermesConnected(!!st?.connected)
-      }).catch(() => {})
+    const tryConnect = async (retries = 0) => {
+      try {
+        const st = await hermes.status()
+        if (st?.connected) {
+          useHermesStore.getState().setHermesConnected(true)
+          if (timer) { clearTimeout(timer); timer = null }
+          return
+        }
+      } catch {}
+      // Poll a few times so slow Hermes startup doesn't leave the badge stuck
+      // on "connecting". Once we hit connected or receive gateway.ready we stop.
+      if (retries < 12 && timer === null) {
+        timer = setTimeout(() => tryConnect(retries + 1), 1500)
+      }
     }
-    check()
-    return () => { try { unsubscribe?.() } catch {} }
+    tryConnect()
+    return () => { try { unsubscribe?.() } catch {}; if (timer) clearTimeout(timer) }
   }, [])
 
   const handleMaximizeToggle = useCallback(async () => {
@@ -757,7 +781,8 @@ export function HelixLayout() {
                         }
                         const data = await res.json()
                         const latest = (data.tag_name || data.name || '').replace(/^v/i, '')
-                        const current = '0.2.0'
+                        const hermesVersion = await window.electron?.app?.getHermesVersion?.()
+                        const current = hermesVersion || '0.2.0'
                         const curParts = current.split('.').map(Number)
                         const latParts = latest.split('.').map(Number)
                         let isNewer = false

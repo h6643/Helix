@@ -293,7 +293,7 @@ export class HermesChatClient {
   }
 
   /** 等待网关就绪（setModel 可能触发重启）。超时也放行，让 session/new 自行尝试。 */
-  private waitForGatewayReady(timeoutMs = 8000): Promise<boolean> {
+  private waitForGatewayReady(timeoutMs = 3000): Promise<boolean> {
     const h = hermes()
     if (!h) return Promise.resolve(false)
     return new Promise((resolve) => {

@@ -32,7 +32,7 @@ export const defaultFiles: FileNode[] = [
         name: 'index.css',
         type: 'file',
         language: 'css',
-        content: `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n:root {\n  --primary: #3b82f6;\n  --primary-dark: #2563eb;\n}\n\nbody {\n  font-family: 'Inter', sans-serif;\n}`,
+        content: `@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n:root {\n  --primary: #9acfff;\n  --primary-dark: #6ab0ff;\n}\n\nbody {\n  font-family: 'Inter', sans-serif;\n}`,
       },
     ],
   },

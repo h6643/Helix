@@ -4,9 +4,6 @@ import { useEffect } from 'react'
 import { useHelixStore } from '@/stores/helix-store'
 
 const GITHUB_REPO = 'NousResearch/hermes-agent'
-
-// Module-level flag ensures the check runs at most ONCE per page load,
-// even if the component unmounts and remounts.
 let checked = false
 
 function parseVersion(ver: string): number[] {
@@ -25,6 +22,15 @@ function isNewer(current: string, latest: string): boolean {
   return false
 }
 
+async function getCurrentVersion(): Promise<string | null> {
+  // Only compare if we can get the actual Hermes backend version
+  try {
+    const hVer = await (window as any).electron?.app?.getHermesVersion?.()
+    if (hVer) return hVer
+  } catch {}
+  return null // Can't determine Hermes version — skip update check
+}
+
 export function useCheckUpdate() {
   useEffect(() => {
     if (checked) return
@@ -32,20 +38,22 @@ export function useCheckUpdate() {
 
     const check = async () => {
       try {
-        const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
-          signal: AbortSignal.timeout(8000),
-        })
+        const [currentVer, res] = await Promise.all([
+          getCurrentVersion(),
+          fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+            signal: AbortSignal.timeout(8000),
+          }),
+        ])
         if (!res.ok) return
         const data = await res.json()
         const latestTag = (data.tag_name || data.name || '').replace(/^v/i, '')
-        const currentVer = '0.2.0'
 
-        if (latestTag && isNewer(currentVer, latestTag)) {
+        if (currentVer && latestTag && isNewer(currentVer, latestTag)) {
           const state = useHelixStore.getState()
           state.showToast({
             type: 'info',
             title: '有新版本可用',
-            description: `v${latestTag} 已发布，点击查看`,
+            description: `v${latestTag} 已发布`,
             duration: 8000,
             onClick: () => window.open(`https://github.com/${GITHUB_REPO}/releases/latest`, '_blank'),
           })

@@ -159,7 +159,7 @@ export function CommandPalette() {
         id: 'action-copy-path',
         label: '复制文件路径',
         description: activeTabId ? getFilePath(openTabs.find(t => t.id === activeTabId)?.fileId || '') : '没有打开的文件',
-        icon: <Copy className="size-4 text-purple-400" />,
+        icon: <Copy className="size-4 text-blue-400" />,
         action: () => {
           if (activeTabId) {
             const tab = openTabs.find(t => t.id === activeTabId)
@@ -177,7 +177,7 @@ export function CommandPalette() {
         id: 'action-toggle-theme',
         label: '切换编辑器主题',
         description: `当前: ${editorTheme === 'vs-dark' ? '深色' : '浅色'}`,
-        icon: editorTheme === 'vs-dark' ? <Moon className="size-4 text-indigo-400" /> : <Sun className="size-4 text-yellow-400" />,
+        icon: editorTheme === 'vs-dark' ? <Moon className="size-4 text-blue-400" /> : <Sun className="size-4 text-yellow-400" />,
         action: () => {
           const next = editorTheme === 'vs-dark' ? 'light' : 'vs-dark'
           setEditorTheme(next)

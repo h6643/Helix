@@ -34,8 +34,8 @@ const ALL_PROVIDERS = getAllProviders()
 // Fallback personality presets — shown when the backend (Hermes config.yaml)
 // doesn't return any, so the dropdown is never empty.
 const BUILTIN_PERSONALITIES: Record<string, string> = {
-  温柔: '你是一位温柔、耐心、善解人意的助手。语气柔和,多用共情与鼓励。',
-  干练: '你是一位干练、利落的助手。直奔主题,结论先行,少铺垫。',
+  温柔: '你是一位温柔、耐心、善解人意的助手。语气柔和，多用共情与鼓励。',
+  干练: '你是一位干练、利落的助手。直奔主题，结论先行，少铺垫。',
 }
 
 const PERSONALITY_LABELS: Record<string, string> = {}
@@ -96,37 +96,6 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ]
 
-// ─── settings search index ──────────────────────────────────────────────
-const SETTINGS_SEARCH_INDEX: { page: string; label: string; desc: string }[] = [
-  { page: 'general', label: '输出风格', desc: '简洁 / 详细 / 标准' },
-  { page: 'general', label: '自动压缩上下文', desc: '对话上下文管理' },
-  { page: 'general', label: '桌面通知', desc: '完成任务时通知' },
-  { page: 'general', label: '提示音', desc: '完成时播放提示音' },
-  { page: 'general', label: '恢复上次会话', desc: '启动时恢复' },
-  { page: 'general', label: '默认工作目录', desc: '默认工作路径' },
-  { page: 'general', label: '危险操作确认', desc: '执行前确认' },
-  { page: 'general', label: '自动批准读取', desc: '无需逐次确认' },
-  { page: 'general', label: 'Agent 预设', desc: '行为模式' },
-  { page: 'general', label: '自定义指令', desc: '系统提示词' },
-  { page: 'general', label: '数据管理', desc: '导入/导出配置' },
-  { page: 'appearance', label: '主题', desc: '深色 / 浅色' },
-  { page: 'appearance', label: '编辑器设置', desc: '代码字体字号' },
-  { page: 'appearance', label: '界面设置', desc: 'UI 字体字号' },
-  { page: 'appearance', label: '界面字体', desc: '菜单字体' },
-  { page: 'api', label: '模型配置', desc: 'API 端点' },
-  { page: 'api', label: '添加模型', desc: '新端点' },
-  { page: 'api', label: '历史记录', desc: '已保存配置' },
-  { page: 'mcp', label: 'MCP', desc: '服务器连接' },
-  { page: 'mcp', label: 'MCP 配置', desc: '添加服务器' },
-  { page: 'usage', label: 'Token 用量', desc: '统计' },
-  { page: 'usage', label: '用量详情', desc: '消耗明细' },
-  { page: 'archive', label: '历史归档', desc: '会话管理' },
-  { page: 'shortcuts', label: '快捷键', desc: '自定义' },
-  { page: 'git', label: 'Git', desc: '自动提交推送' },
-  { page: 'git', label: '自动提交', desc: 'Git 自动提交' },
-  { page: 'hook', label: 'Hooks', desc: '事件钩子' },
-]
-
 // ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel — extracted to ./usage-stats.tsx
 
 // ShortcutsPage — extracted to ./shortcuts-page.tsx
@@ -172,15 +141,12 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
     personality, setPersonality,
     // Agent settings
     autoCompactContext, setAutoCompactContext,
-    outputStyle, setOutputStyle,
     // Notification settings
     desktopNotifications, setDesktopNotifications,
     soundEnabled, setSoundEnabled,
     // Startup behavior
     restoreLastSession, setRestoreLastSession,
     defaultWorkDir, setDefaultWorkDir,
-    // Language
-    language, setLanguage,
     // Security
     confirmDangerousActions, setConfirmDangerousActions,
     autoApproveRead, setAutoApproveRead,
@@ -755,89 +721,66 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
   InputField.displayName = 'InputField'
 
   // ── Render content ────────────────────────────────────────────────────────
+  const ModelHistoryList = () => {
+    if (apiHistory.length === 0) {
+      return (
+        <div className="text-center py-12 text-sm text-muted-foreground">
+          暂无配置，点击右上角 "添加模型"
+        </div>
+      )
+    }
+    return (
+      <div className="space-y-1.5">
+        {apiHistory.map((h, i) => {
+          const isActive = apiConfig.model === h.model
+          return (
+            <div key={i}
+              onClick={async () => {
+                setLocalConfig({ ...h })
+                setApiConfig({ ...h })
+                await persistToStorage()
+                if (isElectron()) {
+                  try {
+                    const cfg = { model: h.model, provider: h.provider && h.provider !== '__custom__' ? h.provider : 'custom', baseUrl: h.baseUrl, apiKey: h.apiKey }
+                    await window.electron.hermes.setConfig(cfg)
+                    await window.electron.profile.cacheConfig(cfg)
+                    useHermesStore.getState().setHermesSessionId(null)
+                  } catch {}
+                }
+                showToast({ type: 'success', title: `已切换到 ${h.model}` })
+              }}
+              className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group ${isActive ? 'bg-primary/5' : 'bg-card/50 hover:bg-card'}`}
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
+                  <p className={`text-sm truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
+                </div>
+                <p className="text-xs text-muted-foreground/70 truncate mt-0.5">{h.baseUrl}</p>
+              </div>
+              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+                <button onClick={(e) => { e.stopPropagation(); setLocalConfig({ ...h }); setShowAddModelModal(true) }}
+                  className="ml-2 p-1 rounded text-muted-foreground/20 hover:text-foreground hover:bg-accent transition-all">
+                  <Pencil className="size-3.5" />
+                </button>
+                <button onClick={async (e) => { e.stopPropagation(); removeApiHistory(i); await persistToStorage() }}
+                  className="ml-1 p-1 rounded text-muted-foreground/20 hover:text-red-500 transition-all">
+                  <Trash2 className="size-3.5" />
+                </button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
   const renderContent = () => {
     switch (page) {
       case 'general':
         return (
           <div className="max-w-2xl space-y-8">
             <SectionTitle>常规</SectionTitle>
-
-            <section className="space-y-3">
-              {/* Output style */}
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('outputStyle') ? next.delete('outputStyle') : next.add('outputStyle')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <AlignLeft className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">输出风格</span>
-                  </div>
-                  {collapsedSections.has('outputStyle')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-3 ${collapsedSections.has('outputStyle') ? 'hidden' : ''}`}>
-                  <p className="text-xs text-muted-foreground/70">
-                    控制 Agent 回复的详细程度和风格
-                  </p>
-                  <div className="grid grid-cols-2 gap-2">
-                    {[
-                      { value: 'default', label: '默认', desc: '平衡详细度和简洁性' },
-                      { value: 'concise', label: '简洁', desc: '精简回复,直奔主题' },
-                      { value: 'detailed', label: '详细', desc: '包含更多解释和背景' },
-                      { value: 'technical', label: '技术性', desc: '侧重技术细节和实现' },
-                    ].map(opt => (
-                      <button
-                        key={opt.value}
-                        onClick={() => setOutputStyle(opt.value as typeof outputStyle)}
-                        className={`p-3 rounded-lg border text-left transition-colors ${
-                          outputStyle === opt.value
-                            ? 'border-primary bg-primary/5 text-foreground'
-                            : 'border-border/50 bg-card/50 hover:border-primary/30 text-foreground/70'
-                        }`}
-                      >
-                        <p className="text-sm font-medium">{opt.label}</p>
-                        <p className="text-xs text-muted-foreground/70 mt-0.5">{opt.desc}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Auto compact */}
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('compact') ? next.delete('compact') : next.add('compact')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <Minimize2 className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">上下文管理</span>
-                  </div>
-                  {collapsedSections.has('compact')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-4 ${collapsedSections.has('compact') ? 'hidden' : ''}`}>
-                  <SettingRow
-                    icon={<Minimize2 className="size-4 text-muted-foreground" />}
-                    label="自动压缩上下文"
-                    description="当对话接近上下文限制时,自动压缩历史消息以释放空间"
-                  >
-                    <Toggle enabled={autoCompactContext} onToggle={() => setAutoCompactContext(!autoCompactContext)} />
-                  </SettingRow>
-                </div>
-              </div>
-            </section>
 
             {/* Notification settings */}
             <section className="space-y-3">
@@ -918,49 +861,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
               </div>
             </section>
 
-            {/* Language settings */}
-            <section className="space-y-3">
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('language') ? next.delete('language') : next.add('language')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <Globe className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">语言设置</span>
-                  </div>
-                  {collapsedSections.has('language')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-4 ${collapsedSections.has('language') ? 'hidden' : ''}`}>
-                  <div className="grid grid-cols-2 gap-2">
-                    {[
-                      { value: 'zh', label: '中文', desc: '界面显示中文' },
-                      { value: 'en', label: 'English', desc: 'Display in English' },
-                    ].map(opt => (
-                      <button
-                        key={opt.value}
-                        onClick={() => setLanguage(opt.value as typeof language)}
-                        className={`p-3 rounded-lg border text-left transition-colors ${
-                          language === opt.value
-                            ? 'border-primary bg-primary/5 text-foreground'
-                            : 'border-border/50 bg-card/50 hover:border-primary/30 text-foreground/70'
-                        }`}
-                      >
-                        <p className="text-sm font-medium">{opt.label}</p>
-                        <p className="text-xs text-muted-foreground/70 mt-0.5">{opt.desc}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </section>
-
+            {/* Security settings */}
             {/* Security settings */}
             <section className="space-y-3">
               <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
@@ -991,7 +892,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   <SettingRow
                     icon={<Eye className="size-4 text-muted-foreground" />}
                     label="自动批准读取"
-                    description="自动批准文件读取操作,无需逐次确认"
+                    description="自动批准文件读取操作，无需逐次确认"
                   >
                     <Toggle enabled={autoApproveRead} onToggle={() => setAutoApproveRead(!autoApproveRead)} />
                   </SettingRow>
@@ -1272,58 +1173,8 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
             </div>
 
             {!showAddModelModal ? (
-              /* History list view */
               <div className="max-w-2xl space-y-6">
-                {apiHistory.length > 0 ? (
-                  <div className="space-y-1.5">
-                    {apiHistory.map((h, i) => {
-                      const isActive = apiConfig.model === h.model
-                      return (
-                        <div
-                          key={i}
-                          onClick={async () => {
-                            setLocalConfig({ ...h })
-                            setApiConfig({ ...h })
-                            setActiveModel(h.model)
-                            await persistToStorage()
-                            if (isElectron()) {
-                              try {
-                                const cfg = { model: h.model, provider: h.provider && h.provider !== '__custom__' ? h.provider : 'custom', baseUrl: h.baseUrl, apiKey: h.apiKey }
-                                await window.electron.hermes.setConfig(cfg)
-                                await window.electron.profile.cacheConfig(cfg)
-                                useHermesStore.getState().setHermesSessionId(null)
-                              } catch (e) {}
-                            }
-                            showToast({ type: 'success', title: `已切换到 ${h.model}` })
-                          }}
-                          className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group ${isActive ? 'bg-primary/10 ring-1 ring-primary/30' : 'bg-card/50 hover:bg-card'}`}
-                        >
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
-                              <p className={`text-sm truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
-                            </div>
-                            <p className="text-xs text-muted-foreground/70 truncate mt-0.5">{h.baseUrl}</p>
-                          </div>
-                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-                            <button onClick={(e) => { e.stopPropagation(); setLocalConfig({ ...h }); setShowAddModelModal(true) }}
-                              className="ml-2 p-1 rounded text-muted-foreground/20 hover:text-foreground hover:bg-accent transition-all">
-                              <Pencil className="size-3.5" />
-                            </button>
-                            <button onClick={async (e) => { e.stopPropagation(); removeApiHistory(i); await persistToStorage() }}
-                              className="ml-1 p-1 rounded text-muted-foreground/20 hover:text-red-500 transition-all">
-                              <Trash2 className="size-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                ) : (
-                  <div className="text-center py-12 text-sm text-muted-foreground/50">
-                    暂无配置,点击右上角「添加模型」
-                  </div>
-                )}
+                <ModelHistoryList />
                 <ModelUsageStats />
               </div>
             ) : (
@@ -1635,7 +1486,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   <SettingRow
                     icon={<GitCommit className="size-4 text-muted-foreground" />}
                     label="Agent 完成后自动 commit"
-                    description="Agent 完成所有任务后,自动将变更提交到当前分支"
+                    description="Agent 完成所有任务后，自动将变更提交到当前分支"
                   >
                     <Toggle enabled={gitAutoCommit} onToggle={() => setGitAutoCommit(!gitAutoCommit)} />
                   </SettingRow>
@@ -1775,7 +1626,58 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
       case 'hook':
         return <HookSettings />
 
-      
+      case 'help':
+        return (
+          <div className="max-w-2xl space-y-8">
+            <SectionTitle>帮助</SectionTitle>
+
+            {/* About */}
+            <section className="space-y-3">
+              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
+                <button
+                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
+                  onClick={() => setCollapsedSections(s => {
+                    const next = new Set(s)
+                    next.has('about') ? next.delete('about') : next.add('about')
+                    return next
+                  })}
+                >
+                  <div className="flex items-center gap-2">
+                    <Settings className="size-4 text-muted-foreground" />
+                    <span className="text-sm font-medium text-foreground">关于</span>
+                  </div>
+                  {collapsedSections.has('about')
+                    ? <ChevronRight className="size-4 text-muted-foreground" />
+                    : <ChevronDown className="size-4 text-muted-foreground" />}
+                </button>
+                <div className={`p-4 space-y-4 ${collapsedSections.has('about') ? 'hidden' : ''}`}>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">版本</span>
+                      <span className="text-sm font-mono text-foreground">v0.2.0</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">许可证</span>
+                      <span className="text-sm text-foreground">MIT License</span>
+                    </div>
+                  </div>
+                  <div className="pt-2 border-t border-border/50">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        window.open('https://github.com/helix-ai/helix', '_blank')
+                      }}
+                    >
+                      访问 GitHub
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        )
+
     }
   }
 
@@ -1834,48 +1736,40 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
               </div>
               {(() => {
                 const q = navSearch.trim().toLowerCase()
-                if (!q) {
-                  return (
-                    <nav className="flex-1 overflow-y-auto py-2">
-                      {NAV_GROUPS.map(group => (
-                        <div key={group.title} className="mb-3">
-                          <p className="px-5 py-1.5 text-[10px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">{group.title}</p>
-                          {group.items.map(item => (
-                            <button key={item.id} onClick={() => { setPage(item.id); pushNavigation({ type: 'settings', page: item.id }) }}
-                              title={item.label}
-                              className={`flex items-center gap-3 w-full px-5 py-2 text-sm transition-colors ${page === item.id ? 'text-primary bg-muted/60 font-medium' : 'text-foreground/70 hover:text-foreground hover:bg-muted/40'}`}>
-                              <item.icon className="size-4 shrink-0" />
-                              <span>{item.label}</span>
-                            </button>
-                          ))}
-                        </div>
-                      ))}
-                    </nav>
-                  )
-                }
-                const searchHits = SETTINGS_SEARCH_INDEX.filter(x => x.label.includes(q) || x.desc.includes(q) || x.page.includes(q))
-                if (!searchHits.length) return <div className="px-5 py-8 text-center text-[13px] text-muted-foreground/40">未找到匹配项</div>
-                const seen = new Set<string>()
-                const uniqueHits = searchHits.filter(h => { if (seen.has(h.page)) return false; seen.add(h.page); return true })
+                const filtered = q
+                  ? NAV_GROUPS.map(g => ({ ...g, items: g.items.filter(i => i.label.toLowerCase().includes(q)) })).filter(g => g.items.length)
+                  : NAV_GROUPS
+                if (!filtered.length) return <div className="px-5 py-8 text-center text-[13px] text-muted-foreground/40">未找到匹配项</div>
                 return (
                   <nav className="flex-1 overflow-y-auto py-2">
-                    {uniqueHits.map((hit, idx) => {
-                      const navItem = NAV_GROUPS.flatMap(g => g.items).find(i => i.id === hit.page)
-                      return (
-                        <button key={hit.page + idx} onClick={() => { setPage(hit.page); pushNavigation({ type: 'settings', page: hit.page }); setNavSearch('') }}
-                          className={`flex flex-col items-start gap-0.5 w-full px-5 py-2.5 text-left transition-colors rounded-lg mx-2 mb-1 ${
-                            page === hit.page ? 'bg-muted/60' : 'hover:bg-muted/30'
-                          }`}>
-                          <div className="flex items-center gap-2.5">
-                            {navItem?.icon && React.createElement(navItem.icon, { className: 'size-4 shrink-0 text-muted-foreground/50' })}
-                            <span className="text-sm font-medium text-foreground">{hit.label}</span>
-                          </div>
-                          <span className="text-xs text-muted-foreground/50 pl-6.5">{hit.desc}</span>
-                        </button>
-                      )
-                    })}
+                    {filtered.map(group => (
+                      <div key={group.title} className="mb-3">
+                        <p className="px-5 py-1.5 text-[10px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
+                          {group.title}
+                        </p>
+                        {group.items.map(item => (
+                          <button
+                            key={item.id}
+                            onClick={() => {
+                              setPage(item.id)
+                              pushNavigation({ type: 'settings', page: item.id })
+                              setNavSearch('')
+                            }}
+                            className={`w-full flex items-center gap-2.5 pl-[26px] pr-4 py-2 text-sm rounded-xl transition-all ${
+                              page === item.id
+                                ? 'bg-muted font-medium'
+                                : 'hover:bg-muted/50'
+                            }`}
+                          >
+                            <item.icon className="size-4" />
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                    ))}
                   </nav>
-                )})()}
+                )
+              })()}
             </>
           )}
 

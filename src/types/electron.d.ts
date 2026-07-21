@@ -64,6 +64,7 @@ export interface ElectronAPI {
   app: {
     getInfo: () => Promise<{ version: string; platform: string; workDir: string }>
     setWorkDir: (dir: string) => Promise<{ success: boolean; workDir: string }>
+    getHermesVersion: () => Promise<string | null>;
   }
 
   hermes: {

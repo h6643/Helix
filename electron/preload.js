@@ -180,6 +180,7 @@ contextBridge.exposeInMainWorld('electron', {
   app: {
     getInfo: () => ipcRenderer.invoke('app:getInfo'),
     setWorkDir: (dir) => ipcRenderer.invoke('app:setWorkDir', dir),
+    getHermesVersion: () => ipcRenderer.invoke('app:getHermesVersion'),
   },
 
   // ── Diagnostics & Runtime (gateway health, logs, signature, hosted runtime) ──
