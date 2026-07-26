@@ -4,9 +4,9 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import {
   Settings, Sun, Moon, Plug, Archive, ChevronLeft, ChevronRight, ChevronDown, Search,
   Save, Eye, EyeOff, Trash2, Plus, Pencil, Sparkles,
-  Globe, FileText, Keyboard, Terminal, Link, Wand2,
+  Globe, FileText, Keyboard, Terminal, Link, Wand2, AudioLines,
   RefreshCw, GitBranch, GitCommit, GitPullRequest, Zap, Anchor, Check, Activity, Loader2,
-  ArrowDown, ArrowUp, Target, X, AlignLeft, Minimize2, AlertTriangle,
+  ArrowDown, ArrowUp, Target, X, AlignLeft, Minimize2, AlertTriangle, Bot, Brain,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useHelixStore, DEFAULT_SHORTCUTS, type ApiConfig, type McpServerConfig } from '@/stores/helix-store'
@@ -20,6 +20,9 @@ import { ShortcutsPage } from './shortcuts-page'
 import { McpEditorForm, type McpFormData } from './mcp-editor-form'
 import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './usage-stats'
 import { HookSettings } from './hook-settings'
+import { VoiceSettings } from './voice-settings'
+import { AgentsSettings } from './agents-settings'
+import { LearningView } from './learning-view'
 
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -56,7 +59,7 @@ interface SettingsProps {
   setSidebarCollapsed: (v: boolean | ((prev: boolean) => boolean)) => void
 }
 
-type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'git' | 'skills' | 'hook' | 'usage' | 'help'
+type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'git' | 'skills' | 'hook' | 'usage' | 'help' | 'voice' | 'agents' | 'learning'
 
 interface NavItem {
   id: SettingsPage
@@ -77,6 +80,7 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'appearance', label: '外观', icon: Sun },
       { id: 'archive', label: '历史归档', icon: Archive },
       { id: 'shortcuts', label: '快捷键', icon: Keyboard },
+      { id: 'voice', label: '语音', icon: AudioLines },
     ],
   },
   {
@@ -85,6 +89,7 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'api', label: '模型', icon: Globe },
       { id: 'mcp', label: 'MCP', icon: Plug },
       { id: 'usage', label: '用量', icon: Activity },
+      { id: 'agents', label: 'Agents', icon: Bot },
     ],
   },
   {
@@ -92,6 +97,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'git', label: 'Git', icon: GitBranch },
       { id: 'hook', label: 'Hooks', icon: Zap },
+      { id: 'learning', label: '学习', icon: Brain },
     ],
   },
 ]
@@ -1678,6 +1684,12 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
           </div>
         )
 
+      case 'voice':
+        return <VoiceSettings />
+      case 'agents':
+        return <AgentsSettings />
+      case 'learning':
+        return <LearningView />
     }
   }
 

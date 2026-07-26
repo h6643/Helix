@@ -78,6 +78,16 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsS
   showScheduledTasksPanel: boolean
 
   showRuntimePanel: boolean
+  showActivityFeed: boolean
+  toggleActivityFeed: () => void
+  showReviewPanel: boolean
+  toggleReviewPanel: () => void
+  showArtifactsBrowser: boolean
+  toggleArtifactsBrowser: () => void
+  showLearningView: boolean
+  toggleLearningView: () => void
+  voiceAutoSpeak: boolean
+  setVoiceAutoSpeak: (v: boolean) => void
 
   // MCP Servers
   mcpServers: Record<string, McpServerConfig>
@@ -91,8 +101,17 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsS
 
   // Agent Execution
   isAgentRunning: boolean
+  hasOnboarded: boolean
+  setHasOnboarded: (v: boolean) => void
+  gatewayStatus: 'connecting' | 'ready' | 'disconnected'
+  setGatewayStatus: (v: 'connecting' | 'ready' | 'disconnected') => void
   setIsAgentRunning: (v: boolean) => void
   streamingDrafts: Record<string, StreamingDraft>
+  injectInputSignal: { text: string; nonce: number } | null
+  injectInput: (text: string) => void
+  requestSendSignal: number
+  requestSend: () => void
+  injectAndSend: (text: string) => void
   tabInputs: Record<string, string>
   pendingUpdate: string | null
   setPendingUpdate: (version: string | null) => void
@@ -512,6 +531,23 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // Agent Execution
   isAgentRunning: false,
   setIsAgentRunning: (v) => set({ isAgentRunning: v }),
+  injectInputSignal: null,
+  requestSendSignal: 0,
+  injectInput: (text) => set({ injectInputSignal: { text, nonce: Date.now() } }),
+  requestSend: () => set((s) => ({ requestSendSignal: s.requestSendSignal + 1 })),
+  injectAndSend: (text: string) => set((s) => ({ injectInputSignal: { text, nonce: Date.now() }, requestSendSignal: s.requestSendSignal + 1 })),
+  hasOnboarded: false,
+  setHasOnboarded: (v) => {
+    set({ hasOnboarded: v })
+    // Persist so the onboarding screen doesn't reappear on every restart.
+    // Without this, setHasOnboarded only mutates in-memory state, which resets
+    // to the default `false` on the next app launch — "每次重启都弹引导".
+    import('@/lib/persist').then(({ persistence }) => {
+      persistence.saveSetting('hasOnboarded', v).catch(() => {})
+    }).catch(() => {})
+  },
+  gatewayStatus: 'connecting',
+  setGatewayStatus: (v) => set({ gatewayStatus: v }),
   streamingDrafts: {},
   tabInputs: {} as Record<string, string>,
   pendingUpdate: null as string | null,
@@ -594,8 +630,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // Scheduled Tasks
   scheduledTasks: [],
   showScheduledTasksPanel: false,
+  showActivityFeed: false,
 
   showRuntimePanel: false,
+  showReviewPanel: false,
+  showArtifactsBrowser: false,
+  showLearningView: false,
+  voiceAutoSpeak: false,
 
   // MCP Servers
   mcpServers: {
@@ -796,6 +837,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     })),
 
   toggleSkillPanel: () => set((s) => ({ showSkillPanel: !s.showSkillPanel })),
+  toggleActivityFeed: () => set((s) => ({ showActivityFeed: !s.showActivityFeed })),
+  toggleReviewPanel: () => set((s) => ({ showReviewPanel: !s.showReviewPanel })),
+  toggleArtifactsBrowser: () => set((s) => ({ showArtifactsBrowser: !s.showArtifactsBrowser })),
+  toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
+  setVoiceAutoSpeak: (v: boolean) => set((s) => ({ voiceAutoSpeak: v })),
 
   toggleRuntimePanel: () => set((s) => ({ showRuntimePanel: !s.showRuntimePanel })),
 
@@ -1712,6 +1758,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('personality', state.personality),
         persistence.saveSetting('desktopNotifications', state.desktopNotifications),
         persistence.saveSetting('soundEnabled', state.soundEnabled),
+        persistence.saveSetting('voiceAutoSpeak', state.voiceAutoSpeak),
         persistence.saveSetting('restoreLastSession', state.restoreLastSession),
         persistence.saveSetting('defaultWorkDir', state.defaultWorkDir),        persistence.saveSetting('confirmDangerousActions', state.confirmDangerousActions),
         persistence.saveSetting('autoApproveRead', state.autoApproveRead),
@@ -1749,7 +1796,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, providerModels, streamingEnabled, compressionEnabled, toolGuardrailsEnabled, personality, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, providerModels, streamingEnabled, compressionEnabled, toolGuardrailsEnabled, personality, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -1803,12 +1850,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<string>('gitRemoteUrl'),
         persistence.loadSetting<string>('gitCommitTemplate'),
         persistence.loadSetting<string>('gitBranchPrefix'),
+        persistence.loadSetting<boolean>('voiceAutoSpeak'),
         persistence.loadSetting<ProviderConfig[]>('providers'),
         persistence.loadSetting<string | null>('activeModel'),
         persistence.loadSetting<string | null>('activeProviderId'),
         persistence.loadSetting<string[]>('sessionHistory'),
         persistence.loadSetting<number>('sessionHistoryIndex'),
         persistence.loadSetting<string | null>('selectedWorkDir'),
+        persistence.loadSetting<boolean>('hasOnboarded'),
       ])
 
       // Do NOT restore the latest session's chatMessages on startup.
@@ -1937,6 +1986,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         sessionHistory: prunedHistory,
         sessionHistoryIndex: prunedIndex,
         selectedWorkDir: savedSelectedWorkDir || latestSession?.workDir || get().selectedWorkDir,
+        hasOnboarded: loadedHasOnboarded === true,
         apiConfig: (() => {
           const resolve = (cfg: any) => {
             // Validation gate: reject stale/bad profiles so a poisoned IndexedDB
@@ -2062,6 +2112,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitRemoteUrl: gitRemoteUrl || get().gitRemoteUrl,
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
+        voiceAutoSpeak: voiceAutoSpeak ?? get().voiceAutoSpeak,
       })
 
       // Permanently scrub the pollution from IndexedDB: write back the cleaned

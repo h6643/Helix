@@ -1,7 +1,9 @@
 'use client'
 
 import React, { useState, useRef, useEffect } from 'react'
+import { Shrink, Loader2 } from 'lucide-react'
 import { useHelixStore } from '@/stores/helix-store'
+import { electronHermes } from '@/lib/electron-bridge'
 import { formatTokens } from '@/lib/format'
 
 // ---- Types ----
@@ -116,6 +118,22 @@ export function ContextUsageRing({ used, total = 128000 }: { used: number; total
 function ContextUsagePanel({ used, total, breakdown, onClose }: { used: number; total: number; breakdown: ContextBreakdown[]; onClose: () => void }) {
   const percentage = Math.min(Math.max((used / total) * 100, 0), 100)
   const color = percentage > 90 ? 'bg-red-500' : percentage > 70 ? 'bg-amber-500' : 'bg-primary'
+  const [compacting, setCompacting] = useState(false)
+
+  const handleCompact = async () => {
+    setCompacting(true)
+    try {
+      // Best-effort: ask the gateway to compact the conversation context.
+      // Degrades silently if the running Hermes build lacks the method.
+      await electronHermes.send('compaction.compact', {})
+      useHelixStore.getState().showToast({ type: 'success', title: '已请求压缩上下文' })
+    } catch {
+      useHelixStore.getState().showToast({ type: 'error', title: '压缩失败或网关不支持' })
+    } finally {
+      setCompacting(false)
+      onClose()
+    }
+  }
 
   return (
     <div className="absolute bottom-full right-0 mb-2 w-64 bg-card border border-border/60 rounded-xl shadow-lg p-3 z-50">
@@ -142,6 +160,14 @@ function ContextUsagePanel({ used, total, breakdown, onClose }: { used: number; 
           </div>
         ))}
       </div>
+      <button
+        onClick={handleCompact}
+        disabled={compacting}
+        className="mt-2.5 w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-50"
+      >
+        {compacting ? <Loader2 className="size-3.5 animate-spin" /> : <Shrink className="size-3.5" />}
+        {compacting ? '压缩中…' : '压缩上下文'}
+      </button>
     </div>
   )
 }

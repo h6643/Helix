@@ -34,7 +34,8 @@ import { ToastContainer } from './toast-container'
 import { useHelixStore, type PendingChange } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
 import { useProviderStore } from '@/hermes-ui/provider-store'
-import { isElectron, electronHermes } from '@/lib/electron-bridge'
+import { isElectron, electronHermes, electronNotification } from '@/lib/electron-bridge'
+import { speak, stripAcp } from '@/lib/voice-utils'
 import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
 import { toBackendReasoningEffort } from '@/stores/slices/agent-settings-slice'
 import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
@@ -64,6 +65,11 @@ const ScheduledTasksPanel = dynamic(() => import('./scheduled-tasks-panel').then
 const TaskListPanel = dynamic(() => import('./task-list-panel').then(m => ({ default: m.TaskListPanel })), { ssr: false })
 const CustomizePanel = dynamic(() => import('./customize-panel').then(m => ({ default: m.CustomizePanel })), { ssr: false })
 const RuntimePanel = dynamic(() => import('./runtime-panel').then(m => ({ default: m.RuntimePanel })), { ssr: false })
+const ActivityFeed = dynamic(() => import('./activity-feed').then(m => ({ default: m.ActivityFeed })), { ssr: false })
+const Onboarding = dynamic(() => import('./onboarding').then(m => ({ default: m.Onboarding })), { ssr: false })
+const BootOverlay = dynamic(() => import('./boot-overlay').then(m => ({ default: m.BootOverlay })), { ssr: false })
+const ReviewPanel = dynamic(() => import('./review-panel').then(m => ({ default: m.ReviewPanel })), { ssr: false })
+const ArtifactsBrowser = dynamic(() => import('./artifacts-browser').then(m => ({ default: m.ArtifactsBrowser })), { ssr: false })
 const TerminalPanel = dynamic(() => import('./terminal-panel').then(m => ({ default: m.TerminalPanel })), { ssr: false })
 const WorktreePanel = dynamic(() => import('./worktree-panel').then(m => ({ default: m.WorktreePanel })), { ssr: false })
 
@@ -176,6 +182,9 @@ export function HelixLayout() {
   const showCustomizePanel = useHelixStore(s => s.showCustomizePanel)
   const showRuntimePanel = useHelixStore(s => s.showRuntimePanel)
   const showWorktreePanel = useHelixStore(s => s.showWorktreePanel)
+  const showActivityFeed = useHelixStore(s => s.showActivityFeed)
+  const showReviewPanel = useHelixStore(s => s.showReviewPanel)
+  const showArtifactsBrowser = useHelixStore(s => s.showArtifactsBrowser)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
   const editorTheme = useHelixStore(s => s.editorTheme)
@@ -406,9 +415,11 @@ export function HelixLayout() {
       if (event === 'gateway.ready') {
         useHermesStore.getState().setHermesConnected(true)
         useHermesStore.getState().setHermesError(null)
+        useHelixStore.getState().setGatewayStatus('ready')
         if (timer) { clearTimeout(timer); timer = null }
       } else if (event === 'gateway.disconnected') {
         useHermesStore.getState().setHermesConnected(false)
+        useHelixStore.getState().setGatewayStatus('disconnected')
       }
     })
     const tryConnect = async (retries = 0) => {
@@ -416,18 +427,56 @@ export function HelixLayout() {
         const st = await hermes.status()
         if (st?.connected) {
           useHermesStore.getState().setHermesConnected(true)
+          useHelixStore.getState().setGatewayStatus('ready')
           if (timer) { clearTimeout(timer); timer = null }
           return
         }
       } catch {}
       // Poll a few times so slow Hermes startup doesn't leave the badge stuck
       // on "connecting". Once we hit connected or receive gateway.ready we stop.
+      useHelixStore.getState().setGatewayStatus('connecting')
       if (retries < 12 && timer === null) {
         timer = setTimeout(() => tryConnect(retries + 1), 1500)
       }
     }
     tryConnect()
     return () => { try { unsubscribe?.() } catch {}; if (timer) clearTimeout(timer) }
+  }, [])
+
+  // ── Auto-speak latest assistant reply when a run completes ─────────────
+  // Driven by the persisted `voiceAutoSpeak` setting (moved out of the old
+  // standalone Voice panel into Settings). Always mounted so it works with no
+  // panel open.
+  useEffect(() => {
+    let lastRunning = useHelixStore.getState().isAgentRunning
+    let lastSpokenId: string | null = null
+    const unsub = useHelixStore.subscribe((st) => {
+      const running = st.isAgentRunning
+      if (lastRunning && !running && st.voiceAutoSpeak) {
+        const msgs = st.chatMessages
+        const last = msgs[msgs.length - 1]
+        if (last && last.role === 'assistant' && last.id !== lastSpokenId) {
+          lastSpokenId = last.id
+          const text = stripAcp(last.content)
+          if (text) speak(text)
+        }
+      }
+      lastRunning = running
+    })
+    return unsub
+  }, [])
+
+  // Native OS notification when an agent run finishes (Electron surfaces the
+  // HTML5 Notification API as a real OS toast; falls back to in-app toast).
+  useEffect(() => {
+    let prev = useHelixStore.getState().isAgentRunning
+    const unsub = useHelixStore.subscribe((s) => {
+      if (prev && !s.isAgentRunning) {
+        electronNotification.notify('Helix', 'Agent 任务已完成')
+      }
+      prev = s.isAgentRunning
+    })
+    return unsub
   }, [])
 
   const handleMaximizeToggle = useCallback(async () => {
@@ -1064,6 +1113,13 @@ export function HelixLayout() {
           onClose={() => storeActions.setShowDiffPreview(false)}
         />
       )}
+
+      {/* New surfaces */}
+      {showActivityFeed && <ActivityFeed onClose={() => storeActions.toggleActivityFeed()} />}
+      {showReviewPanel && <ReviewPanel onClose={() => storeActions.toggleReviewPanel()} />}
+      {showArtifactsBrowser && <ArtifactsBrowser onClose={() => storeActions.toggleArtifactsBrowser()} />}
+      <Onboarding />
+      <BootOverlay />
     </div>
   )
 }

@@ -1,8 +1,9 @@
 'use client'
 
 import React, { useState, useEffect, useCallback } from 'react'
-import { X, ShieldCheck, Server, RefreshCw, CheckCircle2, XCircle, Loader2 } from 'lucide-react'
-import { isElectron } from '@/lib/electron-bridge'
+import { X, ShieldCheck, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Download } from 'lucide-react'
+import { isElectron, electronHermes } from '@/lib/electron-bridge'
+import { useHelixStore } from '@/stores/helix-store'
 
 interface DiagStatus {
   gatewayRunning: boolean
@@ -37,6 +38,26 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
     const id = setInterval(refresh, 2000)
     return () => clearInterval(id)
   }, [refresh])
+
+  const [updating, setUpdating] = useState(false)
+
+  const doUpdate = async () => {
+    if (!isElectron()) return
+    setUpdating(true)
+    try {
+      const r = await electronHermes.update()
+      useHelixStore.getState().showToast({
+        type: r.ok ? 'success' : 'error',
+        title: r.ok ? '已启动更新' : '更新失败',
+        description: r.message,
+        duration: 6000,
+      })
+    } catch (e: any) {
+      useHelixStore.getState().showToast({ type: 'error', title: '更新失败', description: String(e?.message || e) })
+    } finally {
+      setUpdating(false)
+    }
+  }
 
   const fmtUptime = (ms: number) => {
     if (!ms || ms < 0) return '—'
@@ -127,6 +148,14 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
                   className="px-3 py-1.5 text-xs rounded-lg border border-border/50 hover:bg-muted/50 transition-colors flex items-center gap-1.5"
                 >
                   <RefreshCw className="size-3.5" /> 刷新状态
+                </button>
+                <button
+                  onClick={doUpdate}
+                  disabled={updating}
+                  className="px-3 py-1.5 text-xs rounded-lg border border-border/50 hover:bg-muted/50 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {updating ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                  检查并更新
                 </button>
               </div>
             </>

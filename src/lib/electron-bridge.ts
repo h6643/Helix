@@ -1,4 +1,5 @@
 import type { ElectronAPI } from '@/types/electron'
+import { useHelixStore } from '@/stores/helix-store'
 
 /**
  * Check if running in Electron
@@ -251,6 +252,15 @@ export const electronHermes = {
       await h.interrupt(sessionId)
     }
   },
+
+  async update(): Promise<{ ok: boolean; message: string }> {
+    const api = getElectronAPI()
+    const h = api?.hermes as any
+    if (h?.update) {
+      return h.update()
+    }
+    return { ok: false, message: '更新通道不可用' }
+  },
 }
 
 /**
@@ -377,6 +387,49 @@ export const electronGit = {
     const api = getElectronAPI()
     if (api?.git) return api.git.fetch(opts)
     return { ok: false, error: 'Git not available in browser mode' }
+  },
+}
+
+/**
+ * Native (OS-level) notifications.
+ *
+ * In Electron the renderer can raise a real OS notification through the HTML5
+ * Notification API — no main-process wiring required. When that is unavailable
+ * (non-Electron / denied permission) we fall back to the in-app toast so the
+ * call site never has to branch.
+ */
+export const electronNotification = {
+  get permission(): NotificationPermission {
+    if (typeof Notification !== 'undefined') return Notification.permission
+    return 'denied'
+  },
+
+  async requestPermission(): Promise<NotificationPermission> {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      try {
+        return await Notification.requestPermission()
+      } catch {
+        return 'denied'
+      }
+    }
+    return this.permission
+  },
+
+  notify(title: string, body?: string): void {
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        new Notification(title, { body })
+        return
+      }
+    } catch {
+      /* fall through to toast */
+    }
+    // Fallback: keep the user informed in-app.
+    try {
+      useHelixStore.getState().showToast({ type: 'info', title, description: body })
+    } catch {
+      /* store unavailable — nothing else we can do */
+    }
   },
 }
 

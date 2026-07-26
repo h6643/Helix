@@ -20,7 +20,6 @@ import {
   Search,
   Folder,
   FolderOpen,
-  Pencil,
   Eye,
   ArrowDown,
   ArrowUp,
@@ -54,7 +53,7 @@ import { useHelixStore, type ImageAttachment, type FileAttachment, type Executio
 import { useHermesStore } from '@/stores/hermes-store'
 import { processClipboardImage, canAddMoreImages, blobToDataUrl, compressImage } from '@/lib/image-utils'
 import { isElectron, electronDialog, electronHermes, electronGit } from '@/lib/electron-bridge'
-import { scheduleConfigPush } from '@/lib/config-sync'
+import { scheduleConfigPush, flushConfigPush } from '@/lib/config-sync'
 import ReactMarkdown from 'react-markdown'
 import { markdownComponents, markdownPlugins } from './markdown-components'
 import type { HermesTodo } from '@/stores/helix-types'
@@ -469,27 +468,15 @@ export function AgentFlowPanel() {
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<FileAttachment[]>([])
   const [isDraggingFile, setIsDraggingFile] = useState(false)
-  // Inline edit state for user messages (window.prompt is not supported in Electron)
-  const [editingMsgId, setEditingMsgId] = useState<string | null>(null)
-  const [editingDraft, setEditingDraft] = useState('')
 
-  const submitMessageEdit = React.useCallback((msgId: string) => {
-    const trimmed = editingDraft.trim()
-    if (!trimmed) return
-    useHelixStore.getState().updateChatMessage(msgId, editingDraft)
-    const msgs = useHelixStore.getState().chatMessages
-    const idx = msgs.findIndex(m => m.id === msgId)
-    if (idx >= 0) {
-      const kept = msgs.slice(0, idx + 1)
-      useHelixStore.setState({ chatMessages: kept })
-      setTimeout(() => {
-        const el = document.querySelector('[data-send-btn]') as HTMLButtonElement
-        el?.click()
-      }, 100)
+  // External input injection (Command Center / Review panel push text here)
+  const injectSignal = useHelixStore((s) => s.injectInputSignal)
+  useEffect(() => {
+    if (injectSignal) {
+      setInputSynced(injectSignal.text)
+      inputRef.current?.focus()
     }
-    setEditingMsgId(null)
-    setEditingDraft('')
-  }, [editingDraft])
+  }, [injectSignal, setInputSynced])
 
   const [responseBlocks, setResponseBlocks] = useState<ResponseBlock[]>([])
   const responseBlocksRef = useRef<ResponseBlock[]>(responseBlocks)
@@ -829,7 +816,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         apiKey: resolvedKey,
       }
       console.warn(`[config-switch] → provider=${push.provider} baseUrl=${push.baseUrl} model=${push.model} apiKey=${resolvedKey ? resolvedKey.substring(0, 6) + '…' : '(EMPTY → backend falls back to target provider stored key)'}`)
-      scheduleConfigPush(push)
+      // Flush IMMEDIATELY (bypass the 1.2s debounce). A model switch is an
+      // explicit user action and must persist to active-profile.json + config.yaml
+      // right away — otherwise closing/restarting within the debounce window leaves
+      // the cache stale and the next launch reverts to the previous model.
+      scheduleConfigPush(push, 0)
+      flushConfigPush()
     }
   }, [])
 
@@ -1052,8 +1044,22 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
   // Auto-scroll to bottom (stop when user scrolls up)
   const userScrolledUpRef = useRef(false)
+  const [userScrolledUp, setUserScrolledUp] = useState(false)
   const scrollToBottom = useCallback(() => {
     if (!scrollRef.current || userScrolledUpRef.current) return
+    const viewport =
+      scrollRef.current.querySelector('[data-radix-scroll-area-viewport]') ||
+      scrollRef.current.querySelector('[data-slot="scroll-area-viewport"]')
+    if (viewport) {
+      requestAnimationFrame(() => {
+        viewport.scrollTop = viewport.scrollHeight
+      })
+    }
+  }, [])
+  const jumpToBottom = useCallback(() => {
+    userScrolledUpRef.current = false
+    setUserScrolledUp(false)
+    if (!scrollRef.current) return
     const viewport =
       scrollRef.current.querySelector('[data-radix-scroll-area-viewport]') ||
       scrollRef.current.querySelector('[data-slot="scroll-area-viewport"]')
@@ -1072,6 +1078,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const handleScroll = () => {
       const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 100
       userScrolledUpRef.current = !atBottom
+      setUserScrolledUp(!atBottom)
     }
     viewport.addEventListener('scroll', handleScroll, { passive: true })
     return () => viewport.removeEventListener('scroll', handleScroll)
@@ -1085,6 +1092,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // message (bottom) instead of showing it from the top.
   useEffect(() => {
     userScrolledUpRef.current = false
+    setUserScrolledUp(false)
     const viewport =
       scrollRef.current?.querySelector('[data-radix-scroll-area-viewport]') ||
       scrollRef.current?.querySelector('[data-slot="scroll-area-viewport"]')
@@ -2700,6 +2708,15 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     }
   }, [input, isBusy, hasApiKey, currentSessionId, setStreamingDraft, clearStreamingDraft, storeActions, resolveCommand, BUILTIN_COMMANDS, setInputSynced, handleStop])
 
+  // External "send" trigger (Command Center / Review panel call injectAndSend,
+  // which bumps requestSendSignal). Fires handleRun with the injected text.
+  const requestSendSignal = useHelixStore((s) => s.requestSendSignal)
+  useEffect(() => {
+    if (requestSendSignal > 0) {
+      const text = inputValueRef.current
+      if (text.trim()) handleRun()
+    }
+  }, [requestSendSignal, handleRun])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -3452,7 +3469,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                           <button
                             onClick={() => storeActions.forkConversation(msg.id)}
                             className="p-1 rounded-lg text-muted-foreground/40 hover:text-blue-500 hover:bg-blue-500/10 transition-colors"
-                            title="从这里分叉对话"
+                            title="分叉对话"
                           >
                             <GitBranch className="size-3" />
                           </button>
@@ -3494,71 +3511,21 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                             ))}
                           </div>
                         )}
-                        {editingMsgId === msg.id ? (
-                          <div className="flex flex-col gap-2">
-                            <textarea
-                              autoFocus
-                              value={editingDraft}
-                              onChange={(e) => setEditingDraft(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                  e.preventDefault()
-                                  submitMessageEdit(msg.id)
-                                } else if (e.key === 'Escape') {
-                                  e.preventDefault()
-                                  setEditingMsgId(null)
-                                  setEditingDraft('')
-                                }
-                              }}
-                              rows={Math.min(8, Math.max(1, editingDraft.split('\n').length))}
-                              className="w-full min-w-[240px] resize-none bg-background/60 border border-border/50 rounded-lg px-3 py-2 leading-normal focus:outline-none focus:border-primary/40 transition-colors"
-                              style={{ fontSize: transcriptFontSize }}
-                            />
-                            <div className="flex justify-end items-center gap-2">
-                              <button
-                                onClick={() => { setEditingMsgId(null); setEditingDraft('') }}
-                                className="text-xs text-muted-foreground/60 hover:text-foreground px-2.5 py-1 rounded-md hover:bg-muted/40 transition-colors"
-                              >
-                                取消
-                              </button>
-                              <button
-                                onClick={() => submitMessageEdit(msg.id)}
-                                disabled={!editingDraft.trim()}
-                                className="text-xs text-primary-foreground bg-primary/90 hover:bg-primary disabled:opacity-40 disabled:cursor-not-allowed px-2.5 py-1 rounded-md transition-colors"
-                              >
-                                保存并重发
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          normalizeAcpContent(msg.content) && (
-                            <div className="whitespace-pre-wrap leading-normal" style={{ fontSize: transcriptFontSize }}>{normalizeAcpContent(msg.content)}</div>
-                          )
+                        {normalizeAcpContent(msg.content) && (
+                          <div className="whitespace-pre-wrap leading-normal" style={{ fontSize: transcriptFontSize }}>{normalizeAcpContent(msg.content)}</div>
                         )}
                       </div>
                       {/* Action buttons below user message */}
-                      {editingMsgId !== msg.id && (
                       <div className="flex justify-end items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
                         <CopyButton text={normalizeAcpContent(msg.content)} />
                         <button
-                          onClick={() => {
-                            setEditingMsgId(msg.id)
-                            setEditingDraft(normalizeAcpContent(msg.content))
-                          }}
-                          className="p-1 rounded-lg text-muted-foreground/40 hover:text-foreground hover:bg-muted/30 transition-colors"
-                          title="编辑并重发"
-                        >
-                          <Pencil className="size-3" />
-                        </button>
-                        <button
                           onClick={() => storeActions.forkConversation(msg.id)}
                           className="p-1 rounded-lg text-muted-foreground/40 hover:text-blue-500 hover:bg-blue-500/10 transition-colors"
-                          title="从这里分叉对话"
+                          title="分叉对话"
                         >
                           <GitBranch className="size-3" />
                         </button>
                       </div>
-                      )}
                     </div>
                   )}
                 </div>
@@ -3711,6 +3678,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               取消
             </Button>
           </div>
+        </div>
+      )}
+
+      {/* Scroll to bottom button */}
+      {userScrolledUp && sessionMessages.length > 0 && (
+        <div className="flex justify-center shrink-0 -my-1 relative z-10">
+          <button
+            onClick={jumpToBottom}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-muted/80 hover:bg-muted border border-border/50 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 shadow-sm backdrop-blur-sm"
+          >
+            <ArrowDown className="size-3.5" />
+          </button>
         </div>
       )}
 

@@ -1592,6 +1592,27 @@ function parseHermesPersonalities(yaml) {
   return out
 }
 
+// Trigger a Hermes backend self-update (`hermes update`). Fire-and-forget:
+// spawn the update command and return immediately so the UI can show
+// "updating…" without blocking on the (potentially long) download.
+safeHandle('hermes:update', async () => {
+  try {
+    const hermesCmd = resolveHermesCmd()
+    if (!hermesCmd) return { ok: false, message: '找不到 hermes 可执行文件' }
+    // Spawn detached so it survives; stdout/stderr go to the gateway logs.
+    const child = spawn(hermesCmd, ['update'], {
+      cwd: path.join(require('os').homedir(), 'AppData', 'Local', 'hermes'),
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    child.unref()
+    return { ok: true, message: '已启动 Hermes 更新，完成后请重启 Helix' }
+  } catch (e) {
+    return { ok: false, message: String(e?.message || e) }
+  }
+})
+
 // Apply a personality by writing agent.system_prompt into Hermes config.yaml.
 // Mirrors the CLI `/personality <name>` command: resolves the prompt from
 // config.yaml's agent.personalities, or uses the prompt passed from the UI.

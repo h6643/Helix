@@ -29,19 +29,30 @@ const VIEW_MODES: Record<ViewMode, { width: string; icon: typeof Monitor; label:
 
 export function PreviewIframe({ url = 'http://localhost:3000', onClose }: PreviewIframeProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('desktop')
+  const [address, setAddress] = useState(url)
   const [isLoading, setIsLoading] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
+  const navigateTo = useCallback((target: string) => {
+    let next = target.trim()
+    if (next && !/^https?:\/\//i.test(next)) next = 'http://' + next
+    if (!next) return
+    setAddress(next)
+    setIsLoading(true)
+    setLastRefresh(new Date())
+    if (iframeRef.current) iframeRef.current.src = next
+  }, [])
+
   const handleRefresh = useCallback(() => {
     setIsLoading(true)
     setLastRefresh(new Date())
     if (iframeRef.current) {
-      iframeRef.current.src = url
+      iframeRef.current.src = address
     }
-  }, [url])
+  }, [address])
 
   const handleOpenExternal = () => {
     window.open(url, '_blank')
@@ -134,6 +145,30 @@ export function PreviewIframe({ url = 'http://localhost:3000', onClose }: Previe
             <X className="size-4" />
           </button>
         </div>
+      </div>
+
+      {/* Address bar */}
+      <div className="h-9 bg-[#2D2A24] flex items-center gap-2 px-3 shrink-0">
+        <span
+          className={`size-2 rounded-full shrink-0 ${
+            isLoading ? 'bg-amber-400 animate-pulse' : 'bg-emerald-500'
+          }`}
+          title={isLoading ? '加载中' : '已就绪'}
+        />
+        <form
+          className="flex-1"
+          onSubmit={(e) => {
+            e.preventDefault()
+            navigateTo(address)
+          }}
+        >
+          <input
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+            spellCheck={false}
+            className="w-full bg-[#1C1A16] text-white/80 text-[12px] px-2.5 py-1 rounded-md outline-none focus:ring-1 focus:ring-white/20"
+          />
+        </form>
       </div>
 
       {/* iframe container */}

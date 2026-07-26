@@ -53,6 +53,9 @@ contextBridge.exposeInMainWorld('electron', {
       }
     },
 
+    // Trigger Hermes backend self-update
+    update: () => ipcRenderer.invoke('hermes:update'),
+
     // ── Memory sync (Hermes backend memory_manager: MEMORY.md / USER.md) ──
     listMemories: () => ipcRenderer.invoke('hermes:listMemories'),
     addMemoryEntry: (target, text) => ipcRenderer.invoke('hermes:addMemoryEntry', { target, text }),
