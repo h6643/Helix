@@ -1,11 +1,11 @@
 "use client"
 
-import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { Terminal, X } from 'lucide-react'
-import { useHelixStore } from '@/stores/helix-store'
-import { isElectron, electronTerminal } from '@/lib/electron-bridge'
-import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { Terminal as XTerm } from '@xterm/xterm'
+import { Terminal, X } from 'lucide-react'
+import React, { useState, useRef, useEffect, useCallback } from 'react'
+import { isElectron, electronTerminal } from '@/lib/electron-bridge'
+import { useHelixStore } from '@/stores/helix-store'
 import '@xterm/xterm/css/xterm.css'
 
 interface TerminalPanelProps {

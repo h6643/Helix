@@ -4,8 +4,8 @@
  * are called from many places but only read/write this slice's own state.
  */
 import type { StateCreator } from 'zustand'
-import type { ToastMessage } from '../helix-types'
 import { generateId } from '@/lib/format'
+import type { ToastMessage } from '../helix-types'
 
 export interface ToastSlice {
   toasts: ToastMessage[]

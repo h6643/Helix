@@ -1,6 +1,5 @@
 'use client'
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Search,
   Plus,
@@ -13,10 +12,12 @@ import {
   Circle,
   X,
 } from 'lucide-react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { hermesApi } from '@/lib/electron-bridge'
+import { parseChineseSchedule } from '@/lib/schedule-utils'
 import { useHelixStore, type ScheduledTask } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
-import { parseChineseSchedule } from '@/lib/schedule-utils'
-import { ScrollArea } from '@/components/ui/scroll-area'
 
 interface ScheduledTasksPanelProps {
   onClose: () => void
@@ -412,7 +413,7 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
       addChatMessage({ role: 'system', content: `[定时任务] ${task.label}: ${task.prompt}` })
       if (hermesSessionId) {
         try {
-          await window.electron.hermes.send('session/prompt', {
+          await hermesApi()!.send('session/prompt', {
             session_id: hermesSessionId,
             prompt: [{ type: 'text', text: task.prompt }],
           })

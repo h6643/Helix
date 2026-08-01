@@ -1,18 +1,6 @@
 // Browser-native speech helpers (Web Speech API). Renderer-only — no gateway
-// needed. Shared by the Settings "语音" page and the always-on auto-speak
+// needed. Shared by the message "朗读" button and the always-on auto-speak
 // effect in helix-layout, so the logic lives in one place.
-
-export function getRecognition(): any {
-  if (typeof window === 'undefined') return null
-  const w = window as any
-  const Ctor = w.SpeechRecognition || w.webkitSpeechRecognition
-  if (!Ctor) return null
-  const r = new Ctor()
-  r.lang = 'zh-CN'
-  r.continuous = true
-  r.interimResults = true
-  return r
-}
 
 export function stripAcp(content: any): string {
   if (typeof content === 'string') return content

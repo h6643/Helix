@@ -1,7 +1,6 @@
 'use client'
 
 import React, { useState } from 'react'
-import { Plug, Terminal, Link, Save } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 export interface McpFormData {
@@ -52,10 +51,10 @@ export function McpEditorForm({
         {/* Type */}
         <div>
           <div className="flex gap-2">
-            {([['local', 'STDIO', Terminal], ['remote', '流式 HTTP', Link]] as const).map(([t, label, Icon]) => (
+            {([['local', 'STDIO'], ['remote', '流式 HTTP']] as const).map(([t, label]) => (
               <button key={t} onClick={() => onChange({ type: t, command: '', url: '' })}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm transition-colors ${form.type === t ? 'border-primary bg-primary/10 text-primary' : 'border-border/50 text-muted-foreground hover:bg-accent/50'}`}>
-                <Icon className="size-4" />{label}
+                {label}
               </button>
             ))}
           </div>
@@ -127,7 +126,7 @@ export function McpEditorForm({
       </div>
 
       <div className="px-4 py-3 border-t border-border/50 bg-muted/10 flex justify-end gap-2 shrink-0">
-        <Button onClick={onSave} size="sm" className="gap-1.5"><Save className="size-3.5" /> 保存</Button>
+        <Button onClick={onSave} size="sm" className="gap-1.5">保存</Button>
       </div>
     </div>
   )

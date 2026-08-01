@@ -1,9 +1,9 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
 import { X, Save, ListTodo, Loader2 } from 'lucide-react'
-import { useHelixStore } from '@/stores/helix-store'
+import React, { useState, useEffect, useCallback } from 'react'
 import { isElectron, electronHermes } from '@/lib/electron-bridge'
+import { useHelixStore } from '@/stores/helix-store'
 
 // ── Types ────────────────────────────────────────────────────────────────
 /** A task item returned by the Hermes backend. */

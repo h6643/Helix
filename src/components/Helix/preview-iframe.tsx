@@ -1,6 +1,5 @@
 'use client'
 
-import React, { useState, useRef, useEffect, useCallback } from 'react'
 import {
   X,
   RefreshCw,
@@ -13,6 +12,7 @@ import {
   Maximize2,
   Minimize2,
 } from 'lucide-react'
+import React, { useState, useRef, useEffect, useCallback } from 'react'
 
 interface PreviewIframeProps {
   url?: string

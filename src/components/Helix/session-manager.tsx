@@ -1,6 +1,5 @@
 'use client'
 
-import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Save,
   FolderOpen,
@@ -13,12 +12,13 @@ import {
   Search,
   AlertTriangle,
 } from 'lucide-react'
-import { useHelixStore } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
-import { persistence, type PersistedSession } from '@/lib/persist'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { timeAgo } from '@/lib/format'
+import { persistence, type PersistedSession } from '@/lib/persist'
+import { useHelixStore } from '@/stores/helix-store'
+import { useHermesStore } from '@/stores/hermes-store'
 
 export function SessionManager({ onClose }: { onClose: () => void }) {
   const [sessions, setSessions] = useState<PersistedSession[]>([])

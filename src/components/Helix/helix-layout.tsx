@@ -1,8 +1,5 @@
 'use client'
 
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import dynamic from 'next/dynamic'
-import { createPortal } from 'react-dom'
 import {
   Minus,
   Square,
@@ -17,6 +14,7 @@ import {
   GripVertical,
   ChevronDown,
   FileText,
+  FileCode2,
   Keyboard,
   Globe,
   ListTodo,
@@ -25,22 +23,25 @@ import {
   Loader2,
   XCircle,
 } from 'lucide-react'
-import { Sidebar } from './sidebar'
+import dynamic from 'next/dynamic'
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import { createPortal } from 'react-dom'
+import { useProviderStore } from '@/hermes-ui/provider-store'
+import { useCheckUpdate } from '@/hooks/use-check-update'
+import { pushModelConfig, pushAgentConfigLive, pushConfigKeyValue } from '@/lib/config-sync'
+import { isElectron, electronHermes, electronNotification, electronShell } from '@/lib/electron-bridge'
+import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
+import { isServeActive, getServeClient } from '@/lib/serve-gateway'
+import { speak, stripAcp } from '@/lib/voice-utils'
+import { useHelixStore, type PendingChange } from '@/stores/helix-store'
 import { AgentFlowPanel } from './agent-flow-panel'
 import { CommandPalette } from './command-palette'
+import { Sidebar } from './sidebar'
 import { KeyboardShortcuts } from './keyboard-shortcuts'
 import { ContextMenuProvider } from './context-menu'
 import { ToastContainer } from './toast-container'
-import { useHelixStore, type PendingChange } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
-import { useProviderStore } from '@/hermes-ui/provider-store'
-import { isElectron, electronHermes, electronNotification } from '@/lib/electron-bridge'
-import { speak, stripAcp } from '@/lib/voice-utils'
 import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
-import { toBackendReasoningEffort } from '@/stores/slices/agent-settings-slice'
-import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
-import { useCheckUpdate } from '@/hooks/use-check-update'
-import { scheduleConfigPush } from '@/lib/config-sync'
 
 // Process-wide guard so the startup restore + Hermes sync runs exactly once.
 // A component-local useRef resets whenever this layout remounts (e.g. tab
@@ -72,6 +73,9 @@ const ReviewPanel = dynamic(() => import('./review-panel').then(m => ({ default:
 const ArtifactsBrowser = dynamic(() => import('./artifacts-browser').then(m => ({ default: m.ArtifactsBrowser })), { ssr: false })
 const TerminalPanel = dynamic(() => import('./terminal-panel').then(m => ({ default: m.TerminalPanel })), { ssr: false })
 const WorktreePanel = dynamic(() => import('./worktree-panel').then(m => ({ default: m.WorktreePanel })), { ssr: false })
+const FileTreePanel = dynamic(() => import('./file-tree-panel').then(m => ({ default: m.FileTreePanel })), { ssr: false })
+const PluginManagerPanel = dynamic(() => import('./plugin-manager').then(m => ({ default: m.PluginManager })), { ssr: false })
+const RightSidebar = dynamic(() => import('./right-sidebar').then(m => ({ default: m.RightSidebar })), { ssr: false })
 
 // ── Resizable sidebar constants ──────────────────────────────────────────
 const SIDEBAR_MIN = 200
@@ -79,6 +83,12 @@ const SIDEBAR_MAX = 500
 const SIDEBAR_COLLAPSED = 48
 const SIDEBAR_DEFAULT = 300
 const STORAGE_KEY = 'helix-sidebar-width'
+
+// Right sidebar (code editor / browser)
+const RIGHT_SIDEBAR_MIN = 300
+const RIGHT_SIDEBAR_MAX = 800
+const RIGHT_SIDEBAR_DEFAULT = 480
+const RIGHT_STORAGE_KEY = 'helix-right-sidebar-width'
 
 function loadSidebarWidth(): number {
   if (typeof localStorage === 'undefined') return SIDEBAR_DEFAULT
@@ -96,6 +106,22 @@ function saveSidebarWidth(w: number) {
   try { localStorage.setItem(STORAGE_KEY, String(w)) } catch {}
 }
 
+function loadRightSidebarWidth(): number {
+  if (typeof localStorage === 'undefined') return RIGHT_SIDEBAR_DEFAULT
+  try {
+    const v = localStorage.getItem(RIGHT_STORAGE_KEY)
+    if (v) {
+      const n = parseInt(v, 10)
+      if (n >= RIGHT_SIDEBAR_MIN && n <= RIGHT_SIDEBAR_MAX) return n
+    }
+  } catch {}
+  return RIGHT_SIDEBAR_DEFAULT
+}
+
+function saveRightSidebarWidth(w: number) {
+  try { localStorage.setItem(RIGHT_STORAGE_KEY, String(w)) } catch {}
+}
+
 interface WindowMenuItem {
   label: string
   shortcut?: string
@@ -108,12 +134,16 @@ export function HelixLayout() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth)
   const [isDragging, setIsDragging] = useState(false)
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(loadRightSidebarWidth)
+  const [isRightDragging, setIsRightDragging] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [isMaximized, setIsMaximized] = useState(false)
   const [hasTaskList, setHasTaskList] = useState(false)
   const [showTaskListPanel, setShowTaskListPanel] = useState(false)
   const dragStartX = useRef(0)
   const dragStartW = useRef(0)
+  const rightDragStartX = useRef(0)
+  const rightDragStartW = useRef(0)
 
   // Refs for keyboard shortcut handler (avoids stale closures)
   const showSidebarRef = useRef(showSidebar)
@@ -171,6 +201,45 @@ export function HelixLayout() {
     }
   }, [isDragging])
 
+  // ── Right sidebar resize drag ────────────────────────────────────────
+  const handleRightDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsRightDragging(true)
+    rightDragStartX.current = e.clientX
+    rightDragStartW.current = rightSidebarWidth
+  }, [rightSidebarWidth])
+
+  useEffect(() => {
+    if (!isRightDragging) return
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+    let raf: number
+    const onMove = (e: MouseEvent) => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        const delta = rightDragStartX.current - e.clientX
+        const next = Math.max(RIGHT_SIDEBAR_MIN, Math.min(RIGHT_SIDEBAR_MAX, rightDragStartW.current + delta))
+        setRightSidebarWidth(next)
+      })
+    }
+    const onUp = () => {
+      cancelAnimationFrame(raf)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      setIsRightDragging(false)
+      setRightSidebarWidth(w => { saveRightSidebarWidth(w); return w })
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      cancelAnimationFrame(raf)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [isRightDragging])
+
   // State selectors (only re-render when this specific slice changes)
   const openTabs = useHelixStore(s => s.openTabs)
   const pendingChanges = useHelixStore(s => s.pendingChanges)
@@ -182,9 +251,12 @@ export function HelixLayout() {
   const showCustomizePanel = useHelixStore(s => s.showCustomizePanel)
   const showRuntimePanel = useHelixStore(s => s.showRuntimePanel)
   const showWorktreePanel = useHelixStore(s => s.showWorktreePanel)
+  const showFileTreePanel = useHelixStore(s => s.showFileTreePanel)
   const showActivityFeed = useHelixStore(s => s.showActivityFeed)
   const showReviewPanel = useHelixStore(s => s.showReviewPanel)
   const showArtifactsBrowser = useHelixStore(s => s.showArtifactsBrowser)
+  const showPluginManager = useHelixStore(s => s.showPluginManager)
+  const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
   const editorTheme = useHelixStore(s => s.editorTheme)
@@ -250,7 +322,7 @@ export function HelixLayout() {
       if (!isElectron()) return
       const cfg = st.apiConfig
       if (!cfg || !cfg.model) return
-      scheduleConfigPush({
+      pushModelConfig({
         model: cfg.model,
         provider: cfg.provider && cfg.provider !== '__custom__' ? cfg.provider : 'custom',
         baseUrl: cfg.baseUrl,
@@ -260,36 +332,29 @@ export function HelixLayout() {
     return () => { cancelled = true }
   }, [storeActions.restoreFromStorage])
 
-  // Sync agent behaviour settings (temperature, maxOutputTokens,
-  // customInstructions, personality) to Hermes config.yaml whenever they
-  // change. Uses a debounced IPC call to avoid restarting the gateway on every
-  // keystroke. NOTE: reasoningEffort is handled by its own instant fast path
-  // below (no restart) so the slider takes effect on the next message.
+  // Sync agent settings to Hermes via live config.set (no gateway restart).
+  // personality + reasoningEffort + fastMode are pushed instantly.
+  // Removed: temperature, maxOutputTokens, customInstructions, Chinese language injection.
   const agentSettingsSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!isElectron()) return
     const pushAgentConfig = () => {
       const s = useHelixStore.getState()
-      const langInstruction = '请始终使用简体中文回复用户。'
-      scheduleConfigPush({
-        temperature: s.temperature,
-        maxOutputTokens: s.maxOutputTokens,
-        customInstructions: [langInstruction, s.customInstructions].filter(Boolean).join('\n'),
-        personality: (s.personality && s.personality.trim() !== '') ? s.personality : undefined,
+      pushAgentConfigLive({
+        personality: s.personality || undefined,
+        reasoningEffort: s.reasoningEffort,
+        fastMode: s.fastMode,
       })
     }
-    // Initial push so the language instruction reaches Hermes on first load
-    // (the subscription below only fires on subsequent changes).
     pushAgentConfig()
     const unsub = useHelixStore.subscribe((state, prevState) => {
       const changed =
-        state.temperature !== prevState.temperature ||
-        state.maxOutputTokens !== prevState.maxOutputTokens ||
-        state.customInstructions !== prevState.customInstructions ||
-        state.personality !== prevState.personality
+        state.personality !== prevState.personality ||
+        state.reasoningEffort !== prevState.reasoningEffort ||
+        state.fastMode !== prevState.fastMode
       if (!changed) return
       if (agentSettingsSyncTimer.current) clearTimeout(agentSettingsSyncTimer.current)
-      agentSettingsSyncTimer.current = setTimeout(pushAgentConfig, 1500)
+      agentSettingsSyncTimer.current = setTimeout(pushAgentConfig, 150)
     })
     return () => {
       unsub()
@@ -297,36 +362,31 @@ export function HelixLayout() {
     }
   }, [])
 
-  // ── Reasoning-effort fast path ─────────────────────────────────────────
-  // The slider takes effect on the very next message, with NO 2–3s gateway
-  // restart: (1) persist agent.reasoning_effort to config.yaml via the no-
-  // restart setReasoningEffort IPC; (2) push a sentinel prompt the ACP server
-  // intercepts to update the live agent's reasoning_config in place (same
-  // session → conversation context preserved). With no active session yet,
-  // only step (1) runs — the next session reads config.yaml.
+  // ── Reasoning-effort: live push via config.set (no restart, no translation) ──
+  // Uses Hermes native effort scale (none/minimal/low/medium/high/xhigh/max/ultra)
+  // directly — no toBackendReasoningEffort translation needed.
   const reasoningFastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!isElectron()) return
     const unsub = useHelixStore.subscribe((state, prevState) => {
       if (state.reasoningEffort === prevState.reasoningEffort) return
       if (reasoningFastTimer.current) clearTimeout(reasoningFastTimer.current)
-      // Short debounce — the slider fires several values while dragging.
       reasoningFastTimer.current = setTimeout(() => {
-        const effort = toBackendReasoningEffort(useHelixStore.getState().reasoningEffort)
-        // (1) Always persist to config.yaml — survives restarts and applies
-        //     to the next session even if we skip the live update below.
-        window.electron?.hermes?.setReasoningEffort?.({ reasoningEffort: effort }).catch(() => {})
-        // (2) Live-update the current agent ONLY when idle. Sending a second
-        //     session/prompt while one is already running violates ACP's
-        //     one-prompt-per-session rule and aborts the in-flight turn
-        //     ("突然中断"). When busy, the persisted value is picked up on
-        //     the next turn instead.
+        const effort = useHelixStore.getState().reasoningEffort
+        pushConfigKeyValue('agent.reasoning_effort', effort)
+        // Also live-update current session if idle
         const hermes = useHermesStore.getState()
         if (hermes.hermesSessionId && !useHelixStore.getState().isChatLoading) {
-          window.electron?.hermes?.send?.('session/prompt', {
-            session_id: hermes.hermesSessionId,
-            prompt: [{ type: 'text', text: `__hermes_set_reasoning__:${effort}` }],
-          }).catch(() => {})
+          if (isServeActive()) {
+            // serve 网关没有 ACP 控制令牌语义：直接 config.set，避免被当成用户消息执行
+            getServeClient()?.rpc('config.set', { key: 'agent.reasoning_effort', value: effort, session_id: hermes.hermesSessionId })
+              .catch(() => {})
+          } else {
+            window.electron?.hermes?.send?.('session/prompt', {
+              session_id: hermes.hermesSessionId,
+              prompt: [{ type: 'text', text: `__hermes_set_reasoning__:${effort}` }],
+            }).catch(() => {})
+          }
         }
       }, 150)
     })
@@ -466,12 +526,11 @@ export function HelixLayout() {
     return unsub
   }, [])
 
-  // Native OS notification when an agent run finishes (Electron surfaces the
-  // HTML5 Notification API as a real OS toast; falls back to in-app toast).
+  // Native OS notification when an agent run finishes — respects desktopNotifications setting
   useEffect(() => {
     let prev = useHelixStore.getState().isAgentRunning
     const unsub = useHelixStore.subscribe((s) => {
-      if (prev && !s.isAgentRunning) {
+      if (prev && !s.isAgentRunning && s.desktopNotifications) {
         electronNotification.notify('Helix', 'Agent 任务已完成')
       }
       prev = s.isAgentRunning
@@ -498,8 +557,18 @@ export function HelixLayout() {
     if (!isElectron()) {
       return
     }
+    // If a project directory is already selected, open it in File Explorer.
+    // Only fall back to the folder picker when nothing is selected yet.
+    if (selectedWorkDir) {
+      try {
+        await electronShell.openPath(selectedWorkDir)
+      } catch (e) {
+        console.error('[handleOpenLocation] openPath failed:', e)
+      }
+      return
+    }
     const { electronDialog } = await import('@/lib/electron-bridge')
-    const dir = await electronDialog.openDirectory()
+    const dir = await electronDialog.openDirectory(selectedWorkDir || undefined)
     if (!dir) return
     try {
       await storeActions.setWorkDir(dir)
@@ -676,6 +745,8 @@ export function HelixLayout() {
     { label: '新建窗口', shortcut: 'Ctrl+Shift+N', action: () => { window.open(window.location.href, '_blank'); closeWindowMenu() } },
     { label: '关闭窗口', shortcut: 'Ctrl+Shift+W', action: () => { window.close(); closeWindowMenu() } },
     { divider: true },
+    { label: '打开浏览器侧边栏', shortcut: '', action: () => { storeActions.setRightSidebarTab('browser'); closeWindowMenu() } },
+    { divider: true },
     { label: '折叠侧边栏', shortcut: 'Ctrl+B', action: () => {
       if (!showSidebar) {
         setShowSidebar(true)
@@ -687,12 +758,13 @@ export function HelixLayout() {
     }},
     { label: '切换侧边栏', shortcut: 'Ctrl+L', action: () => { setShowSidebar(v => !v); closeWindowMenu() } },
     { label: '打开终端', shortcut: shortcutLabel('toggle-terminal', customShortcuts), action: () => { useHelixStore.setState({ isTerminalOpen: true }); closeWindowMenu() } },
-    { label: '切换文件树', shortcut: shortcutLabel('toggle-file-tree', customShortcuts), action: () => { storeActions.toggleWorktreePanel(); closeWindowMenu() } },
+    { label: '切换文件树', shortcut: shortcutLabel('toggle-file-tree', customShortcuts), action: () => { storeActions.toggleFileTreePanel(); closeWindowMenu() } },
+    { label: '打开代码编辑器', action: () => { storeActions.setRightSidebarTab('code'); closeWindowMenu() } },
     { divider: true },
     { label: '设置', shortcut: 'Ctrl+,', action: () => { storeActions.toggleSettings('api'); closeWindowMenu() } },
     { label: '重新加载页面', shortcut: shortcutLabel('reload-page', customShortcuts), action: () => { window.location.reload(); closeWindowMenu() } },
     { divider: true },
-    { label: '查找', shortcut: shortcutLabel('search-chat', customShortcuts), action: () => { storeActions.toggleCommandPalette(); closeWindowMenu() } },
+    { label: '查找', shortcut: shortcutLabel('search-chat', customShortcuts), action: () => { window.dispatchEvent(new CustomEvent('helix:conversation-search')); closeWindowMenu() } },
     { divider: true },
     { label: '后退', shortcut: shortcutLabel('go-back', customShortcuts), action: () => {
       const entry = storeActions.navigateBack()
@@ -964,10 +1036,17 @@ export function HelixLayout() {
           </div>
         )}
 
+        {/* File tree panel */}
+        {showFileTreePanel && (
+          <FileTreePanel onClose={() => storeActions.toggleFileTreePanel()} />
+        )}
+
         {/* Main area */}
         <div className="flex-1 h-full flex flex-col overflow-hidden">
           {showScheduledTasksPanel ? (
             <ScheduledTasksPanel onClose={() => storeActions.toggleScheduledTasksPanel()} />
+          ) : showPluginManager ? (
+            <PluginManagerPanel onClose={() => storeActions.togglePluginManager()} />
           ) : showSkillPanel ? (
             <SkillPanel onClose={() => storeActions.toggleSkillPanel()} />
           ) : showRuntimePanel ? (
@@ -975,7 +1054,8 @@ export function HelixLayout() {
           ) : showWorktreePanel ? (
             <WorktreePanel onClose={() => storeActions.toggleWorktreePanel()} />
           ) : (
-            <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="flex-1 flex flex-row overflow-hidden">
+              <div className="flex-1 flex flex-col overflow-hidden min-w-0">
               {/* Conversation header — only visible when messages exist */}
                 {chatMessages.length > 0 && (
                   <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 bg-background">
@@ -983,7 +1063,7 @@ export function HelixLayout() {
                       <button
                         onClick={handleOpenLocation}
                         className="flex items-center gap-1.5 text-[12px] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
-                        title={selectedWorkDir || '选择位置'}
+                        title={selectedWorkDir ? '在资源管理器中打开' : '选择位置'}
                       >
                         <Folder className="size-3.5 text-muted-foreground" />
                         <span className="max-w-[200px] truncate">{selectedWorkDir ? (selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir) : '未选择位置'}</span>
@@ -1067,13 +1147,39 @@ export function HelixLayout() {
                   >
                     <Terminal className="size-4" />
                   </button>
+                  <button
+                    onClick={() => storeActions.setRightSidebarTab('code')}
+                    className={`p-1.5 rounded-lg transition-colors ${rightSidebarTab === 'code' ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
+                    title="代码编辑器"
+                  >
+                    <FileCode2 className="size-4" />
+                  </button>
+                  <button
+                    onClick={() => storeActions.setRightSidebarTab('browser')}
+                    className={`p-1.5 rounded-lg transition-colors ${rightSidebarTab === 'browser' ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
+                    title="浏览器侧边栏（预览）"
+                  >
+                    <Globe className="size-4" />
+                  </button>
                 </div>
               </div>
               )}
-              <div className="flex-1 overflow-hidden">
+              <div className="flex-1 min-h-0 flex flex-col">
                 <AgentFlowPanel />
               </div>
               <TerminalPanel onClose={storeActions.toggleTerminal} />
+              </div>
+              {rightSidebarTab && (
+                <div className="relative shrink-0" style={{ width: rightSidebarWidth }}>
+                  <div
+                    className={`absolute top-0 -left-1 w-2 h-full cursor-col-resize z-30 group ${isRightDragging ? 'bg-primary/20' : ''}`}
+                    onMouseDown={handleRightDragStart}
+                  >
+                    <div className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${isRightDragging ? 'bg-primary/40' : 'bg-transparent group-hover:bg-border/40'}`} />
+                  </div>
+                  <RightSidebar />
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -1,5 +1,5 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, safeStorage } = require('electron')
 const path = require('path')
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, safeStorage } = require('electron')
 const fsPromises = require('fs').promises
 const fs = require('fs')
 const os = require('os')
@@ -23,14 +23,42 @@ function safeOn(channel, listener) {
 
 // ── IPC Handler Modules ─────────────────────────────────────────────────────
 const registerGitHandlers = require('./ipc/git')
-const registerTerminalHandlers = require('./ipc/terminal')
 const registerScheduledTasksHandlers = require('./ipc/scheduled-tasks')
 const securityModule = require('./ipc/security')
+const registerTerminalHandlers = require('./ipc/terminal')
 const registerSecurityHandlers = securityModule
 const { isBadConfig, APIHUB_DEFAULT } = securityModule
 const registerFsHandlers = require('./ipc/fs')
 const registerWindowHandlers = require('./ipc/window')
 const hooksModule = require('./ipc/hooks')
+const configModule = require('./lib/config')
+const {
+  setYamlKey,
+  setCustomProviderModel,
+  setCustomProviderField,
+  customProviderApiKey,
+  resolveProvider,
+  disambiguateCustomProvider,
+  parseHermesPersonalities,
+  BUILTIN_PROVIDER_ENV,
+} = configModule
+const kernelModule = require('./lib/kernel')
+const {
+  resolveHermesCandidates,
+  resolveHermesCmd,
+  verifyKernel,
+} = kernelModule
+const memoryModule = require('./lib/memory')
+const {
+  hermesMemoriesDir,
+  readMemFile,
+  writeMemFile,
+  readManualMarkers,
+  addManualMarker,
+  removeManualMarker,
+  incrementSkillCallCount,
+  collectSkillsFromDir,
+} = memoryModule
 
 // ── Diagnostics & runtime status (exposed to renderer) ───────────────────────
 const diagState = {
@@ -55,6 +83,36 @@ function getDiagnostics() {
 
 let hermesProcess = null
 let hermesRequestId = 0
+
+// ── serve gateway auto-respawn bookkeeping ──────────────────────────────────
+// If the serve gateway (a python subprocess) dies on its own, we respawn it so
+// the UI never stays stuck on the "connecting to Hermes" splash. See
+// scheduleServeRespawn() below for the full mechanism + rate limiting.
+let appIsQuitting = false
+let serveRespawnCount = 0
+let serveRespawnWindowStart = 0
+const MAX_SERVE_RESPAWN_PER_WINDOW = 6
+const SERVE_RESPAWN_WINDOW_MS = 60_000
+const SERVE_RESPAWN_BASE_DELAY_MS = 800
+
+// ── Gateway mode (Phase 1 of serve migration, see docs/serve-migration.md) ──
+// 'acp'  (default): stdio JSON-RPC via `hermes acp` — current stable path.
+// 'serve'         : official HTTP/WS gateway via `hermes serve` — renderer
+//                   connects DIRECTLY to http://127.0.0.1:<port> (REST) and
+//                   ws://127.0.0.1:<port>/api/ws?token=... (JSON-RPC), same
+//                   architecture as the official desktop app.
+// Default to serve mode on this build: the entire Helix integration (clarify,
+// run.completed, tui_gateway bridge) is built around `hermes serve`. acp mode
+// requires `pip install -e '.[acp]'` extras which are not present in this
+// environment, so acp is non-functional here. Opt out via HELIX_GATEWAY_MODE=acp.
+const GATEWAY_MODE = (process.env.HELIX_GATEWAY_MODE || 'serve').toLowerCase() === 'serve' ? 'serve' : 'acp'
+// Populated after the serve handshake line (HERMES_BACKEND_READY port=N).
+// Shape: { mode:'serve', port, token, baseUrl, wsUrl }
+let serveGatewayInfo = null
+// Session token pinned for the serve gateway (loopback WS auth requires
+// ?token=<HERMES_DASHBOARD_SESSION_TOKEN>). Generated once per app run so
+// restarts of the backend keep the same token and the renderer can reconnect.
+let serveSessionToken = null
 
 const _notifTiming = {}
 const hermesPending = new Map()
@@ -126,7 +184,16 @@ function processHermesBuffer() {  const lines = hermesStdoutBuffer.split('\n')
         if (pending) {
           hermesPending.delete(msg.id)
           if (msg.error) {
-            console.error('[Hermes] gateway error:', msg.error)
+            // -32601 "Method not found" is an expected, harmless response when
+            // the frontend probes an optional ACP method the running Hermes
+            // build doesn't implement (e.g. session.context_breakdown on older
+            // installs). The renderer already degrades gracefully, so we must
+            // NOT spam console.error for it — only surface real failures.
+            if (msg.error.code === -32601) {
+              console.debug('[Hermes] optional method not supported (ignored):', msg.error.data?.method || msg.error.message)
+            } else {
+              console.error('[Hermes] gateway error:', msg.error)
+            }
             pending.reject(new Error(msg.error.message))
           } else {
             pending.resolve(msg.result)
@@ -150,338 +217,12 @@ function processHermesBuffer() {  const lines = hermesStdoutBuffer.split('\n')
   }
 }
 
-// Resolve the absolute path to the `hermes` executable instead of relying on
-// PATH lookup (spawn('hermes') → ENOENT/-4058 when the venv Scripts dir is not
-// on the inherited PATH, e.g. inside Electron after env cleaning).
-function resolveHermesCmd() {
-  const candidates = []
-  try {
-    const { execSync } = require('child_process')
-    const out = execSync('where hermes 2>nul || which hermes 2>/dev/null').toString().trim()
-    if (out) out.split(/\r?\n/).forEach(l => l.trim() && candidates.push(l.trim()))
-  } catch { /* ignore */ }
-  // Fallback candidates (known install locations)
-  const localApp = process.env.LOCALAPPDATA || ''
-  if (localApp) {
-    candidates.push(path.join(localApp, 'hermes', 'hermes-agent', 'venv', 'Scripts', 'hermes.exe'))
-  }
-  candidates.push(path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'hermes-agent', 'venv', 'Scripts', 'hermes.exe'))
-  for (const c of candidates) {
-    try { if (fs.existsSync(c)) return c } catch { /* ignore */ }
-  }
-  return null // not found
-}
-
-// ── Kernel verification (source path + Ed25519 signature) ────────────────────
-
-function isTrustedPath(p) {
-  // Kernel should live under known managed locations, not arbitrary paths.
-  const localApp = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
-  const trustedRoots = [
-    path.join(localApp, 'hermes'),
-    process.resourcesPath,
-    path.dirname(process.execPath),
-    process.cwd(),
-  ]
-  const rp = path.resolve(p)
-  return trustedRoots.some(root => rp.startsWith(path.resolve(root)))
-}
-
-async function sha256File(filePath) {
-  const data = await fsPromises.readFile(filePath)
-  return crypto.createHash('sha256').update(data).digest('hex')
-}
-
-async function listKernelArtifacts(hermesCmdPath) {
-  const artifacts = []
-  if (!hermesCmdPath || !fs.existsSync(hermesCmdPath)) return artifacts
-  artifacts.push({ id: 'entry', path: hermesCmdPath, hash: await sha256File(hermesCmdPath) })
-  const baseDir = path.dirname(hermesCmdPath)
-  const candidates = [
-    path.join(baseDir, 'hermes'),
-    path.join(baseDir, 'hermes-cli'),
-    path.join(baseDir, 'hermes_cli'),
-    path.join(baseDir, 'python.exe'),
-    path.join(baseDir, '..', 'Lib', 'site-packages', 'hermes', '__init__.py'),
-  ]
-  for (const c of candidates) {
-    try {
-      if (fs.existsSync(c) && fs.statSync(c).isFile()) {
-        artifacts.push({ id: path.relative(baseDir, c), path: c, hash: await sha256File(c) })
-      }
-    } catch {}
-  }
-  return artifacts
-}
-
-async function loadKernelPublicKey() {
-  const candidates = [
-    path.join(process.resourcesPath, 'kernel.pub'),
-    path.join(process.resourcesPath, 'assets', 'kernel.pub'),
-    path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'kernel.pub'),
-    path.join(__dirname, '..', 'kernel.pub'),
-  ]
-  for (const c of candidates) {
-    try {
-      if (fs.existsSync(c)) return await fsPromises.readFile(c)
-    } catch {}
-  }
-  return null
-}
-
-async function verifyKernelSignature(hermesCmdPath) {
-  const pubKey = await loadKernelPublicKey()
-  if (!pubKey) {
-    return { ok: false, hasKey: false, message: '未包含官方公钥（开发构建），已跳过 Ed25519 校验' }
-  }
-  const sigPath = hermesCmdPath + '.sig'
-  if (!fs.existsSync(sigPath)) {
-    return { ok: false, hasKey: true, hasSig: false, message: '未找到运行时签名文件 ' + sigPath }
-  }
-  try {
-    const data = await fsPromises.readFile(hermesCmdPath)
-    const sig = await fsPromises.readFile(sigPath)
-    const ok = crypto.verify(null, data, pubKey, sig)
-    return { ok, hasKey: true, hasSig: true, message: ok ? 'Ed25519 签名校验通过' : 'Ed25519 签名校验失败' }
-  } catch (e) {
-    return { ok: false, hasKey: true, hasSig: true, message: '签名校验出错：' + (e && e.message) }
-  }
-}
-
-async function verifyKernel() {
-  const hermesCmdPath = resolveHermesCmd()
-  if (!hermesCmdPath) {
-    return { ok: false, status: 'unknown', message: '未找到 Hermes 运行时可执行文件', artifacts: [], combinedHash: '' }
-  }
-  if (!isTrustedPath(hermesCmdPath)) {
-    return { ok: false, status: 'untrusted', message: '运行时路径不在受信任安装目录中：' + hermesCmdPath, artifacts: [], combinedHash: '' }
-  }
-  const artifacts = await listKernelArtifacts(hermesCmdPath)
-  const sigResult = await verifyKernelSignature(hermesCmdPath)
-  const integrityInput = artifacts.map(a => a.hash).join('')
-  const combinedHash = crypto.createHash('sha256').update(integrityInput).digest('hex').slice(0, 32)
-  const status = sigResult.ok ? 'verified' : 'unverified'
-  const message = sigResult.ok
-    ? `内核来源已校验，完整性哈希 ${combinedHash}`
-    : `${sigResult.message}；完整性哈希 ${combinedHash}`
-  return { ok: sigResult.ok, status, message, artifacts, combinedHash, sig: sigResult }
-}
-
-// Lightweight YAML helper — sets a nested key (up to 2 levels, 2-space indent)
-// without a js-yaml dependency. Preserves the rest of the file. Returns the new
-// YAML string (unchanged if the value was already identical).
-function setYamlKey(yaml, dottedKey, value) {
-  const parts = dottedKey.split('.')
-  if (parts.length !== 2) return yaml
-  const [top, sub] = parts
-  const lines = yaml.replace(/\r\n/g, '\n').split('\n')
-  const valueStr = typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value)
-  let topIdx = -1
-  for (let i = 0; i < lines.length; i++) {
-    if (/^\S/.test(lines[i]) && lines[i].startsWith(top + ':')) { topIdx = i; break }
-  }
-  if (topIdx === -1) {
-    lines.push(`${top}:`)
-    lines.push(`  ${sub}: ${valueStr}`)
-    return lines.join('\n')
-  }
-  let subIdx = -1
-  for (let i = topIdx + 1; i < lines.length; i++) {
-    if (/^\S/.test(lines[i])) break
-    if (new RegExp(`^\\s+${sub}:`).test(lines[i])) { subIdx = i; break }
-  }
-  if (subIdx !== -1) {
-    const oldVal = lines[subIdx]
-    lines[subIdx] = lines[subIdx].replace(new RegExp(`^(\\s+${sub}:\\s*).*$`), `$1${valueStr}`)
-    if (sub === 'provider') {
-      console.log('[setYamlKey] provider: old=' + JSON.stringify(oldVal) + ' new=' + JSON.stringify(lines[subIdx]))
-      console.trace('[setYamlKey] provider write stack')
-    }
-    // Remove any duplicate `sub:` lines within the same parent block so a
-    // previously-inserted/stray key can't survive and shadow the value.
-    for (let i = subIdx + 1; i < lines.length; i++) {
-      if (/^\S/.test(lines[i])) break
-      if (new RegExp(`^\\s+${sub}:`).test(lines[i])) { lines.splice(i, 1); i-- }
-    }
-  } else {
-    lines.splice(topIdx + 1, 0, `  ${sub}: ${valueStr}`)
-  }
-  return lines.join('\n')
-}
-
-// Update the `model:` field of a named custom_providers entry so Hermes
-// actually uses the model the user picked. A named custom provider
-// OVERRIDES model.default (see hermes runtime_provider.resolve_runtime_provider),
-// so without this the UI model selection would never take effect.
-function setCustomProviderModel(yaml, providerName, model) {
-  if (!providerName || !model) return yaml
-  const name = String(providerName).trim()
-  const modelStr = String(model).trim()
-  const lines = yaml.replace(/\r\n/g, '\n').split('\n')
-  let inProviders = false
-  let entryActive = false
-  for (let i = 0; i < lines.length; i++) {
-    const lp = lines[i]
-    if (/^custom_providers:/.test(lp)) { inProviders = true; continue }
-    if (!inProviders) continue
-    if (/^\S/.test(lp) && !lp.startsWith(' ')) { inProviders = false; entryActive = false; continue }
-    const mName = lp.match(/^\s+-\s+name:\s*(.+?)\s*$/)
-    if (mName) { entryActive = (mName[1] === name); continue }
-    if (entryActive) {
-      const mModel = lp.match(/^(\s+)model:\s*(.+?)\s*$/)
-      if (mModel) {
-        lines[i] = mModel[1] + 'model: ' + modelStr
-        return lines.join('\n')
-      }
-    }
-  }
-  return yaml
-}
-
-function setCustomProviderField(yaml, name, field, value) {
-  if (!name || !field || value === undefined || value === null) return yaml
-  const n = String(name).trim()
-  const v = String(value).trim()
-  const lines = yaml.replace(/\r\n/g, '\n').split('\n')
-  let inProviders = false, entryActive = false, entryEnd = -1, entryFound = false
-  for (let i = 0; i < lines.length; i++) {
-    const lp = lines[i]
-    if (/^custom_providers:/.test(lp)) { inProviders = true; continue }
-    if (!inProviders) continue
-    if (/^\S/.test(lp) && !lp.startsWith(' ')) { inProviders = false; entryActive = false; continue }
-    const mName = lp.match(/^\s+-\s+name:\s*(.+?)\s*$/)
-    if (mName) {
-      entryActive = (mName[1] === n)
-      if (entryActive) { entryFound = true; entryEnd = i }
-      continue
-    }
-    if (entryActive) {
-      const mF = lp.match(new RegExp('^(\\s+)' + field + ':\\s*(.+?)\\s*$'))
-      if (mF) { lines[i] = mF[1] + field + ': ' + v; return lines.join('\n') }
-      entryEnd = i
-    }
-  }
-  if (!entryFound) {
-    // Auto-create a new custom_providers entry for any provider name
-    const defaultBaseUrl = 'https://api.openai.com/v1'
-    const defaultModel = 'gpt-4o'
-    const fld = (field === 'base_url') ? v : defaultBaseUrl
-    const mdl = (field === 'model') ? v : defaultModel
-    const entryLines = [
-      '  - name: ' + n,
-      '    base_url: ' + fld,
-      '    api_key_env: OPENAI_API_KEY',
-      '    model: ' + mdl,
-    ]
-    if (/^custom_providers:/m.test(yaml)) {
-      const yl = yaml.replace(/\r\n/g, '\n').split('\n')
-      let inProv = false, lastIdx = -1
-      for (let i = 0; i < yl.length; i++) {
-        if (/^custom_providers:/.test(yl[i])) { inProv = true; continue }
-        if (inProv) {
-          if (/^\S/.test(yl[i]) && !yl[i].startsWith(' ')) { inProv = false; continue }
-          lastIdx = i
-        }
-      }
-      if (lastIdx >= 0) {
-        yl.splice(lastIdx + 1, 0, ...entryLines)
-        return yl.join('\n')
-      }
-      return yaml.replace(/\r\n/g, '\n') + '\n' + entryLines.join('\n') + '\n'
-    }
-    const block = [
-      'custom_providers:',
-      ...entryLines,
-      '',
-    ].join('\n')
-    return block + yaml
-  }
-  // Entry exists but lacks the field - append it at entry end
-  lines.splice(entryEnd + 1, 0, '    ' + field + ': ' + v)
-  return lines.join('\n')
-}
-
-// Resolve a valid named custom provider for model writes. Hermes uses a named
-// custom provider's own `model:` field and OVERRIDES model.default, so the UI
-// model selection must be written there. 'custom'/empty/invalid falls back to
-// the named provider whose base_url matches the configured model.base_url.
-const KNOWN_BASE_PROVIDERS = ['openai','anthropic','openrouter','agnes-ai','nous','moa','ollama','vllm','llamacpp','zai','kimi-coding','kimi-coding-cn','minimax','minimax-cn','bedrock','gemini','deepseek','qwen','grok','xai','antling']
-function customProviderApiKey(yaml, name) {
-  if (!name) return ''
-  const lines = yaml.replace(/\r\n/g, '\n').split('\n')
-  let entryActive = false
-  for (const lp of lines) {
-    const mName = lp.match(/^\s+-\s+name:\s*(.+?)\s*$/)
-    if (mName) { entryActive = (mName[1] === name); continue }
-    if (entryActive) {
-      const mK = lp.match(/^\s+api_key:\s*(.+?)\s*$/)
-      if (mK) return mK[1].trim()
-    }
-  }
-  return ''
-}
-function customProviderBaseUrl(yaml, name) {
-  const lines = yaml.replace(/\r\n/g, '\n').split('\n')
-  let entryActive = false
-  for (const lp of lines) {
-    const mName = lp.match(/^\s+-\s+name:\s*(.+?)\s*$/)
-    if (mName) { entryActive = (mName[1] === name); continue }
-    if (entryActive) {
-      const mB = lp.match(/^\s+base_url:\s*(.+?)\s*$/)
-      if (mB) return mB[1].trim().replace(/\/+$/, '')
-    }
-  }
-  return ''
-}
-function providerNameFromUrl(baseUrl) {
-  if (!baseUrl) return null
-  try {
-    const hostname = new URL(baseUrl).hostname
-    // Strip common prefixes: api., apihub., gateway.
-    return hostname.replace(/^(api|apihub|gateway)\./, '').split('.')[0]
-  } catch { return null }
-}
-function resolveProvider(yaml, requestedProvider, newBaseUrl) {
-  const customNames = [...yaml.matchAll(/^\s+-\s+name:\s*(.+?)\s*$/gm)].map(m => m[1])
-  const validNamed = (p) => p && customNames.includes(p)
-  const validBase = (p) => p && KNOWN_BASE_PROVIDERS.includes(p)
-  // If a new baseUrl is provided, find a custom provider entry that matches it.
-  // This takes priority over the requested name to avoid reusing a stale provider.
-  if (newBaseUrl) {
-    const normNew = newBaseUrl.replace(/\/+$/, '')
-    for (const n of customNames) {
-      if (customProviderBaseUrl(yaml, n).replace(/\/+$/, '') === normNew) return n
-    }
-    // No matching entry — derive a new name from the hostname
-    const derived = providerNameFromUrl(newBaseUrl)
-    if (derived) return derived
-  }
-  if (validNamed(requestedProvider)) return requestedProvider
-  if (validBase(requestedProvider)) return requestedProvider
-  if (customNames.length) {
-    return customNames[0]
-  }
-  return 'custom'
-}
-
 // ── Shared disk writer for Hermes model config ─────────────────────────────
 // Writes the model/provider/baseUrl/apiKey into Hermes config.yaml (model block
 // + named custom_providers entry) and the .env (OPENAI_API_KEY / OPENAI_BASE_URL).
 // Used both by the hermes:setConfig IPC (which also restarts the gateway) and by
 // the startup profile re-assert (applyActiveProfileCache) which runs BEFORE the
 // gateway is spawned. No hardcoded defaults — every value comes from `cfg`.
-
-// Hermes built-in providers (registered in hermes_cli.auth.PROVIDER_REGISTRY)
-// that read their API key from a provider-specific env var instead of
-// OPENAI_API_KEY / custom_providers[].api_key. When model.provider matches one
-// of these names, the custom_providers entry is IGNORED by the resolver, so we
-// MUST also mirror the key into the env var the built-in expects — otherwise
-// the gateway starts with "No LLM provider configured" / "Set <PROVIDER>_API_KEY".
-// Keep this table in sync with the provider names in PROVIDER_REGISTRY.
-const BUILTIN_PROVIDER_ENV = {
-  stepfun: 'STEPFUN_API_KEY',
-  // add more built-in providers here as needed (e.g. glm, minimax, ...)
-}
 function writeHermesConfig({ model, provider, baseUrl, apiKey }) {
   _lastHermesConfigWriteTime = Date.now()
   const hermesDir = path.join(os.homedir(), 'AppData', 'Local', 'hermes')
@@ -531,7 +272,7 @@ function writeHermesConfig({ model, provider, baseUrl, apiKey }) {
     // write back. If effectiveKey is empty we keep the on-disk key intact so a
     // switch never strands the endpoint without credentials (→ 401).
     const stripKey = !!effectiveKey
-    let lines = envContent.split('\n').filter(l => !l.startsWith('OPENAI_BASE_URL=') && !/^\w+_API_KEY=/.test(l) && !(stripKey && l.startsWith('OPENAI_API_KEY=')))
+    const lines = envContent.split('\n').filter(l => !l.startsWith('OPENAI_BASE_URL=') && !/^\w+_API_KEY=/.test(l) && !(stripKey && l.startsWith('OPENAI_API_KEY=')))
     if (baseUrl) lines.push(`OPENAI_BASE_URL=${baseUrl}`)
     if (effectiveKey) lines.push(`OPENAI_API_KEY=${effectiveKey}`)
     // Some provider names are Hermes BUILT-IN providers (registered in
@@ -559,7 +300,12 @@ function writeHermesConfig({ model, provider, baseUrl, apiKey }) {
     // written first) — which is exactly the "switched the model but the gateway
     // keeps using the previous provider's credentials" 401.
     const effectiveProvider = resolved
-    yamlContent = setYamlKey(yamlContent, 'model.provider', effectiveProvider)
+    // Disambiguate names that collide with Hermes built-in providers (e.g.
+    // 'deepseek') by prefixing with 'custom:' so Hermes selects the named
+    // custom_providers entry instead of the built-in resolver (which would
+    // ignore the entry's api_key/base_url and demand a provider-specific env var).
+    const yamlProvider = disambiguateCustomProvider(yamlContent, effectiveProvider)
+    yamlContent = setYamlKey(yamlContent, 'model.provider', yamlProvider)
     if (baseUrl) yamlContent = setYamlKey(yamlContent, 'model.base_url', baseUrl)
     // Keep the named custom provider entry consistent with the model block
     if (model) yamlContent = setCustomProviderField(yamlContent, resolved, 'model', model)
@@ -578,38 +324,26 @@ function writeHermesConfig({ model, provider, baseUrl, apiKey }) {
 }
 
 // ── Agent behaviour settings → Hermes config.yaml ──────────────────────────
-// Writes temperature, max_output_tokens, reasoning_effort, custom_instructions,
-// and system_prompt (personality) into the `agent:` block of config.yaml so the
-// Hermes backend actually uses the user's configured values.
-function writeHermesAgentConfig({ temperature, maxOutputTokens, reasoningEffort, customInstructions, personality }) {
+// Writes reasoning_effort, system_prompt (personality) into the `agent:` block.
+// Removed: temperature, maxOutputTokens, customInstructions (backend-managed).
+// Removed: Chinese language default injection (Hermes Desktop style).
+function writeHermesAgentConfig({ reasoningEffort, personality }) {
   try {
     const yamlPath = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
     let yaml = ''
     try { yaml = fs.readFileSync(yamlPath, 'utf-8') } catch { return }
     let updated = yaml
-    if (temperature !== undefined && temperature !== null) {
-      updated = setYamlKey(updated, 'agent.temperature', String(Number(temperature)))
-    }
-    if (maxOutputTokens !== undefined && maxOutputTokens !== null) {
-      updated = setYamlKey(updated, 'agent.max_output_tokens', String(Number(maxOutputTokens)))
-    }
     if (reasoningEffort !== undefined && reasoningEffort !== null) {
       updated = setYamlKey(updated, 'agent.reasoning_effort', String(reasoningEffort))
-    }
-    if (customInstructions !== undefined) {
-      const safe = '"' + String(customInstructions).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
-      updated = setYamlKey(updated, 'agent.custom_instructions', safe)
     }
     if (personality !== undefined && personality !== null && String(personality).trim() !== '') {
       const safe = '"' + String(personality).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
       updated = setYamlKey(updated, 'agent.system_prompt', safe)
-    } else {
-      // Default: add language matching instruction when no personality is set
-      const defaultPrompt = '"请始终使用与用户相同的语言回复。"'
-      updated = setYamlKey(updated, 'agent.system_prompt', defaultPrompt)
     }
+    // No default Chinese language injection — Hermes Desktop lets SOUL.md / personality decide
     if (updated !== yaml) {
       fs.writeFileSync(yamlPath, updated, 'utf-8')
+      markOwnConfigWrite()
       console.log('[Hermes] agent config written to config.yaml')
     }
   } catch (e) {
@@ -722,6 +456,14 @@ let _restartTimer = null
 let _restartResolveFns = []
 const RESTART_DEBOUNCE_MS = 600
 function restartGatewayDebounced(label) {
+  // serve 模式：网关是常驻 HTTP/WS 服务，config.yaml 的变更在每次
+  // session.create 构建 agent 时才被读取（官方桌面版同理），配置写入
+  // 不需要也不应该重启网关。重启反而会：杀掉所有活跃会话、WS 1006 断连、
+  // 端口漂移、触发渲染层"已同步模型给死实例"竞态。acp 模式行为不变。
+  if (GATEWAY_MODE === 'serve') {
+    console.log('[Hermes] serve mode: skip gateway restart for', label || '(coalesced)')
+    return Promise.resolve()
+  }
   return new Promise((resolve) => {
     _restartResolveFns.push(resolve)
     if (_restartTimer) clearTimeout(_restartTimer)
@@ -730,44 +472,52 @@ function restartGatewayDebounced(label) {
       const waiters = _restartResolveFns
       _restartResolveFns = []
       console.log('[Hermes] debounced restart firing:', label || '(coalesced)')
-      // Tell the renderer the gateway is about to go down so it flips
-      // hermesConnected=false. This makes handleRun await gateway.ready before
-      // issuing session/new — otherwise it fires session/new into the gap
-      // between kill and the new process being ready and the next prompt lands
-      // on a dead session (silent no-output after a provider switch).
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        console.log('[Hermes] notifying renderer: gateway going down (disconnected)')
-        mainWindow.webContents.send('hermes:event', 'gateway.disconnected', { expected: true })
-      }
-      const oldP = hermesProcess
-      hermesProcess = null
-      if (oldP) {
-        try { oldP.kill() } catch {}
-        await new Promise((r) => {
-          if (oldP.exitCode !== null || oldP.signalCode !== null) { r(); return }
-          const onClose = () => r()
-          oldP.once('close', onClose)
-          setTimeout(() => { oldP.removeListener('close', onClose); r() }, 3000)
-        })
-      }
-      await clearHermesSessions()
       try {
-        await startHermesGateway()
+        await restartHermesGatewayCore({ notifyRenderer: true })
         console.log('[Hermes] debounced restart complete:', label || '(coalesced)')
       } catch (e) {
         console.error('[Hermes] debounced restart failed:', e.message)
       }
-      // Notify the renderer that all prior sessions were destroyed by the
-      // restart. The frontend must discard its cached session_id and create a
-      // fresh one on the next send — otherwise it replays a stale id and the
-      // backend answers "session ... not found" → silent no-output.
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        console.log('[Hermes] notifying renderer: gateway sessions invalidated')
-        mainWindow.webContents.send('hermes:event', 'gateway.sessionInvalidated')
-      }
       for (const fn of waiters) { try { fn() } catch {} }
     }, RESTART_DEBOUNCE_MS)
   })
+}
+
+// ── Shared gateway restart core ────────────────────────────────────────────
+// Single implementation for both restart paths (debounced config restarts and
+// the hooks-save restart). Kills the current process, waits for it to exit,
+// optionally notifies the renderer + clears sessions, then boots a new gateway.
+// `restartHermesGatewayCore` is a hoisted function declaration so it can be
+// referenced by restartGatewayDebounced above even though it's defined here.
+async function restartHermesGatewayCore({ notifyRenderer = false } = {}) {
+  // Tell the renderer the gateway is about to go down so it flips
+  // hermesConnected=false. This makes handleRun await gateway.ready before
+  // issuing session/new — otherwise it fires session/new into the gap
+  // between kill and the new process being ready and the next prompt lands
+  // on a dead session (silent no-output after a provider switch).
+  if (notifyRenderer && mainWindow && !mainWindow.isDestroyed()) {
+    console.log('[Hermes] notifying renderer: gateway going down (disconnected)')
+    mainWindow.webContents.send('hermes:event', 'gateway.disconnected', { expected: true })
+  }
+  const oldP = hermesProcess
+  hermesProcess = null
+  try { if (oldP) oldP.kill() } catch {}
+  await new Promise((r) => {
+    if (!oldP || oldP.exitCode !== null || oldP.signalCode !== null) { r(); return }
+    const onClose = () => r()
+    oldP.once('close', onClose)
+    setTimeout(() => { oldP.removeListener('close', onClose); r() }, 3000)
+  })
+  if (notifyRenderer) await clearHermesSessions()
+  await startHermesGateway()
+  // Notify the renderer that all prior sessions were destroyed by the
+  // restart. The frontend must discard its cached session_id and create a
+  // fresh one on the next send — otherwise it replays a stale id and the
+  // backend answers "session ... not found" → silent no-output.
+  if (notifyRenderer && mainWindow && !mainWindow.isDestroyed()) {
+    console.log('[Hermes] notifying renderer: gateway sessions invalidated')
+    mainWindow.webContents.send('hermes:event', 'gateway.sessionInvalidated')
+  }
 }
 
 
@@ -816,7 +566,52 @@ function setupHermesConfigWatcher() {
 // 8s fallback timer.
 let _acpReadySent = false
 
-function startHermesGateway() {
+// ── serve gateway auto-respawn ──────────────────────────────────────────────
+// If the serve gateway dies on its own (e.g. after a heavy tool run — the
+// 2026-07-31 incident where a python serve subprocess exited and Electron never
+// brought it back, leaving the UI stuck on "connecting to Hermes"), respawn it
+// automatically so the user never has to manually kill + cold-restart Electron.
+// Deliberate restarts (debounced restart / config change) set hermesProcess to
+// the replacement BEFORE killing the old one, so the old process's close handler
+// hits the stale-guard and never reaches here. Rate-limited: at most
+// MAX_SERVE_RESPAWN_PER_WINDOW attempts per SERVE_RESPAWN_WINDOW_MS, with an
+// exponential backoff capped at 8s, so an instant-crash loop can't hot-spin.
+function scheduleServeRespawn() {
+  if (appIsQuitting) return
+  if (GATEWAY_MODE !== 'serve') return
+  const now = Date.now()
+  if (now - serveRespawnWindowStart > SERVE_RESPAWN_WINDOW_MS) {
+    serveRespawnWindowStart = now
+    serveRespawnCount = 0
+  }
+  serveRespawnCount++
+  if (serveRespawnCount > MAX_SERVE_RESPAWN_PER_WINDOW) {
+    console.error('[Hermes] serve gateway died too many times in the last 60s — giving up auto-respawn')
+    mainWindow?.webContents.send('hermes:event', 'error', {
+      message: 'Hermes 网关反复崩溃，已停止自动重启。请查看 Hermes 日志（%LOCALAPPDATA%\\hermes\\logs）后手动重启 Helix。',
+    })
+    return
+  }
+  const delay = Math.min(
+    SERVE_RESPAWN_BASE_DELAY_MS * Math.pow(2, serveRespawnCount - 1),
+    8000,
+  )
+  console.log(`[Hermes] serve gateway died — auto-respawning in ${delay}ms (attempt ${serveRespawnCount}/${MAX_SERVE_RESPAWN_PER_WINDOW})`)
+  setTimeout(() => {
+    if (appIsQuitting) return
+    if (hermesProcess) {
+      // A gateway is already alive (e.g. a concurrent restart won the race) —
+      // don't spawn a second one.
+      console.log('[Hermes] respawn skipped: a gateway process is already running')
+      return
+    }
+    startHermesGateway().catch((e) => {
+      console.error('[Hermes] auto-respawn failed:', e?.message || e)
+    })
+  }, delay)
+}
+
+function startHermesGateway(candidateIndex = 0) {
   return new Promise((resolve, reject) => {
     _acpReadySent = false
     // Ensure the git-probe workaround is present before launching (survives updates)
@@ -826,16 +621,18 @@ function startHermesGateway() {
     // choice. No hardcoded pin — the value comes from the user's saved Profile.
     applyActiveProfileCache()
 
-    // Use ACP protocol (JSON-RPC over stdio) for programmatic integration.
     // Resolve the REAL executable path — do NOT spawn the bare command name,
     // because Electron's cleaned PATH often cannot find the hermes venv binary.
-    const hermesCmd = resolveHermesCmd()
-    if (!hermesCmd) {
-      const errMsg = '找不到 hermes 可执行文件。请先安装 Hermes（iex (irm https://hermes-agent.nousresearch.com/install.ps1)），或将其 venv\\Scripts 目录加入 PATH。'
+    // Try each existing candidate in turn; on an ENOENT spawn failure, walk to
+    // the next one (see the 'error' handler + spawn try/catch below).
+    const candidates = resolveHermesCandidates()
+    if (candidateIndex >= candidates.length) {
+      const errMsg = '找不到可启动的 hermes 可执行文件（已尝试 ' + candidates.length + ' 个候选）。请先安装 Hermes（iex (irm https://hermes-agent.nousresearch.com/install.ps1)），或将其 venv\\Scripts 目录加入 PATH。'
       console.error('[Hermes]', errMsg)
       mainWindow?.webContents.send('hermes:event', 'error', { message: errMsg })
       return reject(new Error(errMsg))
     }
+    const hermesCmd = candidates[candidateIndex]
     console.log('[Hermes] resolved executable:', hermesCmd)
     // Build a clean env for the hermes subprocess. Electron's process.env may carry
 
@@ -916,11 +713,57 @@ function startHermesGateway() {
     hermesEnv['PATH'] = cleanPath.join(';')
     hermesEnv['Path'] = cleanPath.join(';')
 
-    const spawnedProcess = spawn(hermesCmd, ['acp'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: hermesEnv,
-      cwd: path.join(require('os').homedir(), 'AppData', 'Local', 'hermes'),
-    })
+    // ── serve-mode branch: same cleaned env, different protocol ──
+    // Official desktop spawns `hermes serve --host 127.0.0.1 --port 0` with
+    // HERMES_SERVE_HEADLESS=1 (API/WS only, no SPA) and announces readiness
+    // on stdout: `HERMES_BACKEND_READY port=<N>` (backend-ready.ts:6).
+    const isServe = GATEWAY_MODE === 'serve'
+    if (isServe) {
+      hermesEnv['HERMES_SERVE_HEADLESS'] = '1'
+      if (!serveSessionToken) serveSessionToken = crypto.randomBytes(24).toString('hex')
+      hermesEnv['HERMES_DASHBOARD_SESSION_TOKEN'] = serveSessionToken
+      serveGatewayInfo = null // reset until the new handshake arrives
+    }
+    const hermesArgs = isServe
+      ? ['serve', '--host', '127.0.0.1', '--port', '0']
+      : ['acp']
+    console.log('[Hermes] gateway mode:', GATEWAY_MODE, '| args:', hermesArgs.join(' '))
+
+    // Pin the gateway's working directory to the user's selected project dir so
+    // the agent (and its tools/terminal) actually runs there instead of inside
+    // the Hermes install dir. TERMINAL_CWD is what Hermes's runtime_cwd reads as
+    // the fallback after the per-session cwd context, so setting it guarantees
+    // the agent lands in the right place even if a session cwd is not propagated.
+    // IMPORTANT: the spawn `cwd` must exist on disk or CreateProcess fails with
+    // ENOENT (-4058) even though the executable exists. A deleted/renamed
+    // project folder was the classic cause — fall back to HOME so the gateway
+    // can still boot, and the renderer's setWorkDir fixes the path later.
+    let spawnCwd = workDir
+    try {
+      if (!fs.existsSync(spawnCwd)) {
+        console.warn('[Hermes] workDir missing, falling back to HOME for spawn cwd:', workDir)
+        spawnCwd = app.getPath('home')
+      }
+    } catch {
+      spawnCwd = app.getPath('home')
+    }
+    hermesEnv['TERMINAL_CWD'] = spawnCwd
+    let spawnedProcess
+    try {
+      spawnedProcess = spawn(hermesCmd, hermesArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: hermesEnv,
+        cwd: spawnCwd,
+      })
+    } catch (err) {
+      // Synchronous spawn failure (e.g. ENOENT) — retry the next candidate.
+      if ((err.code === 'ENOENT' || err.errno === -4058) && candidateIndex + 1 < candidates.length) {
+        console.log('[Hermes] spawn threw (ENOENT) — retrying with next candidate:', candidates[candidateIndex + 1])
+        resolve(startHermesGateway(candidateIndex + 1))
+        return
+      }
+      return reject(err)
+    }
     hermesProcess = spawnedProcess
     // Activate the config.yaml/.env watcher (guarded — runs once even across restarts).
     setupHermesConfigWatcher()
@@ -928,6 +771,15 @@ function startHermesGateway() {
     spawnedProcess.on('error', (err) => {
       console.error('[Hermes] Process error:', err.message, '| cmd:', hermesCmd)
       if (hermesProcess === spawnedProcess) hermesProcess = null
+      // ENOENT / -4058 = the OS couldn't launch this executable (e.g. a broken or
+      // partial venv — common after a failed `hermes update` leaves a `.venv` that
+      // exists on disk but won't start). Walk to the next candidate rather than
+      // giving up, so the gateway still boots from a working venv.
+      if ((err.code === 'ENOENT' || err.errno === -4058) && candidateIndex + 1 < candidates.length) {
+        console.log('[Hermes] spawn failed (ENOENT) — retrying with next candidate:', candidates[candidateIndex + 1])
+        resolve(startHermesGateway(candidateIndex + 1))
+        return
+      }
       const detail = err.code === 'ENOENT'
         ? `找不到可执行文件: ${hermesCmd}\n请确认 Hermes 已安装，或将其 venv\\Scripts 目录加入 PATH。`
         : `Hermes 启动失败: ${err.message}`
@@ -949,10 +801,65 @@ function startHermesGateway() {
       }
       diagState.gatewayRunning = false
       hermesProcess = null
+      serveGatewayInfo = null
       mainWindow?.webContents.send('hermes:event', 'gateway.disconnected', { code, signal })
+      // Unexpected exit (NOT a deliberate restart — those leave hermesProcess
+      // pointing at the replacement and hit the stale-guard above): auto-respawn
+      // the serve gateway so the UI never stays stuck on the "connecting" splash.
+      if (isServe && !appIsQuitting) {
+        scheduleServeRespawn()
+      }
     })
 
     hermesProcess.stdout?.on('data', (data) => {
+      if (isServe) {
+        // serve mode: stdout carries logs + the readiness handshake, NOT JSON-RPC.
+        hermesStdoutBuffer += data.toString()
+        let nl
+        while ((nl = hermesStdoutBuffer.indexOf('\n')) >= 0) {
+          const line = hermesStdoutBuffer.slice(0, nl).trim()
+          hermesStdoutBuffer = hermesStdoutBuffer.slice(nl + 1)
+          if (!line) continue
+          // Official regex: /^HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)/
+          const m = line.match(/^HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)/)
+          // NOTE: do NOT guard with `!serveGatewayInfo` here. On a gateway
+          // restart (setWorkDir / hooks / respawn) the old process's `close`
+          // event may be skipped (hermesProcess already points at the new
+          // process), so serveGatewayInfo is NOT reset to null — and the new
+          // port's ready line would then be silently dropped, leaving the
+          // renderer pointing at the dead port forever → every RPC hangs →
+          // "点发送就卡死". Always update + re-push on every handshake.
+          if (m) {
+            const port = parseInt(m[1], 10)
+            const prevPort = serveGatewayInfo?.port
+            serveGatewayInfo = {
+              mode: 'serve',
+              port,
+              token: serveSessionToken,
+              baseUrl: `http://127.0.0.1:${port}`,
+              wsUrl: `ws://127.0.0.1:${port}/api/ws?token=${serveSessionToken}`,
+            }
+            console.log('[Hermes] serve gateway ready on port', port, prevPort && prevPort !== port ? `(port changed ${prevPort} → ${port})` : '')
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              // `gateway.ready` only flips the connected flag once...
+              if (!_acpReadySent) {
+                _acpReadySent = true
+                mainWindow.webContents.send('hermes:event', 'gateway.ready')
+              }
+              // ...but `gateway.serveInfo` MUST be re-sent on EVERY handshake
+              // (serve runs --port 0 → fresh port each start). Always push it.
+              mainWindow.webContents.send('hermes:event', 'gateway.serveInfo', serveGatewayInfo)
+              // A successful (re)connect clears the auto-respawn backoff window so
+              // a recovered gateway isn't penalized by the previous crash count.
+              serveRespawnCount = 0
+              serveRespawnWindowStart = 0
+            }
+          } else if (/error|fail|traceback/i.test(line)) {
+            console.log('[Hermes serve stdout]', line)
+          }
+        }
+        return
+      }
       hermesStdoutBuffer += data.toString()
       processHermesBuffer()
     })
@@ -1037,10 +944,16 @@ function startHermesGateway() {
       diagState.gatewayStartedAt = Date.now()
       // Fallback: if "ACP client connected" never appears (older Hermes or
       // log format change), still send ready after a generous delay so the
-      // UI doesn't hang forever.
+      // UI doesn't hang forever. serve mode: handshake is authoritative and
+      // Python cold start can take 40-90s (official desktop uses 90s timeout),
+      // so the fallback only logs a warning instead of faking readiness.
       setTimeout(() => {
         if (!mainWindow || mainWindow.isDestroyed()) return
         if (_acpReadySent) return
+        if (isServe) {
+          if (!serveGatewayInfo) console.warn('[Hermes] serve handshake not seen yet (still waiting, up to 90s is normal)')
+          return
+        }
         _acpReadySent = true
         console.log('[Hermes] Sending gateway.ready to renderer (fallback timer)')
         mainWindow.webContents.send('hermes:event', 'gateway.ready')
@@ -1140,15 +1053,44 @@ async function startNextStandalone() {
 // override it with the last-used project from IndexedDB on startup.
 let workDir = app.isReady() ? app.getPath('home') : process.cwd()
 
+// Persist/restore the user's selected project directory so the Hermes gateway
+// (spawned at app start) boots into the right cwd instead of reverting to HOME.
+function getPersistedWorkDir() {
+  try {
+    const p = path.join(app.getPath('userData'), 'workdir.json')
+    const raw = fs.readFileSync(p, 'utf-8')
+    const obj = JSON.parse(raw)
+    if (obj && typeof obj.workDir === 'string' && obj.workDir.trim()) return obj.workDir.trim()
+  } catch {}
+  return null
+}
+function persistWorkDir(dir) {
+  try {
+    const p = path.join(app.getPath('userData'), 'workdir.json')
+    fs.writeFileSync(p, JSON.stringify({ workDir: dir }), 'utf-8')
+  } catch {}
+}
+
 function safePath(filePath) {
-  const resolved = path.resolve(workDir, filePath)
-  if (!resolved.startsWith(workDir)) return null
-  // Check for symlink escapes
+  if (typeof filePath !== 'string' || !filePath.trim()) return null
+  if (typeof workDir !== 'string' || !workDir) return null
+  const root = path.resolve(workDir)
+  const resolved = path.resolve(root, filePath)
+  // Lexical containment: must be inside root (or root itself). The `+ sep`
+  // guard prevents `/workdir2`-style sibling escapes, and path.resolve()
+  // already normalized `..` and drive-relative segments.
+  const within = resolved === root || resolved.startsWith(root + path.sep)
+  if (!within) return null
+  // Symlink escape check: resolve the real path on disk and verify it still
+  // lands inside root. A link pointing outside the workspace is rejected.
   try {
     const realResolved = fs.realpathSync(resolved)
-    const realWorkDir = fs.realpathSync(workDir)
-    return realResolved.startsWith(realWorkDir) ? realResolved : null
+    const realRoot = fs.realpathSync(root)
+    const realWithin = realResolved === realRoot || realResolved.startsWith(realRoot + path.sep)
+    return realWithin ? realResolved : null
   } catch {
+    // Path does not exist yet (e.g. a file about to be created) — lexical
+    // containment above is the best we can do, and it already passed.
     return resolved
   }
 }
@@ -1175,7 +1117,7 @@ async function createWindow() {
 
   // Load the Next.js frontend (dev or production)
   const isDev = !app.isPackaged
-  let url = `http://localhost:${PORT}`
+  const url = `http://localhost:${PORT}`
 
   if (isDev) {
     // Dev: start next dev if not already running
@@ -1274,7 +1216,9 @@ safeHandle('hermes:send', async (event, method, params) => {
   // If config.yaml/.env was edited externally since the gateway started, recycle
   // it now (lazily, before forwarding) so the next request reads fresh auth —
   // no manual invalidation, no session rebuild, no 401.
-  if (_hermesConfigStale && hermesProcess) {
+  if (_hermesConfigStale && hermesProcess && GATEWAY_MODE !== 'serve') {
+    // serve 模式跳过：REST /api/model/set 本身就会写 config.yaml，触发本监视器；
+    // serve 在每次 session.create 时重读配置，无需回收进程（回收反而 WS 1006 断连）。
     console.log('[Hermes] config stale → recycling gateway before request')
     const oldP = hermesProcess
     hermesProcess = null
@@ -1297,6 +1241,14 @@ safeHandle('hermes:send', async (event, method, params) => {
   // with an empty list so neither path 404s or surfaces a spurious error.
   if (method === 'hermes:getTasks') {
     return { tasks: [] }
+  }
+  // The current Hermes gateway build does not implement `session.context_breakdown`
+  // (it returns -32601 Method not found). context-usage.tsx probes it every 10s
+  // for the context-usage ring; answer locally with null so it degrades gracefully
+  // (falls back to the model's default context window) instead of spamming
+  // "Method not found" on every poll.
+  if (method === 'session.context_breakdown') {
+    return null
   }
   if (method === 'session/prompt') {
     // Send, but if the backend reports the session was not found (stale id from
@@ -1374,6 +1326,17 @@ safeHandle('hermes:status', async () => {
   return { connected }
 })
 
+// ── Gateway connection info (serve-migration Phase 1) ──────────────────────
+// Renderer calls this to learn which protocol is active and, in serve mode,
+// where to connect directly (REST baseUrl + WS url with token). In acp mode
+// it returns { mode:'acp' } and the renderer keeps using the IPC bridge.
+safeHandle('hermes:getGatewayInfo', async () => {
+  if (GATEWAY_MODE === 'serve') {
+    return serveGatewayInfo || { mode: 'serve', pending: true }
+  }
+  return { mode: 'acp' }
+})
+
 // ── Fetch models from custom API endpoint ──────────────────────────────────
 
 safeHandle('hermes:fetchModels', async (event, { baseUrl, apiKey }) => {
@@ -1434,6 +1397,22 @@ safeHandle('hermes:getConfig', async () => {
     // Named custom provider overrides model.default / model.base_url
     if (cpBaseUrl) res.baseUrl = cpBaseUrl
     if (cpModel) res.model = cpModel
+    // Parse the top-level `delegation:` block so the Agents/子智能体 settings
+    // panel can show the actual subagent routing config (delegation.provider,
+    // delegation.model, delegation.base_url, max_iterations, reasoning_effort,
+    // subagent_auto_approve). Absent → empty object (inherit parent model).
+    res.delegation = {}
+    {
+      let inDelegation = false
+      for (const lp of yaml.split('\n')) {
+        if (/^delegation:/.test(lp)) { inDelegation = true; continue }
+        if (inDelegation) {
+          if (/^\S/.test(lp) && !lp.startsWith(' ')) { inDelegation = false; break }
+          const m = lp.match(/^\s+([A-Za-z0-9_]+):\s*(.*)$/)
+          if (m) res.delegation[m[1]] = m[2].replace(/^['"]|['"]$/g, '').trim()
+        }
+      }
+    }
     let envKey = ''
     try {
       const env = fs.readFileSync(envPath, 'utf-8')
@@ -1452,6 +1431,10 @@ let _lastHermesConfig = null
 let _lastHermesConfigWriteTime = 0
 
 safeHandle('hermes:setConfig', async (event, config) => {
+  // serve 模式：同样写入 config.yaml（serve 在每次 session.create 时才读取），
+  // 不重启网关——restartGatewayDebounced 在 serve 下已自动 no-op。模型配置的
+  // 首选路径仍是 serve-gateway.setModel（pushModelConfig），setConfig 只是把
+  // 设置页 handleSave / 历史记录点击的直写调用也落到磁盘，二者写入相同值。
   const { model, provider, baseUrl, apiKey } = config
   // Defense-in-depth: validate the incoming config so a stale/malformed profile
   // never poisons Hermes config.yaml and produces 401s.
@@ -1493,9 +1476,13 @@ safeHandle('hermes:setConfig', async (event, config) => {
 // Sets a single nested key (e.g. 'compression.enabled') in config.yaml and
 // restarts Hermes so the change takes effect. Used by the Helix settings UI.
 safeHandle('hermes:setYamlKey', async (event, { key, value }) => {
+  // serve 模式：直接写入 config.yaml（每次 session.create 会重新读取），
+  // 不重启网关——restartGatewayDebounced 在 serve 下自动 no-op。
+  // 修复 serve 下设置页 setYamlKey 曾为 no-op 导致 delegation.* 等配置
+  // 永远不落地的问题。
   try {
     const yamlPath = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
-    let c = fs.readFileSync(yamlPath, 'utf-8')
+    const c = fs.readFileSync(yamlPath, 'utf-8')
     const updated = setYamlKey(c, key, value)
     if (updated === c) return { success: true, changed: false }
     fs.writeFileSync(yamlPath, updated, 'utf-8')
@@ -1513,6 +1500,7 @@ safeHandle('hermes:setYamlKey', async (event, { key, value }) => {
 // ── Hermes agent config (temperature, maxTokens, reasoningEffort, etc.) ────
 // Writes all agent behaviour settings to config.yaml and restarts the gateway.
 safeHandle('hermes:setAgentConfig', async (event, params = {}) => {
+  // serve 模式：直接写入 config.yaml，不重启网关（restart 自动 no-op）。
   try {
     writeHermesAgentConfig(params)
     if (hermesProcess) {
@@ -1552,6 +1540,51 @@ safeHandle('hermes:setReasoningEffort', async (event, params = {}) => {
   }
 })
 
+// ── Live config push (no gateway restart) ────────────────────────────────
+// Sets a single key/value pair in config.yaml. Used for real-time config
+// changes that take effect on the next prompt without restart.
+safeHandle('hermes:setConfigKeyValue', async (event, params = {}) => {
+  try {
+    const { key, value, session_id } = params
+    if (!key) return { success: false }
+    const yamlPath = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    let yaml = ''
+    try { yaml = fs.readFileSync(yamlPath, 'utf-8') } catch { return { success: false } }
+    const updated = setYamlKey(yaml, key, String(value ?? ''))
+    if (updated !== yaml) {
+      fs.writeFileSync(yamlPath, updated, 'utf-8')
+      markOwnConfigWrite()
+    }
+    // Also try to push to the running session via config.set RPC if session_id is provided
+    if (session_id && hermesProcess) {
+      try {
+        await sendHermesRequest('config.set', { key, value, session_id })
+      } catch {
+        // Config was persisted to yaml; live push is best-effort
+      }
+    }
+    return { success: true }
+  } catch (err) {
+    console.error('[Hermes] setConfigKeyValue failed:', err)
+    return { success: false, error: err.message }
+  }
+})
+
+// ── Approval response ────────────────────────────────────────────────────
+// Forwards the user's approval decision to the backend.
+safeHandle('hermes:approvalRespond', async (event, params = {}) => {
+  try {
+    const { session_id, tool_call_id, choice } = params
+    if (hermesProcess) {
+      await sendHermesRequest('approval.respond', { session_id, tool_call_id, choice })
+    }
+    return { success: true }
+  } catch (err) {
+    console.error('[Hermes] approvalRespond failed:', err)
+    return { success: false, error: err.message }
+  }
+})
+
 // ── Hermes personality list ──────────────────────────────────────────────
 // Returns the predefined personalities from config.yaml (agent.personalities).
 safeHandle('hermes:listPersonalities', async () => {
@@ -1575,22 +1608,6 @@ safeHandle('hermes:listPersonalities', async () => {
   }
 })
 
-// Parse agent.personalities from config.yaml (shared by list + set).
-function parseHermesPersonalities(yaml) {
-  const lines = yaml.split(/\r?\n/)
-  let start = -1
-  for (let i = 0; i < lines.length; i++) {
-    if (/^agent:/.test(lines[i])) { start = i; break }
-  }
-  if (start === -1) return {}
-  const out = {}
-  for (let i = start + 1; i < lines.length; i++) {
-    if (/^\S/.test(lines[i]) && !lines[i].startsWith(' ')) break
-    const m = lines[i].match(/^\s{4}([A-Za-z0-9_\u4e00-\u9fff]+):\s?(.*)$/)
-    if (m) out[m[1]] = m[2].replace(/^['"]|['"]$/g, '')
-  }
-  return out
-}
 
 // Trigger a Hermes backend self-update (`hermes update`). Fire-and-forget:
 // spawn the update command and return immediately so the UI can show
@@ -1617,11 +1634,12 @@ safeHandle('hermes:update', async () => {
 // Mirrors the CLI `/personality <name>` command: resolves the prompt from
 // config.yaml's agent.personalities, or uses the prompt passed from the UI.
 safeHandle('hermes:setPersonality', async (event, { name, prompt } = {}) => {
+  // serve 模式：直接写入 config.yaml 的 agent.system_prompt，不重启网关。
   try {
     const localApp = process.env.LOCALAPPDATA || ''
     if (!localApp) return { success: false, error: 'LOCALAPPDATA not set' }
     const yamlPath = path.join(localApp, 'hermes', 'config.yaml')
-    let yaml = fs.readFileSync(yamlPath, 'utf-8')
+    const yaml = fs.readFileSync(yamlPath, 'utf-8')
     const clearNames = ['', 'none', 'default', 'neutral', 'clear']
     const nameStr = String(name || '').trim()
     let resolved
@@ -1698,13 +1716,15 @@ safeHandle('hermes:setModel', async (event, { model, baseUrl, apiKey, provider }
       const effProvider = resolveProvider(yaml, requested, String(baseUrl || '').trim() || undefined)
       let updated = setYamlKey(yaml, 'model.default', String(model).trim())
       updated = setYamlKey(updated, 'model.base_url', String(baseUrl || '').trim())
-      // model.provider MUST be the resolved NAMED provider (not 'custom') so the
-      // gateway selects the correct custom_providers entry. A named entry also
-      // reads api_key_env (OPENAI_API_KEY) from .env, so this stays compatible
-      // with env-based key injection. Forcing 'custom' made the gateway fall
-      // back to custom_providers[0] and reuse the previous provider's creds.
+      // model.provider MUST be the resolved NAMED provider (not literal 'custom')
+      // so the gateway selects the correct custom_providers entry. A named entry
+      // also reads api_key_env (OPENAI_API_KEY) from .env, so this stays
+      // compatible with env-based key injection. For names that collide with a
+      // Hermes built-in (e.g. 'deepseek'), prefix with 'custom:' to defeat the
+      // built-in resolver which would otherwise ignore the entry's base_url/api_key.
       const effectiveProvider = effProvider
-      updated = setYamlKey(updated, 'model.provider', effectiveProvider)
+      const yamlProvider = disambiguateCustomProvider(yaml, effProvider)
+      updated = setYamlKey(updated, 'model.provider', yamlProvider)
       // Only write model.api_key when we have a key. An empty incoming key
       // during a provider switch must NOT wipe the existing credential
       // (which would strand the new base_url with no auth → 401).
@@ -1733,7 +1753,7 @@ safeHandle('hermes:setModel', async (event, { model, baseUrl, apiKey, provider }
             // write back; otherwise keep it so a switch never strands the
             // endpoint without credentials (→ 401).
             const stripKey = !!hermesKey
-            let envLines = envContent.split('\n').filter(l => !l.startsWith('OPENAI_BASE_URL=') && !/^\w+_API_KEY=/.test(l) && !(stripKey && l.startsWith('OPENAI_API_KEY=')))
+            const envLines = envContent.split('\n').filter(l => !l.startsWith('OPENAI_BASE_URL=') && !/^\w+_API_KEY=/.test(l) && !(stripKey && l.startsWith('OPENAI_API_KEY=')))
             if (baseUrl) envLines.push(`OPENAI_BASE_URL=${String(baseUrl).trim()}`)
             if (hermesKey) envLines.push(`OPENAI_API_KEY=${hermesKey}`)
             // Mirror the key into a built-in provider's expected env var (e.g.
@@ -1800,97 +1820,21 @@ safeHandle('hermes:readFile', async (event, filePath) => {
 })
 
 // ── Hermes Memory sync (MEMORY.md / USER.md) ──────────────────────────────
-// Helix's manual memories are synchronized with Hermes's backend memory_manager
-// so the two systems stop keeping separate copies. Single source of truth:
+// Implementation lives in lib/memory.js (pure fs helpers); these IPC channels
+// stay here as thin wrappers. Single source of truth:
 // <hermes_home>/memories/MEMORY.md (agent notes) and USER.md (user profile).
-// Entry format matches Hermes memory_tool: entries joined by "\n◊\n".
-function hermesMemoriesDir() {
-  const home = process.env.HERMES_HOME
-    ? require('path').resolve(process.env.HERMES_HOME)
-    : require('path').join(require('os').homedir(), 'AppData', 'Local', 'hermes')
-  return require('path').join(home, 'memories')
-}
-
-const MEM_DELIM = '\n◊\n'
-
-async function readMemFile(file) {
-  try {
-    const raw = await fsPromises.readFile(file, 'utf-8')
-    if (!raw || !raw.trim()) return []
-    return raw.split(MEM_DELIM).map(e => e.trim()).filter(Boolean)
-  } catch {
-    return []
-  }
-}
-
-async function writeMemFile(file, entries) {
-  const dir = require('path').dirname(file)
-  await fsPromises.mkdir(dir, { recursive: true })
-  const content = entries.join(MEM_DELIM)
-  // Atomic write (temp + rename) to match Hermes memory_tool's contract and
-  // avoid the truncation race window. Windows rename needs the target gone first.
-  const tmp = require('path').join(dir, '.mem_' + Date.now() + '.tmp')
-  await fsPromises.writeFile(tmp, content, 'utf-8')
-  try { await fsPromises.unlink(file) } catch {}
-  await fsPromises.rename(tmp, file)
-}
-
-// Manual-memory origin markers. Helix records which MEMORY.md entries it added
-// manually so the UI can distinguish them from entries Hermes's self-evolution
-// appended automatically. Stored as a separate dotfile (NOT an entry inside
-// MEMORY.md) so it never pollutes agent-visible memory content or trips Hermes's
-// drift detection (which only inspects MEMORY.md / USER.md entry bodies).
-const MANUAL_MARKERS_FILE = '.helix_manual.json'
-
-async function readManualMarkers(dir) {
-  try {
-    const raw = await fsPromises.readFile(
-      require('path').join(dir, MANUAL_MARKERS_FILE),
-      'utf-8',
-    )
-    const arr = JSON.parse(raw)
-    return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-async function addManualMarker(dir, text) {
-  const cur = await readManualMarkers(dir)
-  if (cur.includes(text)) return
-  cur.push(text)
-  await fsPromises.mkdir(dir, { recursive: true })
-  await fsPromises.writeFile(
-    require('path').join(dir, MANUAL_MARKERS_FILE),
-    JSON.stringify(cur, null, 2),
-    'utf-8',
-  )
-}
-
-async function removeManualMarker(dir, text) {
-  const cur = await readManualMarkers(dir)
-  const next = cur.filter((x) => x !== text)
-  if (next.length === cur.length) return
-  const file = require('path').join(dir, MANUAL_MARKERS_FILE)
-  if (next.length === 0) {
-    try { await fsPromises.unlink(file) } catch {}
-    return
-  }
-  await fsPromises.writeFile(file, JSON.stringify(next, null, 2), 'utf-8')
-}
-
 safeHandle('hermes:listMemories', async () => {
   const dir = hermesMemoriesDir()
   return {
-    memory: await readMemFile(require('path').join(dir, 'MEMORY.md')),
-    user: await readMemFile(require('path').join(dir, 'USER.md')),
+    memory: await readMemFile(path.join(dir, 'MEMORY.md')),
+    user: await readMemFile(path.join(dir, 'USER.md')),
     manual: await readManualMarkers(dir),
   }
 })
 
 safeHandle('hermes:addMemoryEntry', async (event, { target, text }) => {
   const dir = hermesMemoriesDir()
-  const file = require('path').join(dir, target === 'user' ? 'USER.md' : 'MEMORY.md')
+  const file = path.join(dir, target === 'user' ? 'USER.md' : 'MEMORY.md')
   const entries = await readMemFile(file)
   const t = (text || '').trim()
   if (!t) return { ok: false, error: 'empty' }
@@ -1910,7 +1854,7 @@ safeHandle('hermes:addMemoryEntry', async (event, { target, text }) => {
 
 safeHandle('hermes:removeMemoryEntry', async (event, { target, text }) => {
   const dir = hermesMemoriesDir()
-  const file = require('path').join(dir, target === 'user' ? 'USER.md' : 'MEMORY.md')
+  const file = path.join(dir, target === 'user' ? 'USER.md' : 'MEMORY.md')
   const entries = await readMemFile(file)
   const t = (text || '').trim()
   const next = entries.filter((e) => e !== t)
@@ -1920,101 +1864,6 @@ safeHandle('hermes:removeMemoryEntry', async (event, { target, text }) => {
   }
   return { ok: true, entries: next }
 })
-
-// Skill call count tracking
-const skillCallCounts = {}
-const SKILL_CALL_COUNTS_FILE = 'skill-call-counts.json'
-
-async function loadSkillCallCounts() {
-  try {
-    // First try to read from Hermes .usage.json (authoritative source)
-    const usageFilePath = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes', 'skills', '.usage.json')
-    const data = await fsPromises.readFile(usageFilePath, 'utf-8')
-    const usageData = JSON.parse(data)
-    // Map from .usage.json format: { skillName: { use_count: N } }
-    for (const [name, info] of Object.entries(usageData)) {
-      if (info && typeof info === 'object' && typeof info.use_count === 'number') {
-        skillCallCounts[name] = info.use_count
-      }
-    }
-  } catch {
-    // Fallback to skill-call-counts.json
-    try {
-      const filePath = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes', SKILL_CALL_COUNTS_FILE)
-      const data = await fsPromises.readFile(filePath, 'utf-8')
-      Object.assign(skillCallCounts, JSON.parse(data))
-    } catch { /* file doesn't exist yet, use empty object */ }
-  }
-}
-
-async function saveSkillCallCounts() {
-  try {
-    const dir = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes')
-    await fsPromises.mkdir(dir, { recursive: true })
-    const filePath = path.join(dir, SKILL_CALL_COUNTS_FILE)
-    await fsPromises.writeFile(filePath, JSON.stringify(skillCallCounts, null, 2), 'utf-8')
-  } catch (err) {
-    console.error('[Skills] Failed to save call counts:', err.message)
-  }
-}
-
-function incrementSkillCallCount(skillName) {
-  skillCallCounts[skillName] = (skillCallCounts[skillName] || 0) + 1
-  saveSkillCallCounts()
-  return skillCallCounts[skillName]
-}
-
-// Load call counts on startup
-loadSkillCallCounts()
-
-// List all Hermes skills (user + builtin) with parsed frontmatter metadata.
-function parseSkillFrontmatter(content, fallbackName) {
-  const fm = content.match(/^---\s*\n([\s\S]*?)\n---/)
-  let name = fallbackName
-  let description = ''
-  if (fm) {
-    const block = fm[1]
-    const nameM = block.match(/name:\s*(.+)/)
-    const descM = block.match(/description:\s*(.+)/)
-    if (nameM) name = nameM[1].trim()
-    if (descM) description = descM[1].trim()
-  }
-  return { name, description }
-}
-
-async function collectSkillsFromDir(rootDir, isBuiltin, out) {
-  // If rootDir itself is a skill (has SKILL.md), add it directly
-  const selfSkillMd = path.join(rootDir, 'SKILL.md')
-  try {
-    await fsPromises.access(selfSkillMd)
-    const content = await fsPromises.readFile(selfSkillMd, 'utf-8')
-    const { name, description } = parseSkillFrontmatter(content, path.basename(rootDir))
-    out.push({ id: selfSkillMd, name, description, isBuiltin, path: selfSkillMd, callCount: skillCallCounts[name] || 0 })
-    return
-  } catch { /* not a skill dir itself — scan subdirectories */ }
-
-  let entries
-  try {
-    entries = await fsPromises.readdir(rootDir, { withFileTypes: true })
-  } catch {
-    return
-  }
-  for (const e of entries) {
-    if (!e.isDirectory()) continue
-    if (e.name === 'tests' || e.name.startsWith('.')) continue
-    const full = path.join(rootDir, e.name)
-    const skillMd = path.join(full, 'SKILL.md')
-    try {
-      await fsPromises.access(skillMd)
-    } catch {
-      await collectSkillsFromDir(full, isBuiltin, out)
-      continue
-    }
-    const content = await fsPromises.readFile(skillMd, 'utf-8')
-    const { name, description } = parseSkillFrontmatter(content, e.name)
-    out.push({ id: skillMd, name, description, isBuiltin, path: skillMd, callCount: skillCallCounts[name] || 0 })
-  }
-}
 
 safeHandle('hermes:listSkills', async () => {
   const localApp = process.env.LOCALAPPDATA || ''
@@ -2103,23 +1952,20 @@ registerScheduledTasksHandlers()
 // Hermes reads hooks at GATEWAY STARTUP (register_from_config), so a save to
 // the hooks: block must be followed by a restart for them to take effect.
 async function restartHermesGateway() {
-  if (!hermesProcess) {
-    try { await startHermesGateway() } catch (e) { console.error('[hooks] restart failed:', e.message) }
-    return
+  try {
+    await restartHermesGatewayCore({ notifyRenderer: false })
+  } catch (e) {
+    console.error('[hooks] restart failed:', e.message)
   }
-  const old = hermesProcess
-  hermesProcess = null
-  try { old.kill() } catch {}
-  await new Promise((resolve) => {
-    if (old.exitCode !== null || old.signalCode !== null) { resolve(); return }
-    const onClose = () => resolve()
-    old.once('close', onClose)
-    setTimeout(() => { old.removeListener('close', onClose); resolve() }, 3000)
-  })
-  try { await startHermesGateway() } catch (e) { console.error('[hooks] restart failed:', e.message) }
 }
 
-hooksModule.registerHooksHandlers(restartHermesGateway)
+// hooks 保存后需要重启网关才能重新注册 hooks。serve 模式下重启会杀掉
+// 常驻 HTTP/WS 网关（活跃会话断开、端口漂移），且 hermes serve 只在启动时
+// 注册 hooks——保存只落地 config.yaml，等用户下次启动 Helix 才生效。
+hooksModule.registerHooksHandlers(() => {
+  if (GATEWAY_MODE === 'serve') return Promise.resolve()
+  return restartHermesGateway()
+})
 
 // ── Security / safeStorage ──────────────────────────────────────────────────
 registerSecurityHandlers(() => mainWindow, getDiagnostics)
@@ -2136,7 +1982,13 @@ safeHandle('shell:open', async (event, target) => {
 })
 
 safeHandle('shell:showItemInFolder', async (event, relativePath) => {
-  const resolved = safePath(relativePath)
+  let resolved = safePath(relativePath)
+  // Also allow the Hermes memory directory (learning view "reveal in folder").
+  if (!resolved) {
+    const memDir = path.join(process.env.LOCALAPPDATA || '', 'hermes', 'memories')
+    const candidate = path.resolve(relativePath || '')
+    if (candidate.startsWith(memDir)) resolved = candidate
+  }
   if (!resolved) {
     return { ok: false, error: '路径不安全或超出工作目录范围' }
   }
@@ -2149,8 +2001,11 @@ safeHandle('shell:openPath', async (event, dir) => {
 })
 
 // App-specific IPC (dialog, app info, runtime — stays in main.js)
-safeHandle('dialog:openDirectory', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
+safeHandle('dialog:openDirectory', async (event, defaultPath) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    defaultPath: typeof defaultPath === 'string' && defaultPath.trim() ? defaultPath : undefined,
+  })
   if (result.canceled) return null
   // Only return the path — let app:setWorkDir handle the actual switch
   // (which does path normalization and session flush). Directly setting
@@ -2212,6 +2067,25 @@ safeHandle('app:setWorkDir', (event, dir) => {
   const isDriveRoot = typeof dir === 'string' && /^[a-zA-Z]:[\/]?$/.test(dir)
   if (dir === '/' || dir === '\\' || isDriveRoot) dir = process.cwd()
   workDir = path.resolve(workDir, dir || workDir)
+  // Ensure the selected directory actually exists on disk. Without this, a path
+  // that looks valid but isn't created yet gets silently ignored by Hermes's
+  // session.create (explicit_cwd requires os.path.isdir(...) to be true) and
+  // the agent falls back to the gateway's HOME (C:\Users\hyt\...\hermes), with
+  // no error surfaced. Creating it here guarantees explicit_cwd is honored.
+  try {
+    fs.mkdirSync(workDir, { recursive: true })
+  } catch (e) {
+    console.warn('[setWorkDir] failed to create directory:', workDir, e?.message)
+  }
+  // Persist so the next cold start boots the gateway into this directory.
+  persistWorkDir(workDir)
+  // The Hermes process's cwd + TERMINAL_CWD are fixed at spawn time. Changing
+  // `workDir` alone does NOT move the already-running process, so the agent would
+  // keep working in the old directory. Restart the gateway to apply the new cwd.
+  if (hermesProcess) {
+    console.log('[setWorkDir] restarting Hermes gateway to apply new cwd:', workDir)
+    restartHermesGateway()
+  }
   return { success: true, workDir }
 })
 
@@ -2236,6 +2110,23 @@ app.whenReady().then(async () => {
   }
 
   await createWindow()
+
+  // Restore the user's last-selected project directory BEFORE spawning the
+  // gateway, so the Hermes process boots with the correct cwd + TERMINAL_CWD
+  // (otherwise it would revert to HOME and the agent would work in the wrong dir).
+  try {
+    const saved = getPersistedWorkDir()
+    if (saved) {
+      // Recreate the directory if it was deleted/renamed while the app was
+      // closed — otherwise spawn(exe, { cwd }) fails with ENOENT (-4058) and
+      // the gateway never starts. Matches setWorkDir's mkdir behavior.
+      fs.mkdirSync(saved, { recursive: true })
+      workDir = saved
+      console.log('[workDir] restored from disk:', workDir)
+    }
+  } catch (e) {
+    console.warn('[workDir] restore failed:', e?.message)
+  }
 
   // Start Hermes gateway (non-blocking, UI loads immediately)
   // The 'spawn' handler inside startHermesGateway() sends 'gateway.ready' to the frontend
@@ -2265,21 +2156,40 @@ app.on('window-all-closed', () => {
 
 
 
-app.on('before-quit', async () => {
+app.on('before-quit', (event) => {
+  // Electron does NOT await async before-quit handlers, so the old async
+  // handler could exit before the gateway / next-server children were torn
+  // down. Reliable shutdown: preventDefault on the first quit, run the
+  // teardown, then app.exit(0) (which bypasses before-quit — no re-entry).
+  if (appIsQuitting) return
+  event.preventDefault()
+  appIsQuitting = true
   terminalModule.kill()
+  const teardown = []
   if (hermesProcess) {
-    try { hermesProcess.kill() } catch {}
+    const proc = hermesProcess
     hermesProcess = null
+    teardown.push(new Promise((resolve) => {
+      try { proc.kill() } catch {}
+      const done = () => resolve()
+      proc.once('close', done)
+      setTimeout(() => { proc.removeListener('close', done); resolve() }, 2000)
+    }))
   }
   if (nextServer) {
     const pid = nextServer.pid
-    try {
-      if (process.platform === 'win32') {
-        await execAsync(`taskkill /F /T /PID ${pid}`)
-      } else {
-        process.kill(-pid, 'SIGTERM')
-      }
-    } catch {}
     nextServer = null
+    teardown.push(Promise.resolve().then(async () => {
+      try {
+        if (process.platform === 'win32') {
+          await execAsync(`taskkill /F /T /PID ${pid}`)
+        } else {
+          process.kill(-pid, 'SIGTERM')
+        }
+      } catch {}
+    }))
   }
+  Promise.all(teardown).finally(() => {
+    app.exit(0)
+  })
 })

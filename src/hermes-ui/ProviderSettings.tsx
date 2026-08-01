@@ -9,8 +9,8 @@
 // hermes-ui 模块的独立性，不被拆散到主流程各处。
 'use client'
 
-import { useState } from 'react'
 import { Globe, Plus, Trash2, Eye, EyeOff, Check } from 'lucide-react'
+import { useState } from 'react'
 import { useProviderStore } from './provider-store'
 import type { ProviderConfig } from './types'
 

@@ -42,7 +42,7 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
     'toggle-scheduled-tasks-panel': () => state.toggleScheduledTasksPanel(),
     'toggle-terminal': () => state.toggleTerminal(),
     'toggle-settings': () => state.toggleSettings(),
-    'toggle-file-tree': () => state.toggleWorktreePanel(),
+    'toggle-file-tree': () => state.toggleFileTreePanel(),
     'settings': () => state.toggleSettings(),
     'show-shortcuts': () => {},
     'command-palette': () => state.toggleCommandPalette(),
@@ -92,7 +92,7 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
 
     // Navigation & misc
     'quick-chat': () => state.clearChat(),
-    'search-chat': () => state.toggleCommandPalette(),
+    'search-chat': () => window.dispatchEvent(new CustomEvent('helix:conversation-search')),
     'next-recent-chat': () => state.toggleSessionManager(),
     'prev-recent-chat': () => state.toggleSessionManager(),
     'open-review': () => state.toggleCommandPalette(),

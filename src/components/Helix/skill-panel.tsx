@@ -1,6 +1,5 @@
 'use client'
 
-import React, { useState, useMemo, useEffect } from 'react'
 import {
   X,
   Puzzle,
@@ -19,9 +18,10 @@ import {
   Settings,
   Zap,
 } from 'lucide-react'
+import React, { useState, useMemo, useEffect } from 'react'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { useHermes } from '@/hooks/use-hermes'
 import { useHelixStore } from '@/stores/helix-store'
-import { ScrollArea } from '@/components/ui/scroll-area'
 
 interface SkillPanelProps {
   onClose: () => void
@@ -197,6 +197,14 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
             <h2 className="text-sm font-semibold text-foreground">
               {activeTab === 'plugins' ? '已安装' : `已安装 (${filteredSkills.length})`}
             </h2>
+            {activeTab === 'plugins' && (
+              <button
+                onClick={() => { useHelixStore.getState().togglePluginManager() }}
+                className="text-[11px] text-primary/60 hover:text-primary transition-colors"
+              >
+                管理插件
+              </button>
+            )}
           </div>
 
           {/* Grid */}

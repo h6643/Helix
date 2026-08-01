@@ -1,0 +1,218 @@
+'use client'
+
+import { loadLanguage } from '@uiw/codemirror-extensions-langs'
+import CodeMirror from '@uiw/react-codemirror'
+import { FileCode2, X, Save } from 'lucide-react'
+import React, { useEffect, useMemo } from 'react'
+import { electronFS } from '@/lib/electron-bridge'
+import { useHelixStore } from '@/stores/helix-store'
+
+// Map a file extension to a CodeMirror language id (the keys accepted by
+// `@uiw/codemirror-extensions-langs` loadLanguage).
+const EXT_LANG: Record<string, string> = {
+  ts: 'typescript',
+  tsx: 'tsx',
+  js: 'javascript',
+  jsx: 'jsx',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  json: 'json',
+  py: 'python',
+  rs: 'rust',
+  go: 'go',
+  java: 'java',
+  c: 'c',
+  h: 'c',
+  cpp: 'cpp',
+  cc: 'cpp',
+  cxx: 'cpp',
+  hpp: 'cpp',
+  cs: 'csharp',
+  rb: 'ruby',
+  php: 'php',
+  swift: 'swift',
+  kt: 'kotlin',
+  scala: 'scala',
+  sh: 'shell',
+  bash: 'shell',
+  zsh: 'shell',
+  yml: 'yaml',
+  yaml: 'yaml',
+  toml: 'toml',
+  xml: 'xml',
+  html: 'html',
+  htm: 'html',
+  css: 'css',
+  scss: 'sass',
+  less: 'less',
+  md: 'markdown',
+  markdown: 'markdown',
+  sql: 'sql',
+  vue: 'vue',
+  svelte: 'svelte',
+  dart: 'dart',
+  lua: 'lua',
+  r: 'r',
+  pl: 'perl',
+  ex: 'elixir',
+  exs: 'elixir',
+  erl: 'erlang',
+  hs: 'haskell',
+  m: 'objectivec',
+  mm: 'objectivec',
+  proto: 'protobuf',
+  graphql: 'graphql',
+  gql: 'graphql',
+  dockerfile: 'dockerfile',
+  makefile: 'makefile',
+  cmake: 'cmake',
+  ini: 'ini',
+  conf: 'nginx',
+  log: 'log',
+  txt: 'text',
+  gitignore: 'text',
+  env: 'shell',
+}
+
+function langFromName(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower === 'dockerfile' || lower === 'makefile') return lower
+  const ext = lower.includes('.') ? lower.split('.').pop()! : ''
+  return EXT_LANG[ext] || 'text'
+}
+
+export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
+  const editorTabs = useHelixStore((s) => s.editorTabs)
+  const activeId = useHelixStore((s) => s.activeEditorTabId)
+  const editorTheme = useHelixStore((s) => s.editorTheme)
+  const setActiveEditorTab = useHelixStore((s) => s.setActiveEditorTab)
+  const closeEditorTab = useHelixStore((s) => s.closeEditorTab)
+  const updateEditorTabContent = useHelixStore((s) => s.updateEditorTabContent)
+  const markEditorTabSaved = useHelixStore((s) => s.markEditorTabSaved)
+  const showToast = useHelixStore((s) => s.showToast)
+
+  const active = editorTabs.find((t) => t.id === activeId) || null
+
+  const handleSave = async (id: string) => {
+    const tab = useHelixStore.getState().editorTabs.find((t) => t.id === id)
+    if (!tab) return
+    try {
+      await electronFS.writeFile(tab.path, tab.content)
+      markEditorTabSaved(id)
+      showToast({ type: 'success', title: '已保存', description: tab.name })
+    } catch (e: any) {
+      showToast({ type: 'error', title: '保存失败', description: e?.message || '写入文件出错' })
+    }
+  }
+
+  // Ctrl/Cmd+S → save active tab
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        if (active && active.dirty) {
+          e.preventDefault()
+          handleSave(active.id)
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active])
+
+  const langExt = useMemo(() => {
+    if (!active) return []
+    const ext = loadLanguage(langFromName(active.name) as Parameters<typeof loadLanguage>[0])
+    return ext ? [ext] : []
+  }, [active])
+
+  const themeMode = editorTheme === 'vs-dark' ? 'dark' : 'light'
+
+  if (!active) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50 gap-2 bg-background">
+        <FileCode2 className="size-10" />
+        <p className="text-sm">从左侧文件树点击文件即可在此编辑</p>
+        <button
+          onClick={onClose}
+          className="mt-2 px-3 py-1.5 text-xs rounded-lg border border-border/60 hover:bg-accent/50 transition-colors"
+        >
+          关闭编辑器
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-background">
+      {/* Tab bar */}
+      <div className="flex items-center gap-0.5 px-1.5 h-9 shrink-0 border-b border-border/40 bg-sidebar overflow-x-auto">
+        {editorTabs.map((tab) => (
+          <div
+            key={tab.id}
+            className={`group flex items-center gap-1.5 pl-3 pr-1.5 py-1 rounded-t-md cursor-pointer text-[12px] max-w-[220px] border-b-2 ${
+              tab.id === activeId
+                ? 'bg-background border-primary text-foreground'
+                : 'text-foreground/60 border-transparent hover:bg-accent/40'
+            }`}
+            onClick={() => setActiveEditorTab(tab.id)}
+            title={tab.path}
+          >
+            <span className="truncate">{tab.name}</span>
+            {tab.dirty && (
+              <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0" title="未保存" />
+            )}
+            <button
+              className="opacity-40 hover:opacity-100 hover:text-destructive transition-opacity ml-0.5"
+              onClick={(e) => {
+                e.stopPropagation()
+                closeEditorTab(tab.id)
+              }}
+              title="关闭"
+            >
+              <X className="size-3" />
+            </button>
+          </div>
+        ))}
+        <div className="flex-1" />
+        <button
+          onClick={() => handleSave(active.id)}
+          disabled={!active.dirty}
+          className="flex items-center gap-1 px-2.5 py-1 text-[12px] rounded-md hover:bg-accent/60 text-foreground/70 disabled:opacity-40 disabled:hover:bg-transparent transition-colors shrink-0"
+          title="保存 (Ctrl+S)"
+        >
+          <Save className="size-3.5" /> 保存
+        </button>
+        <div className="w-px h-4 bg-border/40 mx-0.5 shrink-0" />
+        <button
+          onClick={onClose}
+          className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-md transition-colors shrink-0"
+          title="关闭编辑器（保留已打开的文件）"
+        >
+          <X className="size-3.5" />
+        </button>
+      </div>
+
+      {/* Editor */}
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <CodeMirror
+          value={active.content}
+          height="100%"
+          theme={themeMode}
+          extensions={langExt}
+          onChange={(val) => updateEditorTabContent(active.id, val)}
+          basicSetup={{
+            lineNumbers: true,
+            highlightActiveLine: true,
+            highlightActiveLineGutter: true,
+            foldGutter: true,
+            autocompletion: true,
+            bracketMatching: true,
+            indentOnInput: true,
+          }}
+          style={{ height: '100%', fontSize: 13 }}
+        />
+      </div>
+    </div>
+  )
+}

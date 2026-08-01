@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
 import { X, Check, RotateCcw, FileCode, Split, Rows3, ChevronLeft, ChevronRight } from 'lucide-react'
+import React, { useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 
@@ -261,18 +261,19 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
   const [activeIndex, setActiveIndex] = useState(0)
   const [viewMode, setViewMode] = useState<'unified' | 'side-by-side'>('side-by-side')
 
-  if (changes.length === 0) return null
-
   const activeChange = changes[activeIndex]
 
   // Calculate stats
   const stats = useMemo(() => {
+    if (!activeChange) return { added: 0, removed: 0 }
     const diff = computeDiff(activeChange.oldContent, activeChange.newContent)
     return {
       added: diff.filter(l => l.type === 'add').length,
       removed: diff.filter(l => l.type === 'remove').length,
     }
   }, [activeChange])
+
+  if (changes.length === 0 || !activeChange) return null
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">

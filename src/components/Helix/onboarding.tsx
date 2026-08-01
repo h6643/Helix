@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useState } from 'react'
 import { Sparkles, Settings2, MessageSquare, Check, X } from 'lucide-react'
+import React, { useState } from 'react'
 import { useHelixStore } from '@/stores/helix-store'
 
 const STEPS = [

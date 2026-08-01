@@ -1,28 +1,28 @@
 'use client'
 
-import React, { useState, useCallback, useEffect, useRef } from 'react'
 import {
-  Settings, Sun, Moon, Plug, Archive, ChevronLeft, ChevronRight, ChevronDown, Search,
-  Save, Eye, EyeOff, Trash2, Plus, Pencil, Sparkles,
-  Globe, FileText, Keyboard, Terminal, Link, Wand2, AudioLines,
-  RefreshCw, GitBranch, GitCommit, GitPullRequest, Zap, Anchor, Check, Activity, Loader2,
-  ArrowDown, ArrowUp, Target, X, AlignLeft, Minimize2, AlertTriangle, Bot, Brain,
+  Settings, Sun, Plug, Archive, ChevronLeft, Search,
+  X,
+  Globe, Keyboard, GitBranch, Zap, Brain, Bot, Activity,
 } from 'lucide-react'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
-import { useHelixStore, DEFAULT_SHORTCUTS, type ApiConfig, type McpServerConfig } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
-import { getAllProviders, getModels, getBaseUrl } from '@/lib/providers'
-import { formatTokens } from '@/lib/format'
-import { isElectron } from '@/lib/electron-bridge'
-import { persistence, type PersistedSession } from '@/lib/persist'
 import { useHermes } from '@/hooks/use-hermes'
-import { ShortcutsPage } from './shortcuts-page'
-import { McpEditorForm, type McpFormData } from './mcp-editor-form'
-import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './usage-stats'
-import { HookSettings } from './hook-settings'
-import { VoiceSettings } from './voice-settings'
+import { pushModelConfig } from '@/lib/config-sync'
+import { isElectron, hermesApi } from '@/lib/electron-bridge'
+import { persistence, type PersistedSession } from '@/lib/persist'
+import { getAllProviders, getBaseUrl } from '@/lib/providers'
+import { useHelixStore, type ApiConfig, type McpServerConfig } from '@/stores/helix-store'
+import { useHermesStore } from '@/stores/hermes-store'
 import { AgentsSettings } from './agents-settings'
+import { AppearanceSettingsPanel } from './appearance-settings-panel'
+import { GeneralSettingsPanel } from './general-settings-panel'
+import { GitSettingsPanel } from './git-settings-panel'
+import { HookSettings } from './hook-settings'
 import { LearningView } from './learning-view'
+import { McpEditorForm, type McpFormData } from './mcp-editor-form'
+import { ShortcutsPage } from './shortcuts-page'
+import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './usage-stats'
 
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -45,6 +45,24 @@ const PERSONALITY_LABELS: Record<string, string> = {}
 
 const CUSTOM_PROVIDER_ID = '__custom__'
 
+/** Derive a readable provider name from its base URL instead of the legacy
+ *  "配置 · <model>" pattern, which becomes meaningless once a profile accumulates
+ *  models from multiple endpoints. */
+function deriveProviderName(baseUrl?: string, fallback?: string): string {
+  if (!baseUrl) return fallback || '配置'
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase()
+    if (/ant-ling|agnes|ant-/.test(host)) return 'Ling'
+    if (host.includes('deepseek')) return 'DeepSeek'
+    if (host.includes('openai')) return 'OpenAI'
+    if (host.includes('anthropic')) return 'Anthropic'
+    if (host.includes('google')) return 'Gemini'
+    return host.replace(/^www\./, '') || fallback || '配置'
+  } catch {
+    return fallback || '配置'
+  }
+}
+
 interface SettingsProps {
   theme: 'light' | 'dark'
   onToggleTheme: () => void
@@ -59,7 +77,7 @@ interface SettingsProps {
   setSidebarCollapsed: (v: boolean | ((prev: boolean) => boolean)) => void
 }
 
-type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'git' | 'skills' | 'hook' | 'usage' | 'help' | 'voice' | 'agents' | 'learning'
+type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'git' | 'skills' | 'hook' | 'usage' | 'help' | 'agents' | 'learning'
 
 interface NavItem {
   id: SettingsPage
@@ -80,7 +98,6 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'appearance', label: '外观', icon: Sun },
       { id: 'archive', label: '历史归档', icon: Archive },
       { id: 'shortcuts', label: '快捷键', icon: Keyboard },
-      { id: 'voice', label: '语音', icon: AudioLines },
     ],
   },
   {
@@ -89,7 +106,7 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'api', label: '模型', icon: Globe },
       { id: 'mcp', label: 'MCP', icon: Plug },
       { id: 'usage', label: '用量', icon: Activity },
-      { id: 'agents', label: 'Agents', icon: Bot },
+      { id: 'agents', label: 'Subagent', icon: Bot },
     ],
   },
   {
@@ -97,7 +114,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'git', label: 'Git', icon: GitBranch },
       { id: 'hook', label: 'Hooks', icon: Zap },
-      { id: 'learning', label: '学习', icon: Brain },
+      { id: 'learning', label: 'Memory', icon: Brain },
     ],
   },
 ]
@@ -134,7 +151,6 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
     interfaceFont, setInterfaceFont,
     transcriptFontSize, setTranscriptFontSize,
     mcpServers, addMcpServer, removeMcpServer, toggleMcpServer,
-    customInstructions, setCustomInstructions,
     // Git
     gitAutoCommit, setGitAutoCommit,
     gitAutoPush, setGitAutoPush,
@@ -157,6 +173,11 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
     confirmDangerousActions, setConfirmDangerousActions,
     autoApproveRead, setAutoApproveRead,
   } = useHelixStore()
+
+  const checkpoints = useHelixStore(s => s.checkpoints)
+  const saveCheckpoint = useHelixStore(s => s.saveCheckpoint)
+  const restoreCheckpoint = useHelixStore(s => s.restoreCheckpoint)
+  const removeCheckpoint = useHelixStore(s => s.removeCheckpoint)
 
   const settingsPage = useHelixStore(s => s.settingsPage)
   const setSettingsPage = useHelixStore(s => s.setSettingsPage)
@@ -183,7 +204,6 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
     }
   }, [settingsPage, setSettingsPage])
   const [localConfig, setLocalConfig] = useState<ApiConfig>({ ...apiConfig })
-  const [gitSaving, setGitSaving] = useState(false)
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
 
   // ── Settings nav resize (synced with the main sidebar width) ──────────────
@@ -348,7 +368,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
     try {
       const sessionId = useHermesStore.getState().hermesSessionId
       if (!sessionId) { setMcpStatus({}); return }
-      const result = await window.electron.hermes.send('tools/list', { session_id: sessionId }) as any
+      const result = await hermesApi()!.send('tools/list', { session_id: sessionId }) as any
       const tools: string[] = result?.tools?.map((t: any) => t.name) || result?.map((t: any) => t.name) || []
       // Match tool names to MCP server names (e.g. "tavily_search" -> "tavily")
       const status: Record<string, boolean> = {}
@@ -483,7 +503,12 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
           baseUrl: p.config.baseUrl,
           apiKey: p.config.apiKey,
         }
-        await window.electron.hermes.setConfig(cfg)
+        // serve 模式：hermes:setConfig 是 no-op（main.js 直接 return success），
+        // 必须走 pushModelConfig —— 内部按模式分流：serve → setModel 写
+        // config.yaml（生效）；acp → setConfig + cacheConfig（行为不变）。
+        // 否则在设置里切换 profile 永远到不了网关，config.yaml 残留旧配置
+        // （如 deepseek+Ling 错配 → 400 无输出）。
+        pushModelConfig(cfg)
         // Persist the active profile so the next cold start re-asserts it
         // into Hermes config.yaml (no hardcoded pin, free switching preserved).
         await window.electron.profile.cacheConfig(cfg)
@@ -541,13 +566,16 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
         updateApiProfileConfig(dup.id, localConfig, mergedModels)
         setActiveProfile(dup.id)
       } else {
-        const name = localConfig.model ? `配置 · ${localConfig.model}` : `配置 ${apiProfiles.length + 1}`
+        const name = deriveProviderName(localConfig.baseUrl, localConfig.model ? `配置 · ${localConfig.model}` : `配置 ${apiProfiles.length + 1}`)
         const id = addApiProfile(name, localConfig, profileModels)
         setActiveProfile(id)
       }
     }
     setApiConfig(localConfig)
-    addApiHistory(localConfig)
+    // Persist the snapped (mismatch-corrected) config into history so a
+    // model/baseUrl split can never be re-saved as a new history entry.
+    const snapped = useHelixStore.getState().apiConfig
+    addApiHistory(snapped)
     await persistToStorage()
 
     // Sync to Hermes if running in Electron
@@ -681,25 +709,32 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
     showToast({ type: 'success', title: '已恢复', description: session.label })
   }, [showToast, persistToStorage])
 
-  // ── Git handlers ─────────────────────────────────────────────────────────
-  const handleSaveGit = useCallback(async () => {
-    setGitSaving(true)
-    try {
-      await persistToStorage()
-      showToast({ type: 'success', title: 'Git 设置已保存' })
-    } finally {
-      setGitSaving(false)
-    }
-  }, [persistToStorage, showToast])
+  // ── Checkpoint handlers ───────────────────────────────────────────────────
+  const handleSaveCheckpoint = useCallback(async () => {
+    saveCheckpoint()
+    await persistToStorage()
+    showToast({ type: 'success', title: 'Checkpoint 已保存' })
+  }, [saveCheckpoint, persistToStorage, showToast])
+
+  const handleRestoreCheckpoint = useCallback(async (id: string) => {
+    restoreCheckpoint(id)
+    await persistToStorage()
+    showToast({ type: 'success', title: 'Checkpoint 已恢复' })
+  }, [restoreCheckpoint, persistToStorage, showToast])
+
+  const handleRemoveCheckpoint = useCallback(async (id: string) => {
+    removeCheckpoint(id)
+    await persistToStorage()
+    showToast({ type: 'success', title: 'Checkpoint 已删除' })
+  }, [removeCheckpoint, persistToStorage, showToast])
 
   // ── Shared components ─────────────────────────────────────────────────────
-  const SettingRow = ({ icon, label, description, children }: { icon: React.ReactNode; label: string; description: string; children: React.ReactNode }) => (
-    <div className="flex items-center justify-between px-4 py-3.5 rounded-xl border border-border/50 bg-card/50 shadow-sm gap-3">
+  const SettingRow = ({ icon, label, children }: { icon: React.ReactNode; label: string; children: React.ReactNode }) => (
+    <div className="flex items-center justify-between px-4 py-3 border-b border-border/40 last:border-b-0 gap-3 transition-colors duration-150">
       <div className="flex items-center gap-3 flex-1 min-w-0">
         <span className="text-muted-foreground shrink-0">{icon}</span>
         <div className="min-w-0">
           <p className="text-sm font-medium text-foreground">{label}</p>
-          <p className="text-xs text-muted-foreground/70 mt-0.5">{description}</p>
         </div>
       </div>
       <div className="shrink-0">{children}</div>
@@ -728,52 +763,118 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
 
   // ── Render content ────────────────────────────────────────────────────────
   const ModelHistoryList = () => {
+    const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set())
+
     if (apiHistory.length === 0) {
+      return null
+    }
+
+    // Group by baseUrl (preserve first-appearance order). Within a group the
+    // entries share the same endpoint but may carry different apiKeys — the
+    // addApiHistory dedup already collapses same baseUrl+apiKey, so each item
+    // here is a distinct (baseUrl, apiKey) pair. Grouping keeps one endpoint's
+    // many keys visually together instead of scattered across the flat list.
+    type HistoryItem = { h: typeof apiHistory[number]; index: number }
+    const groups: { baseUrl: string; items: HistoryItem[] }[] = []
+    const groupPos = new Map<string, number>()
+    apiHistory.forEach((h, index) => {
+      const url = h.baseUrl || '(无 baseUrl)'
+      let pos = groupPos.get(url)
+      if (pos === undefined) {
+        pos = groups.length
+        groupPos.set(url, pos)
+        groups.push({ baseUrl: url, items: [] })
+      }
+      groups[pos].items.push({ h, index })
+    })
+
+    const toggleGroup = (url: string) =>
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        if (next.has(url)) next.delete(url)
+        else next.add(url)
+        return next
+      })
+
+    const renderItem = ({ h, index }: HistoryItem) => {
+      const isActive = apiConfig.model === h.model
       return (
-        <div className="text-center py-12 text-sm text-muted-foreground">
-          暂无配置，点击右上角 "添加模型"
+        <div key={index}
+          onClick={async () => {
+            // Write the history entry through setApiConfig first: it guards
+            // against model/baseUrl mismatches (poisoned history) and snaps
+            // the model to the endpoint it actually belongs to.
+            setApiConfig({ ...h })
+            // Then anchor activeModel/activeProviderId directly to this history
+            // entry's endpoint. Don't use setActiveModel here: its model-name-based
+            // resolution can pick the wrong provider when a model name also exists
+            // in another provider's fetched list (e.g. cross-endpoint pollution),
+            // causing an explicit deepseek click to snap back to Ling.
+            const state = useHelixStore.getState()
+            const match = state.providers.find((p) => p.baseUrl === h.baseUrl)
+            useHelixStore.setState({
+              activeModel: h.model,
+              activeProviderId: match?.id || null,
+              apiConfig: {
+                ...state.apiConfig,
+                provider: match?.name || h.provider || 'custom',
+                model: h.model,
+              },
+            })
+            const final = useHelixStore.getState().apiConfig
+            setLocalConfig({ ...final })
+            await persistToStorage()
+            if (isElectron()) {
+              try {
+                const cfg = { model: final.model, provider: final.provider && final.provider !== '__custom__' ? final.provider : 'custom', baseUrl: final.baseUrl, apiKey: final.apiKey }
+                await window.electron.hermes.setConfig(cfg)
+                await window.electron.profile.cacheConfig(cfg)
+                useHermesStore.getState().setHermesSessionId(null)
+              } catch {}
+            }
+            showToast({ type: 'success', title: `已切换到 ${final.model}` })
+          }}
+          className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group border-b border-border/30 last:border-b-0 ${isActive ? 'bg-primary/5' : 'hover:bg-muted/40'}`}
+        >
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
+              <p className={`text-sm truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+            <button onClick={(e) => { e.stopPropagation(); setLocalConfig({ ...h }); setShowAddModelModal(true) }}
+              className="ml-2 p-1 rounded text-xs text-muted-foreground/20 hover:text-foreground hover:bg-accent transition-all">
+              编辑
+            </button>
+            <button onClick={async (e) => { e.stopPropagation(); removeApiHistory(index); await persistToStorage() }}
+              className="ml-1 p-1 rounded text-xs text-muted-foreground/20 hover:text-red-500 transition-all">
+              删除
+            </button>
+          </div>
         </div>
       )
     }
+
     return (
-      <div className="space-y-1.5">
-        {apiHistory.map((h, i) => {
-          const isActive = apiConfig.model === h.model
+      <div className="space-y-3">
+        {groups.map((g) => {
+          const isCollapsed = collapsed.has(g.baseUrl)
           return (
-            <div key={i}
-              onClick={async () => {
-                setLocalConfig({ ...h })
-                setApiConfig({ ...h })
-                await persistToStorage()
-                if (isElectron()) {
-                  try {
-                    const cfg = { model: h.model, provider: h.provider && h.provider !== '__custom__' ? h.provider : 'custom', baseUrl: h.baseUrl, apiKey: h.apiKey }
-                    await window.electron.hermes.setConfig(cfg)
-                    await window.electron.profile.cacheConfig(cfg)
-                    useHermesStore.getState().setHermesSessionId(null)
-                  } catch {}
-                }
-                showToast({ type: 'success', title: `已切换到 ${h.model}` })
-              }}
-              className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group ${isActive ? 'bg-primary/5' : 'bg-card/50 hover:bg-card'}`}
-            >
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
-                  <p className={`text-sm truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
+            <div key={g.baseUrl} className="space-y-1.5">
+              <button
+                onClick={() => toggleGroup(g.baseUrl)}
+                className="flex items-center gap-1.5 w-full px-1 py-1 text-left text-xs hover:bg-accent/40 rounded transition-colors"
+                title={g.baseUrl}
+              >
+                <span className="truncate font-mono text-muted-foreground">{g.baseUrl}</span>
+                <span className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground/70">{g.items.length}</span>
+              </button>
+              {!isCollapsed && (
+                <div className="space-y-1.5 border-l border-border/40 ml-1.5 pl-2">
+                  {g.items.map(renderItem)}
                 </div>
-                <p className="text-xs text-muted-foreground/70 truncate mt-0.5">{h.baseUrl}</p>
-              </div>
-              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-                <button onClick={(e) => { e.stopPropagation(); setLocalConfig({ ...h }); setShowAddModelModal(true) }}
-                  className="ml-2 p-1 rounded text-muted-foreground/20 hover:text-foreground hover:bg-accent transition-all">
-                  <Pencil className="size-3.5" />
-                </button>
-                <button onClick={async (e) => { e.stopPropagation(); removeApiHistory(i); await persistToStorage() }}
-                  className="ml-1 p-1 rounded text-muted-foreground/20 hover:text-red-500 transition-all">
-                  <Trash2 className="size-3.5" />
-                </button>
-              </div>
+              )}
             </div>
           )
         })}
@@ -784,375 +885,10 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
   const renderContent = () => {
     switch (page) {
       case 'general':
-        return (
-          <div className="max-w-2xl space-y-8">
-            <SectionTitle>常规</SectionTitle>
-
-            {/* Notification settings */}
-            <section className="space-y-3">
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('notification') ? next.delete('notification') : next.add('notification')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <Zap className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">通知设置</span>
-                  </div>
-                  {collapsedSections.has('notification')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-4 ${collapsedSections.has('notification') ? 'hidden' : ''}`}>
-                  <SettingRow
-                    icon={<Zap className="size-4 text-muted-foreground" />}
-                    label="桌面通知"
-                    description="Agent 完成任务时显示桌面通知"
-                  >
-                    <Toggle enabled={desktopNotifications} onToggle={() => setDesktopNotifications(!desktopNotifications)} />
-                  </SettingRow>
-                  <SettingRow
-                    icon={<Zap className="size-4 text-muted-foreground" />}
-                    label="提示音"
-                    description="Agent 完成任务时播放提示音"
-                  >
-                    <Toggle enabled={soundEnabled} onToggle={() => setSoundEnabled(!soundEnabled)} />
-                  </SettingRow>
-                </div>
-              </div>
-            </section>
-
-            {/* Startup behavior */}
-            <section className="space-y-3">
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('startup') ? next.delete('startup') : next.add('startup')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <RefreshCw className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">启动行为</span>
-                  </div>
-                  {collapsedSections.has('startup')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-4 ${collapsedSections.has('startup') ? 'hidden' : ''}`}>
-                  <SettingRow
-                    icon={<RefreshCw className="size-4 text-muted-foreground" />}
-                    label="恢复上次会话"
-                    description="启动时自动恢复上次的对话"
-                  >
-                    <Toggle enabled={restoreLastSession} onToggle={() => setRestoreLastSession(!restoreLastSession)} />
-                  </SettingRow>
-                  <div>
-                    <label className="block text-sm font-medium text-foreground mb-1.5">默认工作目录</label>
-                    <input
-                      type="text"
-                      value={defaultWorkDir}
-                      onChange={e => setDefaultWorkDir(e.target.value)}
-                      placeholder="留空使用上次的工作目录"
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-                    />
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            {/* Security settings */}
-            {/* Security settings */}
-            <section className="space-y-3">
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('security') ? next.delete('security') : next.add('security')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <AlertTriangle className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">安全设置</span>
-                  </div>
-                  {collapsedSections.has('security')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-4 ${collapsedSections.has('security') ? 'hidden' : ''}`}>
-                  <SettingRow
-                    icon={<AlertTriangle className="size-4 text-muted-foreground" />}
-                    label="危险操作确认"
-                    description="执行删除、覆盖等危险操作前弹出确认对话框"
-                  >
-                    <Toggle enabled={confirmDangerousActions} onToggle={() => setConfirmDangerousActions(!confirmDangerousActions)} />
-                  </SettingRow>
-                  <SettingRow
-                    icon={<Eye className="size-4 text-muted-foreground" />}
-                    label="自动批准读取"
-                    description="自动批准文件读取操作，无需逐次确认"
-                  >
-                    <Toggle enabled={autoApproveRead} onToggle={() => setAutoApproveRead(!autoApproveRead)} />
-                  </SettingRow>
-                </div>
-              </div>
-            </section>
-
-            {/* Data management */}
-            <section className="space-y-3">
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('data') ? next.delete('data') : next.add('data')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <Archive className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">数据管理</span>
-                  </div>
-                  {collapsedSections.has('data')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-4 ${collapsedSections.has('data') ? 'hidden' : ''}`}>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={async () => {
-                        try {
-                          const data = {
-                            apiConfig,
-                            apiProfiles,
-                            activeProfileId,
-                            providers,
-                            activeModel,
-                            fontFamily,
-                            fontSize,
-                            interfaceFont,
-                            transcriptFontSize,
-                            customInstructions,
-                            mcpServers,
-                            gitAutoCommit,
-                            gitAutoPush,
-                            gitPushConfirm,
-                            gitAutoBranch,
-                            gitRemoteUrl,
-                            gitCommitTemplate,
-                            gitBranchPrefix,
-                          }
-                          const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-                          const url = URL.createObjectURL(blob)
-                          const a = document.createElement('a')
-                          a.href = url
-                          a.download = `helix-config-${new Date().toISOString().slice(0, 10)}.json`
-                          a.click()
-                          URL.revokeObjectURL(url)
-                          showToast({ type: 'success', title: '配置已导出' })
-                        } catch (e) {
-                          showToast({ type: 'error', title: '导出失败' })
-                        }
-                      }}
-                    >
-                      导出配置
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        const input = document.createElement('input')
-                        input.type = 'file'
-                        input.accept = '.json'
-                        input.onchange = async (e) => {
-                          const file = (e.target as HTMLInputElement).files?.[0]
-                          if (!file) return
-                          try {
-                            const text = await file.text()
-                            const data = JSON.parse(text)
-                            if (data.apiConfig) setApiConfig(data.apiConfig)
-                            if (data.fontFamily) setFontFamily(data.fontFamily)
-                            if (data.fontSize) setFontSize(data.fontSize)
-                            if (data.interfaceFont) setInterfaceFont(data.interfaceFont)
-                            if (data.transcriptFontSize) setTranscriptFontSize(data.transcriptFontSize)
-                            if (data.customInstructions) setCustomInstructions(data.customInstructions)
-                            await persistToStorage()
-                            showToast({ type: 'success', title: '配置已导入' })
-                          } catch {
-                            showToast({ type: 'error', title: '导入失败：文件格式无效' })
-                          }
-                        }
-                        input.click()
-                      }}
-                    >
-                      导入配置
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      onClick={() => {
-                        if (confirm('确定要重置所有设置吗？此操作不可撤销。')) {
-                          localStorage.clear()
-                          window.location.reload()
-                        }
-                      }}
-                    >
-                      重置所有设置
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-
-          </div>
-        )
+        return <GeneralSettingsPanel />
 
       case 'appearance':
-        return (
-          <div className="max-w-2xl space-y-8">
-            <SectionTitle>外观</SectionTitle>
-
-            <section className="space-y-4">
-              <SettingRow
-                icon={theme === 'dark' ? <Moon className="size-4" /> : <Sun className="size-4" />}
-                label="主题"
-                description={theme === 'dark' ? '深色模式' : '浅色模式'}
-              >
-                <Toggle enabled={theme === 'dark'} onToggle={onToggleTheme} />
-              </SettingRow>
-
-              {/* Editor settings */}
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('editor') ? next.delete('editor') : next.add('editor')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <FileText className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">编辑器设置</span>
-                  </div>
-                  {collapsedSections.has('editor')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`divide-y divide-border ${collapsedSections.has('editor') ? 'hidden' : ''}`}>
-                  <div className="p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-foreground">代码字体</p>
-                        <p className="text-xs text-muted-foreground/70 mt-0.5">代码编辑器字体</p>
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <select value={fontFamily} onChange={(e) => setFontFamily(e.target.value)}
-                        className="flex-1 px-3 py-2 rounded-lg border border-border/50 bg-card text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer appearance-none bg-[length:14px] bg-[right_10px_center] bg-no-repeat"
-                        style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")` }}>
-                        {[
-                          { label: '默认', value: "'Geist Mono', 'Fira Code', 'Consolas', monospace" },
-                          { label: 'Monaco', value: 'Monaco, monospace' },
-                          { label: 'JetBrains Mono', value: '"JetBrains Mono", monospace' },
-                          { label: 'Fira Code', value: '"Fira Code", monospace' },
-                          { label: 'Consolas', value: 'Consolas, monospace' },
-                          { label: 'SF Mono', value: '"SF Mono", monospace' },
-                        ].map(f => (
-                          <option key={f.value} value={f.value}>{f.label}</option>
-                        ))}
-                      </select>
-                      <input type="text" value={fontFamily} onChange={(e) => setFontFamily(e.target.value)}
-                        placeholder="自定义"
-                        className="w-28 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
-                    </div>
-                    <div className="flex items-center justify-between pt-2">
-                      <p className="text-sm text-foreground">编辑器字号</p>
-                      <div className="flex items-center gap-2">
-                        <button onClick={() => setFontSize(Math.max(10, fontSize - 1))}
-                          className="w-7 h-7 rounded-md bg-muted/50 border border-border/50 text-muted-foreground/60 hover:text-foreground transition-colors text-sm flex items-center justify-center">−</button>
-                        <span className="w-8 text-center text-sm font-mono text-foreground">{fontSize}</span>
-                        <button onClick={() => setFontSize(Math.min(32, fontSize + 1))}
-                          className="w-7 h-7 rounded-md bg-muted/50 border border-border/50 text-muted-foreground/60 hover:text-foreground transition-colors text-sm flex items-center justify-center">+</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Interface settings */}
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('interface') ? next.delete('interface') : next.add('interface')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <Settings className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">界面设置</span>
-                  </div>
-                  {collapsedSections.has('interface')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`divide-y divide-border ${collapsedSections.has('interface') ? 'hidden' : ''}`}>
-                  <div className="p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-foreground">界面字体</p>
-                        <p className="text-xs text-muted-foreground/70 mt-0.5">菜单、侧边栏和聊天的字体</p>
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <select value={interfaceFont} onChange={(e) => setInterfaceFont(e.target.value)}
-                        className="flex-1 px-3 py-2 rounded-lg border border-border/50 bg-card text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer appearance-none bg-[length:14px] bg-[right_10px_center] bg-no-repeat"
-                        style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")` }}>
-                        {[
-                          { label: '默认', value: 'var(--font-geist-sans)' },
-                          { label: 'Inter', value: '"Inter", sans-serif' },
-                          { label: 'SF Pro', value: '"-apple-system", "SF Pro", sans-serif' },
-                          { label: 'Segoe UI', value: '"Segoe UI", sans-serif' },
-                          { label: 'Monaco', value: 'Monaco, monospace' },
-                          { label: 'JetBrains Mono', value: '"JetBrains Mono", monospace' },
-                          { label: 'Consolas', value: 'Consolas, monospace' },
-                        ].map(f => (
-                          <option key={f.value} value={f.value}>{f.label}</option>
-                        ))}
-                      </select>
-                      <input type="text" value={interfaceFont} onChange={(e) => setInterfaceFont(e.target.value)}
-                        placeholder="自定义"
-                        className="w-28 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
-                    </div>
-                    <div className="flex items-center justify-between pt-2">
-                      <p className="text-sm text-foreground">界面字号</p>
-                      <div className="flex items-center gap-2">
-                        <button onClick={() => setTranscriptFontSize(Math.max(10, transcriptFontSize - 1))}
-                          className="w-7 h-7 rounded-md bg-muted/50 border border-border/50 text-muted-foreground/60 hover:text-foreground transition-colors text-sm flex items-center justify-center">−</button>
-                        <span className="w-8 text-center text-sm font-mono text-foreground">{transcriptFontSize}</span>
-                        <button onClick={() => setTranscriptFontSize(Math.min(28, transcriptFontSize + 1))}
-                          className="w-7 h-7 rounded-md bg-muted/50 border border-border/50 text-muted-foreground/60 hover:text-foreground transition-colors text-sm flex items-center justify-center">+</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </section>
-          </div>
-        )
+        return <AppearanceSettingsPanel theme={theme} onToggleTheme={onToggleTheme} />
 
       case 'api':
         return (
@@ -1162,18 +898,25 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
               <h3 className="text-lg font-bold text-foreground">模型</h3>
               {!showAddModelModal ? (
                 <button
-                  onClick={() => setShowAddModelModal(true)}
+                  onClick={() => {
+                    // 每次打开都给一张空白表单，不沿用上次填的内容
+                    setLocalConfig({ provider: '', apiKey: '', baseUrl: '', model: '' })
+                    setIsCustomProvider(false)
+                    setAvailableModels([])
+                    setShowModelDropdown(false)
+                    setShowAddModelModal(true)
+                  }}
                   className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 transition-colors"
                 >
-                  <Plus className="size-4" /> 添加模型
+                  添加模型
                 </button>
               ) : (
                 <button
                   onClick={() => setShowAddModelModal(false)}
-                  className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+                  className="text-sm text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
                   title="关闭"
                 >
-                  <X className="size-4" />
+                  关闭
                 </button>
               )}
             </div>
@@ -1186,7 +929,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
             ) : (
               /* Add model form — normal flow, centered card */
               <div className="flex justify-center py-4">
-                <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm p-6 space-y-5 w-full max-w-2xl">
+                <div className="p-6 space-y-5 w-full max-w-2xl">
                   {/* Provider */}
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1.5">Provider</label>
@@ -1218,10 +961,10 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                         <button
                           type="button"
                           onClick={() => { setIsCustomProvider(false); setCustomInputFocused(false) }}
-                          className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-foreground hover:bg-accent/50 transition-colors"
+                          className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground hover:bg-accent/50 transition-colors"
                           title="返回列表"
                         >
-                          <ChevronLeft className="size-4" />
+                          返回
                         </button>
                       </div>
                     )}
@@ -1253,9 +996,9 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                       <button
                         type="button"
                         onClick={() => setShowApiKey(!showApiKey)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground/50 hover:text-foreground transition-colors"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-xs text-muted-foreground/50 hover:text-foreground transition-colors"
                       >
-                        {showApiKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                        {showApiKey ? '隐藏' : '显示'}
                       </button>
                     </div>
                   </div>
@@ -1270,7 +1013,6 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                         disabled={isLoadingModels}
                         className="flex items-center gap-1 text-xs text-primary hover:text-primary/80 disabled:text-muted-foreground transition-colors"
                       >
-                        <RefreshCw className={`size-3 ${isLoadingModels ? 'animate-spin' : ''}`} />
                         {isLoadingModels ? '获取中...' : '获取模型列表'}
                       </button>
                     </div>
@@ -1317,7 +1059,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   {/* Save button — inside card, bottom-right */}
                   <div className="flex justify-end pt-2">
                     <Button onClick={async () => { await handleSaveApi(); setShowAddModelModal(false) }} size="sm" className="gap-1.5">
-                      <Save className="size-3.5" /> 保存
+                      保存
                     </Button>
                   </div>
                 </div>
@@ -1343,15 +1085,15 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   onClick={() => { setIsAddingMcp(true); resetMcpForm() }}
                   className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 transition-colors"
                 >
-                  <Plus className="size-4" /> 添加服务器
+                  添加服务器
                 </button>
               ) : (
                 <button
                   onClick={() => { setIsAddingMcp(false); setEditingMcpName(null); resetMcpForm() }}
-                  className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+                  className="text-sm text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
                   title="关闭"
                 >
-                  <X className="size-4" />
+                  关闭
                 </button>
               )}
             </div>
@@ -1366,7 +1108,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                     return (
                       <div
                         key={name}
-                        className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/50 bg-card/50 shadow-sm hover:border-primary/20 transition-colors group">
+                        className="flex items-center gap-3 px-4 py-3 border-b border-border/30 last:border-b-0 hover:bg-muted/40 transition-colors group">
                         <div className="relative shrink-0">
                           <div className={`w-2.5 h-2.5 rounded-full ${config.enabled === false ? 'bg-gray-300' : connected ? 'bg-green-500' : connected === false ? 'bg-red-400' : 'bg-amber-400'}`} />
                           {config.enabled !== false && connected && (
@@ -1387,11 +1129,11 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                         <div className="flex items-center gap-1.5 shrink-0">
                           <Toggle enabled={config.enabled !== false} onToggle={() => handleToggleMcp(name)} />
                           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-                            <button onClick={() => handleEditMcp(name)} className="p-1.5 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-accent transition-colors">
-                              <Pencil className="size-3.5" />
+                            <button onClick={() => handleEditMcp(name)} className="px-1 py-1 rounded-md text-xs text-muted-foreground/40 hover:text-foreground hover:bg-accent transition-colors">
+                              编辑
                             </button>
-                            <button onClick={() => handleDeleteMcp(name)} className="p-1.5 rounded-md text-muted-foreground/40 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 transition-colors">
-                              <Trash2 className="size-3.5" />
+                            <button onClick={() => handleDeleteMcp(name)} className="px-1 py-1 rounded-md text-xs text-muted-foreground/40 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 transition-colors">
+                              删除
                             </button>
                           </div>
                         </div>
@@ -1402,15 +1144,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
 
                 {mcpServerNames.length === 0 && (
                   <div className="max-w-2xl flex flex-col items-center justify-center py-12 text-center">
-                    <div className="w-12 h-12 rounded-xl bg-muted flex items-center justify-center mb-3">
-                      <Plug className="size-6 text-muted-foreground/40" />
-                    </div>
                     <p className="text-sm font-medium text-foreground/60">暂无 MCP 服务器</p>
-                    <p className="text-xs text-muted-foreground/40 mt-1">添加服务器以扩展 AI 能力</p>
-                    <button onClick={() => { setIsAddingMcp(true); resetMcpForm() }}
-                      className="mt-4 flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 transition-colors">
-                      <Plus className="size-4" /> 添加第一个服务器
-                    </button>
                   </div>
                 )}
               </>
@@ -1433,198 +1167,88 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
       case 'archive':
         return (
           <div className="max-w-2xl space-y-6">
-            <SectionTitle>历史归档</SectionTitle>
+            <div className="flex items-center justify-between">
+              <SectionTitle className="mb-0">历史归档</SectionTitle>
+              <Button size="sm" onClick={handleArchiveCurrent} disabled={archiving}>
+                {archiving ? '归档中…' : '归档当前会话'}
+              </Button>
+            </div>
 
-            {archives.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <div className="w-12 h-12 rounded-xl bg-muted flex items-center justify-center mb-3">
-                  <Archive className="size-6 text-muted-foreground/40" />
-                </div>
-                <p className="text-sm font-medium text-foreground/60">暂无归档记录</p>
-                <p className="text-xs text-muted-foreground/40 mt-1">会话归档后可随时恢复</p>
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                  {archives.map(a => (
-                    <div key={a.id}
-                      onClick={() => handleLoadArchive(a.id)}
-                      className="flex items-center justify-between px-4 py-3 rounded-xl border border-border/50 bg-card/50 shadow-sm hover:border-primary/30 hover:bg-accent/30 transition-colors group cursor-pointer">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-foreground truncate">{a.label}</p>
-                        <p className="text-xs text-muted-foreground/70 mt-0.5">{a.messageCount} 条消息</p>
-                      </div>
-                      <button onClick={(e) => { e.stopPropagation(); handleDeleteArchive(a.id) }}
-                        className="p-1.5 rounded-md text-muted-foreground/20 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all shrink-0">
-                        <Trash2 className="size-3.5" />
-                      </button>
-                    </div>
-                  ))}
-              </div>
-            )}
-          </div>
-        )
-
-      case 'git':
-        return (
-          <div className="max-w-2xl space-y-6">
-            <SectionTitle>Git</SectionTitle>
-
-            <section className="space-y-4">
-              {/* Auto-commit */}
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('commit') ? next.delete('commit') : next.add('commit')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <GitCommit className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">自动提交</span>
-                  </div>
-                  {collapsedSections.has('commit')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-4 ${collapsedSections.has('commit') ? 'hidden' : ''}`}>
-                  <SettingRow
-                    icon={<GitCommit className="size-4 text-muted-foreground" />}
-                    label="Agent 完成后自动 commit"
-                    description="Agent 完成所有任务后，自动将变更提交到当前分支"
-                  >
-                    <Toggle enabled={gitAutoCommit} onToggle={() => setGitAutoCommit(!gitAutoCommit)} />
-                  </SettingRow>
-
-                  {gitAutoCommit && (
-                    <div>
-                      <label className="block text-sm font-medium text-foreground mb-1.5">自动提交信息模板</label>
-                      <input
-                        type="text"
-                        value={gitCommitTemplate}
-                        onChange={e => setGitCommitTemplate(e.target.value)}
-                        placeholder="如: chore: auto-commit changes"
-                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-                      />
-                      <p className="text-xs text-muted-foreground/50 mt-1">
-                        {gitCommitTemplate || 'chore: auto-commit'}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Auto-push */}
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('push') ? next.delete('push') : next.add('push')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <GitPullRequest className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">自动推送</span>
-                  </div>
-                  {collapsedSections.has('push')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-4 ${collapsedSections.has('push') ? 'hidden' : ''}`}>
-                  <SettingRow
-                    icon={<GitPullRequest className="size-4 text-muted-foreground" />}
-                    label="Commit 后自动 push"
-                    description="自动提交后推送到远程仓库"
-                  >
-                    <Toggle enabled={gitAutoPush} onToggle={() => setGitAutoPush(!gitAutoPush)} />
-                  </SettingRow>
-
-                  {gitAutoPush && (
-                    <>
-                      <div>
-                        <label className="block text-sm font-medium text-foreground mb-1.5">远程仓库 URL</label>
-                        <input
-                          type="text"
-                          value={gitRemoteUrl}
-                          onChange={e => setGitRemoteUrl(e.target.value)}
-                          placeholder="https://github.com/user/repo.git"
-                          className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-                        />
-                      </div>
-
-                      <SettingRow
-                        icon={<Terminal className="size-4 text-muted-foreground" />}
-                        label="Push 前确认"
-                        description="推送前弹出确认对话框"
-                      >
-                        <Toggle enabled={gitPushConfirm} onToggle={() => setGitPushConfirm(!gitPushConfirm)} />
-                      </SettingRow>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              {/* Branch settings */}
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() => setCollapsedSections(s => {
-                    const next = new Set(s)
-                    next.has('branch') ? next.delete('branch') : next.add('branch')
-                    return next
-                  })}
-                >
-                  <div className="flex items-center gap-2">
-                    <GitBranch className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-foreground">分支管理</span>
-                  </div>
-                  {collapsedSections.has('branch')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
-                </button>
-                <div className={`p-4 space-y-4 ${collapsedSections.has('branch') ? 'hidden' : ''}`}>
-                  <SettingRow
-                    icon={<GitBranch className="size-4 text-muted-foreground" />}
-                    label="自动创建特性分支"
-                    description="Agent 开始时自动创建基于当前分支的特性分支"
-                  >
-                    <Toggle enabled={gitAutoBranch} onToggle={() => setGitAutoBranch(!gitAutoBranch)} />
-                  </SettingRow>
-
-                  {gitAutoBranch && (
-                    <div>
-                      <label className="block text-sm font-medium text-foreground mb-1.5">分支命名前缀</label>
-                      <input
-                        type="text"
-                        value={gitBranchPrefix}
-                        onChange={e => setGitBranchPrefix(e.target.value)}
-                        placeholder="feature/"
-                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Save */}
-              <div className="flex justify-end pt-2">
-                <Button onClick={handleSaveGit} size="sm" className="gap-1.5" disabled={gitSaving}>
-                  {gitSaving
-                    ? <><Loader2 className="size-3.5 animate-spin" /> 保存中…</>
-                    : <><Save className="size-3.5" /> 保存设置</>}
+            {/* Checkpoints */}
+            <section className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-base font-semibold text-foreground">Checkpoint</h4>
+                <Button size="sm" variant="outline" onClick={handleSaveCheckpoint}>
+                  + 创建 Checkpoint
                 </Button>
               </div>
+              <p className="text-xs text-muted-foreground/60">保存当前任务树与记忆快照，可随时恢复到该状态。</p>
+              {checkpoints.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-6 text-center rounded-xl border border-dashed border-border/40">
+                  <p className="text-sm font-medium text-foreground/50">暂无 Checkpoint</p>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  {checkpoints.map(cp => (
+                    <div key={cp.id} className="flex items-center justify-between px-4 py-3 border-b border-border/30 last:border-b-0 hover:bg-accent/30 transition-colors group">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-foreground truncate">{cp.label}</p>
+                        <p className="text-xs text-muted-foreground/70 mt-0.5">
+                          {new Date(cp.timestamp).toLocaleString('zh-CN')} · {cp.taskIds.length} 个任务 · {cp.memorySnapshot.split('\n').filter(Boolean).length} 条记忆
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button onClick={() => handleRestoreCheckpoint(cp.id)}
+                          className="px-2 py-1 rounded-md text-xs text-muted-foreground/40 hover:text-blue-500 transition-colors">
+                          恢复
+                        </button>
+                        <button onClick={() => handleRemoveCheckpoint(cp.id)}
+                          className="px-2 py-1 rounded-md text-xs text-muted-foreground/40 hover:text-red-500 transition-colors">
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* Archived sessions */}
+            <section className="space-y-3">
+              <h4 className="text-base font-semibold text-foreground">已归档会话</h4>
+              {archives.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <p className="text-sm font-medium text-foreground/60">暂无归档记录</p>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                    {archives.map(a => (
+                      <div key={a.id}
+                        onClick={() => handleLoadArchive(a.id)}
+                        className="flex items-center justify-between px-4 py-3 border-b border-border/30 last:border-b-0 hover:bg-accent/30 transition-colors group cursor-pointer">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-foreground truncate">{a.label}</p>
+                          <p className="text-xs text-muted-foreground/70 mt-0.5">{a.messageCount} 条消息</p>
+                        </div>
+                        <button onClick={(e) => { e.stopPropagation(); handleDeleteArchive(a.id) }}
+                          className="p-1 rounded-md text-xs text-muted-foreground/20 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all shrink-0">
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              )}
             </section>
           </div>
         )
 
+      case 'git':
+        return <GitSettingsPanel />
+
       case 'usage':
         return (
           <div className="max-w-2xl space-y-6">
-            <SectionTitle>Token 用量</SectionTitle>
+            <SectionTitle>用量</SectionTitle>
             <TokenUsagePanel />
           </div>
         )
@@ -1639,7 +1263,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
 
             {/* About */}
             <section className="space-y-3">
-              <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
+              <div className="overflow-hidden">
                 <button
                   className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
                   onClick={() => setCollapsedSections(s => {
@@ -1649,12 +1273,8 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   })}
                 >
                   <div className="flex items-center gap-2">
-                    <Settings className="size-4 text-muted-foreground" />
                     <span className="text-sm font-medium text-foreground">关于</span>
                   </div>
-                  {collapsedSections.has('about')
-                    ? <ChevronRight className="size-4 text-muted-foreground" />
-                    : <ChevronDown className="size-4 text-muted-foreground" />}
                 </button>
                 <div className={`p-4 space-y-4 ${collapsedSections.has('about') ? 'hidden' : ''}`}>
                   <div className="space-y-2">
@@ -1684,8 +1304,6 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
           </div>
         )
 
-      case 'voice':
-        return <VoiceSettings />
       case 'agents':
         return <AgentsSettings />
       case 'learning':
@@ -1738,7 +1356,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   <ChevronLeft className="size-4" />
                   返回
                 </button>
-                <div className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-lg border border-border/50 bg-transparent">
+                <div className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-lg border border-border/50 bg-transparent transition-all duration-150 focus-within:border-primary/40 focus-within:shadow-[0_0_0_3px_color-mix(in_oklch,var(--primary)_10%,transparent)] hover:border-border/70">
                   <Search className="size-3.5 text-muted-foreground/25 shrink-0" />
                   <input ref={navSearchRef} value={navSearch} onChange={e => setNavSearch(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Escape') { setNavSearch(''); (e.target as HTMLInputElement).blur() } }}
@@ -1755,10 +1373,11 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                 return (
                   <nav className="flex-1 overflow-y-auto py-2">
                     {filtered.map(group => (
-                      <div key={group.title} className="mb-3">
+                      <div key={group.title} className="mb-2">
                         <p className="px-5 py-1.5 text-[10px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
                           {group.title}
                         </p>
+                        <div className="space-y-0.5 px-2">
                         {group.items.map(item => (
                           <button
                             key={item.id}
@@ -1767,16 +1386,17 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                               pushNavigation({ type: 'settings', page: item.id })
                               setNavSearch('')
                             }}
-                            className={`w-full flex items-center gap-2.5 pl-[26px] pr-4 py-2 text-sm rounded-xl transition-all ${
+                            className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-[13px] rounded-md transition-colors duration-100 ${
                               page === item.id
-                                ? 'bg-muted font-medium'
-                                : 'hover:bg-muted/50'
+                                ? 'bg-muted text-foreground font-medium'
+                                : 'text-foreground/65 hover:bg-muted/50 hover:text-foreground'
                             }`}
                           >
                             <item.icon className="size-4" />
                             {item.label}
                           </button>
                         ))}
+                        </div>
                       </div>
                     ))}
                   </nav>
@@ -1804,7 +1424,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
 
       {/* Right content */}
       <div className="flex-1 bg-background overflow-y-auto relative">
-        <div className={`px-8 pt-4 pb-8 ${sidebarCollapsed ? 'max-w-3xl mx-auto' : ''}`}>
+        <div className={`px-8 pt-5 pb-10 ${sidebarCollapsed ? 'max-w-3xl mx-auto' : ''}`}>
           {renderContent()}
         </div>
       </div>

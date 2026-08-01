@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
 import { Check, X, AlertTriangle, Info, XCircle } from 'lucide-react'
+import React, { useEffect, useState } from 'react'
 import { useHelixStore } from '@/stores/helix-store'
 
 function ToastIcon({ type }: { type: string }) {

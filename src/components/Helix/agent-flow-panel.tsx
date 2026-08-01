@@ -1,7 +1,5 @@
 'use client'
 
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { createPortal } from 'react-dom'
 import {
   Send,
   Brain,
@@ -37,24 +35,31 @@ import {
   Download,
   Trash,
   BookOpen,
+  Volume2,
 } from 'lucide-react'
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { createPortal } from 'react-dom'
+import ReactMarkdown from 'react-markdown'
+import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import type { ReasoningEffortLevel } from '@/hermes-ui/types'
+import { pushModelConfig } from '@/lib/config-sync'
+import { isElectron, electronDialog, electronHermes, electronGit, hermesApi } from '@/lib/electron-bridge'
 import { generateId, timeAgo, formatTokens } from '@/lib/format'
+import { processClipboardImage, canAddMoreImages, blobToDataUrl, compressImage } from '@/lib/image-utils'
+import { buildAcpMcpServers } from '@/lib/mcp'
+import { extractScheduledTasks } from '@/lib/schedule-utils'
+import { isServeActive } from '@/lib/serve-gateway'
+import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, stripEmoji, safeMarkdownSource, stripSystemReminders, extractKaomojiStatus } from '@/lib/text-utils'
 import { ContextUsageIndicator } from './context-usage'
 import { getModelContextWindow } from './context-usage'
-import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, stripEmoji, safeMarkdownSource, stripSystemReminders } from '@/lib/text-utils'
 import { getToolLabel, getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
-import { extractScheduledTasks } from '@/lib/schedule-utils'
 import { InlineToolGroup } from './inline-tool-group'
-import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion'
 import { ApprovalDialog, type ApprovalRequest } from './approval-dialog'
 import { useHelixStore, type ImageAttachment, type FileAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
-import { processClipboardImage, canAddMoreImages, blobToDataUrl, compressImage } from '@/lib/image-utils'
-import { isElectron, electronDialog, electronHermes, electronGit } from '@/lib/electron-bridge'
-import { scheduleConfigPush, flushConfigPush } from '@/lib/config-sync'
-import ReactMarkdown from 'react-markdown'
+import { speak, stopSpeaking } from '@/lib/voice-utils'
 import { markdownComponents, markdownPlugins } from './markdown-components'
 import type { HermesTodo } from '@/stores/helix-types'
 // import { TabBar } from './tab-bar'  // removed
@@ -250,6 +255,40 @@ function CopyButton({ text, className = '' }: { text: string; className?: string
 
 // Tool display utilities — extracted to lib/tool-display-utils.tsx
 
+function SpeakButton({ text, className = '' }: { text: string; className?: string }) {
+  const [speaking, setSpeaking] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!speaking) return
+    const t = setInterval(() => {
+      if (typeof window === 'undefined' || !window.speechSynthesis?.speaking) setSpeaking(false)
+    }, 400)
+    return () => clearInterval(t)
+  }, [speaking])
+
+  return (
+    <button
+      onClick={() => {
+        if (window.speechSynthesis?.speaking) {
+          stopSpeaking()
+          setSpeaking(false)
+        } else {
+          speak(text)
+          setSpeaking(true)
+        }
+      }}
+      className={`p-1.5 rounded-md transition-colors ${
+        speaking
+          ? 'text-primary bg-primary/10'
+          : 'text-muted-foreground hover:text-foreground hover:bg-accent/50'
+      } ${className}`}
+      title={speaking ? '停止朗读' : '朗读'}
+    >
+      <Volume2 className={`size-3.5 ${speaking ? 'animate-pulse' : ''}`} />
+    </button>
+  )
+}
+
 
 // ==== Empty State ====================================================================================
 
@@ -259,18 +298,16 @@ function EmptyState() {
 
 // ==== Reasoning Effort Select ==================================================================
 
-type ReasoningEffort = 'ultra_low' | 'low' | 'medium' | 'high' | 'ultra_high' | 'max'
-
-const REASONING_OPTIONS: { value: ReasoningEffort; label: string }[] = [
-  { value: 'ultra_low', label: '极低' },
+const REASONING_OPTIONS: { value: ReasoningEffortLevel; label: string }[] = [
+  { value: 'minimal', label: '极低' },
   { value: 'low', label: '轻度' },
   { value: 'medium', label: '中' },
   { value: 'high', label: '高' },
-  { value: 'ultra_high', label: '极高' },
+  { value: 'xhigh', label: '极高' },
   { value: 'max', label: '最高' },
 ]
 
-function ReasoningEffortControl({ value, onChange }: { value: ReasoningEffort; onChange: (v: ReasoningEffort) => void }) {
+function ReasoningEffortControl({ value, onChange }: { value: ReasoningEffortLevel; onChange: (v: ReasoningEffortLevel) => void }) {
   const idx = REASONING_OPTIONS.findIndex(o => o.value === value)
   const safeIdx = idx < 0 ? 2 : idx
   const current = REASONING_OPTIONS[safeIdx]
@@ -393,6 +430,44 @@ function ReasoningEffortControl({ value, onChange }: { value: ReasoningEffort; o
 
 // ==== Main Component ============================================================================
 
+function HighlightText({ text, query, active }: { text: string; query: string; active: boolean }) {
+  const q = query.trim().toLowerCase()
+  if (!q) return <>{text}</>
+  const lower = text.toLowerCase()
+  const parts: React.ReactNode[] = []
+  let cursor = 0
+  let key = 0
+  while (true) {
+    const idx = lower.indexOf(q, cursor)
+    if (idx === -1) {
+      if (cursor < text.length) parts.push(text.slice(cursor))
+      break
+    }
+    if (idx > cursor) parts.push(text.slice(cursor, idx))
+    parts.push(
+      <mark
+        key={key++}
+        className={`rounded-[3px] px-0.5 ${active ? 'bg-yellow-300/80 text-black' : 'bg-yellow-300/35 text-inherit'}`}
+      >
+        {text.slice(idx, idx + q.length)}
+      </mark>
+    )
+    cursor = idx + q.length
+  }
+  return <>{parts}</>
+}
+
+function countOccurrences(text: string, query: string): number {
+  if (!query) return 0
+  let count = 0
+  let idx = text.indexOf(query)
+  while (idx !== -1) {
+    count++
+    idx = text.indexOf(query, idx + query.length)
+  }
+  return count
+}
+
 export function AgentFlowPanel() {
   const [steps, setSteps] = useState<ExecutionStep[]>([])
   useEffect(() => { stepsRef.current = steps }, [steps])
@@ -422,6 +497,7 @@ export function AgentFlowPanel() {
   const workspaceFilesLoadedRef = useRef(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const inputValueRef = useRef(input)
+  const chatInputWrapRef = useRef<HTMLDivElement>(null)
   const setInputSynced = useCallback((value: string) => {
     setInput(value)
     inputValueRef.current = value
@@ -491,22 +567,35 @@ export function AgentFlowPanel() {
   const rafPendingRef = useRef(false)
   const pendingTextRef = useRef<string | null>(null)
   const pendingThinkingRef = useRef<string | null>(null)
+  // Ordered pending blocks for responseBlocks. thinking was previously flushed
+  // synchronously while text went through requestAnimationFrame — two paths with
+  // different timing, so interleaved events (思考→正文→思考→正文) rendered in the
+  // WRONG order (思考→思考→正文→正文). Now both go through this same ordered
+  // queue and flush together, preserving event order.
+  const pendingBlocksRef = useRef<Array<{ type: 'thinking' | 'text'; content: string }>>([])
   const flushStreamRender = useCallback(() => {
     rafPendingRef.current = false
-    if (pendingTextRef.current !== null) {
-      const t = pendingTextRef.current
-      pendingTextRef.current = null
-      setResponseBlocks(prev => {
-        const last = prev[prev.length - 1]
-        if (last?.type === 'text') return [...prev.slice(0, -1), { type: 'text', content: t }]
-        return [...prev, { type: 'text', content: t }]
-      })
-    }
-    if (pendingThinkingRef.current !== null) {
-      const th = pendingThinkingRef.current
-      pendingThinkingRef.current = null
-      setStreamThinking(th)
-    }
+    const blocks = pendingBlocksRef.current.splice(0)
+    if (!blocks.length) return
+    // Live thinking bar follows the most recent thinking chunk.
+    const lastThinking = [...blocks].reverse().find(b => b.type === 'thinking')
+    if (lastThinking) setStreamThinking(lastThinking.content)
+    setResponseBlocks(prev => {
+      let next = prev
+      for (const b of blocks) {
+        const last = next[next.length - 1]
+        if (b.type === 'thinking') {
+          next = last?.type === 'thinking'
+            ? [...next.slice(0, -1), { type: 'thinking', content: b.content }]
+            : [...next, { type: 'thinking', content: b.content }]
+        } else {
+          next = last?.type === 'text'
+            ? [...next.slice(0, -1), { type: 'text', content: b.content }]
+            : [...next, { type: 'text', content: b.content }]
+        }
+      }
+      return next
+    })
   }, [setResponseBlocks, setStreamThinking])
   const scheduleStreamRender = useCallback(() => {
     if (rafPendingRef.current) return
@@ -528,7 +617,80 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return chatMessages.filter(m => !m.sessionId || m.sessionId === currentSessionId)
   }, [chatMessages, currentSessionId])
 
-  // Fork branch info for current session
+  // ── Conversation content search (Ctrl+F) ──────────────────────────────
+  const [conversationSearchOpen, setConversationSearchOpen] = useState(false)
+  const [conversationSearchQuery, setConversationSearchQuery] = useState('')
+  const [conversationSearchActive, setConversationSearchActive] = useState(0)
+  const conversationSearchInputRef = useRef<HTMLInputElement>(null)
+
+  const searchMatches = useMemo(() => {
+    if (!conversationSearchOpen) return []
+    const q = conversationSearchQuery.trim().toLowerCase()
+    if (!q) return []
+    const result: { messageId: string; count: number }[] = []
+    for (const msg of sessionMessages) {
+      const text = stripEmoji(normalizeAcpContent(msg.content)).toLowerCase()
+      const count = countOccurrences(text, q)
+      if (count > 0) result.push({ messageId: msg.id, count })
+    }
+    return result
+  }, [sessionMessages, conversationSearchQuery, conversationSearchOpen])
+
+  const searchMatchIds = useMemo(() => new Set(searchMatches.map(m => m.messageId)), [searchMatches])
+  const conversationSearchActiveId = searchMatches[conversationSearchActive]?.messageId || null
+
+  const openConversationSearch = useCallback(() => {
+    setConversationSearchOpen(true)
+    setConversationSearchActive(0)
+    setTimeout(() => conversationSearchInputRef.current?.focus(), 50)
+  }, [])
+
+  const closeConversationSearch = useCallback(() => {
+    setConversationSearchOpen(false)
+    setConversationSearchQuery('')
+    setConversationSearchActive(0)
+    inputRef.current?.focus()
+  }, [])
+
+  const goToNextSearchMatch = useCallback(() => {
+    if (!searchMatches.length) return
+    setConversationSearchActive(i => (i + 1) % searchMatches.length)
+  }, [searchMatches.length])
+
+  const goToPrevSearchMatch = useCallback(() => {
+    if (!searchMatches.length) return
+    setConversationSearchActive(i => (i - 1 + searchMatches.length) % searchMatches.length)
+  }, [searchMatches.length])
+
+  const handleConversationSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === 'Escape') {
+      // Stop propagation so the global shortcut handler (Enter → approve,
+      // Escape → decline) doesn't intercept the search input.
+      e.stopPropagation()
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      if (e.shiftKey) goToPrevSearchMatch()
+      else goToNextSearchMatch()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      closeConversationSearch()
+    }
+  }, [goToNextSearchMatch, goToPrevSearchMatch, closeConversationSearch])
+
+  useEffect(() => {
+    const handler = () => openConversationSearch()
+    window.addEventListener('helix:conversation-search', handler)
+    return () => window.removeEventListener('helix:conversation-search', handler)
+  }, [openConversationSearch])
+
+  useEffect(() => {
+    if (!conversationSearchOpen || !conversationSearchActiveId) return
+    const el = scrollRef.current?.querySelector(`[data-message-id="${conversationSearchActiveId}"]`)
+    el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [conversationSearchActiveId, conversationSearchOpen])
+
+  // ── Fork branch info for current session ──────────────────────────────
   const [currentBranchInfo, setCurrentBranchInfo] = useState<{ branchName?: string; parentLabel?: string } | null>(null)
   useEffect(() => {
     if (!currentSessionId) { setCurrentBranchInfo(null); return }
@@ -585,6 +747,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     if (isRunningSession) return streamThinking
     return streamingDrafts[currentSessionId || '']?.streamThinking || ''
   }, [isRunningSession, streamThinking, streamingDrafts, currentSessionId])
+
+  // Extract kaomoji status line from thinking content
+  const { status: thinkingStatus, body: thinkingBody } = useMemo(
+    () => extractKaomojiStatus(displayStreamThinking),
+    [displayStreamThinking]
+  )
   // Currently-running tool calls, shown in the top status bar as
   // "正在执行工具：read xxx / bash xxx" instead of a bare "正在思考".
   const runningToolLabels = useMemo(() => {
@@ -605,24 +773,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // De-duplicate while preserving order
     return labels.filter((l, i, a) => a.indexOf(l) === i)
   }, [isRunning, displayResponseBlocks])
-  const isThinkingEnded = useMemo(() => {
-    const blocks = displayResponseBlocks
-    let lastThinkingIdx = -1
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      if (blocks[i].type === 'thinking') { lastThinkingIdx = i; break }
-    }
-    if (lastThinkingIdx < 0) return true
-    for (let i = lastThinkingIdx + 1; i < blocks.length; i++) {
-      if (blocks[i].type === 'text') return true
-    }
-    return false
-  }, [displayResponseBlocks])
-
   const transcriptFontSize = useHelixStore(s => s.transcriptFontSize)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
   const activeProviderId = useHelixStore(s => s.activeProviderId)
   const activeModel = useHelixStore(s => s.activeModel)
-  const temperature = useHelixStore(s => s.temperature)
   const reasoningEffort = useHelixStore(s => s.reasoningEffort)
   const personality = useHelixStore(s => s.personality)
   const providers = useHelixStore(s => s.providers)
@@ -704,16 +858,16 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
   // Resolve the provider that owns the current backend endpoint.
   // Primary key: apiConfig.baseUrl (what Hermes actually calls — never drifts).
-  // Fallback: activeProviderId (internal state, can desync after profile switches
-  // or setActiveModel silent-fails when a model isn't in any declared list).
+  // We intentionally do NOT fall back to activeProviderId when baseUrl is set but
+  // has no matching provider: the old fallback caused the input-bar model list to
+  // belong to a different endpoint and auto-snap the user away from an explicit
+  // cross-provider selection made in Settings (e.g. clicking a deepseek history
+  // item while Ling was active would snap the model to Ling's default).
   const activeProvider = useMemo(
     () => {
-      // 1) Match by the actual backend URL — this is the source of truth.
       if (apiConfig?.baseUrl) {
-        const byUrl = providers.find((p) => p.baseUrl === apiConfig.baseUrl)
-        if (byUrl) return byUrl
+        return providers.find((p) => p.baseUrl === apiConfig.baseUrl) || null
       }
-      // 2) Fall back to activeProviderId (may point to wrong provider).
       return providers.find((p) => p.id === activeProviderId) || null
     },
     [providers, activeProviderId, apiConfig?.baseUrl],
@@ -731,6 +885,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     }
     return []
   }, [activeProvider, providerModels])
+
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -751,34 +906,19 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     }
   }, [showModelDropdown, showFolderDropdown, showApprovalModeDropdown])
 
-  // Auto-correct a stale apiConfig.model — but ONLY when the model is genuinely
-  // orphaned (belongs to NO provider at all).  If the user just clicked a history
-  // entry whose endpoint doesn't have a pre-built ProviderConfig yet, the click
-  // handler creates one on-the-fly; we must not race against that and revert
-  // the selection back to the previous provider's first model.
+  // The dropdown shows ONLY the active provider's models (modelList). If the
+  // current model doesn't belong to that provider (e.g. after switching the
+  // provider in Settings, or a stale persisted value), snap to the provider's
+  // first model so the button never shows a different supplier's model name
+  // than the list. A model genuinely owned by the active provider is already in
+  // modelList, so we won't snap away from a valid selection.
   useEffect(() => {
     if (modelList.length === 0) return
     const store = useHelixStore.getState()
     const current = store.apiConfig.model
-    const active = store.activeModel
-    // If activeModel matches current, the user (or a click handler) explicitly
-    // set this model — never second-guess it even if it's not in the scoped
-    // list yet (the provider entry may have just been created).
-    if (current && current === active) return
-    // Also skip if the model lives in ANY provider's fetched/declared pool —
-    // it's valid, just scoped to a different provider right now.
-    const allModels = new Set<string>(
-      store.providers.flatMap((p) => [
-        ...(p.models || []),
-        ...(store.providerModels?.[p.id] || []),
-      ]),
-    )
-    if (current && allModels.has(current)) return
-    // Truly orphaned — snap to the current list's first model.
-    if (!current || !modelList.includes(current)) {
-      const fixed = modelList[0]
-      useHelixStore.getState().setActiveModel(fixed)
-    }
+    if (current && modelList.includes(current)) return
+    const fixed = modelList[0]
+    if (current !== fixed) store.setActiveModel(fixed)
   }, [modelList, apiConfig.model])
   // Shared tail for a model switch. Cancels the in-flight session, invalidates
   // the cached session id, then pushes the freshly-resolved config to the
@@ -820,8 +960,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // explicit user action and must persist to active-profile.json + config.yaml
       // right away — otherwise closing/restarting within the debounce window leaves
       // the cache stale and the next launch reverts to the previous model.
-      scheduleConfigPush(push, 0)
-      flushConfigPush()
+      pushModelConfig(push)
     }
   }, [])
 
@@ -855,15 +994,31 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       <div className="relative" ref={modelDropdownRef}>
         <button
           type="button"
-          onClick={() => setShowModelDropdown(!showModelDropdown)}
+          onClick={() => {
+            const opening = !showModelDropdown
+            setShowModelDropdown(!showModelDropdown)
+            // 打开下拉且当前 provider 还没有抓取过的模型列表时，自动拉取，
+            // 免去用户手动去设置页点"获取模型列表"。覆盖冷启动 / applyProfile
+            // 等未经过 setActiveModel 的激活路径；成功后 providerModels 持久化，
+            // 之后不再重复拉取。
+            if (opening) {
+              const st = useHelixStore.getState()
+              // Refresh ONLY the active provider's model list on open (the
+              // dropdown is now scoped to it, so no need to fetch every provider).
+              const pid = st.activeProviderId
+              if (pid && !st.providerModels?.[pid]?.length) {
+                st.fetchProviderModels(pid)
+              }
+            }
+          }}
           className="flex items-center justify-between gap-2 min-w-[140px] max-w-[220px] px-3 py-1.5 bg-muted/30 border border-border/30 rounded-lg text-[13px] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
         >
           <span className="truncate">{displayName}</span>
           <svg className={`size-3.5 text-muted-foreground transition-transform shrink-0 ${showModelDropdown ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
         </button>
         {showModelDropdown && (
-          <div className="absolute bottom-full right-0 mb-2 min-w-[200px] max-w-[320px] max-h-56 overflow-y-auto bg-popover border border-border/40 rounded-xl shadow-xl z-50 p-1 animate-scale-in">
-            {modelList.map(m => (
+          <div className="absolute bottom-full right-0 mb-2 min-w-[220px] max-w-[360px] max-h-56 overflow-y-auto bg-popover border border-border/40 rounded-xl shadow-xl z-50 p-1 animate-scale-in">
+            {modelList.map((m) => (
               <button
                 key={m}
                 type="button"
@@ -874,7 +1029,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     : 'text-foreground/70 hover:bg-muted'
                 }`}
               >
-                {m}
+                <span className="truncate">{m}</span>
               </button>
             ))}
             {modelList.length === 0 && (
@@ -1019,15 +1174,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   }, [allSlashItems, input])
   const slashCmd = input.startsWith('/') ? input.slice(1).split(' ')[0].toLowerCase() : ''
   const matchedQuickCmds = slashCmd ? QUICK_COMMANDS.filter(c => c.cmd.slice(1).startsWith(slashCmd)) : []
-  const showSlashSkills = input.startsWith('/') && filteredSkills.length > 0
-  const showQuickCmds = input.startsWith('/') && matchedQuickCmds.length > 0 && !input.includes(' ')
   const [selectedSkillIndex, setSelectedSkillIndex] = useState(0)
+  const [slashMenuOpen, setSlashMenuOpen] = useState(true)
+  const showSlashSkills = input.startsWith('/') && filteredSkills.length > 0 && slashMenuOpen
+  const showQuickCmds = input.startsWith('/') && matchedQuickCmds.length > 0 && !input.includes(' ')
 
   // Handle input change for skill detection
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value
     setInputSynced(value)
     setSelectedSkillIndex(0) // Reset selection when input changes
+    setSlashMenuOpen(true) // typing re-opens the slash menu
     // Detect @ file reference trigger
     const atIdx = value.lastIndexOf('@')
     if (atIdx >= 0 && (atIdx === 0 || /[\s\n]/.test(value[atIdx - 1]))) {
@@ -1041,6 +1198,19 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       setShowAtRef(false)
     }
   }, [setInputSynced])
+
+  // Close the slash-command menu when clicking outside the chat input.
+  useEffect(() => {
+    if (!slashMenuOpen) return
+    const handlePointerDown = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (chatInputWrapRef.current && !chatInputWrapRef.current.contains(target)) {
+        setSlashMenuOpen(false)
+      }
+    }
+    window.addEventListener('pointerdown', handlePointerDown)
+    return () => window.removeEventListener('pointerdown', handlePointerDown)
+  }, [slashMenuOpen])
 
   // Auto-scroll to bottom (stop when user scrolls up)
   const userScrolledUpRef = useRef(false)
@@ -1103,7 +1273,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         viewport.scrollTop = viewport.scrollHeight
       })
     })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [currentSessionId])
 
   useEffect(() => {
@@ -1418,8 +1588,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       return
     }
 
-    // Check API key
-    if (!hasApiKey) {
+    // Check API key — serve 模式下密钥由 Hermes 托管，Helix 侧 apiConfig.apiKey
+    // 为空，跳过该门否则发送会被永久拦截（"发送按钮无效"）。
+    if (!hasApiKey && !isServeActive()) {
       storeActions.toggleSettings('api')
       return
     }
@@ -1486,7 +1657,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     abortRef.current = controller
 
     let unsubscribe: (() => void) | null = null
-    let queueDone = false
+    const queueDone = false
     try {
       const state = useHelixStore.getState()
       const isElectron = typeof window !== 'undefined' && !!window.electron?.isElectron
@@ -1521,7 +1692,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               resolve(true)
             }
           }
-          const unsub = window.electron.hermes.onEvent((event: string) => {
+          const unsub = hermesApi()!.onEvent((event: string) => {
             if (event === 'gateway.ready') {
               cleanup()
               resolve(true)
@@ -1543,9 +1714,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       let sessionId = hermesSessionIdRef.current
       if (!sessionId) {
         const cwd = selectedWorkDir || state.selectedWorkDir || (typeof process !== 'undefined' ? process.cwd() : '')
-        const res = await window.electron.hermes.send('session/new', {
+        const res = await hermesApi()!.send('session/new', {
           cwd,
-          mcpServers: [],
+          mcpServers: buildAcpMcpServers(useHelixStore.getState().mcpServers),
         }) as any
         sessionId = res?._meta?.hermes?.sessionProvenance?.acpSessionId
           || res?.session_id
@@ -1564,7 +1735,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         // waits for an approval response to a permission_request, so the only
         // way to skip manual approval is to set the session mode here.
         try {
-          await window.electron.hermes.send('session/set_mode', {
+          await hermesApi()!.send('session/set_mode', {
             session_id: sessionId,
             mode_id: approvalMode,
           })
@@ -1651,7 +1822,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 toolParams: u.toolParams || u.params || {},
               }
             case 'run_complete':
-              return { type: 'done', content: textBufferRef.current }
+              // 后端 run.completed / message.complete 携带完整正文(payload.text / output)。
+              // 优先采用它兜底——否则若 serve 后端只在完成时给正文(不发 message.delta 流),
+              // 仅用流式缓冲 textBufferRef.current 会拿到空值 → “只思考不输出”。
+              return { type: 'done', content: u.content || textBufferRef.current }
             case 'usage_update':
               return { type: 'usage_update', size: Number(u.size) || 0, used: Number(u.used) || 0 }
             case 'available_commands_update':
@@ -1798,6 +1972,15 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         queue.push(item)
         if (queueWaiter) { const w = queueWaiter; queueWaiter = null; w() }
       }
+
+      // Disconnect recovery — aligned with official Hermes: on a WS drop the
+      // run is NOT killed. The backend detaches the session (drop sentinel) and
+      // keeps executing (running sessions are never reaped — server.py
+      // _ws_session_is_orphaned returns False for running=True). serve-gateway
+      // reconnects and calls session.resume to re-bind the transport; the event
+      // stream resumes and run.completed lands normally. So a disconnect only
+      // shows a notice here — the run is ended only by the real completion, or
+      // by serve-gateway rejecting the prompt when resume fails for good.
       function dequeue(): string | null {
         return queue.length > 0 ? queue.shift()! : null
       }
@@ -1856,20 +2039,43 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         }
         console.warn('[HelixTrace] scheduleSynthDone', { delay, queueDone, textLen: textBufferRef.current?.length ?? 0 })
         synthDoneTimerRef.current = setTimeout(() => {
+          synthDoneTimerRef.current = null
           console.warn('[HelixTrace] synthDone fired', {
             queueDone,
             textLen: textBufferRef.current?.length ?? 0,
             stepsLen: stepsRef.current.length,
           })
-          if (!queueDone) {
-            enqueue('data: ' + JSON.stringify({ type: 'done', content: textBufferRef.current }))
-            queueDone = true
+          if (queueDone) return
+          const hasText = (textBufferRef.current?.length ?? 0) > 0
+          const hasThinking = (thoughtBufferRef.current?.length ?? 0) > 0
+          // 典型「只思考、还没出正文」的中间态:正文大概率还在 stream,
+          // run.completed 尚未到达。此时若直接提交空 done,会造成「只思考不输出」,
+          // 且后续 message.delta / run.completed 会被 doneProcessedRef 丢弃。
+          // 改走更长的二次兜底,把机会留给真实 run.completed(其 done 已用 u.content 兜底正文)。
+          if (!hasText && hasThinking) {
+            console.warn('[HelixTrace] synthDone deferred (thinking-only, awaiting message)', { textLen: 0 })
+            if (!synthDoneTimerRef.current) {
+              synthDoneTimerRef.current = setTimeout(() => {
+                synthDoneTimerRef.current = null
+                if (!queueDone) {
+                  enqueue('data: ' + JSON.stringify({ type: 'done', content: textBufferRef.current }))
+                  queueDone = true
+                }
+              }, 15000)
+            }
+            return
           }
-          synthDoneTimerRef.current = null
+          enqueue('data: ' + JSON.stringify({ type: 'done', content: textBufferRef.current }))
+          queueDone = true
         }, delay)
       }
 
-      unsubscribe = window.electron.hermes.onEvent(async (method: string, params: any) => {
+      // IMPORTANT: subscribe through hermesApi() (the mode-aware facade), NOT
+      // window.electron.hermes. In serve mode agent stream events (session/update,
+      // tool.*, message.*) arrive over the WS client inside serve-gateway.ts and
+      // never hit the IPC bridge — subscribing to the raw IPC onEvent left the
+      // run with "正在思考" forever (no tool cards, no text).
+      unsubscribe = hermesApi()!.onEvent(async (method: string, params: any) => {
         const now = Date.now()
         // Track time to first token on first meaningful event
         if (method === 'session/update' && (
@@ -1881,16 +2087,60 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           }
         }
         try {
-          // When Hermes starts retrying after a connection error, clear the
-          // accumulated text/thinking buffers so the retry response replaces
-          // (not appends to) the partial content from the failed attempt.
+          // WS 断连：Hermes 会话会 detach，事件流永久丢失。立即武装 8s 结束
+          // 兜底，避免 UI 永久卡在"正在思考/正在执行"（5 分钟长兜底太慢）。
+          // WS 断连：对齐官方——run 不结束。Hermes 把运行中的会话 detach 继续
+          // 执行（running 会话不会被 reap），serve-gateway 会重连并 session.resume
+          // 恢复事件流。这里只显示提示 + 清掉空闲兜底定时器（断连/重连期间模型
+          // 可能仍在思考、无 delta，8s 空闲兜底会提前 enqueue done 把恢复中的
+          // run 砍掉）。run 的收尾完全交给真实完成事件或 resume 失败的 reject。
+          if (method === 'gateway.disconnected') {
+            if (synthDoneTimerRef.current) {
+              clearTimeout(synthDoneTimerRef.current)
+              synthDoneTimerRef.current = null
+            }
+            useHelixStore.getState().setConnectionNotice({ phase: 'error', message: '与 Hermes 网关连接已断开，正在尝试恢复…', ts: Date.now() })
+            return
+          }
+          // Reconnect completed (serve-gateway already re-ran session.resume).
+          // The event stream is about to resume — clear the notice.
+          if (method === 'gateway.reconnected') {
+            useHelixStore.getState().setConnectionNotice({ phase: 'recovered', message: '连接已恢复', ts: Date.now() })
+            setTimeout(() => useHelixStore.getState().setConnectionNotice(null), 2000)
+            return
+          }
+          // When Hermes starts retrying after an UPSTREAM API connection error,
+          // the ACP path clears the accumulated text/thinking buffers so the
+          // retry response replaces (not appends to) the partial content from
+          // the failed attempt. In serve mode this event originates from the
+          // hermes process's stderr (main.js), NOT a WS drop — the session is
+          // never rebuilt, so clearing buffers would discard already-streamed
+          // thinking/text. Only update the notice there.
           if (method === 'gateway.retry') {
             const phase = params?.phase as string | undefined
+            if (isServeActive()) {
+              if (phase === 'recovered') {
+                useHelixStore.getState().setConnectionNotice({ phase: 'recovered', message: '连接已恢复', ts: Date.now() })
+                setTimeout(() => useHelixStore.getState().setConnectionNotice(null), 2000)
+              } else {
+                const attempt = params?.attempt ?? 1
+                const total = params?.total ?? 3
+                useHelixStore.getState().setConnectionNotice({ phase: 'retrying', attempt, total, message: '上游连接不稳定，正在重连（第 ' + attempt + '/' + total + ' 次）…', ts: Date.now() })
+                setTimeout(() => {
+                  const cur = useHelixStore.getState().connectionNotice
+                  if (cur?.phase === 'retrying') {
+                    useHelixStore.getState().setConnectionNotice(null)
+                  }
+                }, 30000)
+              }
+              return
+            }
             if (phase === 'error') {
               textBufferRef.current = ''
               thoughtBufferRef.current = ''
               pendingTextRef.current = ''
               pendingThinkingRef.current = ''
+              pendingBlocksRef.current = []
               // Strip trailing thinking/text blocks so re-streamed content
               // replaces (not appends to) the in-progress response blocks, preventing
               // duplicate thinking/text output after reconnect.
@@ -1910,6 +2160,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               thoughtBufferRef.current = ''
               pendingTextRef.current = ''
               pendingThinkingRef.current = ''
+              pendingBlocksRef.current = []
               setStreamThinking('')
               // Strip trailing thinking/text blocks so re-streamed content
               // replaces (not appends to) the in-progress response blocks, preventing
@@ -1957,7 +2208,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           if (parsed && (parsed.type === 'text' || parsed.type === 'thinking' || parsed.type === 'tool_call' || parsed.type === 'tool_result')) {
             streamedContent = true
             if (!firstContentAtRef.current) firstContentAtRef.current = Date.now()
-            scheduleSynthDone(2000)
+            scheduleSynthDone(8000)
           }
           // A real text chunk (or tool result) means the gateway is delivering again →
           // clear any transient "reconnecting" notice so it doesn't linger.
@@ -2013,7 +2264,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // Fire the prompt — events stream back via onEvent (don't await the promise itself).
       // ACP expects prompt as a list of content blocks, not a plain string
       promptSentAtRef.current = Date.now()
-      window.electron.hermes.send('session/prompt', {
+      hermesApi()!.send('session/prompt', {
         session_id: sessionId,
         prompt: [{ type: 'text', text: promptText }],
       }).then((result: any) => {
@@ -2061,27 +2312,15 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           enqueue('data: ' + JSON.stringify({ type: 'text', content: direct }))
           enqueue('data: ' + JSON.stringify({ type: 'done', content: direct }))
         }
-        // Hermes finished the turn (stopReason comes back via the prompt
-        // response). It does NOT always emit a separate run_complete /
-        // session/complete notification, so synthesize a `done` event so the
-        // assistant reply actually gets persisted into chatMessages. Without
-        // this the reply lives only in the in-memory responseBlocks and is
-        // lost when switching conversations.
-        //
-        // NOTE: session/prompt IPC returns immediately (fire-and-forget), so
-        // this .then() fires BEFORE any session/update notifications arrive.
-        //
-        // CRITICAL: this timer starts from the prompt ack, NOT from first token.
-        // Slow providers (e.g. agnes: ~5-6s of metadata probes + ~10s to first
-        // chunk) deliver their first chunk well after 8s. If synth-done fires
-        // first, the consumer loop `break`s and `finally` unsubscribes the
-        // onEvent handler — so every real chunk that arrives afterwards is
-        // dropped (symptom: event count {} while the terminal shows 36 chunks
-        // forwarded). Therefore the PRE-FIRST-TOKEN fallback must be much longer
-        // than any provider's time-to-first-token. Once the first chunk arrives,
-        // the per-chunk `scheduleSynthDone(2000)` at line ~1449 takes over and
-        // provides the quick idle flush for short replies / dropped run_complete.
-        scheduleSynthDone(90000)
+        // Hermes (ACP) finished the turn — the session/prompt JSON-RPC only
+        // resolves AFTER the agent loop completes, at which point all
+        // streamed chunks have already been delivered via session/update.
+        // Synthesize `done` immediately: no 90s fallback timer needed (ACP
+        // does not fire-and-forget; the response IS the end-of-turn signal).
+        if (!queueDone) {
+          enqueue('data: ' + JSON.stringify({ type: 'done', content: textBufferRef.current }))
+          queueDone = true
+        }
       }).catch((err: any) => {
         console.error('[Helix] session/prompt error', err)
         enqueue('data: ' + JSON.stringify({ type: 'error', content: err?.message || '请求失败' }))
@@ -2240,24 +2479,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 thoughtBufferRef.current = cur + inc
               }
               pendingThinkingRef.current = thoughtBufferRef.current
-              
-              // Update responseBlocks - replace if cumulative, append if incremental
-              setResponseBlocks(prev => {
-                const last = prev.length > 0 ? prev[prev.length - 1] : null
-                if (last && last.type === 'thinking') {
-                  const nb = prev.slice()
-                  if (isCumulative) {
-                    // Replace with full content
-                    nb[nb.length - 1] = { type: 'thinking', content: inc }
-                  } else {
-                    // Append incremental content
-                    nb[nb.length - 1] = { type: 'thinking', content: last.content + inc }
-                  }
-                  return nb
-                }
-                // Create a new thinking block
-                return [...prev, { type: 'thinking', content: inc }]
-              })
+              pendingBlocksRef.current.push({ type: 'thinking', content: thoughtBufferRef.current })
               scheduleStreamRender()
             } else if (parsed.type === 'reasoning') {
               const id = generateId()
@@ -2372,6 +2594,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }
               textBufferRef.current = newText
               pendingTextRef.current = newText
+              pendingBlocksRef.current.push({ type: 'text', content: newText })
 
               // If the model embeds its reasoning inside <think:ID>...</think:ID> tags
               // instead of emitting a separate thinking stream, surface it as the thinking block.
@@ -2386,6 +2609,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   // rather than leaving the message empty.
                   textBufferRef.current = cleaned || reasoning
                   pendingTextRef.current = cleaned || reasoning
+                  // Update the last queued text block so the <think:ID> scrub
+                  // result is what gets rendered (not the raw newText).
+                  const pb = pendingBlocksRef.current
+                  if (pb.length && pb[pb.length - 1].type === 'text') {
+                    pb[pb.length - 1] = { type: 'text', content: cleaned || reasoning }
+                  } else {
+                    pb.push({ type: 'text', content: cleaned || reasoning })
+                  }
                 }
               }
 
@@ -2400,13 +2631,21 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 await new Promise(r => setTimeout(r, 500))
               }
               doneProcessedRef.current = true
+              // 关键修复:done 事件可能自带正文(parsed.content,来自后端 message.complete /
+              // run.completed 的 text)。当模型不流式发 message.delta 时 textBuffer 为空,
+              // 必须回退用事件自带正文,否则表现为"只思考不输出"。流式场景 textBuffer 已填满,
+              // 优先用它(避免 run_complete 自带内容截断已流出的全文)。
               let content = textBufferRef.current
+              if (!content.trim() && parsed.content && typeof parsed.content === 'string' && parsed.content.trim()) {
+                content = parsed.content
+              }
               let reasoning = thoughtBufferRef.current
               const completedSteps = stepsRef.current
               textBufferRef.current = ''
               thoughtBufferRef.current = ''
               pendingTextRef.current = null
               pendingThinkingRef.current = null
+              pendingBlocksRef.current = []
               rafPendingRef.current = false
               setStreamThinking('')
               if (content || reasoning || completedSteps.length > 0 || responseBlocksRef.current.length > 0) {
@@ -2486,6 +2725,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               thoughtBufferRef.current = ''
               pendingTextRef.current = null
               pendingThinkingRef.current = null
+              pendingBlocksRef.current = []
               rafPendingRef.current = false
               setStreamThinking('')
               if (content || reasoning || errorSteps.length > 0 || responseBlocks.length > 0) {
@@ -2582,6 +2822,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         }
         pendingTextRef.current = null
         pendingThinkingRef.current = null
+        pendingBlocksRef.current = []
         rafPendingRef.current = false
         setSteps(prev => [...prev, {
           id: generateId(),
@@ -2765,7 +3006,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           setSelectedSkillIndex(prev => Math.max(prev - 1, 0))
           return
         }
-        if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+        const hasSlashQuery = inputValueRef.current.slice(1).trim().length > 0
+        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && hasSlashQuery)) {
+          // Enter only selects a dropdown item once the user has typed a command
+          // query. With a bare "/", Enter falls through to the normal send path
+          // instead of auto-running the first highlighted item.
           e.preventDefault()
           const idx = Math.min(selectedSkillIndex, filteredSkills.length - 1)
           const selected = filteredSkills[idx] as any
@@ -2859,7 +3104,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     try {
       const sid = hermesSessionIdRef.current
       if (sid) {
-        await window.electron.hermes.send('session/approve', {
+        await hermesApi()!.send('session/approve', {
           session_id: sid,
           toolCallId: approvalId,
           approve: approved,
@@ -2877,7 +3122,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       const sid = hermesSessionIdRef.current
       if (sid) {
         for (const req of approvalQueue) {
-          await window.electron.hermes.send('session/approve', {
+          await hermesApi()!.send('session/approve', {
             session_id: sid,
             toolCallId: req.id,
             approve: true,
@@ -3026,6 +3271,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     )
     return (
     <div
+      ref={chatInputWrapRef}
       className={`border transition-all duration-200 relative bg-background/90 backdrop-blur-md border-border/40 rounded-2xl shadow-lg shadow-black/5 ${isDraggingFile ? 'border-primary/40' : 'hover:border-border/60 focus-within:border-primary/30'}`}
       onDragOver={(e) => {
         e.preventDefault()
@@ -3381,8 +3627,49 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   }
 
   return (
-    <div className="h-full flex flex-col bg-transparent text-foreground">
+    <div className="h-full flex flex-col bg-transparent text-foreground relative">
       {/* Header bar - removed */}
+
+      {/* Conversation search bar (Ctrl+F) */}
+      {conversationSearchOpen && (
+        <div className="absolute top-2.5 right-3 z-40 flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-popover text-popover-foreground border border-border/70 shadow-lg">
+          <Search className="size-3.5 text-muted-foreground shrink-0" />
+          <input
+            ref={conversationSearchInputRef}
+            value={conversationSearchQuery}
+            onChange={(e) => { setConversationSearchQuery(e.target.value); setConversationSearchActive(0) }}
+            onKeyDown={handleConversationSearchKeyDown}
+            placeholder="搜索对话内容..."
+            className="w-44 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          />
+          <span className={`text-[11px] tabular-nums shrink-0 ${searchMatches.length ? 'text-muted-foreground' : 'text-foreground/40'}`}>
+            {conversationSearchQuery.trim() ? (searchMatches.length ? `${conversationSearchActive + 1}/${searchMatches.length}` : '无结果') : ''}
+          </span>
+          <button
+            onClick={goToPrevSearchMatch}
+            disabled={!searchMatches.length}
+            className="p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-accent/60 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+            title="上一个匹配 (Shift+Enter)"
+          >
+            <ArrowUp className="size-3.5" />
+          </button>
+          <button
+            onClick={goToNextSearchMatch}
+            disabled={!searchMatches.length}
+            className="p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-accent/60 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+            title="下一个匹配 (Enter)"
+          >
+            <ArrowDown className="size-3.5" />
+          </button>
+          <button
+            onClick={closeConversationSearch}
+            className="p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-accent/60 transition-colors"
+            title="关闭 (Esc)"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Flow area */}
       <ScrollArea ref={scrollRef} className="flex-1 min-h-0" hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
@@ -3410,9 +3697,15 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               )}
               {/* Chat messages (input/output)  — completed messages only */}
               {sessionMessages.map(msg => (
-                <div key={msg.id} className={`flex w-full step-enter ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div key={msg.id} data-message-id={msg.id} className={`flex w-full step-enter ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role === 'assistant' ? (
-                    <div className="group w-full">
+                    <div className={`group w-full rounded-xl transition-all duration-200 ${
+                      searchMatchIds.has(msg.id)
+                        ? msg.id === conversationSearchActiveId
+                          ? 'ring-2 ring-yellow-400/70 bg-yellow-400/5'
+                          : 'ring-1 ring-yellow-400/30 bg-yellow-400/[0.03]'
+                        : ''
+                    }`}>
                       <div className="flex-1 min-w-0">
                         {/* Inline thinking block (collapsible) — skip if blocks already contain thinking (prevents duplicate) */}
                         {msg.reasoning && msg.reasoning.trim().length > 0 && !(msg.blocks && msg.blocks.some(b => b.type === 'thinking')) && (
@@ -3466,6 +3759,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         {/* Copy button */}
                         <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1 gap-0.5">
                           <CopyButton text={stripEmoji(normalizeAcpContent(msg.content))} />
+                          <SpeakButton text={stripEmoji(normalizeAcpContent(msg.content))} />
                           <button
                             onClick={() => storeActions.forkConversation(msg.id)}
                             className="p-1 rounded-lg text-muted-foreground/40 hover:text-blue-500 hover:bg-blue-500/10 transition-colors"
@@ -3512,7 +3806,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                           </div>
                         )}
                         {normalizeAcpContent(msg.content) && (
-                          <div className="whitespace-pre-wrap leading-normal" style={{ fontSize: transcriptFontSize }}>{normalizeAcpContent(msg.content)}</div>
+                          <div className="whitespace-pre-wrap leading-normal" style={{ fontSize: transcriptFontSize }}>
+                            {conversationSearchOpen && conversationSearchQuery.trim()
+                              ? <HighlightText text={normalizeAcpContent(msg.content)} query={conversationSearchQuery} active={msg.id === conversationSearchActiveId} />
+                              : normalizeAcpContent(msg.content)}
+                          </div>
                         )}
                       </div>
                       {/* Action buttons below user message */}
@@ -3535,69 +3833,57 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               {(isRunning || displayResponseBlocks.length > 0) && (
                 <div className="flex w-full justify-start transition-all duration-300 opacity-100">
                   <div className="w-full px-1 py-1 text-foreground transition-all duration-300">
-                    {/* Loading placeholder when the model is running but has not emitted any content yet */}
+                    {/* Loading placeholder — plain terminal-style reasoning line */}
                     {isRunning && displayResponseBlocks.length === 0 && !displayStreamThinking && (
                       <div className="flex items-center my-1 text-sm text-foreground/50">
-                        <span>正在思考</span>
+                        <span>(¬_¬) reasoning...</span>
                       </div>
                     )}
 
-                    {/* Top status bar: when a tool is actively running, surface it here
-                        instead of a bare "正在思考", so the user can tell the agent
-                        is working (read / bash / search / write) rather than idling. */}
-                    {isRunning && (
+                    {/* Top status bar — shows kaomoji status from thinking or executing info */}
+                    {isRunning && (displayResponseBlocks.length > 0 || displayStreamThinking) && (
                       <div className="flex items-center gap-1.5 my-1 text-sm text-foreground/50">
-                        <span>正在执行</span>
+                        <span>
+                          {thinkingStatus
+                            ? thinkingStatus
+                            : runningToolLabels.length > 0
+                              ? `(•_•) executing: ${runningToolLabels.join(' / ')}`
+                              : '(•_•) executing...'}
+                        </span>
                       </div>
                     )}
 
-                    {/* Show thinking content if available */}
-                    {isRunning && displayStreamThinking && (
+                    {/* Show thinking content if available (kaomoji status line stripped) */}
+                    {isRunning && thinkingBody && (
                       <div className="my-2">
-                          <details className="group/details">
-                            <summary className="text-xs font-medium text-muted-foreground cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none transition-colors">
-                              <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
-                              <span>思考中</span>
-
-                            </summary>
-                            <div className="mt-1 pl-4 text-xs text-foreground/60 whitespace-pre-wrap break-all leading-relaxed max-h-32 overflow-y-auto">
-                              {displayStreamThinking}
-                            </div>
-                          </details>
-                        </div>
+                        <details className="group/details">
+                          <summary className="text-xs font-medium text-muted-foreground cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none transition-colors">
+                            <span>thinking...</span>
+                          </summary>
+                          <div className="mt-1 pl-3 text-xs text-foreground/60 whitespace-pre-wrap break-all leading-relaxed max-h-[50vh] overflow-y-auto">
+                            {thinkingBody}
+                          </div>
+                        </details>
+                      </div>
                     )}
 
                     {/* Inline thinking block (collapsible) — kept for completed messages */}
 
                     {/* Interleaved response blocks: thinking, text, and tool groups in chronological order */}
                     {displayResponseBlocks.length > 0 && (() => {
-                      const hasText = displayResponseBlocks.some(b => b.type === 'text')
-                      const filtered = displayResponseBlocks.filter(b => !isThinkingEnded || b.type !== 'thinking')
+                      const filtered = displayResponseBlocks
                       return (
                         <div className="helix-md" style={{ fontSize: transcriptFontSize }}>
                           {filtered.map((block, idx) =>
                             block.type === 'thinking' ? (
-                              hasText ? (
-                                <details key={idx} className="mb-2 group/details">
-                                  <summary className="text-xs font-medium text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors">
-                                    <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
-                                    <span>思考</span>
-                                  </summary>
-                                  <div className="mt-1 pl-4 text-xs text-foreground/50 whitespace-pre-wrap break-all leading-relaxed">
-                                    {stripEmoji(normalizeAcpContent(block.content))}
-                                  </div>
-                                </details>
-                              ) : (
-                                <details key={idx} className="mb-2 group/details">
-                                  <summary className="text-xs font-medium text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors">
-                                    <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
-                                    <span>思考</span>
-                                  </summary>
-                                  <div className="mt-1 pl-4 text-xs text-foreground/50 whitespace-pre-wrap break-all leading-relaxed">
-                                    {stripEmoji(normalizeAcpContent(block.content))}
-                                  </div>
-                                </details>
-                              )
+                              <details key={idx} className="mb-2 group/details">
+                                <summary className="text-xs font-medium text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors">
+                                  <span>thinking</span>
+                                </summary>
+                                <div className="mt-1 pl-3 text-xs text-foreground/50 whitespace-pre-wrap break-all leading-relaxed">
+                                  {stripEmoji(normalizeAcpContent(block.content))}
+                                </div>
+                              </details>
                             ) : block.type === 'text' ? (
                             <div key={idx}>
                               <ReactMarkdown

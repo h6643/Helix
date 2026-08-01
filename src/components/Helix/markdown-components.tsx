@@ -1,9 +1,10 @@
+import { Check, Copy, Download, Globe, ExternalLink } from 'lucide-react'
 import React, { useState, useRef, useEffect, useMemo } from 'react'
-import { Check, Copy, Download } from 'lucide-react'
 import 'highlight.js/styles/github-dark.css'
 import ReactMarkdown, { type Components } from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
+import remarkGfm from 'remark-gfm'
+import { useHelixStore } from '@/stores/helix-store'
 
 export const markdownPlugins = {
   remarkPlugins: [remarkGfm, remarkBreaks],
@@ -102,7 +103,30 @@ function embedFor(href: string): { kind: 'youtube' | 'spotify' | 'twitter'; src:
 
 const EmbedCard = ({ href, children }: { href: string; children?: React.ReactNode }) => {
   const e = useMemo(() => embedFor(href), [href])
-  if (!e) return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+  const isHttp = /^https?:\/\//i.test(href)
+  const openInSidebar = () => useHelixStore.getState().setPreviewRailUrl(href)
+  if (!e) {
+    if (isHttp) {
+      return (
+        <span className="group/link relative inline-flex items-center align-baseline">
+          <a
+            href={href}
+            onClick={(ev) => { ev.preventDefault(); openInSidebar() }}
+            className="underline decoration-dotted underline-offset-2 hover:text-primary"
+          >{children}</a>
+          <button
+            type="button"
+            onClick={() => window.open(href, '_blank', 'noopener,noreferrer')}
+            className="ml-1 inline-flex opacity-0 group-hover/link:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-primary"
+            title="在外部浏览器打开"
+          >
+            <ExternalLink className="size-3.5" />
+          </button>
+        </span>
+      )
+    }
+    return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+  }
   return (
     <div className="my-3 rounded-xl overflow-hidden border border-border/40 bg-card/40">
       {e.kind === 'twitter' ? (
@@ -116,6 +140,55 @@ const EmbedCard = ({ href, children }: { href: string; children?: React.ReactNod
           allow="encrypted-media; clipboard-write"
         />
       )}
+      <div className="flex justify-end px-2 py-1 border-t border-border/20">
+        <button
+          type="button"
+          onClick={openInSidebar}
+          className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary transition-colors"
+          title="在右侧边栏打开"
+        >
+          <Globe className="size-3" /> 在右侧边栏打开
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// Code block wrapper with a copy button (syntax highlighting added via rehype plugin upstream).
+// Uppercase name so React Hooks rules apply (react-markdown maps the `pre` tag to it).
+function Pre({ children }: { children?: React.ReactNode }) {
+  // Detect a mermaid block rendered by our `code` override.
+  const child = Array.isArray(children) ? children[0] : children
+  const isMermaid = React.isValidElement(child) && (child.props as any)?.['data-mermaid']
+  const ref = useRef<HTMLPreElement>(null)
+  const [copied, setCopied] = useState(false)
+  const [singleLine, setSingleLine] = useState(false)
+  useEffect(() => {
+    const text = ref.current?.textContent || ''
+    setSingleLine(text.trim().split('\n').length === 1)
+  }, [children])
+  if (isMermaid) return <>{children}</>
+  const onCopy = () => {
+    const text = ref.current?.textContent || ''
+    if (navigator.clipboard) navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+  return (
+    <div className={`relative group my-1.5 rounded-lg overflow-hidden bg-muted/20 border border-border/50 ${singleLine ? 'w-fit max-w-full pl-10 pr-14 py-1' : 'px-6 py-1.5'}`}>
+      <button
+        type="button"
+        onClick={onCopy}
+        className="absolute right-3 top-3 z-10 px-1.5 py-1 rounded bg-muted/80 text-foreground/60 opacity-0 group-hover:opacity-100 transition-opacity"
+      >
+        {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+      </button>
+      <pre
+        ref={ref}
+        className={`text-[13px] leading-7 ${singleLine ? 'flex justify-center overflow-hidden whitespace-nowrap' : 'text-left whitespace-pre-wrap break-words'}`}
+      >
+        {children}
+      </pre>
     </div>
   )
 }
@@ -125,32 +198,7 @@ export const markdownComponents: Components = {
     href ? <EmbedCard href={href}>{children}</EmbedCard> : <a {...props}>{children}</a>,
   img: ({ src, alt }) => <LightboxImage src={typeof src === 'string' ? src : undefined} alt={alt} />,
   // Code block wrapper with a copy button (syntax highlighting added via rehype plugin upstream)
-  pre: ({ children }) => {
-    // Detect a mermaid block rendered by our `code` override.
-    const child = Array.isArray(children) ? children[0] : children
-    const isMermaid = React.isValidElement(child) && (child.props as any)?.['data-mermaid']
-    if (isMermaid) return <>{children}</>
-    const ref = useRef<HTMLPreElement>(null)
-    const [copied, setCopied] = useState(false)
-    const onCopy = () => {
-      const text = ref.current?.textContent || ''
-      if (navigator.clipboard) navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    }
-    return (
-      <div className="relative group my-3 rounded-xl overflow-hidden border border-border/40">
-        <button
-          type="button"
-          onClick={onCopy}
-          className="absolute right-2 top-2 z-10 px-1.5 py-1 rounded bg-muted/80 text-foreground/60 opacity-0 group-hover:opacity-100 transition-opacity"
-        >
-          {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
-        </button>
-        <pre ref={ref}>{children}</pre>
-      </div>
-    )
-  },
+  pre: Pre,
   code: ({ className, children, ...props }) => {
     const text = String(children ?? '')
     const isMermaid = /language-mermaid/.test(className || '')
@@ -164,7 +212,7 @@ export const markdownComponents: Components = {
     }
     if (isInline) {
       return (
-        <code className="px-1.5 py-0.5 rounded bg-muted text-[0.85em] font-mono" {...props}>
+        <code {...props}>
           {children}
         </code>
       )

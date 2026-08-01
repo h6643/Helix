@@ -1,9 +1,10 @@
 'use client'
 
-import React, { useState, useCallback, useEffect } from 'react'
 import { X, Keyboard, FileText, Palette, Pencil, Sun, Moon } from 'lucide-react'
-import { useHelixStore, DEFAULT_SHORTCUTS } from '@/stores/helix-store'
+import React, { useState, useCallback, useEffect } from 'react'
+import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { useHelixStore, DEFAULT_SHORTCUTS } from '@/stores/helix-store'
 
 interface CustomizePanelProps {
   onClose: () => void
@@ -207,33 +208,30 @@ function ShortcutsSection() {
 // ─── Instructions Section ─────────────────────────────────────────────────
 
 function InstructionsSection() {
-  const { customInstructions, setCustomInstructions, showToast } = useHelixStore()
-  const [localInstructions, setLocalInstructions] = useState(customInstructions)
+  const { personality, setPersonality, showToast } = useHelixStore()
+  const [localPersonality, setLocalPersonality] = useState(personality)
 
   const handleSave = () => {
-    setCustomInstructions(localInstructions)
+    setPersonality(localPersonality)
   }
 
   return (
     <div className="space-y-6">
       <section className="space-y-3">
-        <h3 className="text-base font-medium text-foreground">自定义指令</h3>
+        <h3 className="text-base font-medium text-foreground">个性设定</h3>
         <p className="text-sm text-muted-foreground">
-          添加自定义指令，这些指令会被注入到 AI 的系统提示中，影响 AI 的行为。
+          设定 AI 的个性和行为风格，影响 AI 的回复方式。
         </p>
         <textarea
-          value={localInstructions}
-          onChange={(e) => setLocalInstructions(e.target.value)}
-          placeholder="例如：始终使用中文回复，代码注释使用中文..."
+          value={localPersonality}
+          onChange={(e) => setLocalPersonality(e.target.value)}
+          placeholder="例如：你是一个耐心友好的助手..."
           className="w-full h-48 p-3 text-sm rounded-xl border border-border/50 bg-card/50 resize-none focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40"
         />
         <div className="flex justify-end">
-          <button
-            onClick={handleSave}
-            className="px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-          >
+          <Button size="sm" onClick={handleSave}>
             保存
-          </button>
+          </Button>
         </div>
       </section>
     </div>

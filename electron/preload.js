@@ -15,6 +15,11 @@ contextBridge.exposeInMainWorld('electron', {
     
     // Check connection status
     status: () => ipcRenderer.invoke('hermes:status'),
+
+    // Gateway connection info (serve-migration Phase 1).
+    // acp mode  → { mode:'acp' }
+    // serve mode→ { mode:'serve', port, token, baseUrl, wsUrl } (or { mode:'serve', pending:true })
+    getGatewayInfo: () => ipcRenderer.invoke('hermes:getGatewayInfo'),
     
     // Update Hermes configuration (model, provider, baseUrl, apiKey)
     setConfig: (config) => ipcRenderer.invoke('hermes:setConfig', config),
@@ -38,6 +43,13 @@ contextBridge.exposeInMainWorld('electron', {
     // Fast path: persist only agent.reasoning_effort (no gateway restart). The
     // renderer also pushes a sentinel prompt to update the live agent in place.
     setReasoningEffort: (params) => ipcRenderer.invoke('hermes:setReasoningEffort', params),
+
+    // Live config push: set a single key/value pair in the running gateway
+    // without restarting. Accepts optional session_id for per-session overrides.
+    setConfigKeyValue: (params) => ipcRenderer.invoke('hermes:setConfigKeyValue', params),
+
+    // Respond to an approval request from the backend
+    approvalRespond: (params) => ipcRenderer.invoke('hermes:approvalRespond', params),
     
     // Fetch available models from API endpoint
     fetchModels: (params) => ipcRenderer.invoke('hermes:fetchModels', params),
@@ -87,6 +99,7 @@ contextBridge.exposeInMainWorld('electron', {
     write: (filePath, content) => ipcRenderer.invoke('fs:write', filePath, content),
     edit: (filePath, oldString, newString) => ipcRenderer.invoke('fs:edit', filePath, oldString, newString),
     readdir: (dirPath) => ipcRenderer.invoke('fs:readdir', dirPath),
+    hermesMemoryDir: () => ipcRenderer.invoke('fs:hermesMemoryDir'),
     stat: (filePath) => ipcRenderer.invoke('fs:stat', filePath),
     rename: (oldPath, newPath) => ipcRenderer.invoke('fs:rename', oldPath, newPath),
     scanTree: (dirPath) => ipcRenderer.invoke('fs:scanTree', dirPath),
@@ -174,7 +187,7 @@ contextBridge.exposeInMainWorld('electron', {
 
   // ── Dialogs ────────────────────────────────────────────────────────────
   dialog: {
-    openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+    openDirectory: (defaultPath) => ipcRenderer.invoke('dialog:openDirectory', defaultPath),
     openFile: (options) => ipcRenderer.invoke('dialog:openFile', options),
     saveFile: (options) => ipcRenderer.invoke('dialog:saveFile', options),
   },

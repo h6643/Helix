@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
 import { X, ShieldCheck, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Download } from 'lucide-react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { isElectron, electronHermes } from '@/lib/electron-bridge'
 import { useHelixStore } from '@/stores/helix-store'
 

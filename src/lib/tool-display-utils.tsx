@@ -2,8 +2,8 @@
  * Tool display utilities — extracted from agent-flow-panel.tsx.
  * Functions for rendering tool names, icons, and labels in the UI.
  */
-import React from 'react'
 import { Eye, Pencil, Search, Terminal, FolderOpen, Wrench } from 'lucide-react'
+import React from 'react'
 import type { ExecutionStep } from '@/stores/helix-store'
 
 const TOOL_LABELS: Record<string, string> = {
@@ -12,9 +12,11 @@ const TOOL_LABELS: Record<string, string> = {
   patch: '编辑文件',
   list_directory: '读取目录',
   glob: '搜索文件',
+  search_files: '搜索文件',
   grep: '搜索内容',
   run_bash: '执行命令',
   bash: '执行命令',
+  terminal: '执行命令',
   webfetch: '获取网页',
   websearch: '搜索网页',
   web_extractor: '获取网页',
@@ -62,7 +64,7 @@ export function getToolIcon(toolName: string) {
 
 export function extractCommandSnippet(params?: Record<string, unknown>): string | undefined {
   if (!params) return undefined
-  const keys = ['command', 'script', 'cmd', 'args', 'code', 'input', 'query', 'text', 'tool_input']
+  const keys = ['command', 'script', 'cmd', 'args', 'code', 'input', 'query', 'text', 'tool_input', 'pattern', 'file_glob', 'path', 'file_path']
   for (const k of keys) {
     const v = params[k]
     if (typeof v === 'string' && v.trim()) return v.trim()
@@ -115,7 +117,13 @@ export function getToolDisplayLabel(toolName: string, toolKind?: string, path?: 
         if (cmd) snippet = cmd
       }
       if (snippet) {
-        snippet = snippet.length > 60 ? snippet.slice(0, 60) + '…' : snippet
+        // For bash commands, show only the first line
+        if (toolName === 'bash' || toolName === 'run_bash') {
+          const firstLine = snippet.split('\n')[0]
+          snippet = firstLine.length > 50 ? firstLine.slice(0, 50) + '…' : firstLine
+        } else {
+          snippet = snippet.length > 60 ? snippet.slice(0, 60) + '…' : snippet
+        }
       }
       return snippet ? `${label}  ${snippet}` : label
     }
@@ -161,7 +169,13 @@ export function getToolDisplayLabel(toolName: string, toolKind?: string, path?: 
     if (cmd) snippet = cmd
   }
   if (snippet) {
-    snippet = snippet.length > 60 ? snippet.slice(0, 60) + '…' : snippet
+    // For bash commands, show only the first line
+    if (toolName === 'bash' || toolName === 'run_bash') {
+      const firstLine = snippet.split('\n')[0]
+      snippet = firstLine.length > 50 ? firstLine.slice(0, 50) + '…' : firstLine
+    } else {
+      snippet = snippet.length > 60 ? snippet.slice(0, 60) + '…' : snippet
+    }
   }
   return snippet ? `${label}  ${snippet}` : label
 }

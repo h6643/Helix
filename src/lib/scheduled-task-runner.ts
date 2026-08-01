@@ -2,6 +2,7 @@
  * Global scheduled task runner — runs independently of any component mount.
  * Checks every 30 seconds for due tasks and dispatches them via Hermes.
  */
+import { hermesApi } from '@/lib/electron-bridge'
 import { useHelixStore } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
 
@@ -29,7 +30,7 @@ async function runTask(task: { id: string; label: string; prompt: string }) {
   if (sessionId) {
     // Actually send to Hermes
     try {
-      await window.electron.hermes.send('session/prompt', {
+      await hermesApi()!.send('session/prompt', {
         session_id: sessionId,
         prompt: [{ type: 'text', text: task.prompt }],
       })

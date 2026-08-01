@@ -1,6 +1,5 @@
 'use client'
 
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   Search,
   FileCode,
@@ -17,6 +16,7 @@ import {
   Settings,
   Sparkles,
 } from 'lucide-react'
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useHelixStore, type FileNode } from '@/stores/helix-store'
 import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
 

@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
 import { X, FolderOpen, FileText, ArrowUp, Loader2, ExternalLink, Folder } from 'lucide-react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { electronFS, electronDialog, electronShell } from '@/lib/electron-bridge'
 
 interface TreeNode {

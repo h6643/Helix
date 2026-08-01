@@ -42,7 +42,6 @@ const PROVIDERS: ProviderConfig[] = [
   { id: 'gmi', name: 'GMI Cloud', baseUrl: 'https://api.gmi-serving.com/v1', models: ['gmi-default'], envKey: 'GMI_API_KEY', website: 'https://gmi.cloud' },
   { id: 'azure-foundry', name: 'Azure Foundry', baseUrl: 'https://YOUR_RESOURCE.services.ai.azure.com/models', models: ['gpt-4o', 'Phi-4'], envKey: 'AZURE_FOUNDRY_API_KEY', website: 'https://azure.microsoft.com/en-us/products/ai-services' },
   // ── Agnes / Hermes ───────────────────────────────────────────────────────
-  { id: 'agnes-ai', name: 'Agnes AI', baseUrl: 'https://apihub.agnes-ai.com/v1', models: ['agnes-2.0-flash', 'agnes-2.0-pro'], envKey: 'AGNES_API_KEY', website: 'https://agnes-ai.com' },
   { id: 'nous', name: 'Nous Research', baseUrl: 'https://inference-api.nousresearch.com/v1', models: ['hermes-3-llama-3.1-405b', 'hermes-3-llama-3.1-70b'], envKey: 'NOUS_API_KEY', website: 'https://nousresearch.com' },
   // ── China ────────────────────────────────────────────────────────────────
   { id: 'qwen', name: 'Alibaba Qwen', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen3-235b-a22b', 'qwen-max', 'qwen2.5-72b-instruct', 'qwen-plus'], envKey: 'DASHSCOPE_API_KEY', website: 'https://dashscope.console.aliyun.com' },
@@ -50,7 +49,6 @@ const PROVIDERS: ProviderConfig[] = [
   { id: 'minimax-cn', name: 'MiniMax (CN)', baseUrl: 'https://api.minimaxi.com/v1', models: ['MiniMax-Text-01', 'abab6.5s-chat'], envKey: 'MINIMAX_CN_API_KEY', website: 'https://platform.minimax.chat' },
   { id: 'zai', name: 'Zhipu AI (z.ai)', baseUrl: 'https://api.z.ai/api/paas/v4', models: ['glm-4-0520', 'glm-4-plus', 'glm-4-flash', 'glm-4-air'], envKey: 'GLM_API_KEY', website: 'https://open.bigmodel.cn' },
   { id: 'kimi-for-coding', name: 'Kimi (Moonshot)', baseUrl: 'https://api.kimi.com/coding/v1', models: ['kimi-k2.5', 'kimi-k1.5'], envKey: 'KIMI_API_KEY', website: 'https://platform.kimi.ai' },
-  { id: 'stepfun', name: 'StepFun', baseUrl: 'https://api.stepfun.ai/step_plan/v1', models: ['step-2-16k', 'step-1.5-32k', 'step-1-flash'], envKey: 'STEPFUN_API_KEY', website: 'https://platform.stepfun.com' },
   { id: 'xiaomi', name: 'Xiaomi MiMo', baseUrl: 'https://api.xiaomimimo.com/v1', models: ['mimo-v2.5-pro', 'mimo-v2.5', 'mimo-v2.5-flash'], envKey: 'XIAOMI_API_KEY', website: 'https://platform.xiaomimimo.com' },
   { id: 'siliconflow', name: 'SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen2.5-72B-Instruct'], envKey: 'SILICONFLOW_API_KEY', website: 'https://siliconflow.cn' },
   { id: 'baichuan', name: 'Baichuan', baseUrl: 'https://api.baichuan-ai.com/v1', models: ['baichuan4', 'baichuan3-turbo', 'baichuan2-53b'], envKey: 'BAICHUAN_API_KEY', website: 'https://platform.baichuan-ai.com' },

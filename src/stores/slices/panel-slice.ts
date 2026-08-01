@@ -22,6 +22,8 @@ export interface PanelSlice {
   showDiffPreview: boolean
   showCustomizePanel: boolean
   showWorktreePanel: boolean
+  showFileTreePanel: boolean
+  showPluginManager: boolean
   availableCommands: AvailableCommand[]
   /**
    * Hermes's in-session todo list, captured from `session/update` events that
@@ -44,6 +46,8 @@ export interface PanelSlice {
   setShowDiffPreview: (show: boolean) => void
   toggleCustomizePanel: () => void
   toggleWorktreePanel: () => void
+  toggleFileTreePanel: () => void
+  togglePluginManager: () => void
   setAvailableCommands: (cmds: AvailableCommand[]) => void
   /** Replace the Hermes todo list (called whenever a fresh todo payload arrives). */
   setHermesTodos: (todos: HermesTodo[]) => void
@@ -63,6 +67,8 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   showDiffPreview: false,
   showCustomizePanel: false,
   showWorktreePanel: false,
+  showFileTreePanel: false,
+  showPluginManager: false,
   availableCommands: [],
   hermesTodos: [],
 
@@ -116,6 +122,8 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   setShowDiffPreview: (show) => set({ showDiffPreview: show }),
   toggleCustomizePanel: () => set((s) => ({ showCustomizePanel: !s.showCustomizePanel })),
   toggleWorktreePanel: () => set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
+  toggleFileTreePanel: () => set((s) => ({ showFileTreePanel: !s.showFileTreePanel })),
+  togglePluginManager: () => set((s) => ({ showPluginManager: !s.showPluginManager })),
   setAvailableCommands: (cmds) => set({ availableCommands: cmds }),
   setHermesTodos: (todos) => set({ hermesTodos: todos }),
   clearHermesTodos: () => set({ hermesTodos: [] }),

@@ -2,8 +2,8 @@
 'use client'
 
 import { useState, type FormEvent } from 'react'
-import { useChat } from './use-chat'
 import { ModelSelector } from './ModelSelector'
+import { useChat } from './use-chat'
 
 export function ChatPanel() {
   const { messages, streaming, error, send, switchModel } = useChat('You are a helpful assistant.')

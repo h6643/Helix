@@ -2,8 +2,8 @@
  * Skills slice — skill definitions + panel toggle.
  */
 import type { StateCreator } from 'zustand'
-import type { Skill } from '../helix-types'
 import { generateId } from '@/lib/format'
+import type { Skill } from '../helix-types'
 
 export interface SkillSlice {
   skills: Skill[]

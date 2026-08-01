@@ -9,13 +9,24 @@ const path = require('path')
 // ── Config validation gate ──────────────────────────────────────────────
 // Detect a stale/bad model profile so it can never poison the real Hermes
 // config on disk.
+// Validation gate: a profile with no usable baseUrl must never be cached as
+// the active one (it would re-assert into Hermes config.yaml on next launch
+// and break the gateway). Non-empty configs are passed through as-is — no host
+// blocklist, so the user's chosen endpoint (including local gateways) is always
+// respected.
 function isBadConfig(cfg) {
   if (!cfg || typeof cfg !== 'object') return true
   const baseUrl = String(cfg.baseUrl || '').trim().toLowerCase()
   if (!baseUrl) return true
   return false
 }
-const APIHUB_DEFAULT = { provider: 'agnes-ai', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-2.0-flash', apiKey: '' }
+// Live fallback used wherever a bad profile must be replaced. Previously this
+// was the DEAD apihub/agnes endpoint — that is exactly what kept resurrecting
+// dead configs on every launch. Now it points at the reachable ant-ling
+// endpoint, so any stale/dead profile is sanitized to a working one. The
+// apiKey is intentionally blank: a leaked key was removed from source and must
+// be rotated on the provider side; the user supplies their own key in the UI.
+const APIHUB_DEFAULT = { provider: 'ant-ling', baseUrl: 'https://api.ant-ling.com/v1', model: 'Ling-2.6-1T', apiKey: '' }
 
 module.exports = function registerSecurityHandlers(getMainWindow, getDiagnostics) {
   // Idempotent registration — dev reloads may re-execute this module.

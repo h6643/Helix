@@ -105,7 +105,7 @@ module.exports = function registerScheduledTasksHandlers() {
         name: name || '未命名任务',
         prompt: prompt || '',
         skills: [], skill: null, model: null, provider: null,
-        provider_snapshot: 'custom', model_snapshot: 'agnes-2.0-flash',
+        provider_snapshot: 'ant-ling', model_snapshot: 'Ling-2.6-1T',
         base_url: null, script: null, no_agent: false, context_from: null,
         schedule, schedule_display,
         repeat: { times: schedule.kind === 'once' ? 1 : null, completed: 0 },

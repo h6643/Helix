@@ -1,5 +1,5 @@
-import type { ScheduledTask } from '@/stores/helix-store'
 import type { HooksConfig } from '@/lib/hooks-config'
+import type { ScheduledTask } from '@/stores/helix-store'
 
 export interface ElectronAPI {
   fs: {
@@ -7,6 +7,7 @@ export interface ElectronAPI {
     write: (filePath: string, content: string) => Promise<{ success: boolean }>
     edit: (filePath: string, oldString: string, newString: string) => Promise<{ success: boolean }>
     readdir: (dirPath: string) => Promise<Array<{ name: string; isDirectory: boolean }>>
+    hermesMemoryDir: () => Promise<string>
     stat: (filePath: string) => Promise<{
       isFile: boolean
       isDirectory: boolean
@@ -56,7 +57,7 @@ export interface ElectronAPI {
   }
 
   dialog: {
-    openDirectory: () => Promise<string | null>
+    openDirectory: (defaultPath?: string) => Promise<string | null>
     openFile: (options?: { filters?: Array<{ name: string; extensions: string[] }> }) => Promise<string | null>
     saveFile: (options?: { filters?: Array<{ name: string; extensions: string[] }> }) => Promise<string | null>
   }
@@ -72,13 +73,17 @@ export interface ElectronAPI {
     notify: (method: string, params?: any) => void
     interrupt: (sessionId: string) => Promise<any>
     status: () => Promise<any>
+    // Gateway connection info (serve-migration Phase 1).
+    // acp mode  → { mode:'acp' }
+    // serve mode→ { mode:'serve', port, token, baseUrl, wsUrl } or { mode:'serve', pending:true }
+    getGatewayInfo: () => Promise<{ mode: 'acp' } | { mode: 'serve'; pending?: boolean; port?: number; token?: string; baseUrl?: string; wsUrl?: string }>
     setConfig: (config: any) => Promise<any>
     getConfig: () => Promise<any>
     setYamlKey: (key: string, value: any) => Promise<any>
     listPersonalities: () => Promise<any>
     setPersonality: (params: { name: string; prompt?: string }) => Promise<any>
     setModel: (params: { model: string; baseUrl?: string; apiKey?: string; provider?: string }) => Promise<any>
-    setAgentConfig: (params: { temperature?: number; maxOutputTokens?: number; reasoningEffort?: string; customInstructions?: string; personality?: string }) => Promise<any>
+    setAgentConfig: (params: { reasoningEffort?: string; personality?: string; fastMode?: boolean }) => Promise<any>
     // Fast path: persist agent.reasoning_effort without a gateway restart.
     setReasoningEffort: (params: { reasoningEffort: string }) => Promise<any>
     fetchModels: (params: any) => Promise<any>

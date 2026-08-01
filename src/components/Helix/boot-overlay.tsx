@@ -1,7 +1,7 @@
 'use client'
 
-import React from 'react'
 import { Loader2, WifiOff, AlertTriangle, RefreshCw } from 'lucide-react'
+import React from 'react'
 import { useHelixStore } from '@/stores/helix-store'
 
 /**

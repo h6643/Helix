@@ -9,10 +9,10 @@
 // 这三者是「切换模型不 401」的根基：请求的认证信息永远来自「当前选中模型」，
 // 而不是某个在初始化时写死的值。
 import { create } from 'zustand'
-import type { ProviderConfig, ResolvedModel, FlatModel } from './types'
 import { generateId } from '@/lib/format'
 import { warn } from '@/lib/logger'
 import * as persistence from './persistence'
+import type { ProviderConfig, ResolvedModel, FlatModel } from './types'
 
 interface ProviderState {
   providers: ProviderConfig[]

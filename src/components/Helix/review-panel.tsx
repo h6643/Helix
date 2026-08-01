@@ -1,7 +1,7 @@
 'use client'
 
-import React, { useState } from 'react'
 import { X, GitPullRequest, Play, AlertCircle, CheckCircle2 } from 'lucide-react'
+import React, { useState } from 'react'
 import { useHelixStore } from '@/stores/helix-store'
 
 // Dedicated Review panel. Triggers `/review` (handled by the agent) and streams

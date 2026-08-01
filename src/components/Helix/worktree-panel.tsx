@@ -1,6 +1,5 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
 import {
   GitBranch,
   Plus,
@@ -14,8 +13,9 @@ import {
   AlertCircle,
   ChevronRight,
 } from 'lucide-react'
-import { useHelixStore } from '@/stores/helix-store'
+import React, { useState, useEffect, useCallback } from 'react'
 import { isElectron, electronGit } from '@/lib/electron-bridge'
+import { useHelixStore } from '@/stores/helix-store'
 
 interface WorktreeInfo {
   path: string

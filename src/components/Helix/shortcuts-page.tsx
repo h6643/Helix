@@ -1,7 +1,6 @@
 'use client'
 
 import React, { useState, useCallback, useEffect, useRef } from 'react'
-import { Pencil } from 'lucide-react'
 import { useHelixStore, DEFAULT_SHORTCUTS } from '@/stores/helix-store'
 
 export function ShortcutsPage() {
@@ -80,10 +79,10 @@ export function ShortcutsPage() {
                   <span className="text-sm font-mono text-foreground/80 bg-muted px-2 py-1 rounded">{s.keys.join(' + ')}</span>
                   <button
                     onClick={() => startRecording(id)}
-                    className="ml-3 p-1.5 rounded text-muted-foreground/20 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all"
+                    className="ml-3 px-1.5 py-1 rounded text-xs text-muted-foreground/20 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all"
                     title="编辑快捷键"
                   >
-                    <Pencil className="size-3.5" />
+                    编辑
                   </button>
                 </div>
               ))}

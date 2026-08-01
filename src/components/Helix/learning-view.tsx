@@ -1,10 +1,8 @@
 'use client'
 
 import React, { useState, useEffect, useCallback } from 'react'
-import { Brain, FileText, Loader2, RefreshCw } from 'lucide-react'
-import { electronFS } from '@/lib/electron-bridge'
-
-const MEMORY_DIR = `${process.env.LOCALAPPDATA || ''}/hermes/memory`.replace(/\\/g, '/')
+import { electronFS, electronShell } from '@/lib/electron-bridge'
+import { SectionHeading } from './settings-ui'
 
 interface MemNode {
   name: string
@@ -15,20 +13,31 @@ interface MemNode {
 // Read-only view of Hermes learning / memory. The gateway's `/api/learning`
 // REST endpoint isn't exposed over Helix's stdio gateway, so we read the local
 // memory store directly via the fs bridge (read-only).
+//
+// NOTE: the memory dir is fetched from the MAIN process via electronFS.memoryDir()
+// — never derived from process.env.LOCALAPPDATA in the renderer. In a Next.js
+// client bundle `process.env.LOCALAPPDATA` is undefined at runtime, which used
+// to produce a bogus "/hermes/memory" path rejected by the fs sandbox.
 export function LearningView({ onClose }: { onClose?: () => void }) {
   const [nodes, setNodes] = useState<MemNode[]>([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  const [active, setActive] = useState<{ name: string; text: string } | null>(null)
+  const [active, setActive] = useState<{ name: string; path: string; text: string } | null>(null)
+  const [revealErr, setRevealErr] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     setErr(null)
     setActive(null)
     try {
+      const MEMORY_DIR = await electronFS.memoryDir()
+      if (!MEMORY_DIR) throw new Error('无法获取 Hermes 记忆目录（非 Electron 环境？）')
       const list = await electronFS.readDir(MEMORY_DIR)
       setNodes(
         (list as { name: string; isDirectory: boolean }[])
+          // Skip editor/process lockfiles and dotfiles — they are not memory
+          // content (e.g. MEMORY.md.lock is Hermes's concurrent-write lock).
+          .filter((n) => !n.name.startsWith('.') && !n.name.endsWith('.lock'))
           .map((n) => ({ name: n.name, path: `${MEMORY_DIR}/${n.name}`.replace(/\\/g, '/'), isDir: n.isDirectory }))
           .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
       )
@@ -48,7 +57,7 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
     setLoading(true)
     try {
       const text = await electronFS.readFile(n.path)
-      setActive({ name: n.name, text: typeof text === 'string' ? text : String(text) })
+      setActive({ name: n.name, path: n.path, text: typeof text === 'string' ? text : String(text) })
     } catch (e: any) {
       setErr(String(e?.message || e))
     } finally {
@@ -57,28 +66,44 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
   }
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border/60">
-        <div className="flex items-center gap-2">
-          <Brain className="size-4 text-primary" />
-          <h2 className="text-sm font-semibold">学习 / 记忆</h2>
-        </div>
-        <button onClick={load} className="p-1.5 rounded-lg text-muted-foreground hover:bg-accent/60" title="刷新">
-          <RefreshCw className="size-3.5" />
+    <div className="max-w-xl space-y-1">
+      <div className="flex items-center justify-between">
+        <SectionHeading>Memory</SectionHeading>
+        <button onClick={load} className="px-1.5 py-1 rounded-lg text-xs text-muted-foreground hover:bg-accent/60" title="刷新">
+          刷新
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto p-3">
-        {loading ? (
+      {loading ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground/60 mt-6">
-            <Loader2 className="size-3.5 animate-spin" /> 读取中…
+            读取中…
           </div>
         ) : err ? (
           <p className="text-xs text-red-400 mt-6">{err}</p>
         ) : active ? (
           <div>
-            <button onClick={() => setActive(null)} className="text-[11px] text-muted-foreground hover:text-foreground mb-2">
-              ← 返回列表
-            </button>
+            <div className="flex items-center justify-between mb-2">
+              <button onClick={() => setActive(null)} className="text-[11px] text-muted-foreground hover:text-foreground">
+                ← 返回列表
+              </button>
+                <button
+                  onClick={async () => {
+                    setRevealErr(null)
+                    try {
+                      const res = await electronShell.showItemInFolder(active.path) as unknown as { ok?: boolean; error?: string } | undefined
+                      if (res && res.ok === false) {
+                        setRevealErr(`无法打开：${res.error || '未知错误'}（多半是主进程未彻底重启）`)
+                      }
+                    } catch (e: any) {
+                      setRevealErr(String(e?.message || e))
+                    }
+                  }}
+                  className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                  title="在资源管理器中打开文件位置"
+                >
+                  打开位置
+                </button>
+            </div>
+            {revealErr && <p className="text-[10px] text-red-400 mb-1">{revealErr}</p>}
             <h3 className="text-xs font-medium mb-1">{active.name}</h3>
             <pre className="text-[11px] whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-muted/40 rounded-lg p-2">
               {active.text.slice(0, 20000)}
@@ -94,16 +119,11 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
                 onClick={() => open(n)}
                 className={`flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-accent/30 ${n.isDir ? 'cursor-default' : 'cursor-pointer'}`}
               >
-                <FileText className="size-3.5 text-muted-foreground shrink-0" />
                 <span className="text-xs truncate">{n.name}</span>
               </div>
             ))}
           </div>
         )}
-      </div>
-      <div className="px-4 py-2 border-t border-border/60 text-[10px] text-muted-foreground/50">
-        只读视图 · 数据来自本地 Hermes 记忆目录
-      </div>
     </div>
   )
 }

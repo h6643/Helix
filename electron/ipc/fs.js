@@ -9,7 +9,7 @@ const path = require('path')
 
 module.exports = function registerFsHandlers(getWorkDir) {
   // Idempotent registration — dev reloads may re-execute this module.
-  const handles = ['fs:read', 'fs:write', 'fs:edit', 'fs:readdir', 'fs:stat', 'fs:rename', 'fs:scanTree']
+  const handles = ['fs:read', 'fs:write', 'fs:edit', 'fs:readdir', 'fs:stat', 'fs:rename', 'fs:scanTree', 'fs:hermesMemoryDir']
   for (const channel of handles) {
     try { ipcMain.removeHandler(channel) } catch { /* ignore */ }
   }
@@ -17,6 +17,12 @@ module.exports = function registerFsHandlers(getWorkDir) {
   function safePath(filePath) {
     const workDir = getWorkDir()
     const resolved = path.resolve(workDir, filePath)
+    // Allow hermes memory directory (used by learning view).
+    // Normalize separators before comparing so a forward-slash path sent from
+    // the renderer still matches a backslash-joined main-process dir.
+    const hermesMemoryDir = path.join(process.env.LOCALAPPDATA || '', 'hermes', 'memories')
+    const norm = (p) => p.replace(/\\/g, '/')
+    if (norm(resolved).startsWith(norm(hermesMemoryDir))) return resolved
     if (!resolved.startsWith(workDir)) return null
     try {
       const realResolved = fs.realpathSync(resolved)
@@ -58,6 +64,15 @@ module.exports = function registerFsHandlers(getWorkDir) {
     if (!resolved) throw new Error('Path is outside working directory')
     const entries = await fsPromises.readdir(resolved, { withFileTypes: true })
     return entries.map(e => ({ name: e.name, isDirectory: e.isDirectory() }))
+  })
+
+  // Returns the absolute Hermes memory directory. Computed in the MAIN process
+  // (where process.env.LOCALAPPDATA is valid) so the renderer never has to infer
+  // it from its own (build-time-only) process.env — which is undefined in a
+  // Next.js client bundle and previously produced a bogus "/hermes/memory" path.
+  ipcMain.handle('fs:hermesMemoryDir', async () => {
+    const dir = path.join(process.env.LOCALAPPDATA || '', 'hermes', 'memories')
+    return path.resolve(dir)
   })
 
   ipcMain.handle('fs:stat', async (event, filePath) => {

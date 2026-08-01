@@ -16,18 +16,22 @@ export function decodeBase64Utf8(b64: string): string {
 }
 
 /**
- * Parse <think:ID>...</think:ID> tags from model output.
- * Returns the content outside the tags and the reasoning inside.
+ * Parse ALL <think:ID>...</think:ID> tags from model output.
+ * Returns the content outside the tags and concatenated reasoning.
  */
 export function extractThinkTags(text: string): { content: string; reasoning: string | null } {
-  const match = text.match(/<think:([a-zA-Z0-9_-]+)>([\s\S]*?)<\/think:\1>/)
-  if (match) {
-    return {
-      reasoning: match[2].trim(),
-      content: (text.slice(0, match.index) + text.slice((match.index || 0) + match[0].length)).trimStart(),
-    }
+  const parts: string[] = []
+  let remaining = text
+  let hasMatch = false
+  const re = /<think:([a-zA-Z0-9_-]+)>([\s\S]*?)<\/think:\1>/
+  let match: RegExpMatchArray | null
+  while ((match = remaining.match(re)) !== null) {
+    hasMatch = true
+    parts.push(match[2].trim())
+    remaining = (remaining.slice(0, match.index) + remaining.slice((match.index || 0) + match[0].length)).trimStart()
   }
-  return { content: text, reasoning: null }
+  if (!hasMatch) return { content: text, reasoning: null }
+  return { content: remaining, reasoning: parts.join('\n\n') || null }
 }
 
 /**
@@ -77,4 +81,31 @@ export function safeMarkdownSource(text: string): string {
  */
 export function stripSystemReminders(text: string): string {
   return text.replace(SYSTEM_REMINDER_RE, '')
+}
+
+// Matches kaomoji status lines like "(¬_¬) reasoning..." / "_( ˘˘) computing..." etc.
+// These are single-line status indicators emitted by some models inside thinking content.
+const KAOMOJI_STATUS_RE = /^\s*[_\(]?\s*[¬˘•○⊙＞≦´・_~xX ]{2,}[\s\S]{0,10}[\)_]?\s+\S.+\.{2,}\s*$/m
+
+/**
+ * Extract the last kaomoji status line from thinking content.
+ * Returns { status, body } where `status` is the kaomoji line (or null)
+ * and `body` is the remaining thinking text with the status line removed.
+ */
+export function extractKaomojiStatus(thinking: string): { status: string | null; body: string } {
+  if (!thinking) return { status: null, body: '' }
+  const lines = thinking.split('\n')
+  let statusLine: string | null = null
+  let statusIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim()
+    if (KAOMOJI_STATUS_RE.test(lines[i]) || KAOMOJI_STATUS_RE.test(trimmed)) {
+      statusLine = trimmed
+      statusIdx = i
+      break
+    }
+  }
+  if (statusLine === null) return { status: null, body: thinking }
+  const bodyLines = lines.slice(0, statusIdx).concat(lines.slice(statusIdx + 1))
+  return { status: statusLine, body: bodyLines.join('\n').trim() }
 }

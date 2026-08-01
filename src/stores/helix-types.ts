@@ -57,10 +57,14 @@ export interface ExecutionStep {
   status?: 'running' | 'completed' | 'failed' | 'waiting'
   startedAt?: number
   finishedAt?: number
+  duration_s?: number
   logs?: string[]
   agentName?: string
   subSteps?: ExecutionStep[]
   delegationId?: string
+  inlineDiff?: string
+  summary?: string
+  output?: string
 }
 
 // Streaming response blocks for the currently-running assistant reply.
@@ -208,6 +212,16 @@ export interface AvailableCommand {
   description?: string
 }
 
+// A plugin managed by the Hermes backend (serve gateway `plugins.manage` /
+// `hermes plugins` / Plugins Hub). Mirrors the backend row shape.
+export interface BackendPlugin {
+  name: string
+  version: string
+  description: string
+  source: 'bundled' | 'user'
+  status: 'enabled' | 'disabled' | 'not enabled'
+}
+
 export interface TaskNode {
   id: string
   label: string
@@ -223,6 +237,9 @@ export interface SessionCheckpoint {
   timestamp: number
   taskIds: string[]
   memorySnapshot: string
+  /** Full task-tree snapshot so restoreCheckpoint can rebuild tasks faithfully.
+   *  Absent on checkpoints saved by older builds — those fall back to taskIds. */
+  tasks?: TaskNode[]
 }
 
 export interface ScheduledTask {
@@ -290,7 +307,7 @@ export const DEFAULT_SHORTCUTS: Record<string, CustomShortcutEntry> = {
   'archive-chat': { keys: ['Ctrl', 'Shift', 'A'], action: 'archive-chat', description: '归档聊天' },
   'new-chat': { keys: ['Ctrl', 'N'], action: 'new-chat', description: '新对话' },
   'quick-chat': { keys: ['Ctrl', 'Alt', 'N'], action: 'quick-chat', description: '新建快速对话' },
-  'search-chat': { keys: ['Ctrl', 'F'], action: 'search-chat', description: '查找' },
+  'search-chat': { keys: ['Ctrl', 'F'], action: 'search-chat', description: '搜索对话内容' },
   'go-back': { keys: ['Ctrl', '['], action: 'go-back', description: '返回' },
   'go-forward': { keys: ['Ctrl', ']'], action: 'go-forward', description: '前进' },
   'next-recent-chat': { keys: ['Ctrl', 'Tab'], action: 'next-recent-chat', description: '下一个最近查看的聊天' },

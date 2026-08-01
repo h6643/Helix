@@ -8,11 +8,12 @@
 'use client'
 
 import { useEffect, useCallback, useRef } from 'react'
-import { useHermesStore } from '@/stores/hermes-store'
-import { useHelixStore } from '@/stores/helix-store'
-import { electronHermes } from '@/lib/electron-bridge'
+import { electronHermes, hermesApi } from '@/lib/electron-bridge'
 import { debug, warn, error as logError } from '@/lib/logger'
-import { scheduleConfigPush } from '@/lib/config-sync'
+import { buildAcpMcpServers } from '@/lib/mcp'
+import { initServeGateway, getServeHermesFacade } from '@/lib/serve-gateway'
+import { useHelixStore } from '@/stores/helix-store'
+import { useHermesStore } from '@/stores/hermes-store'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -24,6 +25,7 @@ export type HermesEvent =
   | 'gateway.sessionReplaced'
   | 'session/update'
   | 'session/request_permission'
+  | 'session/info'
   | 'error'
 
 export interface HermesEventParams {
@@ -35,9 +37,12 @@ export interface HermesEventParams {
   message?: string
   newId?: string
   oldId?: string
+  cwd?: string
+  branch?: string
   phase?: string
   attempt?: number
   total?: number
+  expected?: boolean
   [key: string]: unknown
 }
 
@@ -99,7 +104,12 @@ export function useHermes() {
   useEffect(() => {
     if (!isElectron) return
 
-    const unsubscribe = window.electron.hermes.onEvent((event: HermesEvent, params?: HermesEventParams) => {
+    // 阶段2（serve 迁移）：应用挂载时探测网关模式。acp 模式立即返回 null；
+    // serve 模式等握手完成后连 WS，之后 hermesApi() 自动分流到网关门面。
+    let serveUnsub: (() => void) | null = null
+    let cancelled = false
+
+    const handleHermesEvent = (event: HermesEvent, params?: HermesEventParams) => {
       debug('[Hermes Event]', event, params)
 
       switch (event) {
@@ -205,14 +215,41 @@ export function useHermes() {
           }
           break
         }
+
+        case 'session/info': {
+          // Live CWD tracking: when the backend reports a directory change (e.g. from cd command)
+          if (params?.cwd && typeof params.cwd === 'string') {
+            useHermesStore.getState().setCurrentCwd(params.cwd)
+          }
+          if (params?.branch && typeof params.branch === 'string') {
+            useHermesStore.getState().setCurrentBranch(params.branch)
+          }
+          break
+        }
       }
 
         // Call custom event handler if registered
         eventHandlerRef.current?.(event, params)
+    }
+
+    // 始终订阅 IPC（acp 事件 + serve 模式下主进程的 gateway 生命周期事件）
+    const unsubscribe = window.electron.hermes.onEvent(handleHermesEvent)
+
+    // serve 模式：网关就绪后把同一 handler 补挂到 WS 事件流
+    initServeGateway().then((client) => {
+      if (cancelled || !client) return
+      serveUnsub = client.onEvent(handleHermesEvent as any)
+      // WS 已连上时，握手事件可能已经错过 → 主动同步连接状态
+      if (client.connected) {
+        setHermesConnected(true)
+        setHermesError(null)
+      }
     })
 
     return () => {
+      cancelled = true
       unsubscribe()
+      serveUnsub?.()
     }
   }, [isElectron])
 
@@ -253,7 +290,7 @@ export function useHermes() {
           provider: cfg.provider,
           apiKey: cfg.apiKey ? cfg.apiKey.substring(0, 6) + '…' : '(empty)',
         }))
-      await window.electron.hermes.setModel({
+      await hermesApi()!.setModel({
         model: cfg.model,
         baseUrl: cfg.baseUrl,
         apiKey: cfg.apiKey,
@@ -271,7 +308,7 @@ export function useHermes() {
         resolve(true)
         return
       }
-      const unsubscribe = window.electron.hermes.onEvent((event: HermesEvent) => {
+      const unsubscribe = hermesApi()!.onEvent((event: HermesEvent) => {
         if (event === 'gateway.ready') {
           cleanup()
           resolve(true)
@@ -342,7 +379,7 @@ export function useHermes() {
         // session/new may hit a restarting gateway and produce 401 errors.
         await waitForGatewayReady()
         const cwd = useHelixStore.getState().selectedWorkDir || (typeof process !== 'undefined' ? process.cwd() : '')
-        const result = await window.electron.hermes.send('session/new', {
+        const result = await hermesApi()!.send('session/new', {
           cwd,
           mcpServers: [],
         }) as any
@@ -372,7 +409,7 @@ export function useHermes() {
       debug('[useHermes] Sending session/prompt with session_id:', activeSessionId)
       // Don't await - ACP prompt is blocking, events come via notifications
       // ACP expects prompt as a list of content blocks, not a plain string
-      window.electron.hermes.send('session/prompt', {
+      hermesApi()!.send('session/prompt', {
         session_id: activeSessionId,
         prompt: [{ type: 'text', text }],
       }).then((result: any) => {
@@ -445,7 +482,8 @@ export function useHermes() {
       // Wait for the gateway to be ready after model config update
       await waitForGatewayReady()
       const cwd = useHelixStore.getState().selectedWorkDir || (typeof process !== 'undefined' ? process.cwd() : '')
-      const sessionId = await window.electron.hermes.send('session/new', { cwd, mcpServers: [] }) as string
+      const mcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers)
+      const sessionId = await hermesApi()!.send('session/new', { cwd, mcpServers }) as string
       if (sessionId) {
         setHermesSessionId(sessionId)
       }
@@ -460,7 +498,7 @@ export function useHermes() {
     if (!isElectron) return
 
     try {
-      await window.electron.hermes.send('command/dispatch', { command, session_id: hermesSessionId })
+      await hermesApi()!.send('command/dispatch', { command, session_id: hermesSessionId })
     } catch (err) {
       logError('[Hermes] Failed to dispatch command:', err)
     }
@@ -470,7 +508,7 @@ export function useHermes() {
   const setHermesPersonality = useCallback(async (name: string, prompt?: string) => {
     if (!isElectron) return
     try {
-      await window.electron.hermes.setPersonality({ name, prompt })
+      await hermesApi()!.setPersonality({ name, prompt })
     } catch (err) {
       logError('[Hermes] Failed to set personality:', err)
     }

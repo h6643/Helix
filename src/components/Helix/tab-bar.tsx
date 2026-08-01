@@ -1,6 +1,6 @@
+import { X, Plus } from 'lucide-react'
 import React from 'react'
 import { useHelixStore } from '@/stores/helix-store'
-import { X, Plus } from 'lucide-react'
 
 interface TabBarProps {
   onNewTab: () => void

@@ -3,8 +3,8 @@
 // 复用项目已有的 @/lib/crypto（Electron safeStorage 优先，浏览器回退到
 // Web Crypto）。运行时 ProviderConfig.apiKey 保持明文，只有写盘/读盘时
 // 才做加解密，调用方无感知。
-import type { ProviderConfig } from './types'
 import { encryptApiKey, decryptApiKey } from '@/lib/crypto'
+import type { ProviderConfig } from './types'
 
 const KEY_PROVIDERS = 'hermes-ui:providers'
 const KEY_ACTIVE = 'hermes-ui:activeModel'

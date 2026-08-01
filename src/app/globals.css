@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "./_tw-animate.css";
+@plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -45,77 +46,81 @@
 
 :root {
   --radius: 0.5rem;
-  /* ── Precision Instrument palette (light) ──
-     Primary: #9acfff — light blue, signals clarity + freshness.
-     Dark variant for light bg readability. */
-  --background: oklch(0.985 0.003 250);
-  --foreground: oklch(0.128 0.012 250);
-  --card: oklch(0.994 0.002 250);
-  --card-foreground: oklch(0.128 0.012 250);
-  --popover: oklch(0.992 0.002 250);
-  --popover-foreground: oklch(0.128 0.012 250);
-  --primary: oklch(0.47 0.18 250);
+  /* ── Slate workspace (light) ──
+     Cool indigo-tinted neutrals. Background slightly warm paper-white,
+     primary indigo-violet (not generic blue) — same hue family as dark mode
+     so light/dark feel like one system, not two different apps. */
+  --background: oklch(0.985 0.004 250);
+  --foreground: oklch(0.14 0.012 250);
+  --card: oklch(0.995 0.002 250);
+  --card-foreground: oklch(0.14 0.012 250);
+  --popover: oklch(0.993 0.003 250);
+  --popover-foreground: oklch(0.14 0.012 250);
+  --primary: oklch(0.50 0.19 260);
   --primary-foreground: oklch(0.985 0.002 250);
-  --secondary: oklch(0.945 0.008 250);
-  --secondary-foreground: oklch(0.20 0.012 250);
-  --muted: oklch(0.955 0.005 250);
+  --secondary: oklch(0.94 0.008 250);
+  --secondary-foreground: oklch(0.20 0.015 250);
+  --muted: oklch(0.955 0.006 250);
   --muted-foreground: oklch(0.42 0.015 250);
-  --accent: oklch(0.935 0.015 250);
-  --accent-foreground: oklch(0.15 0.015 250);
+  --accent: oklch(0.92 0.018 258);
+  --accent-foreground: oklch(0.15 0.015 258);
   --destructive: oklch(0.58 0.22 22);
-  --border: oklch(0.91 0.008 250);
-  --input: oklch(0.94 0.005 250);
-  --ring: oklch(0.47 0.18 250);
-  --chart-1: oklch(0.47 0.18 250);
-  --chart-2: oklch(0.52 0.14 200);
-  --chart-3: oklch(0.48 0.10 260);
-  --chart-4: oklch(0.52 0.16 340);
-  --chart-5: oklch(0.58 0.14 55);
+  --border: oklch(0.905 0.008 250);
+  --input: oklch(0.935 0.005 250);
+  --ring: oklch(0.50 0.19 260);
+  --chart-1: oklch(0.50 0.19 260);
+  --chart-2: oklch(0.55 0.14 200);
+  --chart-3: oklch(0.50 0.12 280);
+  --chart-4: oklch(0.55 0.16 340);
+  --chart-5: oklch(0.60 0.14 55);
   /* ── Sidebar — slightly tinted for depth ── */
-  --sidebar: oklch(0.942 0.005 250);
-  --sidebar-foreground: oklch(0.128 0.012 250);
-  --sidebar-primary: oklch(0.47 0.18 250);
+  --sidebar: oklch(0.945 0.006 250);
+  --sidebar-foreground: oklch(0.14 0.012 250);
+  --sidebar-primary: oklch(0.50 0.19 260);
   --sidebar-primary-foreground: oklch(0.985 0.002 250);
-  --sidebar-accent: oklch(0.90 0.008 250);
-  --sidebar-accent-foreground: oklch(0.15 0.015 250);
-  --sidebar-border: oklch(0.90 0.008 250);
-  --sidebar-ring: oklch(0.47 0.18 250);
+  --sidebar-accent: oklch(0.90 0.010 252);
+  --sidebar-accent-foreground: oklch(0.15 0.015 252);
+  --sidebar-border: oklch(0.905 0.008 250);
+  --sidebar-ring: oklch(0.50 0.19 260);
 }
 
 .dark {
-  /* ── Precision Instrument palette (dark) ── */
-  --background: oklch(0.108 0.005 250);
-  --foreground: oklch(0.95 0.004 250);
-  --card: oklch(0.134 0.006 250);
-  --card-foreground: oklch(0.95 0.004 250);
-  --popover: oklch(0.142 0.006 250);
-  --popover-foreground: oklch(0.95 0.004 250);
-  --primary: oklch(0.78 0.14 255);
+  /* ── Deep Slate workspace (dark) ──
+     Cool blue-grey neutrals for an OLED-ish precision workspace. Deeper
+     backgrounds, slightly cool-tinted cards, indigo primary. Foregrounds
+     stay high-luminance for AA+ contrast on the darker surfaces. */
+  --background: oklch(0.16 0.008 250);
+  --foreground: oklch(0.95 0.006 250);
+  --card: oklch(0.17 0.008 250);
+  --card-foreground: oklch(0.95 0.006 250);
+  --popover: oklch(0.18 0.008 250);
+  --popover-foreground: oklch(0.95 0.006 250);
+  --primary: oklch(0.72 0.14 255);
   --primary-foreground: oklch(0.10 0.006 250);
-  --secondary: oklch(0.168 0.008 250);
-  --secondary-foreground: oklch(0.92 0.005 250);
-  --muted: oklch(0.132 0.005 250);
-  --muted-foreground: oklch(0.68 0.008 250);
-  --accent: oklch(0.188 0.018 250);
-  --accent-foreground: oklch(0.95 0.004 250);
-  --destructive: oklch(0.64 0.22 20);
-  --border: oklch(0.22 0.008 250);
-  --input: oklch(0.162 0.006 250);
-  --ring: oklch(0.78 0.14 255);
-  --chart-1: oklch(0.78 0.14 255);
-  --chart-2: oklch(0.64 0.12 200);
-  --chart-3: oklch(0.62 0.10 260);
-  --chart-4: oklch(0.64 0.16 340);
-  --chart-5: oklch(0.70 0.14 55);
-  /* ── Sidebar (dark) ── */
-  --sidebar: oklch(0.10 0.004 250);
-  --sidebar-foreground: oklch(0.93 0.005 250);
-  --sidebar-primary: oklch(0.78 0.14 255);
+  --secondary: oklch(0.205 0.008 250);
+  --secondary-foreground: oklch(0.92 0.006 250);
+  --muted: oklch(0.21 0.008 250);
+  --muted-foreground: oklch(0.72 0.008 250);
+  --accent: oklch(0.26 0.018 255);
+  --accent-foreground: oklch(0.95 0.006 250);
+  --destructive: oklch(0.66 0.20 20);
+  --border: oklch(0.30 0.008 250);
+  --input: oklch(0.24 0.008 250);
+  --ring: oklch(0.72 0.14 255);
+  --chart-1: oklch(0.72 0.14 255);
+  --chart-2: oklch(0.66 0.12 200);
+  --chart-3: oklch(0.62 0.12 280);
+  --chart-4: oklch(0.66 0.14 340);
+  --chart-5: oklch(0.72 0.13 55);
+  /* ── Sidebar (dark) — slightly deeper than background for layering ── */
+  --sidebar: oklch(0.145 0.007 250);
+  --sidebar-foreground: oklch(0.93 0.006 250);
+  --sidebar-primary: oklch(0.72 0.14 255);
   --sidebar-primary-foreground: oklch(0.10 0.006 250);
-  --sidebar-accent: oklch(0.142 0.008 250);
-  --sidebar-accent-foreground: oklch(0.93 0.005 250);
-  --sidebar-border: oklch(0.18 0.006 250);
-  --sidebar-ring: oklch(0.78 0.14 255);
+  --sidebar-accent: oklch(0.19 0.008 252);
+  --sidebar-accent-foreground: oklch(0.93 0.006 250);
+  --sidebar-border: oklch(0.26 0.007 250);
+  --sidebar-ring: oklch(0.72 0.14 255);
 }
 
 /* ── Base & accessibility ─────────────────────────── */
@@ -215,6 +220,30 @@ h1, h2, h3, h4, h5, h6 {
 .helix-md ul, .helix-md ol {
   padding-left: 1.4em;
   margin-block: 0.5em;
+}
+
+/* ── Flowing text indicator for actively-running tool steps ─────────────
+   Replaces the spinning circle loader with a shimmer that moves across
+   the label text, giving a "flowing" style without an icon.
+   Fully achromatic (chroma 0) so it carries NO color in either theme —
+   just a neutral light↔dark gray shimmer. */
+.flowing-text {
+  background-image: linear-gradient(
+    90deg,
+    oklch(0.45 0 0) 0%,
+    oklch(0.72 0 0) 50%,
+    oklch(0.45 0 0) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: flowText 1.5s linear infinite;
+}
+
+@keyframes flowText {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 
 .helix-md li {
@@ -480,13 +509,18 @@ body.user-select-none * {
 
 .helix-md {
   font-size: 14px;
-  line-height: 1.7;
+  line-height: 1.8;          /* 更宽松的行高，缓解密集感 */
   color: var(--foreground);
   word-wrap: break-word;
+  overflow-wrap: break-word;
+  /* 中英文混排自动留白（渐进增强：Chrome 132+ 等支持） */
+  text-autospace: normal;
+  text-spacing-trim: space-all;
 }
 
 .helix-md p {
-  margin: 0.6em 0;
+  margin: 0.75em 0;
+  text-wrap: pretty;         /* 更优雅的换行，避免孤字/标点悬挂 */
 }
 
 .helix-md p:first-child {
@@ -499,9 +533,10 @@ body.user-select-none * {
 
 .helix-md h1, .helix-md h2, .helix-md h3, .helix-md h4 {
   font-weight: 600;
-  margin: 1.2em 0 0.6em;
+  margin: 1.5em 0 0.7em;     /* 标题前后更多呼吸感，强化层级 */
   color: var(--foreground);
   letter-spacing: -0.01em;
+  text-wrap: balance;
 }
 
 .helix-md h1 { font-size: 1.5em; }
@@ -510,27 +545,41 @@ body.user-select-none * {
 .helix-md h4 { font-size: 1em; }
 
 .helix-md ul, .helix-md ol {
-  padding-left: 1.5em;
-  margin: 0.6em 0;
+  padding-left: 1.6em;
+  margin: 0.75em 0;
+  list-style-position: outside;
 }
 
 .helix-md li {
-  margin: 0.4em 0;
+  margin: 0.5em 0;
+}
+
+/* 列表项标记用柔和灰，弱化“噪音” */
+.helix-md li::marker {
+  color: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
+}
+
+/* 嵌套列表：紧凑但清晰 */
+.helix-md li > ul, .helix-md li > ol {
+  margin: 0.35em 0;
 }
 
 .helix-md li > p {
   margin: 0.25em 0;
 }
 
+/* 仅作用于真正的 inline code（代码块内的 code 已被下方 .helix-md pre code 重置） */
 .helix-md code {
   font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'JetBrains Mono', monospace;
-  font-size: 0.85em;
-  background: color-mix(in oklch, var(--muted-foreground) 6%, transparent);
-  border: 1px solid color-mix(in oklch, var(--muted-foreground) 12%, transparent);
-  padding: 0.1em 0.35em;
-  border-radius: 4px;
-  letter-spacing: -0.01em;
-  color: var(--foreground);
+  font-size: 0.86em;
+  background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
+  border: 1px solid color-mix(in oklch, var(--muted-foreground) 13%, transparent);
+  padding: 0.15em 0.4em;
+  border-radius: 5px;
+  vertical-align: 0.08em;     /* 微微上提，避免“浮”在行内 */
+  line-height: 1.4;           /* 给背景框足够高度，杜绝被裁切 */
+  margin: 0 0.12em;           /* 与中文之间留一丝气口 */
+  color: color-mix(in oklch, var(--foreground) 90%, var(--primary));
 }
 
 .helix-md pre {
@@ -558,11 +607,12 @@ body.user-select-none * {
 }
 
 .helix-md blockquote {
-  border-left: 3px solid color-mix(in oklch, var(--muted-foreground) 30%, transparent);
-  padding-left: 1em;
-  margin: 0.75em 0;
-  color: var(--foreground);
-  opacity: 0.85;
+  border-left: 3px solid color-mix(in oklch, var(--muted-foreground) 28%, transparent);
+  padding: 0.4em 0 0.4em 1em;
+  margin: 0.85em 0;
+  color: color-mix(in oklch, var(--foreground) 80%, transparent);
+  background: color-mix(in oklch, var(--muted-foreground) 4%, transparent);
+  border-radius: 0 6px 6px 0;
 }
 
 .helix-md a {
@@ -578,6 +628,11 @@ body.user-select-none * {
 
 .helix-md strong {
   font-weight: 600;
+}
+
+/* 不使用斜体：模型输出里的 *em* / _i_ 一律按正常字形，避免视觉噪音 */
+.helix-md em, .helix-md i {
+  font-style: normal;
 }
 
 .helix-md table {

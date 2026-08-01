@@ -1,9 +1,9 @@
 import { create } from 'zustand'
 import type { StateCreator } from 'zustand'
-import { defaultFiles } from '@/lib/seed-data'
+import { isElectron, getElectronAPI, electronFS, electronApp } from '@/lib/electron-bridge'
 import { generateId } from '@/lib/format'
 import { debug, warn, error as logError } from '@/lib/logger'
-import { isElectron, getElectronAPI, electronFS, electronApp } from '@/lib/electron-bridge'
+import { defaultFiles } from '@/lib/seed-data'
 import type { McpServerConfig } from '@/stores/hermes-store'
 import { useHermesStore } from '@/stores/hermes-store'
 export type { McpServerConfig } from '@/stores/hermes-store'
@@ -15,15 +15,17 @@ import type {
   MemoryCategory, MemoryEntry, AvailableCommand, TaskNode,
   SessionCheckpoint, ScheduledTask,
   ToolCallEntry, SubAgent, CustomShortcutEntry, ProviderConfig,
+  BackendPlugin,
 } from './helix-types'
 import { PROVIDER_PRESETS, DEFAULT_SHORTCUTS } from './helix-types'
-import { createGitSlice, type GitSlice } from './slices/git-slice'
-import { createToastSlice, type ToastSlice } from './slices/toast-slice'
-import { createTerminalSlice, type TerminalSlice } from './slices/terminal-slice'
 import { createAgentSettingsSlice, type AgentSettingsSlice } from './slices/agent-settings-slice'
-import { createPanelSlice, type PanelSlice } from './slices/panel-slice'
 import { createApiConfigSlice, type ApiConfigSlice } from './slices/api-config-slice'
+import { createEditorSlice, type EditorSlice } from './slices/editor-slice'
+import { createGitSlice, type GitSlice } from './slices/git-slice'
+import { createPanelSlice, type PanelSlice } from './slices/panel-slice'
 import { createSkillSlice, type SkillSlice } from './slices/skill-slice'
+import { createTerminalSlice, type TerminalSlice } from './slices/terminal-slice'
+import { createToastSlice, type ToastSlice } from './slices/toast-slice'
 
 export type {
   FileNode, ImageAttachment, FileAttachment, ExecutionStep,
@@ -33,10 +35,11 @@ export type {
   MemoryCategory, MemoryEntry, AvailableCommand, TaskNode,
   SessionCheckpoint, ScheduledTask,
   SubAgent, CustomShortcutEntry, ProviderConfig,
+  BackendPlugin,
 }
 export { PROVIDER_PRESETS, DEFAULT_SHORTCUTS }
 
-interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsSlice, PanelSlice, ApiConfigSlice, SkillSlice {
+interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, AgentSettingsSlice, PanelSlice, ApiConfigSlice, SkillSlice {
   // File system
   files: FileNode[]
   selectedFileId: string | null
@@ -84,6 +87,16 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsS
   toggleReviewPanel: () => void
   showArtifactsBrowser: boolean
   toggleArtifactsBrowser: () => void
+
+  // Preview Rail
+  showPreviewRail: boolean
+  previewRailUrl: string | null
+  setPreviewRailUrl: (url: string | null) => void
+  togglePreviewRail: () => void
+
+  // Unified right sidebar (hosts the browser + code editor as switchable tabs)
+  rightSidebarTab: 'browser' | 'code' | null
+  setRightSidebarTab: (tab: 'browser' | 'code' | null) => void
   showLearningView: boolean
   toggleLearningView: () => void
   voiceAutoSpeak: boolean
@@ -168,6 +181,8 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsS
   ) => void
   notifySessionSaved: () => void
   flushSessionPersist: () => void
+  /** Persist a specific session's messages (works for background sessions). */
+  persistSessionNow: (sessionId: string) => Promise<void>
 
   // UI
   editorTheme: 'vs-dark' | 'light'
@@ -206,6 +221,7 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsS
   addChatMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => string
   updateChatMessage: (messageId: string, content: string) => void
   setChatMessageStreaming: (messageId: string, isStreaming: boolean) => void
+  deleteMessage: (messageId: string) => void
   clearChat: () => void
   clearChatAndPersist: () => Promise<void>
   setChatLoading: (loading: boolean) => void
@@ -249,6 +265,8 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, AgentSettingsS
   loadUserMemories: () => Promise<void>
   updateNotes: (notes: string) => void
   saveCheckpoint: (label?: string) => void
+  restoreCheckpoint: (id: string) => void
+  removeCheckpoint: (id: string) => void
 
   // Actions - Tasks
   addTask: (label: string, parentId?: string) => string
@@ -422,12 +440,18 @@ async function persistCurrentSessionNow(): Promise<void> {
     // and its eventual `done` handler are unaffected. Once the run completes,
     // clearStreamingDraft() drops the draft and the partial stops being
     // injected (the real message, added by done, takes its place).
-    const msgsToSave = state.chatMessages.map(m => ({
-      id: m.id, sessionId, role: m.role,
-      content: m.content, images: m.images, timestamp: m.timestamp, isStreaming: m.isStreaming ?? false,
-      reasoning: m.reasoning,
-      steps: m.steps,
-    }))
+    // Concurrency guard: only persist messages that belong to THIS session
+    // (or legacy untagged ones). The in-memory array may also hold messages of
+    // OTHER sessions still running in the background — stamping those with the
+    // current sessionId would corrupt both conversations.
+    const msgsToSave = state.chatMessages
+      .filter(m => !m.sessionId || m.sessionId === sessionId)
+      .map(m => ({
+        id: m.id, sessionId, role: m.role,
+        content: m.content, images: m.images, timestamp: m.timestamp, isStreaming: m.isStreaming ?? false,
+        reasoning: m.reasoning,
+        steps: m.steps,
+      }))
     const draft = state.streamingDrafts[sessionId]
     if (draft?.isAgentRunning && draft.textBuffer && draft.textBuffer.trim()) {
       msgsToSave.push({
@@ -489,10 +513,57 @@ function flushSessionPersist(): Promise<void> {
   return persistCurrentSessionNow()
 }
 
+// Persist a SPECIFIC session's messages, even when it is not the currently
+// viewed one. Needed for concurrent multi-session runs: a background run that
+// finishes must save its committed reply into ITS OWN session record —
+// persistCurrentSessionNow only covers the foreground session.
+async function persistSessionById(sessionId: string): Promise<void> {
+  try {
+    const state = useHelixStore.getState()
+    if (!sessionId) return
+    if (state.currentSessionId === sessionId) return persistCurrentSessionNow()
+    const msgs = state.chatMessages.filter(m => m.sessionId === sessionId)
+    if (msgs.length === 0) return
+    const { persistence } = await import('@/lib/persist')
+    const all = await persistence.loadSessions()
+    const existing = all.find(s => s.id === sessionId)
+    // Merge by message id: keep everything already on disk, overlay in-memory.
+    const byId = new Map<string, any>()
+    for (const m of existing?.chatMessages || []) byId.set(m.id, m)
+    for (const m of msgs) {
+      byId.set(m.id, {
+        id: m.id, sessionId, role: m.role,
+        content: m.content, images: m.images, timestamp: m.timestamp, isStreaming: false,
+        reasoning: m.reasoning,
+        steps: m.steps,
+      })
+    }
+    const merged = [...byId.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+    const firstUser = merged.find(m => m.role === 'user')
+    await persistence.saveSession({
+      id: sessionId,
+      label: existing?.label || (firstUser ? String(firstUser.content).slice(0, 50) : new Date().toLocaleString('zh-CN')),
+      workDir: existing?.workDir ?? state.activeSessionWorkDir ?? state.selectedWorkDir,
+      goal: existing?.goal ?? null,
+      memories: existing?.memories || [],
+      tasks: existing?.tasks || [],
+      notes: existing?.notes || '',
+      checkpoints: existing?.checkpoints || [],
+      chatMessages: merged,
+      files: existing?.files || [],
+      openTabs: existing?.openTabs || [],
+    })
+    useHelixStore.setState((st) => ({ sessionSaveVersion: st.sessionSaveVersion + 1 }))
+  } catch (e) {
+    logError('Failed to persist background session:', e)
+  }
+}
+
 export const useHelixStore = create<HelixState>()((set, get, store) => ({
   ...createGitSlice(set, get, store),
   ...createToastSlice(set, get, store),
   ...createTerminalSlice(set, get, store),
+  ...createEditorSlice(set, get, store),
   ...createAgentSettingsSlice(set, get, store),
   ...createPanelSlice(set, get, store),
   ...createApiConfigSlice(set, get, store),
@@ -635,6 +706,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   showRuntimePanel: false,
   showReviewPanel: false,
   showArtifactsBrowser: false,
+  showPreviewRail: false,
+  previewRailUrl: null as string | null,
+  rightSidebarTab: null,
   showLearningView: false,
   voiceAutoSpeak: false,
 
@@ -840,6 +914,21 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   toggleActivityFeed: () => set((s) => ({ showActivityFeed: !s.showActivityFeed })),
   toggleReviewPanel: () => set((s) => ({ showReviewPanel: !s.showReviewPanel })),
   toggleArtifactsBrowser: () => set((s) => ({ showArtifactsBrowser: !s.showArtifactsBrowser })),
+  togglePreviewRail: () => set((s) => {
+    const next = s.rightSidebarTab === 'browser' ? null : 'browser'
+    return next === 'browser'
+      ? { rightSidebarTab: 'browser', showPreviewRail: true, editorOpen: false }
+      : { rightSidebarTab: null, showPreviewRail: false, editorOpen: false }
+  }),
+  setPreviewRailUrl: (url: string | null) => set((s) => ({
+    previewRailUrl: url,
+    ...(url !== null ? { showPreviewRail: true, rightSidebarTab: 'browser', editorOpen: false } : {}),
+  })),
+  setRightSidebarTab: (tab) => set(() => {
+    if (tab === 'browser') return { rightSidebarTab: 'browser', showPreviewRail: true, editorOpen: false }
+    if (tab === 'code') return { rightSidebarTab: 'code', showPreviewRail: false, editorOpen: true }
+    return { rightSidebarTab: null, showPreviewRail: false, editorOpen: false }
+  }),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
   setVoiceAutoSpeak: (v: boolean) => set((s) => ({ voiceAutoSpeak: v })),
 
@@ -872,6 +961,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       chatMessages: state.chatMessages.map((m) =>
         m.id === messageId ? { ...m, isStreaming } : m
       ),
+    })),
+
+  deleteMessage: (messageId) =>
+    set((state) => ({
+      chatMessages: state.chatMessages.filter((m) => m.id !== messageId),
     })),
 
   clearChat: () => {
@@ -1112,16 +1206,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const cachedWrite = usage.cachedWriteTokens || 0
       const total = usage.totalTokens || input + output + thought
       const rates: Record<string, { input: number; output: number }> = {
-        'agnes-2.0-flash': { input: 0.4, output: 1.6 },
-        'agnes-2.0': { input: 0.4, output: 1.6 },
         'claude-sonnet-4': { input: 3.0, output: 15.0 },
         'claude-sonnet-4-20250514': { input: 3.0, output: 15.0 },
         'gpt-4o': { input: 2.5, output: 10.0 },
         'gpt-4o-mini': { input: 0.15, output: 0.6 },
         'deepseek-chat': { input: 0.14, output: 0.28 },
         'deepseek-reasoner': { input: 0.55, output: 2.19 },
-        'custom:step-3.7-flash': { input: 0.5, output: 2.0 },
-        'step-3.7-flash': { input: 0.5, output: 2.0 },
         'custom:step-router-v1': { input: 0.5, output: 2.0 },
       }
       const rate = rates[model] || { input: 1.0, output: 5.0 }
@@ -1235,6 +1325,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     return flushSessionPersist()
   },
 
+  persistSessionNow: (sessionId: string) => {
+    return persistSessionById(sessionId)
+  },
+
   // Actions - File modifications
   applyFileChange: (fileId, newContent) =>
     set((state) => ({
@@ -1260,7 +1354,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     // Ensure parent folders exist
     for (const folderName of segments) {
       if (!parentId) {
-        let folder = state.files.find(f => f.type === 'folder' && f.name === folderName)
+        const folder = state.files.find(f => f.type === 'folder' && f.name === folderName)
         if (!folder) {
           const id = generateId()
           const newFolder: FileNode = { id, name: folderName, type: 'folder', children: [] }
@@ -1277,7 +1371,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         }
       } else {
         const parent = get().getFileById(parentId)
-        let folder = parent?.children?.find(f => f.type === 'folder' && f.name === folderName)
+        const folder = parent?.children?.find(f => f.type === 'folder' && f.name === folderName)
         if (!folder) {
           const id = generateId()
           const newFolder: FileNode = { id, name: folderName, type: 'folder', children: [] }
@@ -1511,9 +1605,36 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           timestamp: Date.now(),
           taskIds: state.tasks.map(t => t.id),
           memorySnapshot: state.memories.map(m => m.content).join('\n'),
+          tasks: JSON.parse(JSON.stringify(state.tasks)) as TaskNode[],
         },
       ],
     })),
+  restoreCheckpoint: (id) => {
+    const state = get()
+    const cp = state.checkpoints.find(c => c.id === id)
+    if (!cp) return
+    const hashText = (s: string) => {
+      let h = 5381
+      for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+      return (h >>> 0).toString(36)
+    }
+    const memories: MemoryEntry[] = cp.memorySnapshot
+      .split('\n')
+      .map((content) => content.trim())
+      .filter(Boolean)
+      .map((content) => ({
+        id: 'cp_' + hashText(content),
+        content,
+        category: 'project' as MemoryCategory,
+        createdAt: Date.now(),
+        source: 'manual' as const,
+      }))
+    set({
+      tasks: cp.tasks ? JSON.parse(JSON.stringify(cp.tasks)) as TaskNode[] : [],
+      memories,
+    })
+  },
+  removeCheckpoint: (id) => set((state) => ({ checkpoints: state.checkpoints.filter(c => c.id !== id) })),
 
   // Actions - Tasks
   addTask: (label, parentId) => {
@@ -1732,30 +1853,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('sessionUsageStats', state.sessionUsageStats),
         persistence.saveScheduledTasks(state.scheduledTasks),
         persistence.saveSetting('mcpServers', state.mcpServers),
-        // Also sync MCP config to Hermes config.yaml for persistence
-        isElectron() && window.electron?.hermes?.setYamlKey?.('mcpServers', Object.fromEntries(
-          Object.entries(state.mcpServers).filter(([_, cfg]: any) => cfg.enabled !== false).map(([name, cfg]: any) => [name, {
-            type: cfg.type,
-            command: cfg.command,
-            url: cfg.url,
-            environment: cfg.environment,
-            cwd: cfg.cwd,
-            timeout: cfg.timeout,
-            headers: cfg.headers,
-          }])
-        )),
         persistence.saveSetting('customizedShortcutIds', Array.from(state.customizedShortcutIds)),
         persistence.saveSetting('agentMaxIterations', state.agentMaxIterations),
         persistence.saveSetting('autoCompactContext', state.autoCompactContext),
-        persistence.saveSetting('smartTruncation', state.smartTruncation),
         persistence.saveSetting('autoSaveSession', state.autoSaveSession),
-        persistence.saveSetting('temperature', state.temperature),
-        persistence.saveSetting('maxOutputTokens', state.maxOutputTokens),
-        persistence.saveSetting('customInstructions', state.customInstructions),
-        persistence.saveSetting('streamingEnabled', state.streamingEnabled),
-        persistence.saveSetting('compressionEnabled', state.compressionEnabled),
-        persistence.saveSetting('toolGuardrailsEnabled', state.toolGuardrailsEnabled),
+        persistence.saveSetting('reasoningEffort', state.reasoningEffort),
         persistence.saveSetting('personality', state.personality),
+        persistence.saveSetting('fastMode', state.fastMode),
         persistence.saveSetting('desktopNotifications', state.desktopNotifications),
         persistence.saveSetting('soundEnabled', state.soundEnabled),
         persistence.saveSetting('voiceAutoSpeak', state.voiceAutoSpeak),
@@ -1786,7 +1890,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const sessionId = 'current-session'
 
       // MCP config is now managed by Hermes
-      let fileMcpConfig: Record<string, any> = {}
+      const fileMcpConfig: Record<string, any> = {}
 
       // Try loading the latest saved session first (full state)
       const sessions = await persistence.loadSessions()
@@ -1796,7 +1900,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, smartTruncation, autoSaveSession, temperature, maxOutputTokens, customInstructions, availableModels, providerModels, streamingEnabled, compressionEnabled, toolGuardrailsEnabled, personality, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -1826,17 +1930,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<string[]>('customizedShortcutIds'),
         persistence.loadSetting<number>('agentMaxIterations'),
         persistence.loadSetting<boolean>('autoCompactContext'),
-        persistence.loadSetting<boolean>('smartTruncation'),
         persistence.loadSetting<boolean>('autoSaveSession'),
-        persistence.loadSetting<number>('temperature'),
-        persistence.loadSetting<number>('maxOutputTokens'),
-        persistence.loadSetting<string>('customInstructions'),
         persistence.loadSetting<string[]>('availableModels'),
         persistence.loadSetting<Record<string, string[]>>('providerModels'),
-        persistence.loadSetting<boolean>('streamingEnabled'),
-        persistence.loadSetting<boolean>('compressionEnabled'),
-        persistence.loadSetting<boolean>('toolGuardrailsEnabled'),
+        persistence.loadSetting<string>('reasoningEffort'),
         persistence.loadSetting<string>('personality'),
+        persistence.loadSetting<boolean>('fastMode'),
         persistence.loadSetting<boolean>('desktopNotifications'),
         persistence.loadSetting<boolean>('soundEnabled'),
         persistence.loadSetting<boolean>('restoreLastSession'),
@@ -1865,7 +1964,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // stale/failed messages (e.g. 401 errors) from a previous run.
       // Historical sessions remain available in the sidebar and can be
       // opened manually.
-      const defaults = { provider: 'agnes-ai' as const, apiKey: '', baseUrl: 'https://apihub.agnes-ai.com/v1', model: 'agnes-2.0-flash' }
+      const defaults = { provider: 'custom' as const, apiKey: '', baseUrl: 'https://api.ant-ling.com/v1', model: 'Ling-2.6-1T' }
       // Restore which named profile was active before the restart, so the selection
       // survives a cold start (the profile list itself is persisted to IndexedDB).
       const loadedActiveProfileId = await persistence.loadSetting<string | null>('activeProfileId')
@@ -1889,11 +1988,44 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // without needing the user to clear data. When no fetched list exists for a
       // profile, we leave its declared models untouched (can't verify), but the
       // fixed write path (handleSaveApi) will no longer re-pollute it.
+      // Heuristic guard against cross-endpoint pollution in persisted history:
+      // a model name that obviously cannot belong to the configured endpoint
+      // (e.g. "Ling-*" on a deepseek base URL, or "deepseek-*" on an ant-ling
+      // base URL) is treated as poisoned and dropped from the provider's model
+      // pool, so it can never be silently selected as the active model.
+      // Helpers for scrubbing cross-endpoint model pollution.
+      const isLingFamily = (s: string) => /ling|antangel|ring/.test((s || '').toLowerCase())
+      const isDeepseekFamily = (s: string) => (s || '').toLowerCase().includes('deepseek')
+      const isModelEndpointMismatch = (model: string, baseUrl?: string): boolean => {
+        const u = (baseUrl || '').toLowerCase()
+        const m = (model || '').toLowerCase()
+        if (isDeepseekFamily(u) && isLingFamily(m)) return true
+        if (isLingFamily(u) && isDeepseekFamily(m)) return true
+        return false
+      }
+      const deriveProviderName = (baseUrl?: string, fallback?: string): string => {
+        if (!baseUrl) return fallback || '配置'
+        try {
+          const host = new URL(baseUrl).hostname.toLowerCase()
+          if (/ant-ling|agnes|ant-/.test(host)) return 'Ling'
+          if (host.includes('deepseek')) return 'DeepSeek'
+          if (host.includes('openai')) return 'OpenAI'
+          if (host.includes('anthropic')) return 'Anthropic'
+          if (host.includes('google')) return 'Gemini'
+          return host.replace(/^www\./, '') || fallback || '配置'
+        } catch {
+          return fallback || '配置'
+        }
+      }
       const cleanProfileModels = (p: ApiProfile): string[] => {
-        const own = p.config?.model ? [p.config.model] : []
-        const fetched = providerModels?.[p.id]
-        if (fetched && fetched.length > 0) {
-          // Authoritative: this endpoint's own fetched list wins.
+        const own = (p.config?.model ? [p.config.model] : []).filter(
+          (m) => !isModelEndpointMismatch(m, p.config?.baseUrl),
+        )
+        const fetched = (providerModels?.[p.id] || []).filter(
+          (m) => !isModelEndpointMismatch(m, p.config?.baseUrl),
+        )
+        if (fetched.length > 0) {
+          // Authoritative: this endpoint's own fetched list wins (after scrubbing).
           return Array.from(new Set([...own, ...fetched].filter(Boolean)))
         }
         // No fetched list available → we CANNOT verify that p.models is clean.
@@ -1924,12 +2056,26 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
                       isDefault: true,
                     }]
                   : []))
+      // Heal persisted provider baseUrl pollution: if a provider's models all
+      // clearly belong to a different endpoint than its baseUrl (e.g. Ling/Ring
+      // models but a deepseek URL), its baseUrl was overwritten by an old bug.
+      // Clear it so activeProvider matching falls back to model-based lookup
+      // instead of anchoring to the wrong provider and showing the wrong list.
+      const healedProviders = builtProviders.map((p) => {
+        if (!p.baseUrl || p.models.length === 0) return p
+        const validModels = p.models.filter((m) => !isModelEndpointMismatch(m, p.baseUrl))
+        if (validModels.length === 0) {
+          warn('[restoreFromStorage] provider baseUrl polluted:', p.name, p.baseUrl, 'models:', p.models, '-> clearing baseUrl')
+          return { ...p, baseUrl: '', apiKey: '' }
+        }
+        return p
+      })
       // Merge the persisted per-provider fetched model lists (providerModels)
       // into each provider's candidate `models` pool. This keeps a single source
       // of truth so a model selected from "获取模型列表" survives a cold restart:
       // without it, `activeModel` would be rejected by the check below (not in
       // `providers[].models`) and silently fall back to the default model.
-      const mergedProviders: ProviderConfig[] = builtProviders.map((p) => {
+      const mergedProviders: ProviderConfig[] = healedProviders.map((p) => {
         const fetched = providerModels?.[p.id]
         if (fetched && fetched.length > 0) {
           const models = Array.from(new Set([...p.models, ...fetched]))
@@ -1937,6 +2083,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         }
         return p
       })
+      // Canonical restore logic: the active model is whatever IndexedDB persisted
+      // as `activeModel`. If that model is not declared by any provider, fall
+      // back to the default provider's first model.
       const builtActiveModel: string | null =
         activeModel && (
           mergedProviders.some((p) => p.models.includes(activeModel)) ||
@@ -1944,7 +2093,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         )
           ? activeModel
           : (mergedProviders.length > 0
-              ? (mergedProviders.find((p) => p.isDefault)?.models[0] || mergedProviders[0].models[0] || null)
+              ? (mergedProviders.find((p) => p.isDefault && (p.models?.length || 0) > 0)?.models[0] ||
+                 mergedProviders.find((p) => (p.models?.length || 0) > 0)?.models[0] ||
+                 null)
               : null)
       // Resolve the active provider: prefer a saved id that still exists, then
       // the owner of the active model, then the default/first provider.
@@ -1994,7 +2145,18 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             if (!cfg || !cfg.baseUrl) {
               return { ...defaults }
             }
-            return { ...defaults, ...cfg }
+            const merged = { ...defaults, ...cfg }
+            // Heal model/baseUrl mismatch: a persisted entry can pair a Ling
+            // model with a deepseek baseUrl (old pollution / provider-switch
+            // fallout). The gateway would then 400 "model not supported" and
+            // output nothing. Keep the user's model name but force the
+            // known-good ant-ling endpoint + key — same policy as
+            // main.js hermes:setModel (isBadConfig fallback).
+            if (isModelEndpointMismatch(merged.model, merged.baseUrl)) {
+              warn('[restoreFromStorage] apiConfig model/baseUrl mismatch → snap to ant-ling:', merged.model, merged.baseUrl)
+              return { ...merged, provider: 'ant-ling', baseUrl: defaults.baseUrl, apiKey: defaults.apiKey }
+            }
+            return merged
           }
           // Prefer the active provider built from providers/activeModel — this is
           // what the model selector treats as current, so apiConfig must agree.
@@ -2021,7 +2183,33 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           }
           return resolve(p)
         })(),
-        apiHistory: apiHistory || [],
+        apiHistory: (() => {
+          const raw = apiHistory || []
+          // Heal polluted history entries where a model name was saved against
+          // the wrong endpoint (e.g. Ling model with deepseek baseUrl). Keep
+          // the entry but rewrite its model to one that actually belongs to
+          // the endpoint, so clicking it later cannot resurrect the mismatch.
+          const healed = raw.map((h) => {
+            if (!h.model || !h.baseUrl || !isModelEndpointMismatch(h.model, h.baseUrl)) return h
+            const owner = mergedProviders.find((p) => p.baseUrl === h.baseUrl)
+            const ownerModels = owner
+              ? [...new Set([...(owner.models || []), ...(providerModels?.[owner.id] || [])])]
+              : []
+            const fallback = ownerModels[0] || owner?.defaultModel || h.model
+            return { ...h, model: fallback }
+          })
+          // Deduplicate by model + baseUrl. Older duplicates are dropped so the
+          // history list never shows two identical entries like the same
+          // deepseek model twice.
+          const seen = new Set<string>()
+          return healed.filter((h) => {
+            if (!h.model || !h.baseUrl) return false
+            const key = `${h.model}|${h.baseUrl}`
+            if (seen.has(key)) return false
+            seen.add(key)
+            return true
+          })
+        })(),
         apiProfiles: (() => {
           const loaded = apiProfiles || []
           if (loaded.length > 0) {
@@ -2036,7 +2224,26 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             }))
           }
           if (apiHistory && apiHistory.length > 0) {
-            return apiHistory.map((h, i) => ({ id: generateId(), name: `配置 ${i + 1}`, config: { ...defaults, ...h }, models: h.model ? [h.model] : [] }))
+            // Group history entries by baseUrl so each endpoint becomes its own
+            // provider. This prevents a single "配置 · xxx" profile from owning
+            // models that clearly belong to different endpoints (e.g. Ling and
+            // DeepSeek models mixed together after repeated saves).
+            const groups = new Map<string, typeof apiHistory>()
+            for (const h of apiHistory) {
+              const key = h.baseUrl || `unknown-${groups.size}`
+              if (!groups.has(key)) groups.set(key, [])
+              groups.get(key)!.push(h)
+            }
+            return Array.from(groups.entries()).map(([baseUrl, entries], i) => {
+              const primary = entries[0]
+              const models = Array.from(new Set(entries.map((h) => h.model).filter(Boolean)))
+              return {
+                id: generateId(),
+                name: deriveProviderName(baseUrl, `配置 ${i + 1}`),
+                config: { ...defaults, ...primary },
+                models,
+              }
+            })
           }
           return []
         })(),
@@ -2088,15 +2295,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         customizedShortcutIds: new Set(customizedIdsArr || []),
         agentMaxIterations: agentMaxIterations ?? get().agentMaxIterations,
         autoCompactContext: autoCompactContext ?? get().autoCompactContext,
-        smartTruncation: smartTruncation ?? get().smartTruncation,
         autoSaveSession: autoSaveSession ?? get().autoSaveSession,
-        temperature: temperature ?? get().temperature,
-        maxOutputTokens: maxOutputTokens ?? get().maxOutputTokens,
-        customInstructions: customInstructions ?? get().customInstructions,
-        streamingEnabled: streamingEnabled ?? get().streamingEnabled,
-        compressionEnabled: compressionEnabled ?? get().compressionEnabled,
-        toolGuardrailsEnabled: toolGuardrailsEnabled ?? get().toolGuardrailsEnabled,
-        personality: (personality && personality !== '温柔') ? personality : '',
+        reasoningEffort: (reasoningEffort as any) || get().reasoningEffort,
+        personality: personality || get().personality,
+        fastMode: fastMode ?? get().fastMode,
         desktopNotifications: desktopNotifications ?? get().desktopNotifications,
         soundEnabled: soundEnabled ?? get().soundEnabled,
         restoreLastSession: restoreLastSession ?? get().restoreLastSession,

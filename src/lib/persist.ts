@@ -5,7 +5,7 @@
 import { encryptApiKey, decryptApiKey } from './crypto'
 
 const DB_NAME = 'helix-db'
-const DB_VERSION = 4
+const DB_VERSION = 5
 
 interface PersistedMemory {
   id: string
@@ -29,6 +29,7 @@ interface PersistedCheckpoint {
   timestamp: number
   taskIds: string[]
   memorySnapshot: string
+  tasks?: PersistedTask[]
 }
 
 export interface PersistedChatMessage {

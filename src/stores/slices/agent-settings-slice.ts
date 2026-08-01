@@ -1,67 +1,46 @@
 /**
- * Agent behaviour settings slice — model parameters and Hermes feature flags.
- * All setters are trivial; no cross-state reads/writes.
+ * Agent behaviour settings slice — Hermes Desktop style.
+ *
+ * Changes from original:
+ * - Removed temperature, maxOutputTokens (backend-managed)
+ * - Removed customInstructions (backend-managed via SOUL.md)
+ * - Removed smartTruncation, compressionEnabled, toolGuardrailsEnabled (backend-managed)
+ * - Removed streamingEnabled (always on)
+ * - Changed reasoningEffort to Hermes native scale: none/minimal/low/medium/high/xhigh/max/ultra
+ * - Added perModelPresets (reasoning + fast per provider::model key)
+ * - Added fastMode (service tier)
+ * - Personality is now named preset (not free text)
  */
 import type { StateCreator } from 'zustand'
-
-/** Hermes backend's `parse_reasoning_effort` only accepts
- *  none/minimal/low/medium/high/xhigh/max/ultra. Our UI scale
- *  (ultra_low … max) uses two names it doesn't recognise (ultra_low,
- *  ultra_high), which `parse_reasoning_effort` silently drops → the user's
- *  pick falls back to the default (medium), defeating fast/slow control.
- *  Translate at the IPC boundary so every UI level actually reaches the model. */
-export function toBackendReasoningEffort(
-  v: 'ultra_low' | 'low' | 'medium' | 'high' | 'ultra_high' | 'max',
-): string {
-  switch (v) {
-    case 'ultra_low': return 'minimal'
-    case 'low': return 'low'
-    case 'medium': return 'medium'
-    case 'high': return 'high'
-    case 'ultra_high': return 'xhigh'
-    case 'max': return 'max'
-  }
-}
+import { loadModelPresets, saveModelPreset, type ModelPreset } from '@/hermes-ui/api-client'
+import type { ReasoningEffortLevel } from '@/hermes-ui/types'
 
 export interface AgentSettingsSlice {
   agentMaxIterations: number
   autoCompactContext: boolean
-  smartTruncation: boolean
   autoSaveSession: boolean
-  temperature: number
-  reasoningEffort: 'ultra_low' | 'low' | 'medium' | 'high' | 'ultra_high' | 'max'
-  maxOutputTokens: number
-  customInstructions: string
-  outputStyle: string
-  streamingEnabled: boolean
-  compressionEnabled: boolean
-  toolGuardrailsEnabled: boolean
+  reasoningEffort: ReasoningEffortLevel
   personality: string
+  fastMode: boolean
   // Notification settings
   desktopNotifications: boolean
   soundEnabled: boolean
   // Startup behavior
   restoreLastSession: boolean
   defaultWorkDir: string
-  // Security
+  // Security — only terminal/execute_code need approval (Hermes style)
   confirmDangerousActions: boolean
   autoApproveRead: boolean
-  // Agent presets
+  // Agent presets (custom system prompts)
   agentPresets: Record<string, { name: string; systemPrompt: string }>
   activePreset: string | null
+
   setAgentMaxIterations: (n: number) => void
   setAutoCompactContext: (v: boolean) => void
-  setSmartTruncation: (v: boolean) => void
   setAutoSaveSession: (v: boolean) => void
-  setTemperature: (n: number) => void
-  setReasoningEffort: (v: 'ultra_low' | 'low' | 'medium' | 'high' | 'ultra_high' | 'max') => void
-  setMaxOutputTokens: (n: number) => void
-  setCustomInstructions: (v: string) => void
-  setOutputStyle: (v: string) => void
-  setStreamingEnabled: (v: boolean) => void
-  setCompressionEnabled: (v: boolean) => void
-  setToolGuardrailsEnabled: (v: boolean) => void
+  setReasoningEffort: (v: ReasoningEffortLevel) => void
   setPersonality: (v: string) => void
+  setFastMode: (v: boolean) => void
   setDesktopNotifications: (v: boolean) => void
   setSoundEnabled: (v: boolean) => void
   setRestoreLastSession: (v: boolean) => void
@@ -70,29 +49,26 @@ export interface AgentSettingsSlice {
   setAutoApproveRead: (v: boolean) => void
   setAgentPresets: (presets: Record<string, { name: string; systemPrompt: string }>) => void
   setActivePreset: (preset: string | null) => void
+
+  // Per-model presets (Hermes Desktop style)
+  applyModelPreset: (providerModelKey: string) => void
+  saveCurrentAsModelPreset: (providerModelKey: string) => void
 }
 
-export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], AgentSettingsSlice> = (set) => ({
+export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], AgentSettingsSlice> = (set, get) => ({
   agentMaxIterations: 90,
   autoCompactContext: true,
-  smartTruncation: true,
   autoSaveSession: false,
-  temperature: 0.7,
   reasoningEffort: 'medium',
-  maxOutputTokens: 4096,
-  customInstructions: '',
-  outputStyle: 'default',
-  streamingEnabled: true,
-  compressionEnabled: true,
-  toolGuardrailsEnabled: true,
-  personality: '',
+  personality: 'helpful',
+  fastMode: false,
   // Notification defaults
   desktopNotifications: true,
   soundEnabled: false,
   // Startup defaults
   restoreLastSession: true,
   defaultWorkDir: '',
-  // Security
+  // Security — Hermes style: only terminal/execute_code gate
   confirmDangerousActions: true,
   autoApproveRead: false,
   // Agent presets defaults
@@ -101,17 +77,10 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
 
   setAgentMaxIterations: (n) => set({ agentMaxIterations: n }),
   setAutoCompactContext: (v) => set({ autoCompactContext: v }),
-  setSmartTruncation: (v) => set({ smartTruncation: v }),
   setAutoSaveSession: (v) => set({ autoSaveSession: v }),
-  setTemperature: (v) => set({ temperature: v }),
   setReasoningEffort: (v) => set({ reasoningEffort: v }),
-  setMaxOutputTokens: (v) => set({ maxOutputTokens: v }),
-  setCustomInstructions: (v) => set({ customInstructions: v }),
-  setOutputStyle: (v) => set({ outputStyle: v }),
-  setStreamingEnabled: (v) => set({ streamingEnabled: v }),
-  setCompressionEnabled: (v) => set({ compressionEnabled: v }),
-  setToolGuardrailsEnabled: (v) => set({ toolGuardrailsEnabled: v }),
   setPersonality: (v) => set({ personality: v }),
+  setFastMode: (v) => set({ fastMode: v }),
   setDesktopNotifications: (v) => set({ desktopNotifications: v }),
   setSoundEnabled: (v) => set({ soundEnabled: v }),
   setRestoreLastSession: (v) => set({ restoreLastSession: v }),
@@ -120,4 +89,21 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   setAutoApproveRead: (v) => set({ autoApproveRead: v }),
   setAgentPresets: (presets) => set({ agentPresets: presets }),
   setActivePreset: (preset) => set({ activePreset: preset }),
+
+  applyModelPreset: (providerModelKey: string) => {
+    const preset = loadModelPresets()[providerModelKey]
+    if (!preset) return
+    set({
+      reasoningEffort: (preset.reasoningEffort as ReasoningEffortLevel) || 'medium',
+      fastMode: preset.fast ?? false,
+    })
+  },
+
+  saveCurrentAsModelPreset: (providerModelKey: string) => {
+    const state = get()
+    saveModelPreset(providerModelKey, {
+      reasoningEffort: state.reasoningEffort,
+      fast: state.fastMode,
+    })
+  },
 })

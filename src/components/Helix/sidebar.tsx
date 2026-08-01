@@ -1,7 +1,5 @@
 'use client'
 
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
-import { createPortal } from 'react-dom'
 import {
   Plus,
   Search,
@@ -25,11 +23,13 @@ import {
   AlertTriangle,
   PanelLeft,
 } from 'lucide-react'
-import { useHelixStore } from '@/stores/helix-store'
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { useShallow } from 'zustand/react/shallow'
-import { useHermesStore } from '@/stores/hermes-store'
 import { isElectron, electronDialog, electronShell } from '@/lib/electron-bridge'
 import { persistence, type PersistedSession } from '@/lib/persist'
+import { useHelixStore } from '@/stores/helix-store'
+import { useHermesStore } from '@/stores/hermes-store'
 
 interface SidebarProps {
   onNewTask?: () => void
@@ -408,7 +408,13 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       })
   }, [sessions])
 
-  const handleNewTask = useCallback(() => {
+  // Concurrent multi-session design: switching / creating conversations NEVER
+  // interrupts a running agent. Each run streams into its own per-session
+  // draft (streamingDrafts[sid]) and commits its reply with its own sessionId,
+  // so navigation is purely a view change. (The old interruptIfRunning confirm
+  // dialog was a relic of the single-active-run engine.)
+
+  const handleNewTask = useCallback(async () => {
     useHelixStore.getState().flushSessionPersist()
     clearChat()
     useHelixStore.getState().clearExecutionFlow()
@@ -450,14 +456,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   }, [clearChat, setSelectedWorkDir, setWorkDir, showToast])
 
   const handleLoadSession = useCallback(async (session: PersistedSession) => {
-    // Confirm if agent is currently running
-    const store = useHelixStore.getState()
-    if (store.isAgentRunning || store.isChatLoading) {
-      if (!window.confirm('Agent 正在运行中，切换会话将中断当前任务。确定要切换吗？')) {
-        return
-      }
-      window.dispatchEvent(new Event('helix:interrupt-request'))
-    }
     try {
       const state = useHelixStore.getState()
       // Only persist the current session if it has already been saved at least once.
@@ -467,7 +465,10 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         await state.flushSessionPersist()
       }
       useHelixStore.getState().clearExecutionFlow()
-      useHermesStore.getState().setHermesSessionId(null)
+      // NOTE: do NOT reset the Hermes session here — under the concurrent
+      // multi-session design each conversation owns its own Hermes ACP session
+      // (hermesSessionMapRef in agent-flow-panel); resetting the legacy global
+      // id would be meaningless at best and confusing at worst.
       // Same as above: navigating to a session must close the panels.
       if (state.showScheduledTasksPanel || state.showSkillPanel) {
         useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false })
@@ -482,9 +483,25 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         timestamp: msg.timestamp,
         reasoning: msg.reasoning,
         steps: msg.steps,
+        // Tag with the owning session so concurrent sessions' messages can
+        // coexist in the store without leaking across the per-session filter.
+        sessionId: session.id,
       }))
+      // Preserve in-memory messages of sessions that are STILL RUNNING in the
+      // background — wholesale replacement would drop their user prompt and
+      // leave the eventual `done` commit orphaned in an empty conversation.
+      const st2 = useHelixStore.getState()
+      const runningSids = new Set(
+        Object.entries(st2.streamingDrafts)
+          .filter(([, d]) => d.isAgentRunning)
+          .map(([k]) => k),
+      )
+      const preserved = st2.chatMessages.filter(
+        m => m.sessionId && m.sessionId !== session.id && runningSids.has(m.sessionId),
+      )
+      const loadedIds = new Set(msgs.map(m => m.id))
       useHelixStore.setState({
-        chatMessages: msgs,
+        chatMessages: [...msgs, ...preserved.filter(m => !loadedIds.has(m.id))],
         selectedWorkDir: fresh.workDir || null,
         activeSessionWorkDir: fresh.workDir ?? null,
       })

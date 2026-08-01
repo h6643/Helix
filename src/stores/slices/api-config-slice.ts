@@ -2,11 +2,14 @@
  * API configuration slice — provider, model, profiles, history.
  */
 import type { StateCreator } from 'zustand'
+import { electronHermes } from '@/lib/electron-bridge'
+import { generateId } from '@/lib/format'
+import { warn } from '@/lib/logger'
 import type { ApiConfig, ApiProfile, ApiProvider, ProviderConfig } from '../helix-types'
 import { PROVIDER_PRESETS } from '../helix-types'
-import { generateId } from '@/lib/format'
-import { electronHermes } from '@/lib/electron-bridge'
-import { warn } from '@/lib/logger'
+
+/** Provider ids currently auto-fetching their model lists (in-flight guard). */
+const fetchingProviderModels = new Set<string>()
 
 export interface ApiConfigSlice {
   apiConfig: ApiConfig
@@ -48,6 +51,10 @@ export interface ApiConfigSlice {
   resolveActiveApiConfig: () => ApiConfig | null
   /** Select a model: updates activeModel + mirrors the resolved config into apiConfig. */
   setActiveModel: (model: string) => void
+  /** Fetch a provider's model list from its endpoint and cache it (providerModels).
+   *  No-op / resolves [] when the provider lacks baseUrl+apiKey or a fetch is
+   *  already in flight. Used for auto-populating the model dropdown on switch. */
+  fetchProviderModels: (providerId: string) => Promise<string[]>
   /** Switch the active provider. If the current model doesn't belong to the new
    *  provider, reselect its defaultModel (or models[0]). Mirrors the new
    *  provider's credentials + model into apiConfig. */
@@ -68,10 +75,10 @@ export interface ApiConfigSlice {
 
 export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfigSlice> = (set, get) => ({
   apiConfig: {
-    provider: 'agnes-ai',
+    provider: 'custom',
     apiKey: '',
-    baseUrl: 'https://apihub.agnes-ai.com/v1',
-    model: 'agnes-2.0-flash',
+    baseUrl: 'https://api.ant-ling.com/v1',
+    model: 'Ling-2.6-1T',
   },
   apiHistory: [],
   apiProfiles: [],
@@ -138,15 +145,44 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
 
   setApiConfig: (config) =>
     set((state) => {
-      const apiConfig = { ...state.apiConfig, ...config }
-      // Keep the active provider's credentials in sync with manual edits from
-      // settings, so the flattened selector and Hermes always agree.
+      let apiConfig = { ...state.apiConfig, ...config }
+      // Guard against storing a model/baseUrl mismatch (e.g. a poisoned
+      // apiHistory entry that says model=Ling but baseUrl=deepseek). If the
+      // requested model does not belong to the requested endpoint, snap to the
+      // endpoint's first available model so the backend never receives the
+      // wrong model name and the dropdown never shows one supplier's models
+      // while the button shows another supplier's name.
+      if (apiConfig.baseUrl && apiConfig.model) {
+        const mismatch = (model: string, baseUrl: string): boolean => {
+          const u = baseUrl.toLowerCase()
+          const m = model.toLowerCase()
+          if (u.includes('deepseek') && m.includes('ling')) return true
+          if ((u.includes('ling') || u.includes('agnes') || u.includes('ant-')) && m.includes('deepseek')) return true
+          return false
+        }
+        if (mismatch(apiConfig.model, apiConfig.baseUrl)) {
+          const owner = state.providers.find((p) => p.baseUrl === apiConfig.baseUrl)
+          const ownerModels = owner
+            ? [...new Set([...(owner.models || []), ...(state.providerModels?.[owner.id] || [])])]
+            : []
+          const fallback = ownerModels[0] || owner?.defaultModel || apiConfig.model
+          if (fallback && fallback !== apiConfig.model) {
+            warn('[api-config-slice] setApiConfig: model/baseUrl mismatch, snapping', apiConfig.model, '→', fallback, 'for', apiConfig.baseUrl)
+            apiConfig = { ...apiConfig, model: fallback }
+          }
+        }
+      }
+      // Keep the target endpoint's provider credentials in sync with manual
+      // edits from settings. We match by apiConfig.baseUrl, NOT by the previous
+      // activeModel. Using activeModel would rewrite the provider that owns the
+      // old model (e.g. Ling provider) to the new endpoint URL, polluting its
+      // baseUrl and causing the dropdown to keep showing the old supplier's
+      // models while the button shows the new model name.
       let providers = state.providers
-      const active = state.activeModel
-      if (active) {
+      if (apiConfig.baseUrl) {
         providers = providers.map((p) =>
-          p.models.includes(active)
-            ? { ...p, baseUrl: apiConfig.baseUrl, apiKey: apiConfig.apiKey }
+          p.baseUrl === apiConfig.baseUrl
+            ? { ...p, apiKey: apiConfig.apiKey }
             : p,
         )
       }
@@ -162,10 +198,23 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
 
   addApiHistory: (config) =>
     set((state) => {
-      const exists = state.apiHistory.some(
-        h => h.baseUrl === config.baseUrl && h.apiKey === config.apiKey && h.model === config.model
+      // Deduplicate by baseUrl + apiKey + model. The same endpoint with the
+      // same key AND the same model name is one logical entry; a different
+      // model on the same endpoint is a separate entry so it shows up in the
+      // config list. Normalize empty/undefined values so they collapse together.
+      const normKey = (k?: string) => (k ?? '').trim()
+      const dupIndex = state.apiHistory.findIndex(
+        (h) =>
+          h.baseUrl === config.baseUrl &&
+          normKey(h.apiKey) === normKey(config.apiKey) &&
+          normKey(h.model) === normKey(config.model),
       )
-      if (exists) return state
+      if (dupIndex !== -1) {
+        // Move the existing entry to the front instead of adding a duplicate.
+        const moved = state.apiHistory[dupIndex]
+        const rest = state.apiHistory.filter((_, i) => i !== dupIndex)
+        return { apiHistory: [moved, ...rest].slice(0, 20) }
+      }
       const newHistory = [config, ...state.apiHistory].slice(0, 20)
       return { apiHistory: newHistory }
     }),
@@ -237,15 +286,29 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
         providers.find((p) => (providerModels[p.id] || []).includes(model))
     }
     if (!provider) {
-      // Final fallback: match by the current backend URL. This covers models that
-      // were never fetched via "获取模型列表" and don't appear in any provider's
-      // declared list — e.g. a hand-typed model on a freshly-added endpoint.
-      // Without this fallback setActiveModel silently returns and activeProviderId
-      // drifts to whatever provider was previously active (causing the dropdown to
-      // show the wrong supplier's models while the input bar shows the right one).
+      // Final fallback: match by the current backend URL for hand-typed models.
+      // Only keep the requested model if it actually belongs to that provider;
+      // otherwise snap to the provider's default/first model. This prevents the
+      // common mismatch where a stale Ling model lingers after the endpoint was
+      // switched to deepseek, causing the backend to send Ling to deepseek's API.
       const currentUrl = get().apiConfig?.baseUrl
       if (currentUrl) {
         provider = providers.find((p) => p.baseUrl === currentUrl)
+      }
+      if (provider) {
+        const providerModelList = [
+          ...(provider.models || []),
+          ...(get().providerModels?.[provider.id] || []),
+        ]
+        if (!providerModelList.includes(model)) {
+          const fallbackModel = provider.defaultModel || provider.models[0] || providerModelList[0] || null
+          if (fallbackModel) {
+            model = fallbackModel
+          } else {
+            warn('[api-config-slice] setActiveModel: 当前 Provider 无可用模型，无法选择', model)
+            return
+          }
+        }
       }
     }
     if (!provider) {
@@ -269,6 +332,52 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
       persistence.saveSetting('activeModel', model)
       persistence.saveSetting('activeProviderId', provider.id)
     })
+    // Synchronous backup — if the async IndexedDB write above is still pending
+    // when the app exits, we lose the last model. localStorage.setItem is
+    // synchronous on the main thread, so it's a reliable fallback for the next
+    // cold start.
+    try {
+      localStorage.setItem('helix-active-model', model)
+      localStorage.setItem('helix-active-provider-id', provider.id)
+    } catch {}
+    // Auto-fetch the newly-active provider's model list when we have no cached
+    // copy yet, so the input-bar dropdown shows its full list without the user
+    // having to open settings and click "获取模型列表".
+    if (provider.baseUrl && provider.apiKey && !(get().providerModels?.[provider.id] ?? []).length) {
+      get().fetchProviderModels(provider.id)
+    }
+  },
+
+  // ── Auto-fetch provider model lists ──────────────────────────────────────
+  fetchProviderModels: async (providerId) => {
+    const provider = get().providers.find((p) => p.id === providerId)
+    if (!provider?.baseUrl || !provider.apiKey) return []
+    if (fetchingProviderModels.has(providerId)) {
+      // Already fetching — return whatever cache we have now (the in-flight
+      // fetch will update providerModels when it lands).
+      return get().providerModels?.[providerId] ?? []
+    }
+    fetchingProviderModels.add(providerId)
+    try {
+      if (typeof window === 'undefined' || !(window as any).electron?.hermes?.fetchModels) return []
+      const result = await (window as any).electron.hermes.fetchModels({
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+      })
+      if (result?.error) throw new Error(result.error)
+      const models = Array.isArray(result?.models)
+        ? result.models.filter((m: unknown) => typeof m === 'string' && m)
+        : []
+      if (models.length > 0) {
+        get().setAvailableModels(models, provider.baseUrl, provider.id)
+      }
+      return models
+    } catch (e) {
+      warn('[api-config-slice] 自动获取模型失败:', provider.name, e)
+      return []
+    } finally {
+      fetchingProviderModels.delete(providerId)
+    }
   },
 
   setActiveProvider: (id) => {

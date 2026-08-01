@@ -1,48 +1,49 @@
-// API 客户端 —— 走 Hermes 后端（Electron IPC → 网关子进程），而非直连 LLM。
-//
-// 与直连相比，Hermes 后端是「有状态」的：认证信息在 session 创建时快照进后端进程，
-// 之后该 session 一直用这套 key。这正是「切换 Provider 后 401」的根因 ——
-// 切换只是把新配置写进了 config.yaml，但正在跑的旧 session 仍握着旧 key，
-// 而 config.yaml 只在「session 创建」时被 reload。
-//
-// 本文件用两套机制彻底消除这个问题（对应你的两条需求）：
-//
-// 机制① 切换 Provider 时主动 invalidate
-//   - 用「即将写入 config.yaml 的认证配置」算 sessionConfigHash：
-//       baseUrl || apiKey || model || providerName
-//     （这四个字段就是 setModel 写进 config.yaml 的认证段，hash 等价于基于 config.yaml 内容计算）
-//   - 每次发请求前对比：若与「当前 session 创建时」的 hash 不同 ⇒ 说明 Provider/Key 变了 ⇒
-//     主动 invalidate 当前 session，下一次请求自然重建（reload 新 key）。
-//
-// 机制② 401 错误监听 + 自动重建 + 重试
-//   - 监听 Hermes 的 `error` 事件，匹配 /401|unauthorized|.../ 即判定为认证失败。
-//   - 命中后：invalidate session（丢弃旧 key 快照）→ 用最新配置重建 → 用同一句 prompt 重试 1 次。
-//   - 全程在客户端内部完成，用户无感知（不会看到 401 报错，输出流无缝续上）。
 'use client'
 
-import type { ResolvedModel, ChatMessage } from './types'
 import { getElectronAPI, electronHermes } from '@/lib/electron-bridge'
-import { normalizeAcpContent } from '@/lib/text-utils'
 import { warn, error as logError, debug } from '@/lib/logger'
+import { buildAcpMcpServers } from '@/lib/mcp'
+import { normalizeAcpContent } from '@/lib/text-utils'
+import { useHelixStore } from '@/stores/helix-store'
+import type { ResolvedModel, ChatMessage } from './types'
 
-/** 认证类错误匹配（与 use-hermes.ts 保持一致） */
 const AUTH_RE = /401|unauthorized|incorrect.*api.?key|invalid.*token|认证|令牌|授权/i
 
 export function isAuthError(msg?: string | null): boolean {
   return !!msg && AUTH_RE.test(msg)
 }
 
-/**
- * 基于「即将写入 config.yaml 的认证配置」计算 hash。
- * 这四个字段就是 setModel 写进 Hermes config.yaml 的认证段，
- * 因此 hash 等价于「基于 config.yaml 内容」计算的会话指纹。
- */
 export function configHashOf(cfg: ResolvedModel): string {
   return `${cfg.baseUrl}||${cfg.apiKey}||${cfg.model}||${cfg.providerName}`
 }
 
+// ── Tool call tracking ──────────────────────────────────────────────────
+
+export interface ToolCallInfo {
+  toolCallId: string
+  toolName: string
+  args?: Record<string, unknown>
+  result?: string
+  inlineDiff?: string
+  summary?: string
+  duration_s?: number
+  status: 'running' | 'complete' | 'error'
+  isError?: boolean
+  startedAt: number
+  finishedAt?: number
+}
+
+// ── Stream handlers (extended with reasoning + tool events) ──────────────
+
 export interface StreamHandlers {
   onToken: (delta: string) => void
+  onReasoningDelta?: (delta: string, replace?: boolean) => void
+  onToolStart?: (info: ToolCallInfo) => void
+  onToolProgress?: (info: Partial<ToolCallInfo> & { toolCallId: string }) => void
+  onToolComplete?: (info: Partial<ToolCallInfo> & { toolCallId: string }) => void
+  onWorkspaceChanged?: () => void
+  onSessionTitle?: (title: string) => void
+  onTodoUpdate?: (todos: unknown[]) => void
   onDone: () => void
   onError: (err: ChatError) => void
 }
@@ -50,45 +51,166 @@ export interface StreamHandlers {
 export interface ChatError {
   status?: number
   message: string
-  /** 是否认证类错误（用于 UI 提示检查 API Key） */
   isAuth: boolean
 }
 
 export interface SendOptions {
   system?: string
-  temperature?: number
-  maxTokens?: number
 }
 
 export interface HermesClientOptions {
-  /** 返回「当前模型」对应的 Provider 配置；每次请求都会重新调用。 */
   getConfig: () => ResolvedModel | null
-  /** 工作目录（传给 session/new）。默认 process.cwd()。 */
   getCwd?: () => string
 }
 
-/** 取得 Hermes IPC 句柄（浏览器模式下为 null）。 */
 function hermes(): any {
   return getElectronAPI()?.hermes as any
 }
 
-export class HermesChatClient {
-  // ── session 状态 ──
-  private sessionId: string | null = null
-  /** 当前 session 创建时所用的 config hash；与最新 hash 不一致 ⇒ 已切换 Provider ⇒ 作废 */
-  private sessionConfigHash: string | null = null
+// ── Delta queue for batched flushing (30fps) ────────────────────────────
 
-  // ── 在途请求状态 ──
+const STREAM_DELTA_FLUSH_MS = 33 // ~30fps
+
+interface DeltaQueue {
+  textBuffer: string
+  reasoningBuffer: string
+  lastFlushAt: number
+  flushTimer: ReturnType<typeof setTimeout> | null
+  rafId: number | null
+  scheduleFlush: () => void
+}
+
+function createDeltaQueue(flush: (text: string, reasoning: string) => void): DeltaQueue {
+  const q: DeltaQueue = {
+    textBuffer: '',
+    reasoningBuffer: '',
+    lastFlushAt: 0,
+    flushTimer: null,
+    rafId: null,
+    scheduleFlush: () => {},
+  }
+
+  const doFlush = () => {
+    const text = q.textBuffer
+    const reasoning = q.reasoningBuffer
+    q.textBuffer = ''
+    q.reasoningBuffer = ''
+    q.lastFlushAt = performance.now()
+    q.flushTimer = null
+    q.rafId = null
+    if (text || reasoning) flush(text, reasoning)
+  }
+
+  q.scheduleFlush = () => {
+    if (q.flushTimer !== null || q.rafId !== null) return
+    const sinceLast = performance.now() - q.lastFlushAt
+    if (sinceLast >= STREAM_DELTA_FLUSH_MS && typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      q.rafId = window.requestAnimationFrame(() => {
+        q.rafId = null
+        doFlush()
+      })
+    } else {
+      q.flushTimer = setTimeout(() => {
+        q.flushTimer = null
+        doFlush()
+      }, Math.max(0, STREAM_DELTA_FLUSH_MS - sinceLast))
+    }
+  }
+
+  return q
+}
+
+// ── Deep merge utility for tool args/results ────────────────────────────
+
+function deepMergeArgs(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...target }
+  for (const [key, value] of Object.entries(source)) {
+    if (key === 'todos') {
+      // Carry todos across sparse progress payloads
+      result[key] = value
+    } else if (value !== null && value !== undefined && typeof value === 'object' && !Array.isArray(value) &&
+               result[key] !== null && result[key] !== undefined && typeof result[key] === 'object' && !Array.isArray(result[key])) {
+      result[key] = deepMergeArgs(result[key] as Record<string, unknown>, value as Record<string, unknown>)
+    } else if (value !== null && value !== undefined) {
+      result[key] = value
+    }
+  }
+  return result
+}
+
+function mergeToolResult(existing: string | undefined, params: Record<string, unknown>): string | undefined {
+  // Priority: result > output > message > summary
+  const raw = params.result ?? params.output ?? params.message ?? params.summary
+  if (typeof raw === 'string') return raw
+  if (existing) return existing
+  return undefined
+}
+
+// ── Permission store (session-level + persistent) ───────────────────────
+
+export type ApprovalLevel = 'once' | 'session' | 'always' | 'deny'
+
+const sessionPermissions = new Map<string, ApprovalLevel>() // toolName → level
+let pendingApprovalResolve: ((level: ApprovalLevel) => void) | null = null
+let pendingApprovalRequestId: string | null = null
+
+export function respondApproval(level: ApprovalLevel) {
+  if (pendingApprovalResolve) {
+    pendingApprovalResolve(level)
+    pendingApprovalResolve = null
+    pendingApprovalRequestId = null
+  }
+}
+
+/** Clear any pending approval (called on turn end / cancel / error) */
+export function clearPendingApproval() {
+  if (pendingApprovalResolve) {
+    pendingApprovalResolve('deny')
+    pendingApprovalResolve = null
+    pendingApprovalRequestId = null
+  }
+}
+
+function getSessionPermission(toolName: string): ApprovalLevel | null {
+  const perm = sessionPermissions.get(toolName)
+  return perm ?? null
+}
+
+function setSessionPermission(toolName: string, level: ApprovalLevel) {
+  if (level === 'once') return
+  sessionPermissions.set(toolName, level)
+}
+
+export function clearSessionPermissions() {
+  sessionPermissions.clear()
+}
+
+// Tools that require approval (matching Hermes Desktop)
+const APPROVAL_TOOLS = new Set(['terminal', 'execute_code', 'run_bash'])
+
+function needsApproval(toolName: string): boolean {
+  return APPROVAL_TOOLS.has(toolName)
+}
+
+// ── Main client ─────────────────────────────────────────────────────────
+
+export class HermesChatClient {
+  private sessionId: string | null = null
+  private sessionConfigHash: string | null = null
   private inFlight = false
   private recovering = false
+  private interrupted = false
   private retryCount = 0
   private pendingText: string | null = null
   private pendingHandlers: StreamHandlers | null = null
   private pendingOptions: SendOptions | null = null
-
   private unsubscribe: (() => void) | null = null
   private readonly getConfig: () => ResolvedModel | null
   private readonly getCwd: () => string
+  private deltaQueue: DeltaQueue | null = null
+  // Stream completion signal: resolves when message.complete arrives
+  private streamCompleteResolve: (() => void) | null = null
+  private streamCompleteReject: ((err: Error) => void) | null = null
 
   constructor(opts: HermesClientOptions) {
     this.getConfig = opts.getConfig
@@ -99,17 +221,15 @@ export class HermesChatClient {
     }
   }
 
-  /** 组件卸载时调用，移除事件监听。 */
   dispose() {
     this.unsubscribe?.()
     this.unsubscribe = null
+    this.pendingHandlers = null
+    this.flushDeltaQueue()
   }
 
-  // ──────────────────────────────────────────────────────────────────
-  // 公开 API
-  // ──────────────────────────────────────────────────────────────────
+  // ── Public API ──────────────────────────────────────────────────────
 
-  /** 发起一轮对话（流式）。text 为最新一条用户消息。 */
   async streamChat(
     text: string,
     handlers: StreamHandlers,
@@ -124,16 +244,20 @@ export class HermesChatClient {
     this.pendingHandlers = handlers
     this.pendingOptions = options
     this.retryCount = 0
+    this.interrupted = false
+
+    // Create delta queue for this stream
+    this.deltaQueue = createDeltaQueue((textDelta, reasoningDelta) => {
+      if (!this.pendingHandlers) return
+      if (textDelta) this.pendingHandlers.onToken(textDelta)
+      if (reasoningDelta && this.pendingHandlers.onReasoningDelta) {
+        this.pendingHandlers.onReasoningDelta(reasoningDelta)
+      }
+    })
+
     await this.runAttempt(text, handlers, options)
   }
 
-  /**
-   * ★ 切换模型/Provider 时由调用方触发。
-   * 1) 中断在途输出（session/cancel），让用户立刻看到切换生效；
-   * 2) 用「新配置」的 hash 与当前 session 比对，仅在真正变化时 invalidate，
-   *    避免同 Provider 内切换模型也白白重建 session。
-   * 注意：必须在 setActiveModel 之后调用，这样 getConfig() 才能拿到新配置。
-   */
   onModelSwitched() {
     const cfg = this.getConfig()
     if (this.sessionId) {
@@ -141,6 +265,15 @@ export class HermesChatClient {
     }
     this.inFlight = false
     this.recovering = false
+    this.interrupted = true
+    // Resolve stream promise so runAttempt exits cleanly
+    if (this.streamCompleteResolve) {
+      this.streamCompleteResolve()
+      this.streamCompleteResolve = null
+      this.streamCompleteReject = null
+    }
+    this.flushDeltaQueue()
+    clearPendingApproval()
     if (cfg) {
       const hash = configHashOf(cfg)
       if (this.sessionId && this.sessionConfigHash !== hash) {
@@ -150,23 +283,35 @@ export class HermesChatClient {
     }
   }
 
-  /** 仅中断在途输出，不丢弃 session（配置未变时可复用）。 */
   cancel() {
+    this.interrupted = true
     if (this.sessionId) electronHermes.notify('session/cancel', { session_id: this.sessionId })
     this.inFlight = false
+    this.flushDeltaQueue()
+    clearPendingApproval()
+    // Resolve stream promise so runAttempt exits cleanly
+    if (this.streamCompleteResolve) {
+      this.streamCompleteResolve()
+      this.streamCompleteResolve = null
+      this.streamCompleteReject = null
+    }
   }
 
-  // ──────────────────────────────────────────────────────────────────
-  // 内部：请求 / session 生命周期
-  // ──────────────────────────────────────────────────────────────────
+  /** Invalidate session and clear permissions (e.g. on provider switch) */
+  invalidateAndClear() {
+    this.invalidateSession()
+    clearSessionPermissions()
+  }
+
+  // ── Session lifecycle ──────────────────────────────────────────────
 
   private invalidateSession() {
     debug('[HermesChatClient] invalidateSession:', this.sessionId)
     this.sessionId = null
     this.sessionConfigHash = null
+    clearSessionPermissions()
   }
 
-  /** 确保存在一个「配置与当前一致」的 session；不一致则重建。 */
   private async ensureSession(): Promise<void> {
     const cfg = this.getConfig()
     if (!cfg) throw new Error('未找到当前模型对应的 Provider 配置，请检查设置')
@@ -174,7 +319,7 @@ export class HermesChatClient {
 
     const hash = configHashOf(cfg)
 
-    // 机制①：hash 不一致 ⇒ 旧 session 仍握着旧 key ⇒ 主动作废（切换 Provider / 改 Key）
+    // Try to resume existing session first (Hermes Desktop style)
     if (this.sessionId && this.sessionConfigHash !== hash) {
       warn('[HermesChatClient] config 变化（Provider 切换），invalidate 当前 session')
       this.invalidateSession()
@@ -182,18 +327,34 @@ export class HermesChatClient {
 
     if (!this.sessionId) {
       const h = hermes()
-      // 把当前模型配置写入 config.yaml（后端在 session 创建时 reload 这套 key）
       await h.setModel({
         model: cfg.model,
         baseUrl: cfg.baseUrl,
         apiKey: cfg.apiKey,
         provider: cfg.providerName,
       })
-      // setModel 可能触发网关重启，等其就绪再建 session，否则会命中重启中的网关 → 401
       await this.waitForGatewayReady()
+
+      // Try resume first, then create new
+      const hermesStore = await import('@/stores/hermes-store')
+      const savedSessionId = hermesStore.useHermesStore.getState().hermesSessionId
+      if (savedSessionId) {
+        try {
+          const resumed: any = await h.send('session/resume', { session_id: savedSessionId })
+          if (resumed?.session_id || resumed?._meta?.hermes?.sessionProvenance?.acpSessionId) {
+            this.sessionId = resumed.session_id || resumed._meta?.hermes?.sessionProvenance?.acpSessionId
+            this.sessionConfigHash = hash
+            debug('[HermesChatClient] session 已恢复:', this.sessionId)
+            return
+          }
+        } catch {
+          // Resume failed, create new
+        }
+      }
+
       const result: any = await h.send('session/new', {
         cwd: this.getCwd(),
-        mcpServers: [],
+        mcpServers: buildAcpMcpServers(useHelixStore.getState().mcpServers),
       })
       const sid =
         result?._meta?.hermes?.sessionProvenance?.acpSessionId ||
@@ -213,21 +374,64 @@ export class HermesChatClient {
       await this.ensureSession()
     } catch (e: any) {
       this.inFlight = false
+      this.flushDeltaQueue()
       handlers.onError({ message: e?.message || '无法创建会话', isAuth: false })
       return
     }
     this.inFlight = true
+
+    // Create a Promise that resolves when message.complete arrives
+    const streamDone = new Promise<void>((resolve, reject) => {
+      this.streamCompleteResolve = resolve
+      this.streamCompleteReject = reject
+    })
+
     try {
-      await this.dispatchPrompt(text)
-      this.inFlight = false
-      handlers.onDone()
+      // Send the prompt — race IPC error against stream completion
+      // If IPC fails, the reject from streamCompleteReject won't fire;
+      // the dispatchPrompt rejection propagates to catch below.
+      const ipcSent = this.dispatchPrompt(text).catch((err) => {
+        // IPC send failed — reject stream so cleanup runs
+        if (this.streamCompleteReject) {
+          this.streamCompleteReject(err)
+          this.streamCompleteResolve = null
+          this.streamCompleteReject = null
+        }
+        throw err // re-throw so runAttempt's catch handles it
+      })
+
+      // Wait for BOTH: IPC sent AND stream complete
+      // Use Promise.all: ipcSent catches IPC errors, streamDone catches stream errors
+      const streamTimeout = setTimeout(() => {
+        if (this.streamCompleteReject) {
+          this.streamCompleteReject(new Error('流式输出超时'))
+          this.streamCompleteResolve = null
+          this.streamCompleteReject = null
+        }
+      }, 600_000)
+
+      await Promise.all([ipcSent, streamDone])
+      clearTimeout(streamTimeout)
+
+      // Only finalize if not interrupted
+      if (!this.interrupted) {
+        this.inFlight = false
+        this.flushDeltaQueue()
+        clearPendingApproval()
+        handlers.onDone()
+      }
     } catch (e: any) {
       this.inFlight = false
+      this.flushDeltaQueue()
+      clearPendingApproval()
       if (isAuthError(e?.message)) {
-        this.handleAuthFailure(e.message) // 机制②：401 重试
+        this.handleAuthFailure(e.message)
       } else {
         handlers.onError({ message: e?.message || '请求失败', isAuth: false })
       }
+    } finally {
+      this.streamCompleteResolve = null
+      this.streamCompleteReject = null
     }
   }
 
@@ -235,7 +439,6 @@ export class HermesChatClient {
     const h = hermes()
     if (!h || !this.sessionId) return Promise.reject(new Error('session 未就绪'))
     return new Promise<void>((resolve, reject) => {
-      // ACP 的 prompt 是阻塞调用，真正的流式内容通过 session/update 事件回来
       h.send('session/prompt', {
         session_id: this.sessionId,
         prompt: [{ type: 'text', text }],
@@ -245,12 +448,6 @@ export class HermesChatClient {
     })
   }
 
-  /**
-   * 机制②核心：认证失败的统一入口。
-   * - 仅在「有在途请求」时响应，避免把主流程/其它 session 的错误误判为我们的 401；
-   * - 首次：invalidate → 用最新配置重建 → 同一句 prompt 重试 1 次（用户无感知）；
-   * - 重试仍 401：上抛最终错误，由 UI 提示检查 API Key。
-   */
   private handleAuthFailure(msg: string) {
     if (!this.inFlight || this.recovering) return
     this.recovering = true
@@ -260,39 +457,308 @@ export class HermesChatClient {
       this.pendingHandlers?.onError({ message: msg || '认证失败（401）', isAuth: true })
       return
     }
-    warn('[HermesChatClient] 401 检测 → invalidate + 重建 session + 重试 1 次（用户无感知）')
+    warn('[HermesChatClient] 401 检测 → invalidate + 重建 session + 重试 1 次')
     this.retryCount = 1
     this.invalidateSession()
     void this.runAttempt(this.pendingText!, this.pendingHandlers!, this.pendingOptions!)
   }
 
-  // ──────────────────────────────────────────────────────────────────
-  // 内部：事件总线
-  // ──────────────────────────────────────────────────────────────────
+  // ── Event handling (extended with reasoning + tool events) ──────────
 
   private handleEvent(event: string, params?: any) {
-    // 只处理属于「本客户端 session」的事件，避免与主流程串扰
+    if (this.interrupted) return
     if (this.sessionId && params?.session_id && params.session_id !== this.sessionId) return
 
     switch (event) {
+      // ── Message lifecycle ──
+      case 'message.start': {
+        // Reset state for new assistant turn (Hermes Desktop style)
+        this.interrupted = false
+        break
+      }
+
+      case 'message.complete': {
+        // Finalize: flush remaining deltas, then resolve the stream promise
+        if (this.pendingHandlers && this.inFlight) {
+          this.flushDeltaQueueNow()
+          debug('[HermesChatClient] message.complete received')
+        }
+        // Signal stream completion to runAttempt
+        if (this.streamCompleteResolve) {
+          this.streamCompleteResolve()
+          this.streamCompleteResolve = null
+          this.streamCompleteReject = null
+        }
+        break
+      }
+
+      case 'session/title': {
+        const title = params?.title || params?.name || ''
+        if (title && this.pendingHandlers?.onSessionTitle) {
+          this.pendingHandlers.onSessionTitle(title)
+        }
+        break
+      }
+
+      // ── Content delta ──
       case 'session/update': {
         const raw = params?.content
         if (typeof raw === 'string' && raw && this.pendingHandlers && this.inFlight) {
           const delta = normalizeAcpContent(raw)
-          if (delta) this.pendingHandlers.onToken(delta)
+          if (delta) {
+            // Queue delta for batched flush
+            if (this.deltaQueue) {
+              this.deltaQueue.textBuffer += delta
+              this.deltaQueue.scheduleFlush()
+            } else {
+              this.pendingHandlers.onToken(delta)
+            }
+          }
         }
         break
       }
+
+      // ── Reasoning / thinking events ──
+      case 'reasoning.delta': {
+        if (this.pendingHandlers?.onReasoningDelta && this.inFlight) {
+          const delta = params?.text || params?.delta || ''
+          if (delta) {
+            if (this.deltaQueue) {
+              this.deltaQueue.reasoningBuffer += delta
+              this.deltaQueue.scheduleFlush()
+            } else {
+              this.pendingHandlers.onReasoningDelta(delta)
+            }
+          }
+        }
+        break
+      }
+
+      case 'reasoning.available': {
+        // Hermes Desktop: replace=true — replaces entire reasoning blob when no visible text yet
+        if (this.pendingHandlers?.onReasoningDelta && this.inFlight) {
+          const text = params?.text || params?.delta || ''
+          if (text) {
+            this.flushDeltaQueueNow()
+            this.pendingHandlers.onReasoningDelta(text, true)
+          }
+        }
+        break
+      }
+
+      // ── Thinking delta (spinner status only — ignore, Hermes Desktop style) ──
+      case 'thinking.delta': {
+        // Intentionally ignored — this is just a spinner status, not real reasoning
+        break
+      }
+
+      // ── MoA (Mixture of Agents) reference ──
+      case 'moa.reference': {
+        // Surface MoA reference model output as labelled reasoning chunks
+        if (this.pendingHandlers?.onReasoningDelta && this.inFlight) {
+          const ref = params?.reference || params?.text || ''
+          const model = params?.model || params?.reference_model || ''
+          if (ref) {
+            const label = model ? `[${model}] ` : ''
+            const delta = `${label}${ref}`
+            if (this.deltaQueue) {
+              this.deltaQueue.reasoningBuffer += delta
+              this.deltaQueue.scheduleFlush()
+            } else {
+              this.pendingHandlers.onReasoningDelta(delta)
+            }
+          }
+        }
+        break
+      }
+
+      case 'moa.aggregating': {
+        // MoA aggregation phase — ignore (status-only)
+        break
+      }
+
+      // ── Tool lifecycle events ──
+      case 'tool.start':
+      case 'tool.generating': {
+        if (this.pendingHandlers?.onToolStart && this.inFlight) {
+          // Flush text deltas before tool event to preserve ordering
+          this.flushDeltaQueueNow()
+
+          const rawArgs = params?.args || params?.arguments || params?.input
+          const args = deepMergeArgs({}, typeof rawArgs === 'object' && rawArgs !== null ? rawArgs : {})
+
+          this.pendingHandlers.onToolStart({
+            toolCallId: params?.tool_call_id || params?.toolCallId || '',
+            toolName: params?.tool_name || params?.toolName || params?.name || '',
+            args,
+            status: 'running',
+            startedAt: Date.now(),
+          })
+        }
+        break
+      }
+
+      case 'tool.progress': {
+        if (this.pendingHandlers?.onToolProgress && this.inFlight) {
+          // Flush text deltas before tool event
+          this.flushDeltaQueueNow()
+
+          const rawArgs = params?.args || params?.arguments || params?.input
+          const mergedArgs = rawArgs && typeof rawArgs === 'object' ? rawArgs : undefined
+
+          this.pendingHandlers.onToolProgress({
+            toolCallId: params?.tool_call_id || params?.toolCallId || '',
+            args: mergedArgs,
+            result: mergeToolResult(undefined, params || {}),
+            summary: params?.summary,
+          })
+        }
+        break
+      }
+
+      case 'tool.complete': {
+        if (this.pendingHandlers?.onToolComplete && this.inFlight) {
+          // Flush text deltas before tool event
+          this.flushDeltaQueueNow()
+
+          const rawArgs = params?.args || params?.arguments || params?.input
+          const mergedArgs = rawArgs && typeof rawArgs === 'object' ? rawArgs : undefined
+
+          this.pendingHandlers.onToolComplete({
+            toolCallId: params?.tool_call_id || params?.toolCallId || '',
+            args: mergedArgs,
+            result: mergeToolResult(undefined, params || {}),
+            inlineDiff: params?.inline_diff || params?.diff,
+            summary: params?.summary,
+            duration_s: params?.duration_s,
+            isError: params?.is_error || params?.isError,
+            status: 'complete',
+            finishedAt: Date.now(),
+          })
+
+          // Track workspace mutations
+          if (this.pendingHandlers?.onWorkspaceChanged) {
+            const name = params?.tool_name || params?.toolName || params?.name || ''
+            if (['write_file', 'patch', 'run_bash', 'terminal', 'create_file', 'delete_file', 'apply_patch'].includes(name)) {
+              this.pendingHandlers.onWorkspaceChanged()
+            }
+          }
+
+          // Parse todos from todo_write tool
+          const toolName = params?.tool_name || params?.toolName || params?.name || ''
+          if (toolName === 'todo_write' && params?.todos && this.pendingHandlers?.onTodoUpdate) {
+            this.pendingHandlers.onTodoUpdate(params.todos)
+          }
+        }
+        break
+      }
+
+      // ── Approval requests (for terminal/execute_code) ──
+      case 'approval.request': {
+        if (this.pendingHandlers && this.inFlight) {
+          this.handleApprovalRequest(params)
+        }
+        break
+      }
+
+      // ── Error ──
       case 'error': {
-        // 仅在我们有在途请求时，才把 auth 错误当成「本次会话的 401」处理
         const msg = params?.message || ''
-        if (isAuthError(msg)) this.handleAuthFailure(msg)
+        // Reject the stream promise — runAttempt's catch will call onError
+        if (this.streamCompleteReject) {
+          this.streamCompleteReject(new Error(msg || '未知错误'))
+          this.streamCompleteResolve = null
+          this.streamCompleteReject = null
+        }
+        if (isAuthError(msg)) {
+          this.handleAuthFailure(msg)
+        }
         break
       }
     }
   }
 
-  /** 等待网关就绪（setModel 可能触发重启）。超时也放行，让 session/new 自行尝试。 */
+  private async handleApprovalRequest(params: any) {
+    const toolName = params?.tool_name || params?.toolName || ''
+    const requestId = params?.request_id || params?.requestId || `req_${Date.now()}`
+    const allowPermanent = params?.allow_permanent !== false // default true
+    const command = params?.command || params?.description || ''
+
+    if (!needsApproval(toolName)) {
+      // Auto-approve non-gated tools
+      const h = hermes()
+      if (h) {
+        h.send('approval/respond', {
+          session_id: this.sessionId,
+          tool_call_id: params?.tool_call_id || params?.toolCallId,
+          choice: 'once',
+        }).catch(() => {})
+      }
+      return
+    }
+
+    // Check session-level permission
+    const existing = getSessionPermission(toolName)
+    if (existing === 'always' || existing === 'session') {
+      const h = hermes()
+      if (h) {
+        h.send('approval/respond', {
+          session_id: this.sessionId,
+          tool_call_id: params?.tool_call_id || params?.toolCallId,
+          choice: existing,
+        }).catch((err: any) => warn('[Approval] auto-respond failed:', err))
+      }
+      return
+    }
+
+    // Need user approval — expose via promise with requestId for stale protection
+    const level = await new Promise<ApprovalLevel>((resolve) => {
+      pendingApprovalResolve = resolve
+      pendingApprovalRequestId = requestId
+    })
+
+    // Stale check: if request was superseded or session was cancelled, discard
+    if (pendingApprovalRequestId !== requestId) return
+    if (this.interrupted || !this.inFlight) return
+
+    if (level !== 'deny') {
+      setSessionPermission(toolName, level)
+    }
+
+    const h = hermes()
+    if (h && this.sessionId) {
+      h.send('approval/respond', {
+        session_id: this.sessionId,
+        tool_call_id: params?.tool_call_id || params?.toolCallId,
+        choice: level,
+      }).catch((err: any) => warn('[Approval] respond failed:', err))
+    }
+  }
+
+  private flushDeltaQueueNow() {
+    if (this.deltaQueue) {
+      const q = this.deltaQueue
+      if (q.flushTimer) clearTimeout(q.flushTimer)
+      if (q.rafId !== null && typeof window !== 'undefined') cancelAnimationFrame(q.rafId)
+      q.flushTimer = null
+      q.rafId = null
+      if ((q.textBuffer || q.reasoningBuffer) && this.pendingHandlers) {
+        if (q.textBuffer) this.pendingHandlers.onToken(q.textBuffer)
+        if (q.reasoningBuffer && this.pendingHandlers.onReasoningDelta) {
+          this.pendingHandlers.onReasoningDelta(q.reasoningBuffer)
+        }
+      }
+      q.textBuffer = ''
+      q.reasoningBuffer = ''
+      q.lastFlushAt = performance.now()
+    }
+  }
+
+  private flushDeltaQueue() {
+    this.flushDeltaQueueNow()
+    this.deltaQueue = null
+  }
+
   private waitForGatewayReady(timeoutMs = 3000): Promise<boolean> {
     const h = hermes()
     if (!h) return Promise.resolve(false)
@@ -309,15 +775,40 @@ export class HermesChatClient {
         if (event === 'gateway.ready') finish(true)
       })
       const cleanup = () => {
-        try {
-          unsub?.()
-        } catch {
-          /* noop */
-        }
+        try { unsub?.() } catch { /* noop */ }
       }
       setTimeout(() => finish(true), timeoutMs)
     })
   }
+}
+
+// ── Per-model presets (Hermes Desktop style) ────────────────────────────
+
+export interface ModelPreset {
+  reasoningEffort: string
+  fast: boolean
+}
+
+const MODEL_PRESETS_KEY = 'helix-model-presets'
+
+export function loadModelPresets(): Record<string, ModelPreset> {
+  try {
+    const raw = localStorage.getItem(MODEL_PRESETS_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function saveModelPreset(modelKey: string, preset: ModelPreset) {
+  const presets = loadModelPresets()
+  presets[modelKey] = preset
+  localStorage.setItem(MODEL_PRESETS_KEY, JSON.stringify(presets))
+}
+
+export function getModelPreset(modelKey: string): ModelPreset | null {
+  const presets = loadModelPresets()
+  return presets[modelKey] ?? null
 }
 
 export type { ChatMessage }

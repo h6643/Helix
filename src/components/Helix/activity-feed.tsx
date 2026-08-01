@@ -1,9 +1,9 @@
 'use client'
 
-import React, { useState, useEffect, useRef } from 'react'
 import { X, Activity, Play, Square, MessageSquare, Wrench, Save, GitBranch } from 'lucide-react'
-import { useHelixStore } from '@/stores/helix-store'
+import React, { useState, useEffect, useRef } from 'react'
 import { timeAgo } from '@/lib/format'
+import { useHelixStore } from '@/stores/helix-store'
 
 type ActivityKind = 'run-start' | 'run-end' | 'message' | 'tool' | 'session' | 'git'
 interface ActivityEntry {
