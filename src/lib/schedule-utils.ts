@@ -7,7 +7,7 @@ import { useHelixStore } from '@/stores/helix-store'
 /**
  * Parse a human schedule description into a next-run timestamp.
  */
-export function parseScheduleForTask(text: string): { nextRun: number | null } {
+function parseScheduleForTask(text: string): { nextRun: number | null } {
   const lower = text.toLowerCase().trim()
   const minMatch = lower.match(/every\s+(\d+)\s*min(?:ute)?s?/)
   if (minMatch) return { nextRun: Date.now() + parseInt(minMatch[1]) * 60000 }

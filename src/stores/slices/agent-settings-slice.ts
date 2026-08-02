@@ -12,7 +12,7 @@
  * - Personality is now named preset (not free text)
  */
 import type { StateCreator } from 'zustand'
-import { loadModelPresets, saveModelPreset, type ModelPreset } from '@/hermes-ui/api-client'
+import { loadModelPresets, saveModelPreset } from '@/hermes-ui/api-client'
 import type { ReasoningEffortLevel } from '@/hermes-ui/types'
 
 export interface AgentSettingsSlice {
@@ -25,12 +25,6 @@ export interface AgentSettingsSlice {
   // Notification settings
   desktopNotifications: boolean
   soundEnabled: boolean
-  // Startup behavior
-  restoreLastSession: boolean
-  defaultWorkDir: string
-  // Security — only terminal/execute_code need approval (Hermes style)
-  confirmDangerousActions: boolean
-  autoApproveRead: boolean
   // Agent presets (custom system prompts)
   agentPresets: Record<string, { name: string; systemPrompt: string }>
   activePreset: string | null
@@ -43,10 +37,6 @@ export interface AgentSettingsSlice {
   setFastMode: (v: boolean) => void
   setDesktopNotifications: (v: boolean) => void
   setSoundEnabled: (v: boolean) => void
-  setRestoreLastSession: (v: boolean) => void
-  setDefaultWorkDir: (v: string) => void
-  setConfirmDangerousActions: (v: boolean) => void
-  setAutoApproveRead: (v: boolean) => void
   setAgentPresets: (presets: Record<string, { name: string; systemPrompt: string }>) => void
   setActivePreset: (preset: string | null) => void
 
@@ -65,12 +55,6 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   // Notification defaults
   desktopNotifications: true,
   soundEnabled: false,
-  // Startup defaults
-  restoreLastSession: true,
-  defaultWorkDir: '',
-  // Security — Hermes style: only terminal/execute_code gate
-  confirmDangerousActions: true,
-  autoApproveRead: false,
   // Agent presets defaults
   agentPresets: {},
   activePreset: null,
@@ -83,10 +67,6 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   setFastMode: (v) => set({ fastMode: v }),
   setDesktopNotifications: (v) => set({ desktopNotifications: v }),
   setSoundEnabled: (v) => set({ soundEnabled: v }),
-  setRestoreLastSession: (v) => set({ restoreLastSession: v }),
-  setDefaultWorkDir: (v) => set({ defaultWorkDir: v }),
-  setConfirmDangerousActions: (v) => set({ confirmDangerousActions: v }),
-  setAutoApproveRead: (v) => set({ autoApproveRead: v }),
   setAgentPresets: (presets) => set({ agentPresets: presets }),
   setActivePreset: (preset) => set({ activePreset: preset }),
 

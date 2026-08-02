@@ -1,11 +1,11 @@
 import type { McpServerConfig } from '@/stores/hermes-store'
 
-export interface AcpEnvVar {
+interface AcpEnvVar {
   name: string
   value: string
 }
 
-export interface AcpHttpHeader {
+interface AcpHttpHeader {
   name: string
   value: string
 }

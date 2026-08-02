@@ -14,7 +14,7 @@ import {
   GripVertical,
   ChevronDown,
   FileText,
-  FileCode2,
+  GitBranch,
   Keyboard,
   Globe,
   ListTodo,
@@ -22,6 +22,8 @@ import {
   Circle,
   Loader2,
   XCircle,
+  MoreHorizontal,
+  FolderTree,
 } from 'lucide-react'
 import dynamic from 'next/dynamic'
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
@@ -34,6 +36,7 @@ import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
 import { isServeActive, getServeClient } from '@/lib/serve-gateway'
 import { speak, stripAcp } from '@/lib/voice-utils'
 import { useHelixStore, type PendingChange } from '@/stores/helix-store'
+import { applyHelixPalette, getThemeMeta } from '@/lib/themes'
 import { AgentFlowPanel } from './agent-flow-panel'
 import { CommandPalette } from './command-palette'
 import { Sidebar } from './sidebar'
@@ -69,11 +72,9 @@ const RuntimePanel = dynamic(() => import('./runtime-panel').then(m => ({ defaul
 const ActivityFeed = dynamic(() => import('./activity-feed').then(m => ({ default: m.ActivityFeed })), { ssr: false })
 const Onboarding = dynamic(() => import('./onboarding').then(m => ({ default: m.Onboarding })), { ssr: false })
 const BootOverlay = dynamic(() => import('./boot-overlay').then(m => ({ default: m.BootOverlay })), { ssr: false })
-const ReviewPanel = dynamic(() => import('./review-panel').then(m => ({ default: m.ReviewPanel })), { ssr: false })
 const ArtifactsBrowser = dynamic(() => import('./artifacts-browser').then(m => ({ default: m.ArtifactsBrowser })), { ssr: false })
 const TerminalPanel = dynamic(() => import('./terminal-panel').then(m => ({ default: m.TerminalPanel })), { ssr: false })
 const WorktreePanel = dynamic(() => import('./worktree-panel').then(m => ({ default: m.WorktreePanel })), { ssr: false })
-const FileTreePanel = dynamic(() => import('./file-tree-panel').then(m => ({ default: m.FileTreePanel })), { ssr: false })
 const PluginManagerPanel = dynamic(() => import('./plugin-manager').then(m => ({ default: m.PluginManager })), { ssr: false })
 const RightSidebar = dynamic(() => import('./right-sidebar').then(m => ({ default: m.RightSidebar })), { ssr: false })
 
@@ -81,14 +82,27 @@ const RightSidebar = dynamic(() => import('./right-sidebar').then(m => ({ defaul
 const SIDEBAR_MIN = 200
 const SIDEBAR_MAX = 500
 const SIDEBAR_COLLAPSED = 48
-const SIDEBAR_DEFAULT = 300
+const SIDEBAR_DEFAULT = 240
 const STORAGE_KEY = 'helix-sidebar-width'
 
 // Right sidebar (code editor / browser)
-const RIGHT_SIDEBAR_MIN = 300
-const RIGHT_SIDEBAR_MAX = 800
-const RIGHT_SIDEBAR_DEFAULT = 480
+const RIGHT_SIDEBAR_MIN = 280
+const RIGHT_SIDEBAR_MAX = 400
+const RIGHT_SIDEBAR_DEFAULT = 240
+// The chat/dialogue column must always keep a readable width. Cap the right
+// sidebar so the dialogue area never shrinks into awkwardly short line wraps.
+// (440 would over-constrain the drag range — 400 still keeps lines readable.)
+const CHAT_MIN_WIDTH = 400
 const RIGHT_STORAGE_KEY = 'helix-right-sidebar-width'
+
+function rightSidebarCap(leftWidth: number): number {
+  // Hard ceiling: regardless of how wide the window is, the right sidebar must
+  // never exceed RIGHT_SIDEBAR_MAX. Only the *lower* bound is governed by the
+  // window width (so the chat column keeps a minimum readable width).
+  if (typeof window === 'undefined') return RIGHT_SIDEBAR_MAX
+  const cap = window.innerWidth - leftWidth - CHAT_MIN_WIDTH
+  return Math.max(RIGHT_SIDEBAR_MIN, Math.min(RIGHT_SIDEBAR_MAX, Math.floor(cap)))
+}
 
 function loadSidebarWidth(): number {
   if (typeof localStorage === 'undefined') return SIDEBAR_DEFAULT
@@ -96,6 +110,13 @@ function loadSidebarWidth(): number {
     const v = localStorage.getItem(STORAGE_KEY)
     if (v) {
       const n = parseInt(v, 10)
+      // Migration: the old default was 300. Treat a stored width that equals the
+      // old default as "unset" so the new smaller default (240) takes effect on
+      // first launch — but any custom width the user dragged to is respected.
+      if (n === 300) {
+        try { localStorage.removeItem(STORAGE_KEY) } catch {}
+        return SIDEBAR_DEFAULT
+      }
       if (n >= SIDEBAR_MIN && n <= SIDEBAR_MAX) return n
     }
   } catch {}
@@ -108,14 +129,15 @@ function saveSidebarWidth(w: number) {
 
 function loadRightSidebarWidth(): number {
   if (typeof localStorage === 'undefined') return RIGHT_SIDEBAR_DEFAULT
+  const cap = rightSidebarCap(SIDEBAR_DEFAULT)
   try {
     const v = localStorage.getItem(RIGHT_STORAGE_KEY)
     if (v) {
       const n = parseInt(v, 10)
-      if (n >= RIGHT_SIDEBAR_MIN && n <= RIGHT_SIDEBAR_MAX) return n
+      if (n >= RIGHT_SIDEBAR_MIN && n <= cap) return n
     }
   } catch {}
-  return RIGHT_SIDEBAR_DEFAULT
+  return Math.min(RIGHT_SIDEBAR_DEFAULT, cap)
 }
 
 function saveRightSidebarWidth(w: number) {
@@ -136,7 +158,10 @@ export function HelixLayout() {
   const [isDragging, setIsDragging] = useState(false)
   const [rightSidebarWidth, setRightSidebarWidth] = useState(loadRightSidebarWidth)
   const [isRightDragging, setIsRightDragging] = useState(false)
-  const [theme, setTheme] = useState<'light' | 'dark'>('light')
+  // Mirror sidebarWidth so the right-sidebar resize clamp can read it live
+  // without re-subscribing the drag effect on every sidebar width change.
+  const sidebarWidthRef = useRef(sidebarWidth)
+  sidebarWidthRef.current = sidebarWidth
   const [isMaximized, setIsMaximized] = useState(false)
   const [hasTaskList, setHasTaskList] = useState(false)
   const [showTaskListPanel, setShowTaskListPanel] = useState(false)
@@ -218,7 +243,8 @@ export function HelixLayout() {
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const delta = rightDragStartX.current - e.clientX
-        const next = Math.max(RIGHT_SIDEBAR_MIN, Math.min(RIGHT_SIDEBAR_MAX, rightDragStartW.current + delta))
+        const cap = rightSidebarCap(sidebarWidthRef.current)
+        const next = Math.max(RIGHT_SIDEBAR_MIN, Math.min(cap, rightDragStartW.current + delta))
         setRightSidebarWidth(next)
       })
     }
@@ -251,15 +277,15 @@ export function HelixLayout() {
   const showCustomizePanel = useHelixStore(s => s.showCustomizePanel)
   const showRuntimePanel = useHelixStore(s => s.showRuntimePanel)
   const showWorktreePanel = useHelixStore(s => s.showWorktreePanel)
-  const showFileTreePanel = useHelixStore(s => s.showFileTreePanel)
   const showActivityFeed = useHelixStore(s => s.showActivityFeed)
-  const showReviewPanel = useHelixStore(s => s.showReviewPanel)
   const showArtifactsBrowser = useHelixStore(s => s.showArtifactsBrowser)
   const showPluginManager = useHelixStore(s => s.showPluginManager)
   const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
   const editorTheme = useHelixStore(s => s.editorTheme)
+  const themeStyle = useHelixStore(s => s.themeStyle)
+  const setThemeStyle = useHelixStore(s => s.setThemeStyle)
   const chatMessages = useHelixStore(s => s.chatMessages)
   const navigationHistory = useHelixStore(s => s.navigationHistory)
   const navigationIndex = useHelixStore(s => s.navigationIndex)
@@ -281,12 +307,17 @@ export function HelixLayout() {
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [todoPopoverOpen])
 
-  const toggleTheme = useCallback(() => {
-    const next = theme === 'dark' ? 'light' : 'dark'
-    setTheme(next)
-    document.documentElement.classList.toggle('dark', next === 'dark')
-    storeActions.setEditorTheme(next === 'dark' ? 'vs-dark' : 'light')
-  }, [theme, storeActions.setEditorTheme])
+  // Apply the selected theme style (Catppuccin flavor or built-in cream) by
+  // writing inline CSS variables onto <html>. Runs on mount and whenever the
+  // style changes — including when the light/dark toggle switches to a paired
+  // flavor.
+  useEffect(() => {
+    const meta = getThemeMeta(themeStyle)
+    applyHelixPalette(themeStyle)
+    if (meta) {
+      storeActions.setEditorTheme(meta.mode === 'dark' ? 'vs-dark' : 'light')
+    }
+  }, [themeStyle])
 
   const handleApplyChange = useCallback((change: PendingChange) => {
     storeActions.applyPendingChange(change.id)
@@ -427,6 +458,29 @@ export function HelixLayout() {
             ),
           })
         }
+        // onModelSwitched only updates the store. Mirror the input-bar switch
+        // path (agent-flow-panel.syncConfigToBackend): cancel any in-flight
+        // session, drop the cached id, and push the resolved config so the
+        // backend picks up the new key immediately. Without this, an out-of-band
+        // switch (hermes-ui ModelSelector / settings) only takes effect on the
+        // next sendPrompt via the configHash check, and a run in flight keeps
+        // streaming against the old endpoint.
+        const hs = useHermesStore.getState()
+        const sid = hs.hermesSessionId
+        if (sid) {
+          try { electronHermes.notify('session/cancel', { session_id: sid }) } catch {}
+        }
+        hs.setHermesSessionId(null)
+        const s = useHelixStore.getState()
+        const cfg = s.apiConfig
+        const ap = s.activeProviderId ? s.providers.find((p) => p.id === s.activeProviderId) : undefined
+        const resolvedKey = ap?.apiKey || cfg.apiKey || ''
+        pushModelConfig({
+          model: cfg.model,
+          provider: cfg.provider && cfg.provider !== '__custom__' ? cfg.provider : 'custom',
+          baseUrl: cfg.baseUrl,
+          apiKey: resolvedKey,
+        })
       } else {
         // Model not declared in Helix providers (e.g. fetched list only) — at
         // least reflect it in apiConfig so the selector label updates, avoiding
@@ -575,7 +629,7 @@ export function HelixLayout() {
     } catch {
       storeActions.setSelectedWorkDir(dir)
     }
-  }, [storeActions.setWorkDir, storeActions.setSelectedWorkDir, storeActions.showToast])
+  }, [storeActions.setWorkDir, storeActions.setSelectedWorkDir, storeActions.showToast, selectedWorkDir])
 
   const handleNewChat = useCallback(() => {
     useHelixStore.getState().flushSessionPersist()
@@ -593,6 +647,11 @@ export function HelixLayout() {
   const [helpMenuOpen, setHelpMenuOpen] = useState(false)
   const helpMenuButtonRef = useRef<HTMLButtonElement>(null)
   const helpMenuRef = useRef<HTMLDivElement>(null)
+
+  // Browser "more" menu state (the ••• button next to the browser toggle)
+  const [browserMenuOpen, setBrowserMenuOpen] = useState(false)
+  const browserMenuButtonRef = useRef<HTMLButtonElement>(null)
+  const browserMenuRef = useRef<HTMLDivElement>(null)
 
   const ZOOM_STEP = 0.1
   const zoomIn = useCallback(() => {
@@ -650,6 +709,23 @@ export function HelixLayout() {
     document.addEventListener('mousedown', handleMouseDown)
     return () => document.removeEventListener('mousedown', handleMouseDown)
   }, [helpMenuOpen])
+
+  // Click outside to close browser menu
+  useEffect(() => {
+    if (!browserMenuOpen) return
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (
+        browserMenuButtonRef.current?.contains(target) ||
+        browserMenuRef.current?.contains(target)
+      ) {
+        return
+      }
+      setBrowserMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handleMouseDown)
+    return () => document.removeEventListener('mousedown', handleMouseDown)
+  }, [browserMenuOpen])
 
   // Window menu keyboard shortcuts
   useEffect(() => {
@@ -758,7 +834,7 @@ export function HelixLayout() {
     }},
     { label: '切换侧边栏', shortcut: 'Ctrl+L', action: () => { setShowSidebar(v => !v); closeWindowMenu() } },
     { label: '打开终端', shortcut: shortcutLabel('toggle-terminal', customShortcuts), action: () => { useHelixStore.setState({ isTerminalOpen: true }); closeWindowMenu() } },
-    { label: '切换文件树', shortcut: shortcutLabel('toggle-file-tree', customShortcuts), action: () => { storeActions.toggleFileTreePanel(); closeWindowMenu() } },
+    { label: '切换文件树', shortcut: shortcutLabel('toggle-file-tree', customShortcuts), action: () => { storeActions.setRightSidebarTab(storeActions.rightSidebarTab === 'files' ? null : 'files'); closeWindowMenu() } },
     { label: '打开代码编辑器', action: () => { storeActions.setRightSidebarTab('code'); closeWindowMenu() } },
     { divider: true },
     { label: '设置', shortcut: 'Ctrl+,', action: () => { storeActions.toggleSettings('api'); closeWindowMenu() } },
@@ -800,7 +876,7 @@ export function HelixLayout() {
 
   return (
     <div className={`h-screen w-screen flex flex-col overflow-hidden ${
-      theme === 'dark' ? 'dark bg-background' : 'bg-background'
+      'bg-background'
     }`}>
       <KeyboardShortcuts />
       <CommandPalette />
@@ -1036,11 +1112,6 @@ export function HelixLayout() {
           </div>
         )}
 
-        {/* File tree panel */}
-        {showFileTreePanel && (
-          <FileTreePanel onClose={() => storeActions.toggleFileTreePanel()} />
-        )}
-
         {/* Main area */}
         <div className="flex-1 h-full flex flex-col overflow-hidden">
           {showScheduledTasksPanel ? (
@@ -1147,24 +1218,49 @@ export function HelixLayout() {
                   >
                     <Terminal className="size-4" />
                   </button>
+                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'files') && (
                   <button
-                    onClick={() => storeActions.setRightSidebarTab('code')}
-                    className={`p-1.5 rounded-lg transition-colors ${rightSidebarTab === 'code' ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
-                    title="代码编辑器"
+                    ref={browserMenuButtonRef}
+                    onClick={() => setBrowserMenuOpen(v => !v)}
+                    className={`p-1.5 rounded-lg transition-colors ${browserMenuOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
+                    title="更多操作"
                   >
-                    <FileCode2 className="size-4" />
+                    <MoreHorizontal className="size-4" />
                   </button>
-                  <button
-                    onClick={() => storeActions.setRightSidebarTab('browser')}
-                    className={`p-1.5 rounded-lg transition-colors ${rightSidebarTab === 'browser' ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
-                    title="浏览器侧边栏（预览）"
-                  >
-                    <Globe className="size-4" />
-                  </button>
+                  )}
+                  {browserMenuOpen && typeof window !== 'undefined' && createPortal(
+                    <div
+                      className="fixed z-[100]"
+                      style={{
+                        top: (browserMenuButtonRef.current?.getBoundingClientRect().bottom ?? 0) + 4,
+                        left: browserMenuButtonRef.current?.getBoundingClientRect().right ? browserMenuButtonRef.current!.getBoundingClientRect().right - 208 : 0,
+                      }}
+                    >
+                      <div ref={browserMenuRef} className="w-52 bg-card border border-border/80 rounded-lg shadow-xl py-1">
+                        <button
+                          onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'browser' ? null : 'browser'); setBrowserMenuOpen(false) }}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'browser' ? 'text-primary' : 'text-foreground/80'}`}
+                        >
+                          <Globe className="size-3.5" />
+                          <span className="flex-1 text-left">浏览器</span>
+                          {rightSidebarTab === 'browser' && <CheckCircle2 className="size-3.5" />}
+                        </button>
+                        <button
+                          onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'files' ? null : 'files'); setBrowserMenuOpen(false) }}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'files' ? 'text-primary' : 'text-foreground/80'}`}
+                        >
+                          <FolderTree className="size-3.5" />
+                          <span className="flex-1 text-left">目录</span>
+                          {rightSidebarTab === 'files' && <CheckCircle2 className="size-3.5" />}
+                        </button>
+                      </div>
+                    </div>,
+                    document.body
+                  )}
                 </div>
               </div>
-              )}
-              <div className="flex-1 min-h-0 flex flex-col">
+                )}
+              <div className="flex-1 min-h-0 min-w-0 flex flex-col">
                 <AgentFlowPanel />
               </div>
               <TerminalPanel onClose={storeActions.toggleTerminal} />
@@ -1192,8 +1288,8 @@ export function HelixLayout() {
       {showCustomizePanel && <CustomizePanel onClose={() => storeActions.toggleCustomizePanel()} />}
       {showSettings && (
         <ApiSettings
-          theme={theme}
-          onToggleTheme={toggleTheme}
+          themeStyle={themeStyle}
+          onSelectThemeStyle={setThemeStyle}
           sidebarWidth={sidebarWidth}
           setSidebarWidth={setSidebarWidth}
           saveSidebarWidth={saveSidebarWidth}
@@ -1222,7 +1318,6 @@ export function HelixLayout() {
 
       {/* New surfaces */}
       {showActivityFeed && <ActivityFeed onClose={() => storeActions.toggleActivityFeed()} />}
-      {showReviewPanel && <ReviewPanel onClose={() => storeActions.toggleReviewPanel()} />}
       {showArtifactsBrowser && <ArtifactsBrowser onClose={() => storeActions.toggleArtifactsBrowser()} />}
       <Onboarding />
       <BootOverlay />

@@ -2,7 +2,8 @@
 
 import React from 'react'
 import { useHelixStore } from '@/stores/helix-store'
-import { Toggle, SettingRow, SettingGroup, SectionHeading } from './settings-ui'
+import { SettingRow, SettingGroup, SectionHeading } from './settings-ui'
+import { THEME_SELECT_GROUPS } from '@/lib/themes'
 
 const FONT_OPTIONS = [
   { label: '默认', value: "'Geist Mono', 'Fira Code', 'Consolas', monospace" },
@@ -24,17 +25,12 @@ const UI_FONT_OPTIONS = [
 ]
 
 const fontSelect = (value: string, onChange: (v: string) => void, options: { label: string; value: string }[]) => (
-  <div className="flex gap-2 justify-self-end">
-    <select value={value} onChange={(e) => onChange(e.target.value)}
-      className="w-40 px-2.5 py-1 rounded border border-border/20 bg-muted/20 text-xs focus:outline-none focus:border-primary/30 cursor-pointer appearance-none">
-      {options.map(f => (
-        <option key={f.value} value={f.value}>{f.label}</option>
-      ))}
-    </select>
-    <input type="text" value={value} onChange={(e) => onChange(e.target.value)}
-      placeholder="自定义"
-      className="w-24 px-2.5 py-1 bg-muted/20 border border-border/20 rounded text-xs font-mono focus:outline-none focus:border-primary/30" />
-  </div>
+  <select value={value} onChange={(e) => onChange(e.target.value)}
+    className="w-56 px-2.5 py-1 rounded border border-border/30 bg-popover text-popover-foreground text-xs focus:outline-none focus:border-primary/30 cursor-pointer appearance-none justify-self-end">
+    {options.map(f => (
+      <option key={f.value} value={f.value}>{f.label}</option>
+    ))}
+  </select>
 )
 
 const stepper = (value: number, min: number, max: number, onChange: (v: number) => void) => (
@@ -47,7 +43,10 @@ const stepper = (value: number, min: number, max: number, onChange: (v: number) 
   </div>
 )
 
-export function AppearanceSettingsPanel({ theme, onToggleTheme }: { theme: 'light' | 'dark'; onToggleTheme: () => void }) {
+export function AppearanceSettingsPanel({ themeStyle, onSelectThemeStyle }: {
+  themeStyle: string
+  onSelectThemeStyle: (styleId: string) => void
+}) {
   const fontFamily = useHelixStore(s => s.fontFamily)
   const setFontFamily = useHelixStore(s => s.setFontFamily)
   const fontSize = useHelixStore(s => s.fontSize)
@@ -61,8 +60,20 @@ export function AppearanceSettingsPanel({ theme, onToggleTheme }: { theme: 'ligh
     <div className="max-w-xl space-y-1">
       <SectionHeading>外观</SectionHeading>
 
-      <SettingRow label="主题" labelClassName="text-base font-semibold">
-        <Toggle enabled={theme === 'dark'} onToggle={onToggleTheme} />
+      <SettingRow label="配色风格">
+        <select
+          value={themeStyle}
+          onChange={(e) => onSelectThemeStyle(e.target.value)}
+          className="w-96 px-2.5 py-1 rounded border border-border/30 bg-popover text-popover-foreground text-xs focus:outline-none focus:border-primary/30 cursor-pointer"
+        >
+          {THEME_SELECT_GROUPS.map((g) => (
+            <optgroup key={g.label} label={g.label}>
+              {g.options.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
       </SettingRow>
 
       <SettingGroup title="编辑器">

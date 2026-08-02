@@ -1,5 +1,6 @@
 'use client'
 
+import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { loadLanguage } from '@uiw/codemirror-extensions-langs'
 import CodeMirror from '@uiw/react-codemirror'
 import { FileCode2, X, Save } from 'lucide-react'
@@ -121,9 +122,10 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
   }, [active])
 
   const langExt = useMemo(() => {
-    if (!active) return []
+    const highlight = syntaxHighlighting(defaultHighlightStyle, { fallback: true })
+    if (!active) return [highlight]
     const ext = loadLanguage(langFromName(active.name) as Parameters<typeof loadLanguage>[0])
-    return ext ? [ext] : []
+    return ext ? [highlight, ext] : [highlight]
   }, [active])
 
   const themeMode = editorTheme === 'vs-dark' ? 'dark' : 'light'
@@ -183,14 +185,6 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
         >
           <Save className="size-3.5" /> 保存
         </button>
-        <div className="w-px h-4 bg-border/40 mx-0.5 shrink-0" />
-        <button
-          onClick={onClose}
-          className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-md transition-colors shrink-0"
-          title="关闭编辑器（保留已打开的文件）"
-        >
-          <X className="size-3.5" />
-        </button>
       </div>
 
       {/* Editor */}
@@ -210,7 +204,11 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
             bracketMatching: true,
             indentOnInput: true,
           }}
-          style={{ height: '100%', fontSize: 13 }}
+          style={{
+            height: '100%',
+            fontSize: 'var(--helix-font-size, 13px)',
+            fontFamily: 'var(--helix-font-family, monospace)',
+          }}
         />
       </div>
     </div>

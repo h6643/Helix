@@ -1,20 +1,8 @@
 'use client'
 
-import {
-  Pencil,
-  Trash2,
-  FilePlus,
-  FolderPlus,
-  Copy,
-  Scissors,
-  ClipboardPaste,
-  Eye,
-  FolderOpen,
-  X,
-} from 'lucide-react'
-import React, { useEffect, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 
-export interface ContextMenuItem {
+interface ContextMenuItem {
   label: string
   icon?: React.ReactNode
   shortcut?: string
@@ -24,7 +12,7 @@ export interface ContextMenuItem {
   action: () => void
 }
 
-export interface ContextMenuState {
+interface ContextMenuState {
   x: number
   y: number
   items: ContextMenuItem[]
@@ -35,7 +23,7 @@ interface ContextMenuProps {
   onClose: () => void
 }
 
-export function ContextMenu({ state, onClose }: ContextMenuProps) {
+function ContextMenu({ state, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   const [activeIndex, setActiveIndex] = useState(-1)
 
@@ -149,19 +137,6 @@ export function ContextMenu({ state, onClose }: ContextMenuProps) {
 
 // Singleton context menu manager
 let _setState: ((state: ContextMenuState | null) => void) | null = null
-let _currentState: ContextMenuState | null = null
-
-export function showContextMenu(e: React.MouseEvent | MouseEvent, items: ContextMenuItem[]) {
-  e.preventDefault()
-  e.stopPropagation()
-  _currentState = { x: e.clientX, y: e.clientY, items }
-  _setState?.(_currentState)
-}
-
-export function hideContextMenu() {
-  _currentState = null
-  _setState?.(null)
-}
 
 export function ContextMenuProvider() {
   const [state, setState] = useState<ContextMenuState | null>(null)

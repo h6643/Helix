@@ -10,14 +10,6 @@ export function GeneralSettingsPanel() {
   const setDesktopNotifications = useHelixStore(s => s.setDesktopNotifications)
   const soundEnabled = useHelixStore(s => s.soundEnabled)
   const setSoundEnabled = useHelixStore(s => s.setSoundEnabled)
-  const restoreLastSession = useHelixStore(s => s.restoreLastSession)
-  const setRestoreLastSession = useHelixStore(s => s.setRestoreLastSession)
-  const defaultWorkDir = useHelixStore(s => s.defaultWorkDir)
-  const setDefaultWorkDir = useHelixStore(s => s.setDefaultWorkDir)
-  const confirmDangerousActions = useHelixStore(s => s.confirmDangerousActions)
-  const setConfirmDangerousActions = useHelixStore(s => s.setConfirmDangerousActions)
-  const autoApproveRead = useHelixStore(s => s.autoApproveRead)
-  const setAutoApproveRead = useHelixStore(s => s.setAutoApproveRead)
 
   const {
     apiConfig, apiProfiles, activeProfileId, providers, activeModel,
@@ -37,30 +29,6 @@ export function GeneralSettingsPanel() {
         </SettingRow>
         <SettingRow label="提示音">
           <Toggle enabled={soundEnabled} onToggle={() => setSoundEnabled(!soundEnabled)} />
-        </SettingRow>
-      </SettingGroup>
-
-      <SettingGroup title="启动">
-        <SettingRow label="恢复上次会话">
-          <Toggle enabled={restoreLastSession} onToggle={() => setRestoreLastSession(!restoreLastSession)} />
-        </SettingRow>
-        <SettingRow label="默认工作目录">
-          <input
-            type="text"
-            value={defaultWorkDir}
-            onChange={e => setDefaultWorkDir(e.target.value)}
-            placeholder="留空使用上次的工作目录"
-            className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-sm font-mono text-foreground/70 placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/30 transition-colors"
-          />
-        </SettingRow>
-      </SettingGroup>
-
-      <SettingGroup title="安全">
-        <SettingRow label="危险操作确认">
-          <Toggle enabled={confirmDangerousActions} onToggle={() => setConfirmDangerousActions(!confirmDangerousActions)} />
-        </SettingRow>
-        <SettingRow label="自动批准读取">
-          <Toggle enabled={autoApproveRead} onToggle={() => setAutoApproveRead(!autoApproveRead)} />
         </SettingRow>
       </SettingGroup>
 
@@ -108,7 +76,7 @@ export function GeneralSettingsPanel() {
           }}>
             导入配置
           </Button>
-          <Button size="sm" variant="destructive" onClick={() => {
+          <Button size="sm" variant="outline" onClick={() => {
             if (confirm('确定要重置所有设置吗？此操作不可撤销。')) {
               localStorage.clear(); window.location.reload()
             }

@@ -42,7 +42,7 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
     'toggle-scheduled-tasks-panel': () => state.toggleScheduledTasksPanel(),
     'toggle-terminal': () => state.toggleTerminal(),
     'toggle-settings': () => state.toggleSettings(),
-    'toggle-file-tree': () => state.toggleFileTreePanel(),
+    'toggle-file-tree': () => state.setRightSidebarTab(state.rightSidebarTab === 'files' ? null : 'files'),
     'settings': () => state.toggleSettings(),
     'show-shortcuts': () => {},
     'command-palette': () => state.toggleCommandPalette(),

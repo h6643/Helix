@@ -8,15 +8,15 @@ const MAX_IMAGE_SIZE = 2048 // Maximum dimension in pixels
 const MAX_IMAGES_PER_MESSAGE = 5
 const SUPPORTED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
 
-export function validateImageType(type: string): boolean {
+function validateImageType(type: string): boolean {
   return SUPPORTED_TYPES.includes(type)
 }
 
-export function generateImageId(): string {
+function generateImageId(): string {
   return `img-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
-export async function getImageDimensions(dataUrl: string): Promise<{ width: number; height: number }> {
+async function getImageDimensions(dataUrl: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const img = new Image()
     img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
@@ -96,19 +96,4 @@ export function blobToDataUrl(blob: Blob): Promise<string> {
 
 export function canAddMoreImages(currentCount: number, newCount: number): boolean {
   return currentCount + newCount <= MAX_IMAGES_PER_MESSAGE
-}
-
-export function getImagePreviewSize(attachment: ImageAttachment): { width: number; height: number } {
-  const maxSize = 80
-  const { width = maxSize, height = maxSize } = attachment
-
-  if (width <= maxSize && height <= maxSize) {
-    return { width, height }
-  }
-
-  if (width > height) {
-    return { width: maxSize, height: Math.round((height / width) * maxSize) }
-  } else {
-    return { height: maxSize, width: Math.round((width / height) * maxSize) }
-  }
 }

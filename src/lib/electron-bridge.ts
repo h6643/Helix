@@ -396,6 +396,12 @@ export const electronGit = {
     return { ok: false, error: 'Git not available in browser mode' }
   },
 
+  async currentBranch(): Promise<{ ok: boolean; branch?: string; error?: string }> {
+    const api = getElectronAPI()
+    if (api?.git) return api.git.currentBranch()
+    return { ok: false, error: 'Git not available in browser mode' }
+  },
+
   async log(count?: number): Promise<{ ok: boolean; output?: string; error?: string }> {
     const api = getElectronAPI()
     if (api?.git) return api.git.log(count)
@@ -499,43 +505,6 @@ export const electronNotification = {
     } catch {
       /* store unavailable — nothing else we can do */
     }
-  },
-}
-
-/**
- * Scheduled tasks sync (Hermes backend) — Electron only
- */
-export const electronScheduledTasks = {
-  async list(): Promise<{ ok: boolean; tasks?: any[]; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.scheduledTasks) {
-      return api.scheduledTasks.list()
-    }
-    return { ok: false, tasks: [], error: 'Scheduled tasks not available in browser mode' }
-  },
-
-  async create(params: { name?: string; prompt?: string; scheduleText?: string; cronExpression?: string; nextRunAt?: number }): Promise<{ ok: boolean; id?: string; nextRunAt?: number | null; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.scheduledTasks) {
-      return api.scheduledTasks.create(params)
-    }
-    return { ok: false, error: 'Scheduled tasks not available in browser mode' }
-  },
-
-  async update(params: { id: string; enabled: boolean }): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.scheduledTasks) {
-      return api.scheduledTasks.update(params)
-    }
-    return { ok: false, error: 'Scheduled tasks not available in browser mode' }
-  },
-
-  async remove(params: { id: string }): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.scheduledTasks) {
-      return api.scheduledTasks.remove(params)
-    }
-    return { ok: false, error: 'Scheduled tasks not available in browser mode' }
   },
 }
 

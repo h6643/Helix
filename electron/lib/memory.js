@@ -187,9 +187,6 @@ module.exports = {
   readManualMarkers,
   addManualMarker,
   removeManualMarker,
-  loadSkillCallCounts,
-  saveSkillCallCounts,
   incrementSkillCallCount,
-  parseSkillFrontmatter,
   collectSkillsFromDir,
 }

@@ -60,11 +60,11 @@ export function getAllProviders(): ProviderConfig[] {
   return PROVIDERS
 }
 
-export function getProvider(id: string): ProviderConfig | undefined {
+function getProvider(id: string): ProviderConfig | undefined {
   return PROVIDERS.find(p => p.id === id)
 }
 
-export function getModels(providerID: string): string[] {
+function getModels(providerID: string): string[] {
   return getProvider(providerID)?.models ?? []
 }
 
@@ -72,7 +72,7 @@ export function getBaseUrl(providerID: string): string | undefined {
   return getProvider(providerID)?.baseUrl
 }
 
-export function getEnvApiKey(providerID: string): string | undefined {
+function getEnvApiKey(providerID: string): string | undefined {
   const provider = getProvider(providerID)
   if (!provider?.envKey) return
   return process.env[provider.envKey] || undefined

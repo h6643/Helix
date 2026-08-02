@@ -65,12 +65,28 @@ export function stripEmoji(text: string): string {
   return text.replace(EMOJI_RE, '')
 }
 
+// Models often wrap URLs in emphasis markers and glue CJK punctuation to the
+// end (e.g. `**https://www.baidu.com**。`). remark-gfm's autolink then greedily
+// swallows the trailing `**`/`。` into the URL, leaving the leading `**` to
+// render literally. Rewrite those into proper links:
+//   `**https://www.baidu.com**。` -> `**[https://www.baidu.com](https://www.baidu.com)**。`
+const MODEL_URL_EMPHASIS_RE =
+  /(\*\*|__|\*|_)(https?:\/\/[^\s<，。！？；：、]*?)(\*\*|__|\*|_)([，。！？；：、]?)/g
+
+/**
+ * Normalize model-emitted "URL wrapped in markdown emphasis" patterns so the
+ * URL renders as a clean link instead of leaking `**` and punctuation.
+ */
+function normalizeModelLinks(text: string): string {
+  return text.replace(MODEL_URL_EMPHASIS_RE, '$1[$2]($2)$3$4')
+}
+
 /**
  * Mid-stream Markdown safety: balance unclosed code fences so the live
  * preview stays stable until the run completes.
  */
 export function safeMarkdownSource(text: string): string {
-  let t = text
+  let t = normalizeModelLinks(text)
   const fences = (t.match(/```/g) || []).length
   if (fences % 2 === 1) t += String.fromCharCode(10) + '```'
   return t

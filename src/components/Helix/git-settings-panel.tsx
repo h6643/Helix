@@ -82,7 +82,7 @@ export function GitSettingsPanel() {
       </SettingGroup>
 
       <div className="flex justify-end pt-4">
-        <Button onClick={handleSaveGit} size="sm" className="gap-1.5" disabled={gitSaving}>
+        <Button onClick={handleSaveGit} size="sm" variant="outline" className="gap-1.5" disabled={gitSaving}>
           {gitSaving ? '保存中…' : '保存设置'}
         </Button>
       </div>

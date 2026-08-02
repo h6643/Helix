@@ -25,6 +25,10 @@
     {
       "from": "public",
       "to": ".next/standalone/public"
+    },
+    {
+      "from": "vendor/hermes-agent",
+      "to": "hermes-agent"
     }
   ],
   "win": {

@@ -46,28 +46,6 @@ export interface HermesEventParams {
   [key: string]: unknown
 }
 
-export interface HermesToolStartParams {
-  session_id: string
-  tool_name: string
-  tool_call_id: string
-  args?: Record<string, unknown>
-}
-
-export interface HermesToolCompleteParams {
-  session_id: string
-  tool_name: string
-  tool_call_id: string
-  result?: string
-  error?: string
-}
-
-export interface HermesApprovalRequestParams {
-  session_id: string
-  request_id: string
-  tool_name: string
-  args: Record<string, unknown>
-}
-
 // ── Hook ────────────────────────────────────────────────────────────────────
 
 export function useHermes() {

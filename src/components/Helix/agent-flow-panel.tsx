@@ -51,6 +51,7 @@ import { processClipboardImage, canAddMoreImages, blobToDataUrl, compressImage }
 import { buildAcpMcpServers } from '@/lib/mcp'
 import { extractScheduledTasks } from '@/lib/schedule-utils'
 import { isServeActive } from '@/lib/serve-gateway'
+import { debug } from '@/lib/logger'
 import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, stripEmoji, safeMarkdownSource, stripSystemReminders, extractKaomojiStatus } from '@/lib/text-utils'
 import { ContextUsageIndicator } from './context-usage'
 import { getModelContextWindow } from './context-usage'
@@ -62,7 +63,6 @@ import { useHermesStore } from '@/stores/hermes-store'
 import { speak, stopSpeaking } from '@/lib/voice-utils'
 import { markdownComponents, markdownPlugins } from './markdown-components'
 import type { HermesTodo } from '@/stores/helix-types'
-// import { TabBar } from './tab-bar'  // removed
 
 // ==== Types ============================================================================================
 
@@ -142,6 +142,21 @@ function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return s > 0 ? `${m}m ${s}s` : `${m}m`
+}
+
+// Isolated so the 200ms ticking only re-renders this tiny node, not the whole
+// conversation panel — the old implementation called a parent-level setState
+// every 200ms, forcing the entire agent-flow-panel to re-render 5×/sec.
+function ThinkingTimer({ questionStartTs, isRunning }: { questionStartTs: number; isRunning: boolean }) {
+  const [duration, setDuration] = useState(0)
+  useEffect(() => {
+    if (!isRunning || !questionStartTs) { setDuration(0); return }
+    const tick = () => setDuration(Math.round((Date.now() - questionStartTs) / 1000))
+    tick()
+    const id = setInterval(tick, 200)
+    return () => clearInterval(id)
+  }, [isRunning, questionStartTs])
+  return <>{formatDuration(duration)}</>
 }
 
 // Export conversation as Markdown
@@ -242,13 +257,15 @@ function CopyButton({ text, className = '' }: { text: string; className?: string
           .replace(/\[(.+?)\]\(.+?\)/g, "$1")
           .replace(/^---+$/gm, "")
           .trim()
-        navigator.clipboard.writeText(cleanText)
-        setTimeout(() => setCopied(false), 1500)
+        navigator.clipboard.writeText(cleanText).then(() => {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1500)
+        }).catch(() => {})
       }}
       className={`p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors ${className}`}
       title="复制"
     >
-      {copied ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
     </button>
   )
 }
@@ -558,7 +575,6 @@ export function AgentFlowPanel() {
   const responseBlocksRef = useRef<ResponseBlock[]>(responseBlocks)
   responseBlocksRef.current = responseBlocks
   const [streamThinking, setStreamThinking] = useState<string>('')
-  const [streamThinkingDuration, setStreamThinkingDuration] = useState<number>(0)
   // Anchors the live timer to the moment the USER sends a question, so it keeps
   // ticking across any sub-runs (agent tool loops) instead of resetting per run.
   const [questionStartTs, setQuestionStartTs] = useState<number>(0)
@@ -724,7 +740,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   useEffect(() => {
     const prev = prevIsRunningRef.current
     if (isRunning !== prev) {
-      console.warn('[HelixTrace] isRunning changed:', prev, '->', isRunning, {
+      debug('[HelixTrace] isRunning changed:', prev, '->', isRunning, {
         currentSessionId,
         runningSessionId: runningSessionIdRef.current,
         isRunningSession,
@@ -732,6 +748,26 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       prevIsRunningRef.current = isRunning
     }
   }, [isRunning, currentSessionId, isRunningSession])
+
+  // Email notification: when an agent run for the active session finishes and
+  // notifications are enabled + an account is configured, email a short summary.
+  const prevRunningForNotifyRef = useRef(false)
+  useEffect(() => {
+    const wasRunning = prevRunningForNotifyRef.current
+    prevRunningForNotifyRef.current = isRunning
+    if (wasRunning && !isRunning && isRunningSession) {
+      const st = useHelixStore.getState()
+      if (st.emailNotifyEnabled && st.emailConfigured) {
+        const lastText = (textBufferRef.current || '').slice(-800) || '(无文本输出)'
+        window.electron.email
+          .notify({
+            subject: 'Helix：Agent 运行已完成',
+            text: `本次对话已完成。\n\n最后输出摘要：\n${lastText}`,
+          })
+          .catch(() => {})
+      }
+    }
+  }, [isRunning, isRunningSession])
   const displaySteps = useMemo(() => {
     // Only show live state if viewing the running session
     if (isRunningSession) return steps
@@ -830,31 +866,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   useEffect(() => {
     if (!selectedWorkDir || !isElectron()) return
     let cancelled = false
-    electronGit.branchList().then((res: { ok: boolean; branches?: string[]; error?: string }) => {
-      if (cancelled) return
-      const branches = res.ok && res.branches ? res.branches : []
-      const main = branches.find(b => b === 'main' || b === 'master') || branches[0] || 'main'
-      setCurrentBranch(main)
-    }).catch(() => {
-      if (!cancelled) setCurrentBranch('main')
-    })
-    return () => { cancelled = true }
+    const refresh = () => {
+      electronGit.currentBranch().then((res: { ok: boolean; branch?: string; error?: string }) => {
+        if (cancelled) return
+        if (res.ok && res.branch) setCurrentBranch(res.branch)
+      }).catch(() => {})
+    }
+    refresh()
+    const timer = setInterval(refresh, 4000)
+    return () => { cancelled = true; clearInterval(timer) }
   }, [selectedWorkDir])
 
   const hasApiKey = !!apiConfig.apiKey
-
-  // Live running-time timer — anchored to the user's question, NOT to each run.
-  // It ticks across the whole question (including agent tool-loop sub-runs) and
-  // only resets when a brand-new question is sent (questionStartTs changes).
-  useEffect(() => {
-    if (!isRunning || !questionStartTs) { return }
-    const tick = () => {
-      setStreamThinkingDuration(Math.round((Date.now() - questionStartTs) / 1000))
-    }
-    tick()
-    const id = setInterval(tick, 200)
-    return () => clearInterval(id)
-  }, [isRunning, questionStartTs])
 
   // Resolve the provider that owns the current backend endpoint.
   // Primary key: apiConfig.baseUrl (what Hermes actually calls — never drifts).
@@ -930,7 +953,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // 1) Cancel any in-flight session FIRST (while the id is still valid).
     const currentSid = hermesSessionIdRef.current
     if (isElectron() && currentSid) {
-      try { window.electron?.hermes?.notify?.('session/cancel', { session_id: currentSid }) } catch {}
+      try { electronHermes.notify('session/cancel', { session_id: currentSid }) } catch {}
     }
     // 2) Invalidate the session so the next prompt rebuilds it from config.yaml.
     useHermesStore.getState().setHermesSessionId(null)
@@ -955,7 +978,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         baseUrl: cfg.baseUrl,
         apiKey: resolvedKey,
       }
-      console.warn(`[config-switch] → provider=${push.provider} baseUrl=${push.baseUrl} model=${push.model} apiKey=${resolvedKey ? resolvedKey.substring(0, 6) + '…' : '(EMPTY → backend falls back to target provider stored key)'}`)
+      debug(`[config-switch] → provider=${push.provider} baseUrl=${push.baseUrl} model=${push.model} apiKey=${resolvedKey ? resolvedKey.substring(0, 6) + '…' : '(EMPTY → backend falls back to target provider stored key)'}`)
       // Flush IMMEDIATELY (bypass the 1.2s debounce). A model switch is an
       // explicit user action and must persist to active-profile.json + config.yaml
       // right away — otherwise closing/restarting within the debounce window leaves
@@ -1011,7 +1034,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }
             }
           }}
-          className="flex items-center justify-between gap-2 min-w-[140px] max-w-[220px] px-3 py-1.5 bg-muted/30 border border-border/30 rounded-lg text-[13px] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
+          className="flex items-center justify-between gap-2 min-w-[80px] max-w-[140px] px-2.5 py-1.5 bg-muted/30 border border-border/30 rounded-lg text-[13px] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
         >
           <span className="truncate">{displayName}</span>
           <svg className={`size-3.5 text-muted-foreground transition-transform shrink-0 ${showModelDropdown ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -1408,7 +1431,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
   // Stop running agent
   const handleStop = useCallback(() => {
-    console.warn('[HelixTrace] handleStop start', {
+    debug('[HelixTrace] handleStop start', {
       isBusy,
       runningSessionId: runningSessionIdRef.current,
       currentSessionId,
@@ -1428,13 +1451,15 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       setStreamingDraft(sid, { isAgentRunning: false })
     }
     useHelixStore.setState({ isChatLoading: false })
-    setStreamThinkingDuration(0)
     try {
       const sessionId = hermesSessionIdRef.current || sid || currentSessionId
       if (sessionId && isElectron()) {
-        console.warn('[HelixTrace] handleStop interrupt+notify', { sessionId })
-        window.electron.hermes.interrupt(sessionId)
-        window.electron.hermes.notify('session/cancel', { session_id: sessionId })
+        debug('[HelixTrace] handleStop cancel', { sessionId })
+        // session/cancel via the serve-aware bridge. The run's own AbortController
+        // listener (registered at the run site) also fires this on abort; keep an
+        // explicit send here as a safety net. (interrupt === notify('session/cancel')
+        // in main.js, so one call suffices.)
+        electronHermes.notify('session/cancel', { session_id: sessionId })
       }
     } catch (e) {
       console.error('[handleStop] Failed to interrupt Hermes:', e)
@@ -1579,7 +1604,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
     // If already running, stop current request
     if (isBusy) {
-      console.warn('[HelixTrace] handleRun blocked: already busy, calling handleStop', {
+      debug('[HelixTrace] handleRun blocked: already busy, calling handleStop', {
         currentSessionId,
         runningSessionId: runningSessionIdRef.current,
         input: typeof trimmed === 'string' ? trimmed.slice(0, 80) : trimmed,
@@ -1599,7 +1624,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     resetInputHeight()
     runStartedAtRef.current = Date.now()
     setQuestionStartTs(runStartedAtRef.current)
-    console.warn('[HelixTrace] handleRun start', {
+    debug('[HelixTrace] handleRun start', {
       input: typeof trimmed === 'string' ? trimmed.slice(0, 80) : trimmed,
       currentSessionId,
       pendingImages: pendingImages.length,
@@ -1632,7 +1657,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     thinkingDurationRef.current = 0
     promptSentAtRef.current = 0
     setStreamThoughtTokens(0)
-    setStreamThinkingDuration(0)
     firstContentAtRef.current = 0
     usageReceivedRef.current = false
     // A fresh question starts a new todo scope — drop any stale list from the
@@ -2018,7 +2042,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           // Re-arm with a long fallback only if no long timer is already pending
           if (!synthDoneTimerRef.current) {
             synthDoneTimerRef.current = setTimeout(() => {
-              console.warn('[HelixTrace] synthDone fired (long fallback after deferred)', {
+              debug('[HelixTrace] synthDone fired (long fallback after deferred)', {
                 queueDone,
                 textLen: textBufferRef.current?.length ?? 0,
               })
@@ -2032,15 +2056,15 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           return
         }
         if (hasPendingTools && delay >= 60000) {
-          console.warn('[HelixTrace] scheduleSynthDone firing despite pending tools (long fallback)', {
+          debug('[HelixTrace] scheduleSynthDone firing despite pending tools (long fallback)', {
             toolCount: stepsRef.current.filter(s => s.type === 'tool_call' && s.status === 'running').length,
             delay,
           })
         }
-        console.warn('[HelixTrace] scheduleSynthDone', { delay, queueDone, textLen: textBufferRef.current?.length ?? 0 })
+        debug('[HelixTrace] scheduleSynthDone', { delay, queueDone, textLen: textBufferRef.current?.length ?? 0 })
         synthDoneTimerRef.current = setTimeout(() => {
           synthDoneTimerRef.current = null
-          console.warn('[HelixTrace] synthDone fired', {
+          debug('[HelixTrace] synthDone fired', {
             queueDone,
             textLen: textBufferRef.current?.length ?? 0,
             stepsLen: stepsRef.current.length,
@@ -2053,7 +2077,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           // 且后续 message.delta / run.completed 会被 doneProcessedRef 丢弃。
           // 改走更长的二次兜底,把机会留给真实 run.completed(其 done 已用 u.content 兜底正文)。
           if (!hasText && hasThinking) {
-            console.warn('[HelixTrace] synthDone deferred (thinking-only, awaiting message)', { textLen: 0 })
+            debug('[HelixTrace] synthDone deferred (thinking-only, awaiting message)', { textLen: 0 })
             if (!synthDoneTimerRef.current) {
               synthDoneTimerRef.current = setTimeout(() => {
                 synthDoneTimerRef.current = null
@@ -2268,7 +2292,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         session_id: sessionId,
         prompt: [{ type: 'text', text: promptText }],
       }).then((result: any) => {
-        console.warn('[HelixTrace] session/prompt ack', {
+        debug('[HelixTrace] session/prompt ack', {
           sessionId,
           runningSessionId: runningSessionIdRef.current,
           currentSessionId,
@@ -2796,7 +2820,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         }
       }
     } catch (error) {
-      console.warn('[HelixTrace] handleRun catch', {
+      debug('[HelixTrace] handleRun catch', {
         errorName: error instanceof Error ? error.name : 'unknown',
         errorMessage: error instanceof Error ? error.message : String(error),
         errorStack: error instanceof Error ? error.stack : undefined,
@@ -2840,7 +2864,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         }])
       }
     } finally {
-      console.warn('[HelixTrace] handleRun finally ENTRY', {
+      debug('[HelixTrace] handleRun finally ENTRY', {
         reason: queueDone ? 'queueDone' : 'abort/error',
         currentSessionId,
         runningSessionId: runningSessionIdRef.current,
@@ -2850,7 +2874,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         responseBlocksLen: responseBlocks.length,
       })
       const reason = queueDone ? 'queueDone' : 'abort/error'
-      console.warn('[HelixTrace] handleRun finally', {
+      debug('[HelixTrace] handleRun finally', {
         reason,
         currentSessionId,
         runningSessionId: runningSessionIdRef.current,
@@ -2876,11 +2900,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       const sid = runningSessionIdRef.current
       if (sid) {
         setStreamingDraft(sid, { isAgentRunning: false })
-        console.warn('[HelixTrace] handleRun finally setStreamingDraft false', { sid })
+        debug('[HelixTrace] handleRun finally setStreamingDraft false', { sid })
         // Once the reply is persisted, the draft is no longer needed; clear it
         // on the next tick so any render this cycle still sees the final steps.
         setTimeout(() => {
-          console.warn('[HelixTrace] handleRun finally clearStreamingDraft', { sid })
+          debug('[HelixTrace] handleRun finally clearStreamingDraft', { sid })
           clearStreamingDraft(sid)
         }, 0)
       }
@@ -2891,7 +2915,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       if (hasStale) {
         Object.entries(allDrafts).forEach(([key, d]) => {
           if (d.isAgentRunning) {
-            console.warn('[HelixTrace] handleRun finally clearing stale draft', { key })
+            debug('[HelixTrace] handleRun finally clearing stale draft', { key })
             useHelixStore.getState().setStreamingDraft(key, { isAgentRunning: false })
             setTimeout(() => useHelixStore.getState().clearStreamingDraft(key), 0)
           }
@@ -2899,12 +2923,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       }
       runningSessionIdRef.current = null
       abortRef.current = null
-      console.warn('[HelixTrace] handleRun finally BEFORE isChatLoading false', {
+      debug('[HelixTrace] handleRun finally BEFORE isChatLoading false', {
         isChatLoading: useHelixStore.getState().isChatLoading,
         currentSessionId,
       })
       useHelixStore.setState({ isChatLoading: false })
-      console.warn('[HelixTrace] handleRun finally AFTER isChatLoading false', {
+      debug('[HelixTrace] handleRun finally AFTER isChatLoading false', {
         isChatLoading: useHelixStore.getState().isChatLoading,
         currentSessionId,
       })
@@ -2913,7 +2937,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // is either set back to true later in this frame or something else is
       // keeping `isRunning` true. Capture the next paint-time state too.
       setTimeout(() => {
-        console.warn('[HelixTrace] postRun nextTick snapshot', {
+        debug('[HelixTrace] postRun nextTick snapshot', {
           currentSessionId,
           runningSessionId: runningSessionIdRef.current,
           isRunning,
@@ -3240,7 +3264,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     // Immediately apply to current session if one exists
                     const currentSessionId = hermesSessionIdRef.current
                     if (currentSessionId) {
-                      window.electron?.hermes?.send('session/set_mode', {
+                      hermesApi()!.send('session/set_mode', {
                         session_id: currentSessionId,
                         mode_id: mode.id,
                       }).catch((e: any) => {
@@ -3673,10 +3697,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
       {/* Flow area */}
       <ScrollArea ref={scrollRef} className="flex-1 min-h-0" hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
-        <div className="max-w-[700px] mx-auto py-4 pb-4 min-h-full">
+        <div className="max-w-[700px] mx-auto px-5 py-4 pb-4 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (
             <div className="flex flex-col items-center w-full pt-[22vh]">
-              <div className="w-full max-w-[700px] mx-auto">
+              <div className="w-full max-w-[700px] mx-auto px-5">
                 <img src="/kirin.png" alt="Helix" className="w-14 h-14 opacity-70 mx-auto mb-4" />
                 <p className="text-[15px] font-normal text-foreground/50 text-center mb-6 tracking-tight">有什么可以帮你的？</p>
                 {renderEmptyBreadcrumb()}
@@ -3738,6 +3762,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                                   key={idx}
                                   components={markdownComponents}
                                   remarkPlugins={markdownPlugins.remarkPlugins}
+                                  rehypePlugins={markdownPlugins.rehypePlugins}
                                 >
                                   {safeMarkdownSource(stripEmoji(normalizeAcpContent(block.content)))}
                                 </ReactMarkdown>
@@ -3751,6 +3776,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                             <ReactMarkdown
                               components={markdownComponents}
                               remarkPlugins={markdownPlugins.remarkPlugins}
+                              rehypePlugins={markdownPlugins.rehypePlugins}
                             >
                               {safeMarkdownSource(stripEmoji(normalizeAcpContent(msg.content)))}
                             </ReactMarkdown>
@@ -3889,6 +3915,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                               <ReactMarkdown
                                 components={markdownComponents}
                                 remarkPlugins={markdownPlugins.remarkPlugins}
+                                rehypePlugins={markdownPlugins.rehypePlugins}
                               >
                                 {safeMarkdownSource(stripEmoji(normalizeAcpContent(block.content)))}
                               </ReactMarkdown>
@@ -3904,7 +3931,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     {/* Live thinking duration */}
                     {isRunning && (
                       <div className="text-xs text-foreground/30 tabular-nums mt-1 ml-3">
-                        {streamThinkingDuration > 0 ? formatDuration(streamThinkingDuration) : '0s'}{streamThoughtTokens > 0 ? ` · ${streamThoughtTokens} tokens` : ''}
+                        <ThinkingTimer questionStartTs={questionStartTs} isRunning={isRunning} />{streamThoughtTokens > 0 ? ` · ${streamThoughtTokens} tokens` : ''}
                       </div>
                     )}
 
@@ -3981,7 +4008,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
       {/* Bottom input */}
       {sessionMessages.length > 0 && (
-        <div className="bg-transparent shrink-0 mb-2 mt-2 w-full">
+        <div className="bg-transparent shrink-0 mb-2 mt-2 w-full px-5">
           <div className="w-full max-w-[700px] mx-auto">
             {renderChatInput()}
             <p className="text-xs text-foreground/50 text-center mt-3 mb-1.5 select-none">AI不是万能的，需要有自己的判断</p>

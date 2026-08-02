@@ -147,9 +147,3 @@ export function pushAgentConfigLive(payload: {
     pushConfigKeyValue('agent.service_tier', payload.fastMode ? 'fast' : 'default')
   }
 }
-
-export function resetConfigSync() {
-  if (pushCooldown) clearTimeout(pushCooldown)
-  pushCooldown = null
-  lastPushJson = ''
-}

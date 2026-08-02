@@ -93,6 +93,20 @@ function lastAssistantText(messages: any): string {
   return ''
 }
 
+/**
+ * Derive a Hermes-style tool "kind" from the tool name. The ACP adapter maps
+ * file-modifying tools (write_file / edit / str_replace / apply_patch) to
+ * kind='edit', which the UI uses to detect pending file changes for the diff
+ * preview. serve events don't carry a `kind`, so reconstruct it from the name.
+ */
+function toolKindFromName(name: string): string {
+  const n = (name || '').toLowerCase()
+  if (n.includes('write') || n.includes('edit') || n.includes('patch') || n.includes('str_replace') || n.includes('create_file')) return 'edit'
+  if (n.includes('read') || n.includes('list') || n.includes('glob') || n.includes('grep') || n.includes('search') || n.includes('find')) return 'read'
+  if (n.includes('bash') || n.includes('execute') || n.includes('terminal') || n.includes('shell') || n.includes('run')) return 'execute'
+  return ''
+}
+
 // ── 网关客户端 ──────────────────────────────────────────────────────────
 
 const RPC_TIMEOUT_MS = 60_000
@@ -506,7 +520,7 @@ export class ServeGatewayClient {
               sessionUpdate: 'tool_call',
               toolCallId: toolId,
               title: name || 'tool',
-              kind: '',
+              kind: toolKindFromName(name),
               rawInput: payload?.args ?? payload?.args_text ?? {},
             },
           })

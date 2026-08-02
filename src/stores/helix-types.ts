@@ -7,9 +7,6 @@
  * imports (`import { type ChatMessage } from '@/stores/helix-store'`).
  */
 
-import type { McpServerConfig } from '@/stores/hermes-store'
-export type { McpServerConfig } from '@/stores/hermes-store'
-
 export interface FileNode {
   id: string
   name: string
@@ -183,8 +180,6 @@ export interface ProviderConfig {
   isDefault?: boolean
 }
 
-export const PROVIDER_PRESETS: Record<string, { name: string; baseUrl: string; models: string[] }> = {}
-
 export interface Skill {
   id: string
   name: string
@@ -272,14 +267,6 @@ export interface HermesTodo {
   content: string
   status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
   activeForm?: string
-}
-
-/** Raw payload shape Hermes may use; the parser tolerates missing fields. */
-export interface HermesTodoPayload {
-  todos?: HermesTodo[]
-  items?: HermesTodo[]
-  taskList?: HermesTodo[]
-  list?: HermesTodo[]
 }
 
 export interface SubAgent {

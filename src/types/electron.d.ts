@@ -109,6 +109,7 @@ export interface ElectronAPI {
     branchList: () => Promise<{ ok: boolean; branches?: string[]; error?: string }>
     branchSwitch: (branch: string) => Promise<{ ok: boolean; error?: string }>
     branchCreate: (branch: string) => Promise<{ ok: boolean; error?: string }>
+    currentBranch: () => Promise<{ ok: boolean; branch?: string; error?: string }>
     log: (count?: number) => Promise<{ ok: boolean; output?: string; error?: string }>
     // Worktree operations
     worktreeList: () => Promise<{ ok: boolean; worktrees?: Array<{ path: string; head?: string; branch?: string; bare?: boolean; detached?: boolean; locked?: boolean; prunable?: boolean; isMain?: boolean }>; error?: string }>
@@ -125,6 +126,42 @@ export interface ElectronAPI {
 
   platform: string
   isElectron: boolean
+
+  // ── Email (IMAP inbox / SMTP send / notifications) ─────────────────────────
+  email: {
+    configure: (partial: {
+      user: string
+      authCode: string
+      fromName?: string
+      imapHost?: string
+      imapPort?: number
+      imapSecure?: boolean
+      smtpHost?: string
+      smtpPort?: number
+      smtpSecure?: boolean
+    }) => Promise<{ configured: boolean; user?: string; imapHost?: string; smtpHost?: string } & Record<string, any>>
+    getConfig: () => Promise<{ configured: boolean; hasAuthCode?: boolean } & Record<string, any>>
+    list: (opts?: { limit?: number }) => Promise<Array<{
+      uid: number
+      from: string
+      fromAddress: string
+      subject: string
+      date: number
+      seen: boolean
+    }>>
+    get: (uid: number) => Promise<{
+      uid: number
+      subject: string
+      from: string
+      to: string
+      date: number
+      text: string
+      html: string
+      attachments: Array<{ filename: string; size: number; contentType: string }>
+    }>
+    send: (msg: { to: string; subject?: string; text?: string; html?: string }) => Promise<{ accepted: string[]; messageId: string }>
+    notify: (msg: { to?: string; subject?: string; text?: string }) => Promise<{ accepted: string[]; messageId: string }>
+  }
 
   // ── Hooks (written into Hermes' config.yaml `hooks:` block; backend fires them) ──
   hooks: {

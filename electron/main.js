@@ -30,6 +30,7 @@ const registerSecurityHandlers = securityModule
 const { isBadConfig, APIHUB_DEFAULT } = securityModule
 const registerFsHandlers = require('./ipc/fs')
 const registerWindowHandlers = require('./ipc/window')
+const registerEmailHandlers = require('./ipc/email')
 const hooksModule = require('./ipc/hooks')
 const configModule = require('./lib/config')
 const {
@@ -1111,6 +1112,7 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      webviewTag: true,
     },
     backgroundColor: '#FCFBF9',
   })
@@ -1975,6 +1977,9 @@ registerFsHandlers(() => workDir)
 
 // ── Window management ───────────────────────────────────────────────────────
 const windowModule = registerWindowHandlers(() => mainWindow, PORT, appIcon)
+
+// ── Email (IMAP inbox / SMTP send / notifications) ─────────────────────────
+registerEmailHandlers()
 
 // Shell operations (not extracted — small and standalone)
 safeHandle('shell:open', async (event, target) => {

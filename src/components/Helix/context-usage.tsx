@@ -213,7 +213,7 @@ export function ContextUsageIndicator() {
 
 // ---- Ring component (small circular progress indicator) ----
 
-export function ContextUsageRing({ used, total = 128000 }: { used: number; total?: number }) {
+function ContextUsageRing({ used, total = 128000 }: { used: number; total?: number }) {
   const percentage = Math.min(Math.max((used / total) * 100, 0), 100)
   const radius = 7
   const circumference = 2 * Math.PI * radius

@@ -23,7 +23,30 @@ interface FileTreeItem {
 }
 
 interface FileTreePanelProps {
-  onClose: () => void
+  /** Called after a file's content has been loaded into the editor store, so
+   *  the parent can surface the code page (the pages model, not rightSidebarTab,
+   *  drives which view is visible). */
+  onOpenFile?: () => void
+}
+
+// Pastel folder tints for the warm cream workspace, matching the
+// colorful sidebar in the reference screenshot.
+const FOLDER_COLORS = [
+  'oklch(0.72 0.14 25)',
+  'oklch(0.74 0.16 55)',
+  'oklch(0.80 0.14 95)',
+  'oklch(0.76 0.13 125)',
+  'oklch(0.74 0.13 155)',
+  'oklch(0.74 0.12 185)',
+  'oklch(0.74 0.13 245)',
+  'oklch(0.74 0.14 300)',
+  'oklch(0.76 0.14 340)',
+]
+
+function folderColor(name: string): string {
+  let hash = 0
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0
+  return FOLDER_COLORS[hash % FOLDER_COLORS.length]
 }
 
 function parsePorcelainV2(output: string): Map<string, string> {
@@ -130,7 +153,7 @@ function ExtensionIcon({ name, className }: { name: string; className?: string }
   return <FileText className={`size-4 shrink-0 ${ext && colorMap[ext] ? colorMap[ext] : 'text-muted-foreground/60'} ${className || ''}`} />
 }
 
-export function FileTreePanel({ onClose }: FileTreePanelProps) {
+export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
   const showToast = useHelixStore(s => s.showToast)
   const openFileInEditor = useHelixStore(s => s.openFileInEditor)
@@ -139,7 +162,7 @@ export function FileTreePanel({ onClose }: FileTreePanelProps) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [branchName, setBranchName] = useState('')
-  const [showHidden, setShowHidden] = useState(false)
+  const showHidden = false
 
   const loadTree = useCallback(async () => {
     if (!isElectron() || !selectedWorkDir) {
@@ -270,7 +293,7 @@ export function FileTreePanel({ onClose }: FileTreePanelProps) {
         return
       }
       openFileInEditor(item.path, item.name, content)
-      useHelixStore.getState().setRightSidebarTab('code')
+      onOpenFile?.()
     } catch (e: any) {
       showToast({ type: 'error', title: '打开失败', description: e?.message || '读取文件出错' })
     }
@@ -287,13 +310,18 @@ export function FileTreePanel({ onClose }: FileTreePanelProps) {
     return items.map((item) => {
       const status = gitStatus.get(item.path)
       const style = status ? getStatusStyle(status) : null
+      const isTopFolder = item.isDirectory && depth === 0
+      const bg = isTopFolder ? folderColor(item.name) : undefined
       return (
         <div key={item.path}>
           <div
-            className={`flex items-center gap-1 px-2 py-0.5 cursor-pointer rounded-sm group text-[13px] transition-colors ${
-              item.isDirectory ? '' : 'hover:bg-accent/40'
+            className={`flex items-center gap-1 px-2 py-0.5 cursor-pointer rounded-md group text-[13px] transition-colors ${
+              item.isDirectory ? 'hover:brightness-95' : 'hover:bg-accent/40'
             }`}
-            style={{ paddingLeft: `${depth * 16 + 8}px` }}
+            style={{
+              paddingLeft: `${depth * 16 + 8}px`,
+              ...(bg ? { backgroundColor: bg } : {}),
+            }}
             onClick={() => handleFileClick(item)}
             onContextMenu={(e) => {
               e.preventDefault()
@@ -302,23 +330,23 @@ export function FileTreePanel({ onClose }: FileTreePanelProps) {
           >
             {item.isDirectory ? (
               <ChevronRight
-                className={`size-3.5 text-muted-foreground/40 shrink-0 transition-transform duration-150 ${
-                  item.expanded ? 'rotate-90' : ''
-                }`}
+                className={`size-3.5 shrink-0 transition-transform duration-150 ${
+                  bg ? 'text-white/80' : 'text-muted-foreground/40'
+                } ${item.expanded ? 'rotate-90' : ''}`}
               />
             ) : (
               <span className="w-3.5 shrink-0" />
             )}
             {item.isDirectory ? (
               item.expanded ? (
-                <FolderOpen className="size-4 text-amber-400/70 shrink-0" />
+                <FolderOpen className={`size-4 shrink-0 ${bg ? 'text-white/90' : 'text-amber-400/70'}`} />
               ) : (
-                <Folder className="size-4 text-amber-400/60 shrink-0" />
+                <Folder className={`size-4 shrink-0 ${bg ? 'text-white/80' : 'text-amber-400/60'}`} />
               )
             ) : (
               <ExtensionIcon name={item.name} />
             )}
-            <span className="truncate flex-1 text-foreground/80">{item.name}</span>
+            <span className={`truncate flex-1 ${bg ? 'text-white' : 'text-foreground/80'}`}>{item.name}</span>
             {style && (
               <span
                 className={`shrink-0 text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded ${style.color} ${style.bg}`}
@@ -337,7 +365,7 @@ export function FileTreePanel({ onClose }: FileTreePanelProps) {
   }
 
   return (
-    <div className="h-full bg-sidebar border-r border-sidebar-border/60 flex flex-col overflow-hidden w-[260px] shrink-0">
+    <div className="h-full w-full bg-sidebar flex flex-col overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-3 h-9 shrink-0 border-b border-sidebar-border/60">
         <div className="flex items-center gap-1.5 min-w-0">
@@ -350,26 +378,11 @@ export function FileTreePanel({ onClose }: FileTreePanelProps) {
         </div>
         <div className="flex items-center gap-0.5">
           <button
-            onClick={() => setShowHidden(v => !v)}
-            className={`p-1 rounded text-[10px] font-mono transition-colors ${
-              showHidden ? 'text-foreground bg-accent/60' : 'text-muted-foreground/30 hover:text-foreground/60'
-            }`}
-            title="Show hidden files"
-          >
-            .*
-          </button>
-          <button
             onClick={() => loadTree()}
             className="p-1 rounded text-muted-foreground/30 hover:text-foreground/60 transition-colors"
             title="Refresh"
           >
             <RefreshCw className={`size-3 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-          <button
-            onClick={onClose}
-            className="p-1 rounded text-muted-foreground/30 hover:text-foreground/60 transition-colors"
-          >
-            <span className="text-[15px] leading-none">&times;</span>
           </button>
         </div>
       </div>
@@ -392,5 +405,3 @@ export function FileTreePanel({ onClose }: FileTreePanelProps) {
     </div>
   )
 }
-
-export { parsePorcelainV2 }

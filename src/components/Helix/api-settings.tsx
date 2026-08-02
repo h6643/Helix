@@ -9,10 +9,10 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { useHermes } from '@/hooks/use-hermes'
 import { pushModelConfig } from '@/lib/config-sync'
-import { isElectron, hermesApi } from '@/lib/electron-bridge'
-import { persistence, type PersistedSession } from '@/lib/persist'
+import { isElectron, hermesApi, electronFS, electronDialog } from '@/lib/electron-bridge'
+import { persistence } from '@/lib/persist'
 import { getAllProviders, getBaseUrl } from '@/lib/providers'
-import { useHelixStore, type ApiConfig, type McpServerConfig } from '@/stores/helix-store'
+import { useHelixStore, type ApiConfig, type McpServerConfig, type BrowserBookmark } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
 import { AgentsSettings } from './agents-settings'
 import { AppearanceSettingsPanel } from './appearance-settings-panel'
@@ -27,9 +27,66 @@ import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './u
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <div className={`flex items-center gap-2 mb-4 ${className || ''}`}>
-      <h3 className="text-lg font-bold text-foreground">{children}</h3>
+      <h3 className="text-lg font-semibold text-foreground">{children}</h3>
     </div>
   )
+}
+
+// ── Chrome bookmark import ──────────────────────────────────────────────────────
+function parseChromeBookmarks(content: string): BrowserBookmark[] {
+  try {
+    const data = JSON.parse(content)
+    const bar = (data?.roots?.bookmark_bar?.children ?? []) as any[]
+    const norm = (n: any): BrowserBookmark | null => {
+      if (!n) return null
+      if (n.type === 'url') return { name: String(n.name ?? ''), type: 'url', url: String(n.url ?? '') }
+      if (n.type === 'folder') return { name: String(n.name ?? ''), type: 'folder', children: (n.children ?? []).map(norm).filter(Boolean) as BrowserBookmark[] }
+      return null
+    }
+    return bar.map(norm).filter(Boolean) as BrowserBookmark[]
+  } catch {
+    return []
+  }
+}
+
+// Chrome's default User Data directory on this machine. Used as both the first
+// auto-detect path and the directory picker's starting location.
+const CHROME_DEFAULT_DIR = 'C:/Users/hyt/AppData/Local/Google/Chrome/User Data/Default'
+
+async function tryReadBookmarks(dir: string): Promise<string | null> {
+  if (typeof window === 'undefined' || !window.electron?.hermesSkills) return null
+  for (const cand of [`${dir}/Bookmarks`, `${dir}/Default/Bookmarks`]) {
+    const c = await window.electron.hermesSkills.readFile(cand)
+    if (c) return c
+  }
+  return null
+}
+
+async function importChromeBookmarks(): Promise<void> {
+  const toast = useHelixStore.getState().showToast
+  try {
+    // 1. Try the default path without a dialog (most users have it there).
+    let content = await tryReadBookmarks(CHROME_DEFAULT_DIR)
+    // 2. Otherwise let the user pick the Chrome "Default" or "User Data" dir.
+    if (!content) {
+      const picked = await electronDialog.openDirectory(CHROME_DEFAULT_DIR)
+      if (!picked) return // user cancelled
+      content = await tryReadBookmarks(picked)
+    }
+    if (!content) {
+      toast({ type: 'warning', title: '未找到书签', description: '该目录中未发现 Chrome 的 Bookmarks 文件' })
+      return
+    }
+    const items = parseChromeBookmarks(content)
+    if (items.length === 0) {
+      toast({ type: 'warning', title: '没有可导入的书签', description: '书签栏为空' })
+      return
+    }
+    useHelixStore.getState().setBrowserBookmarks(items)
+    toast({ type: 'success', title: '已导入书签', description: `从 Chrome 导入了 ${items.length} 个书签项` })
+  } catch (e: any) {
+    toast({ type: 'error', title: '导入失败', description: String(e?.message ?? e) })
+  }
 }
 
 const ALL_PROVIDERS = getAllProviders()
@@ -64,8 +121,8 @@ function deriveProviderName(baseUrl?: string, fallback?: string): string {
 }
 
 interface SettingsProps {
-  theme: 'light' | 'dark'
-  onToggleTheme: () => void
+  themeStyle: string
+  onSelectThemeStyle: (styleId: string) => void
   // Shared with the main layout so the settings nav width stays in sync with
   // the main sidebar (single source of truth: helix-layout's sidebarWidth).
   sidebarWidth: number
@@ -77,7 +134,7 @@ interface SettingsProps {
   setSidebarCollapsed: (v: boolean | ((prev: boolean) => boolean)) => void
 }
 
-type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'git' | 'skills' | 'hook' | 'usage' | 'help' | 'agents' | 'learning'
+type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'browser' | 'git' | 'skills' | 'hook' | 'usage' | 'help' | 'agents' | 'learning'
 
 interface NavItem {
   id: SettingsPage
@@ -96,6 +153,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'general', label: '常规', icon: Settings },
       { id: 'appearance', label: '外观', icon: Sun },
+      { id: 'browser', label: '浏览器', icon: Globe },
       { id: 'archive', label: '历史归档', icon: Archive },
       { id: 'shortcuts', label: '快捷键', icon: Keyboard },
     ],
@@ -139,7 +197,7 @@ const Toggle = ({ enabled, onToggle }: { enabled: boolean; onToggle: () => void 
 )
 
 // ─── Main component ──────────────────────────────────────────────────────────
-export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidth, saveSidebarWidth, showSidebar, setShowSidebar, sidebarCollapsed, setSidebarCollapsed }: SettingsProps) {
+export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setSidebarWidth, saveSidebarWidth, showSidebar, setShowSidebar, sidebarCollapsed, setSidebarCollapsed }: SettingsProps) {
   const {
     apiConfig, apiProfiles, activeProfileId,
     apiHistory, addApiHistory, removeApiHistory,
@@ -166,22 +224,13 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
     // Notification settings
     desktopNotifications, setDesktopNotifications,
     soundEnabled, setSoundEnabled,
-    // Startup behavior
-    restoreLastSession, setRestoreLastSession,
-    defaultWorkDir, setDefaultWorkDir,
-    // Security
-    confirmDangerousActions, setConfirmDangerousActions,
-    autoApproveRead, setAutoApproveRead,
   } = useHelixStore()
-
-  const checkpoints = useHelixStore(s => s.checkpoints)
-  const saveCheckpoint = useHelixStore(s => s.saveCheckpoint)
-  const restoreCheckpoint = useHelixStore(s => s.restoreCheckpoint)
-  const removeCheckpoint = useHelixStore(s => s.removeCheckpoint)
 
   const settingsPage = useHelixStore(s => s.settingsPage)
   const setSettingsPage = useHelixStore(s => s.setSettingsPage)
   const pushNavigation = useHelixStore(s => s.pushNavigation)
+  const setBrowserBookmarks = useHelixStore(s => s.setBrowserBookmarks)
+  const browserBookmarks = useHelixStore(s => s.browserBookmarks)
   const [page, setPage] = useState<SettingsPage>((settingsPage as SettingsPage) || 'general')
   const [navSearch, setNavSearch] = useState('')
   const navSearchRef = useRef<HTMLInputElement>(null)
@@ -387,7 +436,6 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
 
   // Archive state
   const [archives, setArchives] = useState<Array<{ id: string; label: string; savedAt: number; messageCount: number }>>([])
-  const [archiving, setArchiving] = useState(false)
 
   const loadArchives = useCallback(async () => {
     try {
@@ -659,29 +707,6 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
     setMcpForm(prev => ({ ...prev, ...patch }))
   }, [])
 
-  // ── Archive handlers ──────────────────────────────────────────────────────
-  const handleArchiveCurrent = useCallback(async () => {
-    const state = useHelixStore.getState()
-    if (state.chatMessages.length === 0) { showToast({ type: 'info', title: '当前没有对话内容' }); return }
-    setArchiving(true)
-    try {
-      const collectFiles = (nodes: typeof state.files): PersistedSession['files'] =>
-        nodes.map(n => ({ id: n.id, name: n.name, type: n.type, content: n.content, language: n.language, children: n.children ? collectFiles(n.children) : undefined }))
-      const label = new Date().toLocaleString('zh-CN')
-      await persistence.saveSession({
-        label, workDir: state.selectedWorkDir, goal: state.goal, memories: state.memories, tasks: state.tasks,
-        notes: state.notes, checkpoints: state.checkpoints,
-        isArchived: true,
-        chatMessages: state.chatMessages.map(m => ({ id: m.id, sessionId: 'session-' + Date.now(), role: m.role, content: m.content, timestamp: m.timestamp, isStreaming: m.isStreaming ?? false })),
-        files: collectFiles(state.files),
-        openTabs: state.openTabs.map(tab => ({
-          id: tab.id, fileId: tab.fileId, name: tab.name, language: tab.language, isDirty: tab.isDirty,
-        })),
-      })
-      showToast({ type: 'success', title: '已归档' }); await loadArchives()
-    } catch { showToast({ type: 'error', title: '归档失败' }) } finally { setArchiving(false) }
-  }, [showToast, loadArchives])
-
   const handleDeleteArchive = useCallback(async (id: string) => {
     await persistence.deleteSession(id); showToast({ type: 'success', title: '已删除' }); await loadArchives()
   }, [showToast, loadArchives])
@@ -708,25 +733,6 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
     await persistToStorage()
     showToast({ type: 'success', title: '已恢复', description: session.label })
   }, [showToast, persistToStorage])
-
-  // ── Checkpoint handlers ───────────────────────────────────────────────────
-  const handleSaveCheckpoint = useCallback(async () => {
-    saveCheckpoint()
-    await persistToStorage()
-    showToast({ type: 'success', title: 'Checkpoint 已保存' })
-  }, [saveCheckpoint, persistToStorage, showToast])
-
-  const handleRestoreCheckpoint = useCallback(async (id: string) => {
-    restoreCheckpoint(id)
-    await persistToStorage()
-    showToast({ type: 'success', title: 'Checkpoint 已恢复' })
-  }, [restoreCheckpoint, persistToStorage, showToast])
-
-  const handleRemoveCheckpoint = useCallback(async (id: string) => {
-    removeCheckpoint(id)
-    await persistToStorage()
-    showToast({ type: 'success', title: 'Checkpoint 已删除' })
-  }, [removeCheckpoint, persistToStorage, showToast])
 
   // ── Shared components ─────────────────────────────────────────────────────
   const SettingRow = ({ icon, label, children }: { icon: React.ReactNode; label: string; children: React.ReactNode }) => (
@@ -811,12 +817,40 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
             // in another provider's fetched list (e.g. cross-endpoint pollution),
             // causing an explicit deepseek click to snap back to Ling.
             const state = useHelixStore.getState()
-            const match = state.providers.find((p) => p.baseUrl === h.baseUrl)
+            let match = state.providers.find((p) => p.baseUrl === h.baseUrl)
+            if (!match) {
+              // This endpoint lives only in history (no saved Profile). Upsert a
+              // runtime provider so the input-bar model list can resolve to it and
+              // the active model stays pinned instead of snapping to the default
+              // provider (Ling) after a refresh.
+              const exists = state.providers.some((p) => p.baseUrl === h.baseUrl)
+              useHelixStore.setState((s) => ({
+                providers: exists
+                  ? s.providers.map((p) =>
+                      p.baseUrl === h.baseUrl
+                        ? { ...p, models: Array.from(new Set([...(p.models || []), h.model])) }
+                        : p,
+                    )
+                  : [
+                      ...s.providers,
+                      {
+                        id: `hist-${h.baseUrl}`,
+                        name: h.provider || (() => { try { return new URL(h.baseUrl).hostname } catch { return '配置' } })(),
+                        baseUrl: h.baseUrl,
+                        apiKey: h.apiKey || '',
+                        models: [h.model],
+                        isDefault: false,
+                      } as any,
+                    ],
+              }))
+              match = useHelixStore.getState().providers.find((p) => p.baseUrl === h.baseUrl) as any
+            }
             useHelixStore.setState({
               activeModel: h.model,
               activeProviderId: match?.id || null,
               apiConfig: {
                 ...state.apiConfig,
+                ...h,
                 provider: match?.name || h.provider || 'custom',
                 model: h.model,
               },
@@ -888,14 +922,14 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
         return <GeneralSettingsPanel />
 
       case 'appearance':
-        return <AppearanceSettingsPanel theme={theme} onToggleTheme={onToggleTheme} />
+        return <AppearanceSettingsPanel themeStyle={themeStyle} onSelectThemeStyle={onSelectThemeStyle} />
 
       case 'api':
         return (
           <div className="space-y-6">
             {/* Title bar — always visible */}
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-bold text-foreground">模型</h3>
+              <h3 className="text-lg font-semibold text-foreground">模型</h3>
               {!showAddModelModal ? (
                 <button
                   onClick={() => {
@@ -1079,7 +1113,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
         return (
           <div className="space-y-6">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-bold text-foreground">MCP</h3>
+              <h3 className="text-lg font-semibold text-foreground">MCP</h3>
               {!isAddingMcp && !editingMcpName ? (
                 <button
                   onClick={() => { setIsAddingMcp(true); resetMcpForm() }}
@@ -1167,55 +1201,10 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
       case 'archive':
         return (
           <div className="max-w-2xl space-y-6">
-            <div className="flex items-center justify-between">
-              <SectionTitle className="mb-0">历史归档</SectionTitle>
-              <Button size="sm" onClick={handleArchiveCurrent} disabled={archiving}>
-                {archiving ? '归档中…' : '归档当前会话'}
-              </Button>
-            </div>
-
-            {/* Checkpoints */}
-            <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-base font-semibold text-foreground">Checkpoint</h4>
-                <Button size="sm" variant="outline" onClick={handleSaveCheckpoint}>
-                  + 创建 Checkpoint
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground/60">保存当前任务树与记忆快照，可随时恢复到该状态。</p>
-              {checkpoints.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-6 text-center rounded-xl border border-dashed border-border/40">
-                  <p className="text-sm font-medium text-foreground/50">暂无 Checkpoint</p>
-                </div>
-              ) : (
-                <div className="space-y-1.5">
-                  {checkpoints.map(cp => (
-                    <div key={cp.id} className="flex items-center justify-between px-4 py-3 border-b border-border/30 last:border-b-0 hover:bg-accent/30 transition-colors group">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-foreground truncate">{cp.label}</p>
-                        <p className="text-xs text-muted-foreground/70 mt-0.5">
-                          {new Date(cp.timestamp).toLocaleString('zh-CN')} · {cp.taskIds.length} 个任务 · {cp.memorySnapshot.split('\n').filter(Boolean).length} 条记忆
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button onClick={() => handleRestoreCheckpoint(cp.id)}
-                          className="px-2 py-1 rounded-md text-xs text-muted-foreground/40 hover:text-blue-500 transition-colors">
-                          恢复
-                        </button>
-                        <button onClick={() => handleRemoveCheckpoint(cp.id)}
-                          className="px-2 py-1 rounded-md text-xs text-muted-foreground/40 hover:text-red-500 transition-colors">
-                          删除
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </section>
+            <SectionTitle className="mb-0">历史归档</SectionTitle>
 
             {/* Archived sessions */}
             <section className="space-y-3">
-              <h4 className="text-base font-semibold text-foreground">已归档会话</h4>
               {archives.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <p className="text-sm font-medium text-foreground/60">暂无归档记录</p>
@@ -1239,6 +1228,21 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                 </div>
               )}
             </section>
+          </div>
+        )
+
+      case 'browser':
+        return (
+          <div className="max-w-xl space-y-4">
+            <SectionTitle>浏览器</SectionTitle>
+            <SettingRow icon={<Globe className="size-4 text-foreground/60" />} label="从 Chrome 导入书签">
+              <Button variant="outline" size="sm" onClick={() => importChromeBookmarks()}>
+                选择 Chrome 数据目录
+              </Button>
+              {browserBookmarks.length > 0 && (
+                <span className="ml-3 text-xs text-muted-foreground/70">已导入 {browserBookmarks.length} 个书签项</span>
+              )}
+            </SettingRow>
           </div>
         )
 
@@ -1348,7 +1352,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
             </div>
           ) : (
             <>
-              <div className="px-4 py-2 space-y-2">
+              <div className="px-4 pt-2 pb-1 space-y-2">
                 <button
                   onClick={() => useHelixStore.getState().toggleSettings()}
                   className="flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground/60 hover:text-foreground hover:bg-muted/80 rounded-xl transition-colors"
@@ -1371,10 +1375,10 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                   : NAV_GROUPS
                 if (!filtered.length) return <div className="px-5 py-8 text-center text-[13px] text-muted-foreground/40">未找到匹配项</div>
                 return (
-                  <nav className="flex-1 overflow-y-auto py-2">
+                  <nav className="flex-1 overflow-y-auto pt-1 pb-2">
                     {filtered.map(group => (
                       <div key={group.title} className="mb-2">
-                        <p className="px-5 py-1.5 text-[10px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
+                        <p className="px-5 py-1.5 text-[13px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
                           {group.title}
                         </p>
                         <div className="space-y-0.5 px-2">
@@ -1386,7 +1390,7 @@ export function ApiSettings({ theme, onToggleTheme, sidebarWidth, setSidebarWidt
                               pushNavigation({ type: 'settings', page: item.id })
                               setNavSearch('')
                             }}
-                            className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-[13px] rounded-md transition-colors duration-100 ${
+                            className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-sm rounded-md transition-colors duration-100 ${
                               page === item.id
                                 ? 'bg-muted text-foreground font-medium'
                                 : 'text-foreground/65 hover:bg-muted/50 hover:text-foreground'

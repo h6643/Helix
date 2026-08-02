@@ -13,7 +13,7 @@ import {
   EMPTY_HOOKS_SETTINGS,
   generateHookId,
 } from '@/lib/hooks-config'
-import { Toggle, SettingRow, SettingGroup, SectionHeading } from './settings-ui'
+import { Toggle, SettingGroup, SectionHeading } from './settings-ui'
 
 export function HookSettings() {
   const [settings, setSettings] = useState<HooksSettings>(EMPTY_HOOKS_SETTINGS)
@@ -130,9 +130,7 @@ export function HookSettings() {
     <div className="max-w-xl space-y-1">
       <SectionHeading>Hooks</SectionHeading>
 
-      <SettingRow label="启用 Hooks">
-        <Toggle enabled={settings.enabled} onToggle={() => setMasterEnabled(!settings.enabled)} />
-      </SettingRow>
+      <SettingGroup title="启用 Hooks" action={<Toggle enabled={settings.enabled} onToggle={() => setMasterEnabled(!settings.enabled)} />} />
 
       {HOOK_TYPES.map((type) => {
         const meta = HOOK_META[type]
@@ -176,7 +174,7 @@ export function HookSettings() {
       })}
 
       <div className="flex items-center justify-end gap-3 pt-4">
-        <Button size="sm" onClick={save} disabled={saving}>
+        <Button size="sm" variant="outline" onClick={save} disabled={saving}>
           {saving ? '保存并重启网关…' : '保存 Hooks 配置'}
         </Button>
         {saveState === 'ok' && (

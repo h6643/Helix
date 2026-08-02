@@ -2,11 +2,10 @@
  * API configuration slice — provider, model, profiles, history.
  */
 import type { StateCreator } from 'zustand'
-import { electronHermes } from '@/lib/electron-bridge'
 import { generateId } from '@/lib/format'
 import { warn } from '@/lib/logger'
-import type { ApiConfig, ApiProfile, ApiProvider, ProviderConfig } from '../helix-types'
-import { PROVIDER_PRESETS } from '../helix-types'
+import type { ApiConfig, ApiProfile, ProviderConfig } from '../helix-types'
+import { isModelProviderMismatch } from '@/lib/provider-match'
 
 /** Provider ids currently auto-fetching their model lists (in-flight guard). */
 const fetchingProviderModels = new Set<string>()
@@ -151,16 +150,11 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
       // requested model does not belong to the requested endpoint, snap to the
       // endpoint's first available model so the backend never receives the
       // wrong model name and the dropdown never shows one supplier's models
-      // while the button shows another supplier's name.
+      // while the button shows another supplier's name. Uses the shared
+      // classifier so ALL families are covered (k3/Kimi, glm/Zhipu, ...),
+      // not just the Ling↔DeepSeek pair the old inline check handled.
       if (apiConfig.baseUrl && apiConfig.model) {
-        const mismatch = (model: string, baseUrl: string): boolean => {
-          const u = baseUrl.toLowerCase()
-          const m = model.toLowerCase()
-          if (u.includes('deepseek') && m.includes('ling')) return true
-          if ((u.includes('ling') || u.includes('agnes') || u.includes('ant-')) && m.includes('deepseek')) return true
-          return false
-        }
-        if (mismatch(apiConfig.model, apiConfig.baseUrl)) {
+        if (isModelProviderMismatch(apiConfig.model, apiConfig.baseUrl)) {
           const owner = state.providers.find((p) => p.baseUrl === apiConfig.baseUrl)
           const ownerModels = owner
             ? [...new Set([...(owner.models || []), ...(state.providerModels?.[owner.id] || [])])]
@@ -198,6 +192,15 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
 
   addApiHistory: (config) =>
     set((state) => {
+      // Refuse to record a poisoned entry where the model name clearly belongs
+      // to a different supplier than the endpoint (e.g. k3/Kimi under a DeepSeek
+      // base URL). Such records are exactly the "脏数据" that previously showed
+      // one supplier's model under another's config group. We drop it before it
+      // ever enters apiHistory; the user keeps using their current selection.
+      if (isModelProviderMismatch(config.model, config.baseUrl)) {
+        warn('[api-config-slice] addApiHistory: 跳过模型/端点不匹配的记录', config.model, config.baseUrl)
+        return state
+      }
       // Deduplicate by baseUrl + apiKey + model. The same endpoint with the
       // same key AND the same model name is one logical entry; a different
       // model on the same endpoint is a separate entry so it shows up in the

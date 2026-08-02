@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile)
 
 module.exports = function registerGitHandlers(getWorkDir) {
   // Idempotent registration — dev reloads may re-execute this module.
-  const handles = ['git:status', 'git:diff', 'git:diffHead', 'git:revert', 'git:stage', 'git:unstage', 'git:commit', 'git:branchList', 'git:branchSwitch', 'git:branchCreate', 'git:log']
+  const handles = ['git:status', 'git:diff', 'git:diffHead', 'git:revert', 'git:stage', 'git:unstage', 'git:commit', 'git:branchList', 'git:branchSwitch', 'git:branchCreate', 'git:currentBranch', 'git:log']
   for (const channel of handles) {
     try { ipcMain.removeHandler(channel) } catch { /* ignore */ }
   }
@@ -129,6 +129,15 @@ module.exports = function registerGitHandlers(getWorkDir) {
     try {
       await gitExecArgs(['checkout', '-b', branch])
       return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e.message) }
+    }
+  })
+
+  ipcMain.handle('git:currentBranch', async () => {
+    try {
+      const { stdout } = await gitExecArgs(['rev-parse', '--abbrev-ref', 'HEAD'])
+      return { ok: true, branch: stdout.trim() || 'HEAD' }
     } catch (e) {
       return { ok: false, error: String(e.message) }
     }

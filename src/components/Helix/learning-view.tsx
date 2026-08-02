@@ -104,8 +104,8 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
                 </button>
             </div>
             {revealErr && <p className="text-[10px] text-red-400 mb-1">{revealErr}</p>}
-            <h3 className="text-xs font-medium mb-1">{active.name}</h3>
-            <pre className="text-[11px] whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-muted/40 rounded-lg p-2">
+            <h3 className="text-sm font-medium mb-1">{active.name}</h3>
+            <pre className="text-sm whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-muted/40 rounded-lg p-2">
               {active.text.slice(0, 20000)}
             </pre>
           </div>

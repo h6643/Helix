@@ -10,9 +10,17 @@ const crypto = require('crypto')
 
 function resolveHermesCandidates() {
   const managedRoot = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'hermes-agent')
+  // Packaged build: the backend ships inside the Electron resources directory
+  // (see electron-builder.json `extraResources`). Check it FIRST so an installed
+  // app uses its bundled backend instead of a (possibly absent / version-mismatched)
+  // external AppData install. In dev mode this path does not exist, so resolution
+  // falls through to managedRoot below — dev behavior is unchanged.
+  const packedRoot = path.join(process.resourcesPath, 'hermes-agent')
   // Prefer `venv` (the user's known-good, integration-patched runtime) first;
   // fall back to `.venv` (provisioned by newer `hermes update`). Both may exist.
   const cands = [
+    path.join(packedRoot, 'venv', 'Scripts', 'hermes.exe'),
+    path.join(packedRoot, '.venv', 'Scripts', 'hermes.exe'),
     path.join(managedRoot, 'venv', 'Scripts', 'hermes.exe'),
     path.join(managedRoot, '.venv', 'Scripts', 'hermes.exe'),
   ]
@@ -134,10 +142,5 @@ async function verifyKernel() {
 module.exports = {
   resolveHermesCandidates,
   resolveHermesCmd,
-  isTrustedPath,
-  sha256File,
-  listKernelArtifacts,
-  loadKernelPublicKey,
-  verifyKernelSignature,
   verifyKernel,
 }

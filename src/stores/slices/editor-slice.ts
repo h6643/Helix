@@ -11,7 +11,7 @@
  */
 import type { StateCreator } from 'zustand'
 
-export interface EditorTab {
+interface EditorTab {
   /** Stable id — equals the file path relative to the working directory. */
   id: string
   /** Path relative to the working directory (what fs:read/write expect). */

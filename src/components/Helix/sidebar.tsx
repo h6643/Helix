@@ -7,7 +7,6 @@ import {
   Puzzle,
   Settings,
   Activity,
-  GitPullRequest,
   Brain,
   Loader2,
   Trash2,
@@ -263,7 +262,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
     toggleSkillPanel,
     toggleSessionManager,
     toggleActivityFeed,
-    toggleReviewPanel,
     showToast,
     setSelectedWorkDir,
     setWorkDir,
@@ -280,7 +278,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       toggleSkillPanel: s.toggleSkillPanel,
       toggleSessionManager: s.toggleSessionManager,
       toggleActivityFeed: s.toggleActivityFeed,
-      toggleReviewPanel: s.toggleReviewPanel,
       showToast: s.showToast,
       setSelectedWorkDir: s.setSelectedWorkDir,
       setWorkDir: s.setWorkDir,
@@ -289,7 +286,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   const showScheduledTasksPanel = useHelixStore((s) => s.showScheduledTasksPanel)
           const showSkillPanel = useHelixStore((s) => s.showSkillPanel)
   const showActivityFeed = useHelixStore((s) => s.showActivityFeed)
-  const showReviewPanel = useHelixStore((s) => s.showReviewPanel)
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir)
 
   const currentSessionId = useHelixStore(s => s.currentSessionId)
@@ -707,7 +703,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       }
     },
     { id: 'activity', label: '活动', icon: Activity, action: () => toggleActivityFeed() },
-    { id: 'review', label: '审查', icon: GitPullRequest, action: () => toggleReviewPanel() },
   ]
 
   return (
@@ -719,8 +714,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             const isActive =
               (item.id === 'scheduled' && showScheduledTasksPanel) ||
               (item.id === 'plugins' && showSkillPanel) ||
-              (item.id === 'activity' && showActivityFeed) ||
-              (item.id === 'review' && showReviewPanel)
+              (item.id === 'activity' && showActivityFeed)
             return (
               <button
                 key={item.id}
@@ -757,8 +751,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             const isActive =
               (item.id === 'scheduled' && showScheduledTasksPanel) ||
               (item.id === 'plugins' && showSkillPanel) ||
-              (item.id === 'activity' && showActivityFeed) ||
-              (item.id === 'review' && showReviewPanel)
+              (item.id === 'activity' && showActivityFeed)
             return (
               <button
                 key={item.id}

@@ -22,13 +22,6 @@ export interface ProviderConfig {
   isDefault?: boolean
 }
 
-/** 顶层应用配置 */
-export interface AppConfig {
-  providers: ProviderConfig[]
-  /** 当前选中的模型名称，例如 "Ling-2.6-1T" */
-  activeModel: string | null
-}
-
 /**
  * 反向查找后得到的结构：模型名 → 所属 Provider 的完整配置 + 模型名本身。
  * 每次请求都重新生成这个对象，绝不缓存。
@@ -49,29 +42,4 @@ export interface FlatModel {
   providerName: string
 }
 
-export type ChatRole = 'system' | 'user' | 'assistant'
-
-export interface ChatMessage {
-  role: ChatRole
-  content: string
-}
-
 export type ReasoningEffortLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
-
-/** Named personality presets (Hermes Desktop style) */
-export const PERSONALITY_PRESETS: Record<string, string> = {
-  helpful: 'You are a helpful, harmless, and honest assistant.',
-  concise: 'You are a concise assistant. Give short, direct answers.',
-  technical: 'You are a technical assistant. Use precise terminology and provide detailed explanations.',
-  creative: 'You are a creative assistant. Think outside the box and provide imaginative solutions.',
-  teacher: 'You are a patient teacher. Explain concepts step by step with examples.',
-  kawaii: 'You are a cute and friendly assistant. Use a warm, cheerful tone.',
-  catgirl: 'Nyaa~ You are a catgirl assistant! Speak with cat-like expressions and be playful.',
-  pirate: 'Yarr! You be a pirate assistant. Speak in pirate slang and be adventurous.',
-  shakespeare: 'Thou art a Shakespearean assistant. Speak in Elizabethan English with eloquent prose.',
-  surfer: 'Dude, you are a surfer assistant! Use surf slang and keep it chill.',
-  noir: 'You are a hard-boiled noir detective assistant. Speak in gritty, cynical prose.',
-  uwu: 'You are a sweet UwU assistant. Use cute emoticons and speak softly~',
-  philosopher: 'You are a philosopher assistant. Explore ideas deeply and reference philosophical traditions.',
-  hype: 'You are a hype assistant! Everything is AMAZING and INCREDIBLE! Use lots of exclamation marks!!!',
-}

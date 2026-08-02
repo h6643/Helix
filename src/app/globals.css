@@ -45,46 +45,57 @@
 }
 
 :root {
+  color-scheme: light;
   --radius: 0.5rem;
-  /* ── Slate workspace (light) ──
-     Cool indigo-tinted neutrals. Background slightly warm paper-white,
-     primary indigo-violet (not generic blue) — same hue family as dark mode
-     so light/dark feel like one system, not two different apps. */
-  --background: oklch(0.985 0.004 250);
-  --foreground: oklch(0.14 0.012 250);
-  --card: oklch(0.995 0.002 250);
-  --card-foreground: oklch(0.14 0.012 250);
-  --popover: oklch(0.993 0.003 250);
-  --popover-foreground: oklch(0.14 0.012 250);
-  --primary: oklch(0.50 0.19 260);
-  --primary-foreground: oklch(0.985 0.002 250);
-  --secondary: oklch(0.94 0.008 250);
-  --secondary-foreground: oklch(0.20 0.015 250);
-  --muted: oklch(0.955 0.006 250);
-  --muted-foreground: oklch(0.42 0.015 250);
-  --accent: oklch(0.92 0.018 258);
-  --accent-foreground: oklch(0.15 0.015 258);
+  /* ── Cream / paper workspace (light) ──
+     Warm, low-contrast cream neutrals inspired by note-taking apps.
+     Primary is a soft amber-orange; surfaces read like tinted paper. */
+  --background: oklch(0.97 0.012 95);
+  --foreground: oklch(0.25 0.024 80);
+  --card: oklch(0.985 0.009 95);
+  --card-foreground: oklch(0.25 0.024 80);
+  --popover: oklch(0.99 0.007 95);
+  --popover-foreground: oklch(0.25 0.024 80);
+  --primary: oklch(0.62 0.15 55);
+  --primary-foreground: oklch(0.99 0.005 55);
+  --secondary: oklch(0.94 0.012 95);
+  --secondary-foreground: oklch(0.25 0.024 80);
+  --muted: oklch(0.92 0.01 100);
+  --muted-foreground: oklch(0.50 0.02 80);
+  --accent: oklch(0.90 0.022 85);
+  --accent-foreground: oklch(0.25 0.024 80);
   --destructive: oklch(0.58 0.22 22);
-  --border: oklch(0.905 0.008 250);
-  --input: oklch(0.935 0.005 250);
-  --ring: oklch(0.50 0.19 260);
-  --chart-1: oklch(0.50 0.19 260);
-  --chart-2: oklch(0.55 0.14 200);
-  --chart-3: oklch(0.50 0.12 280);
-  --chart-4: oklch(0.55 0.16 340);
-  --chart-5: oklch(0.60 0.14 55);
-  /* ── Sidebar — slightly tinted for depth ── */
-  --sidebar: oklch(0.945 0.006 250);
-  --sidebar-foreground: oklch(0.14 0.012 250);
-  --sidebar-primary: oklch(0.50 0.19 260);
-  --sidebar-primary-foreground: oklch(0.985 0.002 250);
-  --sidebar-accent: oklch(0.90 0.010 252);
-  --sidebar-accent-foreground: oklch(0.15 0.015 252);
-  --sidebar-border: oklch(0.905 0.008 250);
-  --sidebar-ring: oklch(0.50 0.19 260);
+  --border: oklch(0.88 0.012 95);
+  --input: oklch(0.95 0.009 95);
+  --ring: oklch(0.62 0.15 55);
+  --chart-1: oklch(0.62 0.15 55);
+  --chart-2: oklch(0.58 0.13 200);
+  --chart-3: oklch(0.55 0.12 280);
+  --chart-4: oklch(0.60 0.14 340);
+  --chart-5: oklch(0.65 0.14 100);
+  /* Extra semantic tokens */
+  --link: oklch(0.55 0.12 320);
+  /* ── Sidebar — warm paper, slightly deeper than background ── */
+  --sidebar: oklch(0.94 0.012 95);
+  --sidebar-foreground: oklch(0.25 0.024 80);
+  --sidebar-primary: oklch(0.62 0.15 55);
+  --sidebar-primary-foreground: oklch(0.99 0.005 55);
+  --sidebar-accent: oklch(0.88 0.016 95);
+  --sidebar-accent-foreground: oklch(0.25 0.024 80);
+  --sidebar-border: oklch(0.86 0.012 95);
+  --sidebar-ring: oklch(0.62 0.15 55);
+  /* ── Font-scope tokens ──
+     UI font + transcript size drive the app chrome (chat + settings).
+     Editor font + size drive ONLY the code editor (CodeMirror).
+     They are deliberately independent so the two never bleed into each other. */
+  --helix-interface-font: var(--font-geist-sans);
+  --helix-transcript-size: 14px;
+  --helix-font-family: var(--font-geist-mono);
+  --helix-font-size: 13px;
 }
 
 .dark {
+  color-scheme: dark;
   /* ── Deep Slate workspace (dark) ──
      Cool blue-grey neutrals for an OLED-ish precision workspace. Deeper
      backgrounds, slightly cool-tinted cards, indigo primary. Foregrounds
@@ -188,6 +199,9 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
   letter-spacing: -0.006em;
+  /* UI font scope: chat + settings inherit this. The code editor overrides
+     its own font via --helix-font-family on the CodeMirror element. */
+  font-family: var(--helix-interface-font, var(--font-geist-sans));
 }
 
 /* Headings: tighter tracking for cleaner hierarchy */
@@ -435,6 +449,169 @@ body.user-select-none * {
   opacity: 1;
 }
 
+/* Syntax highlighting (highlight.js): github light palette by default,
+   github-dark palette under .dark. Defined here (not via a component CSS
+   import) so the token colors are guaranteed to load. */
+pre code.hljs {
+  background: transparent;
+  color: #24292e;
+}
+
+.hljs-doctag,
+.hljs-keyword,
+.hljs-meta .hljs-keyword,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-variable.language_ {
+  color: #d73a49;
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.class_.inherited__,
+.hljs-title.function_ {
+  color: #6f42c1;
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-literal,
+.hljs-meta,
+.hljs-number,
+.hljs-operator,
+.hljs-variable,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: #005cc5;
+}
+.hljs-regexp,
+.hljs-string,
+.hljs-meta .hljs-string {
+  color: #032f62;
+}
+.hljs-built_in,
+.hljs-symbol {
+  color: #e36209;
+}
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  color: #6a737d;
+}
+.hljs-name,
+.hljs-quote,
+.hljs-selector-tag,
+.hljs-selector-pseudo {
+  color: #22863a;
+}
+.hljs-subst {
+  color: #24292e;
+}
+.hljs-section {
+  color: #005cc5;
+  font-weight: bold;
+}
+.hljs-bullet {
+  color: #735c0f;
+}
+.hljs-emphasis {
+  color: #24292e;
+  font-style: italic;
+}
+.hljs-strong {
+  color: #24292e;
+  font-weight: bold;
+}
+.hljs-addition {
+  color: #22863a;
+  background-color: #f0fff4;
+}
+.hljs-deletion {
+  color: #b31d28;
+  background-color: #ffeef0;
+}
+
+.dark pre code.hljs {
+  background: transparent;
+  color: #c9d1d9;
+}
+.dark .hljs-doctag,
+.dark .hljs-keyword,
+.dark .hljs-meta .hljs-keyword,
+.dark .hljs-template-tag,
+.dark .hljs-template-variable,
+.dark .hljs-type,
+.dark .hljs-variable.language_ {
+  color: #ff7b72;
+}
+.dark .hljs-title,
+.dark .hljs-title.class_,
+.dark .hljs-title.class_.inherited__,
+.dark .hljs-title.function_ {
+  color: #d2a8ff;
+}
+.dark .hljs-attr,
+.dark .hljs-attribute,
+.dark .hljs-literal,
+.dark .hljs-meta,
+.dark .hljs-number,
+.dark .hljs-operator,
+.dark .hljs-variable,
+.dark .hljs-selector-attr,
+.dark .hljs-selector-class,
+.dark .hljs-selector-id {
+  color: #79c0ff;
+}
+.dark .hljs-regexp,
+.dark .hljs-string,
+.dark .hljs-meta .hljs-string {
+  color: #a5d6ff;
+}
+.dark .hljs-built_in,
+.dark .hljs-symbol {
+  color: #ffa657;
+}
+.dark .hljs-comment,
+.dark .hljs-code,
+.dark .hljs-formula {
+  color: #8b949e;
+}
+.dark .hljs-name,
+.dark .hljs-quote,
+.dark .hljs-selector-tag,
+.dark .hljs-selector-pseudo {
+  color: #7ee787;
+}
+.dark .hljs-subst {
+  color: #c9d1d9;
+}
+.dark .hljs-section {
+  color: #1f6feb;
+}
+.dark .hljs-bullet {
+  color: #f2cc60;
+}
+.dark .hljs-emphasis,
+.dark .hljs-strong {
+  color: #c9d1d9;
+}
+.dark .hljs-addition {
+  color: #aff5b4;
+  background-color: #033a16;
+}
+.dark .hljs-deletion {
+  color: #ffdcd7;
+  background-color: #67060c;
+}
+.dark .hljs-char.escape_,
+.dark .hljs-link,
+.dark .hljs-params,
+.dark .hljs-property,
+.dark .hljs-punctuation,
+.dark .hljs-tag {
+  color: #8b949e;
+}
+
 /* Link underline animation */
 .helix-md a {
   background-image: linear-gradient(currentColor, currentColor);
@@ -508,7 +685,7 @@ body.user-select-none * {
 /* ── Markdown rendering ─────────────────────────────── */
 
 .helix-md {
-  font-size: 14px;
+  font-size: var(--helix-transcript-size, 14px);  /* 界面字号：对话界面跟随设置 */
   line-height: 1.8;          /* 更宽松的行高，缓解密集感 */
   color: var(--foreground);
   word-wrap: break-word;
@@ -534,13 +711,13 @@ body.user-select-none * {
 .helix-md h1, .helix-md h2, .helix-md h3, .helix-md h4 {
   font-weight: 600;
   margin: 1.5em 0 0.7em;     /* 标题前后更多呼吸感，强化层级 */
-  color: var(--foreground);
+  color: var(--primary);      /* 暖橙色标题，像截图里的“表达链接” */
   letter-spacing: -0.01em;
   text-wrap: balance;
 }
 
 .helix-md h1 { font-size: 1.5em; }
-.helix-md h2 { font-size: 1.25em; border-bottom: 1px solid color-mix(in oklch, var(--muted-foreground) 15%, transparent); padding-bottom: 0.35em; }
+.helix-md h2 { font-size: 1.25em; border-bottom: 1px solid color-mix(in oklch, var(--primary) 18%, transparent); padding-bottom: 0.35em; }
 .helix-md h3 { font-size: 1.1em; }
 .helix-md h4 { font-size: 1em; }
 
@@ -591,8 +768,8 @@ body.user-select-none * {
 }
 
 .helix-md pre > div {
-  background: color-mix(in oklch, var(--muted-foreground) 5%, transparent);
-  border: 1px solid color-mix(in oklch, var(--muted-foreground) 10%, transparent);
+  background: oklch(0.94 0.014 110);   /* 暖米色代码块背景 */
+  border: 1px solid oklch(0.86 0.012 100);
   border-radius: 6px;
   padding: 0.75em 1em;
   overflow-x: auto;
@@ -616,14 +793,14 @@ body.user-select-none * {
 }
 
 .helix-md a {
-  color: var(--primary);
+  color: var(--link);
   text-decoration: underline;
-  text-decoration-color: color-mix(in oklch, var(--primary) 35%, transparent);
+  text-decoration-color: color-mix(in oklch, var(--link) 35%, transparent);
   transition: text-decoration-color 0.15s ease;
 }
 
 .helix-md a:hover {
-  text-decoration-color: var(--primary);
+  text-decoration-color: var(--link);
 }
 
 .helix-md strong {
@@ -674,6 +851,11 @@ body.user-select-none * {
 
 
 /* ── Settings panel polish ─────────────────────────── */
+
+/* 界面字号：设置面板文本跟随「界面字号」设置（与对话界面一致） */
+.max-w-xl {
+  font-size: var(--helix-transcript-size, 14px);
+}
 
 /* Collapsible section animation */
 details > summary {

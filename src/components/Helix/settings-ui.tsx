@@ -22,21 +22,21 @@ export const Toggle = ({ enabled, onToggle }: { enabled: boolean; onToggle: () =
 
 export const SettingRow = ({ label, labelClassName = '', children }: { label: string; labelClassName?: string; children: React.ReactNode }) => (
   <div className="flex items-center justify-between gap-4 py-2.5 px-1 -mx-1 rounded-md hover:bg-muted/30 transition-colors">
-    <span className={`text-[13px] text-foreground ${labelClassName}`}>{label}</span>
+    <span className={`text-sm text-foreground ${labelClassName}`}>{label}</span>
     <div className="shrink-0">{children}</div>
   </div>
 )
 
-export const SettingGroup = ({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) => (
+export const SettingGroup = ({ title, action, children }: { title: string; action?: React.ReactNode; children?: React.ReactNode }) => (
   <div className="pt-5 first:pt-0">
     <div className="mb-1 px-0.5 pb-2 border-b border-border/25 flex items-center justify-between gap-2">
       <h4 className="text-base font-semibold text-foreground">{title}</h4>
       {action}
     </div>
-    <div className="divide-y divide-border/25">{children}</div>
+    {children && <div className="divide-y divide-border/25">{children}</div>}
   </div>
 )
 
 export const SectionHeading = ({ children }: { children: React.ReactNode }) => (
-  <h3 className="text-base font-semibold text-foreground tracking-tight mb-5">{children}</h3>
+  <h3 className="text-lg font-semibold text-foreground tracking-tight mb-5">{children}</h3>
 )

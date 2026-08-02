@@ -255,11 +255,8 @@ module.exports = {
   setCustomProviderModel,
   setCustomProviderField,
   customProviderApiKey,
-  customProviderBaseUrl,
-  providerNameFromUrl,
   resolveProvider,
   disambiguateCustomProvider,
   parseHermesPersonalities,
-  KNOWN_BASE_PROVIDERS,
   BUILTIN_PROVIDER_ENV,
 }

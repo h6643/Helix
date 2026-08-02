@@ -172,6 +172,7 @@ contextBridge.exposeInMainWorld('electron', {
     branchList: () => ipcRenderer.invoke('git:branchList'),
     branchSwitch: (branch) => ipcRenderer.invoke('git:branchSwitch', branch),
     branchCreate: (branch) => ipcRenderer.invoke('git:branchCreate', branch),
+    currentBranch: () => ipcRenderer.invoke('git:currentBranch'),
     log: (count) => ipcRenderer.invoke('git:log', count),
     // Worktree operations
     worktreeList: () => ipcRenderer.invoke('git:worktreeList'),
@@ -205,6 +206,16 @@ contextBridge.exposeInMainWorld('electron', {
   },
   runtime: {
     action: (action) => ipcRenderer.invoke('runtime:action', action),
+  },
+
+  // ── Email (IMAP inbox / SMTP send / notifications) ───────────────────────
+  email: {
+    configure: (partial) => ipcRenderer.invoke('email:configure', partial),
+    getConfig: () => ipcRenderer.invoke('email:getConfig'),
+    list: (opts) => ipcRenderer.invoke('email:list', opts),
+    get: (uid) => ipcRenderer.invoke('email:get', uid),
+    send: (msg) => ipcRenderer.invoke('email:send', msg),
+    notify: (msg) => ipcRenderer.invoke('email:notify', msg),
   },
 
   // ── Platform ───────────────────────────────────────────────────────────

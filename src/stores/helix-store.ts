@@ -1,5 +1,8 @@
 import { create } from 'zustand'
 import type { StateCreator } from 'zustand'
+import { cleanUrl } from '@/lib/url-utils'
+import { applyHelixPalette } from '@/lib/themes'
+import { isModelProviderMismatch } from '@/lib/provider-match'
 import { isElectron, getElectronAPI, electronFS, electronApp } from '@/lib/electron-bridge'
 import { generateId } from '@/lib/format'
 import { debug, warn, error as logError } from '@/lib/logger'
@@ -12,12 +15,19 @@ import type {
   StreamingResponseBlock, StreamingDraft, ConnectionNotice,
   ChatMessage, EditorTab, CursorPosition, ToastMessage, PendingChange,
   ApiProvider, AgentEngine, ApiConfig, ApiProfile, Skill,
-  MemoryCategory, MemoryEntry, AvailableCommand, TaskNode,
+  MemoryCategory, MemoryEntry, TaskNode,
   SessionCheckpoint, ScheduledTask,
-  ToolCallEntry, SubAgent, CustomShortcutEntry, ProviderConfig,
-  BackendPlugin,
+  ToolCallEntry, SubAgent, ProviderConfig,
 } from './helix-types'
-import { PROVIDER_PRESETS, DEFAULT_SHORTCUTS } from './helix-types'
+import { DEFAULT_SHORTCUTS } from './helix-types'
+
+/** A bookmark node (mirrors the subset of Chrome's Bookmarks JSON we care about). */
+export interface BrowserBookmark {
+  name: string
+  type: 'url' | 'folder'
+  url?: string
+  children?: BrowserBookmark[]
+}
 import { createAgentSettingsSlice, type AgentSettingsSlice } from './slices/agent-settings-slice'
 import { createApiConfigSlice, type ApiConfigSlice } from './slices/api-config-slice'
 import { createEditorSlice, type EditorSlice } from './slices/editor-slice'
@@ -29,15 +39,13 @@ import { createToastSlice, type ToastSlice } from './slices/toast-slice'
 
 export type {
   FileNode, ImageAttachment, FileAttachment, ExecutionStep,
-  StreamingResponseBlock, StreamingDraft, ConnectionNotice,
-  ChatMessage, EditorTab, CursorPosition, ToastMessage, PendingChange,
-  ApiProvider, AgentEngine, ApiConfig, ApiProfile, Skill,
-  MemoryCategory, MemoryEntry, AvailableCommand, TaskNode,
-  SessionCheckpoint, ScheduledTask,
-  SubAgent, CustomShortcutEntry, ProviderConfig,
-  BackendPlugin,
+  StreamingResponseBlock, PendingChange,
+  ApiConfig, ApiProfile,
+  TaskNode,
+  ScheduledTask,
+  ProviderConfig,
 }
-export { PROVIDER_PRESETS, DEFAULT_SHORTCUTS }
+export { DEFAULT_SHORTCUTS }
 
 interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, AgentSettingsSlice, PanelSlice, ApiConfigSlice, SkillSlice {
   // File system
@@ -83,8 +91,6 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   showRuntimePanel: boolean
   showActivityFeed: boolean
   toggleActivityFeed: () => void
-  showReviewPanel: boolean
-  toggleReviewPanel: () => void
   showArtifactsBrowser: boolean
   toggleArtifactsBrowser: () => void
 
@@ -94,13 +100,29 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setPreviewRailUrl: (url: string | null) => void
   togglePreviewRail: () => void
 
+  // Browser bookmarks (imported from Chrome etc.)
+  browserBookmarks: BrowserBookmark[]
+  setBrowserBookmarks: (items: BrowserBookmark[]) => void
+
+  // Browser settings
+  browserHomeUrl: string
+  setBrowserHomeUrl: (url: string) => void
+
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: 'browser' | 'code' | null
-  setRightSidebarTab: (tab: 'browser' | 'code' | null) => void
+  rightSidebarTab: 'browser' | 'code' | 'files' | null
+  setRightSidebarTab: (tab: 'browser' | 'code' | 'files' | null) => void
   showLearningView: boolean
   toggleLearningView: () => void
   voiceAutoSpeak: boolean
   setVoiceAutoSpeak: (v: boolean) => void
+
+  // Email integration state (secrets live in the Electron main process; only
+  // non-sensitive flags/identifiers are mirrored here for UI rendering).
+  emailConfigured: boolean
+  emailAccount: string
+  emailNotifyEnabled: boolean
+  setEmailConfigured: (configured: boolean, account?: string) => void
+  setEmailNotifyEnabled: (v: boolean) => void
 
   // MCP Servers
   mcpServers: Record<string, McpServerConfig>
@@ -190,6 +212,8 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   fontSize: number
   interfaceFont: string
   transcriptFontSize: number
+  // Theme style: 'default' (built-in cream) or a Catppuccin flavor id.
+  themeStyle: string
   // Toast — see slices/toast-slice.ts
   pendingChanges: PendingChange[]
   // Panel toggles — see slices/panel-slice.ts
@@ -240,6 +264,7 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setFontSize: (size: number) => void
   setInterfaceFont: (font: string) => void
   setTranscriptFontSize: (size: number) => void
+  setThemeStyle: (styleId: string) => void
   // Toast actions — see slices/toast-slice.ts
 
   // Actions - File modifications
@@ -595,6 +620,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   fontSize: 14 as const,
   interfaceFont: 'var(--font-geist-sans)' as const,
   transcriptFontSize: 14,
+  themeStyle: typeof window !== 'undefined'
+    ? (window.localStorage.getItem('helix-theme-style') || 'default')
+    : 'default',
   // Toast — in slices/toast-slice.ts
   pendingChanges: [],
   // Agent Settings — in slices/agent-settings-slice.ts
@@ -704,13 +732,18 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   showActivityFeed: false,
 
   showRuntimePanel: false,
-  showReviewPanel: false,
   showArtifactsBrowser: false,
   showPreviewRail: false,
   previewRailUrl: null as string | null,
+  browserHomeUrl: '',
+  browserBookmarks: [],
   rightSidebarTab: null,
   showLearningView: false,
   voiceAutoSpeak: false,
+
+  emailConfigured: false,
+  emailAccount: '',
+  emailNotifyEnabled: false,
 
   // MCP Servers
   mcpServers: {
@@ -912,7 +945,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
   toggleSkillPanel: () => set((s) => ({ showSkillPanel: !s.showSkillPanel })),
   toggleActivityFeed: () => set((s) => ({ showActivityFeed: !s.showActivityFeed })),
-  toggleReviewPanel: () => set((s) => ({ showReviewPanel: !s.showReviewPanel })),
   toggleArtifactsBrowser: () => set((s) => ({ showArtifactsBrowser: !s.showArtifactsBrowser })),
   togglePreviewRail: () => set((s) => {
     const next = s.rightSidebarTab === 'browser' ? null : 'browser'
@@ -921,16 +953,29 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       : { rightSidebarTab: null, showPreviewRail: false, editorOpen: false }
   }),
   setPreviewRailUrl: (url: string | null) => set((s) => ({
-    previewRailUrl: url,
+    previewRailUrl: url === null ? null : cleanUrl(url),
     ...(url !== null ? { showPreviewRail: true, rightSidebarTab: 'browser', editorOpen: false } : {}),
   })),
+  setBrowserHomeUrl: (url: string) => {
+    const trimmed = url.trim()
+    set(() => ({ browserHomeUrl: trimmed }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('browserHomeUrl', trimmed)).catch(() => {})
+  },
+  setBrowserBookmarks: (items: BrowserBookmark[]) => {
+    set(() => ({ browserBookmarks: items }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('browserBookmarks', items)).catch(() => {})
+  },
   setRightSidebarTab: (tab) => set(() => {
     if (tab === 'browser') return { rightSidebarTab: 'browser', showPreviewRail: true, editorOpen: false }
     if (tab === 'code') return { rightSidebarTab: 'code', showPreviewRail: false, editorOpen: true }
+    if (tab === 'files') return { rightSidebarTab: 'files', showPreviewRail: false, editorOpen: false }
     return { rightSidebarTab: null, showPreviewRail: false, editorOpen: false }
   }),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
   setVoiceAutoSpeak: (v: boolean) => set((s) => ({ voiceAutoSpeak: v })),
+  setEmailConfigured: (configured: boolean, account?: string) =>
+    set((s) => ({ emailConfigured: configured, emailAccount: account !== undefined ? account : s.emailAccount })),
+  setEmailNotifyEnabled: (v: boolean) => set((s) => ({ emailNotifyEnabled: v })),
 
   toggleRuntimePanel: () => set((s) => ({ showRuntimePanel: !s.showRuntimePanel })),
 
@@ -1083,8 +1128,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   setEditorTheme: (theme) => set({ editorTheme: theme }),
   setFontFamily: (fontFamily) => {
     set({ fontFamily })
+    // Code-editor-only font: applied to CodeMirror via CSS var, NOT to body,
+    // so it never leaks into the chat/settings UI (per the font-scope split).
     document.documentElement.style.setProperty('--helix-font-family', fontFamily)
-    document.body.style.fontFamily = fontFamily
     localStorage.setItem('helix-font-family', fontFamily)
     import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('fontFamily', fontFamily))
   },
@@ -1096,8 +1142,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   },
   setInterfaceFont: (font) => {
     set({ interfaceFont: font })
+    // UI font: applied to the app chrome (chat + settings) via the `--helix-interface-font`
+    // CSS var on <body>. We deliberately do NOT write body.style.fontFamily directly so
+    // the code-editor font (a separate var) stays isolated from the UI font.
     document.documentElement.style.setProperty('--helix-interface-font', font)
-    document.body.style.fontFamily = font
     localStorage.setItem('helix-interface-font', font)
     import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('interfaceFont', font))
   },
@@ -1106,6 +1154,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     document.documentElement.style.setProperty('--helix-transcript-size', `${size}px`)
     localStorage.setItem('helix-transcript-size', String(size))
     import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('transcriptFontSize', size))
+  },
+  setThemeStyle: (styleId) => {
+    set({ themeStyle: styleId })
+    if (typeof localStorage !== 'undefined') localStorage.setItem('helix-theme-style', styleId)
+    // Apply immediately (not only via the layout effect) so selecting a flavor
+    // re-skins the UI even if the React effect doesn't re-run for some reason.
+    applyHelixPalette(styleId)
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('themeStyle', styleId)).catch(() => {})
   },
 
   // Toast — in slices/toast-slice.ts
@@ -1850,6 +1906,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('fontSize', state.fontSize),
         persistence.saveSetting('interfaceFont', state.interfaceFont),
         persistence.saveSetting('transcriptFontSize', state.transcriptFontSize),
+        persistence.saveSetting('themeStyle', state.themeStyle),
         persistence.saveSetting('sessionUsageStats', state.sessionUsageStats),
         persistence.saveScheduledTasks(state.scheduledTasks),
         persistence.saveSetting('mcpServers', state.mcpServers),
@@ -1863,9 +1920,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('desktopNotifications', state.desktopNotifications),
         persistence.saveSetting('soundEnabled', state.soundEnabled),
         persistence.saveSetting('voiceAutoSpeak', state.voiceAutoSpeak),
-        persistence.saveSetting('restoreLastSession', state.restoreLastSession),
-        persistence.saveSetting('defaultWorkDir', state.defaultWorkDir),        persistence.saveSetting('confirmDangerousActions', state.confirmDangerousActions),
-        persistence.saveSetting('autoApproveRead', state.autoApproveRead),
         persistence.saveSetting('editorTheme', state.editorTheme),
         persistence.saveSetting('gitAutoCommit', state.gitAutoCommit),
         persistence.saveSetting('gitAutoPush', state.gitAutoPush),
@@ -1900,7 +1954,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, restoreLastSession, defaultWorkDir, confirmDangerousActions, autoApproveRead, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -1914,6 +1968,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<number>('fontSize'),
         persistence.loadSetting<string>('interfaceFont'),
         persistence.loadSetting<number>('transcriptFontSize'),
+        persistence.loadSetting<string>('themeStyle'),
         persistence.loadSetting<{
           requestCount: number
           totalTokens: number
@@ -1938,9 +1993,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<boolean>('fastMode'),
         persistence.loadSetting<boolean>('desktopNotifications'),
         persistence.loadSetting<boolean>('soundEnabled'),
-        persistence.loadSetting<boolean>('restoreLastSession'),
-        persistence.loadSetting<string>('defaultWorkDir'),        persistence.loadSetting<boolean>('confirmDangerousActions'),
-        persistence.loadSetting<boolean>('autoApproveRead'),
         persistence.loadSetting<string>('editorTheme'),
         persistence.loadSetting<boolean>('gitAutoCommit'),
         persistence.loadSetting<boolean>('gitAutoPush'),
@@ -1968,6 +2020,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // Restore which named profile was active before the restart, so the selection
       // survives a cold start (the profile list itself is persisted to IndexedDB).
       const loadedActiveProfileId = await persistence.loadSetting<string | null>('activeProfileId')
+      const savedBookmarks = await persistence.loadSetting<BrowserBookmark[]>('browserBookmarks')
 
       // ── Build multi-provider config for the flattened model selector ──
       // Always rebuild `builtProviders` from the authoritative declared sources
@@ -1993,16 +2046,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // (e.g. "Ling-*" on a deepseek base URL, or "deepseek-*" on an ant-ling
       // base URL) is treated as poisoned and dropped from the provider's model
       // pool, so it can never be silently selected as the active model.
-      // Helpers for scrubbing cross-endpoint model pollution.
-      const isLingFamily = (s: string) => /ling|antangel|ring/.test((s || '').toLowerCase())
-      const isDeepseekFamily = (s: string) => (s || '').toLowerCase().includes('deepseek')
-      const isModelEndpointMismatch = (model: string, baseUrl?: string): boolean => {
-        const u = (baseUrl || '').toLowerCase()
-        const m = (model || '').toLowerCase()
-        if (isDeepseekFamily(u) && isLingFamily(m)) return true
-        if (isLingFamily(u) && isDeepseekFamily(m)) return true
-        return false
-      }
+      // Helpers for scrubbing cross-endpoint model pollution. The narrow
+      // Ling↔DeepSeek check used to let model/endpoint mismatches from other
+      // suppliers (e.g. `k3`/Kimi saved under a DeepSeek base URL) slip through.
+      // We now delegate to the shared classifier, which recognizes all major
+      // families and only flags when BOTH sides are clearly owned by DIFFERENT
+      // suppliers (custom endpoints / custom model names are never flagged).
+      const isModelEndpointMismatch = (model: string, baseUrl?: string): boolean =>
+        isModelProviderMismatch(model, baseUrl)
       const deriveProviderName = (baseUrl?: string, fallback?: string): string => {
         if (!baseUrl) return fallback || '配置'
         try {
@@ -2017,11 +2068,33 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           return fallback || '配置'
         }
       }
+      // Build id -> baseUrl authority from declared apiProfiles so we can scrub
+      // each provider's *fetched* model list (providerModels[pid]) of models that
+      // don't belong to that endpoint. This is what removes the kimi models a past
+      // bug wrote into the deepseek profile's fetched list — `cleanProfileModels`
+      // alone couldn't fix it because `mergedProviders` later re-merged the
+      // un-filtered providerModels back in.
+      const profileBaseByPid: Record<string, string> = {}
+      for (const p of (apiProfiles || [])) {
+        if (p.id && p.config?.baseUrl) profileBaseByPid[p.id] = p.config.baseUrl
+      }
+      const cleanedProviderModels: Record<string, string[]> = {}
+      for (const [pid, models] of Object.entries(providerModels || {})) {
+        const baseUrl = profileBaseByPid[pid]
+        if (baseUrl) {
+          const scrubbed = (models || []).filter((m) => !isModelEndpointMismatch(m, baseUrl))
+          if (scrubbed.length) cleanedProviderModels[pid] = scrubbed
+        } else if (models && models.length) {
+          // Unknown owner (custom runtime provider) — keep as-is; don't risk
+          // dropping a legit fetched list we can't attribute.
+          cleanedProviderModels[pid] = models
+        }
+      }
       const cleanProfileModels = (p: ApiProfile): string[] => {
         const own = (p.config?.model ? [p.config.model] : []).filter(
           (m) => !isModelEndpointMismatch(m, p.config?.baseUrl),
         )
-        const fetched = (providerModels?.[p.id] || []).filter(
+        const fetched = (cleanedProviderModels[p.id] || []).filter(
           (m) => !isModelEndpointMismatch(m, p.config?.baseUrl),
         )
         if (fetched.length > 0) {
@@ -2038,14 +2111,33 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
       const builtProviders: ProviderConfig[] =
         (apiProfiles && apiProfiles.length > 0
-              ? apiProfiles.map((p, i) => ({
-                  id: p.id || `p-${i}`,
-                  name: p.name,
-                  baseUrl: p.config?.baseUrl || '',
-                  apiKey: p.config?.apiKey || '',
-                  models: cleanProfileModels(p),
-                  isDefault: p.id === loadedActiveProfileId,
-                }))
+              ? apiProfiles.map((p, i) => {
+                  // Scrub cross-endpoint pollution; if that leaves a profile with
+                  // NO models, re-seed it from its own history endpoint so a
+                  // deepseek profile that had its models polluted by another
+                  // supplier's list still surfaces the correct model
+                  // (e.g. deepseek-v4-pro) instead of going empty.
+                  let models = cleanProfileModels(p)
+                  if (models.length === 0 && p.config?.baseUrl) {
+                    const histModels = Array.from(
+                      new Set(
+                        (apiHistory || [])
+                          .filter((h) => h.baseUrl === p.config!.baseUrl && h.model)
+                          .map((h) => h.model as string)
+                          .filter((m) => !isModelEndpointMismatch(m, p.config!.baseUrl)),
+                      ),
+                    )
+                    if (histModels.length) models = histModels
+                  }
+                  return {
+                    id: p.id || `p-${i}`,
+                    name: p.name,
+                    baseUrl: p.config?.baseUrl || '',
+                    apiKey: p.config?.apiKey || '',
+                    models,
+                    isDefault: p.id === loadedActiveProfileId,
+                  }
+                })
               : (apiConfig && apiConfig.baseUrl && apiConfig.model
                   ? [{
                       id: 'p-default',
@@ -2056,12 +2148,51 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
                       isDefault: true,
                     }]
                   : []))
+      // ── Include history-only endpoints as providers ──
+      // An endpoint the user has only ever used via "添加模型" (landing in
+      // apiHistory) but never saved as an apiProfile has NO provider entry. On
+      // restoreFromStorage the persisted activeModel then can't be validated by
+      // any provider and silently falls back to the default provider's first
+      // model (e.g. Ling) — so clicking a deepseek/kimi history item appears to
+      // "switch to Ling" after a refresh. Synthesize a provider for every
+      // history endpoint not already covered by a named profile, so the active
+      // model stays pinned to the endpoint it belongs to.
+      const historyProviders: ProviderConfig[] = []
+      {
+        const seenBase = new Set(builtProviders.map((p) => p.baseUrl))
+        const hist = (apiHistory || []) as Array<{ baseUrl?: string; apiKey?: string; model?: string; provider?: string }>
+        // Single O(n) pass: group history entries by endpoint instead of the old
+        // O(n²) approach that re-filtered the whole list per unique baseUrl.
+        const byBase = new Map<string, { apiKey: string; provider?: string; models: Set<string> }>()
+        for (const h of hist) {
+          if (!h.baseUrl || !h.model) continue
+          if (seenBase.has(h.baseUrl)) continue
+          let entry = byBase.get(h.baseUrl)
+          if (!entry) {
+            entry = { apiKey: h.apiKey || '', provider: h.provider, models: new Set<string>() }
+            byBase.set(h.baseUrl, entry)
+            seenBase.add(h.baseUrl)
+          }
+          entry.models.add(h.model)
+        }
+        for (const [baseUrl, entry] of byBase) {
+          historyProviders.push({
+            id: `hist-${historyProviders.length}`,
+            name: deriveProviderName(baseUrl, entry.provider) || entry.provider || '配置',
+            baseUrl,
+            apiKey: entry.apiKey,
+            models: Array.from(entry.models),
+            isDefault: false,
+          })
+        }
+      }
+      const allBuiltProviders = [...builtProviders, ...historyProviders]
       // Heal persisted provider baseUrl pollution: if a provider's models all
       // clearly belong to a different endpoint than its baseUrl (e.g. Ling/Ring
       // models but a deepseek URL), its baseUrl was overwritten by an old bug.
       // Clear it so activeProvider matching falls back to model-based lookup
       // instead of anchoring to the wrong provider and showing the wrong list.
-      const healedProviders = builtProviders.map((p) => {
+      const healedProviders = allBuiltProviders.map((p) => {
         if (!p.baseUrl || p.models.length === 0) return p
         const validModels = p.models.filter((m) => !isModelEndpointMismatch(m, p.baseUrl))
         if (validModels.length === 0) {
@@ -2076,7 +2207,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // without it, `activeModel` would be rejected by the check below (not in
       // `providers[].models`) and silently fall back to the default model.
       const mergedProviders: ProviderConfig[] = healedProviders.map((p) => {
-        const fetched = providerModels?.[p.id]
+        const fetched = cleanedProviderModels[p.id]
         if (fetched && fetched.length > 0) {
           const models = Array.from(new Set([...p.models, ...fetched]))
           return { ...p, models }
@@ -2185,24 +2316,21 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         })(),
         apiHistory: (() => {
           const raw = apiHistory || []
-          // Heal polluted history entries where a model name was saved against
-          // the wrong endpoint (e.g. Ling model with deepseek baseUrl). Keep
-          // the entry but rewrite its model to one that actually belongs to
-          // the endpoint, so clicking it later cannot resurrect the mismatch.
-          const healed = raw.map((h) => {
-            if (!h.model || !h.baseUrl || !isModelEndpointMismatch(h.model, h.baseUrl)) return h
-            const owner = mergedProviders.find((p) => p.baseUrl === h.baseUrl)
-            const ownerModels = owner
-              ? [...new Set([...(owner.models || []), ...(providerModels?.[owner.id] || [])])]
-              : []
-            const fallback = ownerModels[0] || owner?.defaultModel || h.model
-            return { ...h, model: fallback }
-          })
+          // Drop poisoned history entries where the model name clearly belongs to
+          // a DIFFERENT supplier than the endpoint it was saved against (e.g.
+          // `k3`/Kimi under a DeepSeek base URL). We no longer "heal" these by
+          // rewriting the model — rewriting kept a misleading entry under the
+          // wrong supplier; the user wants them removed outright. Entries whose
+          // model or URL cannot be confidently attributed (custom endpoints /
+          // custom model names) are left untouched to avoid deleting legit configs.
+          const kept = raw.filter(
+            (h) => !h.model || !h.baseUrl || !isModelEndpointMismatch(h.model, h.baseUrl),
+          )
           // Deduplicate by model + baseUrl. Older duplicates are dropped so the
           // history list never shows two identical entries like the same
           // deepseek model twice.
           const seen = new Set<string>()
-          return healed.filter((h) => {
+          return kept.filter((h) => {
             if (!h.model || !h.baseUrl) return false
             const key = `${h.model}|${h.baseUrl}`
             if (seen.has(key)) return false
@@ -2272,6 +2400,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         fontSize: fontSize || (typeof localStorage !== 'undefined' ? Number(localStorage.getItem('helix-font-size')) || get().fontSize : get().fontSize),
         interfaceFont: interfaceFont || (typeof localStorage !== 'undefined' ? localStorage.getItem('helix-interface-font') : null) || get().interfaceFont,
         transcriptFontSize: transcriptFontSize || (typeof localStorage !== 'undefined' ? Number(localStorage.getItem('helix-transcript-size')) || get().transcriptFontSize : get().transcriptFontSize),
+        themeStyle: themeStyle || (typeof localStorage !== 'undefined' ? localStorage.getItem('helix-theme-style') : null) || get().themeStyle,
         sessionUsageStats: sessionUsageStats && sessionUsageStats.requestCount >= 0 ? sessionUsageStats : get().sessionUsageStats,
         scheduledTasks: (scheduledTasks as ScheduledTask[]) || [],
         mcpServers: {
@@ -2301,11 +2430,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         fastMode: fastMode ?? get().fastMode,
         desktopNotifications: desktopNotifications ?? get().desktopNotifications,
         soundEnabled: soundEnabled ?? get().soundEnabled,
-        restoreLastSession: restoreLastSession ?? get().restoreLastSession,
-        defaultWorkDir: defaultWorkDir || get().defaultWorkDir,        confirmDangerousActions: confirmDangerousActions ?? get().confirmDangerousActions,
-        autoApproveRead: autoApproveRead ?? get().autoApproveRead,
         availableModels: availableModels || [],
-        providerModels: providerModels || {},
+        providerModels: cleanedProviderModels,
         editorTheme: (editorTheme as 'vs-dark' | 'light' | null | undefined) ?? get().editorTheme,
         gitAutoCommit: gitAutoCommit ?? get().gitAutoCommit,
         gitAutoPush: gitAutoPush ?? get().gitAutoPush,
@@ -2315,6 +2441,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
         voiceAutoSpeak: voiceAutoSpeak ?? get().voiceAutoSpeak,
+        browserHomeUrl: '',
+        browserBookmarks: savedBookmarks ?? get().browserBookmarks,
       })
 
       // Permanently scrub the pollution from IndexedDB: write back the cleaned
@@ -2324,8 +2452,19 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // after a single restart, with no manual data clearing required.
       try {
         const healed = get()
-        await persistence.saveSetting('apiProfiles', healed.apiProfiles)
-        await persistence.saveSetting('providers', healed.providers)
+        // Skip the redundant IndexedDB writes when nothing actually changed.
+        // After the first "heal" restart the on-disk data is already clean, so
+        // re-writing identical blobs on every subsequent startup is pure I/O.
+        const prevModels = providerModels || {}
+        const changed =
+          JSON.stringify(healed.apiProfiles) !== JSON.stringify(apiProfiles || []) ||
+          JSON.stringify(healed.providers) !== JSON.stringify(providers || []) ||
+          JSON.stringify(cleanedProviderModels) !== JSON.stringify(prevModels)
+        if (changed) {
+          await persistence.saveSetting('apiProfiles', healed.apiProfiles)
+          await persistence.saveSetting('providers', healed.providers)
+          await persistence.saveSetting('providerModels', cleanedProviderModels)
+        }
       } catch (persistErr) {
         logError('Failed to persist healed model lists:', persistErr)
       }

@@ -1,13 +1,16 @@
 import { Check, Copy, Download, Globe, ExternalLink } from 'lucide-react'
 import React, { useState, useRef, useEffect, useMemo } from 'react'
-import 'highlight.js/styles/github-dark.css'
 import ReactMarkdown, { type Components } from 'react-markdown'
+import rehypeHighlight from 'rehype-highlight'
 import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
+import type { PluggableList } from 'unified'
 import { useHelixStore } from '@/stores/helix-store'
+import { cleanUrl } from '@/lib/url-utils'
 
-export const markdownPlugins = {
+export const markdownPlugins: { remarkPlugins: PluggableList; rehypePlugins: PluggableList } = {
   remarkPlugins: [remarkGfm, remarkBreaks],
+  rehypePlugins: [[rehypeHighlight, { detect: true }]],
 }
 
 // Click-to-zoom image for assistant messages (multimodal output)
@@ -101,7 +104,11 @@ function embedFor(href: string): { kind: 'youtube' | 'spotify' | 'twitter'; src:
   return null
 }
 
-const EmbedCard = ({ href, children }: { href: string; children?: React.ReactNode }) => {
+// Strip Markdown emphasis markers and CJK/western punctuation that the model
+// often glues to the end of URLs (e.g. `**https://www.baidu.com**。`).
+// Without this, the browser opens `https://www.baidu.com%E3%80%82`.
+const EmbedCard = ({ href: rawHref, children }: { href: string; children?: React.ReactNode }) => {
+  const href = useMemo(() => cleanUrl(rawHref), [rawHref])
   const e = useMemo(() => embedFor(href), [href])
   const isHttp = /^https?:\/\//i.test(href)
   const openInSidebar = () => useHelixStore.getState().setPreviewRailUrl(href)
@@ -112,16 +119,21 @@ const EmbedCard = ({ href, children }: { href: string; children?: React.ReactNod
           <a
             href={href}
             onClick={(ev) => { ev.preventDefault(); openInSidebar() }}
-            className="underline decoration-dotted underline-offset-2 hover:text-primary"
-          >{children}</a>
-          <button
-            type="button"
-            onClick={() => window.open(href, '_blank', 'noopener,noreferrer')}
-            className="ml-1 inline-flex opacity-0 group-hover/link:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-primary"
-            title="在外部浏览器打开"
+            className="inline-flex items-center gap-1 underline decoration-dotted underline-offset-2 hover:text-primary"
           >
-            <ExternalLink className="size-3.5" />
-          </button>
+            {children}
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(ev) => { ev.stopPropagation(); window.open(href, '_blank', 'noopener,noreferrer') }}
+              onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.stopPropagation(); window.open(href, '_blank', 'noopener,noreferrer') } }}
+              className="inline-flex opacity-0 group-hover/link:opacity-100 focus:opacity-100 transition-opacity text-muted-foreground hover:text-primary"
+              title="在外部浏览器打开"
+              aria-label="在外部浏览器打开"
+            >
+              <ExternalLink className="size-3.5" />
+            </span>
+          </a>
         </span>
       )
     }
