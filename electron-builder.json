@@ -32,7 +32,7 @@
       "to": ".next/standalone/public"
     },
     {
-      "from": "vendor/hermes-agent",
+      "from": ".cache/hermes-runtime/hermes-agent",
       "to": "hermes-agent"
     }
   ],
