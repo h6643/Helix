@@ -93,6 +93,15 @@ skills/
 !vendor/hermes-agent/skills/
 !vendor/hermes-agent/skills/**
 
+# Vendored hermes-agent: drop non-runtime source to slim the repo / GitHub push.
+# These are hermes's own docs site, test suite, and desktop-client source —
+# NOT needed by Helix's gateway at runtime or build. The backend core
+# (agent/, hermes_cli/, skills/, tools/, providers/, gateway/, acp_adapter/)
+# stays tracked.
+vendor/hermes-agent/website/
+vendor/hermes-agent/tests/
+vendor/hermes-agent/apps/
+
 AGENTS.md
 
 .playwright-mcp/
