@@ -38,6 +38,7 @@ export function RightSidebar() {
     const start = cleanUrl(previewRailUrl ?? '') || ''
     if (tab === 'files') return [{ id: newPageId(), kind: 'directory', url: '' }]
     if (tab === 'code') return [{ id: newPageId(), kind: 'code', url: '' }]
+    if (tab === 'email') return [{ id: newPageId(), kind: 'email', url: '' }]
     return [{ id: newPageId(), kind: 'browser', url: start }]
   })
   const [activePageId, setActivePageId] = useState<string>(() => pages[0]?.id ?? '')

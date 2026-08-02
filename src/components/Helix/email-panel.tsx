@@ -59,6 +59,12 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
   const [authCode, setAuthCode] = useState('')
   const [savingCfg, setSavingCfg] = useState(false)
   const [notifyTested, setNotifyTested] = useState<null | boolean>(null)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<null | {
+    ok: boolean
+    imap: { ok: boolean; message: string }
+    smtp: { ok: boolean; message: string }
+  }>(null)
 
   const loadInbox = useCallback(async () => {
     setLoading(true)
@@ -164,6 +170,20 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
     } catch (e: any) {
       setNotifyTested(false)
       setError(e?.message || '发送通知失败')
+    }
+  }
+
+  const handleTestConnection = async () => {
+    setTesting(true)
+    setError(null)
+    setTestResult(null)
+    try {
+      const res = await window.electron.email.test()
+      setTestResult(res)
+    } catch (e: any) {
+      setError(e?.message || '测试失败')
+    } finally {
+      setTesting(false)
     }
   }
 
@@ -350,6 +370,26 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
           >
             {savingCfg ? '保存中…' : '保存配置'}
           </button>
+
+          <div className="mt-1 flex flex-col gap-1.5">
+            <button
+              onClick={handleTestConnection}
+              disabled={testing}
+              className="self-start flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border/60 hover:bg-accent/50 disabled:opacity-50"
+            >
+              {testing ? '测试中…' : '测试连接'}
+            </button>
+            {testResult && (
+              <div className="text-[11px] space-y-0.5">
+                <div className={testResult.imap.ok ? 'text-green-600 dark:text-green-500' : 'text-destructive'}>
+                  {testResult.imap.ok ? '✓' : '✗'} IMAP：{testResult.imap.message}
+                </div>
+                <div className={testResult.smtp.ok ? 'text-green-600 dark:text-green-500' : 'text-destructive'}>
+                  {testResult.smtp.ok ? '✓' : '✗'} SMTP：{testResult.smtp.message}
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="mt-2 pt-3 border-t border-border/30 flex flex-col gap-2">
             <div className="flex items-center justify-between">

@@ -10,9 +10,9 @@
     "lint:fix": "eslint . --fix",
     "electron": "electron .",
     "electron:dev": "concurrently \"next dev --webpack -p 3000\" \"wait-on http://localhost:3000 && electron .\"",
-    "electron:build": "next build --webpack && electron-builder",
-    "electron:build:fast": "next build --webpack && set CSC_IDENTITY_AUTO_DISCOVERY=false && electron-builder --win --x64",
-    "electron:preview": "next build --webpack && electron-builder --dir"
+    "electron:build": "next build --webpack && powershell -File scripts/build-hermes-runtime.ps1 && set CSC_IDENTITY_AUTO_DISCOVERY=false && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ && electron-builder",
+    "electron:build:fast": "next build --webpack && powershell -File scripts/build-hermes-runtime.ps1 && set CSC_IDENTITY_AUTO_DISCOVERY=false && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ && electron-builder --win --x64",
+    "electron:preview": "next build --webpack && powershell -File scripts/build-hermes-runtime.ps1 && set CSC_IDENTITY_AUTO_DISCOVERY=false && set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ && electron-builder --dir"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.15",

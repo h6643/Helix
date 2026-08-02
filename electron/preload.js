@@ -216,6 +216,7 @@ contextBridge.exposeInMainWorld('electron', {
     get: (uid) => ipcRenderer.invoke('email:get', uid),
     send: (msg) => ipcRenderer.invoke('email:send', msg),
     notify: (msg) => ipcRenderer.invoke('email:notify', msg),
+    test: () => ipcRenderer.invoke('email:test'),
   },
 
   // ── Platform ───────────────────────────────────────────────────────────

@@ -109,8 +109,8 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setBrowserHomeUrl: (url: string) => void
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: 'browser' | 'code' | 'files' | null
-  setRightSidebarTab: (tab: 'browser' | 'code' | 'files' | null) => void
+  rightSidebarTab: 'browser' | 'code' | 'files' | 'email' | null
+  setRightSidebarTab: (tab: 'browser' | 'code' | 'files' | 'email' | null) => void
   showLearningView: boolean
   toggleLearningView: () => void
   voiceAutoSpeak: boolean
@@ -969,6 +969,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     if (tab === 'browser') return { rightSidebarTab: 'browser', showPreviewRail: true, editorOpen: false }
     if (tab === 'code') return { rightSidebarTab: 'code', showPreviewRail: false, editorOpen: true }
     if (tab === 'files') return { rightSidebarTab: 'files', showPreviewRail: false, editorOpen: false }
+    if (tab === 'email') return { rightSidebarTab: 'email', showPreviewRail: false, editorOpen: false }
     return { rightSidebarTab: null, showPreviewRail: false, editorOpen: false }
   }),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),

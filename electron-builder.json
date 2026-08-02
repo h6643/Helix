@@ -2,16 +2,21 @@
   "appId": "com.helix.desktop",
   "productName": "Helix",
   "asar": true,
+  "compression": "store",
   "asarUnpack": [
     "node_modules/node-pty/**",
     "node_modules/@xterm/**"
   ],
-  "npmRebuild": true,
+  "npmRebuild": false,
+  "electronDist": ".cache/electron-dist",
   "directories": {
     "output": "release"
   },
   "files": [
-    "electron/**/*"
+    "electron/**/*",
+    "node_modules/**/*",
+    "!node_modules/next/**",
+    "!node_modules/.bin/**"
   ],
   "extraResources": [
     {

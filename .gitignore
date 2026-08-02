@@ -84,8 +84,14 @@ original.txt
 # Electron build output
 release/
 
+# electron-builder local cache (electron-dist, nsis tools, etc.)
+.cache/
+
 # Skills (user-specific, not shared)
 skills/
+# Exception: the vendored hermes-agent keeps its own skills/ (override the rule above)
+!vendor/hermes-agent/skills/
+!vendor/hermes-agent/skills/**
 
 AGENTS.md
 

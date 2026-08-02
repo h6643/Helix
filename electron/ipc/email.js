@@ -89,7 +89,7 @@ module.exports = function registerEmailHandlers() {
   // Idempotent registration — dev reloads may re-execute this module.
   const channels = [
     'email:configure', 'email:getConfig', 'email:list',
-    'email:get', 'email:send', 'email:notify',
+    'email:get', 'email:send', 'email:notify', 'email:test',
   ]
   for (const c of channels) {
     try { ipcMain.removeHandler(c) } catch { /* ignore */ }
@@ -226,5 +226,49 @@ module.exports = function registerEmailHandlers() {
       text: text || '',
     })
     return { accepted: info.accepted, messageId: info.messageId }
+  })
+
+  // Test IMAP + SMTP with the stored config; return a per-service verdict with
+  // the raw error so the user can diagnose bad credentials / wrong host / etc.
+  ipcMain.handle('email:test', async () => {
+    const cfg = loadConfig()
+    if (!cfg) throw new Error('邮箱未配置')
+
+    let imapOk = false
+    let imapMsg = ''
+    const client = new ImapFlow({
+      host: cfg.imapHost,
+      port: cfg.imapPort,
+      secure: cfg.imapSecure !== false,
+      auth: { user: cfg.user, pass: cfg.authCode },
+      // Log the IMAP conversation to the main console so the server's exact
+      // auth-failure text (e.g. 163's reason) is visible when debugging.
+      logger: (log) => { try { console.log('[email IMAP]', log?.msg ?? '', log?.err ?? '') } catch {} },
+    })
+    try {
+      await client.connect()
+      imapOk = true
+      imapMsg = 'IMAP 连接成功'
+      await client.logout()
+    } catch (e) {
+      imapMsg = (e && (e.message || e.responseText || e.text)) || String(e)
+    }
+
+    let smtpOk = false
+    let smtpMsg = ''
+    try {
+      const transport = makeSmtpTransport(cfg)
+      await transport.verify()
+      smtpOk = true
+      smtpMsg = 'SMTP 连接成功'
+    } catch (e) {
+      smtpMsg = (e && (e.message || e.responseText)) || String(e)
+    }
+
+    return {
+      ok: imapOk && smtpOk,
+      imap: { ok: imapOk, message: imapMsg },
+      smtp: { ok: smtpOk, message: smtpMsg },
+    }
   })
 }

@@ -161,6 +161,7 @@ export interface ElectronAPI {
     }>
     send: (msg: { to: string; subject?: string; text?: string; html?: string }) => Promise<{ accepted: string[]; messageId: string }>
     notify: (msg: { to?: string; subject?: string; text?: string }) => Promise<{ accepted: string[]; messageId: string }>
+    test: () => Promise<{ ok: boolean; imap: { ok: boolean; message: string }; smtp: { ok: boolean; message: string } }>
   }
 
   // ── Hooks (written into Hermes' config.yaml `hooks:` block; backend fires them) ──

@@ -24,6 +24,7 @@ import {
   XCircle,
   MoreHorizontal,
   FolderTree,
+  Mail,
 } from 'lucide-react'
 import dynamic from 'next/dynamic'
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
@@ -1218,7 +1219,7 @@ export function HelixLayout() {
                   >
                     <Terminal className="size-4" />
                   </button>
-                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'files') && (
+                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'files' && rightSidebarTab !== 'email') && (
                   <button
                     ref={browserMenuButtonRef}
                     onClick={() => setBrowserMenuOpen(v => !v)}
@@ -1252,6 +1253,14 @@ export function HelixLayout() {
                           <FolderTree className="size-3.5" />
                           <span className="flex-1 text-left">目录</span>
                           {rightSidebarTab === 'files' && <CheckCircle2 className="size-3.5" />}
+                        </button>
+                        <button
+                          onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'email' ? null : 'email'); setBrowserMenuOpen(false) }}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'email' ? 'text-primary' : 'text-foreground/80'}`}
+                        >
+                          <Mail className="size-3.5" />
+                          <span className="flex-1 text-left">邮箱</span>
+                          {rightSidebarTab === 'email' && <CheckCircle2 className="size-3.5" />}
                         </button>
                       </div>
                     </div>,
