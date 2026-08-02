@@ -4,9 +4,10 @@
 # into `resources/hermes-agent` of the installed app, so a fresh machine needs no
 # separate Hermes install. This script produces that staging dir:
 #
-#   1. Ensure a runtime exists in vendor/hermes-agent (reuse a known-good
-#      LOCALAPPDATA install, else `uv sync` fallback).
-#   2. Copy a SLIM copy of the submodule into .cache/hermes-runtime/hermes-agent:
+#   1. Ensure a runtime exists in the vendored hermes-agent/ at the repo root
+#      (reuse a known-good LOCALAPPDATA install, else `uv sync` fallback).
+#   2. Copy a SLIM copy of the vendored hermes-agent into
+#      .cache/hermes-runtime/hermes-agent:
 #      runtime source + `venv` + `.hermes-runtime`, dropping `.venv` (references
 #      the uv cache python — not relocatable), git/website/tests/apps and all
 #      __pycache__/*.pyc bytecode.
@@ -18,12 +19,12 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $repo = Join-Path $root '..'
-$agent = Join-Path $repo 'vendor' | Join-Path -ChildPath 'hermes-agent'
+$agent = Join-Path $repo 'hermes-agent'
 $stagingRoot = Join-Path $repo '.cache\hermes-runtime'
 $staging = Join-Path $stagingRoot 'hermes-agent'
 
 if (-not (Test-Path $agent)) {
-  Write-Error "vendor/hermes-agent not found. Run 'git submodule update --init' first."
+  Write-Error "repo hermes-agent not found (vendored copy missing). Restore hermes-agent/ at the repo root first."
   exit 1
 }
 
@@ -43,7 +44,7 @@ function Invoke-Robocopy {
   if ($code -ge 8) { Write-Error "robocopy failed (code $code): $Src -> $Dst" }
 }
 
-# ── 1) Ensure a runtime is bootstrapped in vendor/hermes-agent ─────────────
+# ── 1) Ensure a runtime is bootstrapped in the vendored hermes-agent ───────
 Push-Location $agent
 try {
   if (-not (Test-Built)) {
@@ -66,7 +67,7 @@ try {
       if (-not (Test-Built)) { Write-Error 'uv sync did not produce hermes.exe'; exit 1 }
     }
   } else {
-    Write-Host '[hermes-runtime] vendor runtime already present.'
+    Write-Host '[hermes-runtime] repo runtime already present.'
   }
 }
 finally { Pop-Location }
