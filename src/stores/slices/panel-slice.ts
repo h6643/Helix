@@ -22,6 +22,7 @@ export interface PanelSlice {
   showCustomizePanel: boolean
   showWorktreePanel: boolean
   showPluginManager: boolean
+  showKanbanPanel: boolean
   availableCommands: AvailableCommand[]
   /**
    * Hermes's in-session todo list, captured from `session/update` events that
@@ -44,6 +45,7 @@ export interface PanelSlice {
   toggleCustomizePanel: () => void
   toggleWorktreePanel: () => void
   togglePluginManager: () => void
+  toggleKanbanPanel: () => void
   setAvailableCommands: (cmds: AvailableCommand[]) => void
   /** Replace the Hermes todo list (called whenever a fresh todo payload arrives). */
   setHermesTodos: (todos: HermesTodo[]) => void
@@ -63,6 +65,7 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   showCustomizePanel: false,
   showWorktreePanel: false,
   showPluginManager: false,
+  showKanbanPanel: false,
   availableCommands: [],
   hermesTodos: [],
 
@@ -116,6 +119,7 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   toggleCustomizePanel: () => set((s) => ({ showCustomizePanel: !s.showCustomizePanel })),
   toggleWorktreePanel: () => set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
   togglePluginManager: () => set((s) => ({ showPluginManager: !s.showPluginManager })),
+  toggleKanbanPanel: () => set((s) => ({ showKanbanPanel: !s.showKanbanPanel })),
   setAvailableCommands: (cmds) => set({ availableCommands: cmds }),
   setHermesTodos: (todos) => set({ hermesTodos: todos }),
   clearHermesTodos: () => set({ hermesTodos: [] }),

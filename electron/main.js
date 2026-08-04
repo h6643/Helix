@@ -24,6 +24,7 @@ function safeOn(channel, listener) {
 // ── IPC Handler Modules ─────────────────────────────────────────────────────
 const registerGitHandlers = require('./ipc/git')
 const registerScheduledTasksHandlers = require('./ipc/scheduled-tasks')
+const registerKanbanHandlers = require('./ipc/kanban')
 const securityModule = require('./ipc/security')
 const registerTerminalHandlers = require('./ipc/terminal')
 const registerSecurityHandlers = securityModule
@@ -2091,6 +2092,9 @@ const terminalModule = registerTerminalHandlers(() => mainWindow, () => workDir)
 
 // ── Scheduled tasks ─────────────────────────────────────────────────────────
 registerScheduledTasksHandlers()
+
+// ── Kanban board (hermes kanban CLI bridge) ─────────────────────────────────
+registerKanbanHandlers()
 
 // Restart the Hermes gateway so it re-registers hooks from config.yaml.
 // Hermes reads hooks at GATEWAY STARTUP (register_from_config), so a save to

@@ -169,6 +169,14 @@ contextBridge.exposeInMainWorld('electron', {
     remove: (params) => ipcRenderer.invoke('scheduled-tasks:remove', params),
   },
 
+  // ── Kanban (hermes kanban CLI bridge via the main process) ─────────────
+  kanban: {
+    // Runs `hermes kanban <verb> ...` in the main process. `args` is the arg
+    // array placed AFTER the subcommand; `board` (optional) becomes the
+    // `--board <slug>` prefix BEFORE the subcommand; `json` appends `--json`.
+    invoke: (verb, args, json, board) => ipcRenderer.invoke('kanban:invoke', { verb, args, json, board }),
+  },
+
   // ── Hooks (Codex-compatible lifecycle hooks, run in the main process) ──
   hooks: {
     getConfig: () => ipcRenderer.invoke('hooks:getConfig'),

@@ -179,6 +179,18 @@ export interface ElectronAPI {
     getConfig: () => Promise<{ ok: boolean; config?: HooksConfig; error?: string }>
     setConfig: (config: HooksConfig) => Promise<{ ok: boolean; error?: string }>
   }
+
+  // ── Kanban (hermes kanban CLI bridge via the main process) ─────────────
+  kanban: {
+    invoke: (verb: string, args?: string[], json?: boolean, board?: string) => Promise<{
+      ok: boolean
+      data?: unknown
+      stdout?: string
+      stderr?: string
+      code?: number
+      error?: string
+    }>
+  }
 }
 
 declare global {
