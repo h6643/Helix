@@ -6,12 +6,13 @@ import {
   Folder,
   FolderOpen,
   ChevronRight,
-  RefreshCw,
   Loader2,
-  GitBranch,
+  Pencil,
+  Trash2,
 } from 'lucide-react'
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import { isElectron, electronGit, electronFS } from '@/lib/electron-bridge'
+import { createPortal } from 'react-dom'
+import { isElectron, electronGit, electronFS, electronShell } from '@/lib/electron-bridge'
 import { useHelixStore } from '@/stores/helix-store'
 
 interface FileTreeItem {
@@ -27,6 +28,8 @@ interface FileTreePanelProps {
    *  the parent can surface the code page (the pages model, not rightSidebarTab,
    *  drives which view is visible). */
   onOpenFile?: () => void
+  /** Bump this key (e.g. from the parent's refresh button) to reload the tree. */
+  reloadKey?: number
 }
 
 // Pastel folder tints for the warm cream workspace, matching the
@@ -153,7 +156,47 @@ function ExtensionIcon({ name, className }: { name: string; className?: string }
   return <FileText className={`size-4 shrink-0 ${ext && colorMap[ext] ? colorMap[ext] : 'text-muted-foreground/60'} ${className || ''}`} />
 }
 
-export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
+// In-place helpers for rename / delete without collapsing the whole tree.
+
+function renameChildrenPaths(nodes: FileTreeItem[], oldPrefix: string, newPrefix: string): FileTreeItem[] {
+  return nodes.map(n => {
+    const rest = n.path.startsWith(oldPrefix) ? n.path.slice(oldPrefix.length) : n.path
+    const updated = { ...n, path: newPrefix + rest }
+    if (updated.isDirectory && updated.children) {
+      updated.children = renameChildrenPaths(updated.children, oldPrefix, newPrefix)
+    }
+    return updated
+  })
+}
+
+function applyRename(nodes: FileTreeItem[], oldPath: string, newName: string, newPath: string): FileTreeItem[] {
+  return nodes.map(n => {
+    if (n.path === oldPath) {
+      const updated = { ...n, name: newName, path: newPath }
+      if (updated.isDirectory && updated.children) {
+        updated.children = renameChildrenPaths(updated.children, oldPath, newPath)
+      }
+      return updated
+    }
+    return n
+  })
+}
+
+function removeFromTree(nodes: FileTreeItem[], path: string): FileTreeItem[] {
+  const result: FileTreeItem[] = []
+  for (const n of nodes) {
+    if (n.path === path) continue
+    if (n.isDirectory && n.children) {
+      const children = removeFromTree(n.children, path)
+      result.push(children.length === n.children.length ? n : { ...n, children })
+    } else {
+      result.push(n)
+    }
+  }
+  return result
+}
+
+export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
   const showToast = useHelixStore(s => s.showToast)
   const openFileInEditor = useHelixStore(s => s.openFileInEditor)
@@ -161,8 +204,15 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
   const [gitStatus, setGitStatus] = useState<Map<string, string>>(new Map())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [branchName, setBranchName] = useState('')
   const showHidden = false
+
+  // VS Code-style right-click context menu.
+  const [menu, setMenu] = useState<{ x: number; y: number; item: FileTreeItem } | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  // VS Code-style inline rename box on the tree node itself.
+  const [renaming, setRenaming] = useState<FileTreeItem | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
 
   const loadTree = useCallback(async () => {
     if (!isElectron() || !selectedWorkDir) {
@@ -176,11 +226,6 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
     try {
       const gitResult = await electronGit.status()
       if (gitResult.ok && gitResult.output) {
-        const lines = gitResult.output.split('\n')
-        for (const line of lines) {
-          const m = line.match(/^# branch\.head (.+)$/)
-          if (m) { setBranchName(m[1]); break }
-        }
         setGitStatus(parsePorcelainV2(gitResult.output))
       }
     } catch {}
@@ -188,8 +233,14 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
     try {
       const api = (window as any).electron
       let tree: FileTreeItem[] = []
+      // 登记当前选中项目为合法根：点历史对话等路径会直接改 selectedWorkDir 而不走
+      // app:setWorkDir，主进程不知道这个根 → 单根校验判越界。扫描前 ensure 一次最稳。
+      try { await api?.fs?.allowRoot?.(selectedWorkDir) } catch { /* best-effort */ }
       if (api?.fs?.scanTree) {
-        const raw = (await api.fs.scanTree()) as Array<{ id: string; name: string; type: 'file' | 'folder'; children?: any[] }>
+        // 显式传当前选中的绝对路径扫描。无参 scanTree() 扫的是主进程模块级 workDir，
+        // 切项目时若它还没更新（或主进程未重启），safePath 的 startsWith(workDir) 会
+        // 判越界 → 扫描被静默吞 → 目录面板“固定”在旧项目。传绝对路径则 safePath 放行。
+        const raw = (await api.fs.scanTree(selectedWorkDir)) as Array<{ id: string; name: string; type: 'file' | 'folder'; children?: any[] }>
         function convert(rawList: Array<{ name: string; type: string; children?: any[] }>, prefix: string): FileTreeItem[] {
           const result: FileTreeItem[] = []
           for (const item of rawList) {
@@ -211,7 +262,7 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
         tree = convert(raw, '')
       } else {
         // Fallback: load only root
-        const entries = await api.fs.readdir() as Array<{ name: string; isDirectory: boolean }>
+        const entries = await api.fs.readdir(selectedWorkDir) as Array<{ name: string; isDirectory: boolean }>
         for (const e of entries) {
           if (e.name.startsWith('.') && !showHidden) continue
           tree.push({ name: e.name, path: e.name, isDirectory: e.isDirectory })
@@ -229,6 +280,82 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
   }, [selectedWorkDir, showHidden])
 
   useEffect(() => { loadTree() }, [loadTree])
+
+  // External refresh trigger: when the parent bumps reloadKey, reload the tree.
+  const firstReloadKey = useRef(reloadKey)
+  useEffect(() => {
+    if (reloadKey === firstReloadKey.current) return
+    firstReloadKey.current = reloadKey
+    loadTree()
+  }, [reloadKey, loadTree])
+
+  // Close the context menu on outside click / Escape.
+  useEffect(() => {
+    if (!menu) return
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(null)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(null) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menu])
+
+  // VS Code-style rename box: pre-fill the name and select the basename
+  // (without extension) once the input mounts.
+  useEffect(() => {
+    if (!renaming) return
+    setRenameValue(renaming.name)
+    requestAnimationFrame(() => {
+      const input = renameInputRef.current
+      if (!input) return
+      input.focus()
+      const dot = renaming.name.lastIndexOf('.')
+      if (renaming.isDirectory || dot <= 0) input.select()
+      else input.setSelectionRange(0, dot)
+    })
+  }, [renaming])
+
+  const openMenu = (e: React.MouseEvent, item: FileTreeItem) => {
+    e.preventDefault()
+    setMenu({ x: e.clientX, y: e.clientY, item })
+  }
+
+  const startRename = (item: FileTreeItem) => {
+    setMenu(null)
+    setRenaming(item)
+  }
+
+  const commitRename = async (item: FileTreeItem) => {
+    const newName = renameValue.trim()
+    setRenaming(null)
+    if (!newName || newName === item.name) return
+    const slash = item.path.lastIndexOf('/')
+    const newPath = slash >= 0 ? item.path.slice(0, slash + 1) + newName : newName
+    try {
+      await electronFS.rename(item.path, newPath)
+      setItems(prev => applyRename(prev, item.path, newName, newPath))
+      showToast({ type: 'success', title: '已重命名', description: newName })
+    } catch (err: any) {
+      showToast({ type: 'error', title: '重命名失败', description: err?.message || '重命名出错' })
+    }
+  }
+
+  const handleDelete = async (item: FileTreeItem) => {
+    setMenu(null)
+    try {
+      await electronFS.deleteFile(item.path)
+      const st = useHelixStore.getState()
+      if (st.editorTabs.some(t => t.path === item.path)) st.closeEditorTab(item.path)
+      setItems(prev => removeFromTree(prev, item.path))
+      showToast({ type: 'success', title: '已移动到回收站', description: item.name })
+    } catch (err: any) {
+      showToast({ type: 'error', title: '删除失败', description: err?.message || '删除出错' })
+    }
+  }
 
   const toggleExpand = async (item: FileTreeItem) => {
     if (!item.isDirectory) return
@@ -299,10 +426,14 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
     }
   }
 
-  const handleOpenInFolder = (item: FileTreeItem) => {
-    const api = (window as any).electron
-    if (api?.shell?.showItemInFolder) {
-      api.shell.showItemInFolder(`${selectedWorkDir}/${item.path}`)
+  const handleOpenInFolder = async (item: FileTreeItem) => {
+    try {
+      const res = await electronShell.showItemInFolder(item.path) as unknown as { ok?: boolean; error?: string } | undefined
+      if (res && res.ok === false) {
+        showToast({ type: 'error', title: '打开失败', description: res.error || '无法在文件夹中显示' })
+      }
+    } catch (e: any) {
+      showToast({ type: 'error', title: '打开失败', description: e?.message || '无法在文件夹中显示' })
     }
   }
 
@@ -323,10 +454,7 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
               ...(bg ? { backgroundColor: bg } : {}),
             }}
             onClick={() => handleFileClick(item)}
-            onContextMenu={(e) => {
-              e.preventDefault()
-              handleOpenInFolder(item)
-            }}
+            onContextMenu={(e) => openMenu(e, item)}
           >
             {item.isDirectory ? (
               <ChevronRight
@@ -346,7 +474,24 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
             ) : (
               <ExtensionIcon name={item.name} />
             )}
-            <span className={`truncate flex-1 ${bg ? 'text-white' : 'text-foreground/80'}`}>{item.name}</span>
+            {renaming && renaming.path === item.path ? (
+              <input
+                ref={renameInputRef}
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation()
+                  if (e.key === 'Enter') { e.preventDefault(); commitRename(item) }
+                  else if (e.key === 'Escape') { e.stopPropagation(); setRenaming(null) }
+                }}
+                onBlur={() => setRenaming(null)}
+                onClick={(e) => e.stopPropagation()}
+                spellCheck={false}
+                className="flex-1 min-w-0 bg-accent/40 text-foreground text-[13px] px-1 py-0 rounded outline-none border border-primary/60"
+              />
+            ) : (
+              <span className={`truncate flex-1 ${bg ? 'text-white' : 'text-foreground/80'}`}>{item.name}</span>
+            )}
             {style && (
               <span
                 className={`shrink-0 text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded ${style.color} ${style.bg}`}
@@ -366,27 +511,6 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
 
   return (
     <div className="h-full w-full bg-sidebar flex flex-col overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 h-9 shrink-0 border-b border-sidebar-border/60">
-        <div className="flex items-center gap-1.5 min-w-0">
-          {branchName && (
-            <>
-              <GitBranch className="size-3 text-muted-foreground/50 shrink-0" />
-              <span className="text-[11px] text-muted-foreground/60 truncate font-mono">{branchName}</span>
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-0.5">
-          <button
-            onClick={() => loadTree()}
-            className="p-1 rounded text-muted-foreground/30 hover:text-foreground/60 transition-colors"
-            title="Refresh"
-          >
-            <RefreshCw className={`size-3 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
-      </div>
-
       {/* Tree */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 text-sm">
         {loading && items.length === 0 ? (
@@ -402,6 +526,41 @@ export function FileTreePanel({ onOpenFile }: FileTreePanelProps) {
           renderTree(items)
         )}
       </div>
+
+      {menu && typeof window !== 'undefined' && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[500] min-w-[180px] bg-card border border-border/80 rounded-lg shadow-xl py-1"
+          style={{
+            left: Math.min(menu.x, window.innerWidth - 200),
+            top: Math.min(menu.y, window.innerHeight - 140),
+          }}
+        >
+          <button
+            onClick={() => startRename(menu.item)}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+          >
+            <Pencil className="size-3.5" />
+            <span className="flex-1 text-left">重命名</span>
+          </button>
+          <button
+            onClick={() => handleDelete(menu.item)}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-accent/60 transition-colors"
+          >
+            <Trash2 className="size-3.5" />
+            <span className="flex-1 text-left">删除</span>
+          </button>
+          <div className="h-px my-1 bg-border/60" />
+          <button
+            onClick={() => { handleOpenInFolder(menu.item); setMenu(null) }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+          >
+            <FolderOpen className="size-3.5" />
+            <span className="flex-1 text-left">在文件夹中显示</span>
+          </button>
+        </div>,
+        document.body,
+      )}
     </div>
   )
 }

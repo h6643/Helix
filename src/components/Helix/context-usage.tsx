@@ -1,11 +1,11 @@
 'use client'
 
-import { Shrink, Loader2 } from 'lucide-react'
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { electronHermes } from '@/lib/electron-bridge'
+import { hermesApi } from '@/lib/electron-bridge'
 import { formatTokens } from '@/lib/format'
 import { debug } from '@/lib/logger'
 import { useHelixStore } from '@/stores/helix-store'
+import { useHermesStore } from '@/stores/hermes-store'
 
 // ---- Types ----
 
@@ -21,6 +21,22 @@ interface ContextUsageData {
   context_used: number
   context_percent: number
   categories: ContextBreakdown[]
+}
+
+// Backend categories carry a CSS-var color; map to our own tailwind classes.
+const CATEGORY_COLORS: Record<string, string> = {
+  system_prompt: 'bg-gray-500',
+  tool_definitions: 'bg-orange-500',
+  rules: 'bg-emerald-500',
+  skills: 'bg-sky-500',
+  mcp: 'bg-pink-500',
+  subagent_definitions: 'bg-purple-500',
+  memory: 'bg-teal-500',
+  conversation: 'bg-blue-500',
+}
+
+function colorFor(id: string): string {
+  return CATEGORY_COLORS[id] || 'bg-gray-500'
 }
 
 // ---- Model-aware context window size lookup (fallback when backend unavailable) ----
@@ -52,6 +68,10 @@ export function getModelContextWindow(modelName?: string): number {
 
 function ContextUsageBar({ used, total, categories }: { used: number; total: number; categories: ContextBreakdown[] }) {
   const percentage = Math.min(Math.max((used / total) * 100, 0), 100)
+  // Segment widths are proportional to each category's share, normalized to the
+  // used fill — so the bar always reads as used/total regardless of whether the
+  // category tokens come from the backend or the local session stats.
+  const catTotal = categories.reduce((s, c) => s + c.tokens, 0) || 1
 
   return (
     <div className="w-full">
@@ -64,7 +84,7 @@ function ContextUsageBar({ used, total, categories }: { used: number; total: num
       {/* Segmented bar */}
       <div className="h-2 w-full bg-muted rounded-full overflow-hidden flex">
         {categories.map((cat) => {
-          const catPercent = used > 0 ? (cat.tokens / total) * 100 : 0
+          const catPercent = used > 0 ? (cat.tokens / catTotal) * percentage : 0
           if (catPercent <= 0) return null
           return (
             <div
@@ -83,44 +103,30 @@ function ContextUsageBar({ used, total, categories }: { used: number; total: num
 // ---- Panel (detailed breakdown popover) ----
 
 function ContextUsagePanel({ used, total, categories, onClose }: { used: number; total: number; categories: ContextBreakdown[]; onClose: () => void }) {
-  const [compacting, setCompacting] = useState(false)
-
-  const handleCompact = async () => {
-    setCompacting(true)
-    try {
-      await electronHermes.send('compaction.compact', {})
-      useHelixStore.getState().showToast({ type: 'success', title: '已请求压缩上下文' })
-    } catch {
-      useHelixStore.getState().showToast({ type: 'error', title: '压缩失败或网关不支持' })
-    } finally {
-      setCompacting(false)
-      onClose()
-    }
-  }
-
   return (
     <div className="absolute bottom-full right-0 mb-2 w-72 bg-card border border-border/60 rounded-xl shadow-lg p-3 z-50">
       <ContextUsageBar used={used} total={total} categories={categories} />
       {/* Legend list */}
       <div className="mt-3 space-y-1.5">
-        {categories.filter(c => c.tokens > 0).map(item => (
-          <div key={item.id} className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <span className={`w-2 h-2 rounded-sm ${item.color}`} />
-              <span className="text-xs text-foreground">{item.label}</span>
-            </div>
-            <span className="text-xs text-muted-foreground">~{formatTokens(item.tokens)}</span>
+        {categories.filter(c => c.tokens > 0).length === 0 ? (
+          <div className="text-xs text-muted-foreground">
+            暂无上下文分类数据（需要正在运行的 Hermes 会话）
           </div>
-        ))}
+        ) : categories.filter(c => c.tokens > 0).map(item => {
+          const pct = total > 0 ? (item.tokens / total) * 100 : 0
+          return (
+            <div key={item.id} className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-sm ${item.color}`} />
+                <span className="text-xs text-foreground">{item.label}</span>
+              </div>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                ~{formatTokens(item.tokens)} <span className="text-foreground/60">{pct.toFixed(1)}%</span>
+              </span>
+            </div>
+          )
+        })}
       </div>
-      <button
-        onClick={handleCompact}
-        disabled={compacting}
-        className="mt-2.5 w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-50"
-      >
-        {compacting ? <Loader2 className="size-3.5 animate-spin" /> : <Shrink className="size-3.5" />}
-        {compacting ? '压缩中…' : '压缩上下文'}
-      </button>
     </div>
   )
 }
@@ -132,7 +138,9 @@ export function ContextUsageIndicator() {
   const [backendData, setBackendData] = useState<ContextUsageData | null>(null)
   const activeModel = useHelixStore(s => s.activeModel)
   const apiConfig = useHelixStore(s => s.apiConfig)
-  const isStreaming = useHelixStore(s => s.isChatLoading)
+  const currentSessionId = useHelixStore(s => s.currentSessionId)
+  const storeContextUsageMap = useHelixStore(s => s.contextUsage)
+  const storeContextUsage = currentSessionId ? storeContextUsageMap[currentSessionId] : null
   const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -151,7 +159,18 @@ export function ContextUsageIndicator() {
   // Fetch context breakdown from backend via RPC
   const fetchContextData = useCallback(async () => {
     try {
-      const result = await electronHermes.send('session.context_breakdown', {})
+      const sessionId = useHermesStore.getState().hermesSessionId
+      // No live Hermes session for THIS conversation (e.g. it was never run this
+      // session, or the gateway restarted and invalidated it). Don't query with an
+      // empty id — the backend would return the GLOBAL session's breakdown and the
+      // ring would show identical usage for every conversation. Instead fall back
+      // to the per-conversation store (contextUsage[currentSessionId], already
+      // persisted and correct) and render an empty breakdown.
+      if (!sessionId) {
+        setBackendData(null)
+        return
+      }
+      const result = await hermesApi()?.send('session.context_breakdown', { session_id: sessionId })
       if (result && typeof result === 'object') {
         const data = result as ContextUsageData
         setBackendData(data)
@@ -164,7 +183,7 @@ export function ContextUsageIndicator() {
             // Cooldown: don't trigger again for 60 seconds
             setTimeout(() => { autoCompactCooldownRef.current = false }, 60_000)
             try {
-              await electronHermes.send('compaction.compact', {})
+              await hermesApi()?.send('compaction.compact', { session_id: sessionId })
               debug('[ContextUsage] auto-compaction triggered at', data.context_percent.toFixed(1), '%')
             } catch { /* backend may not support */ }
           }
@@ -175,33 +194,34 @@ export function ContextUsageIndicator() {
     }
   }, [])
 
+  // 不轮询：只在用户点击打开弹层时查询一次，避免每 10s 空跑 RPC。
   useEffect(() => {
-    fetchContextData()
-    if (!isStreaming) return // Only poll while streaming
-    const interval = setInterval(fetchContextData, 10000)
-    return () => clearInterval(interval)
-  }, [isStreaming, fetchContextData])
+    if (open) fetchContextData()
+  }, [open, fetchContextData])
 
   const modelName = activeModel || apiConfig?.model || ''
-  const total = backendData?.context_max || getModelContextWindow(modelName)
-  const used = backendData?.context_used || 0
+  // 环的 used/total 优先取后端 RPC 的 context_used/context_max，其次取
+  // store 里由 message.complete / usage_update 等真实事件写入的 contextUsage，
+  // 最后才按模型名查默认窗口大小。
+  const total = backendData?.context_max || storeContextUsage?.size || getModelContextWindow(modelName)
+  const used = backendData?.context_used || storeContextUsage?.used || 0
 
-  const categories: ContextBreakdown[] = backendData?.categories || [
-    { id: 'system', label: '系统提示词', tokens: 0, color: 'bg-gray-500' },
-    { id: 'tools', label: '工具及子智能体', tokens: 0, color: 'bg-blue-500' },
-    { id: 'messages', label: '对话消息', tokens: 0, color: 'bg-orange-500' },
-    { id: 'mcp', label: '连接器及MCP', tokens: 0, color: 'bg-pink-500' },
-    { id: 'skills', label: '技能', tokens: 0, color: 'bg-sky-500' },
-  ]
+  // 单一数据源：后端 `session.context_breakdown` 的分类明细。RPC 拿不到
+  // categories 时不再用本地输入/输出统计兜底——那会让同一控件在两套语义
+  // （分类 vs 输入输出）间跳变。空数据就显示空态。
+  const categories: ContextBreakdown[] = backendData?.categories?.length
+    ? backendData.categories.map(c => ({ ...c, color: colorFor(c.id) }))
+    : []
 
-  if (used === 0) return null
+  // 无数据时也一直显示：空环（背景圆可见、进度弧为 0），有数据后填充。
+  // 注意 used 可能为 0（尚未开始对话 / 后端尚无 context_used），此时仍渲染空圈。
 
   return (
     <div className="relative" ref={panelRef}>
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="size-9 rounded-lg flex items-center justify-center text-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors"
+        className="size-10 rounded-lg flex items-center justify-center text-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors"
         title="上下文使用情况"
       >
         <ContextUsageRing used={used} total={total} />
@@ -221,16 +241,16 @@ function ContextUsageRing({ used, total = 128000 }: { used: number; total?: numb
   const colorClass = percentage > 90 ? 'text-red-500' : percentage > 70 ? 'text-amber-500' : 'text-primary'
 
   return (
-    <div className="relative size-5 flex items-center justify-center">
-      <svg className="size-4 -rotate-90" viewBox="0 0 20 20">
-        <circle cx="10" cy="10" r={radius} fill="none" stroke="currentColor" strokeOpacity="0.15" strokeWidth="2.5" />
+    <div className="relative size-7 flex items-center justify-center">
+      <svg className="size-6 -rotate-90" viewBox="0 0 20 20">
+        <circle cx="10" cy="10" r={radius} fill="none" stroke="currentColor" strokeOpacity="0.15" strokeWidth="3" />
         <circle
           cx="10"
           cy="10"
           r={radius}
           fill="none"
           stroke="currentColor"
-          strokeWidth="2.5"
+          strokeWidth="3"
           strokeLinecap="round"
           strokeDasharray={circumference}
           strokeDashoffset={strokeDashoffset}

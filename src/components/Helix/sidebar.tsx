@@ -50,12 +50,22 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  const [coords, setCoords] = useState<{ top: number; right: number } | null>(null)
+  const [coords, setCoords] = useState<{ top?: number; bottom?: number; right: number } | null>(null)
 
   const updatePosition = useCallback(() => {
     if (!buttonRef.current) return
     const rect = buttonRef.current.getBoundingClientRect()
-    setCoords({ top: rect.bottom + 4, right: window.innerWidth - rect.right })
+    const MENU_HEIGHT_ESTIMATE = 180 // ~4–5 items × ~36px each + padding
+    const spaceBelow = window.innerHeight - rect.bottom - 4
+    const spaceAbove = rect.top - 4
+    // Prefer opening downward; flip upward only when there isn't enough room.
+    // When upward, anchor menu BOTTOM just above the button (no gap).
+    const openUpward = spaceBelow < MENU_HEIGHT_ESTIMATE && spaceAbove > spaceBelow
+    setCoords({
+      top: openUpward ? undefined : rect.bottom + 4,
+      bottom: openUpward ? window.innerHeight - rect.top + 4 : undefined,
+      right: window.innerWidth - rect.right,
+    })
   }, [])
 
   useEffect(() => {
@@ -93,7 +103,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
         <MoreVertical className="size-3.5" />
       </button>
       {open && coords && createPortal(
-        <div className="fixed z-[100]" style={{ top: coords.top, right: coords.right }}>
+        <div className="fixed z-[100]" style={{ top: coords.top, bottom: coords.bottom, right: coords.right }}>
           <div ref={menuRef} className="w-40 bg-card border border-border/80 rounded-lg shadow-xl py-1">
             {onRename && (
               <button
@@ -160,12 +170,22 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  const [coords, setCoords] = useState<{ top: number; right: number } | null>(null)
+  const [coords, setCoords] = useState<{ top?: number; bottom?: number; right: number } | null>(null)
 
   const updatePosition = useCallback(() => {
     if (!buttonRef.current) return
     const rect = buttonRef.current.getBoundingClientRect()
-    setCoords({ top: rect.bottom + 4, right: window.innerWidth - rect.right })
+    const MENU_HEIGHT_ESTIMATE = 180 // ~4–5 items × ~36px each + padding
+    const spaceBelow = window.innerHeight - rect.bottom - 4
+    const spaceAbove = rect.top - 4
+    // Prefer opening downward; flip upward only when there isn't enough room.
+    // When upward, anchor menu BOTTOM just above the button (no gap).
+    const openUpward = spaceBelow < MENU_HEIGHT_ESTIMATE && spaceAbove > spaceBelow
+    setCoords({
+      top: openUpward ? undefined : rect.bottom + 4,
+      bottom: openUpward ? window.innerHeight - rect.top + 4 : undefined,
+      right: window.innerWidth - rect.right,
+    })
   }, [])
 
   useEffect(() => {
@@ -203,7 +223,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
         <MoreVertical className="size-3.5" />
       </button>
       {open && coords && createPortal(
-        <div className="fixed z-[100]" style={{ top: coords.top, right: coords.right }}>
+        <div className="fixed z-[100]" style={{ top: coords.top, bottom: coords.bottom, right: coords.right }}>
           <div ref={menuRef} className="w-40 bg-card border border-border/80 rounded-lg shadow-xl py-1">
             {onPin && (
               <button
@@ -256,7 +276,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
     flushSessionPersist,
     setCurrentSessionId,
     pushNavigation,
-    persistToStorage,
     toggleSettings,
     toggleScheduledTasksPanel,
     toggleSkillPanel,
@@ -272,7 +291,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       flushSessionPersist: s.flushSessionPersist,
       setCurrentSessionId: s.setCurrentSessionId,
       pushNavigation: s.pushNavigation,
-      persistToStorage: s.persistToStorage,
       toggleSettings: s.toggleSettings,
       toggleScheduledTasksPanel: s.toggleScheduledTasksPanel,
       toggleSkillPanel: s.toggleSkillPanel,
@@ -306,7 +324,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
 
   const sortSessions = useCallback(
     (list: PersistedSession[]) =>
-      [...list].sort((a, b) => b.savedAt - a.savedAt),
+      [...list].sort((a, b) => (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt)),
     []
   )
 
@@ -379,7 +397,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       .map(([dir, list]) => {
         const sorted = [...list].sort((a, b) => {
           if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
-          return b.savedAt - a.savedAt
+          return (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt)
         })
         return {
           dir,
@@ -390,7 +408,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       })
       .sort((a, b) => {
         if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
-        return (b.sessions[0]?.savedAt || 0) - (a.sessions[0]?.savedAt || 0)
+        return (b.sessions[0]?.createdAt ?? b.sessions[0]?.savedAt ?? 0) - (a.sessions[0]?.createdAt ?? a.sessions[0]?.savedAt ?? 0)
       })
   }, [sessions, persistedFolders, pinnedProjectDirs])
 
@@ -400,7 +418,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       .filter(s => !s.isArchived && !s.workDir)
       .sort((a, b) => {
         if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
-        return b.savedAt - a.savedAt
+        return (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt)
       })
   }, [sessions])
 
@@ -457,8 +475,10 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       // Only persist the current session if it has already been saved at least once.
       // Otherwise, loading a historical session from a different project would cause
       // temporary unsaved messages to be saved under the current project.
+      // Fire-and-forget: persistCurrentSessionNow captures a synchronous snapshot
+      // at entry, so it stays correct even after we switch away below.
       if (state.currentSessionId) {
-        await state.flushSessionPersist()
+        void state.flushSessionPersist()
       }
       useHelixStore.getState().clearExecutionFlow()
       // NOTE: do NOT reset the Hermes session here — under the concurrent
@@ -469,8 +489,10 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       if (state.showScheduledTasksPanel || state.showSkillPanel) {
         useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false })
       }
-      const all = await persistence.loadSessions()
-      const fresh = all.find(s => s.id === session.id) || session
+      // Load just the target session (single IndexedDB read) instead of
+      // fetching every session from disk just to pick one. Fall back to the
+      // in-memory snapshot if the record is missing (e.g. just-deleted).
+      const fresh = (await persistence.loadSession(session.id)) || session
       const msgs = fresh.chatMessages.map(msg => ({
         id: msg.id,
         role: msg.role as 'user' | 'assistant' | 'system',
@@ -503,15 +525,19 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       })
       if (fresh.workDir) {
         await persistence.saveProjectFolder(fresh.workDir)
+        // 对齐主进程 workDir：历史对话只改前端 selectedWorkDir，主进程会残留在旧
+        // 项目 → 相对路径的 fs IPC（打开文件/diff 预览等）被拼到旧目录 → ENOENT。
+        // 用轻量 syncWorkDir（不重启网关、不持久化），绝不能走 setWorkDir——那会
+        // 触发“切换项目”副作用，打断正在运行的对话。
+        try { await (window as any).electron?.app?.syncWorkDir?.(fresh.workDir) } catch { /* best-effort */ }
       }
       useHelixStore.getState().setCurrentSessionId(session.id)
       pushNavigation({ type: 'chat', sessionId: session.id })
-      await persistToStorage()
     } catch (e) {
       console.error('Failed to load session:', e)
       showToast({ type: 'error', title: '加载失败' })
     }
-  }, [showToast, persistToStorage])
+  }, [showToast])
 
   const handleDeleteSession = useCallback(async (id: string) => {
     const session = sessions.find(s => s.id === id)
@@ -770,7 +796,8 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         </div>
       </div>
 
-      <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+      {/* Unified scroll: single scrollbar covers projects + standalone conversations */}
+      <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
         <div className="flex items-center px-4 pt-2.5 pb-1 group/section">
           <button
             onClick={() => setRecentCollapsed(prev => !prev)}
@@ -782,7 +809,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         </div>
         
 {!recentCollapsed && (
-        <div className="px-2 overflow-y-auto min-h-0 [scrollbar-gutter:stable]">
+        <div className="px-2">
           {loading ? (
             <div className="flex items-center justify-center py-6">
               <Loader2 className="size-4 animate-spin text-sidebar-foreground/30" />
@@ -791,7 +818,14 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             <div className="space-y-1">
               {projects.map(project => {
                 const isExpanded = expandedProjects.has(project.dir)
-                const isSelectedProject = selectedWorkDir === project.dir
+                // 项目仅在「选中了项目、未选中其中具体会话、且没打开任何顶部面板」时高亮。
+                const isSelectedProject =
+                  selectedWorkDir === project.dir &&
+                  !(sessions.find(s => s.id === currentSessionId)?.workDir === project.dir) &&
+                  // 计划/插件/活动等全屏面板打开时，项目不高亮——避免两处同时亮
+                  !showScheduledTasksPanel &&
+                  !showSkillPanel &&
+                  !showActivityFeed
                 return (
                   <div key={project.dir} className="group rounded-lg overflow-hidden">
                     <div
@@ -827,7 +861,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                       </div>
                     </div>
                     {isExpanded && (
-                      <div className="border-t border-border/20">
+                      <div>
                         {project.sessions.length === 0 ? (
                           <div className="px-4 py-1.5 text-[12px] text-sidebar-foreground/30">
                             暂无对话
@@ -933,7 +967,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             <div className="px-4 pt-2.5 pb-1 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
               对话
             </div>
-            <div className="px-3 overflow-y-auto pb-2 [scrollbar-gutter:stable]">
+            <div className="px-3 pb-2">
               <div className="space-y-0.5">
                 {conversations.map(session => (
                   <div

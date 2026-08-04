@@ -1,16 +1,17 @@
 'use client'
 
-import { Globe, FolderTree, FileCode2, Mail, Maximize2, Minimize2, Plus, X } from 'lucide-react'
+import { Globe, FolderTree, FileCode2, FileDiff, Mail, Maximize2, Minimize2, Plus, X, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useHelixStore } from '@/stores/helix-store'
 import { cleanUrl } from '@/lib/url-utils'
+import { useHelixStore } from '@/stores/helix-store'
 import { CodeEditorPanel } from './code-editor-panel'
+import { DiffSidebarPanel } from './diff-sidebar-panel'
+import { EmailPanel } from './email-panel'
 import { FileTreePanel } from './file-tree-panel'
 import { BrowserView, summarizeUrl } from './preview-rail'
-import { EmailPanel } from './email-panel'
 
-type PageKind = 'browser' | 'directory' | 'code' | 'email'
+type PageKind = 'browser' | 'directory' | 'code' | 'email' | 'diff'
 interface PanelPage {
   id: string
   kind: PageKind
@@ -19,6 +20,28 @@ interface PanelPage {
 
 let pageSeq = 0
 const newPageId = () => `pg-${++pageSeq}`
+
+// Resizable file-tree column in the fullscreen split view.
+const TREE_COL_MIN = 220
+const TREE_COL_MAX = 560
+const TREE_COL_DEFAULT = 300
+const TREE_STORAGE_KEY = 'helix:split-tree-width'
+
+function loadTreeWidth(): number {
+  if (typeof localStorage === 'undefined') return TREE_COL_DEFAULT
+  try {
+    const v = localStorage.getItem(TREE_STORAGE_KEY)
+    if (v) {
+      const n = parseInt(v, 10)
+      if (n >= TREE_COL_MIN && n <= TREE_COL_MAX) return n
+    }
+  } catch {}
+  return TREE_COL_DEFAULT
+}
+
+function saveTreeWidth(w: number) {
+  try { localStorage.setItem(TREE_STORAGE_KEY, String(w)) } catch {}
+}
 
 /**
  * Right-hand sidebar as a tabbed workspace. Every "page" is one of:
@@ -39,6 +62,7 @@ export function RightSidebar() {
     if (tab === 'files') return [{ id: newPageId(), kind: 'directory', url: '' }]
     if (tab === 'code') return [{ id: newPageId(), kind: 'code', url: '' }]
     if (tab === 'email') return [{ id: newPageId(), kind: 'email', url: '' }]
+    if (tab === 'diff') return [{ id: newPageId(), kind: 'diff', url: '' }]
     return [{ id: newPageId(), kind: 'browser', url: start }]
   })
   const [activePageId, setActivePageId] = useState<string>(() => pages[0]?.id ?? '')
@@ -78,7 +102,14 @@ export function RightSidebar() {
   activePageIdRef.current = activePageId
 
   // External link (e.g. a message link click) → open / navigate a browser page.
+  // Only reacts to changes AFTER mount: the initial `pages` state already seeds
+  // a browser page from previewRailUrl, so a stale URL (e.g. from a previous
+  // browser session) must not hijack other tabs like the diff panel into
+  // showing a browser page on mount.
+  const prevRailUrlRef = useRef(previewRailUrl)
   useEffect(() => {
+    if (prevRailUrlRef.current === previewRailUrl) return
+    prevRailUrlRef.current = previewRailUrl
     const url = cleanUrl(previewRailUrl ?? '')
     if (!url) return
     let addedId: string | null = null
@@ -126,14 +157,53 @@ export function RightSidebar() {
   // Only one directory page is allowed at a time — disable the "目录" entry
   // while one already exists; it re-enables once that page is closed.
   const hasDirectory = pages.some(p => p.kind === 'directory')
+  const hasCode = pages.some(p => p.kind === 'code')
+  const hasDiff = pages.some(p => p.kind === 'diff')
 
   // VS Code–style split layout: when the sidebar is in fullscreen overlay mode
   // AND the active page is the directory, the whole overlay becomes a left/right
   // split — the left column shows the file tree, the right column shows the code
   // editor (exactly like VS Code's explorer + editor panes). Browser / code
   // pages keep the plain full-screen overlay behavior.
-  const activePage = pages.find(p => p.id === activePageId)
-  const expandedSplit = isExpanded && activePage?.kind === 'directory'
+  // Split into file-tree + code editor whenever BOTH a directory page and a
+  // code page exist, so entering fullscreen from a code tab still defaults the
+  // left sidebar to the directory (VS Code–style) instead of a bare editor.
+  const expandedSplit = isExpanded && hasDirectory && hasCode
+
+  // Resizable file-tree column in the fullscreen split view.
+  const [treeWidth, setTreeWidth] = useState(loadTreeWidth)
+  // Bumped by the refresh button next to the 目录 tab; the file tree reloads.
+  const [treeReloadKey, setTreeReloadKey] = useState(0)
+  const treeDrag = useRef<{ startX: number; startW: number } | null>(null)
+  const [treeDragging, setTreeDragging] = useState(false)
+  const onTreeDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    treeDrag.current = { startX: e.clientX, startW: treeWidth }
+    setTreeDragging(true)
+  }, [treeWidth])
+  useEffect(() => {
+    if (!treeDragging) return
+    document.body.style.userSelect = 'none'
+    const onMove = (e: MouseEvent) => {
+      const d = treeDrag.current
+      if (!d) return
+      const next = Math.max(TREE_COL_MIN, Math.min(TREE_COL_MAX, d.startW + (e.clientX - d.startX)))
+      setTreeWidth(next)
+    }
+    const onUp = () => {
+      treeDrag.current = null
+      document.body.style.userSelect = ''
+      setTreeDragging(false)
+      setTreeWidth(w => { saveTreeWidth(w); return w })
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      document.body.style.userSelect = ''
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [treeDragging])
 
   // A file was opened from the directory page. The store already loaded its
   // content via openFileInEditor(); here we make sure a code page exists and
@@ -154,9 +224,9 @@ export function RightSidebar() {
   }, [pages, expandedSplit])
 
   const pageIcon = (k: PageKind) =>
-    k === 'browser' ? <Globe className="size-3" /> : k === 'directory' ? <FolderTree className="size-3" /> : k === 'code' ? <FileCode2 className="size-3" /> : <Mail className="size-3" />
+    k === 'browser' ? <Globe className="size-3" /> : k === 'directory' ? <FolderTree className="size-3" /> : k === 'code' ? <FileCode2 className="size-3" /> : k === 'diff' ? <FileDiff className="size-3" /> : <Mail className="size-3" />
   const pageTitle = (p: PanelPage) =>
-    p.kind === 'directory' ? '目录' : p.kind === 'code' ? '代码' : p.kind === 'email' ? '邮箱' : summarizeUrl(p.url)
+    p.kind === 'directory' ? '目录' : p.kind === 'code' ? '代码' : p.kind === 'email' ? '邮箱' : p.kind === 'diff' ? '变更' : summarizeUrl(p.url)
 
   return (
     <div
@@ -186,6 +256,15 @@ export function RightSidebar() {
             >
               {pageIcon(p.kind)}
               <span className="max-w-[100px] truncate text-[11px]">{pageTitle(p)}</span>
+              {p.kind === 'directory' && (
+                <button
+                  onClick={e => { e.stopPropagation(); setTreeReloadKey(k => k + 1) }}
+                  className="p-0.5 rounded text-muted-foreground/40 hover:text-foreground hover:bg-accent/80 transition-colors"
+                  title="刷新目录"
+                >
+                  <RefreshCw className="size-2.5" />
+                </button>
+              )}
               <button
                 onClick={e => { e.stopPropagation(); closePage(p.id) }}
                 className="p-0.5 rounded text-muted-foreground/40 hover:text-foreground hover:bg-accent/80 transition-colors"
@@ -219,8 +298,15 @@ export function RightSidebar() {
         {expandedSplit ? (
           // VS Code–style split: file tree on the left, code editor on the right.
           <div className="flex-1 min-h-0 flex flex-row">
-            <div className="w-[300px] shrink-0 h-full border-r border-border/30 flex flex-col min-h-0">
-              <FileTreePanel onOpenFile={openCodePage} />
+            <div className="relative shrink-0 h-full border-r border-border/30 flex flex-col min-h-0" style={{ width: treeWidth }}>
+              <FileTreePanel onOpenFile={openCodePage} reloadKey={treeReloadKey} />
+              {/* Resize handle overlays the tree's right edge so it adds no
+                  visual gap between the tree and the editor. */}
+              <div
+                onMouseDown={onTreeDragStart}
+                className={`absolute top-0 right-0 w-1.5 h-full cursor-col-resize z-10 transition-colors ${treeDragging ? 'bg-primary/30' : 'hover:bg-primary/30'}`}
+                title="拖动调整目录宽度"
+              />
             </div>
             <div className="flex-1 min-w-0 h-full flex flex-col min-h-0">
               <CodeEditorPanel onClose={() => setIsExpanded(false)} />
@@ -237,13 +323,16 @@ export function RightSidebar() {
                 />
               )}
               {p.kind === 'directory' && (
-                <FileTreePanel onOpenFile={openCodePage} />
+                <FileTreePanel onOpenFile={openCodePage} reloadKey={treeReloadKey} />
               )}
             {p.kind === 'code' && (
               <CodeEditorPanel onClose={() => closePage(p.id)} />
             )}
             {p.kind === 'email' && (
               <EmailPanel onClose={() => closePage(p.id)} />
+            )}
+            {p.kind === 'diff' && (
+              <DiffSidebarPanel />
             )}
             </div>
           ))
@@ -280,6 +369,14 @@ export function RightSidebar() {
             >
               <Mail className="size-3.5" />
               <span className="flex-1 text-left">邮箱</span>
+            </button>
+            <button
+              onClick={() => addPage('diff')}
+              disabled={hasDiff}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            >
+              <FileDiff className="size-3.5" />
+              <span className="flex-1 text-left">变更</span>
             </button>
           </div>
         </div>,

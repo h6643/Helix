@@ -35,6 +35,7 @@ const hooksModule = require('./ipc/hooks')
 const configModule = require('./lib/config')
 const {
   setYamlKey,
+  setDelegationIdentities,
   setCustomProviderModel,
   setCustomProviderField,
   customProviderApiKey,
@@ -114,6 +115,11 @@ let serveGatewayInfo = null
 // ?token=<HERMES_DASHBOARD_SESSION_TOKEN>). Generated once per app run so
 // restarts of the backend keep the same token and the renderer can reconnect.
 let serveSessionToken = null
+// Gateway topology: 'local' spawns the bundled Hermes runtime (hermes serve);
+// 'remote' connects to an external Hermes gateway WebSocket URL without spawning
+// any local subprocess. Controlled at runtime via hermes:setGatewayMode.
+let currentGatewayMode = 'local'
+let remoteGatewayUrl = ''
 
 const _notifTiming = {}
 const hermesPending = new Map()
@@ -491,6 +497,15 @@ function restartGatewayDebounced(label) {
 // `restartHermesGatewayCore` is a hoisted function declaration so it can be
 // referenced by restartGatewayDebounced above even though it's defined here.
 async function restartHermesGatewayCore({ notifyRenderer = false } = {}) {
+  // In remote mode there is no local gateway to recycle — config changes apply on
+  // the remote side via RPC, not by restarting a (non-existent) local process.
+  // Just re-assert the remote info so the renderer stays pointed at it.
+  if (currentGatewayMode === 'remote') {
+    if (notifyRenderer && mainWindow && !mainWindow.isDestroyed() && serveGatewayInfo) {
+      mainWindow.webContents.send('hermes:event', 'gateway.serveInfo', serveGatewayInfo)
+    }
+    return
+  }
   // Tell the renderer the gateway is about to go down so it flips
   // hermesConnected=false. This makes handleRun await gateway.ready before
   // issuing session/new — otherwise it fires session/new into the gap
@@ -615,6 +630,12 @@ function scheduleServeRespawn() {
 function startHermesGateway(candidateIndex = 0) {
   return new Promise((resolve, reject) => {
     _acpReadySent = false
+    // In remote mode there is no local subprocess to spawn — serveGatewayInfo is
+    // owned by hermes:setGatewayMode, which populates it directly. Bail out so we
+    // never try to launch a hermes serve that would shadow the remote connection.
+    if (currentGatewayMode === 'remote') {
+      return resolve(serveGatewayInfo)
+    }
     // Ensure the git-probe workaround is present before launching (survives updates)
     ensureCodingContextOff()
     // Re-assert the user's last-saved model profile (cached by the renderer) into
@@ -1177,10 +1198,18 @@ async function createWindow() {
   })
 
   mainWindow.on('maximize', () => {
-    mainWindow?.webContents.send('window:maximized-changed', true)
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send('window:maximized-changed', true)
+      }
+    } catch {}
   })
   mainWindow.on('unmaximize', () => {
-    mainWindow?.webContents.send('window:maximized-changed', false)
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send('window:maximized-changed', false)
+      }
+    } catch {}
   })
 
   // Block Electron's default Ctrl+R / Ctrl+Shift+R / F5 page refresh so the
@@ -1244,14 +1273,11 @@ safeHandle('hermes:send', async (event, method, params) => {
   if (method === 'hermes:getTasks') {
     return { tasks: [] }
   }
-  // The current Hermes gateway build does not implement `session.context_breakdown`
-  // (it returns -32601 Method not found). context-usage.tsx probes it every 10s
-  // for the context-usage ring; answer locally with null so it degrades gracefully
-  // (falls back to the model's default context window) instead of spamming
-  // "Method not found" on every poll.
-  if (method === 'session.context_breakdown') {
-    return null
-  }
+  // `session.context_breakdown` is implemented by the serve gateway
+  // (tui_gateway/methods_session.py). Forward it through instead of answering
+  // null, so the context-usage ring/breakdown can show real category data in
+  // ACP mode as well. If the backend still 404s, the renderer catches it and
+  // shows the empty state.
   if (method === 'session/prompt') {
     // Send, but if the backend reports the session was not found (stale id from
     // a gateway restart the frontend hasn't caught up with), auto-create a new
@@ -1339,6 +1365,53 @@ safeHandle('hermes:getGatewayInfo', async () => {
   return { mode: 'acp' }
 })
 
+// ── Gateway topology switch (local spawned runtime <-> remote external WS) ──
+// The renderer's breadcrumb toggle calls this. In 'remote' mode we tear down the
+// local `hermes serve` subprocess and point the frontend at an external gateway
+// WebSocket URL; in 'local' mode we respawn the bundled runtime.
+function buildRemoteGatewayInfo(rawUrl) {
+  if (!rawUrl) return null
+  let wsUrl = rawUrl.trim()
+  // Accept a plain http(s) base and derive the Hermes WS path.
+  if (/^https?:\/\//i.test(wsUrl)) {
+    const base = wsUrl.replace(/\/+$/, '')
+    wsUrl = base.replace(/^http/i, 'ws') + '/api/ws'
+  }
+  let baseUrl = wsUrl.split('?')[0].replace(/\/api\/ws$/, '')
+  baseUrl = baseUrl.replace(/^wss?:\/\//i, (m) => (m.toLowerCase().startsWith('wss') ? 'https://' : 'http://'))
+  return { mode: 'serve', pending: false, wsUrl, baseUrl, port: 0, remote: true }
+}
+
+safeHandle('hermes:setGatewayMode', async (event, params = {}) => {
+  const mode = params.mode === 'remote' ? 'remote' : 'local'
+  const url = (params.url || '').trim()
+  currentGatewayMode = mode
+  remoteGatewayUrl = url
+  if (mode === 'remote') {
+    if (!url) {
+      return { ok: false, error: 'remote 模式需要提供网关地址（WebSocket URL）' }
+    }
+    const info = buildRemoteGatewayInfo(url)
+    if (!info) {
+      return { ok: false, error: '无效的远程网关地址' }
+    }
+    // Kill the local subprocess if one is running.
+    const oldP = hermesProcess
+    hermesProcess = null
+    try { if (oldP) oldP.kill() } catch {}
+    serveGatewayInfo = info
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('hermes:event', 'gateway.serveInfo', serveGatewayInfo)
+    }
+    console.log('[Hermes] gateway mode → remote:', info.wsUrl)
+    return { ok: true, mode: 'remote', info: serveGatewayInfo }
+  }
+  // Back to local: respawn the bundled runtime (handshake will push serveInfo).
+  console.log('[Hermes] gateway mode → local (respawning bundled runtime)')
+  startHermesGateway().catch((e) => console.error('[Hermes] local gateway respawn failed:', e?.message || e))
+  return { ok: true, mode: 'local' }
+})
+
 // ── Fetch models from custom API endpoint ──────────────────────────────────
 
 safeHandle('hermes:fetchModels', async (event, { baseUrl, apiKey }) => {
@@ -1352,6 +1425,54 @@ safeHandle('hermes:fetchModels', async (event, { baseUrl, apiKey }) => {
     return { models }
   } catch (err) {
     return { models: [], error: err.message }
+  }
+})
+
+// ── Hermes backend config.yaml read/write (Memory settings panel) ──────
+// The serve gateway exposes GET/PUT /api/config on the SAME uvicorn port as
+// /api/ws. A *browser* fetch from http://localhost:3000 → 127.0.0.1:<port>
+// fails with "Failed to fetch": we send the `X-Hermes-Session-Token` custom
+// header, so the browser issues a CORS preflight (OPTIONS) which carries NO
+// token; the dashboard auth gate 401s that preflight *before* the CORS
+// middleware can answer, so the real request is blocked. Routing the call
+// through the main process (Node fetch, token attached, no browser preflight)
+// sidesteps the entire problem. Verified: OPTIONS w/o token → 401, GET w/ token
+// → 200 + full config JSON.
+function _serveConfigUrl() {
+  if (GATEWAY_MODE !== 'serve' || !serveGatewayInfo || !serveGatewayInfo.port) return null
+  return `http://127.0.0.1:${serveGatewayInfo.port}/api/config`
+}
+
+safeHandle('hermes:getRawConfig', async () => {
+  const url = _serveConfigUrl()
+  if (!url) return { ok: false, error: 'gateway-not-ready' }
+  try {
+    const res = await fetch(url, {
+      headers: { 'X-Hermes-Session-Token': serveGatewayInfo.token || '' },
+    })
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
+    return { ok: true, config: await res.json() }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+safeHandle('hermes:setRawConfig', async (event, patch) => {
+  const url = _serveConfigUrl()
+  if (!url) return { ok: false, error: 'gateway-not-ready' }
+  try {
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Hermes-Session-Token': serveGatewayInfo.token || '',
+      },
+      body: JSON.stringify({ config: patch }),
+    })
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
   }
 })
 
@@ -1385,8 +1506,8 @@ safeHandle('hermes:getConfig', async () => {
         }
       }
       if (inProviders) {
-        if (/^\S/.test(lp) && !lp.startsWith(' ')) { inProviders = false; entryActive = false; continue }
-        const mN = lp.match(/^\s+-\s+name:\s*(.+?)\s*$/)
+        if (/^\S/.test(lp) && !lp.startsWith(' ') && !lp.startsWith('-')) { inProviders = false; entryActive = false; continue }
+        const mN = lp.match(/^\s*-\s+name:\s*(.+?)\s*$/)
         if (mN) { entryActive = (mN[1] === res.provider); continue }
         if (entryActive) {
           const mB = lp.match(/^\s+base_url:\s*(.+?)\s*$/)
@@ -1495,6 +1616,27 @@ safeHandle('hermes:setYamlKey', async (event, { key, value }) => {
     return { success: true, changed: true }
   } catch (err) {
     console.error('[Hermes] setYamlKey failed:', err)
+    return { success: false, error: err.message }
+  }
+})
+
+// Persist `delegation.identities` (named subagent personas) as a JSON-on-one-
+// line YAML flow value. Serve mode: direct config.yaml write, no restart (the
+// next session.create re-reads it). Used by the Subagent settings UI.
+safeHandle('hermes:setDelegationIdentities', async (event, identities) => {
+  try {
+    const yamlPath = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    const c = fs.readFileSync(yamlPath, 'utf-8')
+    const updated = setDelegationIdentities(c, identities)
+    if (updated === c) return { success: true, changed: false }
+    fs.writeFileSync(yamlPath, updated, 'utf-8')
+    console.log('[Hermes] setDelegationIdentities:', Array.isArray(identities) ? identities.length : 0, 'identities')
+    if (hermesProcess) {
+      await restartGatewayDebounced('setDelegationIdentities')
+    }
+    return { success: true, changed: true }
+  } catch (err) {
+    console.error('[Hermes] setDelegationIdentities failed:', err)
     return { success: false, error: err.message }
   }
 })
@@ -1973,7 +2115,7 @@ hooksModule.registerHooksHandlers(() => {
 registerSecurityHandlers(() => mainWindow, getDiagnostics)
 
 // ── Filesystem operations ───────────────────────────────────────────────────
-registerFsHandlers(() => workDir)
+const fsModule = registerFsHandlers(() => workDir)
 
 // ── Window management ───────────────────────────────────────────────────────
 const windowModule = registerWindowHandlers(() => mainWindow, PORT, appIcon)
@@ -2054,6 +2196,18 @@ safeHandle('app:getInfo', () => ({
   workDir: workDir || app.getPath('home'),
 }))
 
+// 轻量同步：只把主进程 workDir 对齐到前端选中的项目，不做 app:setWorkDir 的
+// 任何副作用（不重启网关、不持久化、不 mkdir）。点历史对话等路径只改前端
+// selectedWorkDir，主进程 workDir 会残留在旧项目 → 相对路径的 fs IPC（fs:read
+// 等）被拼到旧目录 → ENOENT "no such file"。这里只做对齐。
+safeHandle('app:syncWorkDir', (event, dir) => {
+  if (typeof dir !== 'string' || !dir.trim()) return { success: false, workDir }
+  const resolved = path.resolve(dir.trim())
+  workDir = resolved
+  try { fsModule && fsModule.addAllowedRoot && fsModule.addAllowedRoot(resolved) } catch { /* ignore */ }
+  return { success: true, workDir }
+})
+
 
 // Get installed Hermes backend version by running 'hermes --version'
 safeHandle('app:getHermesVersion', async () => {
@@ -2072,6 +2226,9 @@ safeHandle('app:setWorkDir', (event, dir) => {
   const isDriveRoot = typeof dir === 'string' && /^[a-zA-Z]:[\/]?$/.test(dir)
   if (dir === '/' || dir === '\\' || isDriveRoot) dir = process.cwd()
   workDir = path.resolve(workDir, dir || workDir)
+  // 登记为合法访问根：右侧目录面板按绝对路径扫描任意已选项目时，
+  // safePath 不会因主进程 workDir 时序问题判越界（"Path is outside working directory"）。
+  try { fsModule && fsModule.addAllowedRoot && fsModule.addAllowedRoot(workDir) } catch { /* ignore */ }
   // Ensure the selected directory actually exists on disk. Without this, a path
   // that looks valid but isn't created yet gets silently ignored by Hermes's
   // session.create (explicit_cwd requires os.path.isdir(...) to be true) and
@@ -2087,14 +2244,26 @@ safeHandle('app:setWorkDir', (event, dir) => {
   // The Hermes process's cwd + TERMINAL_CWD are fixed at spawn time. Changing
   // `workDir` alone does NOT move the already-running process, so the agent would
   // keep working in the old directory. Restart the gateway to apply the new cwd.
-  if (hermesProcess) {
+  //
+  // serve 模式：cwd 是每次 session.create 用 explicit_cwd 传的（serve-gateway.ts
+  // → session.create { cwd }），跟网关进程自己的 cwd 无关，所以切换工作目录
+  // 完全不需要重启网关。重启只会杀掉所有活跃会话、让端口漂移、WS 断连重连——
+  // 这正是"对话中点另一个项目就重连/模型停止"的根因。acp 模式仍需重启。
+  if (hermesProcess && GATEWAY_MODE !== 'serve') {
     console.log('[setWorkDir] restarting Hermes gateway to apply new cwd:', workDir)
     restartHermesGateway()
+  } else if (hermesProcess) {
+    console.log('[setWorkDir] serve mode: cwd applied per-session via explicit_cwd, no restart:', workDir)
   }
   return { success: true, workDir }
 })
 
 // ── App lifecycle ───────────────────────────────────────────────────────────
+// 渲染进程 V8 老生代堆上限默认约 3GB，长会话（大量工具输出/超长回复）会把
+// 历史消息与流式缓冲顶到上限导致 "JavaScript heap out of memory"。提高上限，
+// 为超长会话留出空间（64 位下有效，32 位安装包会被 Electron 自动忽略）。
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=8192')
+
 app.whenReady().then(async () => {
   // Remove default menu bar
   Menu.setApplicationMenu(null)

@@ -61,8 +61,8 @@ function setCustomProviderModel(yaml, providerName, model) {
     const lp = lines[i]
     if (/^custom_providers:/.test(lp)) { inProviders = true; continue }
     if (!inProviders) continue
-    if (/^\S/.test(lp) && !lp.startsWith(' ')) { inProviders = false; entryActive = false; continue }
-    const mName = lp.match(/^\s+-\s+name:\s*(.+?)\s*$/)
+    if (/^\S/.test(lp) && !lp.startsWith(' ') && !lp.startsWith('-')) { inProviders = false; entryActive = false; continue }
+    const mName = lp.match(/^\s*-\s+name:\s*(.+?)\s*$/)
     if (mName) { entryActive = (mName[1] === name); continue }
     if (entryActive) {
       const mModel = lp.match(/^(\s+)model:\s*(.+?)\s*$/)
@@ -85,8 +85,8 @@ function setCustomProviderField(yaml, name, field, value) {
     const lp = lines[i]
     if (/^custom_providers:/.test(lp)) { inProviders = true; continue }
     if (!inProviders) continue
-    if (/^\S/.test(lp) && !lp.startsWith(' ')) { inProviders = false; entryActive = false; continue }
-    const mName = lp.match(/^\s+-\s+name:\s*(.+?)\s*$/)
+    if (/^\S/.test(lp) && !lp.startsWith(' ') && !lp.startsWith('-')) { inProviders = false; entryActive = false; continue }
+    const mName = lp.match(/^\s*-\s+name:\s*(.+?)\s*$/)
     if (mName) {
       entryActive = (mName[1] === n)
       if (entryActive) { entryFound = true; entryEnd = i }
@@ -116,7 +116,7 @@ function setCustomProviderField(yaml, name, field, value) {
       for (let i = 0; i < yl.length; i++) {
         if (/^custom_providers:/.test(yl[i])) { inProv = true; continue }
         if (inProv) {
-          if (/^\S/.test(yl[i]) && !yl[i].startsWith(' ')) { inProv = false; continue }
+          if (/^\S/.test(yl[i]) && !yl[i].startsWith(' ') && !yl[i].startsWith('-')) { inProv = false; continue }
           lastIdx = i
         }
       }
@@ -148,7 +148,7 @@ function customProviderApiKey(yaml, name) {
   const lines = yaml.replace(/\r\n/g, '\n').split('\n')
   let entryActive = false
   for (const lp of lines) {
-    const mName = lp.match(/^\s+-\s+name:\s*(.+?)\s*$/)
+    const mName = lp.match(/^\s*-\s+name:\s*(.+?)\s*$/)
     if (mName) { entryActive = (mName[1] === name); continue }
     if (entryActive) {
       const mK = lp.match(/^\s+api_key:\s*(.+?)\s*$/)
@@ -161,7 +161,7 @@ function customProviderBaseUrl(yaml, name) {
   const lines = yaml.replace(/\r\n/g, '\n').split('\n')
   let entryActive = false
   for (const lp of lines) {
-    const mName = lp.match(/^\s+-\s+name:\s*(.+?)\s*$/)
+    const mName = lp.match(/^\s*-\s+name:\s*(.+?)\s*$/)
     if (mName) { entryActive = (mName[1] === name); continue }
     if (entryActive) {
       const mB = lp.match(/^\s+base_url:\s*(.+?)\s*$/)
@@ -179,7 +179,7 @@ function providerNameFromUrl(baseUrl) {
   } catch { return null }
 }
 function resolveProvider(yaml, requestedProvider, newBaseUrl) {
-  const customNames = [...yaml.matchAll(/^\s+-\s+name:\s*(.+?)\s*$/gm)].map(m => m[1])
+  const customNames = [...yaml.matchAll(/^\s*-\s+name:\s*(.+?)\s*$/gm)].map(m => m[1])
   const validNamed = (p) => p && customNames.includes(p)
   const validBase = (p) => p && KNOWN_BASE_PROVIDERS.includes(p)
   // If a new baseUrl is provided, find a custom provider entry that matches it.
@@ -213,7 +213,7 @@ function resolveProvider(yaml, requestedProvider, newBaseUrl) {
 function disambiguateCustomProvider(yaml, name) {
   if (!name) return name
   const colliding = Object.keys(BUILTIN_PROVIDER_ENV)
-  const customNames = [...yaml.matchAll(/^\s+-\s+name:\s*(.+?)\s*$/gm)].map(m => m[1])
+  const customNames = [...yaml.matchAll(/^\s*-\s+name:\s*(.+?)\s*$/gm)].map(m => m[1])
   if (customNames.includes(name) && colliding.includes(name)) {
     return 'custom:' + name
   }
@@ -250,8 +250,45 @@ function parseHermesPersonalities(yaml) {
   return out
 }
 
+// Write `delegation.identities` as a JSON-on-one-line YAML flow value, e.g.
+// `  identities: [{"name":"researcher","system_prompt":"..."}]`. Stored as a
+// single scalar line so: (a) Hermes' YAML loader parses the flow syntax into a
+// real list, and (b) the existing flat-scalar getConfig reader returns it as a
+// string the UI can JSON.parse. The value line is built directly (not via a
+// regex-replace of the old value) so `$`, quotes, or backslashes inside a
+// persona can't corrupt the write. `identities` is a list of {name, system_prompt}.
+function setDelegationIdentities(yaml, identities) {
+  const valueStr = JSON.stringify(Array.isArray(identities) ? identities : [])
+  const line = `  identities: ${valueStr}`
+  const lines = yaml.replace(/\r\n/g, '\n').split('\n')
+  let topIdx = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\S/.test(lines[i]) && lines[i].startsWith('delegation:')) { topIdx = i; break }
+  }
+  if (topIdx === -1) {
+    lines.push('delegation:')
+    lines.push(line)
+    return lines.join('\n')
+  }
+  // Find the delegation block's extent and drop any existing `identities:` lines
+  // (reverse iteration keeps indices valid) so there's a single canonical line.
+  let blockEnd = topIdx
+  for (let i = topIdx + 1; i < lines.length; i++) {
+    if (/^\S/.test(lines[i])) break
+    blockEnd = i
+  }
+  for (let i = blockEnd; i > topIdx; i--) {
+    if (/^\s+identities:/.test(lines[i])) lines.splice(i, 1)
+  }
+  // Insert right after the `delegation:` header (topIdx is unchanged since we
+  // only removed lines after it).
+  lines.splice(topIdx + 1, 0, line)
+  return lines.join('\n')
+}
+
 module.exports = {
   setYamlKey,
+  setDelegationIdentities,
   setCustomProviderModel,
   setCustomProviderField,
   customProviderApiKey,

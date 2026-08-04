@@ -29,7 +29,7 @@ const TOOL_LABELS: Record<string, string> = {
   memory_add: '添加记忆',
   memory_read: '读取记忆',
   git_status: '查看状态',
-  git_diff: '查看差异',
+  git_diff: '查看变更',
   git_log: '查看日志',
   git_branch: '查看分支',
   git_commit: '提交代码',
@@ -64,7 +64,7 @@ export function getToolIcon(toolName: string) {
 
 export function extractCommandSnippet(params?: Record<string, unknown>): string | undefined {
   if (!params) return undefined
-  const keys = ['command', 'script', 'cmd', 'args', 'code', 'input', 'query', 'text', 'tool_input', 'pattern', 'file_glob', 'path', 'file_path']
+  const keys = ['command', 'script', 'cmd', 'args', 'code', 'input', 'query', 'text', 'tool_input', 'pattern', 'file_glob', 'path', 'file_path', 'context']
   for (const k of keys) {
     const v = params[k]
     if (typeof v === 'string' && v.trim()) return v.trim()
@@ -186,6 +186,11 @@ export function extractToolPath(step: ExecutionStep): string {
   }
   if (step.toolParams?.file_path && typeof step.toolParams.file_path === 'string') {
     return step.toolParams.file_path as string
+  }
+  // Hermes `tool.start` carries a display `context` preview (e.g. "foo.ts 1-50")
+  // instead of raw args — surface it so read/run steps show what they acted on.
+  if (step.toolParams?.context && typeof step.toolParams.context === 'string') {
+    return step.toolParams.context as string
   }
   // Try to parse content as JSON
   try {

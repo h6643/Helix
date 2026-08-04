@@ -3,8 +3,8 @@
 import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { loadLanguage } from '@uiw/codemirror-extensions-langs'
 import CodeMirror from '@uiw/react-codemirror'
-import { FileCode2, X, Save } from 'lucide-react'
-import React, { useEffect, useMemo } from 'react'
+import { FileCode2, X, AlertTriangle } from 'lucide-react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { electronFS } from '@/lib/electron-bridge'
 import { useHelixStore } from '@/stores/helix-store'
 
@@ -94,16 +94,46 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
 
   const active = editorTabs.find((t) => t.id === activeId) || null
 
-  const handleSave = async (id: string) => {
+  // Editor tab waiting for an unsaved-changes confirmation before it closes.
+  const [pendingCloseId, setPendingCloseId] = useState<string | null>(null)
+  const pendingClose = editorTabs.find((t) => t.id === pendingCloseId) || null
+
+  const handleSave = async (id: string): Promise<boolean> => {
     const tab = useHelixStore.getState().editorTabs.find((t) => t.id === id)
-    if (!tab) return
+    if (!tab) return false
     try {
       await electronFS.writeFile(tab.path, tab.content)
       markEditorTabSaved(id)
       showToast({ type: 'success', title: '已保存', description: tab.name })
+      return true
     } catch (e: any) {
       showToast({ type: 'error', title: '保存失败', description: e?.message || '写入文件出错' })
+      return false
     }
+  }
+
+  // Closing a tab: clean tabs close immediately; dirty tabs prompt first.
+  const requestCloseTab = (id: string) => {
+    const tab = useHelixStore.getState().editorTabs.find((t) => t.id === id)
+    if (!tab || !tab.dirty) {
+      closeEditorTab(id)
+      return
+    }
+    setPendingCloseId(id)
+  }
+
+  const confirmSaveAndClose = async () => {
+    if (!pendingCloseId) return
+    const id = pendingCloseId
+    const ok = await handleSave(id)
+    if (ok) closeEditorTab(id)
+    setPendingCloseId(null)
+  }
+
+  const confirmDiscardClose = () => {
+    if (!pendingCloseId) return
+    closeEditorTab(pendingCloseId)
+    setPendingCloseId(null)
   }
 
   // Ctrl/Cmd+S → save active tab
@@ -168,23 +198,15 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
               className="opacity-40 hover:opacity-100 hover:text-destructive transition-opacity ml-0.5"
               onClick={(e) => {
                 e.stopPropagation()
-                closeEditorTab(tab.id)
+                requestCloseTab(tab.id)
               }}
-              title="关闭"
+              title={tab.dirty ? '关闭（未保存）' : '关闭'}
             >
               <X className="size-3" />
             </button>
           </div>
         ))}
         <div className="flex-1" />
-        <button
-          onClick={() => handleSave(active.id)}
-          disabled={!active.dirty}
-          className="flex items-center gap-1 px-2.5 py-1 text-[12px] rounded-md hover:bg-accent/60 text-foreground/70 disabled:opacity-40 disabled:hover:bg-transparent transition-colors shrink-0"
-          title="保存 (Ctrl+S)"
-        >
-          <Save className="size-3.5" /> 保存
-        </button>
       </div>
 
       {/* Editor */}
@@ -211,6 +233,42 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
           }}
         />
       </div>
+
+      {pendingClose && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/40">
+          <div className="bg-card border border-border/80 rounded-lg shadow-xl w-[380px] p-5 flex flex-col gap-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="size-5 text-amber-400 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <h3 className="text-sm font-medium text-foreground">未保存的修改</h3>
+                <p className="text-xs text-muted-foreground mt-1 break-words">
+                  <span className="font-mono text-foreground/80">{pendingClose.name}</span> 有未保存的修改，关闭前要保存吗？
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => setPendingCloseId(null)}
+                className="px-3 py-1.5 text-xs rounded-md text-muted-foreground/80 hover:bg-accent/60 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmDiscardClose}
+                className="px-3 py-1.5 text-xs rounded-md text-destructive border border-destructive/40 hover:bg-destructive/10 transition-colors"
+              >
+                不保存
+              </button>
+              <button
+                onClick={confirmSaveAndClose}
+                className="px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-colors"
+              >
+                保存并关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

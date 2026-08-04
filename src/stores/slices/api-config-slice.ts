@@ -54,6 +54,10 @@ export interface ApiConfigSlice {
    *  No-op / resolves [] when the provider lacks baseUrl+apiKey or a fetch is
    *  already in flight. Used for auto-populating the model dropdown on switch. */
   fetchProviderModels: (providerId: string) => Promise<string[]>
+  /** Drop the cached fetched model list for a provider so the next open of the
+   *  model selector re-fetches live instead of relying on a possibly-stale
+   *  persisted list. Called on save to keep stored config free of a stale list. */
+  clearProviderModels: (providerId: string) => void
   /** Switch the active provider. If the current model doesn't belong to the new
    *  provider, reselect its defaultModel (or models[0]). Mirrors the new
    *  provider's credentials + model into apiConfig. */
@@ -201,22 +205,23 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
         warn('[api-config-slice] addApiHistory: 跳过模型/端点不匹配的记录', config.model, config.baseUrl)
         return state
       }
-      // Deduplicate by baseUrl + apiKey + model. The same endpoint with the
-      // same key AND the same model name is one logical entry; a different
-      // model on the same endpoint is a separate entry so it shows up in the
-      // config list. Normalize empty/undefined values so they collapse together.
+      // A history entry represents one CONFIG = baseUrl + apiKey (the list is
+      // grouped by baseUrl, with entries inside a group differing by apiKey).
+      // Switching models on the SAME connection must NOT create a new entry —
+      // it updates that config's model in place. Dedup by baseUrl + apiKey.
+      // Normalize empty/undefined values so they collapse together.
       const normKey = (k?: string) => (k ?? '').trim()
       const dupIndex = state.apiHistory.findIndex(
         (h) =>
           h.baseUrl === config.baseUrl &&
-          normKey(h.apiKey) === normKey(config.apiKey) &&
-          normKey(h.model) === normKey(config.model),
+          normKey(h.apiKey) === normKey(config.apiKey),
       )
       if (dupIndex !== -1) {
-        // Move the existing entry to the front instead of adding a duplicate.
-        const moved = state.apiHistory[dupIndex]
+        // Same connection → update the entry's model/provider to the latest
+        // selection and move it to the front (most recently used).
+        const updated = { ...state.apiHistory[dupIndex], ...config }
         const rest = state.apiHistory.filter((_, i) => i !== dupIndex)
-        return { apiHistory: [moved, ...rest].slice(0, 20) }
+        return { apiHistory: [updated, ...rest].slice(0, 20) }
       }
       const newHistory = [config, ...state.apiHistory].slice(0, 20)
       return { apiHistory: newHistory }
@@ -289,30 +294,43 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
         providers.find((p) => (providerModels[p.id] || []).includes(model))
     }
     if (!provider) {
-      // Final fallback: match by the current backend URL for hand-typed models.
-      // Only keep the requested model if it actually belongs to that provider;
-      // otherwise snap to the provider's default/first model. This prevents the
-      // common mismatch where a stale Ling model lingers after the endpoint was
-      // switched to deepseek, causing the backend to send Ling to deepseek's API.
+      // Final fallback: match by the current backend URL for hand-typed /
+      // fetched-only models that don't appear in any provider's declared
+      // `models` array. We HONOR the user's explicit selection and do NOT snap
+      // to a different model — that snap was the cause of "selecting
+      // deepseek-v4-flash reverts to deepseek-v4-pro" when flash only lived in
+      // the fetched model list (providerModels) and never in static models.
+      // Credentials still come from the baseUrl-matched provider; only the model
+      // name is kept exactly as chosen.
       const currentUrl = get().apiConfig?.baseUrl
-      if (currentUrl) {
-        provider = providers.find((p) => p.baseUrl === currentUrl)
+      const urlProvider = currentUrl ? providers.find((p) => p.baseUrl === currentUrl) : undefined
+      if (!urlProvider) {
+        // No provider known for this endpoint at all — trust the selection and
+        // mirror it straight into apiConfig without rewriting the model name.
+        const fallbackId = get().apiConfig.provider || 'custom'
+        set({
+          activeModel: model,
+          activeProviderId: fallbackId,
+          apiConfig: { ...get().apiConfig, model, baseUrl: currentUrl || get().apiConfig.baseUrl },
+        })
+        // Record the activation into apiHistory so the settings model list can
+        // highlight it. Without this, models activated through paths that bypass
+        // the chat dropdown (bridge / hermes-ui onModelSwitched / fallback
+        // resolution) never appear in the history list — the active model is
+        // selected but no entry matches it, so nothing highlights.
+        get().addApiHistory({ ...get().apiConfig, model })
+        import('@/lib/persist').then(({ persistence }) => {
+          persistence.saveSetting('activeModel', model)
+          persistence.saveSetting('activeProviderId', fallbackId)
+        })
+        try {
+          localStorage.setItem('helix-active-model', model)
+          localStorage.setItem('helix-active-provider-id', fallbackId)
+        } catch {}
+        return
       }
-      if (provider) {
-        const providerModelList = [
-          ...(provider.models || []),
-          ...(get().providerModels?.[provider.id] || []),
-        ]
-        if (!providerModelList.includes(model)) {
-          const fallbackModel = provider.defaultModel || provider.models[0] || providerModelList[0] || null
-          if (fallbackModel) {
-            model = fallbackModel
-          } else {
-            warn('[api-config-slice] setActiveModel: 当前 Provider 无可用模型，无法选择', model)
-            return
-          }
-        }
-      }
+      // Provider resolved by baseUrl — keep `model` exactly as the user selected.
+      provider = urlProvider
     }
     if (!provider) {
       warn('[api-config-slice] setActiveModel: 找不到包含模型', model, '的 Provider')
@@ -331,6 +349,10 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
         model,
       },
     })
+    // Keep the settings model list in sync: the model just activated must show
+    // up (highlighted) on the config page. addApiHistory dedups by baseUrl +
+    // apiKey + model, so re-activating the same model is idempotent.
+    get().addApiHistory({ ...get().apiConfig, model })
     import('@/lib/persist').then(({ persistence }) => {
       persistence.saveSetting('activeModel', model)
       persistence.saveSetting('activeProviderId', provider.id)
@@ -381,6 +403,14 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
     } finally {
       fetchingProviderModels.delete(providerId)
     }
+  },
+
+  clearProviderModels: (providerId) => {
+    set((state) => {
+      const next = { ...state.providerModels }
+      delete next[providerId]
+      return { providerModels: next }
+    })
   },
 
   setActiveProvider: (id) => {
@@ -462,5 +492,16 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
     get().setActiveModel(model)
     // 2) Interrupt any in-flight session so the next prompt is built fresh.
     //    (use-hermes detects the apiConfig hash change on next send → invalidate + repush.)
+    // 3) Persist the switch (apiConfig + apiHistory + activeModel). This path is
+    //    reached by the helix-layout bridge for OUT-OF-BAND switches (hermes-ui
+    //    ModelSelector), which otherwise never call persistToStorage — leaving a
+    //    restart with an apiHistory that doesn't contain the newly-selected model.
+    import('@/lib/persist').then(({ persistence }) => {
+      const s = get()
+      persistence.saveSetting('apiHistory', s.apiHistory)
+      persistence.saveSetting('apiConfig', s.apiConfig)
+      persistence.saveSetting('activeModel', s.activeModel)
+      persistence.saveSetting('activeProviderId', s.activeProviderId)
+    })
   },
 })

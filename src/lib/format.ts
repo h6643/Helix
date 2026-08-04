@@ -57,3 +57,17 @@ export function formatDurationSeconds(seconds: number): string {
   const remMinutes = minutes % 60
   return remMinutes ? `${hours}h ${remMinutes}m` : `${hours}h`
 }
+
+/**
+ * Truncate a potentially huge string (e.g. tool output / file content) to a
+ * bounded length, keeping a head + tail window so the truncated result is still
+ * useful for display. Used by addChatMessage / addExecutionStep to prevent
+ * multi-MB payloads from blowing the V8 heap across a long conversation.
+ */
+export function truncateString(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text
+  const head = Math.floor(maxLength * 0.6)
+  const tail = Math.floor(maxLength * 0.3)
+  const sep = '\n\n… (truncated) …\n\n'
+  return text.slice(0, head) + sep + text.slice(-tail)
+}

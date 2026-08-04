@@ -1,6 +1,6 @@
 'use client'
 
-import { X, Check, RotateCcw, FileCode, Split, Rows3, ChevronLeft, ChevronRight } from 'lucide-react'
+import { X, Check, RotateCcw, FileCode, Split, Rows3, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react'
 import React, { useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -12,6 +12,10 @@ export interface DiffChange {
   oldContent: string
   newContent: string
   language: string
+  /** Backend-rendered unified diff (Hermes inline_diff). When present the
+   *  viewers render these lines directly instead of recomputing from
+   *  old/new content. */
+  unifiedDiff?: string
 }
 
 interface DiffLine {
@@ -22,7 +26,7 @@ interface DiffLine {
 }
 
 // Optimized diff algorithm using patience diff approach
-function computeDiff(oldText: string, newText: string): DiffLine[] {
+export function computeDiff(oldText: string, newText: string): DiffLine[] {
   const oldLines = oldText.split('\n')
   const newLines = newText.split('\n')
   const result: DiffLine[] = []
@@ -255,29 +259,91 @@ interface DiffPreviewProps {
   onRejectAll: () => void
   onClose: () => void
   onNavigateToLine?: (filePath: string, lineNumber: number) => void
+  onOpenFile?: (change: DiffChange) => void
 }
 
-export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAll, onClose, onNavigateToLine }: DiffPreviewProps) {
+// Renders a backend-provided unified diff string directly (Hermes inline_diff).
+// Lines carry their own +/-/context markers, so we colorize them instead of
+// recomputing a diff from old/new content.
+function UnifiedDiffTextViewer({ diff }: { diff: string }) {
+  const lines = useMemo(() => diff.split('\n'), [diff])
+  return (
+    <div className="font-mono text-xs">
+      <div className="max-h-[500px] overflow-y-auto">
+        {lines.map((line, idx) => {
+          if (line.startsWith('+++') || line.startsWith('---')) {
+            return (
+              <div key={idx} className="flex bg-purple-500/10 px-2 py-0.5 text-purple-300">
+                <span className="px-2 flex-1 whitespace-pre-wrap">{line}</span>
+              </div>
+            )
+          }
+          if (line.startsWith('@@')) {
+            return (
+              <div key={idx} className="flex bg-sky-500/10 px-2 py-0.5 text-sky-300">
+                <span className="px-2 flex-1 whitespace-pre-wrap">{line}</span>
+              </div>
+            )
+          }
+          if (line.startsWith('+')) {
+            return (
+              <div key={idx} className="flex bg-emerald-500/10 border-l-2 border-emerald-500">
+                <span className="px-2 flex-1 whitespace-pre-wrap text-emerald-300">{line}</span>
+              </div>
+            )
+          }
+          if (line.startsWith('-')) {
+            return (
+              <div key={idx} className="flex bg-red-500/10 border-l-2 border-red-500">
+                <span className="px-2 flex-1 whitespace-pre-wrap text-red-300">{line}</span>
+              </div>
+            )
+          }
+          return (
+            <div key={idx} className="flex hover:bg-accent/20">
+              <span className="px-2 flex-1 whitespace-pre-wrap text-muted-foreground/80">{line}</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/** Count +added / -removed lines from a unified diff or old/new content pair. */
+export function countDiffLines(change: DiffChange): { added: number; removed: number } {
+  if (change.unifiedDiff) {
+    let added = 0, removed = 0
+    for (const line of change.unifiedDiff.split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) added++
+      else if (line.startsWith('-') && !line.startsWith('---')) removed++
+    }
+    return { added, removed }
+  }
+  const diff = computeDiff(change.oldContent, change.newContent)
+  return {
+    added: diff.filter(l => l.type === 'add').length,
+    removed: diff.filter(l => l.type === 'remove').length,
+  }
+}
+
+export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAll, onClose, onNavigateToLine, onOpenFile }: DiffPreviewProps) {
   const [activeIndex, setActiveIndex] = useState(0)
   const [viewMode, setViewMode] = useState<'unified' | 'side-by-side'>('side-by-side')
 
   const activeChange = changes[activeIndex]
 
-  // Calculate stats
-  const stats = useMemo(() => {
-    if (!activeChange) return { added: 0, removed: 0 }
-    const diff = computeDiff(activeChange.oldContent, activeChange.newContent)
-    return {
-      added: diff.filter(l => l.type === 'add').length,
-      removed: diff.filter(l => l.type === 'remove').length,
-    }
-  }, [activeChange])
+  // Per-file line-change counts (memoized so file list doesn't recompute on every render)
+  const perFileStats = useMemo(() => changes.map(countDiffLines), [changes])
+
+  // Active file stats (for the header badge)
+  const stats = activeChange ? countDiffLines(activeChange) : { added: 0, removed: 0 }
 
   if (changes.length === 0 || !activeChange) return null
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
       <div className="relative w-full max-w-4xl max-h-[85vh] bg-card border border-border/60 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border/60 shrink-0">
@@ -330,20 +396,28 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
             >
               <ChevronLeft className="size-3.5" />
             </button>
-            {changes.map((c, idx) => (
-              <button
-                key={c.fileId}
-                onClick={() => setActiveIndex(idx)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md transition-colors whitespace-nowrap ${
-                  idx === activeIndex
-                    ? 'bg-accent text-accent-foreground'
-                    : 'text-muted-foreground hover:bg-accent/50'
-                }`}
-              >
-                <FileCode className="size-3" />
-                {c.fileName}
-              </button>
-            ))}
+            {changes.map((c, idx) => {
+              const isNew = c.oldContent.trim() === '' && !c.unifiedDiff
+              const fs = perFileStats[idx]
+              return (
+                <div
+                  key={c.fileId}
+                  onClick={() => setActiveIndex(idx)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md transition-colors whitespace-nowrap cursor-pointer select-none ${
+                    idx === activeIndex
+                      ? 'bg-accent text-accent-foreground'
+                      : 'text-muted-foreground hover:bg-accent/50'
+                  }`}
+                >
+                  <FileCode className="size-3 shrink-0" />
+                  <span className="truncate max-w-[150px]">{c.fileName}</span>
+                  <span className="shrink-0 tabular-nums ml-auto">
+                    <span className="text-emerald-500">+{fs.added}</span>
+                    <span className="text-red-500 ml-1">-{fs.removed}</span>
+                  </span>
+                </div>
+              )
+            })}
             <button
               onClick={() => setActiveIndex(Math.min(changes.length - 1, activeIndex + 1))}
               disabled={activeIndex === changes.length - 1}
@@ -356,7 +430,9 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
 
         {/* Diff content */}
         <div className="flex-1 overflow-hidden">
-          {viewMode === 'side-by-side' ? (
+          {activeChange.unifiedDiff ? (
+            <UnifiedDiffTextViewer diff={activeChange.unifiedDiff} />
+          ) : viewMode === 'side-by-side' ? (
             <SideBySideDiffViewer change={activeChange} onNavigateToLine={onNavigateToLine} />
           ) : (
             <UnifiedDiffViewer change={activeChange} onNavigateToLine={onNavigateToLine} />

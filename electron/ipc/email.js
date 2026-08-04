@@ -71,7 +71,7 @@ function makeImap(cfg) {
     host: cfg.imapHost,
     port: cfg.imapPort,
     secure: cfg.imapSecure !== false,
-    auth: { user: cfg.user, pass: cfg.authCode },
+    auth: { user: (cfg.user || '').trim(), pass: (cfg.authCode || '').trim() },
     logger: false,
   })
 }
@@ -81,7 +81,7 @@ function makeSmtpTransport(cfg) {
     host: cfg.smtpHost,
     port: cfg.smtpPort,
     secure: cfg.smtpSecure !== false,
-    auth: { user: cfg.user, pass: cfg.authCode },
+    auth: { user: (cfg.user || '').trim(), pass: (cfg.authCode || '').trim() },
   })
 }
 
@@ -125,15 +125,19 @@ module.exports = function registerEmailHandlers() {
     return { ...safe, configured: true, hasAuthCode: !!authCode || !!authCodeEnc }
   })
 
-  // List recent messages from INBOX.
+  // List recent messages from INBOX. Returns { ok, messages, error } so auth /
+  // connection failures surface in the UI WITHOUT Electron logging
+  // "Error occurred in handler for 'email:list'" to the main console.
   ipcMain.handle('email:list', async (event, opts = {}) => {
     const cfg = loadConfig()
-    if (!cfg) throw new Error('邮箱未配置')
+    if (!cfg) return { ok: false, messages: [], error: '邮箱未配置' }
     const limit = Math.min(opts.limit || 30, 100)
     const client = makeImap(cfg)
     const messages = []
+    let connected = false
     try {
       await client.connect()
+      connected = true
       const lock = await client.getMailboxLock('INBOX')
       try {
         const uids = (await client.search({ all: true }, { uid: true })) || []
@@ -158,10 +162,13 @@ module.exports = function registerEmailHandlers() {
       } finally {
         lock.release()
       }
+      return { ok: true, messages }
+    } catch (e) {
+      const msg = (e && (e.responseText || e.response || e.message)) || '读取收件箱失败'
+      return { ok: false, messages: [], error: msg }
     } finally {
-      await client.logout()
+      if (connected) { try { await client.logout() } catch {} }
     }
-    return messages
   })
 
   // Fetch a single message's full body.
@@ -240,7 +247,7 @@ module.exports = function registerEmailHandlers() {
       host: cfg.imapHost,
       port: cfg.imapPort,
       secure: cfg.imapSecure !== false,
-      auth: { user: cfg.user, pass: cfg.authCode },
+      auth: { user: (cfg.user || '').trim(), pass: (cfg.authCode || '').trim() },
       // Log the IMAP conversation to the main console so the server's exact
       // auth-failure text (e.g. 163's reason) is visible when debugging.
       logger: (log) => { try { console.log('[email IMAP]', log?.msg ?? '', log?.err ?? '') } catch {} },
@@ -269,6 +276,7 @@ module.exports = function registerEmailHandlers() {
       ok: imapOk && smtpOk,
       imap: { ok: imapOk, message: imapMsg },
       smtp: { ok: smtpOk, message: smtpMsg },
+      debug: { user: cfg.user || '', authCodeLength: (cfg.authCode || '').length },
     }
   })
 }

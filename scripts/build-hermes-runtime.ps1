@@ -8,10 +8,17 @@
 #      (reuse a known-good LOCALAPPDATA install, else `uv sync` fallback).
 #   2. Copy a SLIM copy of the vendored hermes-agent into
 #      .cache/hermes-runtime/hermes-agent:
-#      runtime source + `venv` + `.hermes-runtime`, dropping `.venv` (references
-#      the uv cache python — not relocatable), git/website/tests/apps and all
-#      __pycache__/*.pyc bytecode.
-#   3. Relocate the editable-install finder: hermes is installed editable, and
+#      runtime source + `venv`, dropping `.venv` (references the uv cache
+#      python - not relocatable), `.hermes-runtime`, git/website/tests/apps
+#      and all __pycache__/*.pyc bytecode.
+#   3. Flatten the base CPython distribution INTO `venv` (python.exe,
+#      python311.dll, DLLs/, stdlib Lib/) and strip `home` from pyvenv.cfg,
+#      so the venv's own python.exe is a complete interpreter. This is
+#      REQUIRED for portability: `hermes.exe` is a uv trampoline that looks
+#      up python.exe relative to itself (fine), but python.exe itself is a
+#      uv launcher embedding the DEVELOPER MACHINE's absolute base-python
+#      path - it would break on any other machine.
+#   4. Relocate the editable-install finder: hermes is installed editable, and
 #      its finder hardcodes the developer machine's absolute source path
 #      (e.g. C:\Users\...\AppData\Local\hermes\hermes-agent). Rewrite it to
 #      resolve the source tree relative to the finder file itself, so the
@@ -44,7 +51,7 @@ function Invoke-Robocopy {
   if ($code -ge 8) { Write-Error "robocopy failed (code $code): $Src -> $Dst" }
 }
 
-# ── 1) Ensure a runtime is bootstrapped in the vendored hermes-agent ───────
+# [1] Ensure a runtime is bootstrapped in the vendored hermes-agent
 Push-Location $agent
 try {
   if (-not (Test-Built)) {
@@ -72,7 +79,7 @@ try {
 }
 finally { Pop-Location }
 
-# ── 2) Stage a slim, self-contained copy ─────────────────────────────────────
+# [2] Stage a slim, self-contained copy
 if (Test-Path $stagingRoot) { Remove-Item $stagingRoot -Recurse -Force }
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
@@ -82,17 +89,49 @@ Invoke-Robocopy $agent $staging @('.git', '.venv', 'venv', '.hermes-runtime', 'w
 
 $venvSrc = Join-Path $agent 'venv'
 if (-not (Test-Path $venvSrc)) { $venvSrc = Join-Path $agent '.venv' }
-if (-not (Test-Path $venvSrc)) { Write-Error 'no venv to stage — bootstrap failed'; exit 1 }
+if (-not (Test-Path $venvSrc)) { Write-Error 'no venv to stage - bootstrap failed'; exit 1 }
 Write-Host '[hermes-runtime] staging venv...'
 Invoke-Robocopy $venvSrc (Join-Path $staging 'venv') @('__pycache__') @('*.pyc', '*.pyo')
 
-$rtSrc = Join-Path $agent '.hermes-runtime'
-if (Test-Path $rtSrc) {
-  Write-Host '[hermes-runtime] staging .hermes-runtime...'
-  Invoke-Robocopy $rtSrc (Join-Path $staging '.hermes-runtime') @('__pycache__') @('*.pyc', '*.pyo')
+# [3] Flatten the base CPython distribution into the venv
+# The staged venv python.exe is a uv launcher embedding the developer's
+# absolute base-python path. Copy the matching base CPython (from
+# hermes-agent/.hermes-runtime) INTO the venv so it is a complete, standalone
+# interpreter, then drop pyvenv.cfg `home` so base_prefix resolves to the venv
+# itself instead of the original machine's path.
+$ver = ((Get-Content (Join-Path $staging 'venv\pyvenv.cfg') | Select-String '^version_info\s*=') -replace '^version_info\s*=\s*', '').Trim()
+$baseCandidates = @()
+$genRoot = Join-Path $agent '.hermes-runtime\python'
+if (Test-Path $genRoot) {
+  $baseCandidates = Get-ChildItem $genRoot -Directory | ForEach-Object {
+    Get-ChildItem $_.FullName -Directory
+  } | Where-Object { -not $ver -or $_.Name -like "cpython-$ver-*" }
+}
+$basePython = $baseCandidates | Select-Object -First 1
+if ($basePython) {
+  Write-Host "[hermes-runtime] flattening base python into venv: $($basePython.Name)"
+  foreach ($f in @('python.exe', 'pythonw.exe', 'python3.dll', 'python311.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+    $src = Join-Path $basePython.FullName $f
+    if (Test-Path $src) { Copy-Item $src (Join-Path $staging 'venv\Scripts') -Force }
+  }
+  $bpDlls = Join-Path $basePython.FullName 'DLLs'
+  if (Test-Path $bpDlls) {
+    New-Item -ItemType Directory -Path (Join-Path $staging 'venv\DLLs') -Force | Out-Null
+    Copy-Item (Join-Path $bpDlls '*') (Join-Path $staging 'venv\DLLs') -Recurse -Force
+  }
+  $bpLib = Join-Path $basePython.FullName 'Lib'
+  if (Test-Path $bpLib) {
+    Copy-Item (Join-Path $bpLib '*') (Join-Path $staging 'venv\Lib') -Recurse -Force
+  }
+  $cfgPath = Join-Path $staging 'venv\pyvenv.cfg'
+  $cfg = Get-Content $cfgPath | Where-Object { $_ -notmatch '^home\s*=' }
+  $cfg | Set-Content $cfgPath -Encoding ASCII
+  Write-Host '[hermes-runtime] pyvenv.cfg home stripped -> venv is standalone'
+} else {
+  Write-Warning "[hermes-runtime] no base python found under $genRoot - venv not flattened (may not be portable)"
 }
 
-# ── 3) Relocate the editable-install finder (absolute -> relative) ───────────
+# [4] Relocate the editable-install finder (absolute -> relative)
 $sp = Join-Path $staging 'venv\Lib\site-packages'
 $finder = Get-ChildItem $sp -Filter '__editable___hermes_agent_*_finder.py' -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($finder) {
@@ -109,7 +148,7 @@ if ($finder) {
     Write-Host "[hermes-runtime] patched editable finder -> relative to packaged source"
   }
 } else {
-  Write-Warning '[hermes-runtime] no editable finder found (non-editable install?) — nothing to relocate'
+  Write-Warning '[hermes-runtime] no editable finder found (non-editable install?) - nothing to relocate'
 }
 
 Write-Host "[hermes-runtime] staging complete: $staging"

@@ -101,6 +101,12 @@ skills/
 hermes-agent/website/
 hermes-agent/tests/
 hermes-agent/apps/
+# hermes-agent runtime artifacts — never tracked (rebuilt via `uv sync`)
+hermes-agent/venv/
+hermes-agent/.venv/
+hermes-agent/.hermes-runtime/
+hermes-agent/**/__pycache__/
+hermes-agent/**/*.egg-info/
 
 AGENTS.md
 

@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('electron', {
 
     // Set a single nested config.yaml key (e.g. 'compression.enabled')
     setYamlKey: (key, value) => ipcRenderer.invoke('hermes:setYamlKey', { key, value }),
+    setDelegationIdentities: (identities) => ipcRenderer.invoke('hermes:setDelegationIdentities', identities),
 
     // List predefined personalities from config.yaml
     listPersonalities: () => ipcRenderer.invoke('hermes:listPersonalities'),
@@ -53,6 +54,14 @@ contextBridge.exposeInMainWorld('electron', {
     
     // Fetch available models from API endpoint
     fetchModels: (params) => ipcRenderer.invoke('hermes:fetchModels', params),
+
+    // Read/write raw Hermes config.yaml via the *main process* (NOT a direct
+    // browser fetch). The serve gateway's dashboard auth gate 401s the CORS
+    // preflight (OPTIONS, no token) before CORS can answer, so a renderer-side
+    // fetch is always blocked ("Failed to fetch"). The main process carries the
+    // session token and skips the browser preflight entirely.
+    getRawConfig: () => ipcRenderer.invoke('hermes:getRawConfig'),
+    setRawConfig: (patch) => ipcRenderer.invoke('hermes:setRawConfig', patch),
     
     // Listen for Hermes events (message.delta, tool.start, approval.request, etc.)
     onEvent: (callback) => {
@@ -67,6 +76,10 @@ contextBridge.exposeInMainWorld('electron', {
 
     // Trigger Hermes backend self-update
     update: () => ipcRenderer.invoke('hermes:update'),
+
+    // Switch gateway between local (spawned runtime) and remote (external WS URL).
+    // params: { mode: 'local' | 'remote', url?: string }
+    setGatewayMode: (params) => ipcRenderer.invoke('hermes:setGatewayMode', params),
 
     // ── Memory sync (Hermes backend memory_manager: MEMORY.md / USER.md) ──
     listMemories: () => ipcRenderer.invoke('hermes:listMemories'),
@@ -102,7 +115,9 @@ contextBridge.exposeInMainWorld('electron', {
     hermesMemoryDir: () => ipcRenderer.invoke('fs:hermesMemoryDir'),
     stat: (filePath) => ipcRenderer.invoke('fs:stat', filePath),
     rename: (oldPath, newPath) => ipcRenderer.invoke('fs:rename', oldPath, newPath),
+    delete: (filePath) => ipcRenderer.invoke('fs:delete', filePath),
     scanTree: (dirPath) => ipcRenderer.invoke('fs:scanTree', dirPath),
+    allowRoot: (dirPath) => ipcRenderer.invoke('fs:allowRoot', dirPath),
   },
 
   // ── Hermes Skills (bypasses working directory restriction) ─────────────
@@ -162,17 +177,17 @@ contextBridge.exposeInMainWorld('electron', {
 
   // ── Git Operations ──────────────────────────────────────────────────────
   git: {
-    status: () => ipcRenderer.invoke('git:status'),
+    status: (cwd) => ipcRenderer.invoke('git:status', cwd),
     diff: (filePath, staged) => ipcRenderer.invoke('git:diff', filePath, staged),
     diffHead: (filePath) => ipcRenderer.invoke('git:diffHead', filePath),
     revert: (filePath) => ipcRenderer.invoke('git:revert', filePath),
     stage: (filePath) => ipcRenderer.invoke('git:stage', filePath),
     unstage: (filePath) => ipcRenderer.invoke('git:unstage', filePath),
     commit: (message) => ipcRenderer.invoke('git:commit', message),
-    branchList: () => ipcRenderer.invoke('git:branchList'),
-    branchSwitch: (branch) => ipcRenderer.invoke('git:branchSwitch', branch),
-    branchCreate: (branch) => ipcRenderer.invoke('git:branchCreate', branch),
-    currentBranch: () => ipcRenderer.invoke('git:currentBranch'),
+    branchList: (cwd) => ipcRenderer.invoke('git:branchList', cwd),
+    branchSwitch: (branch, cwd) => ipcRenderer.invoke('git:branchSwitch', branch, cwd),
+    branchCreate: (branch, cwd) => ipcRenderer.invoke('git:branchCreate', branch, cwd),
+    currentBranch: (cwd) => ipcRenderer.invoke('git:currentBranch', cwd),
     log: (count) => ipcRenderer.invoke('git:log', count),
     // Worktree operations
     worktreeList: () => ipcRenderer.invoke('git:worktreeList'),
@@ -197,6 +212,7 @@ contextBridge.exposeInMainWorld('electron', {
   app: {
     getInfo: () => ipcRenderer.invoke('app:getInfo'),
     setWorkDir: (dir) => ipcRenderer.invoke('app:setWorkDir', dir),
+    syncWorkDir: (dir) => ipcRenderer.invoke('app:syncWorkDir', dir),
     getHermesVersion: () => ipcRenderer.invoke('app:getHermesVersion'),
   },
 

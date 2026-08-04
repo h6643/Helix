@@ -1,6 +1,6 @@
 'use client'
 
-import { Plus } from 'lucide-react'
+import { Plus, Trash2 } from 'lucide-react'
 import React, { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { isElectron } from '@/lib/electron-bridge'
@@ -111,7 +111,7 @@ export function HookSettings() {
 
   if (!electronReady) {
     return (
-      <div className="max-w-xl">
+      <div className="max-w-3xl">
         <SectionHeading>Hooks</SectionHeading>
       </div>
     )
@@ -119,7 +119,7 @@ export function HookSettings() {
 
   if (!loaded) {
     return (
-      <div className="max-w-xl">
+      <div className="max-w-3xl">
         <SectionHeading>Hooks</SectionHeading>
         <p className="text-sm text-muted-foreground">加载 Hooks 配置中…</p>
       </div>
@@ -127,7 +127,7 @@ export function HookSettings() {
   }
 
   return (
-    <div className="max-w-xl space-y-1">
+    <div className="space-y-1">
       <SectionHeading>Hooks</SectionHeading>
 
       <SettingGroup title="启用 Hooks" action={<Toggle enabled={settings.enabled} onToggle={() => setMasterEnabled(!settings.enabled)} />} />
@@ -139,37 +139,53 @@ export function HookSettings() {
           <SettingGroup
             key={type}
             title={meta.label}
+            className="pt-2!"
+            divider="top"
             action={
               <Button size="icon" variant="outline" onClick={() => addHook(type)} aria-label="添加">
                 <Plus className="size-4" />
               </Button>
             }
           >
+            <div className="py-0.5 text-xs text-muted-foreground/60">{meta.desc}</div>
             {hooks.map((hook) => (
-              <div key={hook.id} className="py-2.5 px-1 -mx-1 space-y-2 hover:bg-muted/30 rounded-md transition-colors">
-                <div className="flex items-center gap-2">
-                  <Toggle enabled={hook.enabled} onToggle={() => toggleHook(hook.id)} />
-                  <input
-                    value={hook.command}
-                    onChange={(e) => updateHook(hook.id, { command: e.target.value })}
-                    placeholder="命令，如 python3 ~/.helix/hooks/notify.py"
-                    className="flex-1 min-w-0 px-2.5 py-1.5 bg-muted/20 border border-border/20 rounded-md text-sm text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/30 font-mono transition-colors"
-                  />
-                  <Button size="sm" variant="ghost" onClick={() => removeHook(hook.id)}>
-                    删除
-                  </Button>
+                <div key={hook.id} className="rounded-lg border border-border/30 bg-muted/10 px-3 py-2 space-y-1.5">
+                  <div className="flex items-center gap-3">
+                    <Toggle enabled={hook.enabled} onToggle={() => toggleHook(hook.id)} />
+                    <div className="flex-1 min-w-0 space-y-1">
+                      <label className="block text-[11px] text-muted-foreground/70">命令 Command</label>
+                      <input
+                        value={hook.command}
+                        onChange={(e) => updateHook(hook.id, { command: e.target.value })}
+                        placeholder="如 python3 ~/.helix/hooks/notify.py"
+                        className="w-full px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md text-sm text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/40 font-mono transition-colors"
+                      />
+                    </div>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
+                      onClick={() => removeHook(hook.id)}
+                      aria-label="删除 hook"
+                      title="删除"
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                  {meta.supportsMatcher && (
+                    <div className="space-y-1 pl-[52px]">
+                      <label className="block text-[11px] text-muted-foreground/70">Matcher 正则（工具名，留空 = 全部）</label>
+                      <input
+                        value={hook.matcher}
+                        onChange={(e) => updateHook(hook.id, { matcher: e.target.value })}
+                        placeholder="如 edit|write"
+                        className="w-full px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md text-sm text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/40 font-mono transition-colors"
+                      />
+                    </div>
+                  )}
                 </div>
-                {meta.supportsMatcher && (
-                  <input
-                    value={hook.matcher}
-                    onChange={(e) => updateHook(hook.id, { matcher: e.target.value })}
-                    placeholder="matcher 正则（工具名，留空=全部）"
-                    className="w-full px-2.5 py-1.5 bg-muted/20 border border-border/20 rounded-md text-sm text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/30 font-mono transition-colors"
-                  />
-                )}
-              </div>
-            ))}
-          </SettingGroup>
+              ))}
+            </SettingGroup>
         )
       })}
 

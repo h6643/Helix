@@ -75,8 +75,8 @@ export function ShortcutsPage() {
             <div className="divide-y divide-border/50">
               {systemShortcuts.map(([id, s]) => (
                 <div key={id} className="flex items-center px-4 py-2.5 hover:bg-accent/20 transition-colors group">
-                  <span className="flex-1 text-sm font-medium text-foreground/80">{s.description}</span>
-                  <span className="text-sm font-mono text-foreground/80 bg-muted px-2 py-1 rounded">{s.keys.join(' + ')}</span>
+                  <span className="text-sm font-medium text-foreground/80">{s.description}</span>
+                  <span className="ml-auto text-sm font-mono text-foreground/80 bg-muted px-2.5 py-1 rounded shrink-0">{s.keys.join(' + ')}</span>
                   <button
                     onClick={() => startRecording(id)}
                     className="ml-3 px-1.5 py-1 rounded text-xs text-muted-foreground/20 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all"

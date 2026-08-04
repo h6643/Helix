@@ -21,18 +21,24 @@ export const Toggle = ({ enabled, onToggle }: { enabled: boolean; onToggle: () =
 )
 
 export const SettingRow = ({ label, labelClassName = '', children }: { label: string; labelClassName?: string; children: React.ReactNode }) => (
-  <div className="flex items-center justify-between gap-4 py-2.5 px-1 -mx-1 rounded-md hover:bg-muted/30 transition-colors">
-    <span className={`text-sm text-foreground ${labelClassName}`}>{label}</span>
+  <div className="flex items-center gap-3 py-2.5 px-1 -mx-1 rounded-md hover:bg-muted/30 transition-colors">
+    <span className={`text-sm text-foreground min-w-0 flex-1 ${labelClassName}`}>{label}</span>
     <div className="shrink-0">{children}</div>
   </div>
 )
 
-export const SettingGroup = ({ title, action, children }: { title: string; action?: React.ReactNode; children?: React.ReactNode }) => (
-  <div className="pt-5 first:pt-0">
-    <div className="mb-1 px-0.5 pb-2 border-b border-border/25 flex items-center justify-between gap-2">
-      <h4 className="text-base font-semibold text-foreground">{title}</h4>
-      {action}
-    </div>
+export const SettingGroup = ({ title, action, children, className = '', divider = 'bottom' }: { title?: string; action?: React.ReactNode; children?: React.ReactNode; className?: string; divider?: 'top' | 'bottom' }) => (
+  <div className={`pt-5 first:pt-0 ${className}`}>
+    {(title || action) && (
+      <div className={`mb-1 px-0.5 flex items-center justify-between gap-2 ${
+        divider === 'top'
+          ? 'pt-2 border-t border-border/25'
+          : 'pb-2 border-b border-border/25'
+      }`}>
+        <h4 className="text-base font-semibold text-foreground">{title}</h4>
+        {action}
+      </div>
+    )}
     {children && <div className="divide-y divide-border/25">{children}</div>}
   </div>
 )

@@ -20,7 +20,7 @@ export function GeneralSettingsPanel() {
   } = useHelixStore()
 
   return (
-    <div className="max-w-xl space-y-1">
+    <div className="space-y-1">
       <SectionHeading>常规</SectionHeading>
 
       <SettingGroup title="通知">
@@ -33,7 +33,7 @@ export function GeneralSettingsPanel() {
       </SettingGroup>
 
       <SettingGroup title="数据管理">
-        <div className="py-3 flex flex-wrap gap-2">
+        <div className="py-3 flex flex-wrap gap-2 justify-end">
           <Button size="sm" variant="outline" onClick={async () => {
             try {
               const data = { apiConfig, apiProfiles, activeProfileId, providers, activeModel, fontFamily, fontSize, interfaceFont, transcriptFontSize, mcpServers, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix }

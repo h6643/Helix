@@ -41,11 +41,6 @@ interface PendingRpc {
   timer: ReturnType<typeof setTimeout>
 }
 
-interface PendingPrompt {
-  resolve: (v: any) => void
-  reject: (e: Error) => void
-}
-
 // ── usage 映射（serve payload → Helix 期望的驼峰字段）──────────────────
 
 function num(u: any, ...keys: string[]): number | undefined {
@@ -59,10 +54,10 @@ function num(u: any, ...keys: string[]): number | undefined {
 function mapUsage(u: any): any {
   if (!u || typeof u !== 'object') return null
   return {
-    totalTokens: num(u, 'totalTokens', 'total_tokens'),
-    inputTokens: num(u, 'inputTokens', 'input_tokens', 'prompt_tokens'),
-    outputTokens: num(u, 'outputTokens', 'output_tokens', 'completion_tokens'),
-    thoughtTokens: num(u, 'thoughtTokens', 'thought_tokens', 'reasoning_tokens'),
+    totalTokens: num(u, 'totalTokens', 'total_tokens', 'total'),
+    inputTokens: num(u, 'inputTokens', 'input_tokens', 'prompt_tokens', 'input', 'prompt'),
+    outputTokens: num(u, 'outputTokens', 'output_tokens', 'completion_tokens', 'output', 'completion'),
+    thoughtTokens: num(u, 'thoughtTokens', 'thought_tokens', 'reasoning_tokens', 'reasoning'),
     cachedReadTokens: num(u, 'cachedReadTokens', 'cache_read_tokens', 'cache_read_input_tokens'),
     cachedWriteTokens: num(u, 'cachedWriteTokens', 'cache_write_tokens', 'cache_creation_input_tokens'),
     ...u,
@@ -107,6 +102,14 @@ function toolKindFromName(name: string): string {
   return ''
 }
 
+// Hermes ships the terminal-styled inline diff with ANSI SGR codes around every
+// line (see agent/display.py _render_inline_unified_diff). Strip them so the
+// renderer can consume plain text.
+function stripAnsi(s: unknown): string {
+  if (typeof s !== 'string') return ''
+  return s.replace(/\u001b\[[0-9;]*m/g, '')
+}
+
 // ── 网关客户端 ──────────────────────────────────────────────────────────
 
 const RPC_TIMEOUT_MS = 60_000
@@ -116,14 +119,14 @@ export class ServeGatewayClient {
   private ws: WebSocket | null = null
   private nextId = 1
   private pending = new Map<string | number, PendingRpc>()
-  private pendingPrompts = new Map<string, PendingPrompt>()
+  /** Sessions with an in-flight prompt (ack-only model): tracked solely so a WS
+   *  reconnect can session.resume them to restore the event stream. */
+  private inflightSessions = new Set<string>()
   private listeners = new Set<EventCallback>()
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private disposed = false
   private approvalSeq = 0
-  /** 最近一次 message.complete 缓存（session_id → payload），供 prompt resolve 用 */
-  private lastComplete = new Map<string, any>()
   /** 等待 WS 首次 OPEN 的挂起者（修 CONNECTING 窗口内 rpc 被误拒的竞态） */
   private openWaiters: Array<() => void> = []
 
@@ -187,7 +190,7 @@ export class ServeGatewayClient {
         // sentinel 继续执行，客户端重连后必须调用 session.resume 把 transport
         // 重绑回会话（server.py _live_session_payload 里 session["transport"]=
         // transport），事件流才会恢复。不 resume 的话，断连期间产生的事件永久丢失。
-        this.resumePendingPrompts()
+        this.resumeInflightSessions()
         this.emit('gateway.reconnected', {})
         // gateway.ready 由服务端主动推，不在这里合成
       }
@@ -269,58 +272,47 @@ export class ServeGatewayClient {
     this.pending.clear()
   }
 
-  /** 全部失败（客户端销毁等确定性终止路径；prompt 一并 reject） */
+  /** 全部失败（客户端销毁等确定性终止路径）。ack-only 模型下 prompt 已即时 ack，
+   *  无挂起 Promise 可 reject；只需清掉 in-flight 追踪。监听者已随销毁移除，无需 emit。 */
   private failAllPending(err: Error): void {
     this.failPendingRpcs(err)
-    for (const [, p] of this.pendingPrompts) p.reject(err)
-    this.pendingPrompts.clear()
+    this.inflightSessions.clear()
   }
 
   /**
    * 重连后恢复断连期间仍在运行的会话（对齐官方桌面端）。
    * WS 断开时 Hermes 把会话 detach 到 drop sentinel 继续执行；重连后必须
-   * session.resume 把 transport 重绑回会话，事件流才恢复。对每个挂起的
-   * session/prompt 逐会话 resume：
-   * - running=true  → 会话仍在跑，保持 prompt 挂起，等 run.completed 收尾
-   * - running=false → 断连期间已跑完，用返回的 messages 兜底正文并 resolve
-   * - resume 报错   → 会话已不可恢复（网关重启/reap），reject 让前端收尾
+   * session.resume 把 transport 重绑回会话，事件流才恢复。对每个 in-flight 会话：
+   * - running=true  → 会话仍在跑，transport 已重绑，后续 run.completed 事件正常到达
+   * - running=false → 断连期间已跑完（run.completed 发往 drop sink 丢失），用返回的
+   *                   messages 兜底正文，合成 run_complete 事件交给前端
+   * - resume 报错   → 会话已不可恢复（网关重启/reap），合成空 run_complete 让前端收尾，
+   *                   否则前端循环会挂起（ack-only 下没有挂起 Promise 可 reject）
    */
-  private resumePendingPrompts(): void {
-    const sessionIds = [...this.pendingPrompts.keys()]
+  private resumeInflightSessions(): void {
+    const sessionIds = [...this.inflightSessions]
     if (sessionIds.length === 0) return
     debug('[ServeGateway] 重连成功，resume 断连前在跑的会话:', sessionIds)
+    const finish = (sessionId: string, text: string) => {
+      this.inflightSessions.delete(sessionId)
+      this.emit('session/update', {
+        session_id: sessionId,
+        update: { sessionUpdate: 'run_complete', content: text },
+      })
+    }
     for (const sessionId of sessionIds) {
       this.rpc('session.resume', { session_id: sessionId }, 20_000)
         .then((res: any) => {
-          const pp = this.pendingPrompts.get(sessionId)
-          if (!pp) return
+          if (!this.inflightSessions.has(sessionId)) return
           if (res?.running) {
-            // 会话仍在跑：transport 已重绑，后续 run.completed 会正常 resolve
             debug('[ServeGateway] 会话仍在运行，等待事件流恢复:', sessionId)
             return
           }
-          // 断连期间 run 已跑完（run.completed 发往 drop sink 丢失）。用 resume
-          // 返回的完整 messages 兜底正文，经 run_complete 事件把完整回复交给前端，
-          // 避免只显示断连前流出的半截内容。
-          this.pendingPrompts.delete(sessionId)
-          const text = lastAssistantText(res?.messages)
-          this.emit('session/update', {
-            session_id: sessionId,
-            update: { sessionUpdate: 'run_complete', content: text },
-          })
-          pp.resolve({
-            status: 'complete',
-            usage: null,
-            text,
-            stopReason: 'end_turn',
-          })
+          finish(sessionId, lastAssistantText(res?.messages))
         })
         .catch((e: Error) => {
-          const pp = this.pendingPrompts.get(sessionId)
-          if (pp) {
-            this.pendingPrompts.delete(sessionId)
-            pp.reject(new Error(`会话恢复失败（${e?.message ?? '连接未能恢复'}）`))
-          }
+          debug('[ServeGateway] 会话恢复失败，合成结束事件:', sessionId, e?.message)
+          finish(sessionId, '')
         })
     }
   }
@@ -382,8 +374,19 @@ export class ServeGatewayClient {
       if (p) {
         this.pending.delete(msg.id)
         clearTimeout(p.timer)
-        if (msg.error) p.reject(new Error(msg.error.message || 'RPC 错误'))
-        else p.resolve(msg.result)
+        if (msg.error) {
+          // "session not found" 等 RPC 错误：并发多 session 时可能发生
+          // （后端可能不支持真正的多 session 并发，一个 session 被另一个挤掉）。
+          // 不让 reject 直接 throw 到未捕获区域——用 warn 记录后正常 reject，
+          // 调用方的 try/catch 会处理。
+          const errMsg = msg.error.message || 'RPC 错误'
+          if (/session.*not.*found|not found/i.test(errMsg)) {
+            warn('[ServeGateway] RPC session 错误(并发?):', errMsg)
+          }
+          p.reject(new Error(errMsg))
+        } else {
+          p.resolve(msg.result)
+        }
       }
       return
     }
@@ -394,21 +397,11 @@ export class ServeGatewayClient {
     }
   }
 
-  // 解析一个挂起的 prompt promise。优先按 session_id 精确匹配；若上游结束事件
-  // 漏带 session_id（serve 网关常见），且当前仅有唯一挂起 prompt，则模糊匹配，
-  // 避免 done promise 永久挂起导致前端卡死在「停止」按钮。
-  private resolvePending(sessionId: string | undefined, result: any): void {
-    const exact = sessionId ? this.pendingPrompts.get(sessionId) : null
-    if (exact) {
-      this.pendingPrompts.delete(sessionId!)
-      exact.resolve(result)
-      return
-    }
-    if (!sessionId && this.pendingPrompts.size === 1) {
-      const [key, pp] = [...this.pendingPrompts.entries()][0]
-      this.pendingPrompts.delete(key)
-      pp.resolve(result)
-    }
+  /** 完成事件（run.completed/cancelled/failed/message.complete）到达时把该会话从
+   *  in-flight 集合移除。ack-only 模型下完成由 translateEvent 发出的 run_complete 事件
+   *  驱动，这里只做清理——不再有挂起 Promise 要 resolve。 */
+  private resolvePending(sessionId: string | undefined, _result?: any): void {
+    if (sessionId) this.inflightSessions.delete(sessionId)
   }
 
   // ── 事件翻译：serve 原生 → 原生直通 + ACP 合成双发 ─────────
@@ -456,7 +449,6 @@ export class ServeGatewayClient {
 
       case 'message.complete': {
         const usage = mapUsage(payload?.usage)
-        if (sessionId) this.lastComplete.set(sessionId, payload)
         // 先发原生 + usage 事件，再 resolve pending prompt（顺序与 ACP 主进程一致）
         this.emit('message.complete', base)
         if (usage) this.emit('usage:prompt-complete', { session_id: sessionId, usage })
@@ -521,7 +513,11 @@ export class ServeGatewayClient {
               toolCallId: toolId,
               title: name || 'tool',
               kind: toolKindFromName(name),
-              rawInput: payload?.args ?? payload?.args_text ?? {},
+              // Hermes `tool.start` never carries raw `args` — only a
+              // display `context` preview (e.g. "foo.ts 1-50" for read_file,
+              // a summarized command for terminal). Fall back to it so the
+              // frontend can show what the tool actually operated on.
+              rawInput: payload?.args ?? payload?.args_text ?? (payload?.context ? { context: payload.context } : {}),
             },
           })
         }
@@ -540,7 +536,8 @@ export class ServeGatewayClient {
         const resultText = typeof payload?.result_text === 'string' ? payload.result_text
           : typeof payload?.result === 'string' ? payload.result
           : payload?.summary ?? ''
-        this.emit('tool.complete', { ...base, tool_call_id: toolId, tool_name: name })
+        const inlineDiff = stripAnsi(payload?.inline_diff)
+        this.emit('tool.complete', { ...base, tool_call_id: toolId, tool_name: name, inline_diff: inlineDiff })
         this.emit('session/update', {
           session_id: sessionId,
           update: {
@@ -548,6 +545,7 @@ export class ServeGatewayClient {
             toolCallId: toolId,
             status: payload?.is_error ? 'failed' : 'completed',
             content: resultText,
+            inlineDiff,
           },
         })
         return
@@ -562,7 +560,16 @@ export class ServeGatewayClient {
             sessionUpdate: 'permission_request',
             toolCallId: approvalId,
             toolName: payload?.pattern_key || payload?.command || 'terminal',
-            toolParams: { command: payload?.command ?? '', description: payload?.description ?? '' },
+            toolParams: {
+              command: payload?.command ?? '',
+              description: payload?.description ?? '',
+              // 前端审批分流用：pattern_key 区分危险命令/插件规则，reason 是后端解释，
+              // choices/smart_denied 供审批条渲染可选项（once/session/always/deny）。
+              pattern_key: payload?.pattern_key ?? '',
+              reason: payload?.reason ?? payload?.description ?? '',
+              choices: Array.isArray(payload?.choices) ? payload.choices : null,
+              smart_denied: !!payload?.smart_denied,
+            },
           },
         })
         return
@@ -604,11 +611,8 @@ export class ServeGatewayClient {
 
       case 'error': {
         this.emit('error', { session_id: sessionId, message: payload?.message ?? '未知网关错误' })
-        const pp = sessionId ? this.pendingPrompts.get(sessionId) : null
-        if (pp && sessionId) {
-          this.pendingPrompts.delete(sessionId)
-          pp.reject(new Error(payload?.message ?? '网关错误'))
-        }
+        // error 事件本身已 emit（前端 error→queueDone 收尾）。ack-only 下无挂起 Promise，只清理 in-flight。
+        if (sessionId) this.inflightSessions.delete(sessionId)
         return
       }
 
@@ -620,6 +624,31 @@ export class ServeGatewayClient {
 
   // ── ACP 兼容门面方法 ─────────────────────────────────────
 
+  /**
+   * 建会话（session/new 与「session not found 自动重试」共用）。
+   * 后端疑似只保留一个活跃会话：每次成功 session.create 都可能把此前正在
+   * 运行的会话挤掉（后续其 RPC 报 "session not found"）。因此创建成功后，
+   * 把其余 in-flight 会话标记为已驱逐（session.evicted），前端据此快速收尾
+   * 被挤掉的 run，而不是静默挂到 5 分钟兜底。
+   */
+  private async createSession(params?: any): Promise<any> {
+    await this.ensureModelSynced()
+    const res = await this.rpc('session.create', {
+      cwd: params?.cwd,
+      source: 'helix',
+    })
+    const newId = res?.session_id
+    if (newId) {
+      for (const other of [...this.inflightSessions]) {
+        if (other !== newId) {
+          this.inflightSessions.delete(other)
+          this.emit('session.evicted', { session_id: other, replacedBy: newId })
+        }
+      }
+    }
+    return res
+  }
+
   /** ACP send(method, params) → serve RPC 翻译 */
   async send(method: string, params?: any): Promise<any> {
     switch (method) {
@@ -630,11 +659,7 @@ export class ServeGatewayClient {
         // use-hermes 的 setHermesModel；而 HERMES_HOME 下 config.yaml 里
         // 可能残留旧 IPC 直写的 provider（如 'agnes-ai'），serve 的模型解析
         // 不认识 → base_url 被丢弃 → agent 构建 30s 超时 → error 事件。
-        await this.ensureModelSynced()
-        const res = await this.rpc('session.create', {
-          cwd: params?.cwd,
-          source: 'helix',
-        })
+        const res = await this.createSession(params)
         debug('[ServeGateway] ✓ session/new OK →', res?.session_id)
         return res // 已含 session_id，调用点的提取链兼容
       }
@@ -649,34 +674,36 @@ export class ServeGatewayClient {
         const sessionId = String(params?.session_id ?? '')
         if (!sessionId) throw new Error('session/prompt 缺少 session_id')
         const text = promptBlocksToText(params?.prompt)
-        // 桥接语义：ack 后挂起，等 message.complete / run.completed 才 resolve（带 usage）
-        const done = new Promise<any>((resolve, reject) => {
-          // 同一 session 的旧 pending（不应存在）直接顶掉
-          const prev = this.pendingPrompts.get(sessionId)
-          if (prev) prev.resolve({ status: 'superseded' })
-          // 安全网：上游结束事件若丢失或 session_id 错位，done 会永久挂起 →
-          // 前端 while 循环卡死在 await waitForItem，按钮永远停在「停止」。
-          // 加硬超时（300s）兜底，超时按 interrupted 收尾，前端会用已流式缓冲的结果收尾。
-          // 54000 太小会误杀长 agentic 任务（构建/多工具），此处仅用于彻底兜底「零事件」的坏情况。
-          const timer = setTimeout(() => {
-            const pp = this.pendingPrompts.get(sessionId)
-            if (pp) {
-              this.pendingPrompts.delete(sessionId)
-              pp.resolve({ status: 'interrupted', text: '', stopReason: 'timeout', timedOut: true })
-            }
-          }, 300000)
-          this.pendingPrompts.set(sessionId, {
-            resolve: (v: any) => { clearTimeout(timer); resolve(v) },
-            reject: (e: any) => { clearTimeout(timer); reject(e) },
-          })
-        })
+        // 官方语义：prompt.submit 只回 ack（{"status":"streaming"}），真正的回复走事件流
+        // （message.delta → … → run.completed）。这里不再挂起 Promise、不再设超时——完成
+        // 由 run.completed/cancelled/failed 事件驱动（translateEvent 发 run_complete 事件，
+        // agent-flow-panel 据此收尾）。只把 session 记为 in-flight，供 WS 断连重连后
+        // session.resume 恢复事件流（见 resumeInflightSessions）。
         try {
           await this.rpc('prompt.submit', { session_id: sessionId, text })
-        } catch (e) {
-          this.pendingPrompts.delete(sessionId)
-          throw e
+        } catch (err) {
+          // 并发多 session 的 "session not found" 恢复（对齐主进程 ACP 路径：
+          // electron/main.js hermes:send → recreate + retry）。后端疑似只保留一个
+          // 活跃会话：新的 session.create 会把旧会话挤掉，旧会话上的 RPC 报
+          // "session not found"。这里自动重建会话并重放 prompt，尽力让该对话也
+          // 跑完；返回新 session_id 让前端把 conversation→session 映射改绑。
+          const msg = (err as Error)?.message || ''
+          if (/session.*not.*found|not found|no such session|unknown session/i.test(msg)) {
+            warn('[ServeGateway] session not found on prompt — recreating session and retrying')
+            const res = await this.createSession({})
+            const newId = res?.session_id
+            if (newId) {
+              debug('[ServeGateway] recreated session for retry:', newId)
+              this.emit('gateway.sessionReplaced', { oldId: sessionId, newId })
+              await this.rpc('prompt.submit', { session_id: newId, text })
+              this.inflightSessions.add(newId)
+              return { status: 'streaming', session_id: newId }
+            }
+          }
+          throw err
         }
-        return done
+        this.inflightSessions.add(sessionId)
+        return { status: 'streaming' }
       }
 
       case 'session/cancel':
@@ -689,13 +716,20 @@ export class ServeGatewayClient {
       }
 
       case 'session/set_mode': {
-        // serve 无 set_mode；审批策略拆成 config.set yolo
+        // serve 无 set_mode；审批策略拆成 config.set yolo。
+        // 语义（审批分流版）：
+        // - dont_ask（完全访问权限）→ yolo on：后端不发 approval.request，全部自动批。
+        // - default / accept_edits（请求批准 / 替我审批）→ yolo off：后端发 approval.request，
+        //   前端 classifyApproval 分流——项目内文件修改自动批，危险命令/项目外文件/敏感文件/
+        //   上传外发弹窗。分流只在 yolo off 时才有物可分。
         const mode = params?.mode_id ?? params?.mode
-        if (mode === 'dont_ask' || mode === 'accept_edits') {
+        if (mode === 'dont_ask') {
           return this.rpc('config.set', { key: 'yolo', value: 'on', scope: 'session', session_id: params?.session_id })
             .catch((e) => { warn('[ServeGateway] config.set yolo 失败:', e); return {} })
         }
-        return {}
+        // yolo off：确保默认/替我审批模式下后端会发审批请求。
+        return this.rpc('config.set', { key: 'yolo', value: 'off', scope: 'session', session_id: params?.session_id })
+          .catch((e) => { warn('[ServeGateway] config.set yolo(off) 失败:', e); return {} })
       }
 
       case 'session/approve': {
@@ -748,19 +782,23 @@ export class ServeGatewayClient {
         return { tools, toolsets: res?.toolsets ?? [] }
       }
 
-      case 'session.context_breakdown':
-      case 'session/context_breakdown':
-        return null // 与 acp 模式主进程短路行为一致
-
       default:
-        // 未映射方法：透传（serve 侧同名注册的直接可用）
+        // 未映射方法：透传（serve 侧同名注册的直接可用）。
+        // session.context_breakdown 由 tui_gateway/methods_session.py 实现，
+        // 不再短路，直接透传给后端取真实分类占比。
         return this.rpc(method.replace(/\//g, '.'), params)
     }
   }
 
   /** ACP notify（无响应通知）→ serve 没有通知语义，转为 fire-and-forget RPC */
   notify(method: string, params?: any): void {
-    this.send(method, params).catch((e) => warn('[ServeGateway] notify 失败:', method, e))
+    this.send(method, params).catch((e) => {
+      // session/cancel on a run that already finished is a benign race (the
+      // session is gone server-side); don't log it as a scary failure.
+      const msg = String((e as Error)?.message ?? e)
+      if (method === 'session/cancel' && /not found/i.test(msg)) return
+      warn('[ServeGateway] notify 失败:', method, e)
+    })
   }
 
   async interrupt(sessionId: string): Promise<any> {

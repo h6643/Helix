@@ -36,7 +36,7 @@ import { isElectron, electronHermes, electronNotification, electronShell } from 
 import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
 import { isServeActive, getServeClient } from '@/lib/serve-gateway'
 import { speak, stripAcp } from '@/lib/voice-utils'
-import { useHelixStore, type PendingChange } from '@/stores/helix-store'
+import { useHelixStore } from '@/stores/helix-store'
 import { applyHelixPalette, getThemeMeta } from '@/lib/themes'
 import { AgentFlowPanel } from './agent-flow-panel'
 import { CommandPalette } from './command-palette'
@@ -62,7 +62,6 @@ function shortcutLabel(action: string, customShortcuts?: Record<string, { keys: 
 }
 
 // Dynamic imports for heavy components
-const DiffPreview = dynamic(() => import('./diff-preview').then(m => ({ default: m.DiffPreview })), { ssr: false })
 const SessionManager = dynamic(() => import('./session-manager').then(m => ({ default: m.SessionManager })), { ssr: false })
 const ApiSettings = dynamic(() => import('./api-settings').then(m => ({ default: m.ApiSettings })), { ssr: false })
 const SkillPanel = dynamic(() => import('./skill-panel').then(m => ({ default: m.SkillPanel })), { ssr: false })
@@ -269,8 +268,6 @@ export function HelixLayout() {
 
   // State selectors (only re-render when this specific slice changes)
   const openTabs = useHelixStore(s => s.openTabs)
-  const pendingChanges = useHelixStore(s => s.pendingChanges)
-  const showDiffPreview = useHelixStore(s => s.showDiffPreview)
   const showSessionManager = useHelixStore(s => s.showSessionManager)
   const showSettings = useHelixStore(s => s.showSettings)
   const showSkillPanel = useHelixStore(s => s.showSkillPanel)
@@ -281,6 +278,11 @@ export function HelixLayout() {
   const showActivityFeed = useHelixStore(s => s.showActivityFeed)
   const showArtifactsBrowser = useHelixStore(s => s.showArtifactsBrowser)
   const showPluginManager = useHelixStore(s => s.showPluginManager)
+  // 打开任一主区覆盖页（计划/插件管理/技能/运行时/工作树）时，聊天区用
+  // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
+  // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
+  // 切页面时让模型继续在后台运行，返回后还能接着看。
+  const sidePanelOpen = showScheduledTasksPanel || showPluginManager || showSkillPanel || showRuntimePanel || showWorktreePanel
   const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
@@ -288,6 +290,7 @@ export function HelixLayout() {
   const themeStyle = useHelixStore(s => s.themeStyle)
   const setThemeStyle = useHelixStore(s => s.setThemeStyle)
   const chatMessages = useHelixStore(s => s.chatMessages)
+  const currentSessionId = useHelixStore(s => s.currentSessionId)
   const navigationHistory = useHelixStore(s => s.navigationHistory)
   const navigationIndex = useHelixStore(s => s.navigationIndex)
   const customShortcuts = useHelixStore(s => s.customShortcuts)
@@ -319,24 +322,6 @@ export function HelixLayout() {
       storeActions.setEditorTheme(meta.mode === 'dark' ? 'vs-dark' : 'light')
     }
   }, [themeStyle])
-
-  const handleApplyChange = useCallback((change: PendingChange) => {
-    storeActions.applyPendingChange(change.id)
-  }, [storeActions.applyPendingChange])
-
-  const handleRejectChange = useCallback((change: PendingChange) => {
-    storeActions.rejectPendingChange(change.id)
-  }, [storeActions.rejectPendingChange])
-
-  const handleApplyAll = useCallback(() => {
-    storeActions.applyAllPendingChanges()
-    storeActions.setShowDiffPreview(false)
-  }, [storeActions.applyAllPendingChanges, storeActions.setShowDiffPreview, pendingChanges.length])
-
-  const handleRejectAll = useCallback(() => {
-    storeActions.rejectAllPendingChanges()
-    storeActions.setShowDiffPreview(false)
-  }, [storeActions.rejectAllPendingChanges, storeActions.setShowDiffPreview])
 
   // Re-assert the frontend's restored model config into Hermes on startup so
   // the backend always matches the user's choice. This runs once after the
@@ -437,11 +422,25 @@ export function HelixLayout() {
   // owning provider's config) into useHelixStore whenever it changes out-of-band.
   useEffect(() => {
     if (!isElectron()) return
+    // On the FIRST fire (which is the hermes-ui hydration), the Helix store has
+    // already restored its own active model — and unlike hermes-ui it knows about
+    // fetched-only models. If hermes-ui hydrated to a declared default (pro) while
+    // Helix restored a fetched model (flash), don't let hermes-ui clobber Helix.
+    // Instead sync hermes-ui to Helix so the two agree, then return.
+    let firstFire = true
     const unsub = useProviderStore.subscribe((state, prev) => {
       const model = state.activeModel
       if (model === prev.activeModel) return
       if (!model) return
       const helix = useHelixStore.getState()
+      if (firstFire) {
+        firstFire = false
+        const helixModel = helix.apiConfig?.model
+        if (helixModel && helixModel !== model) {
+          useProviderStore.getState().setActiveModel(helixModel)
+          return
+        }
+      }
       // Reuse the canonical resolver so the mirrored config matches a normal
       // in-panel switch (credentials + session invalidation handled there).
       const provider = state.providers.find((p) => p.models.includes(model))
@@ -485,8 +484,13 @@ export function HelixLayout() {
       } else {
         // Model not declared in Helix providers (e.g. fetched list only) — at
         // least reflect it in apiConfig so the selector label updates, avoiding
-        // a frozen "always same model" display.
-        useHelixStore.setState({ apiConfig: { ...useHelixStore.getState().apiConfig, model } })
+        // a frozen "always same model" display. Also set activeModel so the
+        // dropdown highlight and the backend-mirror guard (`activeModel ||
+        // cur.model`) don't stay pinned to the previous model.
+        useHelixStore.setState({
+          activeModel: model,
+          apiConfig: { ...useHelixStore.getState().apiConfig, model },
+        })
       }
     })
     return () => { try { unsub() } catch {} }
@@ -498,12 +502,9 @@ export function HelixLayout() {
     }
   }, [chatMessages.length])
 
-  useEffect(() => {
-    if (pendingChanges.length > 0 && !showDiffPreview) {
-      const timer = setTimeout(() => storeActions.setShowDiffPreview(true), 100)
-      return () => clearTimeout(timer)
-    }
-  }, [pendingChanges.length, showDiffPreview, storeActions.setShowDiffPreview])
+  // DiffPreview no longer auto-pops: per-file change stats (+green / -red) are
+  // rendered inline in the conversation transcript (FileChangeSummary). The
+  // top-right diff button still opens the review modal on demand.
 
   // Track window maximize/restore state via native events
 
@@ -885,7 +886,7 @@ export function HelixLayout() {
       <ToastContainer />
 
       {/* Title bar — frameless window drag region */}
-      <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 bg-sidebar shrink-0 select-none border-b border-border/20">
+      <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 bg-sidebar shrink-0 select-none">
         {/* Left: navigation buttons */}
         <div className="flex items-center gap-0.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
           <button
@@ -895,7 +896,6 @@ export function HelixLayout() {
           >
             <PanelLeft className="size-4" />
           </button>
-          <div className="w-px h-4 bg-border/40 mx-0.5" />
           <button
             onClick={() => {
               const entry = storeActions.navigateBack()
@@ -936,7 +936,6 @@ export function HelixLayout() {
           >
             <ArrowRight className="size-4" />
           </button>
-          <div className="w-px h-4 bg-border/40 mx-0.5" />
           <button
             ref={windowMenuButtonRef}
             onClick={toggleWindowMenu}
@@ -1087,7 +1086,7 @@ export function HelixLayout() {
             style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth }}
           >
             <div
-              className="h-full overflow-hidden bg-sidebar border-r border-sidebar-border/60"
+              className="h-full overflow-hidden bg-sidebar"
               style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth }}
             >
               <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(v => !v)} />
@@ -1114,22 +1113,11 @@ export function HelixLayout() {
         )}
 
         {/* Main area */}
-        <div className="flex-1 h-full flex flex-col overflow-hidden">
-          {showScheduledTasksPanel ? (
-            <ScheduledTasksPanel onClose={() => storeActions.toggleScheduledTasksPanel()} />
-          ) : showPluginManager ? (
-            <PluginManagerPanel onClose={() => storeActions.togglePluginManager()} />
-          ) : showSkillPanel ? (
-            <SkillPanel onClose={() => storeActions.toggleSkillPanel()} />
-          ) : showRuntimePanel ? (
-            <RuntimePanel onClose={() => storeActions.toggleRuntimePanel()} />
-          ) : showWorktreePanel ? (
-            <WorktreePanel onClose={() => storeActions.toggleWorktreePanel()} />
-          ) : (
-            <div className="flex-1 flex flex-row overflow-hidden">
+        <div className="relative flex-1 h-full flex flex-col overflow-hidden">
+          <div className={`flex-1 flex flex-row overflow-hidden ${sidePanelOpen ? 'hidden' : ''}`}>
               <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-              {/* Conversation header — only visible when messages exist */}
-                {chatMessages.length > 0 && (
+              {/* Conversation header — only visible when an active conversation has messages */}
+                {(chatMessages.length > 0 && !!currentSessionId) && (
                   <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 bg-background">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <button
@@ -1201,25 +1189,13 @@ export function HelixLayout() {
                     </div>
                   )}
                   <button
-                    onClick={() => { if (pendingChanges.length > 0) storeActions.setShowDiffPreview(true) }}
-                    className="relative p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-                    title="文件差异"
-                  >
-                    <FileDiff className="size-4" />
-                    {pendingChanges.length > 0 && (
-                      <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[9px] font-medium flex items-center justify-center">
-                        {pendingChanges.length}
-                      </span>
-                    )}
-                  </button>
-                  <button
                     onClick={() => storeActions.toggleTerminal()}
                     className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
                     title="终端"
                   >
                     <Terminal className="size-4" />
                   </button>
-                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'files' && rightSidebarTab !== 'email') && (
+                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'files' && rightSidebarTab !== 'email' && rightSidebarTab !== 'diff') && (
                   <button
                     ref={browserMenuButtonRef}
                     onClick={() => setBrowserMenuOpen(v => !v)}
@@ -1262,6 +1238,14 @@ export function HelixLayout() {
                           <span className="flex-1 text-left">邮箱</span>
                           {rightSidebarTab === 'email' && <CheckCircle2 className="size-3.5" />}
                         </button>
+                        <button
+                          onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'diff' ? null : 'diff'); setBrowserMenuOpen(false) }}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'diff' ? 'text-primary' : 'text-foreground/80'}`}
+                        >
+                          <FileDiff className="size-3.5" />
+                          <span className="flex-1 text-left">变更</span>
+                          {rightSidebarTab === 'diff' && <CheckCircle2 className="size-3.5" />}
+                        </button>
                       </div>
                     </div>,
                     document.body
@@ -1282,9 +1266,33 @@ export function HelixLayout() {
                   >
                     <div className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${isRightDragging ? 'bg-primary/40' : 'bg-transparent group-hover:bg-border/40'}`} />
                   </div>
-                  <RightSidebar />
+                  <RightSidebar key={rightSidebarTab} />
                 </div>
               )}
+            </div>
+          {showScheduledTasksPanel && (
+            <div className="absolute inset-0 z-20">
+              <ScheduledTasksPanel onClose={() => storeActions.toggleScheduledTasksPanel()} />
+            </div>
+          )}
+          {showPluginManager && (
+            <div className="absolute inset-0 z-20">
+              <PluginManagerPanel onClose={() => storeActions.togglePluginManager()} />
+            </div>
+          )}
+          {showSkillPanel && (
+            <div className="absolute inset-0 z-20">
+              <SkillPanel onClose={() => storeActions.toggleSkillPanel()} />
+            </div>
+          )}
+          {showRuntimePanel && (
+            <div className="absolute inset-0 z-20">
+              <RuntimePanel onClose={() => storeActions.toggleRuntimePanel()} />
+            </div>
+          )}
+          {showWorktreePanel && (
+            <div className="absolute inset-0 z-20">
+              <WorktreePanel onClose={() => storeActions.toggleWorktreePanel()} />
             </div>
           )}
         </div>
@@ -1308,23 +1316,6 @@ export function HelixLayout() {
           setSidebarCollapsed={setSidebarCollapsed}
         />
       )}
-      {showDiffPreview && pendingChanges.length > 0 && (
-        <DiffPreview
-          changes={pendingChanges.map(({ id, ...rest }) => rest)}
-          onApply={(change) => {
-            const pending = pendingChanges.find(p => p.filePath === change.filePath)
-            if (pending) handleApplyChange(pending)
-          }}
-          onApplyAll={handleApplyAll}
-          onReject={(change) => {
-            const pending = pendingChanges.find(p => p.filePath === change.filePath)
-            if (pending) handleRejectChange(pending)
-          }}
-          onRejectAll={handleRejectAll}
-          onClose={() => storeActions.setShowDiffPreview(false)}
-        />
-      )}
-
       {/* New surfaces */}
       {showActivityFeed && <ActivityFeed onClose={() => storeActions.toggleActivityFeed()} />}
       {showArtifactsBrowser && <ArtifactsBrowser onClose={() => storeActions.toggleArtifactsBrowser()} />}

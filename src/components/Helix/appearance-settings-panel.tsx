@@ -26,7 +26,7 @@ const UI_FONT_OPTIONS = [
 
 const fontSelect = (value: string, onChange: (v: string) => void, options: { label: string; value: string }[]) => (
   <select value={value} onChange={(e) => onChange(e.target.value)}
-    className="w-56 px-2.5 py-1 rounded border border-border/30 bg-popover text-popover-foreground text-xs focus:outline-none focus:border-primary/30 cursor-pointer appearance-none justify-self-end">
+    className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors">
     {options.map(f => (
       <option key={f.value} value={f.value}>{f.label}</option>
     ))}
@@ -57,14 +57,14 @@ export function AppearanceSettingsPanel({ themeStyle, onSelectThemeStyle }: {
   const setTranscriptFontSize = useHelixStore(s => s.setTranscriptFontSize)
 
   return (
-    <div className="max-w-xl space-y-1">
+    <div className="space-y-1">
       <SectionHeading>外观</SectionHeading>
 
       <SettingRow label="配色风格">
         <select
           value={themeStyle}
           onChange={(e) => onSelectThemeStyle(e.target.value)}
-          className="w-96 px-2.5 py-1 rounded border border-border/30 bg-popover text-popover-foreground text-xs focus:outline-none focus:border-primary/30 cursor-pointer"
+          className="w-96 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
         >
           {THEME_SELECT_GROUPS.map((g) => (
             <optgroup key={g.label} label={g.label}>

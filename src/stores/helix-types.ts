@@ -69,6 +69,7 @@ export type StreamingResponseBlock =
   | { type: 'text'; content: string }
   | { type: 'thinking'; content: string }
   | { type: 'tool_group'; steps: ExecutionStep[] }
+  | { type: 'file_change'; changes: PendingChange[] }
 
 // Per-session streaming draft: survives conversation switches.
 export interface StreamingDraft {
@@ -79,6 +80,11 @@ export interface StreamingDraft {
   textBuffer?: string
   thoughtBuffer?: string
   hermesSessionId?: string | null
+  // When this run started (ms epoch). Per-session so each conversation's live
+  // timer keeps its own elapsed time instead of sharing one global timestamp.
+  startedAt?: number
+  // Streaming thought-token count for this run, for the per-session timer line.
+  thoughtTokens?: number
 }
 
 // Transient notice about the Hermes gateway connection (e.g. upstream dropped the
@@ -105,7 +111,7 @@ export interface ChatMessage {
   thoughtTokens?: number
   reasoning?: string
   steps?: ExecutionStep[]
-  blocks?: Array<{ type: 'text'; content: string } | { type: 'thinking'; content: string } | { type: 'tool_group'; steps: ExecutionStep[] }>
+  blocks?: Array<{ type: 'text'; content: string } | { type: 'thinking'; content: string } | { type: 'tool_group'; steps: ExecutionStep[] } | { type: 'file_change'; changes: PendingChange[] }>
 }
 
 export interface EditorTab {
@@ -136,9 +142,16 @@ export interface PendingChange {
   fileId: string
   fileName: string
   filePath: string
+  /** 捕获该变更时所属的项目工作目录（绝对路径）。diff 面板按当前项目过滤；
+   *  对话内联 file_change 块（非聚合列表）可以没有该字段。 */
+  workDir?: string
   oldContent: string
   newContent: string
   language: string
+  /** Backend-rendered unified diff (from Hermes tool.complete inline_diff),
+   *  ANSI-stripped. When present, DiffPreview renders it directly instead of
+   *  recomputing a diff from old/new content. */
+  unifiedDiff?: string
 }
 
 export type ApiProvider = string

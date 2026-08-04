@@ -1,52 +1,78 @@
 /**
  * Global scheduled task runner — runs independently of any component mount.
- * Checks every 30 seconds for due tasks and dispatches them via Hermes.
+ * Checks every 30 seconds for due tasks and dispatches them to a DEDICATED
+ * Hermes session so they never interrupt or pollute the active conversation.
  */
 import { hermesApi } from '@/lib/electron-bridge'
+import { parseScheduleForTask } from '@/lib/schedule-utils'
 import { useHelixStore } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
 
 let _started = false
+// Cached Hermes session ID for scheduled tasks (separate from any conversation).
+let _taskSessionId: string | null = null
 
-function parseSchedule(text: string): { nextRun: number | null; error?: string } {
-  const now = Date.now()
-  const t = text.trim().toLowerCase()
-  if (t === 'every minute') return { nextRun: now + 60_000 }
-  if (t === 'every hour') return { nextRun: now + 3_600_000 }
-  if (t === 'every day') return { nextRun: now + 86_400_000 }
-  // Try parsing as ms duration
-  const ms = Number(t)
-  if (!isNaN(ms) && ms > 0) return { nextRun: now + ms }
-  return { nextRun: null, error: `无法解析计划: ${text}` }
+async function getOrCreateTaskSession(): Promise<string | null> {
+  if (_taskSessionId) return _taskSessionId
+  try {
+    const res = await hermesApi()!.send('session/new', {
+      cwd: useHelixStore.getState().selectedWorkDir || '',
+      mcpServers: [],
+    }) as any
+    const sid = res?._meta?.hermes?.sessionProvenance?.acpSessionId
+      || res?.session_id
+      || res?.sessionID
+      || (typeof res === 'string' ? res : null)
+    if (sid) {
+      _taskSessionId = sid
+      return sid
+    }
+  } catch (e) {
+    console.error('[ScheduledTask] Failed to create task session:', e)
+  }
+  return null
 }
 
-async function runTask(task: { id: string; label: string; prompt: string }) {
-  const { addChatMessage, updateScheduledTask, showToast } = useHelixStore.getState()
-  const sessionId = useHermesStore.getState().hermesSessionId
+async function runTask(task: { id: string; label: string; prompt: string; scheduleText?: string }) {
+  const { updateScheduledTask, showToast } = useHelixStore.getState()
 
-  // Add system message to chat
-  addChatMessage({ role: 'system', content: `[定时任务] ${task.label}: ${task.prompt}` })
-
-  if (sessionId) {
-    // Actually send to Hermes
-    try {
-      await hermesApi()!.send('session/prompt', {
-        session_id: sessionId,
-        prompt: [{ type: 'text', text: task.prompt }],
-      })
-    } catch (e) {
-      console.error('[ScheduledTask] Failed to dispatch to Hermes:', e)
-    }
+  // Create / reuse a DEDICATED Hermes session for background tasks — NEVER the
+  // active conversation's session.  This prevents the task from polluting the
+  // user's current conversation context or interrupting a running agent.
+  const taskSid = await getOrCreateTaskSession()
+  if (!taskSid) {
+    showToast({ type: 'error', title: `定时任务 "${task.label}" 失败`, description: '无法创建后台会话' })
+    updateScheduledTask(task.id, { lastRunAt: Date.now() })
+    return
   }
 
-  // Update last/next run
+  // Send the prompt to the DEDICATED session — NOT the active conversation.
+  // The response events arrive with this session_id, which no active conversation's
+  // onEvent handler claims (they filter by their own session_id), so the UI stays
+  // untouched.  The task runs silently in the background.
+  try {
+    await hermesApi()!.send('session/prompt', {
+      session_id: taskSid,
+      prompt: [{ type: 'text', text: task.prompt }],
+    })
+  } catch (e) {
+    console.error('[ScheduledTask] Failed to dispatch:', e)
+    // Session may have been invalidated (gateway restart) — reset and retry next cycle.
+    _taskSessionId = null
+  }
+
   updateScheduledTask(task.id, { lastRunAt: Date.now() })
-  const parsed = parseSchedule(task.label) // Use scheduleText from task
+
+  // Advance nextRunAt using the task's REAL schedule text (e.g. "明天上午10点"),
+  // NOT the label (a human name like "工作提醒" that the old parseSchedule never
+  // matched). The old code read task.label here, so nextRunAt never advanced and
+  // the task re-fired every 30s forever — spamming the "已在后台执行" toast.
+  const parsed = parseScheduleForTask(task.scheduleText || task.label || '')
   if (parsed.nextRun) {
     updateScheduledTask(task.id, { nextRunAt: parsed.nextRun })
   }
 
-  showToast({ type: 'info', title: `定时任务 "${task.label}" 已触发` })
+  // NOTE: intentionally NO per-run info toast. It fired every 30s and was pure
+  // noise. Failures still surface via the error toast in the session branch above.
 }
 
 export function startScheduledTaskRunner() {

@@ -3,7 +3,7 @@
 import {
   Settings, Sun, Plug, Archive, ChevronLeft, Search,
   X,
-  Globe, Keyboard, GitBranch, Zap, Brain, Bot, Activity,
+  Globe, Keyboard, GitBranch, Zap, Brain, Bot, Activity, Workflow,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
@@ -20,6 +20,7 @@ import { GeneralSettingsPanel } from './general-settings-panel'
 import { GitSettingsPanel } from './git-settings-panel'
 import { HookSettings } from './hook-settings'
 import { LearningView } from './learning-view'
+import { MemorySettings } from './memory-settings'
 import { McpEditorForm, type McpFormData } from './mcp-editor-form'
 import { ShortcutsPage } from './shortcuts-page'
 import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './usage-stats'
@@ -153,8 +154,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'general', label: '常规', icon: Settings },
       { id: 'appearance', label: '外观', icon: Sun },
-      { id: 'browser', label: '浏览器', icon: Globe },
-      { id: 'archive', label: '历史归档', icon: Archive },
+      { id: 'learning', label: '记忆', icon: Brain },
       { id: 'shortcuts', label: '快捷键', icon: Keyboard },
     ],
   },
@@ -171,8 +171,9 @@ const NAV_GROUPS: NavGroup[] = [
     title: '集成',
     items: [
       { id: 'git', label: 'Git', icon: GitBranch },
-      { id: 'hook', label: 'Hooks', icon: Zap },
-      { id: 'learning', label: 'Memory', icon: Brain },
+      { id: 'hook', label: 'Hooks', icon: Workflow },
+      { id: 'browser', label: '浏览器', icon: Globe },
+      { id: 'archive', label: '历史归档', icon: Archive },
     ],
   },
 ]
@@ -334,18 +335,42 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       if (!r || !r.model) return
       // Read the latest store value at resolve time (restoreFromStorage may have
       // just rehydrated it). Preserve its key; only fill backend-known fields.
-      const cur = useHelixStore.getState().apiConfig
+      const store = useHelixStore.getState()
+      const cur = store.apiConfig
+      // ★ Critical: if the user has explicitly selected a different model in the
+      // chat input (activeModel), do NOT let the backend config.yaml overwrite it.
+      // Without this guard, opening Settings would revert apiConfig.model to the
+      // backend default (e.g. Ling-3.0-flash) even though the chat is actively
+      // using a different model — causing the settings list to highlight the wrong
+      // entry and creating a visual/actual mismatch.
+      const frontendModel = store.activeModel || cur.model
+      const effectiveModel = frontendModel || r.model
       // Reject the broken ant-ling endpoint if it ever surfaces in the backend.
       const baseUrl = /ant-ling/i.test(r.baseUrl || '') ? cur.baseUrl : (r.baseUrl || cur.baseUrl)
       setApiConfig({
         provider: r.provider || cur.provider,
         apiKey: cur.apiKey, // never overwrite the saved key with ''
         baseUrl,
-        model: r.model || cur.model,
+        model: effectiveModel,
       })
       // Intentionally NOT calling persistToStorage(): mirroring must not write
       // back to IndexedDB (that would wipe the persisted profile's key).
     }).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Self-heal: make sure the CURRENT model always appears (and therefore
+  // highlights) in the history list. If a model was activated through a path
+  // that never recorded it into apiHistory (or a stale persisted copy dropped
+  // it), opening Settings would show no highlighted entry at all. addApiHistory
+  // dedups by baseUrl + apiKey + model, so re-adding the current config is
+  // idempotent.
+  useEffect(() => {
+    const st = useHelixStore.getState()
+    const cfg = st.apiConfig
+    if (cfg?.baseUrl && cfg?.model) {
+      st.addApiHistory({ ...cfg })
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -597,8 +622,11 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     if (!localConfig.baseUrl.trim()) { showToast({ type: 'error', title: '请填写 Base URL' }); return }
     if (!localConfig.model.trim()) { showToast({ type: 'error', title: '请填写模型名称' }); return }
     const keyMissing = !localConfig.apiKey.trim()
-    // Collect all models for this profile: fetched models + the current model
-    const profileModels = [...new Set([localConfig.model, ...availableModels].filter(Boolean))]
+    // Store ONLY the single chosen model — NOT the full fetched list. The model
+    // list is fetched live when the selector is opened (renderModelSelector), so
+    // persisting the fetched list here would only create a stale cache that hides
+    // newly-added models (e.g. ling-pro) until the next manual refresh.
+    const profileModels = [localConfig.model].filter(Boolean) as string[]
     // Bind to current profile: update the active one, otherwise reuse a matching
     // profile or create a new named one.
     if (editingProfileId) {
@@ -620,10 +648,26 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       }
     }
     setApiConfig(localConfig)
+    // Keep activeModel in sync with the saved model. Without this the chat
+    // dropdown highlight (activeModel-first) and the settings backend mirror
+    // (which guards on activeModel || cur.model) would keep pinning the
+    // PREVIOUS model — e.g. after saving Ling-2.6-1T while flash was active,
+    // the dropdown would never highlight Ling and the mirror would revert the
+    // backend model back to flash. Use the POST-snap apiConfig.model (setApiConfig
+    // may correct a model/baseUrl mismatch), so activeModel can't drift from it.
+    useHelixStore.setState({ activeModel: useHelixStore.getState().apiConfig.model })
     // Persist the snapped (mismatch-corrected) config into history so a
     // model/baseUrl split can never be re-saved as a new history entry.
     const snapped = useHelixStore.getState().apiConfig
     addApiHistory(snapped)
+    // Clear any stale per-provider fetched model cache for this endpoint so the
+    // next open of the chat model selector re-fetches live (per user request:
+    // "保存时不存储模型列表"). The live fetch on open repopulates it.
+    {
+      const st = useHelixStore.getState()
+      const pid = st.providers.find((p) => p.baseUrl === localConfig.baseUrl)?.id
+      if (pid) st.clearProviderModels(pid)
+    }
     await persistToStorage()
 
     // Sync to Hermes if running in Electron
@@ -802,8 +846,30 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
         return next
       })
 
+    // Whether the CURRENT connection (baseUrl + apiKey) exists in history at
+    // all. Computed ONCE per render, not per entry (renderItem). The list
+    // groups entries by baseUrl only, so one endpoint can hold entries saved
+    // under different apiKeys. When the current connection IS present, highlight
+    // only the exact key; when it's NOT (legacy keys only), fall back to
+    // baseUrl+model so the highlight never orphans the whole group.
+    const activeCfg = useHelixStore.getState().apiConfig
+    const connPresent =
+      !!activeCfg?.baseUrl &&
+      !!activeCfg?.apiKey &&
+      apiHistory.some((x) => x.baseUrl === activeCfg.baseUrl && x.apiKey === activeCfg.apiKey)
+
     const renderItem = ({ h, index }: HistoryItem) => {
-      const isActive = apiConfig.model === h.model
+      // Use the same unified criterion as the chat input's model selector
+      // (activeModel || apiConfig.model) so both pages always agree on which
+      // model is "current". Without this, selecting a model in chat would leave
+      // the settings list highlighting a stale entry (or nothing at all).
+      const store = useHelixStore.getState()
+      const displayModel = store.activeModel || apiConfig.model
+      const isActive =
+        !!activeCfg?.baseUrl &&
+        activeCfg.baseUrl === h.baseUrl &&
+        displayModel === h.model &&
+        (connPresent ? !!h.apiKey && h.apiKey === activeCfg.apiKey : true)
       return (
         <div key={index}
           onClick={async () => {
@@ -956,7 +1022,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             </div>
 
             {!showAddModelModal ? (
-              <div className="max-w-2xl space-y-6">
+              <div className="max-w-3xl space-y-6">
                 <ModelHistoryList />
                 <ModelUsageStats />
               </div>
@@ -971,8 +1037,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                       <select
                         value={localConfig.provider}
                         onChange={(e) => handleSelectProvider(e.target.value)}
-                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer appearance-none bg-[length:14px] bg-[right_10px_center] bg-no-repeat"
-                        style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")` }}
+                        className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
                       >
                         <option value="">请选择 Provider</option>
                         {ALL_PROVIDERS.map(p => (
@@ -1104,7 +1169,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
       case 'shortcuts':
         return (
-          <div className="max-w-2xl">
+          <div className="max-w-3xl">
             <ShortcutsPage />
           </div>
         )
@@ -1135,7 +1200,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             {!isAddingMcp && !editingMcpName ? (
               <>
                 {/* Server list */}
-                <div className="max-w-2xl space-y-2">
+                <div className="max-w-3xl space-y-2">
                   {mcpServerNames.map(name => {
                     const config = mcpServers[name]
                     const connected = mcpStatus[name]
@@ -1177,7 +1242,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 </div>
 
                 {mcpServerNames.length === 0 && (
-                  <div className="max-w-2xl flex flex-col items-center justify-center py-12 text-center">
+                  <div className="max-w-3xl flex flex-col items-center justify-center py-12 text-center">
                     <p className="text-sm font-medium text-foreground/60">暂无 MCP 服务器</p>
                   </div>
                 )}
@@ -1200,7 +1265,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
       case 'archive':
         return (
-          <div className="max-w-2xl space-y-6">
+          <div className="max-w-3xl space-y-6">
             <SectionTitle className="mb-0">历史归档</SectionTitle>
 
             {/* Archived sessions */}
@@ -1233,15 +1298,17 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
       case 'browser':
         return (
-          <div className="max-w-xl space-y-4">
+          <div className="space-y-4">
             <SectionTitle>浏览器</SectionTitle>
             <SettingRow icon={<Globe className="size-4 text-foreground/60" />} label="从 Chrome 导入书签">
-              <Button variant="outline" size="sm" onClick={() => importChromeBookmarks()}>
-                选择 Chrome 数据目录
-              </Button>
-              {browserBookmarks.length > 0 && (
-                <span className="ml-3 text-xs text-muted-foreground/70">已导入 {browserBookmarks.length} 个书签项</span>
-              )}
+              <div className="ml-auto flex items-center">
+                {browserBookmarks.length > 0 && (
+                  <span className="mr-3 text-xs text-muted-foreground/70">已导入 {browserBookmarks.length} 个书签项</span>
+                )}
+                <Button variant="outline" size="sm" onClick={() => importChromeBookmarks()}>
+                  选择 Chrome 数据目录
+                </Button>
+              </div>
             </SettingRow>
           </div>
         )
@@ -1251,7 +1318,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
       case 'usage':
         return (
-          <div className="max-w-2xl space-y-6">
+          <div className="max-w-3xl space-y-6">
             <SectionTitle>用量</SectionTitle>
             <TokenUsagePanel />
           </div>
@@ -1262,7 +1329,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
       case 'help':
         return (
-          <div className="max-w-2xl space-y-8">
+          <div className="max-w-3xl space-y-8">
             <SectionTitle>帮助</SectionTitle>
 
             {/* About */}
@@ -1291,7 +1358,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                       <span className="text-sm text-foreground">MIT License</span>
                     </div>
                   </div>
-                  <div className="pt-2 border-t border-border/50">
+                  <div className="pt-2 border-t border-border/50 flex justify-end">
                     <Button
                       size="sm"
                       variant="outline"
@@ -1311,7 +1378,12 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       case 'agents':
         return <AgentsSettings />
       case 'learning':
-        return <LearningView />
+        return (
+          <div className="space-y-6">
+            <MemorySettings />
+            <LearningView />
+          </div>
+        )
     }
   }
 
@@ -1428,8 +1500,10 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
       {/* Right content */}
       <div className="flex-1 bg-background overflow-y-auto relative">
-        <div className={`px-8 pt-5 pb-10 ${sidebarCollapsed ? 'max-w-3xl mx-auto' : ''}`}>
-          {renderContent()}
+        <div className="flex justify-center">
+          <div className="px-8 pt-5 pb-10 w-full max-w-3xl">
+            {renderContent()}
+          </div>
         </div>
       </div>
     </div>

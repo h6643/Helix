@@ -2,7 +2,6 @@
 
 import React, { useState, useEffect, useCallback } from 'react'
 import { electronFS, electronShell } from '@/lib/electron-bridge'
-import { SectionHeading } from './settings-ui'
 
 interface MemNode {
   name: string
@@ -37,7 +36,7 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
         (list as { name: string; isDirectory: boolean }[])
           // Skip editor/process lockfiles and dotfiles — they are not memory
           // content (e.g. MEMORY.md.lock is Hermes's concurrent-write lock).
-          .filter((n) => !n.name.startsWith('.') && !n.name.endsWith('.lock'))
+          .filter((n) => !n.name.startsWith('.') && !n.name.endsWith('.lock') && n.name !== 'MEMORY.md' && n.name !== 'USER.md')
           .map((n) => ({ name: n.name, path: `${MEMORY_DIR}/${n.name}`.replace(/\\/g, '/'), isDir: n.isDirectory }))
           .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
       )
@@ -66,13 +65,8 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
   }
 
   return (
-    <div className="max-w-xl space-y-1">
-      <div className="flex items-center justify-between">
-        <SectionHeading>Memory</SectionHeading>
-        <button onClick={load} className="px-1.5 py-1 rounded-lg text-xs text-muted-foreground hover:bg-accent/60" title="刷新">
-          刷新
-        </button>
-      </div>
+    <div className="max-w-3xl space-y-1">
+
       {loading ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground/60 mt-6">
             读取中…
@@ -109,8 +103,6 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
               {active.text.slice(0, 20000)}
             </pre>
           </div>
-        ) : nodes.length === 0 ? (
-          <p className="text-xs text-muted-foreground/60 text-center mt-8">暂无学习记录</p>
         ) : (
           <div className="space-y-1">
             {nodes.map((n) => (

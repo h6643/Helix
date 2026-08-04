@@ -1,8 +1,10 @@
 'use client'
 
 import React, { useState, useEffect } from 'react'
+import { Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { SettingRow, SettingGroup, SectionHeading } from './settings-ui'
+import { useHelixStore } from '@/stores/helix-store'
+import { SettingRow, SettingGroup } from './settings-ui'
 
 interface DelegationConfig {
   provider: string
@@ -22,12 +24,87 @@ const DEFAULTS: DelegationConfig = {
   subagent_auto_approve: false,
 }
 
+interface SubagentDraft {
+  id: string
+  name: string
+  system_prompt: string
+}
+
+const SubagentCard = ({
+  i,
+  update,
+  remove,
+}: {
+  i: SubagentDraft
+  update: (id: string, patch: Partial<SubagentDraft>) => void
+  remove: (id: string) => void
+}) => (
+  <div className="rounded-lg border border-border/30 bg-muted/10 px-3 py-2.5 space-y-2.5">
+    <div className="space-y-1">
+      <label className="block text-[11px] text-muted-foreground/70">名称 Name</label>
+      <div className="flex items-center gap-2">
+        <input
+          value={i.name}
+          onChange={(e) => update(i.id, { name: e.target.value })}
+          placeholder="如 researcher"
+          className="flex-1 min-w-0 px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md text-sm font-semibold text-foreground placeholder:text-muted-foreground/30 placeholder:font-normal focus:outline-none focus:border-primary/40 transition-colors"
+        />
+        <Button
+          size="icon"
+          variant="ghost"
+          className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
+          onClick={() => remove(i.id)}
+          aria-label="删除 Subagent"
+          title="删除"
+        >
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
+    </div>
+    <textarea
+      value={i.system_prompt}
+      onChange={(e) => update(i.id, { system_prompt: e.target.value })}
+      placeholder="系统提示词 / 人格描述…"
+      className="w-full min-h-[80px] px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md text-sm text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/40 resize-y transition-colors"
+    />
+  </div>
+)
+
+const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s)
+
+const SubagentItem = ({ i, remove }: { i: SubagentDraft; remove: (id: string) => void }) => (
+  <div className="rounded-lg border border-border/30 bg-muted/10 px-3 py-2.5 flex items-center justify-between gap-3">
+    <div className="min-w-0 space-y-0.5">
+      <p className="text-sm font-semibold text-foreground truncate">{i.name.trim() || '未命名'}</p>
+      <p className="text-xs text-muted-foreground/70 truncate">
+        {i.system_prompt.trim()
+          ? truncate(i.system_prompt.trim(), 20)
+          : '（未填写系统提示词）'}
+      </p>
+    </div>
+    <Button
+      size="icon"
+      variant="ghost"
+      className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
+      onClick={() => remove(i.id)}
+      aria-label="删除 Subagent"
+      title="删除"
+    >
+      <Trash2 className="size-4" />
+    </Button>
+  </div>
+)
+
 export function AgentsSettings() {
   const [cfg, setCfg] = useState<DelegationConfig>(DEFAULTS)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [identities, setIdentities] = useState<{ id: string; name: string; system_prompt: string }[]>([])
+  const [adding, setAdding] = useState(false)
+
+  const apiHistory = useHelixStore((s) => s.apiHistory)
 
   useEffect(() => {
     let alive = true
@@ -50,6 +127,20 @@ export function AgentsSettings() {
           reasoning_effort: d.reasoning_effort ?? '',
           subagent_auto_approve: d.subagent_auto_approve === true || d.subagent_auto_approve === 'true',
         })
+        // identities is persisted as a JSON-on-one-line YAML flow value, so
+        // getConfig returns it as a string we JSON.parse here.
+        const rawIds = d?.identities
+        let parsedIds: any[] = []
+        if (rawIds) { try { parsedIds = JSON.parse(rawIds) } catch {} }
+        if (Array.isArray(parsedIds)) {
+          setIdentities(
+            parsedIds.map((x, i) => ({
+              id: `id-${i}`,
+              name: String(x?.name ?? ''),
+              system_prompt: String(x?.system_prompt ?? ''),
+            })),
+          )
+        }
       })
       .catch((e: any) => alive && setErr(String(e?.message || e)))
       .finally(() => alive && setLoading(false))
@@ -74,7 +165,12 @@ export function AgentsSettings() {
         setKey('reasoning_effort', cfg.reasoning_effort),
         setKey('subagent_auto_approve', cfg.subagent_auto_approve),
       ])
+      const payload = identities
+        .filter((i) => i.name.trim())
+        .map(({ name, system_prompt }) => ({ name: name.trim(), system_prompt }))
+      await (window as any).electron?.hermes?.setDelegationIdentities?.(payload)
       setSaved(true)
+      setAdding(false)
       setTimeout(() => setSaved(false), 2000)
     } catch (e: any) {
       setErr(String(e?.message || e))
@@ -82,6 +178,34 @@ export function AgentsSettings() {
       setSaving(false)
     }
   }
+
+  const hostOf = (url: string) => {
+    try { return new URL(url).hostname } catch { return '' }
+  }
+
+  const applyHistory = (idx: string) => {
+    const h = apiHistory[Number(idx)]
+    if (!h) return
+    setCfg((c) => ({ ...c, provider: h.provider, model: h.model, base_url: h.baseUrl }))
+  }
+
+  const matchedHistory = apiHistory.findIndex(
+    (h) => h.model === cfg.model && h.baseUrl === cfg.base_url
+  )
+
+  const addIdentity = () =>
+    setIdentities((prev) => [...prev, { id: `id-${Date.now()}`, name: '', system_prompt: '' }])
+
+  const startAdd = () => {
+    addIdentity()
+    setAdding(true)
+  }
+
+  const updateIdentity = (id: string, patch: Partial<{ name: string; system_prompt: string }>) =>
+    setIdentities((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)))
+
+  const removeIdentity = (id: string) =>
+    setIdentities((prev) => prev.filter((i) => i.id !== id))
 
   const field = (
     label: string,
@@ -103,39 +227,87 @@ export function AgentsSettings() {
   )
 
   return (
-    <div className="max-w-xl space-y-1">
-      <SectionHeading>Subagent</SectionHeading>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-semibold text-foreground">Subagent</h3>
+        <button
+          onClick={startAdd}
+          className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 transition-colors"
+        >
+          添加 Subagent
+        </button>
+      </div>
 
+      <div className="max-w-3xl space-y-1">
       {loading ? (
         <div className="text-xs text-muted-foreground/60 mt-2">读取配置中…</div>
       ) : (
         <>
-          <SettingGroup title="委托配置">
-            {field('子智能体 Provider', 'provider', '例如 openai / anthropic')}
-            {field('子智能体 Model', 'model', '例如 gpt-4o')}
-            {field('子智能体 Base URL', 'base_url', 'OpenAI 兼容端点（可选）')}
-            {field('最大迭代次数', 'max_iterations', '50', 'number')}
-            {field('推理强度', 'reasoning_effort', 'ultra / max / high（可选）')}
-            <SettingRow label="子智能体危险命令自动通过（非交互式）">
-              <input
-                type="checkbox"
-                checked={cfg.subagent_auto_approve}
-                onChange={(e) => setCfg((c) => ({ ...c, subagent_auto_approve: e.target.checked }))}
-                className="size-4 accent-primary"
-              />
-            </SettingRow>
-          </SettingGroup>
-          {err && <p className="text-xs text-red-400 pt-2">{err}</p>}
-          <div className="flex items-center justify-end gap-3 pt-4">
-            <Button size="sm" variant="ghost" onClick={() => setCfg(DEFAULTS)}>
-              重置
-            </Button>
-            <Button size="sm" variant="default" onClick={save} disabled={loading || saving}>
-              {saving ? '保存中…' : saved ? '已保存' : '保存'}
-            </Button>
-          </div>
+          {adding && (
+            <>
+              <SettingGroup>
+                {apiHistory.length > 0 ? (
+                  <SettingRow label="模型配置（从历史选择）">
+                    <select
+                      value={matchedHistory >= 0 ? String(matchedHistory) : ''}
+                      onChange={(e) => applyHistory(e.target.value)}
+                      className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+                    >
+                      <option value="" disabled>
+                        {matchedHistory >= 0 ? '手动配置' : '选择历史模型配置…'}
+                      </option>
+                      {apiHistory.map((h, i) => (
+                        <option key={i} value={i} title={h.baseUrl}>
+                          {h.model}{h.baseUrl ? ` · ${hostOf(h.baseUrl)}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </SettingRow>
+                ) : (
+                  <SettingRow label="模型配置">
+                    <span className="text-sm text-muted-foreground/60">
+                      暂无历史配置，请先在「API 配置」中添加模型
+                    </span>
+                  </SettingRow>
+                )}
+                {field('最大迭代次数', 'max_iterations', '50', 'number')}
+                {field('推理强度', 'reasoning_effort', 'ultra / max / high（可选）')}
+                <SettingRow label="子智能体危险命令自动通过（非交互式）">
+                  <input
+                    type="checkbox"
+                    checked={cfg.subagent_auto_approve}
+                    onChange={(e) => setCfg((c) => ({ ...c, subagent_auto_approve: e.target.checked }))}
+                    className="size-4 accent-primary"
+                  />
+                </SettingRow>
+              </SettingGroup>
+
+              {identities.length > 0 && (
+                <SubagentCard
+                  i={identities[identities.length - 1]}
+                  update={updateIdentity}
+                  remove={removeIdentity}
+                />
+              )}
+
+              {err && <p className="text-xs text-red-400 pt-2">{err}</p>}
+              <div className="flex items-center justify-end gap-3 pt-4">
+                <Button size="sm" variant="ghost" onClick={() => setCfg(DEFAULTS)}>
+                  重置
+                </Button>
+                <Button size="sm" variant="default" onClick={save} disabled={loading || saving}>
+                  {saving ? '保存中…' : saved ? '已保存' : '保存'}
+                </Button>
+              </div>
+            </>
+          )}
+
+          {identities.slice(0, adding ? identities.length - 1 : undefined).map((i) => (
+            <SubagentItem key={i.id} i={i} remove={removeIdentity} />
+          ))}
         </>
       )}
+      </div>
     </div>
   )
 }

@@ -24,17 +24,23 @@ module.exports = function registerGitHandlers(getWorkDir) {
     return cwd
   }
 
-  function gitExecArgs(args) {
+  // Resolve an optional caller-provided directory; falls back to the main
+  // process workDir so existing (no-arg) callers keep their old behavior.
+  function resolveCwd(targetCwd) {
+    return (targetCwd && String(targetCwd).trim()) ? String(targetCwd).trim() : gitCwd()
+  }
+
+  function gitExecArgs(args, targetCwd) {
     return execFileAsync('git', args, {
-      cwd: gitCwd(),
+      cwd: targetCwd ? resolveCwd(targetCwd) : gitCwd(),
       timeout: 30000,
       maxBuffer: 1024 * 1024,
     }).then(({ stdout, stderr }) => ({ stdout: stdout || '', stderr: stderr || '' }))
   }
 
-  ipcMain.handle('git:status', async () => {
+  ipcMain.handle('git:status', async (event, targetCwd) => {
     try {
-      const { stdout } = await gitExecArgs(['status', '--porcelain=v2', '--branch'])
+      const { stdout } = await gitExecArgs(['status', '--porcelain=v2', '--branch'], targetCwd)
       return { ok: true, output: stdout.trim() }
     } catch (e) {
       return { ok: false, error: String(e.message) }
@@ -107,36 +113,36 @@ module.exports = function registerGitHandlers(getWorkDir) {
     }
   })
 
-  ipcMain.handle('git:branchList', async () => {
+  ipcMain.handle('git:branchList', async (event, targetCwd) => {
     try {
-      const { stdout } = await gitExecArgs(['for-each-ref', '--format=%(refname:short)', 'refs/heads'])
+      const { stdout } = await gitExecArgs(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], targetCwd)
       return { ok: true, branches: stdout.trim().split('\n').filter(Boolean) }
     } catch (e) {
       return { ok: false, error: String(e.message) }
     }
   })
 
-  ipcMain.handle('git:branchSwitch', async (event, branch) => {
+  ipcMain.handle('git:branchSwitch', async (event, branch, targetCwd) => {
     try {
-      await gitExecArgs(['switch', branch])
+      await gitExecArgs(['switch', branch], targetCwd)
       return { ok: true }
     } catch (e) {
       return { ok: false, error: String(e.message) }
     }
   })
 
-  ipcMain.handle('git:branchCreate', async (event, branch) => {
+  ipcMain.handle('git:branchCreate', async (event, branch, targetCwd) => {
     try {
-      await gitExecArgs(['checkout', '-b', branch])
+      await gitExecArgs(['checkout', '-b', branch], targetCwd)
       return { ok: true }
     } catch (e) {
       return { ok: false, error: String(e.message) }
     }
   })
 
-  ipcMain.handle('git:currentBranch', async () => {
+  ipcMain.handle('git:currentBranch', async (event, targetCwd) => {
     try {
-      const { stdout } = await gitExecArgs(['rev-parse', '--abbrev-ref', 'HEAD'])
+      const { stdout } = await gitExecArgs(['rev-parse', '--abbrev-ref', 'HEAD'], targetCwd)
       return { ok: true, branch: stdout.trim() || 'HEAD' }
     } catch (e) {
       return { ok: false, error: String(e.message) }

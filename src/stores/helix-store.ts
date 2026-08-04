@@ -4,7 +4,7 @@ import { cleanUrl } from '@/lib/url-utils'
 import { applyHelixPalette } from '@/lib/themes'
 import { isModelProviderMismatch } from '@/lib/provider-match'
 import { isElectron, getElectronAPI, electronFS, electronApp } from '@/lib/electron-bridge'
-import { generateId } from '@/lib/format'
+import { generateId, truncateString } from '@/lib/format'
 import { debug, warn, error as logError } from '@/lib/logger'
 import { defaultFiles } from '@/lib/seed-data'
 import type { McpServerConfig } from '@/stores/hermes-store'
@@ -27,6 +27,28 @@ export interface BrowserBookmark {
   type: 'url' | 'folder'
   url?: string
   children?: BrowserBookmark[]
+}
+
+/** Per-model usage within a single day. */
+export interface DailyModelUsage {
+  totalTokens: number
+  totalCost: number
+  requestCount: number
+}
+
+/** Per-day token/cost usage, keyed by local date string `YYYY-MM-DD`. */
+export interface DailyUsageEntry {
+  totalTokens: number
+  totalCost: number
+  requestCount: number
+  models: Record<string, DailyModelUsage>
+}
+
+export function dayKeyOf(date: Date): string {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
 }
 import { createAgentSettingsSlice, type AgentSettingsSlice } from './slices/agent-settings-slice'
 import { createApiConfigSlice, type ApiConfigSlice } from './slices/api-config-slice'
@@ -109,8 +131,8 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setBrowserHomeUrl: (url: string) => void
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: 'browser' | 'code' | 'files' | 'email' | null
-  setRightSidebarTab: (tab: 'browser' | 'code' | 'files' | 'email' | null) => void
+  rightSidebarTab: 'browser' | 'code' | 'files' | 'email' | 'diff' | null
+  setRightSidebarTab: (tab: 'browser' | 'code' | 'files' | 'email' | 'diff' | null) => void
   showLearningView: boolean
   toggleLearningView: () => void
   voiceAutoSpeak: boolean
@@ -148,10 +170,13 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   requestSend: () => void
   injectAndSend: (text: string) => void
   tabInputs: Record<string, string>
+  tabAttachments: Record<string, { images: ImageAttachment[]; files: FileAttachment[] }>
   pendingUpdate: string | null
   setPendingUpdate: (version: string | null) => void
   setTabInput: (sessionId: string, text: string) => void
   clearTabInput: (sessionId: string) => void
+  setTabAttachments: (sessionId: string, images: ImageAttachment[], files: FileAttachment[]) => void
+  clearTabAttachments: (sessionId: string) => void
   setStreamingDraft: (sessionId: string, draft: Partial<StreamingDraft>) => void
   clearStreamingDraft: (sessionId: string) => void
   connectionNotice: ConnectionNotice | null
@@ -178,8 +203,8 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   clearExecutionFlow: () => void
   modelUsage: Record<string, { prompt: number; completion: number; total: number; cost: number }>
   addModelUsage: (model: string, usage: { prompt: number; completion: number; total: number; cost: number }) => void
-  contextUsage: { size: number; used: number } | null
-  setContextUsage: (size: number, used: number) => void
+  contextUsage: Record<string, { size: number; used: number }>
+  setContextUsage: (sessionId: string, size: number, used: number) => void
   sessionUsageStats: {
     requestCount: number
     totalTokens: number
@@ -190,6 +215,7 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
     cachedWriteTokens: number
     totalCost: number
   }
+  dailyUsage: Record<string, DailyUsageEntry>
   addSessionUsageStats: (
     model: string,
     usage: {
@@ -270,12 +296,11 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   // Actions - File modifications
   applyFileChange: (fileId: string, newContent: string) => void
   createOrUpdateFile: (filePath: string, content: string) => void
-  addPendingChange: (change: Omit<PendingChange, 'id'>) => string
+  addPendingChange: (change: Omit<PendingChange, 'id' | 'workDir'> & { workDir?: string }) => string
   applyPendingChange: (changeId: string) => void
   rejectPendingChange: (changeId: string) => void
   applyAllPendingChanges: () => void
   rejectAllPendingChanges: () => void
-  // setShowDiffPreview — see slices/panel-slice.ts
 
   // Actions - Goal
   setGoal: (goal: string | null) => void
@@ -448,14 +473,25 @@ function collectFiles(nodes: FileNode[]) {
 // Core save logic, shared by the debounced scheduler and the synchronous flush.
 async function persistCurrentSessionNow(): Promise<void> {
   try {
-    const { persistence } = await import('@/lib/persist')
-    const state = useHelixStore.getState()
-    const firstUser = state.chatMessages.find(m => m.role === 'user')
-    // Don't persist empty sessions (no user messages and no assistant responses).
-    // This prevents auto-creating sessions with timestamp labels when switching
-    // projects or losing focus on an empty conversation.
-    if (!firstUser && state.chatMessages.every(m => m.role !== 'assistant')) return
-    const sessionId = state.currentSessionId || 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
+    // Capture the CURRENT store state synchronously at entry — O(1), just grabs
+    // the object reference. Zustand's set() swaps in a new state object rather
+    // than mutating in place, so this snapshot keeps referencing the pre-clear
+    // conversation even if the caller (e.g. handleNewTask) clearChat()s right
+    // after firing this flush. The expensive per-message mapping / file-tree
+    // walk below runs AFTER the await, so this never blocks the click handler.
+    const snapshot = useHelixStore.getState()
+    const sessionId = snapshot.currentSessionId
+    const firstUser = snapshot.chatMessages.find(m => m.role === 'user')
+    // Don't persist empty sessions (no user/assistant messages).
+    // This prevents auto-creating ghost sessions with timestamp labels when the
+    // system clock resumes after sleep/freeze — the debounce timer fires, finds
+    // stale messages (e.g. system-role from scheduled tasks), and would otherwise
+    // generate a new session ID and write it to disk + setCurrentSessionId.
+    const hasRealContent = snapshot.chatMessages.some(m => m.role === 'user' || m.role === 'assistant')
+    if (!firstUser && !hasRealContent) return
+    // Never auto-create a session when there's no active session context.
+    // persistCurrentSessionNow's job is to save the CURRENT session, not invent new ones.
+    if (!sessionId) return
     const label = firstUser ? firstUser.content.slice(0, 50) : new Date().toLocaleString('zh-CN')
 
     // If a stream is mid-flight for this session, also persist its buffered
@@ -465,11 +501,18 @@ async function persistCurrentSessionNow(): Promise<void> {
     // and its eventual `done` handler are unaffected. Once the run completes,
     // clearStreamingDraft() drops the draft and the partial stops being
     // injected (the real message, added by done, takes its place).
+    // The expensive per-message work below reads from the synchronous `snapshot`
+    // captured at entry. Even though the store may have been cleared/switched
+    // during the await, the snapshot still references the session that was
+    // current when this flush fired — so a fire-and-forget flush from
+    // handleNewTask saves the abandoned session correctly.
+    const { persistence } = await import('@/lib/persist')
+
     // Concurrency guard: only persist messages that belong to THIS session
     // (or legacy untagged ones). The in-memory array may also hold messages of
     // OTHER sessions still running in the background — stamping those with the
     // current sessionId would corrupt both conversations.
-    const msgsToSave = state.chatMessages
+    const msgsToSave = snapshot.chatMessages
       .filter(m => !m.sessionId || m.sessionId === sessionId)
       .map(m => ({
         id: m.id, sessionId, role: m.role,
@@ -477,10 +520,15 @@ async function persistCurrentSessionNow(): Promise<void> {
         reasoning: m.reasoning,
         steps: m.steps,
       }))
-    const draft = state.streamingDrafts[sessionId]
+    const draft = snapshot.streamingDrafts[sessionId]
+    const draftPartialId = 'draft-partial-' + sessionId
+    // 会话若曾被持久化并重新加载，chatMessages 里可能已有一条 draft-partial。
+    // 再追加同 id 的消息会把相同 id 写进文件 → 重新加载后渲染重复 key。先去掉旧值。
+    const existingPartial = msgsToSave.findIndex(m => m.id === draftPartialId)
+    if (existingPartial !== -1) msgsToSave.splice(existingPartial, 1)
     if (draft?.isAgentRunning && draft.textBuffer && draft.textBuffer.trim()) {
       msgsToSave.push({
-        id: 'draft-partial-' + sessionId,
+        id: draftPartialId,
         sessionId,
         role: 'assistant',
         content: draft.textBuffer + '\n\n*[生成中断，仅保存部分内容]*',
@@ -495,21 +543,25 @@ async function persistCurrentSessionNow(): Promise<void> {
     await persistence.saveSession({
       id: sessionId,
       label,
-      workDir: state.activeSessionWorkDir ?? state.selectedWorkDir,
-      goal: state.goal,
-      memories: state.memories,
-      tasks: state.tasks,
-      notes: state.notes,
-      checkpoints: state.checkpoints,
+      workDir: snapshot.activeSessionWorkDir ?? snapshot.selectedWorkDir,
+      goal: snapshot.goal,
+      memories: snapshot.memories,
+      tasks: snapshot.tasks,
+      notes: snapshot.notes,
+      checkpoints: snapshot.checkpoints,
       chatMessages: msgsToSave,
-      files: collectFiles(state.files),
-      openTabs: state.openTabs.map(tab => ({
+      files: collectFiles(snapshot.files),
+      openTabs: snapshot.openTabs.map(tab => ({
         id: tab.id, fileId: tab.fileId, name: tab.name, language: tab.language, isDirty: tab.isDirty,
       })),
     })
-    // Pin the session id so subsequent saves land on the same session,
-    // and refresh the sidebar list so the conversation shows up immediately.
-    if (!state.currentSessionId) {
+    // Pin the session id so subsequent saves land on the same session, and
+    // refresh the sidebar list so the conversation shows up immediately. Only
+    // pin back when the conversation wasn't explicitly cleared/switched during
+    // the save — otherwise a fire-and-forget flush from "new conversation"
+    // would resurrect the just-abandoned session in the UI.
+    const live = useHelixStore.getState()
+    if (!live.currentSessionId && live.chatMessages.length > 0) {
       useHelixStore.getState().setCurrentSessionId(sessionId)
     }
     useHelixStore.setState((st) => ({ sessionSaveVersion: st.sessionSaveVersion + 1 }))
@@ -657,6 +709,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     const { [sessionId]: _, ...rest } = state.tabInputs
     return { tabInputs: rest }
   }),
+  tabAttachments: {} as Record<string, { images: ImageAttachment[]; files: FileAttachment[] }>,
+  setTabAttachments: (sessionId, images, files) => set((state) => ({
+    tabAttachments: { ...state.tabAttachments, [sessionId]: { images, files } },
+  })),
+  clearTabAttachments: (sessionId) => set((state) => {
+    const { [sessionId]: _, ...rest } = state.tabAttachments
+    return { tabAttachments: rest }
+  }),
   setPendingUpdate: (version) => set({ pendingUpdate: version }),
   connectionNotice: null,
   setConnectionNotice: (notice) => set({ connectionNotice: notice }),
@@ -692,7 +752,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   sessionHistoryIndex: -1,
   // Panel state — in slices/panel-slice.ts
   modelUsage: {},
-  contextUsage: null,
+  contextUsage: {},
   sessionUsageStats: {
     requestCount: 0,
     totalTokens: 0,
@@ -703,6 +763,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     cachedWriteTokens: 0,
     totalCost: 0,
   },
+  dailyUsage: {},
   showSessionManager: false,
 
   // Agent Settings — in slices/agent-settings-slice.ts
@@ -970,6 +1031,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     if (tab === 'code') return { rightSidebarTab: 'code', showPreviewRail: false, editorOpen: true }
     if (tab === 'files') return { rightSidebarTab: 'files', showPreviewRail: false, editorOpen: false }
     if (tab === 'email') return { rightSidebarTab: 'email', showPreviewRail: false, editorOpen: false }
+    if (tab === 'diff') return { rightSidebarTab: 'diff', showPreviewRail: false, editorOpen: false }
     return { rightSidebarTab: null, showPreviewRail: false, editorOpen: false }
   }),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
@@ -984,8 +1046,23 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   addChatMessage: (message) => {
     const id = generateId()
     set((state) => {
+      // Truncate any single message's text/content to 128 KB — larger payloads
+      // (e.g. a tool_result carrying a full file) can blow the heap in long
+      // conversations. Keep a head + tail window so the message is still useful.
+      const msg: Record<string, any> = { ...message }
+      const truncKeys = ['content', 'text', 'reasoning', 'html']
+      for (const k of truncKeys) {
+        const v = msg[k]
+        if (typeof v === 'string') msg[k] = truncateString(v, 128_000)
+      }
       const newState: Record<string, any> = {
-        chatMessages: [...state.chatMessages, { ...message, id, sessionId: message.sessionId || state.currentSessionId || undefined, timestamp: Date.now() }],
+        chatMessages: [...state.chatMessages, { ...msg, id, sessionId: msg.sessionId || state.currentSessionId || undefined, timestamp: Date.now() }],
+      }
+      // Keep the in-memory message list bounded (persistence handles the rest)
+      // so the render heap doesn't grow unboundedly with long conversations.
+      const MAX_CHAT_MESSAGES = 300
+      if (newState.chatMessages.length > MAX_CHAT_MESSAGES) {
+        newState.chatMessages = newState.chatMessages.slice(-MAX_CHAT_MESSAGES)
       }
       return newState
     })
@@ -1022,7 +1099,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       currentSessionId: null,
       activeSessionWorkDir: null,
       selectedWorkDir: null,
-      contextUsage: null,
+      contextUsage: {},
     })
     // Reset the Hermes backend session so a fresh ACP session is created on the
     // next prompt. Without this the UI clears but Hermes keeps the full
@@ -1170,10 +1247,24 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // Agent Settings — in slices/agent-settings-slice.ts
 
   // Actions - Agent Execution
-  addExecutionStep: (step) =>
+  addExecutionStep: (step) => {
+    // Never store full file content in memory — tool_params from a write_file
+    // can be multi-MB and multiply with every call across a long conversation,
+    // blowing the V8 heap to 3+ GB. Truncate each string param and keep only a
+    // bounded number of execution steps (the execution panel renders a summary
+    // view, not the full content, and full steps persist to disk separately).
+    const s = { ...step }
+    if (s.toolParams) {
+      const p: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(s.toolParams)) {
+        p[k] = typeof v === 'string' ? truncateString(v, 32_000) : v
+      }
+      s.toolParams = p
+    }
     set((state) => ({
-      agentExecutionSteps: [...state.agentExecutionSteps, { ...step, timestamp: Date.now() }],
-    })),
+      agentExecutionSteps: [...state.agentExecutionSteps, { ...s, timestamp: Date.now() }].slice(-200),
+    }))
+  },
   addAccessedDirectory: (dir) =>
     set((state) => {
       if (state.accessedDirectories.includes(dir)) return state
@@ -1209,6 +1300,31 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       return
     }
     const api = getElectronAPI()
+    // 对话正在运行时，点另一个项目只是“浏览”，绝不能打断它：
+    // 不卸载当前对话、不 bump workDirEpoch（那会把全局 hermesSessionId 置空），
+    // 也不触发 agent-flow-panel 的 [selectedWorkDir] effect（那会从 sessionMapRef
+    // 里删掉正在跑的会话 → 下次 session/prompt 拿到死会话 → "session not found" → 模型停止）。
+    // 只切 selectedWorkDir + 文件树；新对话的第一条消息会用新 cwd 新建后端会话。
+    const running = get().isAgentRunning || Object.keys(get().streamingDrafts || {}).length > 0
+    if (running && api) {
+      try {
+        const res = await api.app.setWorkDir(relativePath)
+        const absDir = res?.workDir || relativePath
+        set({ selectedWorkDir: absDir })
+        // 显式传目录扫描（与非运行分支一致），失败要看得见而不是静默吞掉。
+        try {
+          try { await (getElectronAPI() as any)?.fs?.allowRoot?.(absDir) } catch { /* best-effort */ }
+          const tree = await electronFS.scanTree(absDir)
+          set({ files: tree as FileNode[] })
+        } catch (scanErr) {
+          logError('[setWorkDir] scanTree failed:', scanErr)
+        }
+      } catch (err) {
+        logError('[setWorkDir]', err)
+        get().showToast({ title: '切换工作目录失败', type: 'error' })
+      }
+      return
+    }
     if (!api) {
       // Don't auto-save the current session when switching projects.
       // Just clear the current session so new messages go to the new project.
@@ -1226,6 +1342,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       set({ selectedWorkDir: absDir, workDirEpoch: get().workDirEpoch + 1 })
       // 文件树扫描降级为尽力而为：scanTree 不可用时不影响工作目录切换。
       try {
+        try { await (getElectronAPI() as any)?.fs?.allowRoot?.(absDir) } catch { /* best-effort */ }
         const tree = await electronFS.scanTree(absDir)
         set({ files: tree as FileNode[] })
       } catch (scanErr) {
@@ -1253,7 +1370,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         },
       }
     }),
-  setContextUsage: (size, used) => set({ contextUsage: { size, used } }),
+  setContextUsage: (sessionId, size, used) => {
+    set((s) => ({ contextUsage: { ...s.contextUsage, [sessionId]: { size, used } } }))
+    // Persist immediately so a cold restart restores the latest usage snapshot
+    // instead of resetting to zero (the backend never reports a session's
+    // accumulated token count on launch, and the in-memory field is only
+    // refreshed by runtime events).
+    import('@/lib/persist').then(({ persistence }) => {
+      persistence.saveSetting('contextUsage', get().contextUsage).catch(() => {})
+    })
+  },
   addSessionUsageStats: (model, usage) =>
     set((state) => {
       const input = usage.inputTokens || 0
@@ -1273,6 +1399,31 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
       const rate = rates[model] || { input: 1.0, output: 5.0 }
       const cost = (input * rate.input + output * rate.output) / 1_000_000
+      // Accumulate into the current local day (used by the daily-usage treemap).
+      const dayKey = dayKeyOf(new Date())
+      const prevDay = state.dailyUsage[dayKey] || { totalTokens: 0, totalCost: 0, requestCount: 0, models: {} }
+      const prevModels = prevDay.models || {}
+      const prevModel = prevModels[model] || { totalTokens: 0, totalCost: 0, requestCount: 0 }
+      // Prune entries older than 90 days so the record stays bounded.
+      const cutoff = Date.now() - 90 * 86400000
+      const prunedDaily: Record<string, DailyUsageEntry> = {}
+      for (const [k, v] of Object.entries(state.dailyUsage)) {
+        const t = new Date(`${k}T00:00:00`).getTime()
+        if (!Number.isNaN(t) && t >= cutoff) prunedDaily[k] = v
+      }
+      prunedDaily[dayKey] = {
+        totalTokens: prevDay.totalTokens + total,
+        totalCost: prevDay.totalCost + cost,
+        requestCount: prevDay.requestCount + 1,
+        models: {
+          ...prevModels,
+          [model]: {
+            totalTokens: prevModel.totalTokens + total,
+            totalCost: prevModel.totalCost + cost,
+            requestCount: prevModel.requestCount + 1,
+          },
+        },
+      }
       return {
         sessionUsageStats: {
           requestCount: state.sessionUsageStats.requestCount + 1,
@@ -1284,6 +1435,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           cachedWriteTokens: state.sessionUsageStats.cachedWriteTokens + cachedWrite,
           totalCost: state.sessionUsageStats.totalCost + cost,
         },
+        dailyUsage: prunedDaily,
       }
     }),
   setCurrentSessionId: (id) => set((state) => {
@@ -1334,15 +1486,28 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         return
       }
 
-      const msgs = session.chatMessages.map(msg => ({
-        id: msg.id,
-        role: msg.role as 'user' | 'assistant' | 'system',
-        content: msg.content,
-        images: msg.images,
-        timestamp: msg.timestamp,
-        reasoning: msg.reasoning,
-        steps: msg.steps,
-      }))
+      const seen = new Set<string>()
+      const msgs = session.chatMessages
+        .filter(msg => {
+          // 防御性去重：session 保存时 "draft-partial" 可能被写两次
+          // (streaming 中 flushSessionPersist 一次 + turn 结束再持久化一次)，
+          // 导致恢复后 chatMessages 含同 id 消息 → React 渲染 duplicate key。
+          if (seen.has(msg.id)) return false
+          seen.add(msg.id)
+          // 恢复时丢弃 draft-partial 消息（只在运行意外中断时才有用，
+          // 恢复后它只是"中断的残本"，不再是当前运行的草稿）。
+          if (typeof msg.id === 'string' && msg.id.startsWith('draft-partial-')) return false
+          return true
+        })
+        .map(msg => ({
+          id: msg.id,
+          role: msg.role as 'user' | 'assistant' | 'system',
+          content: msg.content,
+          images: msg.images,
+          timestamp: msg.timestamp,
+          reasoning: msg.reasoning,
+          steps: msg.steps,
+        }))
 
       useHelixStore.getState().clearExecutionFlow()
       useHermesStore.getState().setHermesSessionId(null)
@@ -1463,9 +1628,20 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
   addPendingChange: (change) => {
     const id = generateId()
-    set((state) => ({
-      pendingChanges: [...state.pendingChanges, { ...change, id }],
-    }))
+    set((state) => {
+      // Each diff belongs to the project it was captured in. Without this scope,
+      // the aggregated diff panel would mix changes across all projects.
+      const workDir = change.workDir ?? state.selectedWorkDir ?? state.activeSessionWorkDir ?? ''
+      const entry = { ...change, id, workDir }
+      // Upsert by fileId (+ workDir so identical relative paths in different
+      // projects don't collide) so repeated edits to the same file keep a
+      // single entry showing the latest diff.
+      const exists = state.pendingChanges.findIndex(c => c.fileId === change.fileId && (c.workDir ?? '') === workDir)
+      const pendingChanges = exists >= 0
+        ? state.pendingChanges.map((c, i) => (i === exists ? entry : c))
+        : [...state.pendingChanges, entry]
+      return { pendingChanges }
+    })
     return id
   },
 
@@ -1473,6 +1649,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set((state) => {
       const change = state.pendingChanges.find(c => c.id === changeId)
       if (!change) return state
+      if (change.unifiedDiff) {
+        // Backend-sourced diff: the file is already written on disk. Applying
+        // means acknowledging the change, not rewriting partial content.
+        return { pendingChanges: state.pendingChanges.filter(c => c.id !== changeId) }
+      }
       return {
         files: updateFileInTree(state.files, change.fileId, (n) => ({ ...n, content: change.newContent })),
         pendingChanges: state.pendingChanges.filter(c => c.id !== changeId),
@@ -1492,6 +1673,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       let files = state.files
       let openTabs = state.openTabs
       for (const change of state.pendingChanges) {
+        if (change.unifiedDiff) continue // backend already wrote it; ack only
         files = updateFileInTree(files, change.fileId, (n) => ({ ...n, content: change.newContent }))
         openTabs = openTabs.map((t) =>
           t.fileId === change.fileId ? { ...t, isDirty: false } : t
@@ -1501,8 +1683,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }),
 
   rejectAllPendingChanges: () => set({ pendingChanges: [] }),
-
-  // setShowDiffPreview — in slices/panel-slice.ts
 
   // Actions - Goal
   setGoal: (goal) => set({ goal }),
@@ -1909,6 +2089,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('transcriptFontSize', state.transcriptFontSize),
         persistence.saveSetting('themeStyle', state.themeStyle),
         persistence.saveSetting('sessionUsageStats', state.sessionUsageStats),
+        persistence.saveSetting('contextUsage', state.contextUsage),
+        persistence.saveSetting('dailyUsage', state.dailyUsage),
         persistence.saveScheduledTasks(state.scheduledTasks),
         persistence.saveSetting('mcpServers', state.mcpServers),
         persistence.saveSetting('customizedShortcutIds', Array.from(state.customizedShortcutIds)),
@@ -1955,7 +2137,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -1980,6 +2162,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           cachedWriteTokens: number
           totalCost: number
         }>('sessionUsageStats'),
+        persistence.loadSetting<Record<string, DailyUsageEntry>>('dailyUsage'),
         persistence.loadSetting<any[]>('scheduledTasks'),
         persistence.loadSetting<Record<string, McpServerConfig>>('mcpServers'),
         persistence.loadSetting<Record<string, { keys: string[], action: string, description: string }>>('customShortcuts'),
@@ -2010,6 +2193,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<number>('sessionHistoryIndex'),
         persistence.loadSetting<string | null>('selectedWorkDir'),
         persistence.loadSetting<boolean>('hasOnboarded'),
+        persistence.loadSetting<{ size: number; used: number } | null>('contextUsage'),
       ])
 
       // Do NOT restore the latest session's chatMessages on startup.
@@ -2218,17 +2402,20 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // Canonical restore logic: the active model is whatever IndexedDB persisted
       // as `activeModel`. If that model is not declared by any provider, fall
       // back to the default provider's first model.
+      // Honor the persisted active model even when it is only present in a
+      // fetched list (providerModels) and not in the declared `models[]` yet —
+      // e.g. a model picked from "获取模型列表". The previous logic dropped it
+      // back to the default provider's `models[0]` (deepseek-v4-pro) whenever
+      // the fetched list hadn't hydrated at restore time, which reverted every
+      // launch to pro. The mismatch guard below (isModelEndpointMismatch) still
+      // catches genuinely bad model/endpoint pairings, so keeping the user's
+      // explicit choice here is safe.
       const builtActiveModel: string | null =
-        activeModel && (
-          mergedProviders.some((p) => p.models.includes(activeModel)) ||
-          Object.values(providerModels || {}).some((list) => (list || []).includes(activeModel))
-        )
-          ? activeModel
-          : (mergedProviders.length > 0
-              ? (mergedProviders.find((p) => p.isDefault && (p.models?.length || 0) > 0)?.models[0] ||
-                 mergedProviders.find((p) => (p.models?.length || 0) > 0)?.models[0] ||
-                 null)
-              : null)
+        activeModel || (mergedProviders.length > 0
+          ? (mergedProviders.find((p) => p.isDefault && (p.models?.length || 0) > 0)?.models[0] ||
+             mergedProviders.find((p) => (p.models?.length || 0) > 0)?.models[0] ||
+             null)
+          : null)
       // Resolve the active provider: prefer a saved id that still exists, then
       // the owner of the active model, then the default/first provider.
       const builtActiveProviderId: string | null = (() => {
@@ -2327,13 +2514,18 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           const kept = raw.filter(
             (h) => !h.model || !h.baseUrl || !isModelEndpointMismatch(h.model, h.baseUrl),
           )
-          // Deduplicate by model + baseUrl. Older duplicates are dropped so the
-          // history list never shows two identical entries like the same
-          // deepseek model twice.
+          // Deduplicate by baseUrl + apiKey: one CONFIG is one history entry
+          // (the list groups by baseUrl and entries within a group differ by
+          // apiKey). Model changes on the same connection update that entry in
+          // place, so persisted duplicates from older builds — several entries
+          // with the same endpoint+key but different models — collapse here.
+          // The list is ordered most-recent-first, so the first occurrence kept
+          // is the newest model for that config.
           const seen = new Set<string>()
+          const normKey = (k?: string) => (k ?? '').trim()
           return kept.filter((h) => {
             if (!h.model || !h.baseUrl) return false
-            const key = `${h.model}|${h.baseUrl}`
+            const key = `${h.baseUrl}|${normKey(h.apiKey)}`
             if (seen.has(key)) return false
             seen.add(key)
             return true
@@ -2402,7 +2594,30 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         interfaceFont: interfaceFont || (typeof localStorage !== 'undefined' ? localStorage.getItem('helix-interface-font') : null) || get().interfaceFont,
         transcriptFontSize: transcriptFontSize || (typeof localStorage !== 'undefined' ? Number(localStorage.getItem('helix-transcript-size')) || get().transcriptFontSize : get().transcriptFontSize),
         themeStyle: themeStyle || (typeof localStorage !== 'undefined' ? localStorage.getItem('helix-theme-style') : null) || get().themeStyle,
-        sessionUsageStats: sessionUsageStats && sessionUsageStats.requestCount >= 0 ? sessionUsageStats : get().sessionUsageStats,
+        sessionUsageStats: (sessionUsageStats && typeof sessionUsageStats === 'object' && typeof (sessionUsageStats as { requestCount?: unknown }).requestCount === 'number')
+          // Restore the persisted cumulative token stats verbatim. Previously a
+          // "one-time migration" gated this on dailyUsage having a `models`
+          // subfield; that wrongly discarded valid historical stats whenever
+          // dailyUsage was empty or predated per-model tracking, so the panel
+          // showed "尚未获取到用量数据" after every cold restart. Cumulative
+          // usage is inherently persistent, so we keep it whenever it was saved.
+          ? sessionUsageStats
+          : { requestCount: 0, totalTokens: 0, inputTokens: 0, outputTokens: 0, thoughtTokens: 0, cachedReadTokens: 0, cachedWriteTokens: 0, totalCost: 0 },
+        // Rehydrate the last persisted context-window usage snapshot so the
+        // indicator no longer resets to zero on every cold start. The backend
+        // does not report a session's accumulated token count on launch and the
+        // in-memory field is only refreshed by runtime events, so we persist it
+        // (see setContextUsage / persistToStorage) and restore it here. A fresh
+        // `message.complete` from the backend overwrites it with the live value.
+        contextUsage: (contextUsage && typeof contextUsage === 'object' && !Array.isArray(contextUsage))
+          ? contextUsage as unknown as Record<string, { size: number; used: number }>
+          : {},
+        dailyUsage: (dailyUsage && typeof dailyUsage === 'object' && Object.keys(dailyUsage).length > 0)
+          // Restore the persisted daily breakdown verbatim. The old `hasDailyModels`
+          // gate dropped every day entry that lacked the newer `models` subfield,
+          // which silently emptied the chart on restart for pre-per-model data.
+          ? dailyUsage
+          : {},
         scheduledTasks: (scheduledTasks as ScheduledTask[]) || [],
         mcpServers: {
           ...fileMcpConfig,

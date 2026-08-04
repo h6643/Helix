@@ -15,7 +15,9 @@ export interface ElectronAPI {
       mtime: number
     }>
     rename: (oldPath: string, newPath: string) => Promise<{ success: boolean }>
+    delete: (filePath: string) => Promise<{ success: boolean }>
     scanTree: (dirPath?: string) => Promise<Array<{ id: string; name: string; type: 'file' | 'folder'; children?: any[] }>>
+    allowRoot: (dirPath: string) => Promise<{ success: boolean }>
   }
 
   hermesSkills: {
@@ -65,6 +67,7 @@ export interface ElectronAPI {
   app: {
     getInfo: () => Promise<{ version: string; platform: string; workDir: string }>
     setWorkDir: (dir: string) => Promise<{ success: boolean; workDir: string }>
+    syncWorkDir: (dir: string) => Promise<{ success: boolean; workDir: string }>
     getHermesVersion: () => Promise<string | null>;
   }
 
@@ -80,6 +83,7 @@ export interface ElectronAPI {
     setConfig: (config: any) => Promise<any>
     getConfig: () => Promise<any>
     setYamlKey: (key: string, value: any) => Promise<any>
+    setDelegationIdentities: (identities: Array<{ name: string; system_prompt: string }>) => Promise<{ success: boolean; changed?: boolean; error?: string }>
     listPersonalities: () => Promise<any>
     setPersonality: (params: { name: string; prompt?: string }) => Promise<any>
     setModel: (params: { model: string; baseUrl?: string; apiKey?: string; provider?: string }) => Promise<any>
@@ -92,6 +96,8 @@ export interface ElectronAPI {
     listMemories: () => Promise<{ memory: string[]; user: string[]; manual: string[] }>
     addMemoryEntry: (target: 'memory' | 'user', text: string) => Promise<{ ok: boolean; entries?: string[]; error?: string }>
     removeMemoryEntry: (target: 'memory' | 'user', text: string) => Promise<{ ok: boolean; entries?: string[] }>
+    // Switch gateway between local (spawned runtime) and remote (external WS URL).
+    setGatewayMode: (params: { mode: 'local' | 'remote'; url?: string }) => Promise<{ ok: boolean; mode?: 'local' | 'remote'; info?: any; error?: string }>
   }
 
   profile: {
@@ -99,17 +105,17 @@ export interface ElectronAPI {
   }
 
   git: {
-    status: () => Promise<{ ok: boolean; output?: string; error?: string }>
+    status: (cwd?: string | null) => Promise<{ ok: boolean; output?: string; error?: string }>
     diff: (filePath?: string, staged?: boolean) => Promise<{ ok: boolean; diff?: string; error?: string }>
     diffHead: (filePath?: string) => Promise<{ ok: boolean; diff?: string; error?: string }>
     revert: (filePath?: string) => Promise<{ ok: boolean; error?: string }>
     stage: (filePath?: string) => Promise<{ ok: boolean; error?: string }>
     unstage: (filePath?: string) => Promise<{ ok: boolean; error?: string }>
     commit: (message?: string) => Promise<{ ok: boolean; output?: string; error?: string }>
-    branchList: () => Promise<{ ok: boolean; branches?: string[]; error?: string }>
-    branchSwitch: (branch: string) => Promise<{ ok: boolean; error?: string }>
-    branchCreate: (branch: string) => Promise<{ ok: boolean; error?: string }>
-    currentBranch: () => Promise<{ ok: boolean; branch?: string; error?: string }>
+    branchList: (cwd?: string | null) => Promise<{ ok: boolean; branches?: string[]; error?: string }>
+    branchSwitch: (branch: string, cwd?: string | null) => Promise<{ ok: boolean; error?: string }>
+    branchCreate: (branch: string, cwd?: string | null) => Promise<{ ok: boolean; error?: string }>
+    currentBranch: (cwd?: string | null) => Promise<{ ok: boolean; branch?: string; error?: string }>
     log: (count?: number) => Promise<{ ok: boolean; output?: string; error?: string }>
     // Worktree operations
     worktreeList: () => Promise<{ ok: boolean; worktrees?: Array<{ path: string; head?: string; branch?: string; bare?: boolean; detached?: boolean; locked?: boolean; prunable?: boolean; isMain?: boolean }>; error?: string }>
@@ -141,14 +147,18 @@ export interface ElectronAPI {
       smtpSecure?: boolean
     }) => Promise<{ configured: boolean; user?: string; imapHost?: string; smtpHost?: string } & Record<string, any>>
     getConfig: () => Promise<{ configured: boolean; hasAuthCode?: boolean } & Record<string, any>>
-    list: (opts?: { limit?: number }) => Promise<Array<{
-      uid: number
-      from: string
-      fromAddress: string
-      subject: string
-      date: number
-      seen: boolean
-    }>>
+    list: (opts?: { limit?: number }) => Promise<{
+      ok: boolean
+      messages: Array<{
+        uid: number
+        from: string
+        fromAddress: string
+        subject: string
+        date: number
+        seen: boolean
+      }>
+      error?: string
+    }>
     get: (uid: number) => Promise<{
       uid: number
       subject: string
@@ -161,7 +171,7 @@ export interface ElectronAPI {
     }>
     send: (msg: { to: string; subject?: string; text?: string; html?: string }) => Promise<{ accepted: string[]; messageId: string }>
     notify: (msg: { to?: string; subject?: string; text?: string }) => Promise<{ accepted: string[]; messageId: string }>
-    test: () => Promise<{ ok: boolean; imap: { ok: boolean; message: string }; smtp: { ok: boolean; message: string } }>
+    test: () => Promise<{ ok: boolean; imap: { ok: boolean; message: string }; smtp: { ok: boolean; message: string }; debug: { user: string; authCodeLength: number } }>
   }
 
   // ── Hooks (written into Hermes' config.yaml `hooks:` block; backend fires them) ──

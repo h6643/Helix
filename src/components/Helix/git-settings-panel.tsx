@@ -40,7 +40,7 @@ export function GitSettingsPanel() {
   }
 
   return (
-    <div className="max-w-xl space-y-1">
+    <div className="space-y-1">
       <SectionHeading>Git</SectionHeading>
 
       <SettingGroup title="自动提交">

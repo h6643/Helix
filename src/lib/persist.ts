@@ -488,6 +488,16 @@ export const persistence = {
     return txAll<PersistedSession>(db, 'sessions', 'readonly', () => {})
   },
 
+  async loadSession(id: string): Promise<PersistedSession | undefined> {
+    const db = await openDB()
+    return tx<PersistedSession | undefined>(
+      db,
+      'sessions',
+      'readonly',
+      (store) => store.get(id)
+    )
+  },
+
   async deleteSession(id: string): Promise<void> {
     const db = await openDB()
     await tx(db, 'sessions', 'readwrite', (store) => store.delete(id))

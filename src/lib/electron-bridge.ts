@@ -128,6 +128,15 @@ export const electronFS = {
     throw new Error('File system not available in browser mode')
   },
 
+  async deleteFile(filePath: string): Promise<void> {
+    const api = getElectronAPI()
+    if (api) {
+      await api.fs.delete(filePath)
+      return
+    }
+    throw new Error('File system not available in browser mode')
+  },
+
   async scanTree(dirPath?: string): Promise<Array<{ id: string; name: string; type: string; children?: any[] }>> {
     const api = getElectronAPI()
     if (api && typeof api.fs.scanTree === 'function') {
@@ -336,9 +345,9 @@ export const electronHermes = {
  * Git operations (Electron only)
  */
 export const electronGit = {
-  async status(): Promise<{ ok: boolean; output?: string; error?: string }> {
+  async status(cwd?: string | null): Promise<{ ok: boolean; output?: string; error?: string }> {
     const api = getElectronAPI()
-    if (api?.git) return api.git.status()
+    if (api?.git) return api.git.status(cwd)
     return { ok: false, error: 'Git not available in browser mode' }
   },
 
@@ -378,27 +387,27 @@ export const electronGit = {
     return { ok: false, error: 'Git not available in browser mode' }
   },
 
-  async branchList(): Promise<{ ok: boolean; branches?: string[]; error?: string }> {
+  async branchList(cwd?: string | null): Promise<{ ok: boolean; branches?: string[]; error?: string }> {
     const api = getElectronAPI()
-    if (api?.git) return api.git.branchList()
+    if (api?.git) return api.git.branchList(cwd)
     return { ok: false, error: 'Git not available in browser mode' }
   },
 
-  async branchSwitch(branch: string): Promise<{ ok: boolean; error?: string }> {
+  async branchSwitch(branch: string, cwd?: string | null): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI()
-    if (api?.git) return api.git.branchSwitch(branch)
+    if (api?.git) return api.git.branchSwitch(branch, cwd)
     return { ok: false, error: 'Git not available in browser mode' }
   },
 
-  async branchCreate(branch: string): Promise<{ ok: boolean; error?: string }> {
+  async branchCreate(branch: string, cwd?: string | null): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI()
-    if (api?.git) return api.git.branchCreate(branch)
+    if (api?.git) return api.git.branchCreate(branch, cwd)
     return { ok: false, error: 'Git not available in browser mode' }
   },
 
-  async currentBranch(): Promise<{ ok: boolean; branch?: string; error?: string }> {
+  async currentBranch(cwd?: string | null): Promise<{ ok: boolean; branch?: string; error?: string }> {
     const api = getElectronAPI()
-    if (api?.git) return api.git.currentBranch()
+    if (api?.git) return api.git.currentBranch(cwd)
     return { ok: false, error: 'Git not available in browser mode' }
   },
 

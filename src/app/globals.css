@@ -747,16 +747,14 @@ pre code.hljs {
 
 /* 仅作用于真正的 inline code（代码块内的 code 已被下方 .helix-md pre code 重置） */
 .helix-md code {
-  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'JetBrains Mono', monospace;
-  font-size: 0.86em;
-  background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
-  border: 1px solid color-mix(in oklch, var(--muted-foreground) 13%, transparent);
-  padding: 0.15em 0.4em;
-  border-radius: 5px;
-  vertical-align: 0.08em;     /* 微微上提，避免“浮”在行内 */
-  line-height: 1.4;           /* 给背景框足够高度，杜绝被裁切 */
-  margin: 0 0.12em;           /* 与中文之间留一丝气口 */
-  color: color-mix(in oklch, var(--foreground) 90%, var(--primary));
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.8em;
+  background: none;
+  padding: 0 0.15em;
+  border-radius: 3px;
+  vertical-align: -0.05em;
+  line-height: 1;
+  color: color-mix(in oklch, var(--foreground) 75%, var(--primary));
 }
 
 .helix-md pre {
@@ -1204,3 +1202,21 @@ nav::-webkit-scrollbar-thumb:hover {
 .xterm { background: transparent !important; }
 .xterm .xterm-viewport { background: transparent !important; }
 .xterm .xterm-screen { background: transparent !important; }
+
+/* Isolate xterm from the global UI typography. The body sets a negative
+   letter-spacing and OpenType feature settings (cv11/ss01/ss03) which are
+   inherited by xterm's hidden CharMeasure <span>. That makes the measured
+   cell width narrower than the glyphs actually painted on the canvas
+   (canvas 2D has no letter-spacing / font-feature concept), so the selection
+   overlay drifts from the real characters and clips/covers the first glyph of
+   the line. Resetting these to the canvas-equivalent values keeps measure and
+   paint in sync. */
+.xterm,
+.xterm *,
+.xterm-char-measure-element,
+.xterm-char-measure-element * {
+  letter-spacing: normal !important;
+  font-feature-settings: normal !important;
+  font-kerning: auto !important;
+  font-variant-ligatures: none !important;
+}

@@ -2,18 +2,40 @@
  * Filesystem IPC handlers — extracted from main.js.
  * Path-validated file operations scoped to the working directory.
  */
-const { ipcMain } = require('electron')
+const { ipcMain, shell } = require('electron')
 const fsPromises = require('fs').promises
 const fs = require('fs')
 const path = require('path')
 
-module.exports = function registerFsHandlers(getWorkDir) {
+module.exports = function registerFsHandlers(getWorkDir, getAllowedRoots) {
   // Idempotent registration — dev reloads may re-execute this module.
-  const handles = ['fs:read', 'fs:write', 'fs:edit', 'fs:readdir', 'fs:stat', 'fs:rename', 'fs:scanTree', 'fs:hermesMemoryDir']
+  const handles = ['fs:read', 'fs:write', 'fs:edit', 'fs:readdir', 'fs:stat', 'fs:rename', 'fs:delete', 'fs:scanTree', 'fs:hermesMemoryDir', 'fs:allowRoot']
   for (const channel of handles) {
     try { ipcMain.removeHandler(channel) } catch { /* ignore */ }
   }
 
+  // 允许访问的根目录集合：当前 workDir + 用户在侧边栏点选过的每个项目目录。
+  // 为什么需要：右侧目录面板按“选中的项目”传绝对路径扫描，若主进程模块级
+  // workDir 还没切过去（时序竞争 / 旧进程），单一根的 startsWith(workDir) 会
+  // 判越界 → "Path is outside working directory"。把每个用户选过的项目都登记为
+  // 合法根，既放行跨项目浏览，又仍挡住真正的任意路径枚举。
+  const extraRoots = new Set()
+  const norm = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  function allowedRoots() {
+    const roots = [getWorkDir()]
+    if (typeof getAllowedRoots === 'function') {
+      try { roots.push(...(getAllowedRoots() || [])) } catch { /* ignore */ }
+    }
+    roots.push(...extraRoots)
+    return roots.filter(Boolean).map((r) => path.resolve(r))
+  }
+  // 渲染进程主动登记一个合法根（目录面板扫描前调用）。app:setWorkDir 并非唯一
+  // 改变“选中项目”的路径——点击历史对话会直接在 store 里写 selectedWorkDir，
+  // 主进程收不到，单根校验就会判越界。扫描前 ensure 一次最稳。
+  ipcMain.handle('fs:allowRoot', (event, dir) => {
+    if (typeof dir === 'string' && dir.trim()) extraRoots.add(path.resolve(dir.trim()))
+    return { success: true }
+  })
   function safePath(filePath) {
     const workDir = getWorkDir()
     const resolved = path.resolve(workDir, filePath)
@@ -21,13 +43,23 @@ module.exports = function registerFsHandlers(getWorkDir) {
     // Normalize separators before comparing so a forward-slash path sent from
     // the renderer still matches a backslash-joined main-process dir.
     const hermesMemoryDir = path.join(process.env.LOCALAPPDATA || '', 'hermes', 'memories')
-    const norm = (p) => p.replace(/\\/g, '/')
     if (norm(resolved).startsWith(norm(hermesMemoryDir))) return resolved
-    if (!resolved.startsWith(workDir)) return null
+    // 任一合法根（当前 workDir 或用户选过的项目）之内即放行。
+    const inAnyRoot = allowedRoots().some((root) => {
+      const r = norm(root)
+      const p = norm(resolved)
+      return p === r || p.startsWith(r + '/')
+    })
+    if (!inAnyRoot) return null
     try {
       const realResolved = fs.realpathSync(resolved)
-      const realWorkDir = fs.realpathSync(workDir)
-      return realResolved.startsWith(realWorkDir) ? realResolved : null
+      return allowedRoots().some((root) => {
+        try {
+          const rr = norm(fs.realpathSync(root))
+          const rp = norm(realResolved)
+          return rp === rr || rp.startsWith(rr + '/')
+        } catch { return false }
+      }) ? realResolved : null
     } catch {
       return resolved
     }
@@ -91,6 +123,14 @@ module.exports = function registerFsHandlers(getWorkDir) {
     return { success: true }
   })
 
+  // VS Code-style delete: move to the OS trash (recoverable), not permanent unlink.
+  ipcMain.handle('fs:delete', async (event, filePath) => {
+    const resolved = safePath(filePath)
+    if (!resolved) throw new Error('Path is outside working directory')
+    await shell.trashItem(resolved)
+    return { success: true }
+  })
+
   ipcMain.handle('fs:scanTree', async (event, relativePath) => {
     const workDir = getWorkDir()
     const rootDir = relativePath ? safePath(relativePath) : workDir
@@ -122,5 +162,13 @@ module.exports = function registerFsHandlers(getWorkDir) {
       return a.name.localeCompare(b.name)
     })
     return nodes
+  }
+
+  // 暴露给主进程：app:setWorkDir 成功切换项目时登记该目录为合法根，
+  // 这样目录面板按绝对路径扫描任意已选项目都不会被 safePath 判越界。
+  return {
+    addAllowedRoot(dir) {
+      if (typeof dir === 'string' && dir.trim()) extraRoots.add(path.resolve(dir.trim()))
+    },
   }
 }

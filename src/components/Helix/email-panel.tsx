@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Mail, Send, Settings, Inbox, RefreshCw, ArrowLeft, AlertCircle, CheckCircle2,
+  Send, Settings, Inbox, RefreshCw, ArrowLeft, AlertCircle, CheckCircle2,
 } from 'lucide-react'
 import { useHelixStore } from '@/stores/helix-store'
 
@@ -64,14 +64,19 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
     ok: boolean
     imap: { ok: boolean; message: string }
     smtp: { ok: boolean; message: string }
+    debug: { user: string; authCodeLength: number }
   }>(null)
 
   const loadInbox = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const list = await window.electron.email.list({ limit: 30 })
-      setMessages(list)
+      const res = await window.electron.email.list({ limit: 30 })
+      if (!res.ok) {
+        setError(res.error || '读取收件箱失败')
+      } else {
+        setMessages(res.messages)
+      }
     } catch (e: any) {
       setError(e?.message || '读取收件箱失败')
     } finally {
@@ -209,14 +214,6 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
         >
           <Settings className="size-3.5" /> 设置
         </button>
-        <div className="flex-1" />
-        <button
-          onClick={onClose}
-          className="p-1 rounded text-muted-foreground/50 hover:text-foreground hover:bg-accent/60 transition-colors"
-          title="关闭"
-        >
-          <Mail className="size-3.5" />
-        </button>
       </div>
 
       {error && (
@@ -311,7 +308,7 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
           <button
             onClick={handleSend}
             disabled={sending}
-            className="self-start flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            className="self-end flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
           >
             <Send className="size-3.5" /> {sending ? '发送中…' : '发送'}
           </button>
@@ -366,7 +363,7 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
           <button
             onClick={handleSaveConfig}
             disabled={savingCfg}
-            className="self-start flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            className="self-end flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
           >
             {savingCfg ? '保存中…' : '保存配置'}
           </button>
@@ -375,7 +372,7 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
             <button
               onClick={handleTestConnection}
               disabled={testing}
-              className="self-start flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border/60 hover:bg-accent/50 disabled:opacity-50"
+              className="self-end flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border/60 hover:bg-accent/50 disabled:opacity-50"
             >
               {testing ? '测试中…' : '测试连接'}
             </button>
@@ -386,6 +383,12 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
                 </div>
                 <div className={testResult.smtp.ok ? 'text-green-600 dark:text-green-500' : 'text-destructive'}>
                   {testResult.smtp.ok ? '✓' : '✗'} SMTP：{testResult.smtp.message}
+                </div>
+                <div className="text-muted-foreground pt-0.5">
+                  账号：{testResult.debug.user || '(空)'} · 授权码长度：{testResult.debug.authCodeLength}
+                  {testResult.debug.authCodeLength > 0 && testResult.debug.authCodeLength !== 16
+                    ? '（163/QQ 授权码通常为 16 位，请确认是否完整）'
+                    : ''}
                 </div>
               </div>
             )}
@@ -403,7 +406,7 @@ export function EmailPanel({ onClose }: { onClose: () => void }) {
             </div>
             <button
               onClick={handleTestNotify}
-              className="self-start flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border/60 hover:bg-accent/50"
+              className="self-end flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border/60 hover:bg-accent/50"
             >
               {notifyTested === true ? <CheckCircle2 className="size-3.5 text-green-500" /> : null}
               {notifyTested === false ? <AlertCircle className="size-3.5 text-destructive" /> : null}

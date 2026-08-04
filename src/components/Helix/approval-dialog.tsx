@@ -254,3 +254,91 @@ export function ApprovalDialog(props: LegacyProps) {
   )
 }
 
+// ── Clarify 反问浮条 ─────────────────────────────────────────────────────
+// 模型调用 clarify 工具反问你（给几个选项让你挑，或自由输入）。样式/位置与
+// ApprovalDialog 的底部浮条一致。点选项或提交输入后 onRespond(requestId, answer)。
+
+export interface ClarifyRequest {
+  id: string
+  question: string
+  choices: string[] | null
+}
+
+interface ClarifyBarProps {
+  request: ClarifyRequest
+  onRespond: (requestId: string, answer: string) => void
+}
+
+export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
+  const [freeText, setFreeText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const submit = useCallback((answer: string) => {
+    const a = answer.trim()
+    if (!a || submitting) return
+    setSubmitting(true)
+    onRespond(request.id, a)
+  }, [request.id, onRespond, submitting])
+
+  // Enter 提交自由输入
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      submit(freeText)
+    }
+  }
+
+  return (
+    <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-2 max-w-2xl w-[min(42rem,90vw)]">
+      <div className="flex flex-col gap-2 px-3 py-2.5 rounded-lg bg-sky-500/10 border border-sky-500/30 text-xs shadow-lg">
+        {/* 问题 */}
+        <div className="flex items-start gap-2">
+          <AlertTriangle className="size-3.5 text-sky-500 mt-0.5 shrink-0" />
+          <span className="text-foreground/85 whitespace-pre-wrap break-words leading-relaxed">
+            {request.question || '模型需要你的选择'}
+          </span>
+        </div>
+        {/* 选项按钮 */}
+        {request.choices && request.choices.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {request.choices.map((c) => (
+              <Button
+                key={c}
+                variant="outline"
+                size="sm"
+                disabled={submitting}
+                onClick={() => submit(c)}
+                className="h-6 px-2.5 text-[11px] border-sky-500/40 hover:bg-sky-500/15"
+              >
+                {submitting ? <Loader2 className="size-3 animate-spin" /> : null}
+                {c}
+              </Button>
+            ))}
+          </div>
+        )}
+        {/* 自由输入 */}
+        <div className="flex items-center gap-1.5">
+          <input
+            value={freeText}
+            onChange={(e) => setFreeText(e.target.value)}
+            onKeyDown={onKeyDown}
+            disabled={submitting}
+            placeholder={request.choices?.length ? '或输入其他回答…' : '输入回答…'}
+            className="flex-1 h-7 px-2 rounded-md bg-background/60 border border-border/50 text-[12px] outline-none focus:border-sky-500/50 disabled:opacity-50"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={submitting || !freeText.trim()}
+            onClick={() => submit(freeText)}
+            className="h-7 px-2.5 text-[11px] gap-1"
+          >
+            {submitting ? <Loader2 className="size-3 animate-spin" /> : <Play className="size-3" />}
+            回复
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+

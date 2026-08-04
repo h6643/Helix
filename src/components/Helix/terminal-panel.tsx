@@ -121,9 +121,51 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
       setTerminalRawBuffer(bufferRef.current)
     })
 
-    // Forward raw keystrokes from xterm to the PTY (native line editing).
-    term.onData((d) => {
+    // ── Paste de-dup gate ────────────────────────────────────────────────
+    // Electron fires paste through SEVERAL channels at once for a single Ctrl+V:
+    //   1) xterm's own textarea paste listener (→ term.onData),
+    //   2) the native `paste` ClipboardEvent on the container,
+    //   3) Electron's insertText injection (also → term.onData),
+    //   4) our Ctrl+V handler reading the clipboard.
+    // All of (1)(3) funnel through term.onData, which writes RAW keystrokes too —
+    // so we can't just gate onData. Instead: gate EVERY multi-char write that
+    // reaches the PTY within a short window. A real keystroke is 1-2 chars; a
+    // paste is a burst of the SAME text from multiple channels near-simultaneously.
+    // We collapse identical bursts within 250ms into ONE PTY write.
+    let lastPasteText = ''
+    let lastPasteAt = 0
+    const PASTE_DEDUP_MS = 250
+    const writePty = (d: string) => {
       electronTerminal.write(d)
+    }
+    const writePasteOnce = (text: string) => {
+      if (!text) return
+      const now = Date.now()
+      if (text === lastPasteText && now - lastPasteAt < PASTE_DEDUP_MS) return
+      lastPasteText = text
+      lastPasteAt = now
+      writePty(text)
+    }
+    // A multi-char burst arriving via onData that duplicates a just-handled paste
+    // (xterm's own paste listener / Electron insertText) is swallowed; genuine
+    // typed input (1-2 chars, or different text) passes straight through.
+    const isDupPasteBurst = (d: string) => {
+      if (d.length < 2) return false
+      const now = Date.now()
+      if (d === lastPasteText && now - lastPasteAt < PASTE_DEDUP_MS) return true
+      // Record multi-char bursts so a subsequent channel for the SAME burst dedups.
+      if (now - lastPasteAt < PASTE_DEDUP_MS) return d === lastPasteText
+      lastPasteText = d
+      lastPasteAt = now
+      return false
+    }
+
+    // Forward raw keystrokes from xterm to the PTY (native line editing).
+    // xterm owns keystrokes here; paste is handled separately below so it is
+    // never double-fed into the PTY.
+    term.onData((d) => {
+      if (isDupPasteBurst(d)) return
+      writePty(d)
     })
 
     // ── Copy / paste ────────────────────────────────────────────────────
@@ -138,9 +180,25 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
     }
     term.onSelectionChange(onSelectionChange)
 
-    // Ctrl+C inside the terminal: if there is a selection, copy it (don't
-    // forward the keystroke to the shell); otherwise let it through as
-    // SIGINT. Ctrl+V: paste from the system clipboard.
+    // Single authoritative paste path. Listen on the DOCUMENT in the capture
+    // phase (not just the xterm container) so a native paste that lands when the
+    // terminal isn't focused is still intercepted before Electron falls back to
+    // insertText injection. Only hijack the event when its target is inside our
+    // terminal — otherwise let other inputs/outputs handle their own paste.
+    const onPasteCapture = (e: ClipboardEvent) => {
+      const container = containerRef.current
+      if (!container || !container.contains(e.target as Node)) return
+      e.preventDefault()
+      e.stopPropagation()
+      const text = e.clipboardData?.getData('text') ?? ''
+      writePasteOnce(text)
+    }
+    document.addEventListener('paste', onPasteCapture, true)
+
+    // Ctrl+C: if there is a selection, copy it (don't forward to the shell);
+    // otherwise let it through as SIGINT. Ctrl+V: read the clipboard ourselves
+    // and paste exactly once; return false so xterm never emits ^V or triggers
+    // its own paste (that was the source of the triple-paste).
     term.attachCustomKeyEventHandler((ev) => {
       if (!ev.ctrlKey || ev.altKey || ev.metaKey) return true
       if (ev.key === 'c' && !ev.shiftKey) {
@@ -153,11 +211,9 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
       }
       if (ev.key === 'v' && !ev.shiftKey) {
         try {
-          navigator.clipboard.readText().then((text) => {
-            if (text) electronTerminal.write(text)
-          }).catch(() => {})
+          navigator.clipboard.readText().then((text) => writePasteOnce(text)).catch(() => {})
         } catch { /* ignore */ }
-        return false // consume: we handle paste ourselves
+        return false // consume: we own paste
       }
       return true
     })
@@ -174,6 +230,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
       unsub()
       ro.disconnect()
       cancelAnimationFrame(raf)
+      document.removeEventListener('paste', onPasteCapture, true)
       term.dispose()
       termRef.current = null
     }

@@ -19,7 +19,6 @@ export interface PanelSlice {
   /** Unified navigation history — tracks both chat sessions and settings pages */
   navigationHistory: NavEntry[]
   navigationIndex: number
-  showDiffPreview: boolean
   showCustomizePanel: boolean
   showWorktreePanel: boolean
   showPluginManager: boolean
@@ -42,7 +41,6 @@ export interface PanelSlice {
   navigateForward: () => NavEntry | null
   canGoBack: () => boolean
   canGoForward: () => boolean
-  setShowDiffPreview: (show: boolean) => void
   toggleCustomizePanel: () => void
   toggleWorktreePanel: () => void
   togglePluginManager: () => void
@@ -62,7 +60,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   settingsPage: null,
   navigationHistory: [],
   navigationIndex: -1,
-  showDiffPreview: false,
   showCustomizePanel: false,
   showWorktreePanel: false,
   showPluginManager: false,
@@ -116,7 +113,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
     return navigationIndex < navigationHistory.length - 1
   },
 
-  setShowDiffPreview: (show) => set({ showDiffPreview: show }),
   toggleCustomizePanel: () => set((s) => ({ showCustomizePanel: !s.showCustomizePanel })),
   toggleWorktreePanel: () => set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
   togglePluginManager: () => set((s) => ({ showPluginManager: !s.showPluginManager })),

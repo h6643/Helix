@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react'
 import { formatTokens } from '@/lib/format'
 import { useHelixStore } from '@/stores/helix-store'
+import { DailyUsageChart, type DailyUsagePoint } from './usage-daily-chart'
 
 export function ModelUsageStats() {
   const modelUsage = useHelixStore(s => s.modelUsage)
@@ -137,6 +138,9 @@ export function UsageDetail() {
 
 export function TokenUsagePanel() {
   const stats = useHelixStore(s => s.sessionUsageStats)
+  const dailyUsage = useHelixStore(s => s.dailyUsage)
+  const [rangeDays, setRangeDays] = useState<7 | 30>(30)
+  const [selectedDay, setSelectedDay] = useState<string | null>(null)
 
   if (stats.requestCount === 0) {
     return (
@@ -153,8 +157,33 @@ export function TokenUsagePanel() {
     return n.toLocaleString()
   }
 
-  const totalInput = stats.inputTokens + stats.cachedReadTokens
-  const cacheHitRate = totalInput > 0 ? (stats.cachedReadTokens / totalInput) * 100 : 0
+  const dayKeyOf = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const addDays = (d: Date, n: number) => {
+    const r = new Date(d)
+    r.setDate(r.getDate() + n)
+    return r
+  }
+
+  const dailyMap = new Map(Object.entries(dailyUsage))
+  const days: DailyUsagePoint[] = []
+  for (let i = rangeDays - 1; i >= 0; i--) {
+    const key = dayKeyOf(addDays(new Date(), -i))
+    const v = dailyMap.get(key)
+    days.push({
+      day: key,
+      totalTokens: v?.totalTokens ?? 0,
+      totalCost: v?.totalCost ?? 0,
+      requestCount: v?.requestCount ?? 0,
+    })
+  }
+
+  const today = days[days.length - 1]
+  const activeDay = selectedDay && days.some(p => p.day === selectedDay) ? selectedDay : today.day
+
+  const dayEntry = dailyMap.get(activeDay)
+  const modelRows = dayEntry?.models
+    ? Object.entries(dayEntry.models).sort((a, b) => b[1].totalTokens - a[1].totalTokens)
+    : []
 
   return (
     <section className="space-y-4">
@@ -167,43 +196,72 @@ export function TokenUsagePanel() {
         </div>
       </div>
 
-      {/* Request count + cache hit */}
-      <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-xl border border-border/40 bg-card p-4">
-          <span className="text-xs text-muted-foreground/70">总请求数</span>
-          <p className="text-lg font-semibold tabular-nums text-foreground mt-1.5">{stats.requestCount.toLocaleString()}</p>
-        </div>
-        <div className="rounded-xl border border-border/40 bg-card p-4">
-          <span className="text-xs text-muted-foreground/70">缓存命中</span>
-          <p className="text-lg font-semibold tabular-nums text-foreground mt-1.5">{formatBig(stats.cachedReadTokens)}</p>
-        </div>
-      </div>
-
-      {/* Input + Output */}
-      <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-xl border border-border/40 bg-card p-4">
-          <span className="text-xs text-muted-foreground/70">新增输入</span>
-          <p className="text-lg font-semibold tabular-nums text-foreground mt-1.5">{formatBig(stats.inputTokens)}</p>
-        </div>
-        <div className="rounded-xl border border-border/40 bg-card p-4">
-          <span className="text-xs text-muted-foreground/70">Output</span>
-          <p className="text-lg font-semibold tabular-nums text-foreground mt-1.5">{formatBig(stats.outputTokens)}</p>
-        </div>
-      </div>
-
-      {/* Cache hit rate */}
+      {/* Daily usage bar chart */}
       <div className="rounded-xl border border-border/40 bg-card p-4">
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-muted-foreground/70">缓存命中率</span>
-          <span className="text-sm font-medium text-emerald-500">{cacheHitRate.toFixed(1)}%</span>
+        <div className="flex items-center justify-between px-0.5">
+          <div className="flex items-center gap-3">
+            <h3 className="text-sm font-medium text-foreground">每日用量</h3>
+            <div className="flex items-center rounded-lg border border-border/40 p-0.5">
+              {([7, 30] as const).map(n => (
+                <button
+                  key={n}
+                  onClick={() => setRangeDays(n)}
+                  className={`px-2 py-0.5 rounded-md text-xs transition-colors ${
+                    rangeDays === n
+                      ? 'bg-primary text-primary-foreground font-medium'
+                      : 'text-muted-foreground/60 hover:text-foreground'
+                  }`}
+                >
+                  {n} 天
+                </button>
+              ))}
+            </div>
+          </div>
+          {today.totalTokens > 0 && (
+            <span className="text-xs text-muted-foreground/60">
+              今日 {formatBig(today.totalTokens)} Tokens · ${today.totalCost.toFixed(4)}
+            </span>
+          )}
         </div>
-        <div className="h-2 w-full rounded-full bg-muted mt-2.5 overflow-hidden">
-          <div
-            className="h-full rounded-full bg-emerald-500 transition-all"
-            style={{ width: `${Math.min(100, cacheHitRate)}%` }}
-          />
+        <div className="mt-3">
+          <DailyUsageChart data={days} selectedDay={activeDay} onSelect={setSelectedDay} />
         </div>
       </div>
+
+      {/* Per-model breakdown for the selected day */}
+      <div className="rounded-xl border border-border/40 bg-card">
+        <div className="flex items-center justify-between px-4 pt-3 pb-2">
+          <h3 className="text-sm font-medium text-foreground">模型用量明细</h3>
+          <span className="text-xs text-muted-foreground/60">{activeDay}</span>
+        </div>
+        {modelRows.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border/50 text-xs text-muted-foreground/60">
+                  <th className="text-left font-medium px-4 py-2">模型</th>
+                  <th className="text-right font-medium px-4 py-2">Tokens</th>
+                  <th className="text-right font-medium px-4 py-2">成本</th>
+                  <th className="text-right font-medium px-4 py-2">请求数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {modelRows.map(([model, m]) => (
+                  <tr key={model} className="border-b border-border/40 last:border-0">
+                    <td className="px-4 py-2 font-mono text-foreground truncate">{model}</td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums">{formatTokens(m.totalTokens)}</td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums">${m.totalCost.toFixed(4)}</td>
+                    <td className="px-4 py-2 text-right font-mono tabular-nums">{m.requestCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="px-4 pb-4 text-sm text-muted-foreground/50">该日无用量数据</p>
+        )}
+      </div>
+
     </section>
   )
 }

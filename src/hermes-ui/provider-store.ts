@@ -85,11 +85,15 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     if (get().hydrated) return
     const providers = await persistence.loadProviders()
     let active = persistence.loadActiveModel()
-    // 校验 activeModel 仍然合法（其所属 Provider 仍存在）
-    if (active && !providers.some((p) => p.models.includes(active!))) {
-      active = null
-    }
-    // 兜底：没有任何选中模型时，选默认 Provider 的第一个模型
+    // NOTE: do NOT null `active` just because it isn't in the declared `models[]`.
+    // A model picked from "获取模型列表" is fetched-only and lives in the Helix
+    // side's providerModels, never in this store's static `models`. Nulling it and
+    // falling back to `def.models[0]` (deepseek-v4-pro) reverted every launch to
+    // pro, and — because helix-layout.tsx bridges this store's activeModel into the
+    // Helix store via onModelSwitched — it ALSO overwrote the Helix store's active
+    // model. Trust the persisted value; a genuinely invalid model is harmless here
+    // (only the hermes-ui panels read it, and resolveActiveModel warns if truly
+    // unresolvable). Only default to models[0] when nothing was persisted at all.
     if (!active && providers.length > 0) {
       const def = providers.find((p) => p.isDefault) || providers[0]
       active = def.models[0] ?? null

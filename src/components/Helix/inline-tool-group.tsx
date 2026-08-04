@@ -6,7 +6,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
 import { formatDurationSeconds } from '@/lib/format'
-import { normalizeAcpContent, stripEmoji } from '@/lib/text-utils'
+import { normalizeAcpContent, stripEmoji, safeMarkdownSource } from '@/lib/text-utils'
 import { getToolLabel, getToolIcon, getToolDisplayLabel, extractToolPath } from '@/lib/tool-display-utils'
 import type { ExecutionStep } from '@/stores/helix-store'
 
@@ -184,7 +184,7 @@ function MarkdownRenderer({ content }: { content: string }) {
   return (
     <div className="text-[11px] prose prose-xs dark:prose-invert max-w-none prose-p:my-1 prose-pre:my-1 prose-pre:bg-transparent prose-pre:p-0">
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
-        {content}
+        {safeMarkdownSource(content)}
       </ReactMarkdown>
     </div>
   )
@@ -233,7 +233,7 @@ export function InlineToolGroup({ steps, isRunning }: { steps: ExecutionStep[]; 
   if (calls.length === 0) {
     title = '工具结果'
   } else if (calls.length === 1) {
-    title = calls[0].content || getToolLabel(calls[0].toolName || '')
+    title = calls[0].content || getToolDisplayLabel(calls[0].toolName || '', calls[0].toolKind, undefined, calls[0].toolParams)
   } else {
     const names = Array.from(new Set(calls.map(s => getToolLabel(s.toolName || ''))))
     if (names.length === 1) {

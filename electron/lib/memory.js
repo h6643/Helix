@@ -87,6 +87,9 @@ async function removeManualMarker(dir, text) {
 }
 
 const skillCallCounts = {}
+// Skill names that Hermes created itself (per .usage.json `created_by: "agent"`).
+// These should be deletable even when they live under a non-`helix-custom` dir.
+const agentCreatedSkillNames = new Set()
 const SKILL_CALL_COUNTS_FILE = 'skill-call-counts.json'
 
 async function loadSkillCallCounts() {
@@ -97,8 +100,13 @@ async function loadSkillCallCounts() {
     const usageData = JSON.parse(data)
     // Map from .usage.json format: { skillName: { use_count: N } }
     for (const [name, info] of Object.entries(usageData)) {
-      if (info && typeof info === 'object' && typeof info.use_count === 'number') {
-        skillCallCounts[name] = info.use_count
+      if (info && typeof info === 'object') {
+        if (typeof info.use_count === 'number') {
+          skillCallCounts[name] = info.use_count
+        }
+        if (info.created_by === 'agent' || info.agent_created === true) {
+          agentCreatedSkillNames.add(name)
+        }
       }
     }
   } catch {
@@ -153,7 +161,9 @@ async function collectSkillsFromDir(rootDir, isBuiltin, out) {
     await fsPromises.access(selfSkillMd)
     const content = await fsPromises.readFile(selfSkillMd, 'utf-8')
     const { name, description } = parseSkillFrontmatter(content, path.basename(rootDir))
-    out.push({ id: selfSkillMd, name, description, isBuiltin, path: selfSkillMd, callCount: skillCallCounts[name] || 0 })
+    // Skills Hermes created itself are deletable even inside a "built-in" dir.
+    const effectiveBuiltin = isBuiltin && !agentCreatedSkillNames.has(name)
+    out.push({ id: selfSkillMd, name, description, isBuiltin: effectiveBuiltin, path: selfSkillMd, callCount: skillCallCounts[name] || 0 })
     return
   } catch { /* not a skill dir itself — scan subdirectories */ }
 
@@ -176,7 +186,8 @@ async function collectSkillsFromDir(rootDir, isBuiltin, out) {
     }
     const content = await fsPromises.readFile(skillMd, 'utf-8')
     const { name, description } = parseSkillFrontmatter(content, e.name)
-    out.push({ id: skillMd, name, description, isBuiltin, path: skillMd, callCount: skillCallCounts[name] || 0 })
+    const effectiveBuiltin = isBuiltin && !agentCreatedSkillNames.has(name)
+    out.push({ id: skillMd, name, description, isBuiltin: effectiveBuiltin, path: skillMd, callCount: skillCallCounts[name] || 0 })
   }
 }
 

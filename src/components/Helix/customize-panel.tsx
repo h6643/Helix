@@ -144,8 +144,8 @@ function ShortcutsSection() {
             <div className="divide-y divide-border/50">
               {systemShortcuts.map(([id, s]) => (
                 <div key={id} className="flex items-center px-4 py-2.5 hover:bg-accent/20 transition-colors group">
-                  <span className="flex-1 text-sm font-medium text-foreground/80">{s.description}</span>
-                  <span className="text-sm font-mono text-foreground/80 bg-muted px-2 py-1 rounded">{s.keys.join(' + ')}</span>
+                  <span className="text-sm font-medium text-foreground/80">{s.description}</span>
+                  <span className="ml-auto text-sm font-mono text-foreground/80 bg-muted px-2.5 py-1 rounded shrink-0">{s.keys.join(' + ')}</span>
                   <button
                     onClick={() => startRecording(id)}
                     className="ml-3 p-1.5 rounded text-muted-foreground/20 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all"
@@ -315,7 +315,7 @@ function AppearanceSection() {
               onChange={(e) => {
                 setFontFamily(e.target.value)
               }}
-              className="w-full px-3 py-2 text-sm rounded-lg border border-border/50 bg-card/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+              className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
             >
               {fontOptions.map(opt => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -347,7 +347,7 @@ function AppearanceSection() {
             onChange={(e) => {
               setInterfaceFont(e.target.value)
             }}
-            className="w-full px-3 py-2 text-sm rounded-lg border border-border/50 bg-card/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+            className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
           >
             {interfaceFontOptions.map(opt => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>

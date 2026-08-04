@@ -62,7 +62,12 @@ export function useHermes() {
   const workDirEpoch = useHelixStore(s => s.workDirEpoch)
 
   const currentMessageIdRef = useRef<string | null>(null)
-  const eventHandlerRef = useRef<((event: HermesEvent, params?: HermesEventParams) => void) | null>(null)
+  // Multi-subscriber event registry. Parallel runs each register their own
+  // handler (agent-flow-panel handleRun) and MUST NOT clobber each other —
+  // a single-slot ref caused "background conversation executes but never
+  // outputs": the second onEvent overwrote the first, and the first run's
+  // finally (unsubscribe → null) killed the second's stream.
+  const eventHandlersRef = useRef<Set<(event: HermesEvent, params?: HermesEventParams) => void>>(new Set())
   // Mirrors hermesSessionId so auth-error recovery can reset it synchronously.
   const hermesSessionIdRef = useRef<string | null>(null)
   // Track which config was used to create the current session, so we can detect
@@ -206,8 +211,12 @@ export function useHermes() {
         }
       }
 
-        // Call custom event handler if registered
-        eventHandlerRef.current?.(event, params)
+        // Call custom event handler(s) if registered. Each is isolated so a
+        // throwing handler can't starve the other concurrent runs.
+        const handlers = eventHandlersRef.current
+        for (const h of handlers) {
+          try { h(event, params) } catch {}
+        }
     }
 
     // 始终订阅 IPC（acp 事件 + serve 模式下主进程的 gateway 生命周期事件）
@@ -492,11 +501,12 @@ export function useHermes() {
     }
   }, [isElectron])
 
-  // Register a custom event handler
+  // Register a custom event handler. Supports concurrent subscribers: the
+  // returned unsubscribe removes ONLY this handler (never nulls the registry).
   const onEvent = useCallback((handler: (event: HermesEvent, params?: HermesEventParams) => void) => {
-    eventHandlerRef.current = handler
+    eventHandlersRef.current.add(handler)
     return () => {
-      eventHandlerRef.current = null
+      eventHandlersRef.current.delete(handler)
     }
   }, [])
 

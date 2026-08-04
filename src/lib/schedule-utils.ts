@@ -7,7 +7,7 @@ import { useHelixStore } from '@/stores/helix-store'
 /**
  * Parse a human schedule description into a next-run timestamp.
  */
-function parseScheduleForTask(text: string): { nextRun: number | null } {
+export function parseScheduleForTask(text: string): { nextRun: number | null } {
   const lower = text.toLowerCase().trim()
   const minMatch = lower.match(/every\s+(\d+)\s*min(?:ute)?s?/)
   if (minMatch) return { nextRun: Date.now() + parseInt(minMatch[1]) * 60000 }
@@ -68,9 +68,20 @@ export function parseChineseSchedule(text: string): number {
 }
 
 /**
+ * A scheduled task detected in assistant output but NOT yet created. Creation
+ * only happens after the user confirms (via the Scheduled Task confirm dialog).
+ */
+export interface DetectedTask {
+  label: string
+  prompt: string
+  scheduleText: string
+  nextRunAt: number | null
+}
+
+/**
  * Fire-and-forget sync of a created scheduled task to Hermes backend jobs.json.
  */
-function syncTaskToBackend(label: string, prompt: string, scheduleText: string, nextRunAt: number | null) {
+export function syncTaskToBackend(label: string, prompt: string, scheduleText: string, nextRunAt: number | null) {
   try {
     const electron = (window as any).electron
     if (electron?.scheduledTasks?.create) {
@@ -88,11 +99,16 @@ function syncTaskToBackend(label: string, prompt: string, scheduleText: string, 
 }
 
 /**
- * Detect ```scheduled-task JSON blocks in the assistant reply, create the
- * tasks in the store, and return the reply with those blocks stripped.
+ * Detect ```scheduled-task JSON blocks AND natural-language "已创建定时任务 /
+ * 名称： / 时间：" patterns in assistant output, returning the cleaned text
+ * (blocks stripped) plus the tasks that were detected.
+ *
+ * Tasks are NOT auto-created here — the caller shows a confirm dialog and only
+ * creates them once the user approves. This avoids silently spamming duplicate
+ * tasks on every AI reply (the old behaviour we removed).
  */
-export function extractScheduledTasks(text: string): { cleaned: string; created: string[] } {
-  const created: string[] = []
+export function detectScheduledTasks(text: string): { cleaned: string; tasks: DetectedTask[] } {
+  const tasks: DetectedTask[] = []
   let cleaned = text
   // 1) Structured ```scheduled-task JSON blocks (label/prompt/schedule or aliases)
   const re = /```(\w*)\s*\n([\s\S]*?)```/g
@@ -107,17 +123,7 @@ export function extractScheduledTasks(text: string): { cleaned: string; created:
       const schedule = String(data.schedule || data.when || data.time || '').trim()
       if (label && prompt && schedule) {
         const parsed = parseScheduleForTask(schedule)
-        useHelixStore.getState().addScheduledTask({
-          label,
-          prompt,
-          scheduleText: schedule,
-          cronExpression: undefined,
-          enabled: true,
-          lastRunAt: null,
-          nextRunAt: parsed.nextRun,
-        })
-        syncTaskToBackend(label, prompt, schedule, parsed.nextRun)
-        created.push(label)
+        tasks.push({ label, prompt, scheduleText: schedule, nextRunAt: parsed.nextRun })
         cleaned = cleaned.replace(block, '')
       }
     } catch {
@@ -133,21 +139,11 @@ export function extractScheduledTasks(text: string): { cleaned: string; created:
       const label = nameMatch[1].trim().replace(/\s+/g, ' ')
       const timeText = timeMatch[1].trim()
       const nextRun = parseChineseSchedule(timeText)
-      if (!created.includes(label)) {
-        useHelixStore.getState().addScheduledTask({
-          label,
-          prompt: label,
-          scheduleText: timeText,
-          cronExpression: undefined,
-          enabled: true,
-          lastRunAt: null,
-          nextRunAt: nextRun,
-        })
-        syncTaskToBackend(label, label, timeText, nextRun)
-        created.push(label)
+      if (!tasks.some(t => t.label === label)) {
+        tasks.push({ label, prompt: label, scheduleText: timeText, nextRunAt: nextRun })
       }
     }
   }
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n').replace(/^\n+|\n+$/g, '')
-  return { cleaned, created }
+  return { cleaned, tasks }
 }
