@@ -1263,6 +1263,21 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     () => extractKaomojiStatus(displayStreamThinking),
     [displayStreamThinking]
   )
+  // Detect whether this session already has a completed assistant message.
+  // When true, suppress the bare "reasoning..." placeholder in the streaming area
+  // — the user can already see finished content (with copy buttons) above, and
+  // the ThinkingTimer below still conveys "still running".
+  //
+  // Why not just check m.reasoning?  Because the done-handler may *move* reasoning
+  // into content ("if !content && reasoning → content=reasoning; reasoning=''"),
+  // leaving the committed message with reasoning=undefined even though it was
+  // originally a thinking-only reply.  Checking for *any* assistant message is
+  // simpler and covers every variant (pure text, reasoning-as-content, tool output,
+  // etc.).
+  const hasCompletedAssistant = useMemo(() => {
+    return sessionMessages.some(m => m.role === 'assistant')
+  }, [sessionMessages])
+
   // Currently-running tool calls, shown in the top status bar as
   // "正在执行工具：read xxx / bash xxx" instead of a bare "正在思考".
   const runningToolLabels = useMemo(() => {
@@ -4787,8 +4802,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               {(streamingActive || displayResponseBlocks.length > 0) && (
                 <div className="flex w-full justify-start transition-all duration-300 opacity-100">
                   <div className="w-full px-1 py-1 text-foreground transition-all duration-300">
-                    {/* Loading placeholder — plain terminal-style reasoning line */}
-                    {streamingActive && displayResponseBlocks.length === 0 && !displayStreamThinking && (
+                    {/* Loading placeholder — plain terminal-style reasoning line.
+                        Only shown while streaming AND no content/blocks/thinking yet AND
+                        no completed assistant message exists yet in this session.
+                        Prevents duplicate "reasoning..." when a prior assistant message
+                        was already committed (e.g. think→done→think again within one run). */}
+                    {streamingActive && displayResponseBlocks.length === 0 && !displayStreamThinking && !hasCompletedAssistant && (
                       <div className="flex items-center my-1 text-sm text-foreground/50">
                         <span>(¬_¬) reasoning...</span>
                       </div>

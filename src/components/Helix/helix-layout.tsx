@@ -76,6 +76,7 @@ const ArtifactsBrowser = dynamic(() => import('./artifacts-browser').then(m => (
 const TerminalPanel = dynamic(() => import('./terminal-panel').then(m => ({ default: m.TerminalPanel })), { ssr: false })
 const WorktreePanel = dynamic(() => import('./worktree-panel').then(m => ({ default: m.WorktreePanel })), { ssr: false })
 const PluginManagerPanel = dynamic(() => import('./plugin-manager').then(m => ({ default: m.PluginManager })), { ssr: false })
+const KanbanPanel = dynamic(() => import('./kanban-panel').then(m => ({ default: m.KanbanPanel })), { ssr: false })
 const RightSidebar = dynamic(() => import('./right-sidebar').then(m => ({ default: m.RightSidebar })), { ssr: false })
 
 // ── Resizable sidebar constants ──────────────────────────────────────────
@@ -275,6 +276,7 @@ export function HelixLayout() {
   const showCustomizePanel = useHelixStore(s => s.showCustomizePanel)
   const showRuntimePanel = useHelixStore(s => s.showRuntimePanel)
   const showWorktreePanel = useHelixStore(s => s.showWorktreePanel)
+  const showKanbanPanel = useHelixStore(s => s.showKanbanPanel)
   const showActivityFeed = useHelixStore(s => s.showActivityFeed)
   const showArtifactsBrowser = useHelixStore(s => s.showArtifactsBrowser)
   const showPluginManager = useHelixStore(s => s.showPluginManager)
@@ -282,7 +284,7 @@ export function HelixLayout() {
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
   // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
   // 切页面时让模型继续在后台运行，返回后还能接着看。
-  const sidePanelOpen = showScheduledTasksPanel || showPluginManager || showSkillPanel || showRuntimePanel || showWorktreePanel
+  const sidePanelOpen = showScheduledTasksPanel || showPluginManager || showSkillPanel || showRuntimePanel || showWorktreePanel || showKanbanPanel
   const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
@@ -1293,6 +1295,11 @@ export function HelixLayout() {
           {showWorktreePanel && (
             <div className="absolute inset-0 z-20">
               <WorktreePanel onClose={() => storeActions.toggleWorktreePanel()} />
+            </div>
+          )}
+          {showKanbanPanel && (
+            <div className="absolute inset-0 z-20">
+              <KanbanPanel onClose={() => storeActions.toggleKanbanPanel()} />
             </div>
           )}
         </div>
