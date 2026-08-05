@@ -85,6 +85,9 @@ export interface StreamingDraft {
   startedAt?: number
   // Streaming thought-token count for this run, for the per-session timer line.
   thoughtTokens?: number
+  // Streaming total-token count (input+output+thought) for this run. Used as a
+  // fallback on the timer line when thoughtTokens is 0 (non-reasoning models).
+  totalTokens?: number
 }
 
 // Transient notice about the Hermes gateway connection (e.g. upstream dropped the

@@ -2,7 +2,6 @@
 
 import {
   Send,
-  Server,
   Brain,
   Wrench,
   Circle,
@@ -58,7 +57,6 @@ import { getModelContextWindow } from './context-usage'
 import { getToolLabel, getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
 import { InlineToolGroup } from './inline-tool-group'
 import { FileChangeSummary } from './file-change-summary'
-import { ExternalServicesPopover } from './external-services-popover'
 import { ApprovalDialog, ClarifyBar, type ApprovalRequest } from './approval-dialog'
 import { ScheduledTaskConfirm } from './scheduled-task-confirm'
 import { useHelixStore, type ImageAttachment, type FileAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
@@ -941,10 +939,6 @@ export function AgentFlowPanel() {
   const [branchCreating, setBranchCreating] = useState(false)
   const [branchNewName, setBranchNewName] = useState('')
   const branchPopoverRef = useRef<HTMLDivElement>(null)
-  // External services (server / VM) popover (empty-state breadcrumb).
-  const [externalPopoverOpen, setExternalPopoverOpen] = useState(false)
-  const externalPopoverRef = useRef<HTMLDivElement>(null)
-  const externalButtonRef = useRef<HTMLButtonElement>(null)
   const externalServices = useHelixStore((s) => s.externalServices)
   // Detected scheduled tasks awaiting user confirmation (AI asked to create them).
   const [pendingTaskCreations, setPendingTaskCreations] = useState<DetectedTask[]>([])
@@ -1049,6 +1043,7 @@ export function AgentFlowPanel() {
   // ticking across any sub-runs (agent tool loops) instead of resetting per run.
   const [questionStartTs, setQuestionStartTs] = useState<number>(0)
   const [streamThoughtTokens, setStreamThoughtTokens] = useState<number>(0)
+  const [streamTotalTokens, setStreamTotalTokens] = useState<number>(0)
 
   const apiConfig = useHelixStore(s => s.apiConfig)
   const skills = useHelixStore(s => s.skills)
@@ -1352,22 +1347,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return () => document.removeEventListener('mousedown', onDown)
   }, [branchPopoverOpen])
 
-  // Close external-services popover on outside click (portal renders at body level).
-  useEffect(() => {
-    if (!externalPopoverOpen) return
-    const onDown = (e: MouseEvent) => {
-      const target = e.target as Node
-      // Keep open if clicking the trigger button or inside the portal content
-      if (
-        externalButtonRef.current?.contains(target) ||
-        (target as Element)?.closest?.('[data-external-popover]')
-      ) return
-      setExternalPopoverOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [externalPopoverOpen])
-
   // Clear stale connection notices on mount
   useEffect(() => {
     const notice = useHelixStore.getState().connectionNotice
@@ -1459,6 +1438,21 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     })
     return () => { try { unsub?.() } catch {} }
   }, [])
+  // When an SSH connection is established, reload MCP tools for the active
+  // session so `remote_exec` becomes available immediately (the bridge server
+  // was just written into config.yaml). Fire-and-forget — a failure just means
+  // the tool appears on the next conversation / manual /reload-mcp.
+  useEffect(() => {
+    if (!isElectron() || !window.electron?.external?.onSshConnected) return
+    const unsubSsh = window.electron.external.onSshConnected(() => {
+      const sid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || hermesSessionIdRef.current
+      if (!sid) return
+      hermesApi()!.send('reload.mcp', { session_id: sid, confirm: true }).catch((e: any) => {
+        console.warn('[Helix] reload.mcp after SSH connect failed:', e)
+      })
+    })
+    return () => { try { unsubSsh?.() } catch {} }
+  }, [currentSessionId])
   // Resolve current git branch for the empty-state breadcrumb.
   // Queries the *currently-selected project directory* (passed as cwd) rather than
   // relying on the Electron main-process workDir, so the branch follows the active
@@ -2320,6 +2314,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const thinkingStartTimeRef = { current: 0 }
     const thinkingDurationRef = { current: 0 }
     const thoughtTokensRef = { current: 0 }
+    const totalTokensRef = { current: 0 }
     const synthDoneTimerRef = { current: null as ReturnType<typeof setTimeout> | null }
     const forceDoneTimerRef = { current: null as ReturnType<typeof setTimeout> | null }
     const startedAtRef = { current: 0 }
@@ -2355,6 +2350,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       setStreamThoughtTokens(u)
       liveStateOwnerRef.current = activeSessionId
     }
+    const uiTotalTokens = (u: any) => {
+      totalTokensRef.current = u
+      if (!isFrontRun()) { wasFront = false; return }
+      if (!wasFront) { wasFront = true; setStreamTotalTokens(totalTokensRef.current) }
+      setStreamTotalTokens(u)
+      liveStateOwnerRef.current = activeSessionId
+    }
     // Push this run's accumulated state into its own per-session draft so the
     // streaming content survives switching away and back. Throttled to one
     // store write per animation frame (same cost model as the old shared sync).
@@ -2378,6 +2380,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           thoughtBuffer: thoughtBufferRef.current,
           startedAt: startedAtRef.current,
           thoughtTokens: thoughtTokensRef.current,
+          totalTokens: totalTokensRef.current,
         })
       })
     }
@@ -2432,6 +2435,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       thoughtBuffer: '',
       startedAt: startedAtRef.current,
       thoughtTokens: 0,
+      totalTokens: 0,
     })
     uiRB([])
     uiSteps([])
@@ -2445,6 +2449,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     thinkingDurationRef.current = 0
     promptSentAtRef.current = 0
     uiTokens(0)
+    uiTotalTokens(0)
     firstContentAtRef.current = 0
     usageReceivedRef.current = false
     // A fresh question starts a new todo scope — drop any stale list from the
@@ -3703,6 +3708,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 usageReceivedRef.current = true
                 thoughtTokensRef.current = Number(u.thoughtTokens) || 0
                 uiTokens(thoughtTokensRef.current)
+                totalTokensRef.current = Number(u.totalTokens) || 0
+                uiTotalTokens(totalTokensRef.current)
                 // serve 模式下 session/prompt 只回 {status:'streaming'}，无 usage，
                 // 上下文圆环的数据只能来自这里：用后端 message.complete 携带的真实
                 // context_used/context_max（经 mapUsage 透传），否则退回 totalTokens 估算。
@@ -4645,25 +4652,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         </button>
 
         {/* External services (server / VM) — breadcrumb entry, placed right of project name */}
-        <div className="relative" ref={externalPopoverRef}>
-          <button
-            type="button"
-            ref={externalButtonRef}
-            onClick={() => setExternalPopoverOpen((v) => !v)}
-            className={`flex items-center gap-1.5 text-[12px] px-2 py-1 rounded-lg transition-colors ${externalPopoverOpen ? 'text-foreground bg-accent/50' : 'text-foreground/60 hover:text-foreground hover:bg-accent/50'}`}
-            title="连接外部服务（服务器 / 虚拟机）"
-          >
-            <Server className="size-3.5 text-sky-500" />
-            <span>连接外部服务</span>
-          </button>
-          {externalPopoverOpen && (
-            <ExternalServicesPopover
-              onClose={() => setExternalPopoverOpen(false)}
-              anchorRef={externalButtonRef}
-            />
-          )}
-        </div>
-
         {/* Git branch picker — only shown when the selected project is a git repo */}
         {gitAvailable === true && (
           <div className="relative" ref={branchPopoverRef}>
@@ -4984,7 +4972,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         from clearing isChatLoading), causing the timer to tick forever. */}
                     {isRunning && (
                       <div className="text-xs text-foreground/30 tabular-nums mt-1 ml-3">
-                        <ThinkingTimer questionStartTs={streamingDrafts[currentSessionId || '']?.startedAt ?? questionStartTs} isRunning={isRunning} />{(streamingDrafts[currentSessionId || '']?.thoughtTokens ?? streamThoughtTokens) > 0 ? ` · ${streamingDrafts[currentSessionId || '']?.thoughtTokens ?? streamThoughtTokens} tokens` : ''}
+                        <ThinkingTimer questionStartTs={streamingDrafts[currentSessionId || '']?.startedAt ?? questionStartTs} isRunning={isRunning} />{(() => {
+                          const sd = streamingDrafts[currentSessionId || '']
+                          const thought = sd?.thoughtTokens ?? streamThoughtTokens
+                          const total = sd?.totalTokens ?? streamTotalTokens
+                          const shown = thought > 0 ? thought : (total > 0 ? total : 0)
+                          return shown > 0 ? ` · ${shown} tokens` : ''
+                        })()}
                       </div>
                     )}
 
