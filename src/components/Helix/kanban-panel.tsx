@@ -17,6 +17,7 @@ import {
   Users,
   ChevronDown,
   FileText,
+  Trash2,
 } from 'lucide-react'
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { isElectron } from '@/lib/electron-bridge'
@@ -34,6 +35,7 @@ import {
   kanbanComplete,
   kanbanArchive,
   kanbanBoardCreate,
+  kanbanBoardDelete,
   kanbanAssignees,
   type KanbanBoard,
   type KanbanTask,
@@ -48,9 +50,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useHelixStore } from '@/stores/helix-store'
 
-interface KanbanPanelProps {
-  onClose: () => void
-}
+interface KanbanPanelProps {}
 
 function fmtDate(ts: number | null): string {
   if (!ts) return '—'
@@ -69,7 +69,7 @@ const STATUS_COLORS: Record<KanbanStatus, { bar: string; chip: string; dot: stri
   archived: { bar: 'bg-border', chip: 'bg-muted text-muted-foreground/60', dot: 'text-muted-foreground/60' },
 }
 
-export function KanbanPanel({ onClose }: KanbanPanelProps) {
+export function KanbanPanel(_props: KanbanPanelProps) {
   const showToast = useHelixStore(s => s.showToast)
 
   const [boards, setBoards] = useState<KanbanBoard[]>([])
@@ -91,6 +91,7 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
 
   const [dragId, setDragId] = useState<string | null>(null)
   const [overCol, setOverCol] = useState<KanbanStatus | null>(null)
+  const [overTrash, setOverTrash] = useState(false)
 
   const [createForm, setCreateForm] = useState({ title: '', body: '', assignee: '', priority: 0, initialStatus: '' as '' | 'blocked' | 'running' })
   const [boardForm, setBoardForm] = useState({ slug: '', name: '' })
@@ -221,6 +222,31 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
     void moveTask(task, toStatus)
   }
 
+  const handleTrashDrop = async () => {
+    const id = dragId
+    setOverTrash(false)
+    setOverCol(null)
+    setDragId(null)
+    if (!id || !activeBoard) return
+    const task = tasks.find(t => t.id === id)
+    if (!task) return
+    setBusy(id)
+    try {
+      const res = await kanbanArchive(id, activeBoard)
+      if (res.ok) {
+        showToast({ type: 'success', title: '已删除任务' })
+        await loadTasks(activeBoard)
+        if (detailId === id) setDetailId(null)
+      } else {
+        showToast({ type: 'error', title: '删除失败', description: res.error })
+      }
+    } catch (e) {
+      showToast({ type: 'error', title: '删除失败', description: String(e) })
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const handleCreate = async () => {
     if (!createForm.title.trim()) {
       showToast({ type: 'warning', title: '请填写任务标题' })
@@ -280,6 +306,28 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
     }
   }
 
+  const handleDeleteBoard = async () => {
+    if (!activeBoard) return
+    if (boards.length <= 1) {
+      showToast({ type: 'warning', title: '至少保留一个看板' })
+      return
+    }
+    setBusy('deleteboard')
+    try {
+      const res = await kanbanBoardDelete(activeBoard)
+      if (res.ok) {
+        showToast({ type: 'success', title: '看板已删除' })
+        await loadBoards()
+      } else {
+        showToast({ type: 'error', title: '删除看板失败', description: res.error })
+      }
+    } catch (e) {
+      showToast({ type: 'error', title: '删除看板失败', description: String(e) })
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const runDetailAction = async (fn: (board: string) => Promise<{ ok: boolean; error?: string }>, successMsg: string) => {
     if (!activeBoard || !detail) return
     setBusy(detail.task.id)
@@ -329,7 +377,7 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
         onDragLeave={() => { if (overCol === status) setOverCol(null) }}
         onDrop={() => { if (droppable) handleDrop(status) }}
         className={cn(
-          'w-72 shrink-0 max-h-full flex flex-col rounded-xl border bg-muted/20 transition-colors',
+          'w-64 shrink-0 max-h-full flex flex-col rounded-xl border bg-muted/20 transition-colors',
           isOver ? 'border-primary/60 bg-primary/5' : 'border-border/60',
         )}
       >
@@ -339,7 +387,7 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
           <span className="text-[13px] font-semibold text-foreground/80">{headerLabel}</span>
           <span className="ml-auto text-[11px] text-muted-foreground/60">{tasksInCol.length}</span>
         </div>
-        <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-2">
+        <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1.5">
           {tasksInCol.length === 0 ? (
             <div className="rounded-lg border border-dashed border-border/60 py-6 text-center text-[11px] text-muted-foreground/40">
               空
@@ -350,40 +398,32 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
                 key={task.id}
                 draggable
                 onDragStart={e => { setDragId(task.id); e.dataTransfer.effectAllowed = 'move' }}
-                onDragEnd={() => { setDragId(null); setOverCol(null) }}
+                onDragEnd={() => { setDragId(null); setOverCol(null); setOverTrash(false) }}
                 onClick={() => setDetailId(task.id)}
                 className={cn(
-                  'group cursor-grab active:cursor-grabbing rounded-lg border border-border/60 bg-card p-3 hover:border-primary/40 hover:shadow-sm transition-all select-none',
+                  'group cursor-grab active:cursor-grabbing rounded-lg border border-border/60 bg-card px-2 py-1.5 hover:border-primary/40 hover:shadow-sm transition-all select-none',
                   dragId === task.id && 'opacity-40',
                   busy === task.id && 'opacity-60',
                 )}
               >
-                <div className="flex items-start justify-between gap-2">
-                  <p className="text-[13px] leading-snug text-foreground/90 line-clamp-2 break-words">{task.title}</p>
-                  <span className={cn('shrink-0 text-[11px] font-medium px-1.5 py-0.5 rounded', STATUS_COLORS[task.status].chip)}>
+                {/* 上半部分：标题 + 状态 */}
+                <div className="flex items-start justify-between gap-1.5">
+                  <p className="text-[11px] leading-snug text-foreground/90 line-clamp-2 break-words flex-1">{task.title}</p>
+                  <span className={cn('shrink-0 text-[10px] font-medium px-1 py-0.5 rounded', STATUS_COLORS[task.status].chip)}>
                     {STATUS_ICONS[task.status]}
                   </span>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2">
-                  {task.assignee ? (
-                    <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                      <User className="size-3" />
+                {/* 下半部分：元信息 */}
+                <div className="flex items-center gap-2 mt-1 text-[9px] text-muted-foreground/60">
+                  {task.assignee && (
+                    <span className="flex items-center gap-0.5">
+                      <User className="size-2.5" />
                       {task.assignee}
                     </span>
-                  ) : null}
-                  {task.priority > 0 && (
-                    <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                      <Flag className="size-3" />
-                      P{task.priority}
-                    </span>
                   )}
-                  {task.created_at ? (
-                    <span className="flex items-center gap-1 text-[11px] text-muted-foreground/60">
-                      <Clock className="size-3" />
-                      {timeAgo(task.created_at * 1000)}
-                    </span>
-                  ) : null}
-                  <span className="ml-auto text-[10px] font-mono text-muted-foreground/40">{task.id.slice(-6)}</span>
+                  {task.priority > 0 && <span>P{task.priority}</span>}
+                  {task.created_at && <span>{timeAgo(task.created_at * 1000)}</span>}
+                  <span className="ml-auto font-mono text-muted-foreground/40">{task.id.slice(-6)}</span>
                 </div>
               </div>
             ))
@@ -392,6 +432,84 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
       </div>
     )
   }
+
+  // 渲染组合列（上下两个状态）
+  const renderCombinedColumn = (topStatus: KanbanStatus, bottomStatus: KanbanStatus, topTasks: KanbanTask[], bottomTasks: KanbanTask[]) => {
+    const topColors = STATUS_COLORS[topStatus]
+    const bottomColors = STATUS_COLORS[bottomStatus]
+    const isTopOver = overCol === topStatus && dragId != null
+    const isBottomOver = overCol === bottomStatus && dragId != null
+
+    return (
+      <div
+        key={`${topStatus}-${bottomStatus}`}
+        className="w-44 shrink-0 max-h-full flex flex-col rounded-lg border border-border/60 bg-muted/10 transition-colors"
+      >
+        {/* 上半部分 */}
+        <div
+          onDragOver={e => { e.preventDefault(); if (overCol !== topStatus) setOverCol(topStatus) }}
+          onDragLeave={() => { if (overCol === topStatus) setOverCol(null) }}
+          onDrop={() => handleDrop(topStatus)}
+          className={cn('flex-1 flex flex-col transition-colors min-h-0', isTopOver && 'bg-primary/5')}
+        >
+          <div className={cn('shrink-0 h-0.5 rounded-t-lg', topColors.bar)} />
+          <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-1">
+            <span className={cn('text-[10px] font-semibold', topColors.chip)}>{STATUS_ICONS[topStatus]}</span>
+            <span className="text-[10px] font-semibold text-foreground/80">{STATUS_LABELS[topStatus]}</span>
+            <span className="ml-auto text-[9px] text-muted-foreground/60">{topTasks.length}</span>
+          </div>
+          <div className="flex-1 overflow-y-auto px-1.5 pb-1 space-y-0.5">
+            {topTasks.length === 0 ? (
+              <div className="rounded border border-dashed border-border/60 py-1.5 text-center text-[9px] text-muted-foreground/40">空</div>
+            ) : (
+              topTasks.map(task => renderCompactCard(task))
+            )}
+          </div>
+        </div>
+        {/* 分隔线 */}
+        <div className="h-px bg-border/40 mx-1.5" />
+        {/* 下半部分 */}
+        <div
+          onDragOver={e => { e.preventDefault(); if (overCol !== bottomStatus) setOverCol(bottomStatus) }}
+          onDragLeave={() => { if (overCol === bottomStatus) setOverCol(null) }}
+          onDrop={() => handleDrop(bottomStatus)}
+          className={cn('flex-1 flex flex-col transition-colors min-h-0', isBottomOver && 'bg-primary/5')}
+        >
+          <div className={cn('shrink-0 h-0.5', bottomColors.bar)} />
+          <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-1">
+            <span className={cn('text-[10px] font-semibold', bottomColors.chip)}>{STATUS_ICONS[bottomStatus]}</span>
+            <span className="text-[10px] font-semibold text-foreground/80">{STATUS_LABELS[bottomStatus]}</span>
+            <span className="ml-auto text-[9px] text-muted-foreground/60">{bottomTasks.length}</span>
+          </div>
+          <div className="flex-1 overflow-y-auto px-1.5 pb-1 space-y-0.5">
+            {bottomTasks.length === 0 ? (
+              <div className="rounded border border-dashed border-border/60 py-1.5 text-center text-[9px] text-muted-foreground/40">空</div>
+            ) : (
+              bottomTasks.map(task => renderCompactCard(task))
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // 紧凑卡片渲染
+  const renderCompactCard = (task: KanbanTask) => (
+    <div
+      key={task.id}
+      draggable
+      onDragStart={e => { setDragId(task.id); e.dataTransfer.effectAllowed = 'move' }}
+      onDragEnd={() => { setDragId(null); setOverCol(null); setOverTrash(false) }}
+      onClick={() => setDetailId(task.id)}
+      className={cn(
+        'group cursor-grab active:cursor-grabbing rounded bg-card px-1.5 py-0.5 hover:bg-accent/50 transition-all select-none border border-transparent hover:border-primary/30',
+        dragId === task.id && 'opacity-40',
+        busy === task.id && 'opacity-60',
+      )}
+    >
+      <p className="text-[10px] leading-[1.15] text-foreground/80 line-clamp-1 break-words truncate">{task.title}</p>
+    </div>
+  )
 
   return (
     <div className="h-full w-full flex flex-col bg-background relative select-none">
@@ -409,11 +527,14 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
               title="切换看板"
             >
               {boards.length === 0 && <option value="">加载中…</option>}
-              {boards.map(b => (
-                <option key={b.slug} value={b.slug}>
-                  {b.name || b.slug} ({b.total})
-                </option>
-              ))}
+              {boards.map(b => {
+                const activeCount = b.total - (b.counts?.archived || 0)
+                return (
+                  <option key={b.slug} value={b.slug}>
+                    {b.name || b.slug} ({activeCount})
+                  </option>
+                )
+              })}
             </select>
             <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
           </div>
@@ -424,9 +545,34 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
           >
             <Plus className="size-3.5" />
           </button>
+          <button
+            onClick={handleDeleteBoard}
+            disabled={!activeBoard || busy === 'deleteboard'}
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40"
+            title="删除当前看板"
+          >
+            {busy === 'deleteboard' ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+          </button>
         </div>
 
-        <div className="flex items-center gap-1 ml-auto">
+        <div className="flex items-center gap-1 ml-auto shrink-0">
+          {/* Trash zone */}
+          <div
+            onDragOver={e => { if (dragId) { e.preventDefault(); setOverTrash(true) } }}
+            onDragLeave={() => setOverTrash(false)}
+            onDrop={handleTrashDrop}
+            className={cn(
+              'flex items-center gap-1.5 px-40 h-8 rounded-lg border-2 border-dashed transition-all shrink-0 justify-center -ml-2',
+              overTrash
+                ? 'border-red-400 bg-red-500/10 text-red-500'
+                : dragId
+                  ? 'border-red-300/50 text-red-400/60'
+                  : 'border-transparent text-transparent pointer-events-none',
+            )}
+          >
+            <Trash2 className="size-3.5" />
+            <span className="text-xs font-medium">拖到这里删除</span>
+          </div>
           <button
             onClick={refresh}
             className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
@@ -437,23 +583,16 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
           <button
             onClick={() => setShowCreate(true)}
             disabled={busy === 'create'}
-            className="flex items-center gap-1.5 px-3 h-8 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 h-8 rounded-lg border border-border/60 text-xs font-medium text-foreground hover:bg-accent/60 transition-colors disabled:opacity-50"
           >
             <Plus className="size-3.5" />
             新建任务
-          </button>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
-            title="关闭"
-          >
-            <X className="size-4" />
           </button>
         </div>
       </div>
 
       {/* Columns */}
-      <div className="flex-1 min-h-0 flex gap-3 overflow-x-auto p-4">
+      <div className="flex-1 min-h-0 flex gap-2 overflow-x-auto p-3">
         {error ? (
           <div className="flex flex-col items-center justify-center gap-2 py-16 text-red-500 mx-auto">
             <AlertCircle className="size-5" />
@@ -466,7 +605,10 @@ export function KanbanPanel({ onClose }: KanbanPanelProps) {
           </div>
         ) : (
           <>
-            {KANBAN_COLUMNS.map(status => renderColumn(status, grouped.map.get(status) || [], true))}
+            {renderCombinedColumn('triage', 'todo', grouped.map.get('triage') || [], grouped.map.get('todo') || [])}
+            {renderCombinedColumn('scheduled', 'ready', grouped.map.get('scheduled') || [], grouped.map.get('ready') || [])}
+            {renderCombinedColumn('running', 'blocked', grouped.map.get('running') || [], grouped.map.get('blocked') || [])}
+            {renderCombinedColumn('review', 'done', grouped.map.get('review') || [], grouped.map.get('done') || [])}
             {grouped.other.length > 0 && renderColumn('archived', grouped.other, false, '其他', '⋯', { bar: 'bg-border', chip: 'bg-muted text-muted-foreground/70', dot: 'text-muted-foreground/70' })}
           </>
         )}
