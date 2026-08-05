@@ -1,7 +1,6 @@
 'use client'
 
 import {
-  SquareKanban,
   Plus,
   X,
   RefreshCw,
@@ -515,7 +514,6 @@ export function KanbanPanel(_props: KanbanPanelProps) {
     <div className="h-full w-full flex flex-col bg-background relative select-none">
       {/* Header */}
       <div className="shrink-0 flex items-center gap-3 px-5 py-3 border-b border-border/40">
-        <SquareKanban className="size-4 text-muted-foreground" />
         <h2 className="text-sm font-semibold text-foreground">看板</h2>
 
         <div className="flex items-center gap-2 ml-2">
