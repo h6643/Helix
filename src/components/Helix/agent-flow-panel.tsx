@@ -944,6 +944,7 @@ export function AgentFlowPanel() {
   // External services (server / VM) popover (empty-state breadcrumb).
   const [externalPopoverOpen, setExternalPopoverOpen] = useState(false)
   const externalPopoverRef = useRef<HTMLDivElement>(null)
+  const externalButtonRef = useRef<HTMLButtonElement>(null)
   const externalServices = useHelixStore((s) => s.externalServices)
   // Detected scheduled tasks awaiting user confirmation (AI asked to create them).
   const [pendingTaskCreations, setPendingTaskCreations] = useState<DetectedTask[]>([])
@@ -1351,13 +1352,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return () => document.removeEventListener('mousedown', onDown)
   }, [branchPopoverOpen])
 
-  // Close external-services popover on outside click.
+  // Close external-services popover on outside click (portal renders at body level).
   useEffect(() => {
     if (!externalPopoverOpen) return
     const onDown = (e: MouseEvent) => {
-      if (externalPopoverRef.current && !externalPopoverRef.current.contains(e.target as Node)) {
-        setExternalPopoverOpen(false)
-      }
+      const target = e.target as Node
+      // Keep open if clicking the trigger button or inside the portal content
+      if (
+        externalButtonRef.current?.contains(target) ||
+        (target as Element)?.closest?.('[data-external-popover]')
+      ) return
+      setExternalPopoverOpen(false)
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
@@ -4635,6 +4640,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         <div className="relative" ref={externalPopoverRef}>
           <button
             type="button"
+            ref={externalButtonRef}
             onClick={() => setExternalPopoverOpen((v) => !v)}
             className={`flex items-center gap-1.5 text-[12px] px-2 py-1 rounded-lg transition-colors ${externalPopoverOpen ? 'text-foreground bg-accent/50' : 'text-foreground/60 hover:text-foreground hover:bg-accent/50'}`}
             title="连接外部服务（服务器 / 虚拟机）"
@@ -4643,7 +4649,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             <span>连接外部服务</span>
           </button>
           {externalPopoverOpen && (
-            <ExternalServicesPopover onClose={() => setExternalPopoverOpen(false)} />
+            <ExternalServicesPopover
+              onClose={() => setExternalPopoverOpen(false)}
+              anchorRef={externalButtonRef}
+            />
           )}
         </div>
 

@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useLayoutEffect } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Server,
   Plus,
@@ -18,7 +19,13 @@ import { isElectron } from '@/lib/electron-bridge'
 
 type FormMode = 'list' | 'add' | 'edit'
 
-export function ExternalServicesPopover({ onClose }: { onClose: () => void }) {
+export function ExternalServicesPopover({
+  onClose,
+  anchorRef,
+}: {
+  onClose: () => void
+  anchorRef: React.RefObject<HTMLButtonElement | null>
+}) {
   const externalServices = useHelixStore((s) => s.externalServices)
   const [mode, setMode] = useState<FormMode>('list')
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -130,8 +137,34 @@ export function ExternalServicesPopover({ onClose }: { onClose: () => void }) {
     useHelixStore.getState().removeExternalService(svc.id)
   }
 
-  return (
-    <div className="absolute bottom-full left-0 mb-1.5 w-80 bg-background/95 backdrop-blur-sm rounded-xl border border-border/30 shadow-lg shadow-black/8 z-50 flex flex-col max-h-96">
+  // Calculate position relative to the anchor button
+  const [position, setPosition] = useState<{ top: number; left: number }>({ top: 0, left: 0 })
+
+  useLayoutEffect(() => {
+    const updatePosition = () => {
+      if (anchorRef.current) {
+        const rect = anchorRef.current.getBoundingClientRect()
+        setPosition({
+          top: rect.top - 8, // 8px gap above button
+          left: rect.left,
+        })
+      }
+    }
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [anchorRef])
+
+  const content = (
+    <div
+      data-external-popover
+      className="fixed w-80 bg-background/95 backdrop-blur-sm rounded-xl border border-border/30 shadow-lg shadow-black/8 z-[9999] flex flex-col max-h-96"
+      style={{ top: position.top, left: position.left, transform: 'translateY(-100%)' }}
+    >
       {/* Header */}
       <div className="flex items-center justify-between px-3 pt-2.5 pb-1.5 border-b border-border/20">
         <div className="flex items-center gap-2 text-[13px] font-medium text-foreground/80">
@@ -330,4 +363,9 @@ export function ExternalServicesPopover({ onClose }: { onClose: () => void }) {
       )}
     </div>
   )
+
+  // Use typeof check for SSR safety
+  return typeof document !== 'undefined'
+    ? createPortal(content, document.body)
+    : content
 }
