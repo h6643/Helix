@@ -724,11 +724,13 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
     { id: 'search', label: '搜索', icon: Search, action: () => toggleSessionManager() },
     { id: 'scheduled', label: '计划', icon: Clock, action: () => {
         if (!showScheduledTasksPanel && showSkillPanel) toggleSkillPanel()
+        if (showKanbanPanel) toggleKanbanPanel()
         toggleScheduledTasksPanel()
       }
     },
     { id: 'plugins', label: '插件', icon: Puzzle, action: () => {
         if (!showSkillPanel && showScheduledTasksPanel) toggleScheduledTasksPanel()
+        if (showKanbanPanel) toggleKanbanPanel()
         toggleSkillPanel()
       }
     },
