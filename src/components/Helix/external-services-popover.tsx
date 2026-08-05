@@ -81,7 +81,7 @@ export function ExternalServicesPopover({
   const content = (
     <div
       data-external-popover
-      className="fixed w-72 bg-background/95 backdrop-blur-sm rounded-xl border border-border/30 shadow-lg shadow-black/8 z-[9999] flex flex-col max-h-96"
+      className="fixed w-60 bg-background/95 backdrop-blur-sm rounded-xl border border-border/30 shadow-lg shadow-black/8 z-[9999] flex flex-col max-h-80"
       style={{ top: position.top, left: position.left, transform: 'translateY(-100%)' }}
     >
       <div className="flex items-center justify-between px-3 pt-2.5 pb-1.5 border-b border-border/20">
