@@ -4656,14 +4656,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           )}
         </div>
 
-        {/* Connected external services status chip */}
-        {externalServices.some((s) => s.connected) && (
-          <div className="flex items-center gap-1.5 text-[12px] text-foreground/60 px-2 py-1 rounded-lg bg-emerald-500/8">
-            <Circle className="size-2.5 fill-emerald-500 text-emerald-500" />
-            <span>已连接 {externalServices.filter((s) => s.connected).length} 台</span>
-          </div>
-        )}
-
         {/* Git branch picker — only shown when the selected project is a git repo */}
         {gitAvailable === true && (
           <div className="relative" ref={branchPopoverRef}>
