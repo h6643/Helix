@@ -4630,6 +4630,31 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           <Folder className="size-3.5 text-amber-500" />
           <span className="max-w-[160px] truncate">{projectName}</span>
         </button>
+
+        {/* External services (server / VM) — breadcrumb entry, placed right of project name */}
+        <div className="relative" ref={externalPopoverRef}>
+          <button
+            type="button"
+            onClick={() => setExternalPopoverOpen((v) => !v)}
+            className={`flex items-center gap-1.5 text-[12px] px-2 py-1 rounded-lg transition-colors ${externalPopoverOpen ? 'text-foreground bg-accent/50' : 'text-foreground/60 hover:text-foreground hover:bg-accent/50'}`}
+            title="连接外部服务（服务器 / 虚拟机）"
+          >
+            <Server className="size-3.5 text-sky-500" />
+            <span>连接外部服务</span>
+          </button>
+          {externalPopoverOpen && (
+            <ExternalServicesPopover onClose={() => setExternalPopoverOpen(false)} />
+          )}
+        </div>
+
+        {/* Connected external services status chip */}
+        {externalServices.some((s) => s.connected) && (
+          <div className="flex items-center gap-1.5 text-[12px] text-foreground/60 px-2 py-1 rounded-lg bg-emerald-500/8">
+            <Circle className="size-2.5 fill-emerald-500 text-emerald-500" />
+            <span>已连接 {externalServices.filter((s) => s.connected).length} 台</span>
+          </div>
+        )}
+
         {/* Git branch picker — only shown when the selected project is a git repo */}
         {gitAvailable === true && (
           <div className="relative" ref={branchPopoverRef}>
@@ -4760,29 +4785,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             </div>
           )}
 
-          {/* External services (server / VM) — breadcrumb entry */}
-          <div className="relative" ref={externalPopoverRef}>
-            <button
-              type="button"
-              onClick={() => setExternalPopoverOpen((v) => !v)}
-              className={`flex items-center gap-1.5 text-[12px] px-2 py-1 rounded-lg transition-colors ${externalPopoverOpen ? 'text-foreground bg-accent/50' : 'text-foreground/60 hover:text-foreground hover:bg-accent/50'}`}
-              title="连接外部服务（服务器 / 虚拟机）"
-            >
-              <Server className="size-3.5 text-sky-500" />
-              <span>连接外部服务</span>
-            </button>
-            {externalPopoverOpen && (
-              <ExternalServicesPopover onClose={() => setExternalPopoverOpen(false)} />
-            )}
-          </div>
-
-          {/* Connected external services status chip */}
-          {externalServices.some((s) => s.connected) && (
-            <div className="flex items-center gap-1.5 text-[12px] text-foreground/60 px-2 py-1 rounded-lg bg-emerald-500/8">
-              <Circle className="size-2.5 fill-emerald-500 text-emerald-500" />
-              <span>已连接 {externalServices.filter((s) => s.connected).length} 台</span>
-            </div>
-          )}
           </div>
         )}
       </div>
