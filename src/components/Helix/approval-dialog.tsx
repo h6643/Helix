@@ -289,7 +289,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
   }
 
   return (
-    <div className="fixed bottom-20 right-6 z-50 animate-in slide-in-from-bottom-2 max-w-2xl w-[min(42rem,90vw)]">
+    <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-2 max-w-2xl w-[min(42rem,90vw)]">
       <div className="flex flex-col gap-2 px-3 py-2.5 rounded-lg bg-sky-500/10 border border-sky-500/30 text-xs shadow-lg">
         {/* 问题 */}
         <div className="flex items-start gap-2">
