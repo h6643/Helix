@@ -22,6 +22,7 @@ export interface ElectronAPI {
 
   hermesSkills: {
     getDir: () => Promise<string | null>
+    getPluginsDir: () => Promise<string | null>
     readdir: (dirPath: string) => Promise<Array<{ name: string; isDirectory: boolean }>>
     readFile: (filePath: string) => Promise<string | null>
     deleteDir: (dirPath: string) => Promise<boolean>
@@ -131,6 +132,11 @@ export interface ElectronAPI {
   }
 
   platform: string
+
+  // ── External services (server / VM TCP reachability probe) ──
+  external: {
+    testConnection: (host: string, port: number | string, timeoutMs?: number) => Promise<{ ok: boolean; error?: string; latencyMs?: number }>
+  }
   isElectron: boolean
 
   // ── Email (IMAP inbox / SMTP send / notifications) ─────────────────────────

@@ -2,6 +2,7 @@
 
 import {
   Send,
+  Server,
   Brain,
   Wrench,
   Circle,
@@ -57,6 +58,7 @@ import { getModelContextWindow } from './context-usage'
 import { getToolLabel, getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
 import { InlineToolGroup } from './inline-tool-group'
 import { FileChangeSummary } from './file-change-summary'
+import { ExternalServicesPopover } from './external-services-popover'
 import { ApprovalDialog, ClarifyBar, type ApprovalRequest } from './approval-dialog'
 import { ScheduledTaskConfirm } from './scheduled-task-confirm'
 import { useHelixStore, type ImageAttachment, type FileAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
@@ -939,6 +941,10 @@ export function AgentFlowPanel() {
   const [branchCreating, setBranchCreating] = useState(false)
   const [branchNewName, setBranchNewName] = useState('')
   const branchPopoverRef = useRef<HTMLDivElement>(null)
+  // External services (server / VM) popover (empty-state breadcrumb).
+  const [externalPopoverOpen, setExternalPopoverOpen] = useState(false)
+  const externalPopoverRef = useRef<HTMLDivElement>(null)
+  const externalServices = useHelixStore((s) => s.externalServices)
   // Detected scheduled tasks awaiting user confirmation (AI asked to create them).
   const [pendingTaskCreations, setPendingTaskCreations] = useState<DetectedTask[]>([])
   const handleConfirmTasks = (tasks: DetectedTask[]) => {
@@ -1344,6 +1350,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
   }, [branchPopoverOpen])
+
+  // Close external-services popover on outside click.
+  useEffect(() => {
+    if (!externalPopoverOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (externalPopoverRef.current && !externalPopoverRef.current.contains(e.target as Node)) {
+        setExternalPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [externalPopoverOpen])
 
   // Clear stale connection notices on mount
   useEffect(() => {
@@ -1756,13 +1774,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // regular prompts).  These show up in the "/" autocomplete picker alongside
   // skills, Hermes commands, and shell commands.
   const BUILTIN_COMMANDS = useMemo(() => [
-    { name: 'compact', description: '压缩上下文，重置对话窗口', action: 'compact' as const },
+    { name: 'compact', description: '压缩上下文', action: 'compact' as const },
     { name: 'clear', description: '清空当前对话', action: 'clear' as const },
     { name: 'reset', description: '重置会话（清空对话+上下文）', action: 'reset' as const },
     { name: 'mcp', description: '管理 MCP 服务器', action: 'mcp' as const },
     { name: 'model', description: '切换到模型选择设置', action: 'model' as const },
     { name: 'skill', description: '打开技能管理面板', action: 'skill' as const },
-    { name: 'fork', description: '从最后一条消息分叉对话', action: 'fork' as const },
   ], [])
 
   // Merge local skills with Hermes slash commands
@@ -1793,11 +1810,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return allSlashItems
   }, [allSlashItems, input])
   const slashCmd = input.startsWith('/') ? input.slice(1).split(' ')[0].toLowerCase() : ''
-  const matchedQuickCmds = slashCmd ? QUICK_COMMANDS.filter(c => c.cmd.slice(1).startsWith(slashCmd)) : []
+  const matchedQuickCmds = input.startsWith('/') ? QUICK_COMMANDS.filter(c => !slashCmd || c.cmd.slice(1).startsWith(slashCmd)) : []
   const [selectedSkillIndex, setSelectedSkillIndex] = useState(0)
   const [slashMenuOpen, setSlashMenuOpen] = useState(true)
-  const showSlashSkills = input.startsWith('/') && filteredSkills.length > 0 && slashMenuOpen
-  const showQuickCmds = input.startsWith('/') && matchedQuickCmds.length > 0 && !input.includes(' ')
+  const showSlashMenu = input.startsWith('/') && slashMenuOpen && (filteredSkills.length > 0 || matchedQuickCmds.length > 0) && !input.includes(' ')
 
   // Handle input change for skill detection
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -2165,38 +2181,65 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         setInputSynced('')
         resetInputHeight()
         switch (builtin.action) {
-          case 'compact':
-          case 'reset':
+          case 'compact': {
+            // Compact: call backend session.compress RPC and update frontend messages
+            try {
+              const result = await hermesApi()?.send('session.compress', { session_id: currentSessionId })
+              if (result && typeof result === 'object') {
+                const r = result as any
+                if (r.status === 'compressed' && Array.isArray(r.messages)) {
+                  // Update frontend messages with compressed messages from backend
+                  const msgs = r.messages.map((m: any) => ({
+                    id: m.id || generateId(),
+                    role: m.role as 'user' | 'assistant' | 'system',
+                    content: m.content || '',
+                    images: m.images,
+                    timestamp: m.timestamp || Date.now(),
+                    reasoning: m.reasoning,
+                    steps: m.steps,
+                    sessionId: currentSessionId,
+                  }))
+                  useHelixStore.setState({ chatMessages: msgs })
+                  storeActions.showToast({ type: 'success', title: '上下文已压缩' })
+                } else if (r.status === 'aborted') {
+                  storeActions.showToast({ type: 'warning', title: '压缩已中止' })
+                } else {
+                  storeActions.showToast({ type: 'success', title: '上下文已压缩' })
+                }
+              }
+            } catch (e) {
+              storeActions.showToast({ type: 'error', title: '压缩失败', description: String(e) })
+            }
+            break
+          }
+          case 'reset': {
+            // Reset: clear messages + reset backend session (model forgets history)
             if (currentSessionId) {
               sessionMapRef.current.delete(currentSessionId)
               persistSessionMap(sessionMapRef.current)
             }
-            storeActions.clearChat()
-            storeActions.showToast({ type: 'success', title: builtin.action === 'compact' ? '上下文已压缩' : '会话已重置' })
+            await storeActions.clearChatInPlace()
+            storeActions.showToast({ type: 'success', title: '会话已重置' })
             break
-          case 'clear':
-            storeActions.clearChat()
+          }
+          case 'clear': {
+            // Clear: only clear frontend messages (keep backend session alive)
+            await storeActions.clearChatInPlace()
             break
+          }
           case 'mcp':
             storeActions.toggleSettings('mcp')
             break
           case 'model':
             storeActions.toggleSettings('api')
             break
-          case 'fork': {
-            // Fork from the last user message
-            const msgs = useHelixStore.getState().chatMessages
-            const sid = useHelixStore.getState().currentSessionId
-            const sessionMsgs = sid ? msgs.filter(m => !m.sessionId || m.sessionId === sid) : msgs
-            const lastUserMsg = [...sessionMsgs].reverse().find(m => m.role === 'user')
-            if (lastUserMsg) {
-              await storeActions.forkConversation(lastUserMsg.id)
-            } else {
-              storeActions.showToast({ type: 'warning', title: '无法分叉', description: '对话中没有用户消息' })
-            }
+          case 'skill':
+            storeActions.toggleSettings('skills')
             break
-          }
         }
+        // Builtin commands are instant client-side operations — never leave the
+        // isChatLoading flag stuck true (it was set before this branch).
+        useHelixStore.setState({ isChatLoading: false })
         return
       }
     }
@@ -3924,7 +3967,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           return
         }
       }
-      if (showSlashSkills && filteredSkills.length > 0) {
+      if (showSlashMenu && filteredSkills.length > 0) {
         if (e.key === 'ArrowDown') {
           e.preventDefault()
           setSelectedSkillIndex(prev => Math.min(prev + 1, filteredSkills.length - 1))
@@ -3936,28 +3979,38 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           return
         }
         const hasSlashQuery = inputValueRef.current.slice(1).trim().length > 0
-        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && hasSlashQuery)) {
-          // Enter only selects a dropdown item once the user has typed a command
-          // query. With a bare "/", Enter falls through to the normal send path
-          // instead of auto-running the first highlighted item.
+        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+          // With a bare "/", Enter inserts the highlighted item into the input
+          // box (so the user can keep composing) instead of auto-running it or
+          // sending a bare "/" to the agent. Once a query is typed, Enter runs
+          // the highlighted item directly.
           e.preventDefault()
           const idx = Math.min(selectedSkillIndex, filteredSkills.length - 1)
           const selected = filteredSkills[idx] as any
           if (!selected) return
-          // Built-in / Hermes commands: send directly through handleRun
-          if (selected.isHermesCommand || selected.isBuiltinCommand) {
-            setInputSynced(`/${selected.name}`)
-            setTimeout(() => {
-              if (isBusy) {
-                handleStop()
-              } else {
-                handleRun()
-              }
-            }, 0)
-          } else {
+          if (!hasSlashQuery) {
             handleSkillSelect(selected)
+            return
           }
-          return
+            // Built-in commands are instant client-side operations — never gate
+            // them on the run state (otherwise /compact & co. silently no-op
+            // while a task is running). Hermes commands still stop first.
+            if (selected.isBuiltinCommand) {
+              setInputSynced(`/${selected.name}`)
+              setTimeout(() => handleRun(), 0)
+            } else if (selected.isHermesCommand) {
+              setInputSynced(`/${selected.name}`)
+              setTimeout(() => {
+                if (isBusy) {
+                  handleStop()
+                } else {
+                  handleRun()
+                }
+              }, 0)
+            } else {
+              handleSkillSelect(selected)
+            }
+            return
         }
         if (e.key === 'Escape') {
           setInputSynced('')
@@ -3975,7 +4028,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         }
       }
     },
-    [handleRun, handleStop, showSlashSkills, filteredSkills, handleSkillSelect, selectedSkillIndex, setInputSynced]
+    [handleRun, handleStop, showSlashMenu, filteredSkills, handleSkillSelect, selectedSkillIndex, setInputSynced]
   )
 
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
@@ -4350,50 +4403,83 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               </div>
             </div>
 
-            {/* Slash-triggered skill dropdown */}
-            {showSlashSkills && filteredSkills.length > 0 && (
-              <div className={`absolute bottom-full left-0 right-0 mb-2 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 z-50 max-h-[200px] overflow-y-auto mx-3`}>
-                {filteredSkills.map((skill, index) => (
-                  <button
-                    key={skill.id}
-                    type="button"
-                    ref={index === selectedSkillIndex ? (el) => { if (el) el.scrollIntoView({ block: 'nearest' }) } : undefined}
-                    onClick={() => {
-                      if ((skill as any).isHermesCommand || (skill as any).isBuiltinCommand) {
-                        setInputSynced(`/${skill.name}`)
-                        if (!isBusy) {
-                          setTimeout(() => handleRun(), 0)
-                        }
-                      } else {
-                        handleSkillSelect(skill)
-                      }
-                    }}
-                    className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 first:rounded-t-2xl last:rounded-b-2xl ${
-                      index === selectedSkillIndex
-                        ? 'bg-primary/10 text-primary'
-                        : 'hover:bg-muted/30'
-                    }`}
-                  >
-                    {(skill as any).isBuiltinCommand
-                      ? <Circle className="size-3.5 text-amber-500/70 shrink-0" fill="currentColor" />
-                      : <FileText className="size-4 text-foreground/40 shrink-0" />}
-                    <div className="min-w-0 flex-1">
-                      <span className="text-[13px] text-foreground block truncate">{skill.name}</span>
-                      {skill.description && (
-                        <span className="text-[11px] text-muted-foreground block truncate">{skill.description}</span>
-                      )}
-                    </div>
-                    {(skill as any).isBuiltinCommand && (
-                      <span className="text-[10px] text-amber-500/70 shrink-0">CMD</span>
-                    )}
-                    {(skill as any).isHermesCommand && (
-                      <span className="text-[10px] text-muted-foreground/60 shrink-0">Hermes</span>
-                    )}
-                  </button>
-                ))}
+            {/* Unified slash command dropdown */}
+            {showSlashMenu && (
+              <div className="absolute bottom-full left-0 right-0 mb-2 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 z-50 max-h-[300px] overflow-y-auto mx-3">
+                {/* Quick commands section */}
+                {matchedQuickCmds.length > 0 && (
+                  <>
+                    <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-muted-foreground/30 uppercase tracking-wider">快捷指令</p>
+                    {matchedQuickCmds.map((qc) => (
+                      <button
+                        key={qc.cmd}
+                        type="button"
+                        onClick={() => {
+                          setInputSynced(qc.prompt)
+                          inputRef.current?.focus()
+                        }}
+                        className="w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 hover:bg-muted/30"
+                      >
+                        <code className="text-[12px] font-mono text-primary/70 shrink-0">{qc.cmd}</code>
+                        <div className="min-w-0 flex-1">
+                          <span className="text-[13px] text-foreground block">{qc.label}</span>
+                          <span className="text-[11px] text-muted-foreground block truncate">{qc.prompt}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </>
+                )}
+
+                {/* Skills/Commands section */}
+                {filteredSkills.length > 0 && (
+                  <>
+                    {matchedQuickCmds.length > 0 && <div className="border-t border-border/20 mx-3" />}
+                    <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-muted-foreground/30 uppercase tracking-wider">命令</p>
+                    {filteredSkills.map((skill, index) => (
+                      <button
+                        key={skill.id}
+                        type="button"
+                        ref={index === selectedSkillIndex ? (el) => { if (el) el.scrollIntoView({ block: 'nearest' }) } : undefined}
+                        onClick={() => {
+                          if ((skill as any).isBuiltinCommand) {
+                            setInputSynced(`/${skill.name}`)
+                            setTimeout(() => handleRun(), 0)
+                          } else if ((skill as any).isHermesCommand) {
+                            setInputSynced(`/${skill.name}`)
+                            if (!isBusy) {
+                              setTimeout(() => handleRun(), 0)
+                            }
+                          } else {
+                            handleSkillSelect(skill)
+                          }
+                        }}
+                        className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
+                          index === selectedSkillIndex
+                            ? 'bg-primary/10 text-primary'
+                            : 'hover:bg-muted/30'
+                        }`}
+                      >
+                        {(skill as any).isBuiltinCommand
+                          ? <Circle className="size-3.5 text-amber-500/70 shrink-0" fill="currentColor" />
+                          : <FileText className="size-4 text-foreground/40 shrink-0" />}
+                        <div className="min-w-0 flex-1">
+                          <span className="text-[13px] text-foreground block truncate">{skill.name}</span>
+                          {skill.description && (
+                            <span className="text-[11px] text-muted-foreground block truncate">{skill.description}</span>
+                          )}
+                        </div>
+                        {(skill as any).isBuiltinCommand && (
+                          <span className="text-[10px] text-amber-500/70 shrink-0">CMD</span>
+                        )}
+                        {(skill as any).isHermesCommand && (
+                          <span className="text-[10px] text-muted-foreground/60 shrink-0">Hermes</span>
+                        )}
+                      </button>
+                    ))}
+                  </>
+                )}
               </div>
             )}
-
 
             {/* @-triggered file reference dropdown */}
             {showAtRef && filteredAtFiles.length > 0 && (
@@ -4424,30 +4510,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     <div className="min-w-0 flex-1">
                       <span className="text-[13px] text-foreground block truncate">{file.name}</span>
                       <span className="text-[11px] text-muted-foreground block truncate">{file.path}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* Quick commands dropdown */}
-            {showQuickCmds && (
-              <div className="absolute bottom-full left-0 right-0 mb-2 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 z-50 max-h-[200px] overflow-y-auto mx-3">
-                <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-muted-foreground/30 uppercase tracking-wider">快捷指令</p>
-                {matchedQuickCmds.map((qc, idx) => (
-                  <button
-                    key={qc.cmd}
-                    type="button"
-                    onClick={() => {
-                      setInputSynced(qc.prompt)
-                      inputRef.current?.focus()
-                    }}
-                    className="w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 last:rounded-b-2xl hover:bg-muted/30"
-                  >
-                    <code className="text-[12px] font-mono text-primary/70 shrink-0">{qc.cmd}</code>
-                    <div className="min-w-0 flex-1">
-                      <span className="text-[13px] text-foreground block">{qc.label}</span>
-                      <span className="text-[11px] text-muted-foreground block truncate">{qc.prompt}</span>
                     </div>
                   </button>
                 ))}
@@ -4695,6 +4757,30 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* External services (server / VM) — breadcrumb entry */}
+          <div className="relative" ref={externalPopoverRef}>
+            <button
+              type="button"
+              onClick={() => setExternalPopoverOpen((v) => !v)}
+              className={`flex items-center gap-1.5 text-[12px] px-2 py-1 rounded-lg transition-colors ${externalPopoverOpen ? 'text-foreground bg-accent/50' : 'text-foreground/60 hover:text-foreground hover:bg-accent/50'}`}
+              title="连接外部服务（服务器 / 虚拟机）"
+            >
+              <Server className="size-3.5 text-sky-500" />
+              <span>连接外部服务</span>
+            </button>
+            {externalPopoverOpen && (
+              <ExternalServicesPopover onClose={() => setExternalPopoverOpen(false)} />
+            )}
+          </div>
+
+          {/* Connected external services status chip */}
+          {externalServices.some((s) => s.connected) && (
+            <div className="flex items-center gap-1.5 text-[12px] text-foreground/60 px-2 py-1 rounded-lg bg-emerald-500/8">
+              <Circle className="size-2.5 fill-emerald-500 text-emerald-500" />
+              <span>已连接 {externalServices.filter((s) => s.connected).length} 台</span>
             </div>
           )}
           </div>

@@ -29,6 +29,22 @@ export interface BrowserBookmark {
   children?: BrowserBookmark[]
 }
 
+/** A server / virtual machine the user can connect to from the breadcrumb. */
+export interface ExternalService {
+  id: string
+  name: string
+  host: string
+  port: number
+  username?: string
+  /** 'password' | 'key' — how the secret authenticates. */
+  authType?: 'password' | 'key'
+  /** Secret (password or private key). Stored encrypted when safeStorage is available. */
+  secret?: string
+  secretEncrypted?: boolean
+  connected: boolean
+  createdAt: number
+}
+
 /** Per-model usage within a single day. */
 export interface DailyModelUsage {
   totalTokens: number
@@ -148,6 +164,9 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
 
   // MCP Servers
   mcpServers: Record<string, McpServerConfig>
+
+  // External services (servers / virtual machines) connected from the breadcrumb.
+  externalServices: ExternalService[]
 
   // Custom Shortcuts
   customShortcuts: Record<string, { keys: string[], action: string, description: string }>
@@ -273,6 +292,7 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setChatMessageStreaming: (messageId: string, isStreaming: boolean) => void
   deleteMessage: (messageId: string) => void
   clearChat: () => void
+  clearChatInPlace: () => Promise<void>
   clearChatAndPersist: () => Promise<void>
   setChatLoading: (loading: boolean) => void
   forkConversation: (messageId: string) => Promise<string | null>
@@ -338,6 +358,12 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   removeMcpServer: (name: string) => void
   updateMcpServer: (name: string, config: McpServerConfig) => void
   toggleMcpServer: (name: string) => void
+
+  // Actions - External Services (server / VM)
+  addExternalService: (svc: Omit<ExternalService, 'id' | 'createdAt' | 'connected'>) => Promise<void>
+  updateExternalService: (id: string, patch: Partial<ExternalService>) => Promise<void>
+  removeExternalService: (id: string) => void
+  setExternalServiceConnected: (id: string, connected: boolean) => void
 
   // Actions - Artifacts
   // (removed — unused)
@@ -830,6 +856,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   customShortcuts: { ...DEFAULT_SHORTCUTS },
   customizedShortcutIds: new Set<string>(),
 
+  // External services (servers / VMs)
+  externalServices: [],
+
   // Actions - Files
   setFiles: (files) => set({ files }),
   syncFilesFromDisk: async () => {
@@ -1113,6 +1142,46 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // legacy 'chatMessages' store would not affect session data, and doing
       // so inside clearChat was causing a race where flushSessionPersist saved
       // messages only for clearChat to immediately discard them.
+    }
+  },
+  clearChatInPlace: async () => {
+    // Like clearChat, but KEEPS currentSessionId so the UI stays on the same
+    // conversation instead of jumping to a blank new session. Used by the
+    // /clear /reset /compact slash commands. The backend session is still
+    // reset so the model forgets history; the caller is responsible for
+    // deleting the sessionMap entry so the next prompt opens a fresh session.
+    if (sessionPersistTimer) clearTimeout(sessionPersistTimer)
+    const sessionId = get().currentSessionId
+    const snapshot = get()
+    set({
+      chatMessages: [],
+      contextUsage: {},
+    })
+    import('@/stores/hermes-store').then(({ useHermesStore }) => {
+      useHermesStore.getState().setHermesSessionId(null)
+    })
+    // Persist empty state to IndexedDB so cleared messages don't reappear
+    // on next session load.
+    if (sessionId) {
+      try {
+        const { persistence } = await import('@/lib/persist')
+        await persistence.saveSession({
+          id: sessionId,
+          label: '新对话',
+          chatMessages: [],
+          goal: snapshot.goal,
+          memories: snapshot.memories,
+          tasks: snapshot.tasks,
+          notes: snapshot.notes,
+          checkpoints: snapshot.checkpoints,
+          files: snapshot.files as any,
+          openTabs: snapshot.openTabs as any,
+          workDir: snapshot.activeSessionWorkDir,
+        })
+        useHelixStore.setState((st) => ({ sessionSaveVersion: st.sessionSaveVersion + 1 }))
+      } catch (e) {
+        logError('Failed to persist cleared session:', e)
+      }
     }
   },
   clearChatAndPersist: async () => {
@@ -1923,24 +1992,31 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         updatedAt: Date.now(),
       }],
     }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveScheduledTasks(get().scheduledTasks))
     return id
   },
-  updateScheduledTask: (taskId, updates) =>
+  updateScheduledTask: (taskId, updates) => {
     set((state) => ({
       scheduledTasks: state.scheduledTasks.map(t =>
         t.id === taskId ? { ...t, ...updates, updatedAt: Date.now() } : t
       ),
-    })),
-  removeScheduledTask: (taskId) =>
+    }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveScheduledTasks(get().scheduledTasks))
+  },
+  removeScheduledTask: (taskId) => {
     set((state) => ({
       scheduledTasks: state.scheduledTasks.filter(t => t.id !== taskId),
-    })),
-  toggleScheduledTask: (taskId) =>
+    }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveScheduledTasks(get().scheduledTasks))
+  },
+  toggleScheduledTask: (taskId) => {
     set((state) => ({
       scheduledTasks: state.scheduledTasks.map(t =>
         t.id === taskId ? { ...t, enabled: !t.enabled, updatedAt: Date.now() } : t
       ),
-    })),
+    }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveScheduledTasks(get().scheduledTasks))
+  },
   toggleScheduledTasksPanel: () =>
     set((s) => ({ showScheduledTasksPanel: !s.showScheduledTasksPanel })),
 
@@ -1968,6 +2044,65 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         },
       },
     })),
+
+  // Actions - External Services (server / VM)
+  addExternalService: async (svc) => {
+    // Encrypt the secret at rest when safeStorage is available (Electron only).
+    let secret = svc.secret
+    let secretEncrypted = false
+    if (secret && typeof window !== 'undefined' && window.electron?.secure) {
+      try {
+        const available = await window.electron.secure.available()
+        if (available) {
+          secret = (await window.electron.secure.encrypt(secret)) ?? undefined
+          secretEncrypted = true
+        }
+      } catch { /* fall back to plaintext */ }
+    }
+    const entry: ExternalService = {
+      ...svc,
+      secret,
+      secretEncrypted,
+      id: `ext_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      connected: false,
+      createdAt: Date.now(),
+    }
+    set((state) => ({ externalServices: [...state.externalServices, entry] }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('externalServices', get().externalServices))
+  },
+  updateExternalService: async (id, patch) => {
+    let secret = patch.secret
+    let secretEncrypted = patch.secretEncrypted
+    if (secret !== undefined && typeof window !== 'undefined' && window.electron?.secure) {
+      try {
+        const available = await window.electron.secure.available()
+        if (available) {
+          secret = (await window.electron.secure.encrypt(secret)) ?? undefined
+          secretEncrypted = true
+        }
+      } catch { /* fall back to plaintext */ }
+    }
+    set((state) => ({
+      externalServices: state.externalServices.map((s) =>
+        s.id === id
+          ? { ...s, ...patch, ...(secret !== undefined ? { secret, secretEncrypted } : {}) }
+          : s
+      ),
+    }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('externalServices', get().externalServices))
+  },
+  removeExternalService: (id) => {
+    set((state) => ({ externalServices: state.externalServices.filter((s) => s.id !== id) }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('externalServices', get().externalServices))
+  },
+  setExternalServiceConnected: (id, connected) => {
+    set((state) => ({
+      externalServices: state.externalServices.map((s) =>
+        s.id === id ? { ...s, connected } : s
+      ),
+    }))
+    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('externalServices', get().externalServices))
+  },
 
   // Actions - Webhooks/Artifacts — removed (unused features)
 
@@ -2093,6 +2228,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('dailyUsage', state.dailyUsage),
         persistence.saveScheduledTasks(state.scheduledTasks),
         persistence.saveSetting('mcpServers', state.mcpServers),
+        persistence.saveSetting('externalServices', state.externalServices),
         persistence.saveSetting('customizedShortcutIds', Array.from(state.customizedShortcutIds)),
         persistence.saveSetting('agentMaxIterations', state.agentMaxIterations),
         persistence.saveSetting('autoCompactContext', state.autoCompactContext),
@@ -2137,7 +2273,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -2194,6 +2330,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<string | null>('selectedWorkDir'),
         persistence.loadSetting<boolean>('hasOnboarded'),
         persistence.loadSetting<{ size: number; used: number } | null>('contextUsage'),
+        persistence.loadSetting<ExternalService[]>('externalServices'),
       ])
 
       // Do NOT restore the latest session's chatMessages on startup.
@@ -2623,6 +2760,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           ...fileMcpConfig,
           ...(mcpServers || {}),
         },
+        externalServices: (externalServices || []).filter(
+          (s) => s && typeof s.id === 'string' && typeof s.host === 'string'
+        ),
         customShortcuts: (() => {
           const customizedIds = new Set(customizedIdsArr || [])
           const defaults = { ...DEFAULT_SHORTCUTS }

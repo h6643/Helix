@@ -32,6 +32,7 @@ const { isBadConfig, APIHUB_DEFAULT } = securityModule
 const registerFsHandlers = require('./ipc/fs')
 const registerWindowHandlers = require('./ipc/window')
 const registerEmailHandlers = require('./ipc/email')
+const registerExternalHandlers = require('./ipc/external')
 const hooksModule = require('./ipc/hooks')
 const configModule = require('./lib/config')
 const {
@@ -1944,6 +1945,11 @@ safeHandle('hermes:getSkillsDir', async () => {
   return localApp ? path.join(localApp, 'hermes', 'skills') : null
 })
 
+safeHandle('hermes:getPluginsDir', async () => {
+  const localApp = process.env.LOCALAPPDATA || ''
+  return localApp ? path.join(localApp, 'hermes', 'plugins') : null
+})
+
 safeHandle('hermes:readDir', async (event, dirPath) => {
   try {
     const entries = await fsPromises.readdir(dirPath, { withFileTypes: true })
@@ -2126,6 +2132,9 @@ const windowModule = registerWindowHandlers(() => mainWindow, PORT, appIcon)
 
 // ── Email (IMAP inbox / SMTP send / notifications) ─────────────────────────
 registerEmailHandlers()
+
+// ── External services (server / VM TCP reachability probe) ─────────────────
+registerExternalHandlers()
 
 // Shell operations (not extracted — small and standalone)
 safeHandle('shell:open', async (event, target) => {

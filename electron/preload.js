@@ -123,6 +123,7 @@ contextBridge.exposeInMainWorld('electron', {
   // ── Hermes Skills (bypasses working directory restriction) ─────────────
   hermesSkills: {
     getDir: () => ipcRenderer.invoke('hermes:getSkillsDir'),
+    getPluginsDir: () => ipcRenderer.invoke('hermes:getPluginsDir'),
     readdir: (dirPath) => ipcRenderer.invoke('hermes:readDir', dirPath),
     readFile: (filePath) => ipcRenderer.invoke('hermes:readFile', filePath),
     deleteDir: (dirPath) => ipcRenderer.invoke('hermes:deleteDir', dirPath),
@@ -175,6 +176,13 @@ contextBridge.exposeInMainWorld('electron', {
     // array placed AFTER the subcommand; `board` (optional) becomes the
     // `--board <slug>` prefix BEFORE the subcommand; `json` appends `--json`.
     invoke: (verb, args, json, board) => ipcRenderer.invoke('kanban:invoke', { verb, args, json, board }),
+  },
+
+  // ── External services (server / VM TCP reachability probe) ────────────
+  external: {
+    // Verify a host:port is reachable (connectivity check only).
+    testConnection: (host, port, timeoutMs) =>
+      ipcRenderer.invoke('external:testConnection', host, port, timeoutMs),
   },
 
   // ── Hooks (Codex-compatible lifecycle hooks, run in the main process) ──
