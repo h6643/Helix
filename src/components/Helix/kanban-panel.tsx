@@ -592,7 +592,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
       </div>
 
       {/* Columns */}
-      <div className="flex-1 min-h-0 flex gap-2 overflow-x-auto p-3">
+      <div className="flex-1 min-h-0 flex gap-2 overflow-x-auto py-3 pl-6 pr-3">
         {error ? (
           <div className="flex flex-col items-center justify-center gap-2 py-16 text-red-500 mx-auto">
             <AlertCircle className="size-5" />
