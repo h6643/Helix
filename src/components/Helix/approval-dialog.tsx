@@ -289,12 +289,12 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
   }
 
   return (
-    <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-2 max-w-2xl w-[min(42rem,90vw)]">
-      <div className="flex flex-col gap-2 px-3 py-2.5 rounded-lg bg-sky-500/10 border border-sky-500/30 text-xs shadow-lg">
+    <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-2 w-[min(32rem,92vw)]">
+      <div className="flex flex-col gap-2.5 px-3.5 py-3 rounded-xl bg-popover border border-border/60 text-xs shadow-2xl">
         {/* 问题 */}
         <div className="flex items-start gap-2">
           <AlertTriangle className="size-3.5 text-sky-500 mt-0.5 shrink-0" />
-          <span className="text-foreground/85 whitespace-pre-wrap break-words leading-relaxed">
+          <span className="text-foreground/90 whitespace-pre-wrap break-words leading-relaxed">
             {request.question || '模型需要你的选择'}
           </span>
         </div>
@@ -308,7 +308,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
                 size="sm"
                 disabled={submitting}
                 onClick={() => submit(c)}
-                className="h-6 px-2.5 text-[11px] border-sky-500/40 hover:bg-sky-500/15"
+                className="h-6 px-2.5 text-[11px] border-border/60 hover:bg-accent/60"
               >
                 {submitting ? <Loader2 className="size-3 animate-spin" /> : null}
                 {c}
@@ -324,7 +324,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
             onKeyDown={onKeyDown}
             disabled={submitting}
             placeholder={request.choices?.length ? '或输入其他回答…' : '输入回答…'}
-            className="flex-1 h-7 px-2 rounded-md bg-background/60 border border-border/50 text-[12px] outline-none focus:border-sky-500/50 disabled:opacity-50"
+            className="flex-1 h-7 px-2 rounded-md bg-background/60 border border-border/50 text-[12px] text-foreground outline-none focus:border-sky-500/50 disabled:opacity-50"
           />
           <Button
             variant="outline"
