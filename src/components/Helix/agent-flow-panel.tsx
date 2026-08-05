@@ -2359,13 +2359,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // streaming content survives switching away and back. Throttled to one
     // store write per animation frame (same cost model as the old shared sync).
     let draftSyncPending = false
+    let runCompleted = false  // Guard: once finally sets this, stop writing isAgentRunning=true
     const syncDraft = () => {
       if (draftSyncPending) return
       draftSyncPending = true
       requestAnimationFrame(() => {
         draftSyncPending = false
+        // Only assert isAgentRunning while the run is still live.
+        // After the finally block fires, a straggler rAF callback must NOT
+        // flip isAgentRunning back to true — that causes the thinking timer
+        // to tick forever (the rAF race condition).
         setStreamingDraft(activeSessionId ?? '', {
-          isAgentRunning: true,
+          ...(runCompleted ? {} : { isAgentRunning: true }),
           responseBlocks: responseBlocksRef.current,
           steps: stepsRef.current,
           streamThinking: streamThinkingRef.current,
@@ -3832,6 +3837,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         forceDoneTimerRef.current = null
       }
       if (idleTimerRef) { clearTimeout(idleTimerRef); idleTimerRef = null }  // 清理空闲检测定时器
+      // Seal the run: prevent any straggler rAF syncDraft callback from
+      // re-setting isAgentRunning=true after we mark it false below.
+      runCompleted = true
       const sid = activeSessionId
       if (sid) {
         setStreamingDraft(sid, { isAgentRunning: false })
