@@ -3807,7 +3807,10 @@ def _load_enabled_toolsets() -> list[str] | None:
                 # the focus-mode coding posture returns before the fallback path
                 # that normally adds it — without this the desktop loses the
                 # project tools exactly when sitting in a repo (see below).
-                return sorted({*selection, "project"})
+                result = sorted({*selection, "project"})
+                if _resolve_session_platform() == "desktop":
+                    result = [t for t in result if t != "cronjob"]
+                return result
         except Exception:
             pass
 
@@ -3842,9 +3845,11 @@ def _load_enabled_toolsets() -> list[str] | None:
                     file=sys.stderr,
                     flush=True,
                 )
-            return None
+            return None  # None = "use all toolsets"; desktop cronjob filter applied downstream
 
         if not unresolved:
+            if _resolve_session_platform() == "desktop":
+                built_in = [t for t in built_in if t != "cronjob"]
             return built_in
 
         mcp_names: set[str] = set()
@@ -3895,6 +3900,9 @@ def _load_enabled_toolsets() -> list[str] | None:
             )
 
         if valid:
+            # Strip cronjob on desktop (same rationale as the config-based path)
+            if _resolve_session_platform() == "desktop":
+                valid = [t for t in valid if t != "cronjob"]
             return valid
 
         fallback_notice = (
@@ -3924,7 +3932,15 @@ def _load_enabled_toolsets() -> list[str] | None:
         # surface them. This resolver runs ONLY in the desktop/TUI gateway, so
         # folding in the `project` toolset here is the gate that exposes them on
         # exactly the surface that can follow a project move.
-        return sorted(enabled | {"project"})
+        result = sorted(enabled | {"project"})
+        # The desktop chat panel has its own frontend-driven scheduled-task
+        # creation flow with a user-confirmation dialog.  Leaving the backend
+        # cronjob tool enabled lets the model bypass that confirmation by
+        # calling cronjob(action='create') directly.  Strip it so scheduled
+        # tasks are ONLY created through the frontend confirm dialog.
+        if _resolve_session_platform() == "desktop":
+            result = [t for t in result if t != "cronjob"]
+        return result
     except Exception:
         if fallback_notice is not None:
             print(

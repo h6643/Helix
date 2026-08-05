@@ -33,6 +33,7 @@ const registerFsHandlers = require('./ipc/fs')
 const registerWindowHandlers = require('./ipc/window')
 const registerEmailHandlers = require('./ipc/email')
 const registerExternalHandlers = require('./ipc/external')
+const registerSshHandlers = require('./ipc/ssh')
 const hooksModule = require('./ipc/hooks')
 const configModule = require('./lib/config')
 const {
@@ -2136,6 +2137,9 @@ registerEmailHandlers()
 // ── External services (server / VM TCP reachability probe) ─────────────────
 registerExternalHandlers()
 
+// ── SSH sessions (real remote connections for external services) ───────────
+const sshModule = registerSshHandlers(() => mainWindow)
+
 // Shell operations (not extracted — small and standalone)
 safeHandle('shell:open', async (event, target) => {
   await shell.openExternal(target)
@@ -2352,6 +2356,7 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   appIsQuitting = true
   terminalModule.kill()
+  try { sshModule && sshModule.disconnect && sshModule.disconnect() } catch { /* ignore */ }
   const teardown = []
   if (hermesProcess) {
     const proc = hermesProcess

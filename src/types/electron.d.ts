@@ -97,8 +97,6 @@ export interface ElectronAPI {
     listMemories: () => Promise<{ memory: string[]; user: string[]; manual: string[] }>
     addMemoryEntry: (target: 'memory' | 'user', text: string) => Promise<{ ok: boolean; entries?: string[]; error?: string }>
     removeMemoryEntry: (target: 'memory' | 'user', text: string) => Promise<{ ok: boolean; entries?: string[] }>
-    // Switch gateway between local (spawned runtime) and remote (external WS URL).
-    setGatewayMode: (params: { mode: 'local' | 'remote'; url?: string }) => Promise<{ ok: boolean; mode?: 'local' | 'remote'; info?: any; error?: string }>
   }
 
   profile: {
@@ -136,6 +134,20 @@ export interface ElectronAPI {
   // ── External services (server / VM TCP reachability probe) ──
   external: {
     testConnection: (host: string, port: number | string, timeoutMs?: number) => Promise<{ ok: boolean; error?: string; latencyMs?: number }>
+    // Real SSH session management (ssh2 in main process; secret decrypted in main).
+    sshConnect: (params: {
+      host: string
+      port: number | string
+      username: string
+      authType?: 'password' | 'key'
+      secretEncrypted?: boolean
+      secret: string
+    }) => Promise<{ ok: boolean; error?: string; banner?: string }>
+    sshExec: (params: { command: string; cwd?: string }) => Promise<{ ok: boolean; stdout?: string; stderr?: string; code?: number; error?: string }>
+    sshStatus: () => Promise<{ connected: boolean; host?: string; username?: string }>
+    sshDisconnect: () => Promise<{ ok: boolean }>
+    onSshConnected: (cb: (data: { host: string; username: string }) => void) => () => void
+    onSshList: (cb: (data: string) => void) => () => void
   }
   isElectron: boolean
 

@@ -183,7 +183,27 @@ export function ContextUsageIndicator() {
             // Cooldown: don't trigger again for 60 seconds
             setTimeout(() => { autoCompactCooldownRef.current = false }, 60_000)
             try {
-              await hermesApi()?.send('compaction.compact', { session_id: sessionId })
+              const result = await hermesApi()?.send('session.compress', { session_id: sessionId })
+              if (result && typeof result === 'object') {
+                const r = result as any
+                if (r.status === 'compressed' && Array.isArray(r.messages)) {
+                  // Update frontend messages with compressed messages
+                  const currentSessionId = useHelixStore.getState().currentSessionId
+                  if (currentSessionId === sessionId) {
+                    const msgs = r.messages.map((m: any) => ({
+                      id: m.id || `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                      role: m.role as 'user' | 'assistant' | 'system',
+                      content: m.content || '',
+                      images: m.images,
+                      timestamp: m.timestamp || Date.now(),
+                      reasoning: m.reasoning,
+                      steps: m.steps,
+                      sessionId: currentSessionId,
+                    }))
+                    useHelixStore.setState({ chatMessages: msgs })
+                  }
+                }
+              }
               debug('[ContextUsage] auto-compaction triggered at', data.context_percent.toFixed(1), '%')
             } catch { /* backend may not support */ }
           }

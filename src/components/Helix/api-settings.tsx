@@ -4,6 +4,7 @@ import {
   Settings, Sun, Plug, Archive, ChevronLeft, Search,
   X,
   Globe, Keyboard, GitBranch, Zap, Brain, Bot, Activity, Workflow,
+  MessageSquare,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
@@ -135,7 +136,7 @@ interface SettingsProps {
   setSidebarCollapsed: (v: boolean | ((prev: boolean) => boolean)) => void
 }
 
-type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'browser' | 'git' | 'skills' | 'hook' | 'usage' | 'help' | 'agents' | 'learning'
+type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'browser' | 'git' | 'skills' | 'hook' | 'usage' | 'help' | 'agents' | 'learning' | 'channels'
 
 interface NavItem {
   id: SettingsPage
@@ -167,9 +168,10 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'agents', label: 'Subagent', icon: Bot },
     ],
   },
-  {
+   {
     title: '集成',
     items: [
+      { id: 'channels', label: 'Channels', icon: MessageSquare },
       { id: 'git', label: 'Git', icon: GitBranch },
       { id: 'hook', label: 'Hooks', icon: Workflow },
       { id: 'browser', label: '浏览器', icon: Globe },
@@ -196,6 +198,102 @@ const Toggle = ({ enabled, onToggle }: { enabled: boolean; onToggle: () => void 
     }`} />
   </button>
 )
+
+// ─── Channels settings ──────────────────────────────────────────────────────
+interface ChannelConfig {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  config: Record<string, string>
+}
+
+const DEFAULT_CHANNELS: ChannelConfig[] = [
+  { id: 'dingtalk', name: 'DingTalk', description: 'Connect Hermes to DingTalk groups (钉钉).', enabled: false, config: { app_key: '', app_secret: '' } },
+  { id: 'feishu', name: 'Feishu / Lark', description: 'Use Hermes inside Feishu / Lark.', enabled: false, config: { app_id: '', app_secret: '' } },
+  { id: 'wecom_group', name: 'WeCom (group bot)', description: 'Send-only WeCom group bot via webhook.', enabled: false, config: {} },
+  { id: 'wecom', name: 'WeCom (app)', description: 'Two-way WeCom integration via callback app.', enabled: false, config: { corp_id: '', agent_id: '', secret: '' } },
+  { id: 'weixin', name: 'Weixin / WeChat (Personal)', description: "Connect a personal WeChat account through Tencent's iLink Bot API.", enabled: false, config: {} },
+  { id: 'qqbot', name: 'QQ Bot', description: 'Connect Hermes to a QQ Bot from the QQ Open Platform.', enabled: false, config: {} },
+  { id: 'yuanbao', name: 'Yuanbao (元宝)', description: 'Connect Hermes to Tencent Yuanbao.', enabled: false, config: {} },
+  { id: 'homeassistant', name: 'Home Assistant', description: 'Control your smart home from Hermes via Home Assistant.', enabled: false, config: {} },
+  { id: 'api_server', name: 'API server', description: 'Expose Hermes as an OpenAI-compatible HTTP API for tools like Open WebUI.', enabled: false, config: {} },
+  { id: 'webhooks', name: 'Webhooks', description: 'Receive events from GitHub, GitLab, and other webhook sources.', enabled: false, config: {} },
+  { id: 'a2a', name: 'A2A', description: 'No extra packages needed (stdlib only)', enabled: false, config: {} },
+  { id: 'ntfy', name: 'ntfy', description: 'Chat with Hermes over ntfy push topics (ntfy.sh or self-hosted).', enabled: false, config: {} },
+]
+
+function ChannelsSettings() {
+  const [channels, setChannels] = useState<ChannelConfig[]>(DEFAULT_CHANNELS)
+  const [expandedChannel, setExpandedChannel] = useState<string | null>(null)
+
+  const handleToggle = (id: string) => {
+    setChannels(prev => prev.map(ch =>
+      ch.id === id ? { ...ch, enabled: !ch.enabled } : ch
+    ))
+  }
+
+  const handleConfigChange = (id: string, key: string, value: string) => {
+    setChannels(prev => prev.map(ch =>
+      ch.id === id ? { ...ch, config: { ...ch.config, [key]: value } } : ch
+    ))
+  }
+
+  return (
+    <div className="max-w-3xl space-y-4">
+      <SectionTitle>Channels</SectionTitle>
+      <p className="text-sm text-muted-foreground/70">
+      </p>
+      <div className="space-y-3">
+        {channels.map(channel => (
+          <div key={channel.id} className="border border-border/50 rounded-xl overflow-hidden">
+            <div className="flex items-center justify-between p-4 hover:bg-accent/30 transition-colors">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-foreground">{channel.name}</p>
+                <p className="text-xs text-muted-foreground/60 mt-0.5">{channel.description}</p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 ml-4">
+                <button
+                  className="px-3 py-1.5 text-xs font-medium text-muted-foreground/60 hover:text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
+                >
+                  Test
+                </button>
+                <button
+                  onClick={() => setExpandedChannel(expandedChannel === channel.id ? null : channel.id)}
+                  className="px-3 py-1.5 text-xs font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
+                >
+                  Configure
+                </button>
+                <Toggle enabled={channel.enabled} onToggle={() => handleToggle(channel.id)} />
+              </div>
+            </div>
+            {expandedChannel === channel.id && (
+              <div className="px-4 pb-4 pt-2 border-t border-border/30 bg-muted/20 space-y-3">
+                {Object.entries(channel.config).map(([key, value]) => (
+                  <div key={key}>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">
+                      {key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                    </label>
+                    <input
+                      type={key.includes('secret') || key.includes('token') || key.includes('password') ? 'password' : 'text'}
+                      value={value}
+                      onChange={(e) => handleConfigChange(channel.id, key, e.target.value)}
+                      placeholder={`Enter ${key.replace(/_/g, ' ')}`}
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                    />
+                  </div>
+                ))}
+                {Object.keys(channel.config).length === 0 && (
+                  <p className="text-xs text-muted-foreground/60">No configuration required</p>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 // ─── Main component ──────────────────────────────────────────────────────────
 export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setSidebarWidth, saveSidebarWidth, showSidebar, setShowSidebar, sidebarCollapsed, setSidebarCollapsed }: SettingsProps) {
@@ -1384,6 +1482,8 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             <LearningView />
           </div>
         )
+      case 'channels':
+        return <ChannelsSettings />
     }
   }
 

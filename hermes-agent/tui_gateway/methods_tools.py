@@ -1785,7 +1785,7 @@ def _(rid, params: dict) -> dict:
 
 @method("plugins.manage")
 def _(rid, params: dict) -> dict:
-    """List installed plugins with activation state, or toggle one on/off.
+    """List installed plugins with activation state, toggle one on/off, or delete one.
 
     Backs the TUI Plugins Hub. Uses the same disk-discovery + enable/disable
     primitives as ``hermes plugins`` / the dashboard, so the three surfaces
@@ -1796,6 +1796,7 @@ def _(rid, params: dict) -> dict:
                        status}], "user_count": N, "bundled_count": M}
       - ``toggle`` → flip ``name`` based on ``enable`` (bool). Returns the
                        refreshed row plus {"ok", "unchanged"}.
+      - ``delete`` → delete plugin directory. Returns {"ok", "name"}.
     """
     action = params.get("action", "list")
     try:
@@ -1856,6 +1857,17 @@ def _(rid, params: dict) -> dict:
                     "plugin": row,
                 },
             )
+
+        if action == "delete":
+            from hermes_cli.plugins_cmd import dashboard_remove_user_plugin
+
+            name = (params.get("name") or "").strip()
+            if not name:
+                return _err(rid, 4019, "plugins.delete requires a 'name'")
+            result = dashboard_remove_user_plugin(name)
+            if not result.get("ok"):
+                return _err(rid, 5026, result.get("error") or "delete failed")
+            return _ok(rid, {"ok": True, "name": name})
 
         return _err(rid, 4017, f"unknown plugins action: {action}")
     except Exception as e:

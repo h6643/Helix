@@ -1,12 +1,10 @@
 'use client'
 
 import {
-  Puzzle,
   ToggleLeft,
   ToggleRight,
   Loader2,
   X,
-  Server,
   RefreshCw,
 } from 'lucide-react'
 import React, { useState, useEffect, useCallback } from 'react'
@@ -70,7 +68,6 @@ export function PluginManager({ onClose }: PluginManagerProps) {
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 shrink-0">
         <div className="flex items-center gap-2">
-          <Puzzle className="size-5 text-primary" />
           <h2 className="text-lg font-semibold">插件管理</h2>
           <span className="text-xs text-muted-foreground/50 font-mono ml-1">
             {backendPlugins.length} 个 Hermes 插件
@@ -121,9 +118,6 @@ export function PluginManager({ onClose }: PluginManagerProps) {
               <div key={`${p.source}:${p.name}:${i}`}
                 className="flex items-start gap-3 p-3 rounded-xl border border-border/50 bg-card/50 hover:bg-accent/30 transition-colors"
               >
-                <div className="size-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-                  <Server className="size-5 text-primary" />
-                </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-foreground">{p.name}</span>

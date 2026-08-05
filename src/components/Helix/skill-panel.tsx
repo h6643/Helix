@@ -2,26 +2,17 @@
 
 import {
   X,
-  Puzzle,
-  BookOpen,
-  ImageIcon,
-  Code,
-  Wrench,
-  Terminal,
-  MessageSquare,
-  Sparkles,
   Search,
-  Check,
-  Plus,
   Trash2,
-  RotateCcw,
-  Settings,
-  Zap,
+  ToggleLeft,
+  ToggleRight,
+  Plus,
 } from 'lucide-react'
 import React, { useState, useMemo, useEffect } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useHermes } from '@/hooks/use-hermes'
-import { useHelixStore } from '@/stores/helix-store'
+import { hermesApi, electronFS } from '@/lib/electron-bridge'
+import type { BackendPlugin } from '@/stores/helix-types'
 
 interface SkillPanelProps {
   onClose: () => void
@@ -38,33 +29,38 @@ interface HelixSkill {
 
 type TabKey = 'plugins' | 'skills'
 
-const iconSet = [
-  { Icon: Puzzle, color: 'bg-blue-500', iconColor: 'text-white' },
-  { Icon: Sparkles, color: 'bg-amber-500', iconColor: 'text-white' },
-  { Icon: BookOpen, color: 'bg-rose-500', iconColor: 'text-white' },
-  { Icon: ImageIcon, color: 'bg-cyan-500', iconColor: 'text-white' },
-  { Icon: Code, color: 'bg-emerald-500', iconColor: 'text-white' },
-  { Icon: Wrench, color: 'bg-blue-400', iconColor: 'text-white' },
-  { Icon: Terminal, color: 'bg-slate-600', iconColor: 'text-white' },
-  { Icon: MessageSquare, color: 'bg-blue-500', iconColor: 'text-white' },
-  { Icon: Zap, color: 'bg-pink-500', iconColor: 'text-white' },
-]
-
-function getCommandStyle(name: string) {
-  let hash = 0
-  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash)
-  return iconSet[Math.abs(hash) % iconSet.length]
-}
-
 export function SkillPanel({ onClose }: SkillPanelProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('plugins')
   const [searchQuery, setSearchQuery] = useState('')
   const { dispatchCommand } = useHermes()
-  const availableCommands = useHelixStore(s => s.availableCommands)
+
+  // Plugins state
+  const [plugins, setPlugins] = useState<BackendPlugin[]>([])
+  const [pluginsLoading, setPluginsLoading] = useState(false)
 
   // Skills state
   const [skills, setSkills] = useState<HelixSkill[]>([])
   const [skillsLoading, setSkillsLoading] = useState(false)
+
+  const loadPlugins = async () => {
+    setPluginsLoading(true)
+    try {
+      const api = hermesApi()
+      if (!api) return
+      const res = await api.send('plugins.manage', { action: 'list' }) as any
+      if (Array.isArray(res?.plugins)) {
+        const seen = new Set<string>()
+        setPlugins(res.plugins.filter((p: BackendPlugin) => {
+          if (seen.has(p.name)) return false
+          seen.add(p.name)
+          return true
+        }))
+      }
+    } catch (e) {
+      console.error('loadPlugins error:', e)
+    }
+    setPluginsLoading(false)
+  }
 
   const loadSkills = async () => {
     setSkillsLoading(true)
@@ -77,7 +73,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
     setSkillsLoading(false)
   }
 
-  useEffect(() => { loadSkills() }, [])
+  useEffect(() => { loadPlugins(); loadSkills() }, [])
 
   // Refresh skills when window regains focus
   useEffect(() => {
@@ -98,6 +94,31 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
     setSkillsLoading(false)
   }
 
+  const handleTogglePlugin = async (plugin: BackendPlugin) => {
+    const enable = plugin.status !== 'enabled'
+    try {
+      const api = hermesApi()
+      if (!api) return
+      await api.send('plugins.manage', { action: 'toggle', name: plugin.name, enable })
+      await loadPlugins()
+    } catch (e) {
+      console.error('togglePlugin error:', e)
+    }
+  }
+
+  const handleDeletePlugin = async (plugin: BackendPlugin) => {
+    if (plugin.source === 'bundled') return
+    try {
+      const pluginsDir = await window.electron?.hermesSkills.getPluginsDir()
+      if (!pluginsDir) return
+      const pluginPath = `${pluginsDir}/${plugin.name}`
+      await electronFS.deleteFile(pluginPath)
+      await loadPlugins()
+    } catch (e) {
+      console.error('deletePlugin error:', e)
+    }
+  }
+
   const filteredSkills = useMemo(() => {
     if (activeTab !== 'skills') return []
     const q = searchQuery.trim().toLowerCase()
@@ -110,19 +131,19 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
     })
   }, [activeTab, skills, searchQuery])
 
-  const filteredCommands = useMemo(() => {
+  const filteredPlugins = useMemo(() => {
     if (activeTab !== 'plugins') return []
     const q = searchQuery.trim().toLowerCase()
-    return availableCommands.filter(cmd => {
+    return plugins.filter(p => {
       if (!q) return true
       return (
-        cmd.name.toLowerCase().includes(q) ||
-        (cmd.description || '').toLowerCase().includes(q)
+        p.name.toLowerCase().includes(q) ||
+        (p.description || '').toLowerCase().includes(q)
       )
     })
-  }, [activeTab, availableCommands, searchQuery])
+  }, [activeTab, plugins, searchQuery])
 
-  const isEmpty = activeTab === 'plugins' ? filteredCommands.length === 0 : filteredSkills.length === 0
+  const isEmpty = activeTab === 'plugins' ? filteredPlugins.length === 0 : filteredSkills.length === 0
 
   return (
     <div className="h-full w-full flex flex-col bg-background">
@@ -195,41 +216,63 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
           {/* Section header */}
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-foreground">
-              {activeTab === 'plugins' ? '已安装' : `已安装 (${filteredSkills.length})`}
+              {activeTab === 'plugins' ? `已安装 (${filteredPlugins.length})` : `已安装 (${filteredSkills.length})`}
             </h2>
-            {activeTab === 'plugins' && (
-              <button
-                onClick={() => { useHelixStore.getState().togglePluginManager() }}
-                className="text-[11px] text-primary/60 hover:text-primary transition-colors"
-              >
-                管理插件
-              </button>
-            )}
           </div>
 
           {/* Grid */}
           {!isEmpty ? (activeTab === 'plugins' ? (
-            <div className="grid grid-cols-2 gap-3">
-              {filteredCommands.map(cmd => {
-                const { Icon, color, iconColor } = getCommandStyle(cmd.name)
-                return (
-                  <button
-                    key={cmd.name}
-                    onClick={() => dispatchCommand(`/${cmd.name}`)}
-                    className="flex items-center gap-3 p-3 text-left rounded-xl border border-border/50 bg-card/50 hover:bg-accent/30 hover:border-border transition-colors group"
+            <div className="space-y-2">
+              {pluginsLoading && plugins.length === 0 && (
+                <p className="text-sm text-muted-foreground/60 text-center py-8">加载中...</p>
+              )}
+              {filteredPlugins.map(plugin => (
+                  <div
+                    key={plugin.name}
+                    className="flex items-center gap-3 p-3 rounded-xl border border-border/50 bg-card/50 hover:bg-accent/30 hover:border-border transition-colors"
                   >
-                    <div className={`size-10 rounded-lg ${color} flex items-center justify-center shrink-0`}>
-                      <Icon className={`size-5 ${iconColor}`} />
-                    </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">/{cmd.name}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-foreground truncate">{plugin.name}</p>
+                        {plugin.source === 'bundled' && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">内置</span>
+                        )}
+                      </div>
+                      {plugin.description && (
+                        <p className="text-xs text-muted-foreground/70 truncate mt-0.5">{plugin.description}</p>
+                      )}
+                      {plugin.version && (
+                        <p className="text-[10px] text-muted-foreground/50 mt-0.5">v{plugin.version}</p>
+                      )}
                     </div>
-                    <div className="size-6 rounded-full border border-border/50 flex items-center justify-center text-emerald-500 bg-emerald-500/10 shrink-0">
-                      <Check className="size-3.5" />
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => handleTogglePlugin(plugin)}
+                        className={`p-1.5 rounded-lg transition-colors ${
+                          plugin.status === 'enabled'
+                            ? 'text-emerald-500 hover:bg-emerald-500/10'
+                            : 'text-muted-foreground/60 hover:bg-accent/60'
+                        }`}
+                        title={plugin.status === 'enabled' ? '点击禁用' : '点击启用'}
+                      >
+                        {plugin.status === 'enabled' ? (
+                          <ToggleRight className="size-5" />
+                        ) : (
+                          <ToggleLeft className="size-5" />
+                        )}
+                       </button>
+                      {plugin.source !== 'bundled' && (
+                        <button
+                          onClick={() => handleDeletePlugin(plugin)}
+                          className="p-1.5 rounded-lg text-muted-foreground/60 hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                          title="删除插件"
+                        >
+                          <Trash2 className="size-4" />
+                        </button>
+                      )}
                     </div>
-                  </button>
-                )
-              })}
+                  </div>
+                ))}
             </div>
           ) : (
             <div className="space-y-2">
@@ -241,7 +284,6 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
                   key={skill.id}
                   className="flex items-center gap-3 p-3 rounded-xl border border-border/50 bg-card/50 hover:bg-accent/30 hover:border-border transition-colors"
                 >
-                  <span className="text-lg shrink-0 text-muted-foreground/40">&gt;</span>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-foreground">{skill.name}</span>
@@ -276,7 +318,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
             </div>
           )) : (
             <div className="text-center py-12 text-sm text-muted-foreground/60">
-              {activeTab === 'plugins' ? '暂无可用插件或命令' : '暂无技能'}
+              {activeTab === 'plugins' ? '暂无已安装插件' : '暂无技能'}
             </div>
           )}
         </div>

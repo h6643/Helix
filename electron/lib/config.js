@@ -286,9 +286,71 @@ function setDelegationIdentities(yaml, identities) {
   return lines.join('\n')
 }
 
+// Write/remove the SSH bridge MCP server into the `mcp_servers:` block of
+// config.yaml. The bridge (electron/ssh-bridge/mcp-server.js) exposes
+// `remote_exec` to the Hermes agent; connection params travel in its `env:`
+// block, which Hermes passes through verbatim (mcp_tool.py _build_safe_env).
+// `bridgePath` = absolute path to mcp-server.js. `sshInfo` = { host, port,
+// username, secret } or null to remove the entry.
+function setMcpSshBridge(yaml, sshInfo, bridgePath) {
+  const lines = yaml.replace(/\r\n/g, '\n').split('\n')
+  const KEY = '  ssh-bridge:'
+  // Find the mcp_servers: block.
+  let topIdx = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\S/.test(lines[i]) && lines[i].startsWith('mcp_servers:')) { topIdx = i; break }
+  }
+  // Remove any existing ssh-bridge block (reverse iteration keeps indices valid).
+  const removeExisting = () => {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (/^\s+ssh-bridge:/.test(lines[i])) {
+        // Remove this line and any deeper-indented following lines.
+        let j = i
+        while (j + 1 < lines.length && /^\s{4,}/.test(lines[j + 1])) j++
+        lines.splice(i, j - i + 1)
+      }
+    }
+  }
+  removeExisting()
+
+  if (!sshInfo) {
+    // Removal requested. Drop the mcp_servers block entirely if it's now empty.
+    if (topIdx !== -1) {
+      let empty = true
+      for (let i = topIdx + 1; i < lines.length; i++) {
+        if (/^\S/.test(lines[i])) break
+        if (/\S/.test(lines[i])) { empty = false; break }
+      }
+      if (empty) lines.splice(topIdx, 1)
+    }
+    return lines.join('\n')
+  }
+
+  const block = [
+    KEY,
+    '    command: node',
+    `    args: ["${String(bridgePath || '').replace(/\\/g, '/')}"]`,
+    '    env:',
+    `      HERMES_SSH_HOST: "${String(sshInfo.host).replace(/"/g, '\\"')}"`,
+    `      HERMES_SSH_PORT: "${Number(sshInfo.port) || 22}"`,
+    `      HERMES_SSH_USER: "${String(sshInfo.username).replace(/"/g, '\\"')}"`,
+    `      HERMES_SSH_SECRET: ${JSON.stringify(String(sshInfo.secret || ''))}`,
+  ]
+  if (topIdx === -1) {
+    // No mcp_servers block yet — append one at the end.
+    lines.push('mcp_servers:')
+    lines.push(...block)
+  } else {
+    // Insert right after the mcp_servers: header line.
+    lines.splice(topIdx + 1, 0, ...block)
+  }
+  return lines.join('\n')
+}
+
 module.exports = {
   setYamlKey,
   setDelegationIdentities,
+  setMcpSshBridge,
   setCustomProviderModel,
   setCustomProviderField,
   customProviderApiKey,

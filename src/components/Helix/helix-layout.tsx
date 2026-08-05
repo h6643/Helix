@@ -1297,11 +1297,9 @@ export function HelixLayout() {
               <WorktreePanel onClose={() => storeActions.toggleWorktreePanel()} />
             </div>
           )}
-          {showKanbanPanel && (
-            <div className="absolute inset-0 z-20">
-              <KanbanPanel onClose={() => storeActions.toggleKanbanPanel()} />
-            </div>
-          )}
+          <div className={`absolute inset-0 z-20 ${showKanbanPanel ? '' : 'hidden'}`}>
+            <KanbanPanel />
+          </div>
         </div>
       </div>
 

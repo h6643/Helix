@@ -77,10 +77,6 @@ contextBridge.exposeInMainWorld('electron', {
     // Trigger Hermes backend self-update
     update: () => ipcRenderer.invoke('hermes:update'),
 
-    // Switch gateway between local (spawned runtime) and remote (external WS URL).
-    // params: { mode: 'local' | 'remote', url?: string }
-    setGatewayMode: (params) => ipcRenderer.invoke('hermes:setGatewayMode', params),
-
     // ── Memory sync (Hermes backend memory_manager: MEMORY.md / USER.md) ──
     listMemories: () => ipcRenderer.invoke('hermes:listMemories'),
     addMemoryEntry: (target, text) => ipcRenderer.invoke('hermes:addMemoryEntry', { target, text }),
@@ -183,6 +179,21 @@ contextBridge.exposeInMainWorld('electron', {
     // Verify a host:port is reachable (connectivity check only).
     testConnection: (host, port, timeoutMs) =>
       ipcRenderer.invoke('external:testConnection', host, port, timeoutMs),
+    // Real SSH session management (ssh2 in main process; secret decrypted in main).
+    sshConnect: (params) => ipcRenderer.invoke('ssh:connect', params),
+    sshExec: (params) => ipcRenderer.invoke('ssh:exec', params),
+    sshStatus: () => ipcRenderer.invoke('ssh:status'),
+    sshDisconnect: () => ipcRenderer.invoke('ssh:disconnect'),
+    onSshConnected: (callback) => {
+      const handler = (_e, data) => callback(data)
+      ipcRenderer.on('ssh:connected', handler)
+      return () => ipcRenderer.removeListener('ssh:connected', handler)
+    },
+    onSshList: (callback) => {
+      const handler = (_e, data) => callback(data)
+      ipcRenderer.on('ssh:list', handler)
+      return () => ipcRenderer.removeListener('ssh:list', handler)
+    },
   },
 
   // ── Hooks (Codex-compatible lifecycle hooks, run in the main process) ──

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Server,
   Plus,
@@ -20,11 +20,28 @@ import { isElectron } from '@/lib/electron-bridge'
 // here; the breadcrumb popover only selects & connects.
 export function ExternalServiceManager() {
   const externalServices = useHelixStore((s) => s.externalServices)
-  const gatewayMode = useHelixStore((s) => s.gatewayMode)
-  const gatewayServiceId = useHelixStore((s) => s.gatewayServiceId)
+  const sshConnected = useHelixStore((s) => s.sshConnected)
+  const sshServiceId = useHelixStore((s) => s.sshServiceId)
   const [mode, setMode] = useState<'list' | 'add' | 'edit'>('list')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [testingId, setTestingId] = useState<string | null>(null)
+
+  // If the SSH session dies on the main-process side (remote close, error),
+  // reflect that back in the UI immediately.
+  useEffect(() => {
+    if (!isElectron()) return
+    const check = () => {
+      if (!useHelixStore.getState().sshConnected) return
+      window.electron?.external?.sshStatus().then((st) => {
+        if (!st.connected && useHelixStore.getState().sshConnected) {
+          useHelixStore.getState().setSshConnected(false)
+          useHelixStore.getState().showToast({ type: 'info', title: 'SSH 连接已断开' })
+        }
+      }).catch(() => {})
+    }
+    const timer = setInterval(check, 5000)
+    return () => clearInterval(timer)
+  }, [])
 
   const [name, setName] = useState('')
   const [host, setHost] = useState('')
@@ -32,7 +49,6 @@ export function ExternalServiceManager() {
   const [username, setUsername] = useState('')
   const [authType, setAuthType] = useState<'password' | 'key'>('password')
   const [secret, setSecret] = useState('')
-  const [gatewayUrl, setGatewayUrl] = useState('')
 
   const resetForm = () => {
     setName('')
@@ -41,7 +57,6 @@ export function ExternalServiceManager() {
     setUsername('')
     setAuthType('password')
     setSecret('')
-    setGatewayUrl('')
     setEditingId(null)
   }
 
@@ -50,14 +65,13 @@ export function ExternalServiceManager() {
     setMode('add')
   }
 
-  const openEdit = (svc: { id: string; name: string; host: string; port: number; username?: string; authType?: 'password' | 'key'; gatewayUrl?: string }) => {
+  const openEdit = (svc: { id: string; name: string; host: string; port: number; username?: string; authType?: 'password' | 'key' }) => {
     setName(svc.name)
     setHost(svc.host)
     setPort(String(svc.port))
     setUsername(svc.username || '')
     setAuthType(svc.authType || 'password')
     setSecret('')
-    setGatewayUrl(svc.gatewayUrl || '')
     setEditingId(svc.id)
     setMode('edit')
   }
@@ -76,7 +90,6 @@ export function ExternalServiceManager() {
       username: username.trim() || undefined,
       authType,
       secret: secret ? secret : undefined,
-      gatewayUrl: gatewayUrl.trim() || undefined,
     }
     if (mode === 'add') {
       await useHelixStore.getState().addExternalService(payload)
@@ -87,26 +100,54 @@ export function ExternalServiceManager() {
     setMode('list')
   }
 
-  const handleConnect = async (svc: { id: string; name: string; host: string; port: number }) => {
+  const handleConnect = async (svc: { id: string; name: string; host: string; port: number; username?: string; authType?: 'password' | 'key'; secret?: string; secretEncrypted?: boolean }) => {
     if (testingId) return
+    if (useHelixStore.getState().sshConnected) {
+      useHelixStore.getState().showToast({ type: 'error', title: '已有 SSH 连接', description: '请先断开当前连接' })
+      return
+    }
     setTestingId(svc.id)
     try {
       if (isElectron() && window.electron?.external) {
-        const res = await window.electron.external.testConnection(svc.host, svc.port, 4000)
+        // Real SSH: pass the (possibly encrypted) secret to the main process,
+        // which decrypts it there. Plaintext never enters the renderer.
+        const res = await window.electron.external.sshConnect({
+          host: svc.host,
+          port: svc.port,
+          username: svc.username || 'root',
+          authType: svc.authType || 'password',
+          secret: svc.secret || '',
+          secretEncrypted: svc.secretEncrypted,
+        })
         if (!res.ok) {
           useHelixStore.getState().showToast({ type: 'error', title: `连接 ${svc.name} 失败`, description: res.error })
           return
         }
+      } else {
+        useHelixStore.getState().showToast({ type: 'error', title: '仅桌面模式支持 SSH 连接' })
+        return
       }
       useHelixStore.getState().setExternalServiceConnected(svc.id, true)
-      useHelixStore.getState().showToast({ type: 'success', title: `已连接 ${svc.name}` })
+      useHelixStore.getState().setSshConnected(true, svc.id)
+      useHelixStore.getState().showToast({ type: 'success', title: `已连接 ${svc.name}`, description: 'agent 已获得远程命令能力（remote_exec）。若当前对话没有该工具，输入 /reload-mcp 或开新对话生效。' })
+    } catch (err: any) {
+      // sshConnect can throw (e.g. main process not restarted → "No handler
+      // registered for 'ssh:connect'"). Surface the real error instead of an
+      // unhandled rejection.
+      useHelixStore.getState().showToast({ type: 'error', title: `连接 ${svc.name} 失败`, description: err?.message || String(err) })
     } finally {
       setTestingId(null)
     }
   }
 
-  const handleDisconnect = (svc: { id: string; name: string }) => {
+  const handleDisconnect = async (svc: { id: string; name: string }) => {
+    try {
+      if (isElectron() && window.electron?.external) {
+        await window.electron.external.sshDisconnect()
+      }
+    } catch { /* ignore */ }
     useHelixStore.getState().setExternalServiceConnected(svc.id, false)
+    useHelixStore.getState().setSshConnected(false)
   }
 
   const handleDelete = (svc: { id: string; name: string }) => {
@@ -189,17 +230,6 @@ export function ExternalServiceManager() {
             className="w-full text-[12px] px-2 py-1.5 rounded-md bg-background border border-border/30 outline-none focus:border-primary/50 font-mono"
           />
         </div>
-        <div className="space-y-1">
-          <label className="text-[11px] text-muted-foreground">
-            Hermes 网关地址（用作后端时连接）
-          </label>
-          <input
-            value={gatewayUrl}
-            onChange={(e) => setGatewayUrl(e.target.value)}
-            placeholder="ws://host:port/api/ws 或 http://host:port?token=..."
-            className="w-full text-[12px] px-2 py-1.5 rounded-md bg-background border border-border/30 outline-none focus:border-primary/50 font-mono"
-          />
-        </div>
         <div className="flex gap-1.5 pt-1">
           <button
             type="button"
@@ -236,12 +266,12 @@ export function ExternalServiceManager() {
             >
               <div className="flex items-center gap-2">
                 <Circle
-                  className={`size-2.5 shrink-0 ${svc.connected ? 'fill-emerald-500 text-emerald-500' : 'fill-foreground/20 text-foreground/20'}`}
+                  className={`size-2.5 shrink-0 ${sshConnected && sshServiceId === svc.id ? 'fill-emerald-500 text-emerald-500' : 'fill-foreground/20 text-foreground/20'}`}
                 />
                 <span className="text-[13px] text-foreground/90 truncate flex-1">{svc.name}</span>
                 {testingId === svc.id ? (
                   <Loader2 className="size-3.5 animate-spin text-foreground/40" />
-                ) : svc.connected ? (
+                ) : sshConnected && sshServiceId === svc.id ? (
                   <button
                     type="button"
                     onClick={() => handleDisconnect(svc)}
@@ -262,30 +292,8 @@ export function ExternalServiceManager() {
               <div className="flex items-center gap-2 mt-0.5 pl-4">
                 <span className="text-[11px] text-muted-foreground truncate">
                   {svc.username ? `${svc.username}@` : ''}{svc.host}:{svc.port}
-                  {svc.gatewayUrl ? ` · ${svc.gatewayUrl}` : ''}
                 </span>
                 <span className="ml-auto flex items-center gap-1.5 shrink-0">
-                  {gatewayMode === 'remote' && gatewayServiceId === svc.id ? (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-                      当前后端
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!svc.gatewayUrl) {
-                          useHelixStore.getState().showToast({ type: 'error', title: '未配置网关地址', description: '请先填写 Hermes 网关地址' })
-                          return
-                        }
-                        useHelixStore.getState().setGatewayMode('remote', svc.id, svc.gatewayUrl)
-                        useHelixStore.getState().showToast({ type: 'success', title: `已切换到外部服务：${svc.name}` })
-                      }}
-                      className="text-[11px] px-1.5 py-0.5 rounded-md text-sky-600 dark:text-sky-400 hover:bg-sky-500/10 transition-colors"
-                      title="将该服务器用作后端引擎"
-                    >
-                      用作后端
-                    </button>
-                  )}
                   <button
                     type="button"
                     onClick={() => openEdit(svc)}

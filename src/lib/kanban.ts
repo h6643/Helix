@@ -109,8 +109,12 @@ interface InvokeOptions {
 
 async function invoke(verb: string, args: string[] = [], opts: InvokeOptions = {}): Promise<KanbanResult> {
   const api = getElectronAPI()
-  if (!api?.kanban) {
+  if (!api) {
     return { ok: false, error: '看板功能仅在桌面版可用' }
+  }
+  if (!api.kanban) {
+    // Old preload/main: the running app predates the kanban IPC bridge.
+    return { ok: false, error: '看板 IPC 未加载：当前运行的仍是旧版应用，请完全重启 Helix（或重新打包）后再试' }
   }
   return api.kanban.invoke(verb, args, opts.json ?? false, opts.board)
 }
@@ -194,12 +198,16 @@ export async function kanbanBoardSwitch(slug: string): Promise<KanbanResult> {
   return invoke('boards', ['switch', slug])
 }
 
+export async function kanbanBoardDelete(slug: string): Promise<KanbanResult> {
+  return invoke('boards', ['delete', slug])
+}
+
 export async function kanbanAssignees(board?: string): Promise<KanbanResult<KanbanAssignee[]>> {
   return cast(await invoke('assignees', [], { board, json: true }))
 }
 
 /** Statuses shown as columns on the board. Other statuses land in a catch-all column. */
-export const KANBAN_COLUMNS: KanbanStatus[] = ['todo', 'ready', 'running', 'blocked', 'done']
+export const KANBAN_COLUMNS: KanbanStatus[] = ['triage', 'todo', 'scheduled', 'ready', 'running', 'blocked', 'review', 'done']
 
 export const STATUS_ICONS: Record<KanbanStatus, string> = {
   triage: '?',
@@ -214,26 +222,26 @@ export const STATUS_ICONS: Record<KanbanStatus, string> = {
 }
 
 export const STATUS_LABELS: Record<KanbanStatus, string> = {
-  triage: '待分诊',
+  triage: '待分类',
   todo: '待办',
-  scheduled: '已排期',
+  scheduled: '已调度',
   ready: '就绪',
   running: '进行中',
-  blocked: '受阻',
-  review: '待审',
-  done: '完成',
+  blocked: '阻塞',
+  review: 'Review',
+  done: '已完成',
   archived: '已归档',
 }
 
 /** Statuses a card may be moved TO directly (column view drag & drop). */
 export const STATUS_TRANSITIONS: Partial<Record<KanbanStatus, KanbanStatus[]>> = {
-  triage: ['todo'],
-  todo: ['ready', 'blocked', 'done'],
-  scheduled: ['ready'],
-  ready: ['blocked', 'done'],
-  running: ['blocked', 'done'],
-  blocked: ['ready', 'done'],
-  review: ['done'],
+  triage: ['todo', 'scheduled', 'ready'],
+  todo: ['scheduled', 'ready', 'blocked', 'done'],
+  scheduled: ['ready', 'running'],
+  ready: ['running', 'blocked'],
+  running: ['blocked', 'review', 'done'],
+  blocked: ['ready', 'running'],
+  review: ['done', 'running'],
   done: [],
   archived: [],
 }
