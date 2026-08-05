@@ -4978,10 +4978,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       )
                     })()}
 
-                    {/* Live thinking duration */}
-                    {streamingActive && (
+                    {/* Live thinking duration — only while actually streaming (isRunning).
+                        Must NOT hang on streamingActive/isChatLoading; those can stay true
+                        after completion (e.g. session-id drift prevents the finally block
+                        from clearing isChatLoading), causing the timer to tick forever. */}
+                    {isRunning && (
                       <div className="text-xs text-foreground/30 tabular-nums mt-1 ml-3">
-                        <ThinkingTimer questionStartTs={streamingDrafts[currentSessionId || '']?.startedAt ?? questionStartTs} isRunning={streamingActive} />{(streamingDrafts[currentSessionId || '']?.thoughtTokens ?? streamThoughtTokens) > 0 ? ` · ${streamingDrafts[currentSessionId || '']?.thoughtTokens ?? streamThoughtTokens} tokens` : ''}
+                        <ThinkingTimer questionStartTs={streamingDrafts[currentSessionId || '']?.startedAt ?? questionStartTs} isRunning={isRunning} />{(streamingDrafts[currentSessionId || '']?.thoughtTokens ?? streamThoughtTokens) > 0 ? ` · ${streamingDrafts[currentSessionId || '']?.thoughtTokens ?? streamThoughtTokens} tokens` : ''}
                       </div>
                     )}
 
