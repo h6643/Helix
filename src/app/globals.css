@@ -829,8 +829,7 @@ pre code.hljs {
 
 .helix-md hr {
   border: none;
-  border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
-  margin: 1em 0;
+  margin: 0.5em 0;
 }
 
 .monaco-editor .margin {
