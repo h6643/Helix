@@ -41,6 +41,9 @@ export interface ExternalService {
   /** Secret (password or private key). Stored encrypted when safeStorage is available. */
   secret?: string
   secretEncrypted?: boolean
+  /** Hermes gateway endpoint (ws://host:port/api/ws or http(s)://host:port) used
+   *  when this service is selected as the active backend via gateway mode switch. */
+  gatewayUrl?: string
   connected: boolean
   createdAt: number
 }
@@ -167,6 +170,11 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
 
   // External services (servers / virtual machines) connected from the breadcrumb.
   externalServices: ExternalService[]
+
+  // Gateway topology: 'local' spawns the bundled Hermes runtime; 'remote' points
+  // the frontend at an external Hermes gateway (selected from externalServices).
+  gatewayMode: 'local' | 'remote'
+  gatewayServiceId: string | null
 
   // Custom Shortcuts
   customShortcuts: Record<string, { keys: string[], action: string, description: string }>
@@ -364,6 +372,7 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   updateExternalService: (id: string, patch: Partial<ExternalService>) => Promise<void>
   removeExternalService: (id: string) => void
   setExternalServiceConnected: (id: string, connected: boolean) => void
+  setGatewayMode: (mode: 'local' | 'remote', serviceId?: string, url?: string) => Promise<void>
 
   // Actions - Artifacts
   // (removed — unused)
@@ -858,6 +867,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
   // External services (servers / VMs)
   externalServices: [],
+
+  // Gateway topology (local spawned runtime vs external remote gateway)
+  gatewayMode: 'local',
+  gatewayServiceId: null,
 
   // Actions - Files
   setFiles: (files) => set({ files }),
@@ -2103,6 +2116,29 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }))
     import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('externalServices', get().externalServices))
   },
+  setGatewayMode: async (mode, serviceId, url) => {
+    const apply = () => set({ gatewayMode: mode, gatewayServiceId: mode === 'remote' ? (serviceId ?? null) : null })
+    try {
+      if (typeof window !== 'undefined' && window.electron?.hermes) {
+        const res = await window.electron.hermes.setGatewayMode({ mode, url })
+        if (!res.ok) {
+          useHelixStore.getState().showToast({ type: 'error', title: '切换网关模式失败', description: res.error })
+          return
+        }
+      }
+      apply()
+    } catch (e: any) {
+      useHelixStore.getState().showToast({
+        type: 'error',
+        title: '切换网关模式失败',
+        description: e?.message || String(e),
+      })
+    } finally {
+      const persist = await import('@/lib/persist').then((m) => m.persistence)
+      persist.saveSetting('gatewayMode', get().gatewayMode)
+      persist.saveSetting('gatewayServiceId', get().gatewayServiceId)
+    }
+  },
 
   // Actions - Webhooks/Artifacts — removed (unused features)
 
@@ -2273,7 +2309,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices, gatewayMode, gatewayServiceId] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -2331,6 +2367,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<boolean>('hasOnboarded'),
         persistence.loadSetting<{ size: number; used: number } | null>('contextUsage'),
         persistence.loadSetting<ExternalService[]>('externalServices'),
+        persistence.loadSetting<'local' | 'remote'>('gatewayMode'),
+        persistence.loadSetting<string | null>('gatewayServiceId'),
       ])
 
       // Do NOT restore the latest session's chatMessages on startup.
@@ -2763,6 +2801,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         externalServices: (externalServices || []).filter(
           (s) => s && typeof s.id === 'string' && typeof s.host === 'string'
         ),
+        gatewayMode: gatewayMode === 'remote' ? 'remote' : 'local',
+        gatewayServiceId: gatewayMode === 'remote' ? (gatewayServiceId as string | null) : null,
         customShortcuts: (() => {
           const customizedIds = new Set(customizedIdsArr || [])
           const defaults = { ...DEFAULT_SHORTCUTS }
@@ -2800,6 +2840,22 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         browserHomeUrl: '',
         browserBookmarks: savedBookmarks ?? get().browserBookmarks,
       })
+
+      // Re-assert the persisted gateway topology on startup. The main process
+      // always boots in local mode, so if the user last ran against an external
+      // Hermes gateway we must point the renderer back at it.
+      const bootMode = get().gatewayMode
+      const bootServiceId = get().gatewayServiceId
+      if (bootMode === 'remote' && bootServiceId) {
+        const svc = get().externalServices.find((s) => s.id === bootServiceId)
+        if (svc?.gatewayUrl) {
+          get().setGatewayMode('remote', svc.id, svc.gatewayUrl)
+        } else {
+          set({ gatewayMode: 'local', gatewayServiceId: null })
+          persistence.saveSetting('gatewayMode', 'local')
+          persistence.saveSetting('gatewayServiceId', null)
+        }
+      }
 
       // Permanently scrub the pollution from IndexedDB: write back the cleaned
       // apiProfiles and the unpolluted providers list. Without this, the on-disk

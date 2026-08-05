@@ -20,6 +20,8 @@ import { isElectron } from '@/lib/electron-bridge'
 // here; the breadcrumb popover only selects & connects.
 export function ExternalServiceManager() {
   const externalServices = useHelixStore((s) => s.externalServices)
+  const gatewayMode = useHelixStore((s) => s.gatewayMode)
+  const gatewayServiceId = useHelixStore((s) => s.gatewayServiceId)
   const [mode, setMode] = useState<'list' | 'add' | 'edit'>('list')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [testingId, setTestingId] = useState<string | null>(null)
@@ -30,6 +32,7 @@ export function ExternalServiceManager() {
   const [username, setUsername] = useState('')
   const [authType, setAuthType] = useState<'password' | 'key'>('password')
   const [secret, setSecret] = useState('')
+  const [gatewayUrl, setGatewayUrl] = useState('')
 
   const resetForm = () => {
     setName('')
@@ -38,6 +41,7 @@ export function ExternalServiceManager() {
     setUsername('')
     setAuthType('password')
     setSecret('')
+    setGatewayUrl('')
     setEditingId(null)
   }
 
@@ -46,13 +50,14 @@ export function ExternalServiceManager() {
     setMode('add')
   }
 
-  const openEdit = (svc: { id: string; name: string; host: string; port: number; username?: string; authType?: 'password' | 'key' }) => {
+  const openEdit = (svc: { id: string; name: string; host: string; port: number; username?: string; authType?: 'password' | 'key'; gatewayUrl?: string }) => {
     setName(svc.name)
     setHost(svc.host)
     setPort(String(svc.port))
     setUsername(svc.username || '')
     setAuthType(svc.authType || 'password')
     setSecret('')
+    setGatewayUrl(svc.gatewayUrl || '')
     setEditingId(svc.id)
     setMode('edit')
   }
@@ -71,6 +76,7 @@ export function ExternalServiceManager() {
       username: username.trim() || undefined,
       authType,
       secret: secret ? secret : undefined,
+      gatewayUrl: gatewayUrl.trim() || undefined,
     }
     if (mode === 'add') {
       await useHelixStore.getState().addExternalService(payload)
@@ -183,6 +189,17 @@ export function ExternalServiceManager() {
             className="w-full text-[12px] px-2 py-1.5 rounded-md bg-background border border-border/30 outline-none focus:border-primary/50 font-mono"
           />
         </div>
+        <div className="space-y-1">
+          <label className="text-[11px] text-muted-foreground">
+            Hermes 网关地址（用作后端时连接）
+          </label>
+          <input
+            value={gatewayUrl}
+            onChange={(e) => setGatewayUrl(e.target.value)}
+            placeholder="ws://host:port/api/ws 或 http://host:port?token=..."
+            className="w-full text-[12px] px-2 py-1.5 rounded-md bg-background border border-border/30 outline-none focus:border-primary/50 font-mono"
+          />
+        </div>
         <div className="flex gap-1.5 pt-1">
           <button
             type="button"
@@ -245,8 +262,30 @@ export function ExternalServiceManager() {
               <div className="flex items-center gap-2 mt-0.5 pl-4">
                 <span className="text-[11px] text-muted-foreground truncate">
                   {svc.username ? `${svc.username}@` : ''}{svc.host}:{svc.port}
+                  {svc.gatewayUrl ? ` · ${svc.gatewayUrl}` : ''}
                 </span>
                 <span className="ml-auto flex items-center gap-1.5 shrink-0">
+                  {gatewayMode === 'remote' && gatewayServiceId === svc.id ? (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                      当前后端
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!svc.gatewayUrl) {
+                          useHelixStore.getState().showToast({ type: 'error', title: '未配置网关地址', description: '请先填写 Hermes 网关地址' })
+                          return
+                        }
+                        useHelixStore.getState().setGatewayMode('remote', svc.id, svc.gatewayUrl)
+                        useHelixStore.getState().showToast({ type: 'success', title: `已切换到外部服务：${svc.name}` })
+                      }}
+                      className="text-[11px] px-1.5 py-0.5 rounded-md text-sky-600 dark:text-sky-400 hover:bg-sky-500/10 transition-colors"
+                      title="将该服务器用作后端引擎"
+                    >
+                      用作后端
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => openEdit(svc)}
