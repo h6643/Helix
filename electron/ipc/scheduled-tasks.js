@@ -6,9 +6,10 @@ const { ipcMain } = require('electron')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const { hermesDataDir } = require('../lib/platform-paths')
 
 function _cronJobsPath() {
-  return path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'cron', 'jobs.json')
+  return path.join(hermesDataDir(), 'cron', 'jobs.json')
 }
 
 function _atomicWriteJobs(jobsData) {

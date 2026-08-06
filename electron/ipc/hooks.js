@@ -24,6 +24,7 @@ const { ipcMain } = require('electron')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const { hermesDataDir } = require('../lib/platform-paths')
 
 // Event names MUST match Hermes' VALID_HOOKS (snake_case). Side-effect events
 // only — transform_* / pre_gateway_dispatch are excluded because they expect a
@@ -44,7 +45,7 @@ const HOOK_EVENTS = [
 ]
 
 function _configYamlPath() {
-  return path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+  return path.join(hermesDataDir(), 'config.yaml')
 }
 
 // ── YAML line editing (no js-yaml dep; preserves the rest of the file) ──────

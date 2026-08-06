@@ -7,9 +7,10 @@ const os = require('os')
 const fs = require('fs')
 const fsPromises = require('fs').promises
 const crypto = require('crypto')
+const { hermesAgentDir, hermesDataDir, venvHermesBin, localAppDataDir } = require('./platform-paths')
 
 function resolveHermesCandidates() {
-  const managedRoot = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'hermes-agent')
+  const managedRoot = hermesAgentDir()
   // Packaged build: the backend ships inside the Electron resources directory
   // (see electron-builder.json `extraResources`). Check it FIRST so an installed
   // app uses its bundled backend instead of a (possibly absent / version-mismatched)
@@ -19,10 +20,10 @@ function resolveHermesCandidates() {
   // Prefer `venv` (the user's known-good, integration-patched runtime) first;
   // fall back to `.venv` (provisioned by newer `hermes update`). Both may exist.
   const cands = [
-    path.join(packedRoot, 'venv', 'Scripts', 'hermes.exe'),
-    path.join(packedRoot, '.venv', 'Scripts', 'hermes.exe'),
-    path.join(managedRoot, 'venv', 'Scripts', 'hermes.exe'),
-    path.join(managedRoot, '.venv', 'Scripts', 'hermes.exe'),
+    venvHermesBin(packedRoot, 'venv'),
+    venvHermesBin(packedRoot, '.venv'),
+    venvHermesBin(managedRoot, 'venv'),
+    venvHermesBin(managedRoot, '.venv'),
   ]
   try {
     const { execSync } = require('child_process')
@@ -48,7 +49,7 @@ function resolveHermesCmd() {
 
 function isTrustedPath(p) {
   // Kernel should live under known managed locations, not arbitrary paths.
-  const localApp = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+  const localApp = localAppDataDir()
   const trustedRoots = [
     path.join(localApp, 'hermes'),
     process.resourcesPath,
@@ -73,7 +74,7 @@ async function listKernelArtifacts(hermesCmdPath) {
     path.join(baseDir, 'hermes'),
     path.join(baseDir, 'hermes-cli'),
     path.join(baseDir, 'hermes_cli'),
-    path.join(baseDir, 'python.exe'),
+    path.join(baseDir, process.platform === 'win32' ? 'python.exe' : 'python'),
     path.join(baseDir, '..', 'Lib', 'site-packages', 'hermes', '__init__.py'),
   ]
   for (const c of candidates) {
@@ -90,7 +91,7 @@ async function loadKernelPublicKey() {
   const candidates = [
     path.join(process.resourcesPath, 'kernel.pub'),
     path.join(process.resourcesPath, 'assets', 'kernel.pub'),
-    path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'kernel.pub'),
+    path.join(hermesDataDir(), 'kernel.pub'),
     path.join(__dirname, '..', 'kernel.pub'),
   ]
   for (const c of candidates) {

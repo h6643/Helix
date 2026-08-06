@@ -21,10 +21,11 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const configModule = require('../lib/config')
+const { hermesDataDir } = require('../lib/platform-paths')
 
 // config.yaml lives in the hermes runtime dir (HERMES_HOME); matches main.js.
 function configYamlPath() {
-  return path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+  return path.join(hermesDataDir(), 'config.yaml')
 }
 
 // Absolute path to the SSH bridge MCP server (electron/ssh-bridge/mcp-server.js).

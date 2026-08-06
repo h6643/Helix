@@ -10,11 +10,12 @@
 const path = require('path')
 const os = require('os')
 const fsPromises = require('fs').promises
+const { hermesDataDir } = require('./platform-paths')
 
 function hermesMemoriesDir() {
   const home = process.env.HERMES_HOME
     ? path.resolve(process.env.HERMES_HOME)
-    : path.join(os.homedir(), 'AppData', 'Local', 'hermes')
+    : hermesDataDir()
   return path.join(home, 'memories')
 }
 
@@ -95,7 +96,7 @@ const SKILL_CALL_COUNTS_FILE = 'skill-call-counts.json'
 async function loadSkillCallCounts() {
   try {
     // First try to read from Hermes .usage.json (authoritative source)
-    const usageFilePath = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'skills', '.usage.json')
+    const usageFilePath = path.join(hermesDataDir(), 'skills', '.usage.json')
     const data = await fsPromises.readFile(usageFilePath, 'utf-8')
     const usageData = JSON.parse(data)
     // Map from .usage.json format: { skillName: { use_count: N } }
@@ -112,7 +113,7 @@ async function loadSkillCallCounts() {
   } catch {
     // Fallback to skill-call-counts.json
     try {
-      const filePath = path.join(os.homedir(), 'AppData', 'Local', 'hermes', SKILL_CALL_COUNTS_FILE)
+      const filePath = path.join(hermesDataDir(), SKILL_CALL_COUNTS_FILE)
       const data = await fsPromises.readFile(filePath, 'utf-8')
       Object.assign(skillCallCounts, JSON.parse(data))
     } catch { /* file doesn't exist yet, use empty object */ }
@@ -121,7 +122,7 @@ async function loadSkillCallCounts() {
 
 async function saveSkillCallCounts() {
   try {
-    const dir = path.join(os.homedir(), 'AppData', 'Local', 'hermes')
+    const dir = hermesDataDir()
     await fsPromises.mkdir(dir, { recursive: true })
     const filePath = path.join(dir, SKILL_CALL_COUNTS_FILE)
     await fsPromises.writeFile(filePath, JSON.stringify(skillCallCounts, null, 2), 'utf-8')

@@ -6,6 +6,7 @@ const { ipcMain, shell } = require('electron')
 const fsPromises = require('fs').promises
 const fs = require('fs')
 const path = require('path')
+const { hermesDataDir } = require('../lib/platform-paths')
 
 module.exports = function registerFsHandlers(getWorkDir, getAllowedRoots) {
   // Idempotent registration — dev reloads may re-execute this module.
@@ -42,7 +43,7 @@ module.exports = function registerFsHandlers(getWorkDir, getAllowedRoots) {
     // Allow hermes memory directory (used by learning view).
     // Normalize separators before comparing so a forward-slash path sent from
     // the renderer still matches a backslash-joined main-process dir.
-    const hermesMemoryDir = path.join(process.env.LOCALAPPDATA || '', 'hermes', 'memories')
+    const hermesMemoryDir = path.join(hermesDataDir(), 'memories')
     if (norm(resolved).startsWith(norm(hermesMemoryDir))) return resolved
     // 任一合法根（当前 workDir 或用户选过的项目）之内即放行。
     const inAnyRoot = allowedRoots().some((root) => {
@@ -103,7 +104,7 @@ module.exports = function registerFsHandlers(getWorkDir, getAllowedRoots) {
   // it from its own (build-time-only) process.env — which is undefined in a
   // Next.js client bundle and previously produced a bogus "/hermes/memory" path.
   ipcMain.handle('fs:hermesMemoryDir', async () => {
-    const dir = path.join(process.env.LOCALAPPDATA || '', 'hermes', 'memories')
+    const dir = path.join(hermesDataDir(), 'memories')
     return path.resolve(dir)
   })
 

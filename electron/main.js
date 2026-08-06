@@ -6,6 +6,7 @@ const os = require('os')
 const crypto = require('crypto')
 const { spawn, exec } = require('child_process')
 const { promisify } = require('util')
+const { hermesDataDir, venvPython, localAppDataDir } = require('./lib/platform-paths')
 
 const execAsync = promisify(exec)
 
@@ -235,7 +236,7 @@ function processHermesBuffer() {  const lines = hermesStdoutBuffer.split('\n')
 // gateway is spawned. No hardcoded defaults — every value comes from `cfg`.
 function writeHermesConfig({ model, provider, baseUrl, apiKey }) {
   _lastHermesConfigWriteTime = Date.now()
-  const hermesDir = path.join(os.homedir(), 'AppData', 'Local', 'hermes')
+  const hermesDir = hermesDataDir()
   const yamlPath = path.join(hermesDir, 'config.yaml')
   const incomingKey = (apiKey && String(apiKey).trim()) ? String(apiKey).trim() : ''
   let diskKey = ''
@@ -339,7 +340,7 @@ function writeHermesConfig({ model, provider, baseUrl, apiKey }) {
 // Removed: Chinese language default injection (Hermes Desktop style).
 function writeHermesAgentConfig({ reasoningEffort, personality }) {
   try {
-    const yamlPath = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    const yamlPath = path.join(hermesDataDir(), 'config.yaml')
     let yaml = ''
     try { yaml = fs.readFileSync(yamlPath, 'utf-8') } catch { return }
     let updated = yaml
@@ -402,7 +403,7 @@ function applyActiveProfileCache() {
 // config.yaml. Uses setYamlKey (no js-yaml dep).
 function ensureCodingContextOff() {
   try {
-    const yamlPath = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    const yamlPath = path.join(hermesDataDir(), 'config.yaml')
     let c = fs.readFileSync(yamlPath, 'utf-8')
     // fix any legacy broken inline-merge (e.g. "max_turns: 150  coding_context: off")
     if (/^\s*max_turns:\s*\d+\s+coding_context/m.test(c)) {
@@ -426,13 +427,10 @@ function ensureCodingContextOff() {
 // 401 "授权令牌无效" / ling_auth_not_exist. Sessions are recreated fresh from
 // config.yaml on the next session/new, so the new provider takes effect.
 // Messages are preserved (only the session index rows are cleared).
-const _HERMES_VENV_PY = path.join(
-  require('os').homedir(), 'AppData', 'Local', 'hermes',
-  'hermes-agent', 'venv', 'Scripts', 'python.exe'
-)
+const _HERMES_VENV_PY = venvPython()
 function clearHermesSessions() {
   return new Promise((resolve) => {
-    const dbPath = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes', 'state.db')
+    const dbPath = path.join(hermesDataDir(), 'state.db')
     if (!fs.existsSync(dbPath) || !fs.existsSync(_HERMES_VENV_PY)) { resolve(false); return }
     const script =
       'import sqlite3,sys\n' +
@@ -555,7 +553,7 @@ function markOwnConfigWrite() { _lastOwnConfigWrite = Date.now() }
 
 function setupHermesConfigWatcher() {
   if (_hermesConfigWatcher) return
-  const hermesDir = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes')
+  const hermesDir = hermesDataDir()
   const targets = [path.join(hermesDir, 'config.yaml'), path.join(hermesDir, '.env')]
   let debounce = null
   const onChange = (file) => {
@@ -607,7 +605,7 @@ function scheduleServeRespawn() {
   if (serveRespawnCount > MAX_SERVE_RESPAWN_PER_WINDOW) {
     console.error('[Hermes] serve gateway died too many times in the last 60s — giving up auto-respawn')
     mainWindow?.webContents.send('hermes:event', 'error', {
-      message: 'Hermes 网关反复崩溃，已停止自动重启。请查看 Hermes 日志（%LOCALAPPDATA%\\hermes\\logs）后手动重启 Helix。',
+      message: 'Hermes 网关反复崩溃，已停止自动重启。请查看 Hermes 日志（hermes 数据目录下的 logs）后手动重启 Helix。',
     })
     return
   }
@@ -652,7 +650,7 @@ function startHermesGateway(candidateIndex = 0) {
     // the next one (see the 'error' handler + spawn try/catch below).
     const candidates = resolveHermesCandidates()
     if (candidateIndex >= candidates.length) {
-      const errMsg = '找不到可启动的 hermes 可执行文件（已尝试 ' + candidates.length + ' 个候选）。请先安装 Hermes（iex (irm https://hermes-agent.nousresearch.com/install.ps1)），或将其 venv\\Scripts 目录加入 PATH。'
+      const errMsg = '找不到可启动的 hermes 可执行文件（已尝试 ' + candidates.length + ' 个候选）。请先安装 Hermes（详见 https://hermes-agent.nousresearch.com ），或将其 venv 的 Scripts/bin 目录加入 PATH。'
       console.error('[Hermes]', errMsg)
       mainWindow?.webContents.send('hermes:event', 'error', { message: errMsg })
       return reject(new Error(errMsg))
@@ -664,7 +662,7 @@ function startHermesGateway(candidateIndex = 0) {
     // proxy / TLS settings that OpenAI/ httpx picks up from the environment and that
     // cause the *chat completion* request to hang (init probe works, streaming hangs).
     // Strip those so the subprocess behaves like a plain terminal launch.
-    const hermesDir = path.join(os.homedir(), 'AppData', 'Local', 'hermes')
+    const hermesDir = hermesDataDir()
 
     const hermesEnv = { ...process.env }
 
@@ -728,7 +726,7 @@ function startHermesGateway(candidateIndex = 0) {
     }
     // Rebuild PATH: keep system dirs + hermes venv, drop node_modules/.bin entries
     // that may shadow python tooling / inject Electron context.
-    // IMPORTANT: always prepend the hermes venv Scripts dir so the resolved
+    // IMPORTANT: always prepend the hermes venv Scripts/bin dir so the resolved
     // executable can find its bundled python/deps regardless of inherited PATH.
     const hermesBinDir = path.dirname(hermesCmd)
     const cleanPath = (process.env.PATH || '')
@@ -806,7 +804,7 @@ function startHermesGateway(candidateIndex = 0) {
         return
       }
       const detail = err.code === 'ENOENT'
-        ? `找不到可执行文件: ${hermesCmd}\n请确认 Hermes 已安装，或将其 venv\\Scripts 目录加入 PATH。`
+        ? `找不到可执行文件: ${hermesCmd}\n请确认 Hermes 已安装，或将其 venv 的 Scripts/bin 目录加入 PATH。`
         : `Hermes 启动失败: ${err.message}`
       mainWindow?.webContents.send('hermes:event', 'error', {
         message: detail + '\n\n安装:\niex (irm https://hermes-agent.nousresearch.com/install.ps1)\n\n文档: https://hermes-agent.nousresearch.com/docs/getting-started/quickstart'
@@ -1484,7 +1482,7 @@ safeHandle('hermes:setRawConfig', async (event, patch) => {
 // ── Hermes config read (frontend mirrors backend) ───────────────────────
 safeHandle('hermes:getConfig', async () => {
   try {
-    const hermesDir = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes')
+    const hermesDir = hermesDataDir()
     const yamlPath = path.join(hermesDir, 'config.yaml')
     const envPath = path.join(hermesDir, '.env')
     const yaml = fs.readFileSync(yamlPath, 'utf-8').replace(/\r\n/g, '\n')
@@ -1607,7 +1605,7 @@ safeHandle('hermes:setYamlKey', async (event, { key, value }) => {
   // 修复 serve 下设置页 setYamlKey 曾为 no-op 导致 delegation.* 等配置
   // 永远不落地的问题。
   try {
-    const yamlPath = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    const yamlPath = path.join(hermesDataDir(), 'config.yaml')
     const c = fs.readFileSync(yamlPath, 'utf-8')
     const updated = setYamlKey(c, key, value)
     if (updated === c) return { success: true, changed: false }
@@ -1628,7 +1626,7 @@ safeHandle('hermes:setYamlKey', async (event, { key, value }) => {
 // next session.create re-reads it). Used by the Subagent settings UI.
 safeHandle('hermes:setDelegationIdentities', async (event, identities) => {
   try {
-    const yamlPath = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    const yamlPath = path.join(hermesDataDir(), 'config.yaml')
     const c = fs.readFileSync(yamlPath, 'utf-8')
     const updated = setDelegationIdentities(c, identities)
     if (updated === c) return { success: true, changed: false }
@@ -1672,7 +1670,7 @@ safeHandle('hermes:setReasoningEffort', async (event, params = {}) => {
   try {
     const { reasoningEffort } = params
     if (reasoningEffort === undefined || reasoningEffort === null) return { success: false }
-    const yamlPath = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    const yamlPath = path.join(hermesDataDir(), 'config.yaml')
     let yaml = ''
     try { yaml = fs.readFileSync(yamlPath, 'utf-8') } catch { return { success: false } }
     const updated = setYamlKey(yaml, 'agent.reasoning_effort', String(reasoningEffort))
@@ -1694,7 +1692,7 @@ safeHandle('hermes:setConfigKeyValue', async (event, params = {}) => {
   try {
     const { key, value, session_id } = params
     if (!key) return { success: false }
-    const yamlPath = path.join(os.homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    const yamlPath = path.join(hermesDataDir(), 'config.yaml')
     let yaml = ''
     try { yaml = fs.readFileSync(yamlPath, 'utf-8') } catch { return { success: false } }
     const updated = setYamlKey(yaml, key, String(value ?? ''))
@@ -1736,7 +1734,7 @@ safeHandle('hermes:approvalRespond', async (event, params = {}) => {
 // Returns the predefined personalities from config.yaml (agent.personalities).
 safeHandle('hermes:listPersonalities', async () => {
   try {
-    const yamlPath = path.join(require('os').homedir(), 'AppData', 'Local', 'hermes', 'config.yaml')
+    const yamlPath = path.join(hermesDataDir(), 'config.yaml')
     const lines = fs.readFileSync(yamlPath, 'utf-8').split('\n')
     let start = -1
     for (let i = 0; i < lines.length; i++) {
@@ -1765,7 +1763,7 @@ safeHandle('hermes:update', async () => {
     if (!hermesCmd) return { ok: false, message: '找不到 hermes 可执行文件' }
     // Spawn detached so it survives; stdout/stderr go to the gateway logs.
     const child = spawn(hermesCmd, ['update'], {
-      cwd: path.join(require('os').homedir(), 'AppData', 'Local', 'hermes'),
+      cwd: hermesDataDir(),
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
@@ -1783,7 +1781,7 @@ safeHandle('hermes:update', async () => {
 safeHandle('hermes:setPersonality', async (event, { name, prompt } = {}) => {
   // serve 模式：直接写入 config.yaml 的 agent.system_prompt，不重启网关。
   try {
-    const localApp = process.env.LOCALAPPDATA || ''
+    const localApp = localAppDataDir() || ''
     if (!localApp) return { success: false, error: 'LOCALAPPDATA not set' }
     const yamlPath = path.join(localApp, 'hermes', 'config.yaml')
     const yaml = fs.readFileSync(yamlPath, 'utf-8')
@@ -1825,7 +1823,7 @@ safeHandle('hermes:setModel', async (event, { model, baseUrl, apiKey, provider }
       apiKey = APIHUB_DEFAULT.apiKey
       provider = APIHUB_DEFAULT.provider
     }
-    const localApp = process.env.LOCALAPPDATA || ''
+    const localApp = localAppDataDir() || ''
     if (!localApp) return { success: false, error: 'LOCALAPPDATA not set' }
     const hermesDir = path.join(localApp, 'hermes')
     const requested = provider && String(provider).trim() && String(provider).trim() !== 'custom' ? String(provider).trim() : ''
@@ -1942,12 +1940,12 @@ safeHandle('hermes:setModel', async (event, { model, baseUrl, apiKey, provider }
 
 // Hermes skills directory access (bypasses safePath restriction)
 safeHandle('hermes:getSkillsDir', async () => {
-  const localApp = process.env.LOCALAPPDATA || ''
+  const localApp = localAppDataDir() || ''
   return localApp ? path.join(localApp, 'hermes', 'skills') : null
 })
 
 safeHandle('hermes:getPluginsDir', async () => {
-  const localApp = process.env.LOCALAPPDATA || ''
+  const localApp = localAppDataDir() || ''
   return localApp ? path.join(localApp, 'hermes', 'plugins') : null
 })
 
@@ -2018,7 +2016,7 @@ safeHandle('hermes:removeMemoryEntry', async (event, { target, text }) => {
 })
 
 safeHandle('hermes:listSkills', async () => {
-  const localApp = process.env.LOCALAPPDATA || ''
+  const localApp = localAppDataDir() || ''
   const skillsDir = path.join(localApp, 'hermes', 'skills')
   const skills = []
 
@@ -2061,8 +2059,8 @@ safeHandle('hermes:deleteDir', async (event, dirPath) => {
     // Security: confine deletion to the Hermes skills directory. The renderer
     // should only ever delete custom skills, and a malicious/compromised
     // renderer must not be able to `rm -rf` an arbitrary path.
-    const skillsRoot = process.env.LOCALAPPDATA
-      ? path.join(process.env.LOCALAPPDATA, 'hermes', 'skills')
+    const skillsRoot = localAppDataDir()
+      ? path.join(localAppDataDir(), 'hermes', 'skills')
       : null
     const target = dirPath && dirPath.endsWith('SKILL.md') ? path.dirname(dirPath) : dirPath
     if (!target || !skillsRoot) {
@@ -2149,7 +2147,7 @@ safeHandle('shell:showItemInFolder', async (event, relativePath) => {
   let resolved = safePath(relativePath)
   // Also allow the Hermes memory directory (learning view "reveal in folder").
   if (!resolved) {
-    const memDir = path.join(process.env.LOCALAPPDATA || '', 'hermes', 'memories')
+    const memDir = path.join(localAppDataDir() || '', 'hermes', 'memories')
     const candidate = path.resolve(relativePath || '')
     if (candidate.startsWith(memDir)) resolved = candidate
   }
