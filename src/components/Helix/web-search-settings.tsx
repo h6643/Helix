@@ -57,7 +57,7 @@ const SEARCH_PROVIDERS: SearchProvider[] = [
 
 export function WebSearchSettings() {
   const showToast = useHelixStore((s) => s.showToast)
-  const [activeProvider, setActiveProvider] = useState<string>('')
+  const [activeProviders, setActiveProviders] = useState<string[]>([])
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
 
@@ -68,7 +68,7 @@ export function WebSearchSettings() {
     if (saved) {
       try {
         const data = JSON.parse(saved)
-        setActiveProvider(data.activeProvider || '')
+        setActiveProviders(data.activeProviders || (data.activeProvider ? [data.activeProvider] : []))
         setApiKeys(data.apiKeys || {})
       } catch {}
     }
@@ -79,7 +79,7 @@ export function WebSearchSettings() {
     try {
       // Save to localStorage for now
       localStorage.setItem('helix-web-search', JSON.stringify({
-        activeProvider,
+        activeProviders,
         apiKeys,
       }))
 
@@ -102,15 +102,20 @@ export function WebSearchSettings() {
     <div className="space-y-1">
       <SectionHeading>网页搜索</SectionHeading>
 
-      <SettingGroup title="搜索引擎">
+      <SettingGroup title="搜索引擎（可多选）">
         {SEARCH_PROVIDERS.map((provider) => (
           <SettingRow key={provider.id} label={provider.name}>
             <div className="flex items-center gap-2">
               <input
-                type="radio"
-                name="search-provider"
-                checked={activeProvider === provider.id}
-                onChange={() => setActiveProvider(provider.id)}
+                type="checkbox"
+                checked={activeProviders.includes(provider.id)}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    setActiveProviders([...activeProviders, provider.id])
+                  } else {
+                    setActiveProviders(activeProviders.filter(id => id !== provider.id))
+                  }
+                }}
                 className="w-4 h-4 text-primary"
               />
             </div>
@@ -118,42 +123,47 @@ export function WebSearchSettings() {
         ))}
       </SettingGroup>
 
-      {activeProvider && (() => {
-        const provider = SEARCH_PROVIDERS.find(p => p.id === activeProvider)
-        if (!provider) return null
+      {activeProviders.length > 0 && (
+        <SettingGroup title="已选搜索引擎配置">
+          {activeProviders.map(providerId => {
+            const provider = SEARCH_PROVIDERS.find(p => p.id === providerId)
+            if (!provider) return null
 
-        return (
-          <SettingGroup title={`${provider.name} 配置`}>
-            <div className="px-1 py-2 space-y-2">
-              <p className="text-xs text-muted-foreground">{provider.description}</p>
-              {provider.freeQuota && (
-                <p className="text-xs text-muted-foreground">免费额度: {provider.freeQuota}</p>
-              )}
-              {provider.signupUrl && (
-                <a
-                  href={provider.signupUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary hover:underline"
-                >
-                  获取 API Key →
-                </a>
-              )}
-              {provider.envKey && (
-                <SettingRow label="API Key">
-                  <input
-                    type="password"
-                    value={apiKeys[provider.envKey] || ''}
-                    onChange={(e) => setApiKeys({ ...apiKeys, [provider.envKey]: e.target.value })}
-                    placeholder={`输入 ${provider.envKey}`}
-                    className="w-64 px-3 py-1.5 text-sm border rounded-md bg-background"
-                  />
-                </SettingRow>
-              )}
-            </div>
-          </SettingGroup>
-        )
-      })()}
+            return (
+              <div key={provider.id} className="px-1 py-2 space-y-2 border-b border-border/30 last:border-0">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">{provider.name}</span>
+                  {provider.freeQuota && (
+                    <span className="text-xs text-muted-foreground">免费: {provider.freeQuota}</span>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">{provider.description}</p>
+                {provider.signupUrl && (
+                  <a
+                    href={provider.signupUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline"
+                  >
+                    获取 API Key →
+                  </a>
+                )}
+                {provider.envKey && (
+                  <SettingRow label="API Key">
+                    <input
+                      type="password"
+                      value={apiKeys[provider.envKey] || ''}
+                      onChange={(e) => setApiKeys({ ...apiKeys, [provider.envKey]: e.target.value })}
+                      placeholder={`输入 ${provider.envKey}`}
+                      className="w-64 px-3 py-1.5 text-sm border rounded-md bg-background"
+                    />
+                  </SettingRow>
+                )}
+              </div>
+            )
+          })}
+        </SettingGroup>
+      )}
 
       <div className="flex justify-end pt-2">
         <button
