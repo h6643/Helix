@@ -29,7 +29,7 @@ export default defineConfig({
       : undefined,
     watch: {
       // tell vite to ignore watching `src-tauri`
-      ignored: ['**/src-tauri/**'],
+      ignored: ['**/src-tauri/**', '**/hermes-agent/**'],
     },
   },
   build: {
