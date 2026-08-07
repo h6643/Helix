@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
 import { Toggle, SettingRow, SettingGroup, SectionHeading } from './settings-ui'
 import { ExternalServiceManager } from './external-services-manager'
+import { WebSearchSettings } from './web-search-settings'
 
 export function GeneralSettingsPanel() {
   const desktopNotifications = useHelixStore(s => s.desktopNotifications)
@@ -38,6 +39,8 @@ export function GeneralSettingsPanel() {
           <ExternalServiceManager />
         </div>
       </SettingGroup>
+
+      <WebSearchSettings />
 
       <SettingGroup title="数据管理">
         <div className="py-3 flex flex-wrap gap-2 justify-end">
