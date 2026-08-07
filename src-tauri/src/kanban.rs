@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-fn build_clean_env(hermes_bin: &std::path::Path) -> std::collections::HashMap<String, String> {
+pub(crate) fn build_clean_env(hermes_bin: &std::path::Path) -> std::collections::HashMap<String, String> {
     let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
     env.retain(|k, _| {
         if k == "PATH" || k == "Path" || k == "path" {

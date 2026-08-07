@@ -144,8 +144,13 @@ pub fn exec() -> Result<(), String> {
 
 // ── dialogs ────────────────────────────────────────────────────────────────
 
+// ── 注意：三个对话框命令必须是 async 且用回调式 API ──────────────────────────
+// Linux 上 `blocking_pick_folder()` 从同步命令（主线程）调用时，对话框不会
+// 显示、应用卡住（tauri-apps/plugins-workspace#956）。这里改用回调式
+// pick_folder / pick_file / save_file + oneshot channel，让主线程保持事件循环。
+
 #[tauri::command]
-pub fn open_directory(app: AppHandle, default_path: Option<String>) -> Option<String> {
+pub async fn open_directory(app: AppHandle, default_path: Option<String>) -> Option<String> {
     use tauri_plugin_dialog::{DialogExt, FilePath};
     let mut builder = app.dialog().file();
     if let Some(dp) = default_path {
@@ -153,14 +158,18 @@ pub fn open_directory(app: AppHandle, default_path: Option<String>) -> Option<St
             builder = builder.set_directory(&dp);
         }
     }
-    match builder.blocking_pick_folder() {
-        Some(FilePath::Path(p)) => p.into_os_string().into_string().ok(),
-        _ => None,
-    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    builder.pick_folder(move |p| {
+        let _ = tx.send(match p {
+            Some(FilePath::Path(p)) => p.into_os_string().into_string().ok(),
+            _ => None,
+        });
+    });
+    rx.await.unwrap_or(None)
 }
 
 #[tauri::command]
-pub fn open_file(app: AppHandle, options: Option<Value>) -> Option<String> {
+pub async fn open_file(app: AppHandle, options: Option<Value>) -> Option<String> {
     use tauri_plugin_dialog::{DialogExt, FilePath};
     let mut builder = app.dialog().file();
     if let Some(opts) = options {
@@ -176,14 +185,18 @@ pub fn open_file(app: AppHandle, options: Option<Value>) -> Option<String> {
             }
         }
     }
-    match builder.blocking_pick_file() {
-        Some(FilePath::Path(p)) => p.into_os_string().into_string().ok(),
-        _ => None,
-    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    builder.pick_file(move |p| {
+        let _ = tx.send(match p {
+            Some(FilePath::Path(p)) => p.into_os_string().into_string().ok(),
+            _ => None,
+        });
+    });
+    rx.await.unwrap_or(None)
 }
 
 #[tauri::command]
-pub fn save_file(app: AppHandle, options: Option<Value>) -> Option<String> {
+pub async fn save_file(app: AppHandle, options: Option<Value>) -> Option<String> {
     use tauri_plugin_dialog::{DialogExt, FilePath};
     let mut builder = app.dialog().file();
     if let Some(opts) = options {
@@ -199,10 +212,14 @@ pub fn save_file(app: AppHandle, options: Option<Value>) -> Option<String> {
             }
         }
     }
-    match builder.blocking_save_file() {
-        Some(FilePath::Path(p)) => p.into_os_string().into_string().ok(),
-        _ => None,
-    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    builder.save_file(move |p| {
+        let _ = tx.send(match p {
+            Some(FilePath::Path(p)) => p.into_os_string().into_string().ok(),
+            _ => None,
+        });
+    });
+    rx.await.unwrap_or(None)
 }
 
 // ── diagnostics helper ─────────────────────────────────────────────────────

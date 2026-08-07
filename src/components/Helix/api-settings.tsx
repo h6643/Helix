@@ -25,6 +25,7 @@ import { MemorySettings } from './memory-settings'
 import { McpEditorForm, type McpFormData } from './mcp-editor-form'
 import { ShortcutsPage } from './shortcuts-page'
 import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './usage-stats'
+import { PopupSelect } from './settings-ui'
 
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -642,7 +643,12 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       if (models.length === 0) {
         showToast({ type: 'warning', title: '未获取到模型' })
       } else {
-        setAvailableModels(models)
+        // Scope the fetched list to the endpoint being probed (baseUrl), NOT the
+        // (possibly stale) activeProviderId. Without this, setAvailableModels
+        // keys the list under the previous provider and the model selector —
+        // which reads providerModels[activeProvider.id] — can't see it, dropping
+        // the fetched list to just the single declared model.
+        setAvailableModels(models, localConfig.baseUrl)
         showToast({ type: 'success', title: `获取到 ${models.length} 个模型` })
       }
     } catch (error) {
@@ -656,6 +662,13 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     if (!p) return
     setLocalConfig({ ...p.config })
     setApiConfig({ ...p.config })
+    // Re-anchor activeProviderId to the profile's endpoint. applyProfile used to
+    // leave it at the previously-active provider, so the chat dropdown's open
+    // refetch hit the wrong endpoint and the selector dropped to 1 model.
+    useHelixStore.setState((s) => {
+      const pid = s.providers.find((pr) => pr.baseUrl === s.apiConfig.baseUrl)?.id
+      return pid ? { activeProviderId: pid } : {}
+    })
     setActiveProfile(id)
     // Clear stale available models from the previous provider so the dropdown
     // only shows models fetched from the NEW endpoint.
@@ -753,7 +766,17 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     // the dropdown would never highlight Ling and the mirror would revert the
     // backend model back to flash. Use the POST-snap apiConfig.model (setApiConfig
     // may correct a model/baseUrl mismatch), so activeModel can't drift from it.
-    useHelixStore.setState({ activeModel: useHelixStore.getState().apiConfig.model })
+    // Also re-anchor activeProviderId to the endpoint just saved: leaving it at
+    // the PREVIOUS provider makes the chat dropdown's open-refetch hit the wrong
+    // endpoint and scopes providerModels reads to the wrong key — the "fetched 2
+    // models, selector shows only 1" bug.
+    useHelixStore.setState((s) => {
+      const pid = s.providers.find((p) => p.baseUrl === s.apiConfig.baseUrl)?.id
+      return {
+        activeModel: s.apiConfig.model,
+        ...(pid ? { activeProviderId: pid } : {}),
+      }
+    })
     // Persist the snapped (mismatch-corrected) config into history so a
     // model/baseUrl split can never be re-saved as a new history entry.
     const snapped = useHelixStore.getState().apiConfig
@@ -1132,17 +1155,17 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1.5">Provider</label>
                     {!isCustomProvider ? (
-                      <select
+                      <PopupSelect
                         value={localConfig.provider}
-                        onChange={(e) => handleSelectProvider(e.target.value)}
+                        onChange={handleSelectProvider}
+                        placeholder="请选择 Provider"
+                        popupWidth={300}
                         className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
-                      >
-                        <option value="">请选择 Provider</option>
-                        {ALL_PROVIDERS.map(p => (
-                          <option key={p.id} value={p.id}>{p.name} ({p.id})</option>
-                        ))}
-                        <option value={CUSTOM_PROVIDER_ID}>＋ 自定义</option>
-                      </select>
+                        options={[
+                          ...ALL_PROVIDERS.map(p => ({ label: `${p.name} (${p.id})`, value: p.id })),
+                          { label: '＋ 自定义', value: CUSTOM_PROVIDER_ID },
+                        ]}
+                      />
                     ) : (
                       <div className="flex gap-2">
                         <input

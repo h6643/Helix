@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import { useHelixStore } from '@/stores/helix-store'
-import { SettingRow, SettingGroup, SectionHeading } from './settings-ui'
+import { SettingRow, SettingGroup, SectionHeading, PopupSelect } from './settings-ui'
 import { THEME_SELECT_GROUPS } from '@/lib/themes'
 
 /**
@@ -48,7 +48,8 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
     const btn = btnRef.current
     if (!btn) return
     const r = btn.getBoundingClientRect()
-    const left = Math.max(8, r.right - 240)
+    // popup 与触发器同宽（w-56 = 224px），右对齐后两者左缘也对齐。
+    const left = Math.max(8, r.right - 224)
     setPos({ left, top: r.bottom + 4 })
   }, [open])
 
@@ -67,7 +68,7 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
         ref={btnRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-96 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors flex items-center justify-between gap-2 text-left"
+        className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors flex items-center justify-between gap-2 text-left"
       >
         <span className="truncate">{currentLabel}</span>
         <ChevronDown className={`size-3.5 shrink-0 text-muted-foreground/60 transition-transform ${open ? 'rotate-180' : ''}`} />
@@ -76,7 +77,7 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed z-50 w-60 bg-popover border border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto backdrop-blur-sm"
+          className="fixed z-50 w-56 bg-popover border border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto backdrop-blur-sm"
           style={{ left: pos.left, top: pos.top }}
         >
           {THEME_SELECT_GROUPS.map((g) => (
@@ -127,12 +128,13 @@ const UI_FONT_OPTIONS = [
 ]
 
 const fontSelect = (value: string, onChange: (v: string) => void, options: { label: string; value: string }[]) => (
-  <select value={value} onChange={(e) => onChange(e.target.value)}
-    className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors">
-    {options.map(f => (
-      <option key={f.value} value={f.value}>{f.label}</option>
-    ))}
-  </select>
+  <PopupSelect
+    value={value}
+    onChange={onChange}
+    options={options}
+    placeholder="默认"
+    className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+  />
 )
 
 const stepper = (value: number, min: number, max: number, onChange: (v: number) => void) => (

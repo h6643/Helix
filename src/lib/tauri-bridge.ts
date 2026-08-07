@@ -14,7 +14,9 @@ import type { ElectronAPI } from '@/types/electron'
 
 let installed = false
 const eventListeners = new Set<(method: string, params?: unknown) => void>()
+const terminalListeners = new Set<(data: string) => void>()
 let unlistenPromise: Promise<UnlistenFn> | null = null
+let terminalUnlistenPromise: Promise<UnlistenFn> | null = null
 
 /** 检测是否运行在 Tauri 环境。 */
 export function isTauri(): boolean {
@@ -42,6 +44,35 @@ async function subscribeHermesEvents(): Promise<void> {
       return () => {}
     }
   })()
+}
+
+async function subscribeTerminalEvents(): Promise<void> {
+  if (terminalUnlistenPromise) return
+  terminalUnlistenPromise = (async () => {
+    try {
+      return await listen('terminal:data', (event) => {
+        const data = typeof event.payload === 'string' ? event.payload : String(event.payload ?? '')
+        for (const cb of terminalListeners) {
+          try {
+            cb(data)
+          } catch {
+            /* listener threw — keep dispatching to the rest */
+          }
+        }
+      })
+    } catch (e) {
+      console.error('[tauri-bridge] 订阅 terminal:data 失败:', e)
+      return () => {}
+    }
+  })()
+}
+
+function onTerminalData(callback: (data: string) => void): () => void {
+  terminalListeners.add(callback)
+  void subscribeTerminalEvents()
+  return () => {
+    terminalListeners.delete(callback)
+  }
 }
 
 /** 返回取消订阅函数（同步，符合 Electron onEvent 的形状）。 */
@@ -125,6 +156,24 @@ function buildTauriAPI(): ElectronAPI {
     openPath: (dir: string) => invoke('open_path', { dir }),
   }
 
+  // ── terminal ───────────────────────────────────────────────────────────
+  api.terminal = {
+    start: (cols?: number, rows?: number, cwd?: string) =>
+      invoke('terminal_start', {
+        cols: cols ?? null,
+        rows: rows ?? null,
+        cwd: cwd ?? null,
+      }),
+    write: (command: string) => {
+      void invoke('terminal_write', { data: command }).catch(() => {})
+    },
+    resize: (cols: number, rows: number) => {
+      void invoke('terminal_resize', { cols, rows }).catch(() => {})
+    },
+    kill: () => invoke('terminal_kill'),
+    onData: onTerminalData,
+  }
+
   // ── secure ──────────────────────────────────────────────────────────────
   api.secure = {
     available: () => invoke('secure_available'),
@@ -188,6 +237,8 @@ function buildTauriAPI(): ElectronAPI {
     setConfigKeyValue: (params: unknown) => invoke('hermes_set_config_key_value', { params }),
     approvalRespond: (params: unknown) => invoke('hermes_approval_respond', { params }),
     update: () => invoke('hermes_update'),
+    installPlugin: (identifier: string, force?: boolean) =>
+      invoke('hermes_install_plugin', { identifier, force: force ?? false }),
   }
 
   // ── profile ─────────────────────────────────────────────────────────────

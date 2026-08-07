@@ -65,6 +65,7 @@ const TRANSPARENT_THEME = {
 export function TerminalPanel({ onClose }: TerminalPanelProps) {
   const { selectedWorkDir, terminalRawBuffer, setTerminalRawBuffer, isTerminalOpen } = useHelixStore()
   const [electronReady, setElectronReady] = useState(false)
+  const [terminalError, setTerminalError] = useState('')
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -113,7 +114,13 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
     const isDriveRoot = typeof selectedWorkDir === 'string' && /^[a-zA-Z]:[\\/]?$/.test(selectedWorkDir)
     const cwd = selectedWorkDir && !isDriveRoot ? selectedWorkDir : undefined
     lastCwdRef.current = cwd || null
-    electronTerminal.start(term.cols, term.rows, cwd).catch(() => {})
+    electronTerminal.start(term.cols, term.rows, cwd).then((res) => {
+      if (res?.ok) {
+        setTerminalError('')
+      } else {
+        setTerminalError(res?.error || 'Terminal failed to start')
+      }
+    }).catch((e) => setTerminalError(String(e)))
 
     const unsub = electronTerminal.onData((data) => {
       term.write(data)
@@ -287,7 +294,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
           <div className="flex items-center gap-2 h-full px-3 bg-white/60 border-t-2 border-primary text-foreground text-[12px]">
             <Terminal className="size-3.5" />
             <span className="max-w-[180px] truncate">
-              {selectedWorkDir ? selectedWorkDir.split(/[\\/]/).pop() || 'PowerShell' : 'PowerShell'}
+              {selectedWorkDir ? selectedWorkDir.split(/[\\/]/).pop() || 'Terminal' : 'Terminal'}
             </span>
           </div>
         </div>
@@ -310,6 +317,9 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
 
       {!electronReady && (
         <div className="px-3 py-2 text-[12px] text-[#999]">Terminal not available in browser mode</div>
+      )}
+      {terminalError && (
+        <div className="px-3 py-2 text-[12px] text-red-500">{terminalError}</div>
       )}
     </div>
   )

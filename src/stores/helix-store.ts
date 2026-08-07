@@ -550,6 +550,9 @@ async function persistCurrentSessionNow(): Promise<void> {
         id: m.id, sessionId, role: m.role,
         content: m.content, images: m.images, timestamp: m.timestamp, isStreaming: m.isStreaming ?? false,
         reasoning: m.reasoning,
+        duration: m.duration,
+        thinkingTime: m.thinkingTime,
+        totalTokens: m.totalTokens,
         steps: m.steps,
       }))
     const draft = snapshot.streamingDrafts[sessionId]
@@ -566,6 +569,9 @@ async function persistCurrentSessionNow(): Promise<void> {
         content: draft.textBuffer + '\n\n*[生成中断，仅保存部分内容]*',
         images: undefined,
         reasoning: draft.thoughtBuffer || undefined,
+        duration: undefined,
+        thinkingTime: undefined,
+        totalTokens: draft.totalTokens,
         timestamp: Date.now(),
         isStreaming: false,
         steps: undefined,
@@ -644,6 +650,9 @@ async function persistSessionById(sessionId: string): Promise<void> {
         id: m.id, sessionId, role: m.role,
         content: m.content, images: m.images, timestamp: m.timestamp, isStreaming: false,
         reasoning: m.reasoning,
+        duration: m.duration,
+        thinkingTime: m.thinkingTime,
+        totalTokens: m.totalTokens,
         steps: m.steps,
       })
     }
@@ -1246,6 +1255,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         timestamp: m.timestamp,
         isStreaming: false,
         reasoning: m.reasoning,
+        duration: m.duration,
+        thinkingTime: m.thinkingTime,
+        totalTokens: m.totalTokens,
         steps: m.steps,
       })),
       files: collectFiles(state.files),
@@ -1585,6 +1597,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           images: msg.images,
           timestamp: msg.timestamp,
           reasoning: msg.reasoning,
+          duration: msg.duration,
+          thinkingTime: msg.thinkingTime,
+          totalTokens: msg.totalTokens,
           steps: msg.steps,
         }))
 
@@ -2566,15 +2581,27 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
              mergedProviders.find((p) => (p.models?.length || 0) > 0)?.models[0] ||
              null)
           : null)
-      // Resolve the active provider: prefer a saved id that still exists, then
-      // the owner of the active model, then the default/first provider.
+      // Resolve the active provider: prefer the owner of the active model, then
+      // a saved id that still exists (only when it agrees with that owner or the
+      // model has no clear owner), then the default/first provider.
       const builtActiveProviderId: string | null = (() => {
-        if (activeProviderId && mergedProviders.some((p) => p.id === activeProviderId)) {
-          return activeProviderId
-        }
+        // Re-anchor to the active model's OWNER first. A saved activeProviderId
+        // can be stale — handleSaveApi/applyProfile used to sync activeModel
+        // without re-anchoring it, leaving the id pointing at an older provider
+        // (e.g. Ling) while the active model belongs to another endpoint (e.g.
+        // DeepSeek). The stale id then scoped providerModels writes and the chat
+        // dropdown's open-refetch to the WRONG endpoint, collapsing the fetched
+        // list to the single declared model. Trusting the saved id only when it
+        // points at the same endpoint as the model owner keeps them in lockstep.
         if (builtActiveModel) {
           const owner = mergedProviders.find((p) => p.models.includes(builtActiveModel))
-          if (owner) return owner.id
+          if (owner) {
+            if (!activeProviderId) return owner.id
+            const saved = mergedProviders.find((p) => p.id === activeProviderId)
+            if (!saved || saved.baseUrl === owner.baseUrl) return owner.id
+            warn('[restoreFromStorage] activeProviderId stale, re-anchoring to model owner:', activeProviderId, '→', owner.id)
+            return owner.id
+          }
           // Fallback: locate the owner via providerModels when the model isn't
           // present in the merged declared+fetched pool (e.g. providerModels
           // loaded but not yet merged), so the active provider scope stays
@@ -2582,6 +2609,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           for (const p of mergedProviders) {
             if ((providerModels?.[p.id] || []).includes(builtActiveModel)) return p.id
           }
+        }
+        if (activeProviderId && mergedProviders.some((p) => p.id === activeProviderId)) {
+          return activeProviderId
         }
         return mergedProviders.find((p) => p.isDefault)?.id || mergedProviders[0]?.id || null
       })()
@@ -2825,14 +2855,24 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         // After the first "heal" restart the on-disk data is already clean, so
         // re-writing identical blobs on every subsequent startup is pure I/O.
         const prevModels = providerModels || {}
+        // A stale persisted activeProviderId (pointing at a different endpoint
+        // than the active model's owner) is healed by builtActiveProviderId
+        // above; write the corrected value back so the next cold start doesn't
+        // have to re-heal it and doesn't scope fetches to the wrong provider.
+        const healedActiveProviderId = healed.activeProviderId
+        const providerIdChanged = healedActiveProviderId !== activeProviderId
         const changed =
           JSON.stringify(healed.apiProfiles) !== JSON.stringify(apiProfiles || []) ||
           JSON.stringify(healed.providers) !== JSON.stringify(providers || []) ||
-          JSON.stringify(cleanedProviderModels) !== JSON.stringify(prevModels)
+          JSON.stringify(cleanedProviderModels) !== JSON.stringify(prevModels) ||
+          providerIdChanged
         if (changed) {
           await persistence.saveSetting('apiProfiles', healed.apiProfiles)
           await persistence.saveSetting('providers', healed.providers)
           await persistence.saveSetting('providerModels', cleanedProviderModels)
+          if (providerIdChanged && healedActiveProviderId !== null) {
+            await persistence.saveSetting('activeProviderId', healedActiveProviderId)
+          }
         }
       } catch (persistErr) {
         logError('Failed to persist healed model lists:', persistErr)
@@ -2881,6 +2921,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           content: m.content,
           timestamp: m.timestamp,
           isStreaming: false,
+          duration: m.duration,
+          thinkingTime: m.thinkingTime,
+          totalTokens: m.totalTokens,
         })),
         sessionId
       )

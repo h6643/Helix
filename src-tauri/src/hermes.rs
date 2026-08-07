@@ -672,6 +672,296 @@ pub fn hermes_update() -> Value {
     }
 }
 
+/// 带超时地执行一条命令并捕获输出（stdout/stderr），返回 `(退出码, stdout, stderr)`。
+/// 子进程输出都很小（git clone / CLI 提示），管道不会撑满；轮询 `try_wait` 以便超时中止。
+fn run_cmd_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: Duration,
+) -> Result<(i32, String, String), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return Err("命令执行超时，已中止".into());
+                }
+                std::thread::sleep(Duration::from_millis(120));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let mut out = String::new();
+    let mut err = String::new();
+    if let Some(mut s) = child.stdout.take() {
+        let _ = s.read_to_string(&mut out);
+    }
+    if let Some(mut s) = child.stderr.take() {
+        let _ = s.read_to_string(&mut err);
+    }
+    Ok((status.code().unwrap_or(-1), out, err))
+}
+
+fn is_safe_provider_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// 解析官方内存 Provider 仓库标识：`owner/repo/.../plugins/memory/<id>` 或
+/// `https://github.com/owner/repo/...` 浏览器 URL。只认 NousResearch/hermes-agent，
+/// 匹配则返回 Provider id（用于稀疏克隆安装）。
+fn monorepo_memory_provider(identifier: &str) -> Option<String> {
+    let s = identifier.trim().trim_end_matches('/');
+    let s = s
+        .strip_prefix("https://github.com/")
+        .or_else(|| s.strip_prefix("http://github.com/"))
+        .unwrap_or(s);
+    let marker = "plugins/memory/";
+    let idx = s.find(marker)?;
+    let prefix = &s[..idx];
+    let id = s[idx + marker.len()..].split('/').next()?.to_string();
+    if !is_safe_provider_id(&id) {
+        return None;
+    }
+    let tokens: Vec<&str> = prefix.trim_matches('/').split('/').filter(|p| !p.is_empty()).collect();
+    let is_official = tokens.len() >= 2 && tokens[0] == "NousResearch" && tokens[1] == "hermes-agent";
+    is_official.then_some(id)
+}
+
+/// 官方内存 Provider 插件（NousResearch/hermes-agent 的 `plugins/memory/<id>`）
+/// 用 sparse 稀疏克隆安装。整仓有约 600MB，普通浅克隆太重；`--depth 1
+/// --filter=blob:none --sparse` 只拉树结构 + 需要的子目录，实测约 3MB / 数十秒。
+/// 递归收集 GitHub 目录（contents API）下所有文件的相对路径。
+/// 每个目录一级一次 API 调用；插件目录都是扁平的，通常只需 1 次。
+fn github_walk_dir(
+    client: &reqwest::blocking::Client,
+    api_path: &str,
+    base: &str,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
+    let url = format!("https://api.github.com/repos/NousResearch/hermes-agent/contents/{api_path}");
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("请求 GitHub 失败：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API {url} → HTTP {}", resp.status()));
+    }
+    let entries: Value = resp.json().map_err(|e| format!("解析 GitHub 响应失败：{e}"))?;
+    let arr = entries
+        .as_array()
+        .ok_or_else(|| "GitHub 返回的不是目录结构".to_string())?;
+    for it in arr {
+        let ty = it.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let rel = if base.is_empty() { name.clone() } else { format!("{base}/{name}") };
+        match ty {
+            "dir" => github_walk_dir(client, &format!("{api_path}/{name}"), &rel, out)?,
+            "file" => out.push(rel),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// 带重试地下载一个文件（走 contents API 的 raw Accept 头，仍落在 api.github.com，
+/// 因为 raw.githubusercontent.com 在某些网络环境不可达）。返回文件字节。
+fn github_download_file(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    rel: &str,
+) -> Result<Vec<u8>, String> {
+    let mut last_err: Option<String> = None;
+    for attempt in 0..3 {
+        match client.get(url).header("Accept", "application/vnd.github.raw").send() {
+            Ok(resp) if resp.status().is_success() => {
+                return resp.bytes().map(|b| b.to_vec()).map_err(|e| format!("读取 {rel} 失败：{e}"));
+            }
+            Ok(resp) => return Err(format!("下载 {rel} 失败：HTTP {}", resp.status())),
+            Err(e) => {
+                last_err = Some(format!("{e}"));
+                if attempt < 2 {
+                    std::thread::sleep(Duration::from_millis(400 * (attempt + 1)));
+                }
+            }
+        }
+    }
+    Err(format!("下载 {rel} 失败（重试后仍失败）：{}", last_err.unwrap_or_default()))
+}
+
+/// 官方内存 Provider 插件（NousResearch/hermes-agent 的 `plugins/memory/<id>`）
+/// 直接用 GitHub contents API + raw 原始文件下载安装。
+///
+/// 不用 git clone：整仓有约 600MB，浅/稀疏克隆都要先协商整个仓库的树结构，
+/// 实测要 1–5 分钟；而插件子目录只有几个小文件（如 mem0 = 6 个文件 / 100KB），
+/// API 一次列目录 + 逐个 raw 下载，几秒内完成。
+async fn install_memory_provider_official(provider: String, force: bool, hermes_bin: &std::path::Path) -> Value {
+    use std::io::Write;
+    let hermes_home = hermes_data_dir();
+
+    let provider_in = provider.clone();
+    let hermes_home_in = hermes_home.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("Helix/0.3")
+            .build()
+            .map_err(|e| format!("HTTP 客户端初始化失败：{e}"))?;
+
+        // 1. 递归列出插件目录所有文件（相对路径）
+        let api_dir = format!("plugins/memory/{provider_in}");
+        let mut files: Vec<String> = Vec::new();
+        github_walk_dir(&client, &api_dir, "", &mut files)?;
+        if files.is_empty() {
+            return Err(format!("GitHub 上没找到插件目录 plugins/memory/{provider_in}"));
+        }
+        if !files.iter().any(|rel| rel == "plugin.yaml" || rel == "plugin.yml") {
+            return Err("该目录没有 plugin.yaml / plugin.yml，不是有效的插件".into());
+        }
+
+        // 2. 落地到 $HERMES_HOME/plugins/<provider>
+        let plugins_dir = hermes_home_in.join("plugins");
+        let target = plugins_dir.join(&provider_in);
+        if target.exists() {
+            if !force {
+                return Err(format!("插件 {provider_in} 已安装，如需重装请在命令后加 --force"));
+            }
+            std::fs::remove_dir_all(&target).map_err(|e| format!("清理旧插件失败：{e}"))?;
+        }
+        std::fs::create_dir_all(&target).map_err(|e| format!("无法创建插件目录：{e}"))?;
+
+        let mut downloaded = 0usize;
+        for rel in &files {
+            let url = format!(
+                "https://api.github.com/repos/NousResearch/hermes-agent/contents/{api_dir}/{rel}"
+            );
+            let bytes = github_download_file(&client, &url, rel)?;
+            let dest = target.join(rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+            }
+            let mut f = std::fs::File::create(&dest).map_err(|e| format!("写入 {rel} 失败：{e}"))?;
+            f.write_all(&bytes).map_err(|e| format!("写入 {rel} 失败：{e}"))?;
+            downloaded += 1;
+        }
+
+        Ok(format!(
+            "已安装插件 {provider_in}（{downloaded} 个文件）→ {}",
+            target.display()
+        ))
+    })
+    .await;
+
+    let install_msg = match result {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(e)) => return json!({ "ok": false, "message": e }),
+        Err(e) => return json!({ "ok": false, "message": e.to_string() }),
+    };
+
+    // 3. 尝试加入启用列表（内存 Provider 加载不走该门控，属锦上添花，失败不影响）
+    use std::process::Command;
+    let enable = run_cmd_with_timeout(
+        {
+            let mut c = Command::new(hermes_bin);
+            c.arg("plugins")
+                .arg("enable")
+                .arg(provider)
+                .arg("--no-allow-tool-override")
+                .envs(crate::kanban::build_clean_env(hermes_bin))
+                .env("HERMES_HOME", hermes_home.display().to_string());
+            c
+        },
+        Duration::from_secs(60),
+    );
+    match enable {
+        Ok((0, _, _)) => json!({ "ok": true, "message": format!("{install_msg}。插件已启用。") }),
+        Ok((code, so, se)) => json!({
+            "ok": true,
+            "message": format!(
+                "{install_msg}。（启用步骤未生效，退出码 {code}：{}）",
+                if !se.trim().is_empty() { se } else { so }
+            )
+        }),
+        Err(e) => json!({ "ok": true, "message": format!("{install_msg}。（启用步骤跳过：{e}）") }),
+    }
+}
+
+/// 安装 Hermes 插件的异步封装（设置页「运行」按钮）。
+///
+/// 两种路径：
+/// - 官方内存 Provider（`NousResearch/hermes-agent/plugins/memory/<id>`）→ GitHub API
+///   直接下载插件文件（几秒完成，绕开 600MB 整仓）；
+/// - 其他仓库 → 交给 `hermes plugins install <identifier> --enable`（免交互确认）。
+/// `--force` 在重装时覆盖已存在插件。环境用 kanban 的 `build_clean_env`（清 npm 变量、
+/// hermes venv bin 前置到 PATH），并钉住 `HERMES_HOME` 指向本应用的数据目录，否则插件
+/// 会装到 CLI 默认的 `~/.hermes`，网关（读 `~/.local/share/hermes`）扫描不到。
+#[tauri::command]
+pub async fn hermes_install_plugin(identifier: String, force: Option<bool>) -> Value {
+    use std::process::Command;
+    let Some(hermes_bin) = resolve_hermes_cmd() else {
+        return json!({ "ok": false, "message": "找不到 hermes 可执行文件" });
+    };
+    let identifier = identifier.trim().to_string();
+    if identifier.is_empty() {
+        return json!({ "ok": false, "message": "安装命令不能为空，请输入 owner/repo 或 Git URL" });
+    }
+    let force = force.unwrap_or(false);
+
+    if let Some(provider) = monorepo_memory_provider(&identifier) {
+        return install_memory_provider_official(provider, force, &hermes_bin).await;
+    }
+
+    let hermes_home = hermes_data_dir();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(&hermes_bin);
+        child
+            .arg("plugins")
+            .arg("install")
+            .arg(&identifier)
+            .arg("--enable");
+        if force {
+            child.arg("--force");
+        }
+        child
+            .envs(crate::kanban::build_clean_env(&hermes_bin))
+            .env("HERMES_HOME", hermes_home.display().to_string())
+            .stdin(std::process::Stdio::null())
+            .output()
+    })
+    .await;
+    match result {
+        Ok(Ok(o)) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            let combined = if !stdout.is_empty() && !stderr.is_empty() {
+                format!("{stdout}\n{stderr}")
+            } else if !stderr.is_empty() {
+                stderr
+            } else {
+                stdout
+            };
+            if o.status.success() {
+                json!({ "ok": true, "message": combined })
+            } else {
+                let code = o.status.code().unwrap_or(-1);
+                json!({ "ok": false, "message": format!("退出码 {code}: {combined}") })
+            }
+        }
+        Ok(Err(e)) => json!({ "ok": false, "message": e.to_string() }),
+        Err(e) => json!({ "ok": false, "message": e.to_string() }),
+    }
+}
+
 #[tauri::command]
 pub fn hermes_set_personality(
     state: State<'_, Arc<AppState>>,

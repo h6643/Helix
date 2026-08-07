@@ -17,6 +17,7 @@ mod profile;
 mod scheduled_tasks;
 mod security;
 mod state;
+mod terminal;
 mod window;
 
 use crate::state::{AppState, APP_HANDLE};
@@ -82,6 +83,7 @@ pub fn run() {
             hermes::hermes_approval_respond,
             hermes::hermes_list_personalities,
             hermes::hermes_update,
+            hermes::hermes_install_plugin,
             hermes::hermes_set_personality,
             hermes::hermes_set_model,
             hermes::hermes_get_skills_dir,
@@ -125,6 +127,11 @@ pub fn run() {
             security::open_directory,
             security::open_file,
             security::save_file,
+            // terminal
+            terminal::terminal_start,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_kill,
             // git
             git::status,
             git::diff,

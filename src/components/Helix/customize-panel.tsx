@@ -5,6 +5,7 @@ import React, { useState, useCallback, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useHelixStore, DEFAULT_SHORTCUTS } from '@/stores/helix-store'
+import { PopupSelect } from './settings-ui'
 
 interface CustomizePanelProps {
   onClose: () => void
@@ -310,17 +311,12 @@ function AppearanceSection() {
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
             <label className="text-sm text-muted-foreground">字体系列</label>
-            <select
+            <PopupSelect
               value={fontFamily}
-              onChange={(e) => {
-                setFontFamily(e.target.value)
-              }}
+              onChange={setFontFamily}
               className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
-            >
-              {fontOptions.map(opt => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
+              options={fontOptions}
+            />
           </div>
           <div className="space-y-2">
             <label className="text-sm text-muted-foreground">字体大小</label>
@@ -342,17 +338,12 @@ function AppearanceSection() {
         <h3 className="text-base font-medium text-foreground">界面字体</h3>
         <div className="space-y-2">
           <label className="text-sm text-muted-foreground">字体系列</label>
-          <select
+          <PopupSelect
             value={interfaceFont}
-            onChange={(e) => {
-              setInterfaceFont(e.target.value)
-            }}
+            onChange={setInterfaceFont}
             className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
-          >
-            {interfaceFontOptions.map(opt => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
+            options={interfaceFontOptions}
+          />
         </div>
       </section>
     </div>

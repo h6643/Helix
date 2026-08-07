@@ -142,6 +142,12 @@ export interface ElectronAPI {
     listMemories: () => Promise<{ memory: string[]; user: string[]; manual: string[] }>
     addMemoryEntry: (target: 'memory' | 'user', text: string) => Promise<{ ok: boolean; entries?: string[]; error?: string }>
     removeMemoryEntry: (target: 'memory' | 'user', text: string) => Promise<{ ok: boolean; entries?: string[] }>
+    // External memory provider auto-install (spawns `hermes plugins install`).
+    installPlugin: (identifier: string, force?: boolean) => Promise<{
+      ok: boolean
+      message?: string
+      error?: string
+    }>
   }
 
   profile: {

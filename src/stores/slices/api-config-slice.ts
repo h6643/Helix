@@ -95,16 +95,20 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
 
   setAvailableModels: (models, baseUrl, providerId) => {
     // Resolve the provider id that scopes this fetched list. Priority:
-    // explicit param → active provider → match by baseUrl. This guarantees
+    // explicit param → match by baseUrl → active provider. This guarantees
     // the saved key equals what the model selector reads (providerModels[pid]
     // where pid === activeProvider.id), so the list survives a restart.
+    // baseUrl MUST be preferred over activeProviderId: the latter can be stale
+    // (handleSaveApi/applyProfile don't always re-anchor it), and keying the
+    // fetched list under the wrong provider hides those models from the
+    // selector — the "获取到 2 个模型，切换后只剩 1 个" bug.
     const resolvePid = (state: any): string | undefined => {
       if (providerId) return providerId
-      if (state.activeProviderId) return state.activeProviderId
       if (baseUrl) {
         const match = state.providers.find((p: any) => p.baseUrl === baseUrl)
         if (match) return match.id
       }
+      if (state.activeProviderId) return state.activeProviderId
       return undefined
     }
     set((state) => {

@@ -38,6 +38,9 @@ export interface PersistedChatMessage {
   role: string
   content: string
   reasoning?: string
+  duration?: number
+  thinkingTime?: number
+  totalTokens?: number
   steps?: import('@/stores/helix-store').ExecutionStep[]
   images?: Array<{
     id: string

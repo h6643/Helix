@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react'
 import { Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
-import { SettingRow, SettingGroup } from './settings-ui'
+import { SettingRow, SettingGroup, PopupSelect } from './settings-ui'
 
 interface DelegationConfig {
   provider: string
@@ -248,20 +248,17 @@ export function AgentsSettings() {
               <SettingGroup>
                 {apiHistory.length > 0 ? (
                   <SettingRow label="模型配置（从历史选择）">
-                    <select
+                    <PopupSelect
                       value={matchedHistory >= 0 ? String(matchedHistory) : ''}
-                      onChange={(e) => applyHistory(e.target.value)}
+                      onChange={applyHistory}
+                      placeholder={matchedHistory >= 0 ? '手动配置' : '选择历史模型配置…'}
                       className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
-                    >
-                      <option value="" disabled>
-                        {matchedHistory >= 0 ? '手动配置' : '选择历史模型配置…'}
-                      </option>
-                      {apiHistory.map((h, i) => (
-                        <option key={i} value={i} title={h.baseUrl}>
-                          {h.model}{h.baseUrl ? ` · ${hostOf(h.baseUrl)}` : ''}
-                        </option>
-                      ))}
-                    </select>
+                      options={apiHistory.map((h, i) => ({
+                        value: String(i),
+                        label: `${h.model}${h.baseUrl ? ` · ${hostOf(h.baseUrl)}` : ''}`,
+                        ...(h.baseUrl ? { hint: h.baseUrl } : {}),
+                      }))}
+                    />
                   </SettingRow>
                 ) : (
                   <SettingRow label="模型配置">

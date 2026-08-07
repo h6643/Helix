@@ -83,10 +83,7 @@ export interface StreamingDraft {
   // When this run started (ms epoch). Per-session so each conversation's live
   // timer keeps its own elapsed time instead of sharing one global timestamp.
   startedAt?: number
-  // Streaming thought-token count for this run, for the per-session timer line.
-  thoughtTokens?: number
-  // Streaming total-token count (input+output+thought) for this run. Used as a
-  // fallback on the timer line when thoughtTokens is 0 (non-reasoning models).
+  // Backend-reported total token count after usage:prompt-complete.
   totalTokens?: number
 }
 
@@ -109,9 +106,11 @@ export interface ChatMessage {
   files?: FileAttachment[]
   timestamp: number
   isStreaming?: boolean
+  duration?: number
   thinkingTime?: number
   tokenCount?: number
   thoughtTokens?: number
+  totalTokens?: number
   reasoning?: string
   steps?: ExecutionStep[]
   blocks?: Array<{ type: 'text'; content: string } | { type: 'thinking'; content: string } | { type: 'tool_group'; steps: ExecutionStep[] } | { type: 'file_change'; changes: PendingChange[] }>

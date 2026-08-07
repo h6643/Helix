@@ -232,9 +232,11 @@ export function ApprovalDialog(props: LegacyProps) {
     }
   }, [request, onApprove, onReject])
   if (!request) return null
+  // 确认弹窗出现时聊天对话框已被隐藏（agent-flow-panel 对 approvalRequest 生效），
+  // 所以这里以居中弹窗的形式呈现，让审批成为屏幕上的唯一焦点。
   return (
-    <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-2">
-      <div className="flex items-center gap-2">
+    <div className="fixed inset-0 z-50 flex items-center justify-center animate-in fade-in">
+      <div className="flex items-center gap-2 px-4 py-3 rounded-2xl bg-card border border-amber-500/30 shadow-2xl">
         <ApprovalBar request={request} onApprove={handleApprove} />
         {pendingCount && pendingCount > 1 && (
           <span className="text-[10px] text-muted-foreground/50 font-mono">

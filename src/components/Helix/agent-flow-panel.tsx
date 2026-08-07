@@ -113,6 +113,20 @@ function pinToolGroupsToTop(blocks: StreamingResponseBlock[]): StreamingResponse
   return [...tools, ...rest]
 }
 
+// Older streamed messages may store cumulative text per block. Convert those
+// to incremental text blocks so completed messages never render duplicates.
+function normalizeTextBlocks(blocks: NonNullable<ChatMessage['blocks']>): NonNullable<ChatMessage['blocks']> {
+  let seen = ''
+  return blocks.map(block => {
+    if (block.type !== 'text') return block
+    const content = seen && block.content.startsWith(seen)
+      ? block.content.slice(seen.length)
+      : block.content
+    seen += content
+    return { ...block, content }
+  })
+}
+
 // ── Diff capture from Hermes inline_diff ──────────────────────────────────
 // Hermes `tool.complete` ships a rendered unified diff (inline_diff) for
 // write_file/patch. Parse enough structure out of it to feed DiffPreview:
@@ -298,6 +312,15 @@ function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return s > 0 ? `${m}m ${s}s` : `${m}m`
+}
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000) {
+    const k = tokens / 1000
+    const rounded = k >= 100 ? Math.round(k) : Math.round(k * 10) / 10
+    return `${rounded}k`
+  }
+  return String(tokens)
 }
 
 // Isolated so the 200ms ticking only re-renders this tiny node, not the whole
@@ -759,6 +782,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   const content = useMemo(() => normalizeAcpContent(msg.content), [msg.content])
   const mdContent = useMemo(() => safeMarkdownSource(stripEmoji(normalizeAcpContent(msg.content))), [msg.content])
   const reasoning = useMemo(() => normalizeAcpContent(msg.reasoning || ''), [msg.reasoning])
+  const messageDuration = msg.duration ?? msg.thinkingTime
 
   return (
     <div
@@ -792,7 +816,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
             {/* Interleaved blocks: thinking, text, and tool groups in chronological order */}
             {(msg.blocks && msg.blocks.length > 0) ? (
               <div className="helix-md" style={{ fontSize }}>
-                {pinToolGroupsToTop(msg.blocks).map((block, idx) =>
+                {pinToolGroupsToTop(normalizeTextBlocks(msg.blocks)).map((block, idx) =>
                   block.type === 'thinking' ? (
                     <details key={idx} className="mb-2 group/details">
                       <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
@@ -810,7 +834,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                       remarkPlugins={markdownPlugins.remarkPlugins}
                       rehypePlugins={markdownPlugins.rehypePlugins}
                     >
-                      {mdContent}
+                      {safeMarkdownSource(stripEmoji(normalizeAcpContent(block.content)))}
                     </ReactMarkdown>
                   ) : block.type === 'file_change' ? (
                     <FileChangeSummary key={idx} changes={block.changes} />
@@ -828,6 +852,13 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 >
                   {mdContent}
                 </ReactMarkdown>
+              </div>
+            )}
+            {((messageDuration ?? 0) > 0 || (msg.totalTokens ?? 0) > 0) && (
+              <div className="text-[10px] text-foreground/30 tabular-nums mt-1 px-1">
+                {messageDuration != null && messageDuration > 0 ? formatDuration(messageDuration) : ''}
+                {messageDuration != null && messageDuration > 0 && msg.totalTokens != null && msg.totalTokens > 0 ? ' · ' : ''}
+                {msg.totalTokens != null && msg.totalTokens > 0 ? `${formatTokenCount(msg.totalTokens)} tokens` : ''}
               </div>
             )}
             {/* Copy button */}
@@ -988,8 +1019,6 @@ export function AgentFlowPanel() {
   const forceDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savedSessionRef = useRef(false)
   const sharedTextBufferRef = useRef<string>('')
-  const thoughtTokensRef = useRef<number>(0)
-  const usageReceivedRef = useRef(false)
   const thoughtBufferRef = useRef<string>('')
   const thinkingStartTimeRef = useRef<number>(0)
   const thinkingDurationRef = useRef<number>(0)
@@ -1009,7 +1038,7 @@ export function AgentFlowPanel() {
   const sessionMapRef = useRef<Map<string, SessionMapEntry>>(new Map())
   const runningSessionIdRef = useRef<string | null>(null)
   // Which session's data the shared live UI state (responseBlocks / steps /
-  // streamThinking / tokens) currently belongs to. Lets the display layer keep
+  // streamThinking) currently belongs to. Lets the display layer keep
   // showing a promoted-but-not-yet-flushed run's own draft instead of another
   // run's stale live state right after switching conversations.
   const liveStateOwnerRef = useRef<string | null>(null)
@@ -1042,7 +1071,6 @@ export function AgentFlowPanel() {
   // Anchors the live timer to the moment the USER sends a question, so it keeps
   // ticking across any sub-runs (agent tool loops) instead of resetting per run.
   const [questionStartTs, setQuestionStartTs] = useState<number>(0)
-  const [streamThoughtTokens, setStreamThoughtTokens] = useState<number>(0)
   const [streamTotalTokens, setStreamTotalTokens] = useState<number>(0)
 
   const apiConfig = useHelixStore(s => s.apiConfig)
@@ -1379,7 +1407,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     setResponseBlocks([])
     setSteps([])
     setStreamThinking('')
-    setStreamThoughtTokens(0)
+    setStreamTotalTokens(0)
     // Sync the GLOBAL hermesSessionId to this conversation's backend session so
     // that consumers outside handleRun (ContextUsageIndicator, compaction, etc.)
     // target the RIGHT session.  Without this they read a stale global that still
@@ -1694,7 +1722,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               // is enough. Forcing a re-fetch (rather than only when the cache is
               // empty) means newly-added models (e.g. a fresh ling-pro) show up
               // immediately, and we never rely on a possibly-stale persisted list.
-              const pid = st.activeProviderId
+              // Use the baseUrl-resolved activeProvider, NOT the raw
+              // activeProviderId — the latter can be stale after saving a
+              // different provider's config, which would probe the wrong endpoint
+              // and leave the selector showing only the declared model.
+              const pid = activeProvider?.id || st.activeProviderId
               if (pid) {
                 st.fetchProviderModels(pid)
               }
@@ -2298,6 +2330,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // state to its own per-session draft (syncDraft) for switch-back.
     const textBufferRef = { current: '' }
     const thoughtBufferRef = { current: '' }
+    const lastStreamedTextRef = { current: '' }
     const stepsRef = { current: [] as ExecutionStep[] }
     const responseBlocksRef = { current: [] as ResponseBlock[] }
     const streamThinkingRef = { current: '' }
@@ -2343,13 +2376,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       setStreamThinking(u)
       liveStateOwnerRef.current = activeSessionId
     }
-    const uiTokens = (u: any) => {
-      thoughtTokensRef.current = u
-      if (!isFrontRun()) { wasFront = false; return }
-      if (!wasFront) { wasFront = true; setStreamThoughtTokens(thoughtTokensRef.current) }
-      setStreamThoughtTokens(u)
-      liveStateOwnerRef.current = activeSessionId
-    }
     const uiTotalTokens = (u: any) => {
       totalTokensRef.current = u
       if (!isFrontRun()) { wasFront = false; return }
@@ -2379,7 +2405,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           textBuffer: textBufferRef.current,
           thoughtBuffer: thoughtBufferRef.current,
           startedAt: startedAtRef.current,
-          thoughtTokens: thoughtTokensRef.current,
           totalTokens: totalTokensRef.current,
         })
       })
@@ -2401,7 +2426,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               : [...next, { type: 'thinking', content: b.content }]
           } else {
             next = last?.type === 'text'
-              ? [...next.slice(0, -1), { type: 'text', content: b.content }]
+              ? [...next.slice(0, -1), { type: 'text', content: last.content + b.content }]
               : [...next, { type: 'text', content: b.content }]
           }
         }
@@ -2434,7 +2459,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       textBuffer: '',
       thoughtBuffer: '',
       startedAt: startedAtRef.current,
-      thoughtTokens: 0,
       totalTokens: 0,
     })
     uiRB([])
@@ -2443,12 +2467,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     uiST('')
     textBufferRef.current = ''
     thoughtBufferRef.current = ''
+    lastStreamedTextRef.current = ''
     streamCappedRef.current = false
     thinkingCappedRef.current = false
     thinkingStartTimeRef.current = 0
     thinkingDurationRef.current = 0
     promptSentAtRef.current = 0
-    uiTokens(0)
     uiTotalTokens(0)
     firstContentAtRef.current = 0
     usageReceivedRef.current = false
@@ -3008,6 +3032,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             if (phase === 'error') {
               textBufferRef.current = ''
               thoughtBufferRef.current = ''
+              lastStreamedTextRef.current = ''
               streamCappedRef.current = false
               thinkingCappedRef.current = false
               pendingTextRef.current = ''
@@ -3030,6 +3055,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             } else if (phase === 'retrying') {
               textBufferRef.current = ''
               thoughtBufferRef.current = ''
+              lastStreamedTextRef.current = ''
               streamCappedRef.current = false
               thinkingCappedRef.current = false
               pendingTextRef.current = ''
@@ -3467,7 +3493,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   const capped = cur + '\n\n[输出过长，已截断，剩余内容不再显示]'
                   textBufferRef.current = capped
                   pendingTextRef.current = capped
-                  pendingBlocksRef.current.push({ type: 'text', content: capped })
+                  const delta = capped.startsWith(lastStreamedTextRef.current)
+                    ? capped.slice(lastStreamedTextRef.current.length)
+                    : capped
+                  lastStreamedTextRef.current = capped
+                  pendingBlocksRef.current.push({ type: 'text', content: delta })
                 }
                 scheduleStreamRender()
                 return
@@ -3505,10 +3535,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }
               textBufferRef.current = newText
               pendingTextRef.current = newText
-              pendingBlocksRef.current.push({ type: 'text', content: newText })
 
               // If the model embeds its reasoning inside <think:ID>...</think:ID> tags
               // instead of emitting a separate thinking stream, surface it as the thinking block.
+              let renderText = newText
               if (!thoughtBufferRef.current) {
                 const { content: cleaned, reasoning } = extractThinkTags(newText)
                 if (reasoning) {
@@ -3519,17 +3549,15 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   // output), fall back to showing reasoning as visible content
                   // rather than leaving the message empty.
                   textBufferRef.current = cleaned || reasoning
-                  pendingTextRef.current = cleaned || reasoning
-                  // Update the last queued text block so the <think:ID> scrub
-                  // result is what gets rendered (not the raw newText).
-                  const pb = pendingBlocksRef.current
-                  if (pb.length && pb[pb.length - 1].type === 'text') {
-                    pb[pb.length - 1] = { type: 'text', content: cleaned || reasoning }
-                  } else {
-                    pb.push({ type: 'text', content: cleaned || reasoning })
-                  }
+                  renderText = cleaned || reasoning
                 }
               }
+              pendingTextRef.current = renderText
+              const delta = renderText.startsWith(lastStreamedTextRef.current)
+                ? renderText.slice(lastStreamedTextRef.current.length)
+                : renderText
+              lastStreamedTextRef.current = renderText
+              pendingBlocksRef.current.push({ type: 'text', content: delta })
 
               scheduleStreamRender()
             } else if (parsed.type === 'done') {
@@ -3586,6 +3614,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 }
                 const curState = useHelixStore.getState()
                 const endTs = Date.now()
+                const totalSecs = Math.max(0, Math.round((endTs - startedAtRef.current) / 1000))
                 let thinkingSecs = thinkingStartTimeRef.current
                   ? Math.round((endTs - thinkingStartTimeRef.current) / 1000)
                   : (firstContentAtRef.current && promptSentAtRef.current
@@ -3614,9 +3643,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 // the streaming area (via displayResponseBlocks) — producing exact
                 // duplicates of every tool_group block.
                 uiRB([])
-                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: discardBlocks ? undefined : (reasoning || undefined), steps: completedSteps.length ? completedSteps : undefined, blocks: finalBlocks, sessionId: activeSessionId, thoughtTokens: thoughtTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
+                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: discardBlocks ? undefined : (reasoning || undefined), steps: completedSteps.length ? completedSteps : undefined, blocks: finalBlocks, sessionId: activeSessionId, duration: totalSecs > 0 ? totalSecs : undefined, thoughtTokens: thoughtTokensRef.current || undefined, totalTokens: totalTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
                 thoughtTokensRef.current = 0
-                uiTokens(0)
                 thinkingStartTimeRef.current = 0
                 thinkingDurationRef.current = 0
                 curState.setChatMessageStreaming(msgId, false)
@@ -3707,7 +3735,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 })
                 usageReceivedRef.current = true
                 thoughtTokensRef.current = Number(u.thoughtTokens) || 0
-                uiTokens(thoughtTokensRef.current)
                 totalTokensRef.current = Number(u.totalTokens) || 0
                 uiTotalTokens(totalTokensRef.current)
                 // serve 模式下 session/prompt 只回 {status:'streaming'}，无 usage，
@@ -4216,19 +4243,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // steps. `displaySteps` is already session-filtered, so use that.
   const hasSteps = displaySteps.length > 0
 
-  
-  // Highlight /command patterns in input
-  const highlightedInput = useMemo(() => {
-    if (!input) return null
-    const parts = input.split(/(\/\w[\w-]*)/g)
-    return parts.map((part, i) => {
-      if (part.startsWith('/') && part.length > 1) {
-        return <span key={i} className="text-primary font-medium">{part}</span>
-      }
-      return <span key={i}>{part}</span>
-    })
-  }, [input])
-
   const renderChatInput = ({ isEmpty }: { isEmpty?: boolean } = {}) => {
     const projectName = selectedWorkDir ? (selectedWorkDir.split(/[/\\]/).pop() || selectedWorkDir) : '选择项目'
     const approvalModeButton = (
@@ -4387,41 +4401,33 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               </div>
             )}
 
-            {/* Textarea + highlighted display layer (wrapped so absolute inset-0 scopes to editor area only, not attachment chips above) */}
-            <div className="relative">
-              {/* Textarea handles sizing + input */}
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-                placeholder={isEmpty ? "随心输入..." : "要求后续变更..."}
-                rows={2}
-                className={`chat-input w-full resize-none bg-transparent text-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none relative z-10 text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed break-words [overflow-wrap:anywhere] overflow-hidden`}
-                style={{
-                  overflow: 'hidden',
-                  height: '52px',
-                }}
-                onInput={(e) => {
-                  const target = e.target as HTMLTextAreaElement
-                  target.style.height = '52px'
-                  const ch = target.scrollHeight
-                  const min = 52
-                  if (ch > min) {
-                    target.style.height = Math.min(ch, 300) + 'px'
-                  }
-                }}
-              />
-
-              {/* Highlighted display layer - behind transparent textarea */}
-              <div
-                className={`absolute inset-0 whitespace-pre-wrap break-words pointer-events-none select-none z-0 overflow-hidden px-4 pt-3.5 pb-1 text-sm leading-relaxed`}
-                aria-hidden="true"
-              >
-                {highlightedInput}
-              </div>
-            </div>
+            {/* Single textarea — no highlight overlay (WebKitGTK renders textarea text
+                via native Pango, not WebKit's CSS engine, so a separate highlight div
+                can never align glyphs pixel-perfectly on Linux). */}
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              placeholder={isEmpty ? "随心输入..." : "要求后续变更..."}
+              rows={2}
+              className={`chat-input w-full resize-none bg-transparent text-foreground caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto`}
+              style={{
+                overflowX: 'hidden',
+                overflowY: 'auto',
+                height: '52px',
+              }}
+              onInput={(e) => {
+                const target = e.target as HTMLTextAreaElement
+                target.style.height = '52px'
+                const ch = target.scrollHeight
+                const min = 52
+                if (ch > min) {
+                  target.style.height = Math.min(ch, 300) + 'px'
+                }
+              }}
+            />
 
             {/* Unified slash command dropdown */}
             {showSlashMenu && (
@@ -4641,8 +4647,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             if (!isElectron()) {
               return
             }
-            const dir = await electronDialog.openDirectory()
-            if (dir) selectWorkDir(dir)
+            try {
+              const dir = await electronDialog.openDirectory()
+              if (dir) selectWorkDir(dir)
+            } catch (e) {
+              console.error('[selectWorkDir] openDirectory failed:', e)
+            }
           }}
           className="flex items-center gap-1.5 text-[12px] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
           title={selectedWorkDir || '选择项目目录'}
@@ -4834,7 +4844,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       )}
 
       {/* Flow area */}
-      <ScrollArea ref={scrollRef} className="flex-1 min-h-0" hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
+      {/* 模型在执行危险操作、弹出确认弹窗时，不显示聊天对话框（对话区+输入框）。
+          只保留确认弹窗，让用户专注审批；审批结束后聊天恢复显示。 */}
+      <ScrollArea ref={scrollRef} className={`flex-1 min-h-0 ${approvalRequest ? 'hidden' : ''}`} hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
         <div className="max-w-[700px] mx-auto px-5 py-4 pb-4 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (
             <div className="flex flex-col items-center w-full pt-[22vh]">
@@ -4973,11 +4985,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     {isRunning && (
                       <div className="text-xs text-foreground/30 tabular-nums mt-1 ml-3">
                         <ThinkingTimer questionStartTs={streamingDrafts[currentSessionId || '']?.startedAt ?? questionStartTs} isRunning={isRunning} />{(() => {
-                          const sd = streamingDrafts[currentSessionId || '']
-                          const thought = sd?.thoughtTokens ?? streamThoughtTokens
-                          const total = sd?.totalTokens ?? streamTotalTokens
-                          const shown = thought > 0 ? thought : (total > 0 ? total : 0)
-                          return shown > 0 ? ` · ${shown} tokens` : ''
+                          const total = streamingDrafts[currentSessionId || '']?.totalTokens ?? streamTotalTokens
+                          return total > 0 ? ` · ${formatTokenCount(total)} tokens` : ''
                         })()}
                       </div>
                     )}
@@ -5042,7 +5051,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       )}
 
       {/* Scroll to bottom button */}
-      {userScrolledUp && sessionMessages.length > 0 && (
+      {userScrolledUp && sessionMessages.length > 0 && !approvalRequest && (
         <div className="flex justify-center shrink-0 -my-1 relative z-10">
           <button
             onClick={jumpToBottom}
@@ -5054,7 +5063,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       )}
 
       {/* Bottom input */}
-      {sessionMessages.length > 0 && (
+      {sessionMessages.length > 0 && !approvalRequest && (
         <div className="bg-transparent shrink-0 mb-2 mt-2 w-full px-5">
           <div className="w-full max-w-[700px] mx-auto">
             {renderChatInput()}
@@ -5093,4 +5102,3 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     </div>
   )
 }
-

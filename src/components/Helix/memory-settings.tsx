@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Toggle, SettingGroup } from './settings-ui'
+import { Toggle, SettingGroup, PopupSelect } from './settings-ui'
 import {
   getHermesConfig,
   patchHermesConfig,
@@ -10,6 +10,7 @@ import {
   HermesRestUnavailable,
 } from '@/lib/hermes-rest'
 import type { MemoryProviderField } from '@/types/electron'
+import { isElectron } from '@/lib/electron-bridge'
 import { warn } from '@/lib/logger'
 
 /**
@@ -60,6 +61,15 @@ interface MemoryCfg {
   targetPct: number
   protectLastN: number
 }
+
+/**
+ * 未安装 Provider 时安装命令的默认值：从上游 NousResearch/hermes-agent 仓库
+ * 取 `plugins/memory/<provider-id>` 子目录安装（该子目录的 plugin.yaml 的
+ * name 与 provider id 一致，装到 ~/.local/share/hermes/plugins/ 后网关实时
+ * 目录扫描即可发现）。命令仍可编辑，方便换源或指定版本。
+ */
+const defaultInstallCmd = (provider: string) =>
+  `hermes plugins install NousResearch/hermes-agent/plugins/memory/${provider}`
 
 const DEFAULTS: MemoryCfg = {
   memoryEnabled: false,
@@ -198,15 +208,17 @@ function renderProviderField(field: MemoryProviderField, value: any, onChange: (
   switch (field.kind) {
     case 'select':
       return (
-        <select
+        <PopupSelect
           value={String(value ?? '')}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={onChange}
+          placeholder="请选择"
           className={`${FIELD_INPUT_CLS} w-56`}
-        >
-          {(field.options || []).map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </select>
+          options={(field.options || []).map((o) => ({
+            label: o.label,
+            value: o.value,
+            ...(o.description ? { hint: o.description } : {}),
+          }))}
+        />
       )
     case 'bool':
       return <Toggle enabled={!!value} onToggle={() => onChange(!value)} />
@@ -251,6 +263,15 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
   const [saving, setSaving] = useState(false)
   const [savedTick, setSavedTick] = useState(0)
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 安装状态：可编辑的安装命令 + 运行按钮（未安装态）。装完通过 loadTick 重新拉配置。
+  const [installCmd, setInstallCmd] = useState(() => defaultInstallCmd(provider))
+  const [installing, setInstalling] = useState(false)
+  const [installOutput, setInstallOutput] = useState<string | null>(null)
+  const [installOk, setInstallOk] = useState(false)
+  const [loadTick, setLoadTick] = useState(0)
+
+  // 切换 Provider 时重置安装命令为该 Provider 的默认仓库。
+  useEffect(() => { setInstallCmd(defaultInstallCmd(provider)) }, [provider])
 
   useEffect(() => {
     let cancelled = false
@@ -286,7 +307,46 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
       }
     })()
     return () => { cancelled = true }
-  }, [provider])
+  }, [provider, loadTick])
+
+  // 运行安装命令（内存 Provider 插件，走后端 hermes 可执行文件）。
+  const runInstall = async () => {
+    const cmd = installCmd.trim()
+    if (!cmd || installing) return
+    setInstalling(true)
+    setInstallOutput(null)
+    try {
+      if (!isElectron()) {
+        setInstallOutput('当前环境不支持自动安装，请在终端手动执行该命令')
+        setInstallOk(false)
+        return
+      }
+      const el = window.electron as any
+      if (typeof el?.hermes?.installPlugin !== 'function') {
+        setInstallOutput('当前运行时未提供自动安装通道，请在终端手动执行该命令')
+        setInstallOk(false)
+        return
+      }
+      // 从可编辑命令里抽出标识符与重装 flag：`hermes plugins install <identifier> [--force]`
+      const m = cmd.match(/^hermes\s+plugins\s+install\s+(\S+)/i)
+      const identifier = m?.[1] ?? cmd
+      const force = /\s--force\b|\s-f\b/i.test(cmd)
+      const res = await el.hermes.installPlugin(identifier, force)
+      if (res?.ok) {
+        setInstallOutput(res.message || '安装成功，正在刷新配置…')
+        setInstallOk(true)
+        setLoadTick((n) => n + 1)
+      } else {
+        setInstallOutput(res?.error || res?.message || '安装失败')
+        setInstallOk(false)
+      }
+    } catch (e: any) {
+      setInstallOutput(String(e?.message || e))
+      setInstallOk(false)
+    } finally {
+      setInstalling(false)
+    }
+  }
 
   useEffect(() => () => { if (savedTimer.current) clearTimeout(savedTimer.current) }, [])
 
@@ -344,11 +404,34 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
       {state === 'not-installed' && (
         <div className="text-xs text-muted-foreground/70 leading-relaxed">
           未检测到 <span className="text-foreground">{label}</span> 的已安装插件，暂无可配置项。
-          外部记忆 Provider 需要先作为 Hermes 插件安装，例如：
-          <code className="block mt-1 px-2 py-1 rounded bg-muted/40 font-mono text-[11px] text-foreground/80">
-            hermes plugins install owner/repo
-          </code>
-          安装到 <code className="font-mono">~/.local/share/hermes/plugins/</code> 后刷新本页即可看到配置项。
+          点击「运行」自动从官方仓库安装该 Provider 的插件（命令可编辑以换源）：
+          <div className="mt-2 flex items-center gap-2">
+            <input
+              value={installCmd}
+              onChange={(e) => setInstallCmd(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') runInstall() }}
+              onFocus={(e) => e.target.select()}
+              spellCheck={false}
+              disabled={installing}
+              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-muted/50 font-mono text-xs text-foreground/80 border border-border focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60 transition-colors"
+            />
+            <button
+              type="button"
+              onClick={runInstall}
+              disabled={installing || !installCmd.trim()}
+              className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors"
+            >
+              {installing ? '安装中…' : '运行'}
+            </button>
+          </div>
+          <div className="mt-1 text-[11px] text-muted-foreground/50">
+            安装到 <code className="font-mono">~/.local/share/hermes/plugins/</code>，完成后本页会自动刷新并显示配置项。
+          </div>
+          {installOutput && (
+            <pre className={`mt-2 max-h-48 overflow-auto px-2.5 py-2 rounded-lg bg-muted/40 font-mono text-[11px] whitespace-pre-wrap break-all ${installOk ? 'text-emerald-500/90' : 'text-red-400'}`}>
+              {installOutput}
+            </pre>
+          )}
         </div>
       )}
 
@@ -481,16 +564,16 @@ export function MemorySettings() {
               : '选择接入的外部记忆服务（与内置 MEMORY.md 并存，仅可选其一）'
           }
         >
-          <select
+          <PopupSelect
             value={cfg.provider}
-            onChange={(e) => update({ provider: e.target.value })}
+            onChange={(v) => update({ provider: v })}
+            placeholder="无"
             className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
-          >
-            <option value="">无</option>
-            {PROVIDERS.map((t) => (
-              <option key={t.id} value={t.id}>{t.label}{t.local ? '（本地）' : ''}</option>
-            ))}
-          </select>
+            options={PROVIDERS.map((t) => ({
+              label: `${t.label}${t.local ? '（本地）' : ''}`,
+              value: t.id,
+            }))}
+          />
         </Row>
         {cfg.provider && <ProviderConfigPanel provider={cfg.provider} />}
         <Row label="记忆预算" hint="MEMORY.md 的字符上限，超出会触发裁剪" dim={memOff}>
