@@ -96,6 +96,11 @@ pub fn run() {
             hermes::hermes_list_skills,
             hermes::hermes_track_skill_call,
             hermes::hermes_delete_dir,
+            hermes::hermes_cron_list,
+            hermes::hermes_cron_create,
+            hermes::hermes_cron_delete,
+            hermes::hermes_cron_run,
+            hermes::hermes_doctor,
             // fs
             fs::read,
             fs::write,

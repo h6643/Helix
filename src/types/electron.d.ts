@@ -148,6 +148,11 @@ export interface ElectronAPI {
       message?: string
       error?: string
     }>
+    cronList: () => Promise<{ success: boolean; jobs?: unknown; error?: string }>
+    cronCreate: (schedule: string, command: string, name?: string) => Promise<{ success: boolean; output?: string; error?: string }>
+    cronDelete: (jobId: string) => Promise<{ success: boolean; output?: string; error?: string }>
+    cronRun: (jobId: string) => Promise<{ success: boolean; output?: string; error?: string }>
+    doctor: () => Promise<{ success: boolean; output?: string; error?: string }>
   }
 
   profile: {

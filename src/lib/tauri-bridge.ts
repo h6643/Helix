@@ -239,6 +239,12 @@ function buildTauriAPI(): ElectronAPI {
     update: () => invoke('hermes_update'),
     installPlugin: (identifier: string, force?: boolean) =>
       invoke('hermes_install_plugin', { identifier, force: force ?? false }),
+    cronList: () => invoke('hermes_cron_list'),
+    cronCreate: (schedule: string, command: string, name?: string) =>
+      invoke('hermes_cron_create', { schedule, command, name: name ?? null }),
+    cronDelete: (jobId: string) => invoke('hermes_cron_delete', { jobId }),
+    cronRun: (jobId: string) => invoke('hermes_cron_run', { jobId }),
+    doctor: () => invoke('hermes_doctor'),
   }
 
   // ── profile ─────────────────────────────────────────────────────────────

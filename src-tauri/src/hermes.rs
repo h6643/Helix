@@ -1207,3 +1207,143 @@ pub fn hermes_delete_dir(dir_path: String) -> Value {
         Err(e) => json!({ "success": false, "error": e.to_string() }),
     }
 }
+
+// ── hermes:cron / doctor ─────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn hermes_cron_list() -> Value {
+    match resolve_hermes_cmd() {
+        Some(cmd) => {
+            let out = std::process::Command::new(&cmd)
+                .args(["cron", "list", "--json"])
+                .envs(crate::kanban::build_clean_env(&cmd))
+                .current_dir(hermes_data_dir())
+                .output();
+            match out {
+                Ok(o) => {
+                    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                    if o.status.success() {
+                        match serde_json::from_str::<Value>(&stdout) {
+                            Ok(v) => json!({ "success": true, "jobs": v }),
+                            Err(_) => json!({ "success": true, "jobs": stdout }),
+                        }
+                    } else {
+                        let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                        json!({ "success": false, "error": stderr })
+                    }
+                }
+                Err(e) => json!({ "success": false, "error": e.to_string() }),
+            }
+        }
+        None => json!({ "success": false, "error": "找不到 hermes 可执行文件" }),
+    }
+}
+
+#[tauri::command]
+pub fn hermes_cron_create(schedule: String, command: String, name: Option<String>) -> Value {
+    match resolve_hermes_cmd() {
+        Some(cmd) => {
+            let mut args = vec!["cron".to_string(), "create".to_string(), schedule, command];
+            if let Some(n) = name {
+                args.push("--name".to_string());
+                args.push(n);
+            }
+            let out = std::process::Command::new(&cmd)
+                .args(&args)
+                .envs(crate::kanban::build_clean_env(&cmd))
+                .current_dir(hermes_data_dir())
+                .output();
+            match out {
+                Ok(o) => {
+                    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                    if o.status.success() {
+                        json!({ "success": true, "output": stdout })
+                    } else {
+                        json!({ "success": false, "error": stderr })
+                    }
+                }
+                Err(e) => json!({ "success": false, "error": e.to_string() }),
+            }
+        }
+        None => json!({ "success": false, "error": "找不到 hermes 可执行文件" }),
+    }
+}
+
+#[tauri::command]
+pub fn hermes_cron_delete(job_id: String) -> Value {
+    match resolve_hermes_cmd() {
+        Some(cmd) => {
+            let out = std::process::Command::new(&cmd)
+                .args(["cron", "delete", &job_id])
+                .envs(crate::kanban::build_clean_env(&cmd))
+                .current_dir(hermes_data_dir())
+                .output();
+            match out {
+                Ok(o) => {
+                    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                    if o.status.success() {
+                        json!({ "success": true, "output": stdout })
+                    } else {
+                        json!({ "success": false, "error": stderr })
+                    }
+                }
+                Err(e) => json!({ "success": false, "error": e.to_string() }),
+            }
+        }
+        None => json!({ "success": false, "error": "找不到 hermes 可执行文件" }),
+    }
+}
+
+#[tauri::command]
+pub fn hermes_cron_run(job_id: String) -> Value {
+    match resolve_hermes_cmd() {
+        Some(cmd) => {
+            let out = std::process::Command::new(&cmd)
+                .args(["cron", "run", &job_id])
+                .envs(crate::kanban::build_clean_env(&cmd))
+                .current_dir(hermes_data_dir())
+                .output();
+            match out {
+                Ok(o) => {
+                    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                    if o.status.success() {
+                        json!({ "success": true, "output": stdout })
+                    } else {
+                        json!({ "success": false, "error": stderr })
+                    }
+                }
+                Err(e) => json!({ "success": false, "error": e.to_string() }),
+            }
+        }
+        None => json!({ "success": false, "error": "找不到 hermes 可执行文件" }),
+    }
+}
+
+#[tauri::command]
+pub fn hermes_doctor() -> Value {
+    match resolve_hermes_cmd() {
+        Some(cmd) => {
+            let out = std::process::Command::new(&cmd)
+                .args(["doctor"])
+                .envs(crate::kanban::build_clean_env(&cmd))
+                .current_dir(hermes_data_dir())
+                .output();
+            match out {
+                Ok(o) => {
+                    let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                    json!({
+                        "success": o.status.success(),
+                        "output": stdout,
+                        "error": if stderr.is_empty() { None } else { Some(stderr) },
+                    })
+                }
+                Err(e) => json!({ "success": false, "error": e.to_string() }),
+            }
+        }
+        None => json!({ "success": false, "error": "找不到 hermes 可执行文件" }),
+    }
+}
