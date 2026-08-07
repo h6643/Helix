@@ -279,9 +279,31 @@ function escapeBackslashOutsideCode(text: string): string {
  * balance unclosed code fences so the live preview stays stable until the
  * run completes.
  */
+// Fix CJK/Latin/number spacing glued together during streaming.
+// Only inserts spaces where both sides are missing one — never between two CJK chars
+// (that's natural for Chinese) or inside code blocks.
+const CJK = '\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff'
+const LATIN = 'A-Za-z'
+const NUM = '0-9'
+// CJK←→Latin/number: insert space when missing
+const CJK_JOIN_RE = new RegExp(`([${CJK}])([${LATIN}${NUM}])`, 'g')
+const JOIN_CJK_RE = new RegExp(`([${LATIN}${NUM}])([${CJK}])`, 'g')
+
+export function fixCJKSpacing(text: string): string {
+  // Preserve code blocks verbatim
+  const codeBlocks: string[] = []
+  let t = text.replace(/```[\s\S]*?```/g, (m) => {
+    codeBlocks.push(m)
+    return `\x00CB${codeBlocks.length - 1}\x00`
+  })
+  t = t.replace(CJK_JOIN_RE, '$1 $2').replace(JOIN_CJK_RE, '$1 $2')
+  t = t.replace(/\x00CB(\d+)\x00/g, (_, i) => codeBlocks[+i])
+  return t
+}
+
 export function safeMarkdownSource(text: string): string {
   let t = escapeBackslashOutsideCode(text)
-  t = normalizeMarkdownTables(normalizeModelLinks(normalizeLooseTables(normalizeHeadings(t))))
+  t = normalizeMarkdownTables(normalizeModelLinks(normalizeLooseTables(normalizeHeadings(fixCJKSpacing(t)))))
   const fences = (t.match(/```/g) || []).length
   if (fences % 2 === 1) t += String.fromCharCode(10) + '```'
   return t
