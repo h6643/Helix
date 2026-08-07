@@ -1,42 +1,33 @@
 import { defineConfig, globalIgnores } from 'eslint/config'
-import nextVitals from 'eslint-config-next/core-web-vitals'
+import js from '@eslint/js'
 import tsPlugin from '@typescript-eslint/eslint-plugin'
+import tsParser from '@typescript-eslint/parser'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import reactPlugin from 'eslint-plugin-react'
 
-// Flat config for ESLint 9. `next lint` was removed in Next 16, so lint runs
-// through eslint directly. Mirrors the old .eslintrc.json rules.
+// Flat config for ESLint 9. The old config inherited eslint-config-next; with
+// the Tauri/Vite migration the Next preset is gone, so we use the
+// typescript-eslint + react-hooks presets that covered the same surface.
 export default defineConfig([
   globalIgnores([
     'node_modules/**',
-    '.next/**',
     'dist/**',
     'out/**',
     'build/**',
     'release/**',
-    'electron/ipc/**',
+    'electron/**',
+    'src-tauri/**',
+    'hermes-agent/**',
     '*.config.js',
     '*.config.mjs',
+    '*.config.ts',
     'eslint.config.mjs',
-    'next-env.d.ts',
   ]),
-  ...nextVitals,
   {
-    name: 'helix/all',
+    name: 'helix/js',
     files: ['**/*.{js,jsx,mjs,ts,tsx,mts,cts}'],
-    rules: {
-      'prefer-const': 'error',
-      'no-var': 'error',
-      'no-unused-vars': 'off',
-      'no-debugger': 'warn',
-      'no-console': ['warn', { allow: ['error', 'warn'] }],
-      // The compiler-nanny rules introduced in eslint-plugin-react-hooks v7
-      // (ships with Next 16's config) were never part of this project's
-      // intended lint surface. This codebase doesn't use the React Compiler,
-      // so keep them as warnings; rules-of-hooks/exhaustive-deps stay errors.
-      'react-hooks/set-state-in-effect': 'warn',
-      'react-hooks/refs': 'warn',
-      'react-hooks/immutability': 'warn',
-      'react-hooks/preserve-manual-memoization': 'warn',
-    },
+    ...js.configs.recommended,
   },
   {
     name: 'helix/ts',
@@ -44,9 +35,35 @@ export default defineConfig([
     plugins: {
       '@typescript-eslint': tsPlugin,
     },
+    languageOptions: {
+      parser: tsParser,
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
     rules: {
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       '@typescript-eslint/no-explicit-any': 'warn',
+    },
+  },
+  {
+    name: 'helix/react',
+    files: ['**/*.{jsx,tsx}'],
+    plugins: {
+      'react-hooks': reactHooks,
+      'react-refresh': reactRefresh,
+      react: reactPlugin,
+    },
+    languageOptions: {
+      parserOptions: {
+        ecmaFeatures: { jsx: true },
+      },
+    },
+    rules: {
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/exhaustive-deps': 'warn',
+      'react-refresh/only-export-components': 'warn',
     },
   },
   {

@@ -28,6 +28,7 @@
  */
 
 import { debug } from '@/lib/logger'
+import type { MemoryProviderField } from '@/types/electron'
 
 export class HermesRestUnavailable extends Error {
   constructor() {
@@ -76,4 +77,48 @@ export function getHermesConfig(): Promise<Record<string, any>> {
 export async function patchHermesConfig(patch: Record<string, any>): Promise<void> {
   await callMain('setRawConfig', patch)
   debug('[hermes-rest] config patched:', Object.keys(patch).join(','))
+}
+
+// ── 外置记忆 Provider（serve 网关 /api/memory/*）────────────────────────────
+// 同样走主进程直连绕开 CORS 预检。GET/PUT /api/memory/providers/{name}/config
+// 是 schema 驱动的：GET 返回字段定义+当前值，PUT 以 {values:{…}} 保存并激活。
+
+async function memoryMain<T>(method: string, ...args: any[]): Promise<T> {
+  const ipc = hermesIpc()
+  if (!ipc || typeof ipc[method] !== 'function') throw new HermesRestUnavailable()
+  let res: any
+  try {
+    res = await ipc[method](...args)
+  } catch (e: any) {
+    throw new Error(e?.message || String(e))
+  }
+  if (!res || res.ok === false) {
+    const msg = res?.error || 'unknown'
+    if (msg === 'gateway-not-ready') throw new HermesRestUnavailable()
+    throw new Error(msg)
+  }
+  return res as T
+}
+
+/** GET /api/memory — 当前激活的 Provider 与已发现插件的状态列表。 */
+export async function getMemoryStatus(): Promise<any> {
+  return (await memoryMain<any>('getMemoryStatus')).status
+}
+
+/** GET /api/memory/providers/{name}/config — schema 字段 + 当前值。 */
+export async function getMemoryProviderConfig(name: string): Promise<{
+  name: string
+  label?: string
+  fields: MemoryProviderField[]
+  setup?: any
+}> {
+  return (await memoryMain<any>('getMemoryProviderConfig', name)).config
+}
+
+/** PUT /api/memory/providers/{name}/config — 保存字段值并激活该 Provider。 */
+export async function setMemoryProviderConfig(
+  name: string,
+  values: Record<string, any>,
+): Promise<any> {
+  return (await memoryMain<any>('setMemoryProviderConfig', name, values)).result
 }

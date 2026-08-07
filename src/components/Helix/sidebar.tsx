@@ -6,7 +6,6 @@ import {
   Clock,
   Puzzle,
   Settings,
-  Activity,
   Brain,
   Loader2,
   Trash2,
@@ -281,7 +280,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
     toggleScheduledTasksPanel,
     toggleSkillPanel,
     toggleSessionManager,
-    toggleActivityFeed,
     toggleKanbanPanel,
     showToast,
     setSelectedWorkDir,
@@ -297,7 +295,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       toggleScheduledTasksPanel: s.toggleScheduledTasksPanel,
       toggleSkillPanel: s.toggleSkillPanel,
       toggleSessionManager: s.toggleSessionManager,
-      toggleActivityFeed: s.toggleActivityFeed,
       toggleKanbanPanel: s.toggleKanbanPanel,
       showToast: s.showToast,
       setSelectedWorkDir: s.setSelectedWorkDir,
@@ -306,7 +303,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   )
   const showScheduledTasksPanel = useHelixStore((s) => s.showScheduledTasksPanel)
           const showSkillPanel = useHelixStore((s) => s.showSkillPanel)
-  const showActivityFeed = useHelixStore((s) => s.showActivityFeed)
   const showKanbanPanel = useHelixStore((s) => s.showKanbanPanel)
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir)
 
@@ -740,7 +736,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         toggleKanbanPanel()
       }
     },
-    { id: 'activity', label: '活动', icon: Activity, action: () => toggleActivityFeed() },
   ]
 
   return (
@@ -752,8 +747,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             const isActive =
               (item.id === 'scheduled' && showScheduledTasksPanel) ||
               (item.id === 'plugins' && showSkillPanel) ||
-              (item.id === 'kanban' && showKanbanPanel) ||
-              (item.id === 'activity' && showActivityFeed)
+              (item.id === 'kanban' && showKanbanPanel)
             return (
               <button
                 key={item.id}
@@ -790,8 +784,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             const isActive =
               (item.id === 'scheduled' && showScheduledTasksPanel) ||
               (item.id === 'plugins' && showSkillPanel) ||
-              (item.id === 'kanban' && showKanbanPanel) ||
-              (item.id === 'activity' && showActivityFeed)
+              (item.id === 'kanban' && showKanbanPanel)
             return (
               <button
                 key={item.id}
@@ -836,11 +829,10 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                 const isSelectedProject =
                   selectedWorkDir === project.dir &&
                   !(sessions.find(s => s.id === currentSessionId)?.workDir === project.dir) &&
-                  // 计划/插件/看板/活动等全屏面板打开时，项目不高亮——避免两处同时亮
+                  // 计划/插件/看板等全屏面板打开时，项目不高亮——避免两处同时亮
                   !showScheduledTasksPanel &&
                   !showSkillPanel &&
-                  !showKanbanPanel &&
-                  !showActivityFeed
+                  !showKanbanPanel
                 return (
                   <div key={project.dir} className="group rounded-lg overflow-hidden">
                     <div

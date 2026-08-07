@@ -1,12 +1,22 @@
 import { getServeHermesFacade } from '@/lib/serve-gateway'
+import { installTauriBridge, isTauri } from '@/lib/tauri-bridge'
 import { useHelixStore } from '@/stores/helix-store'
 import type { ElectronAPI } from '@/types/electron'
 
 /**
- * Check if running in Electron
+ * Check if running in Electron (or the Tauri build, which shims the same
+ * `window.electron` surface).
  */
 export function isElectron(): boolean {
-  return typeof window !== 'undefined' && !!window.electron?.isElectron
+  if (typeof window === 'undefined') return false
+  if (!!window.electron?.isElectron) return true
+  // Tauri: install the invoke-backed bridge lazily so any consumer (even one
+  // that only checks `isElectron()` first) sees a consistent environment.
+  if (isTauri()) {
+    installTauriBridge()
+    return true
+  }
+  return false
 }
 
 // serve 模式下包裹 window.electron 的 Proxy 缓存：

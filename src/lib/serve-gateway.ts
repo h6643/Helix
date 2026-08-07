@@ -1032,7 +1032,9 @@ export function initServeGateway(): Promise<ServeGatewayClient | null> {
       // serve 冷启动最长 90s：pending 时以 2s 间隔轮询
       for (let i = 0; i < 60; i++) {
         const info = await ipc.getGatewayInfo()
-        if (!info || info.mode !== 'serve') return null // acp 模式
+        if (!info || info.mode !== 'serve') {
+          return null // acp 模式
+        }
         if (!info.pending && info.wsUrl && info.baseUrl) {
           client = new ServeGatewayClient(info as any)
           client.connect()

@@ -1,6 +1,28 @@
 import type { HooksConfig } from '@/lib/hooks-config'
 import type { ScheduledTask } from '@/stores/helix-store'
 
+export interface MemoryProviderInfo {
+  name: string
+  description?: string
+  available: boolean
+  configured: boolean
+  status: 'missing' | 'unavailable' | 'needs_config' | 'ready'
+}
+
+export interface MemoryProviderField {
+  key: string
+  label: string
+  kind: 'text' | 'secret' | 'select' | 'bool' | 'number' | 'json'
+  description: string
+  placeholder: string
+  required: boolean
+  value: string | number | boolean
+  is_set: boolean
+  options?: Array<{ value: string; label: string; description?: string }>
+  url?: string
+  when?: unknown
+}
+
 export interface ElectronAPI {
   fs: {
     read: (filePath: string) => Promise<string>
@@ -83,6 +105,29 @@ export interface ElectronAPI {
     getGatewayInfo: () => Promise<{ mode: 'acp' } | { mode: 'serve'; pending?: boolean; port?: number; token?: string; baseUrl?: string; wsUrl?: string }>
     setConfig: (config: any) => Promise<any>
     getConfig: () => Promise<any>
+    // Raw config.yaml read/write via the gateway REST API (memory/compression settings).
+    getRawConfig: () => Promise<{ ok: boolean; config?: Record<string, any>; error?: string }>
+    setRawConfig: (patch: Record<string, any>) => Promise<{ ok: boolean; error?: string }>
+    // External memory provider config (serve gateway /api/memory/*).
+    getMemoryStatus: () => Promise<{
+      ok: boolean
+      status?: {
+        active: string
+        providers: Array<MemoryProviderInfo>
+        builtin_files: Record<string, number>
+      }
+      error?: string
+    }>
+    getMemoryProviderConfig: (name: string) => Promise<{
+      ok: boolean
+      config?: { name: string; label?: string; fields: MemoryProviderField[]; setup?: any }
+      error?: string
+    }>
+    setMemoryProviderConfig: (name: string, values: Record<string, any>) => Promise<{
+      ok: boolean
+      result?: any
+      error?: string
+    }>
     setYamlKey: (key: string, value: any) => Promise<any>
     setDelegationIdentities: (identities: Array<{ name: string; system_prompt: string }>) => Promise<{ success: boolean; changed?: boolean; error?: string }>
     listPersonalities: () => Promise<any>

@@ -27,7 +27,14 @@ export function PluginManager({ onClose }: PluginManagerProps) {
     try {
       const api = hermesApi()
       if (!api?.send) throw new Error('Hermes 网关不可用')
-      const res = await api.send('plugins.manage', { action: 'list' })
+      // Guard against a serve gateway that never answers plugins.manage: the
+      // underlying WS RPC can block up to 60s, which would pin this panel on
+      // "正在加载后端插件…" for a full minute. Race it with a 20s timeout so
+      // the user gets an actionable error + retry instead.
+      const res = await Promise.race([
+        api.send('plugins.manage', { action: 'list' }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('插件列表请求超时（20s），网关可能未实现 plugins.manage')), 20_000)),
+      ])
       const plugins: BackendPlugin[] = Array.isArray(res?.plugins) ? res.plugins : []
       const seen = new Set<string>()
       setBackendPlugins(plugins.filter(p => {

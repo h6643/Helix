@@ -26,8 +26,7 @@ import {
   FolderTree,
   Mail,
 } from 'lucide-react'
-import dynamic from 'next/dynamic'
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import React, { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
 import { useProviderStore } from '@/hermes-ui/provider-store'
 import { useCheckUpdate } from '@/hooks/use-check-update'
@@ -37,7 +36,7 @@ import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
 import { isServeActive, getServeClient } from '@/lib/serve-gateway'
 import { speak, stripAcp } from '@/lib/voice-utils'
 import { useHelixStore } from '@/stores/helix-store'
-import { applyHelixPalette, getThemeMeta } from '@/lib/themes'
+import { applyHelixPalette } from '@/lib/themes'
 import { AgentFlowPanel } from './agent-flow-panel'
 import { CommandPalette } from './command-palette'
 import { Sidebar } from './sidebar'
@@ -61,23 +60,42 @@ function shortcutLabel(action: string, customShortcuts?: Record<string, { keys: 
   return entry.keys.join('+')
 }
 
-// Dynamic imports for heavy components
-const SessionManager = dynamic(() => import('./session-manager').then(m => ({ default: m.SessionManager })), { ssr: false })
-const ApiSettings = dynamic(() => import('./api-settings').then(m => ({ default: m.ApiSettings })), { ssr: false })
-const SkillPanel = dynamic(() => import('./skill-panel').then(m => ({ default: m.SkillPanel })), { ssr: false })
-const ScheduledTasksPanel = dynamic(() => import('./scheduled-tasks-panel').then(m => ({ default: m.ScheduledTasksPanel })), { ssr: false })
-const TaskListPanel = dynamic(() => import('./task-list-panel').then(m => ({ default: m.TaskListPanel })), { ssr: false })
-const CustomizePanel = dynamic(() => import('./customize-panel').then(m => ({ default: m.CustomizePanel })), { ssr: false })
-const RuntimePanel = dynamic(() => import('./runtime-panel').then(m => ({ default: m.RuntimePanel })), { ssr: false })
-const ActivityFeed = dynamic(() => import('./activity-feed').then(m => ({ default: m.ActivityFeed })), { ssr: false })
-const Onboarding = dynamic(() => import('./onboarding').then(m => ({ default: m.Onboarding })), { ssr: false })
-const BootOverlay = dynamic(() => import('./boot-overlay').then(m => ({ default: m.BootOverlay })), { ssr: false })
-const ArtifactsBrowser = dynamic(() => import('./artifacts-browser').then(m => ({ default: m.ArtifactsBrowser })), { ssr: false })
-const TerminalPanel = dynamic(() => import('./terminal-panel').then(m => ({ default: m.TerminalPanel })), { ssr: false })
-const WorktreePanel = dynamic(() => import('./worktree-panel').then(m => ({ default: m.WorktreePanel })), { ssr: false })
-const PluginManagerPanel = dynamic(() => import('./plugin-manager').then(m => ({ default: m.PluginManager })), { ssr: false })
-const KanbanPanel = dynamic(() => import('./kanban-panel').then(m => ({ default: m.KanbanPanel })), { ssr: false })
-const RightSidebar = dynamic(() => import('./right-sidebar').then(m => ({ default: m.RightSidebar })), { ssr: false })
+// Dynamic imports for heavy components (Next's next/dynamic ssr:false →
+// React.lazy; a static Vite SPA is client-only anyway).
+const SessionManager = lazy(() => import('./session-manager').then(m => ({ default: m.SessionManager })))
+const ApiSettings = lazy(() => import('./api-settings').then(m => ({ default: m.ApiSettings })))
+const SkillPanel = lazy(() => import('./skill-panel').then(m => ({ default: m.SkillPanel })))
+const ScheduledTasksPanel = lazy(() => import('./scheduled-tasks-panel').then(m => ({ default: m.ScheduledTasksPanel })))
+const TaskListPanel = lazy(() => import('./task-list-panel').then(m => ({ default: m.TaskListPanel })))
+const CustomizePanel = lazy(() => import('./customize-panel').then(m => ({ default: m.CustomizePanel })))
+const RuntimePanel = lazy(() => import('./runtime-panel').then(m => ({ default: m.RuntimePanel })))
+const ActivityFeed = lazy(() => import('./activity-feed').then(m => ({ default: m.ActivityFeed })))
+const Onboarding = lazy(() => import('./onboarding').then(m => ({ default: m.Onboarding })))
+const BootOverlay = lazy(() => import('./boot-overlay').then(m => ({ default: m.BootOverlay })))
+const ArtifactsBrowser = lazy(() => import('./artifacts-browser').then(m => ({ default: m.ArtifactsBrowser })))
+const TerminalPanel = lazy(() => import('./terminal-panel').then(m => ({ default: m.TerminalPanel })))
+const WorktreePanel = lazy(() => import('./worktree-panel').then(m => ({ default: m.WorktreePanel })))
+const PluginManagerPanel = lazy(() => import('./plugin-manager').then(m => ({ default: m.PluginManager })))
+const KanbanPanel = lazy(() => import('./kanban-panel').then(m => ({ default: m.KanbanPanel })))
+const RightSidebar = lazy(() => import('./right-sidebar').then(m => ({ default: m.RightSidebar })))
+
+// Local Suspense for the always-visible panel areas. Without a boundary the
+// lazy panels' chunk load bubbles up to the root Suspense in main.tsx, which
+// swaps the WHOLE app for "Loading Helix..." and unmounts every component.
+// An in-panel spinner keeps the UI alive while the chunk + data load.
+function PanelSuspense({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense
+      fallback={
+        <div className="h-full w-full flex items-center justify-center text-sm text-muted-foreground">
+          正在加载…
+        </div>
+      }
+    >
+      {children}
+    </Suspense>
+  )
+}
 
 // ── Resizable sidebar constants ──────────────────────────────────────────
 const SIDEBAR_MIN = 200
@@ -316,13 +334,14 @@ export function HelixLayout() {
   // Apply the selected theme style (Catppuccin flavor or built-in cream) by
   // writing inline CSS variables onto <html>. Runs on mount and whenever the
   // style changes — including when the light/dark toggle switches to a paired
-  // flavor.
+  // flavor. Editor theme follows the resolved light/dark state (a flavor's
+  // mode, or the built-in's 亮色/暗色 choice) so it never goes stale after a
+  // 深色 flavor → 内置 switch.
   useEffect(() => {
-    const meta = getThemeMeta(themeStyle)
     applyHelixPalette(themeStyle)
-    if (meta) {
-      storeActions.setEditorTheme(meta.mode === 'dark' ? 'vs-dark' : 'light')
-    }
+    storeActions.setEditorTheme(
+      document.documentElement.classList.contains('dark') ? 'vs-dark' : 'light',
+    )
   }, [themeStyle])
 
   // Re-assert the frontend's restored model config into Hermes on startup so
@@ -1048,8 +1067,10 @@ export function HelixLayout() {
           )}
         </div>
 
-        {/* Center: drag region */}
-        <div className="flex-1 self-stretch" style={{ WebkitAppRegion: 'drag' } as any} />
+        {/* Center: drag region (Tauri uses data-tauri-drag-region; the Electron
+            -webkit-app-region CSS is a no-op on Tauri and leaves the window
+            undraggable) */}
+        <div className="flex-1 self-stretch" data-tauri-drag-region="" />
 
         {/* Right: window controls */}
         <div className="flex items-center" style={{ WebkitAppRegion: 'no-drag' } as any}>
@@ -1274,58 +1295,72 @@ export function HelixLayout() {
             </div>
           {showScheduledTasksPanel && (
             <div className="absolute inset-0 z-20">
-              <ScheduledTasksPanel onClose={() => storeActions.toggleScheduledTasksPanel()} />
+              <PanelSuspense>
+                <ScheduledTasksPanel onClose={() => storeActions.toggleScheduledTasksPanel()} />
+              </PanelSuspense>
             </div>
           )}
           {showPluginManager && (
             <div className="absolute inset-0 z-20">
-              <PluginManagerPanel onClose={() => storeActions.togglePluginManager()} />
+              <PanelSuspense>
+                <PluginManagerPanel onClose={() => storeActions.togglePluginManager()} />
+              </PanelSuspense>
             </div>
           )}
           {showSkillPanel && (
             <div className="absolute inset-0 z-20">
-              <SkillPanel onClose={() => storeActions.toggleSkillPanel()} />
+              <PanelSuspense>
+                <SkillPanel onClose={() => storeActions.toggleSkillPanel()} />
+              </PanelSuspense>
             </div>
           )}
           {showRuntimePanel && (
             <div className="absolute inset-0 z-20">
-              <RuntimePanel onClose={() => storeActions.toggleRuntimePanel()} />
+              <PanelSuspense>
+                <RuntimePanel onClose={() => storeActions.toggleRuntimePanel()} />
+              </PanelSuspense>
             </div>
           )}
           {showWorktreePanel && (
             <div className="absolute inset-0 z-20">
-              <WorktreePanel onClose={() => storeActions.toggleWorktreePanel()} />
+              <PanelSuspense>
+                <WorktreePanel onClose={() => storeActions.toggleWorktreePanel()} />
+              </PanelSuspense>
             </div>
           )}
           <div className={`absolute inset-0 z-20 ${showKanbanPanel ? '' : 'hidden'}`}>
-            <KanbanPanel />
+            <PanelSuspense>
+              <KanbanPanel />
+            </PanelSuspense>
           </div>
         </div>
       </div>
 
       {/* Overlay panels */}
-      {showTaskListPanel && <TaskListPanel onClose={() => setShowTaskListPanel(false)} />}
+      <Suspense fallback={null}>
+        {showTaskListPanel && <TaskListPanel onClose={() => setShowTaskListPanel(false)} />}
 
-      {showSessionManager && <SessionManager onClose={() => storeActions.toggleSessionManager()} />}
-      {showCustomizePanel && <CustomizePanel onClose={() => storeActions.toggleCustomizePanel()} />}
-      {showSettings && (
-        <ApiSettings
-          themeStyle={themeStyle}
-          onSelectThemeStyle={setThemeStyle}
-          sidebarWidth={sidebarWidth}
-          setSidebarWidth={setSidebarWidth}
-          saveSidebarWidth={saveSidebarWidth}
-          showSidebar={showSidebar}
-          setShowSidebar={setShowSidebar}
-          sidebarCollapsed={sidebarCollapsed}
-          setSidebarCollapsed={setSidebarCollapsed}
-        />
-      )}
-      {/* New surfaces */}
-      {showActivityFeed && <ActivityFeed onClose={() => storeActions.toggleActivityFeed()} />}
-      {showArtifactsBrowser && <ArtifactsBrowser onClose={() => storeActions.toggleArtifactsBrowser()} />}
-      <Onboarding />
-      <BootOverlay />
+        {showSessionManager && <SessionManager onClose={() => storeActions.toggleSessionManager()} />}
+        {showCustomizePanel && <CustomizePanel onClose={() => storeActions.toggleCustomizePanel()} />}
+        {showSettings && (
+          <ApiSettings
+            themeStyle={themeStyle}
+            onSelectThemeStyle={setThemeStyle}
+            sidebarWidth={sidebarWidth}
+            setSidebarWidth={setSidebarWidth}
+            saveSidebarWidth={saveSidebarWidth}
+            showSidebar={showSidebar}
+            setShowSidebar={setShowSidebar}
+            sidebarCollapsed={sidebarCollapsed}
+            setSidebarCollapsed={setSidebarCollapsed}
+          />
+        )}
+        {/* New surfaces */}
+        {showActivityFeed && <ActivityFeed onClose={() => storeActions.toggleActivityFeed()} />}
+        {showArtifactsBrowser && <ArtifactsBrowser onClose={() => storeActions.toggleArtifactsBrowser()} />}
+        <Onboarding />
+        <BootOverlay />
+      </Suspense>
     </div>
   )
 }

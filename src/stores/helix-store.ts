@@ -1373,7 +1373,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     const isDriveRoot = typeof relativePath === 'string' && /^[a-zA-Z]:[\\/]?$/.test(relativePath)
     if (!relativePath || relativePath === '/' || relativePath === '\\' || isDriveRoot) {
       get().showToast({ title: '无效的工作目录，已回退到项目目录', type: 'warning' })
-      const fallbackDir = typeof process !== 'undefined' ? process.cwd() : ''
+      const fallbackDir = typeof process !== 'undefined' && typeof (process as any).cwd === 'function' ? (process as any).cwd() : ''
       const info = isElectron() ? await electronApp.getInfo() : { workDir: fallbackDir }
       set({ selectedWorkDir: info.workDir || fallbackDir, workDirEpoch: get().workDirEpoch + 1 })
       return
@@ -2847,7 +2847,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const currentDir = get().selectedWorkDir
       const isDriveRoot = typeof currentDir === 'string' && /^[a-zA-Z]:[\\/]?$/.test(currentDir)
       if (!currentDir || currentDir === '/' || currentDir === '\\' || isDriveRoot) {
-        const fallbackDir = typeof process !== 'undefined' ? process.cwd() : ''
+        const fallbackDir = typeof process !== 'undefined' && typeof (process as any).cwd === 'function' ? (process as any).cwd() : ''
         const info = isElectron() ? await electronApp.getInfo() : { workDir: fallbackDir }
         set({ selectedWorkDir: info.workDir || fallbackDir })
       }

@@ -42,7 +42,7 @@ let _mermaidPromise: Promise<any> | null = null
 const MERMAID_URL = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs'
 function getMermaid() {
   if (!_mermaidPromise) {
-    _mermaidPromise = import(/* webpackIgnore: true */ MERMAID_URL)
+    _mermaidPromise = import(/* @vite-ignore */ MERMAID_URL)
       .then((m) => {
         m.default.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' })
         return m.default

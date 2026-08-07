@@ -2,7 +2,14 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Toggle, SettingGroup } from './settings-ui'
-import { getHermesConfig, patchHermesConfig, HermesRestUnavailable } from '@/lib/hermes-rest'
+import {
+  getHermesConfig,
+  patchHermesConfig,
+  getMemoryProviderConfig,
+  setMemoryProviderConfig,
+  HermesRestUnavailable,
+} from '@/lib/hermes-rest'
+import type { MemoryProviderField } from '@/types/electron'
 import { warn } from '@/lib/logger'
 
 /**
@@ -179,6 +186,201 @@ function NumberField({
   )
 }
 
+// ── 外置记忆 Provider 配置面板 ────────────────────────────────────────────
+// 由 serve 网关 /api/memory/providers/{name}/config 的 schema 驱动渲染：
+// GET 返回字段定义 + 当前值，PUT 以 {values:{…}} 保存并激活。
+// 后端没有该 provider 插件时字段为空 → 显示「未安装」状态与安装指引。
+
+const FIELD_INPUT_CLS =
+  'px-2.5 py-1.5 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary transition-colors'
+
+function renderProviderField(field: MemoryProviderField, value: any, onChange: (v: any) => void) {
+  switch (field.kind) {
+    case 'select':
+      return (
+        <select
+          value={String(value ?? '')}
+          onChange={(e) => onChange(e.target.value)}
+          className={`${FIELD_INPUT_CLS} w-56`}
+        >
+          {(field.options || []).map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      )
+    case 'bool':
+      return <Toggle enabled={!!value} onToggle={() => onChange(!value)} />
+    case 'number':
+      return (
+        <input
+          type="number"
+          value={String(value ?? '')}
+          onChange={(e) => onChange(e.target.value)}
+          className={`${FIELD_INPUT_CLS} w-32 font-mono`}
+        />
+      )
+    case 'json':
+      return (
+        <textarea
+          value={String(value ?? '')}
+          onChange={(e) => onChange(e.target.value)}
+          rows={3}
+          className={`${FIELD_INPUT_CLS} w-72 font-mono`}
+        />
+      )
+    default:
+      return (
+        <input
+          type={field.kind === 'secret' ? 'password' : 'text'}
+          value={String(value ?? '')}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={field.placeholder || (field.kind === 'secret' ? '留空保持原值' : '')}
+          className={`${FIELD_INPUT_CLS} w-56 font-mono`}
+        />
+      )
+  }
+}
+
+function ProviderConfigPanel({ provider }: { provider: string }) {
+  const [state, setState] = useState<'loading' | 'ready' | 'not-installed' | 'error'>('loading')
+  const [fields, setFields] = useState<MemoryProviderField[]>([])
+  const [label, setLabel] = useState(provider)
+  const [values, setValues] = useState<Record<string, any>>({})
+  const [secretSet, setSecretSet] = useState<Record<string, boolean>>({})
+  const [err, setErr] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [savedTick, setSavedTick] = useState(0)
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setState('loading')
+    setErr(null)
+    ;(async () => {
+      try {
+        const cfg = await getMemoryProviderConfig(provider)
+        if (cancelled) return
+        setLabel(cfg?.label || provider)
+        const f: MemoryProviderField[] = Array.isArray(cfg?.fields) ? cfg.fields : []
+        if (!f.length) {
+          setState('not-installed')
+          return
+        }
+        setFields(f)
+        const v: Record<string, any> = {}
+        const s: Record<string, boolean> = {}
+        for (const field of f) {
+          if (field.kind === 'secret') {
+            s[field.key] = !!field.is_set
+          } else {
+            v[field.key] = field.value ?? (field.kind === 'bool' ? false : '')
+          }
+        }
+        setValues(v)
+        setSecretSet(s)
+        setState('ready')
+      } catch (e: any) {
+        if (cancelled) return
+        setErr(String(e?.message || e))
+        setState('error')
+      }
+    })()
+    return () => { cancelled = true }
+  }, [provider])
+
+  useEffect(() => () => { if (savedTimer.current) clearTimeout(savedTimer.current) }, [])
+
+  const save = async () => {
+    setSaving(true)
+    setErr(null)
+    try {
+      await setMemoryProviderConfig(provider, values)
+      setSavedTick((n) => n + 1)
+      if (savedTimer.current) clearTimeout(savedTimer.current)
+      savedTimer.current = setTimeout(() => setSavedTick(0), 2200)
+    } catch (e: any) {
+      setErr(String(e?.message || e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="py-2.5 px-1 -mx-1 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 text-sm text-foreground">
+          配置 <span className="font-mono">{label}</span>
+          <span className="ml-1 text-xs text-muted-foreground/60">（写入后新建会话生效）</span>
+        </div>
+        {state === 'ready' && (
+          <div className="flex items-center gap-2 shrink-0">
+            {err
+              ? <span className="text-[11px] text-red-400">{err}</span>
+              : saving
+                ? <span className="text-[11px] text-muted-foreground/60">保存中…</span>
+                : savedTick > 0
+                  ? <span className="text-[11px] text-muted-foreground/60">已保存</span>
+                  : null}
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving}
+              className="px-3 py-1 rounded-lg text-xs font-medium bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors"
+            >
+              保存
+            </button>
+          </div>
+        )}
+      </div>
+
+      {state === 'loading' && (
+        <div className="text-xs text-muted-foreground/60">读取 Provider 配置…</div>
+      )}
+
+      {state === 'error' && (
+        <div className="text-xs text-red-400">读取配置失败：{err}</div>
+      )}
+
+      {state === 'not-installed' && (
+        <div className="text-xs text-muted-foreground/70 leading-relaxed">
+          未检测到 <span className="text-foreground">{label}</span> 的已安装插件，暂无可配置项。
+          外部记忆 Provider 需要先作为 Hermes 插件安装，例如：
+          <code className="block mt-1 px-2 py-1 rounded bg-muted/40 font-mono text-[11px] text-foreground/80">
+            hermes plugins install owner/repo
+          </code>
+          安装到 <code className="font-mono">~/.local/share/hermes/plugins/</code> 后刷新本页即可看到配置项。
+        </div>
+      )}
+
+      {state === 'ready' && (
+        <div className="space-y-3">
+          {fields.map((field) => (
+            <div key={field.key} className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs text-foreground/90">
+                  {field.label}
+                  {field.required && <span className="ml-1 text-red-400">*</span>}
+                  {field.kind === 'secret' && (
+                    <span className={`ml-2 text-[10px] ${secretSet[field.key] ? 'text-emerald-500' : 'text-amber-500'}`}>
+                      {secretSet[field.key] ? '已设置' : '未设置'}
+                    </span>
+                  )}
+                </div>
+                {field.description && (
+                  <div className="text-[11px] text-muted-foreground/60 mt-0.5">{field.description}</div>
+                )}
+              </div>
+              <div className="shrink-0 pt-0.5">
+                {renderProviderField(field, values[field.key], (v) => setValues((prev) => ({ ...prev, [field.key]: v })))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function MemorySettings() {
   const [cfg, setCfg] = useState<MemoryCfg>(DEFAULTS)
   const [state, setState] = useState<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
@@ -290,6 +492,7 @@ export function MemorySettings() {
             ))}
           </select>
         </Row>
+        {cfg.provider && <ProviderConfigPanel provider={cfg.provider} />}
         <Row label="记忆预算" hint="MEMORY.md 的字符上限，超出会触发裁剪" dim={memOff}>
           <NumberField value={cfg.memoryCharLimit} min={200} max={40000} suffix="字符" disabled={memOff} onCommit={(v) => update({ memoryCharLimit: v })} />
         </Row>

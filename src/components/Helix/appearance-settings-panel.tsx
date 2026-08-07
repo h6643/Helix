@@ -1,9 +1,111 @@
 'use client'
 
-import React from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import { Check, ChevronDown } from 'lucide-react'
 import { useHelixStore } from '@/stores/helix-store'
 import { SettingRow, SettingGroup, SectionHeading } from './settings-ui'
 import { THEME_SELECT_GROUPS } from '@/lib/themes'
+
+/**
+ * Custom theme picker. Native `<select>` + `<optgroup>` popups are unreliable
+ * in WebKitGTK (the 3rd group can silently disappear from the popup), so the
+ * options render as an HTML list instead of a GTK ComboBox popup.
+ */
+function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+
+  const currentLabel =
+    THEME_SELECT_GROUPS.flatMap((g) => g.options).find((o) => o.value === value)?.label ?? '默认'
+
+  // Close on outside click / Escape.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (btnRef.current?.contains(e.target as Node)) return
+      if (popRef.current?.contains(e.target as Node)) return
+      setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); setOpen(false) }
+    }
+    const t = setTimeout(() => {
+      document.addEventListener('mousedown', onDown)
+      document.addEventListener('keydown', onKey)
+    }, 0)
+    return () => {
+      clearTimeout(t)
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  // Anchor below the trigger, right-aligned; flip above if it would overflow.
+  useEffect(() => {
+    if (!open) return
+    const btn = btnRef.current
+    if (!btn) return
+    const r = btn.getBoundingClientRect()
+    const left = Math.max(8, r.right - 240)
+    setPos({ left, top: r.bottom + 4 })
+  }, [open])
+
+  useEffect(() => {
+    if (!open || !popRef.current) return
+    const pr = popRef.current.getBoundingClientRect()
+    if (pr.bottom > window.innerHeight - 8 && btnRef.current) {
+      const br = btnRef.current.getBoundingClientRect()
+      popRef.current.style.top = `${Math.max(8, br.top - pr.height - 4)}px`
+    }
+  }, [open, pos])
+
+  return (
+    <div className="relative">
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-96 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors flex items-center justify-between gap-2 text-left"
+      >
+        <span className="truncate">{currentLabel}</span>
+        <ChevronDown className={`size-3.5 shrink-0 text-muted-foreground/60 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && pos && (
+        <div
+          ref={popRef}
+          className="fixed z-50 w-60 bg-popover border border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto backdrop-blur-sm"
+          style={{ left: pos.left, top: pos.top }}
+        >
+          {THEME_SELECT_GROUPS.map((g) => (
+            <div key={g.label}>
+              <div className="px-3 pt-2 pb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+                {g.label}
+              </div>
+              {g.options.map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => { onChange(o.value); setOpen(false) }}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors text-left ${
+                    o.value === value
+                      ? 'bg-accent text-accent-foreground'
+                      : 'text-foreground hover:bg-accent/50'
+                  }`}
+                >
+                  <span className="flex-1 truncate">{o.label}</span>
+                  {o.value === value && <Check className="size-3.5 shrink-0" />}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
 const FONT_OPTIONS = [
   { label: '默认', value: "'Geist Mono', 'Fira Code', 'Consolas', monospace" },
@@ -61,19 +163,7 @@ export function AppearanceSettingsPanel({ themeStyle, onSelectThemeStyle }: {
       <SectionHeading>外观</SectionHeading>
 
       <SettingRow label="配色风格">
-        <select
-          value={themeStyle}
-          onChange={(e) => onSelectThemeStyle(e.target.value)}
-          className="w-96 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
-        >
-          {THEME_SELECT_GROUPS.map((g) => (
-            <optgroup key={g.label} label={g.label}>
-              {g.options.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </optgroup>
-          ))}
-        </select>
+        <ThemeStylePicker value={themeStyle} onChange={onSelectThemeStyle} />
       </SettingRow>
 
       <SettingGroup title="编辑器">

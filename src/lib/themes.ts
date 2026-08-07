@@ -318,14 +318,14 @@ const THEMES: Record<string, HelixThemeDef> = {
   'ctp-amoled-dark': { id: 'ctp-amoled-dark', label: 'AMOLED 纯黑', mode: 'dark', ctp: amoledDark },
   'ctp-atom-dark': { id: 'ctp-atom-dark', label: 'Atom 暗蓝', mode: 'dark', ctp: atomDark, pair: 'ctp-atom-light' },
   'ctp-coffee-dark': { id: 'ctp-coffee-dark', label: 'Coffee 咖啡', mode: 'dark', ctp: coffeeDark },
-  'ctp-dracula': { id: 'ctp-dracula', label: 'Dracula 橙', mode: 'dark', ctp: draculaDark },
+  'ctp-dracula': { id: 'ctp-dracula', label: 'Dracula 暗紫', mode: 'dark', ctp: draculaDark },
   'ctp-everforest-dark': { id: 'ctp-everforest-dark', label: 'Everforest 墨绿', mode: 'dark', ctp: everforestDark, pair: 'ctp-everforest-light' },
-  'ctp-generic-dark': { id: 'ctp-generic-dark', label: 'Generic 灰黑', mode: 'dark', ctp: genericDark },
+  'ctp-generic-dark': { id: 'ctp-generic-dark', label: 'Grayscale 灰黑', mode: 'dark', ctp: genericDark },
   'ctp-gruvbox-dark': { id: 'ctp-gruvbox-dark', label: 'Gruvbox 活力橙', mode: 'dark', ctp: gruvboxDark, pair: 'ctp-gruvbox-light' },
   'ctp-kanagawa-dark': { id: 'ctp-kanagawa-dark', label: 'Kanagawa 暗橙', mode: 'dark', ctp: kanagawaDark },
   'ctp-material-mint-dark': { id: 'ctp-material-mint-dark', label: 'Material Mint 暗薄荷', mode: 'dark', ctp: materialMintDark, pair: 'ctp-material-mint-light' },
   'ctp-nord-dark': { id: 'ctp-nord-dark', label: 'Nord 雪蓝', mode: 'dark', ctp: nordDark, pair: 'ctp-nord-light' },
-  'ctp-nord-darker': { id: 'ctp-nord-darker', label: 'Nord 更暗', mode: 'dark', ctp: nordDarker, pair: 'ctp-nord-light' },
+  'ctp-nord-darker': { id: 'ctp-nord-darker', label: 'Nord 极夜', mode: 'dark', ctp: nordDarker, pair: 'ctp-nord-light' },
   'ctp-notion-dark': { id: 'ctp-notion-dark', label: 'Notion 暗橙', mode: 'dark', ctp: notionDark, pair: 'ctp-notion-light' },
   'ctp-rosebox': { id: 'ctp-rosebox', label: 'Rosebox 暖棕', mode: 'dark', ctp: roseboxDark },
   'ctp-rosepine-dark': { id: 'ctp-rosepine-dark', label: 'Rosé Pine 玫瑰', mode: 'dark', ctp: rosepineDark },
@@ -395,7 +395,22 @@ export function applyHelixPalette(styleId: string | null | undefined): void {
   const meta = getThemeMeta(styleId)
   if (!meta) {
     VAR_NAMES.forEach((name) => root.style.removeProperty(name))
-    root.style.colorScheme = ''
+    // 内置（默认）回到奶油浅色。深色 flavor 会往 <html> 上挂 `.dark`，如果不
+    // 摘掉，切回内置时界面仍是深色 slate。唯一保留暗色的情况是用户在个性化面板
+    // 里显式切换过暗色（helix-theme），此时内置主题就应保持其暗色外观。
+    let dark = false
+    try {
+      dark = localStorage.getItem('helix-theme') === 'dark'
+    } catch {
+      /* localStorage 不可用时按浅色处理 */
+    }
+    if (dark) {
+      root.classList.add('dark')
+      root.style.colorScheme = 'dark'
+    } else {
+      root.classList.remove('dark')
+      root.style.colorScheme = ''
+    }
     return
   }
   if (meta.mode === 'dark') {
@@ -437,14 +452,14 @@ export const THEME_SELECT_GROUPS: { label: string; options: { value: string; lab
       { value: 'ctp-amoled-dark', label: 'AMOLED 纯黑' },
       { value: 'ctp-atom-dark', label: 'Atom 暗蓝' },
       { value: 'ctp-coffee-dark', label: 'Coffee 咖啡' },
-      { value: 'ctp-dracula', label: 'Dracula 橙' },
+      { value: 'ctp-dracula', label: 'Dracula 暗紫' },
       { value: 'ctp-everforest-dark', label: 'Everforest 墨绿' },
-      { value: 'ctp-generic-dark', label: 'Generic 灰黑' },
+      { value: 'ctp-generic-dark', label: 'Grayscale 灰黑' },
       { value: 'ctp-gruvbox-dark', label: 'Gruvbox 活力橙' },
       { value: 'ctp-kanagawa-dark', label: 'Kanagawa 暗橙' },
       { value: 'ctp-material-mint-dark', label: 'Material Mint 暗薄荷' },
       { value: 'ctp-nord-dark', label: 'Nord 雪蓝' },
-      { value: 'ctp-nord-darker', label: 'Nord 更暗' },
+      { value: 'ctp-nord-darker', label: 'Nord 极夜' },
       { value: 'ctp-notion-dark', label: 'Notion 暗橙' },
       { value: 'ctp-rosebox', label: 'Rosebox 暖棕' },
       { value: 'ctp-rosepine-dark', label: 'Rosé Pine 玫瑰' },

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Helix</title>
+    <link rel="icon" type="image/png" href="/kirin.png" />
+    <script>
+      // Anti-flash theme bootstrap (matches the old Next.js layout inline script).
+      ;(function () {
+        try {
+          var t = localStorage.getItem('helix-theme') || 'light'
+          document.documentElement.classList.toggle('dark', t === 'dark')
+        } catch (e) {}
+      })()
+    </script>
+  </head>
+  <body class="antialiased bg-background text-foreground overflow-hidden">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -47,6 +47,13 @@
 :root {
   color-scheme: light;
   --radius: 0.5rem;
+  /* Font tokens previously injected by next/font (Geist). Fall back to
+     system UI stacks when the web fonts are not bundled. */
+  --font-geist-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-geist-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono",
+    Menlo, Consolas, "Liberation Mono", monospace;
   /* ── Cream / paper workspace (light) ──
      Warm, low-contrast cream neutrals inspired by note-taking apps.
      Primary is a soft amber-orange; surfaces read like tinted paper. */
