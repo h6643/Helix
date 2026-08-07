@@ -4420,11 +4420,19 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }}
               onInput={(e) => {
                 const target = e.target as HTMLTextAreaElement
+                const prevHeight = parseInt(target.style.height || '52', 10)
                 target.style.height = '52px'
                 const ch = target.scrollHeight
                 const min = 52
-                if (ch > min) {
-                  target.style.height = Math.min(ch, 300) + 'px'
+                const nextHeight = ch > min ? Math.min(ch, 300) : min
+                target.style.height = nextHeight + 'px'
+                // 输入框长高时自动把视口滚到底，防止输入框跑到可见区域下方
+                if (nextHeight > prevHeight && scrollRef.current) {
+                  const vp = scrollRef.current.querySelector('[data-radix-scroll-area-viewport]')
+                    || scrollRef.current.querySelector('[data-slot="scroll-area-viewport"]')
+                  if (vp) {
+                    requestAnimationFrame(() => { vp.scrollTop = vp.scrollHeight })
+                  }
                 }
               }}
             />
@@ -4847,7 +4855,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       {/* 模型在执行危险操作、弹出确认弹窗时，不显示聊天对话框（对话区+输入框）。
           只保留确认弹窗，让用户专注审批；审批结束后聊天恢复显示。 */}
       <ScrollArea ref={scrollRef} className={`flex-1 min-h-0 ${approvalRequest ? 'hidden' : ''}`} hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
-        <div className="max-w-[700px] mx-auto px-5 py-4 pb-4 min-h-full">
+        <div className="max-w-[700px] mx-auto px-5 py-4 pb-12 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (
             <div className="flex flex-col items-center w-full pt-[22vh]">
               <div className="w-full max-w-[700px] mx-auto px-5">

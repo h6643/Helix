@@ -205,6 +205,7 @@ html, body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  font-hinting: normal;
   letter-spacing: -0.006em;
   /* UI font scope: chat + settings inherit this. The code editor overrides
      its own font via --helix-font-family on the CodeMirror element. */

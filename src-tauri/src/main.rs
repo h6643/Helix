@@ -23,6 +23,8 @@ fn main() {
         // LIBGL_ALWAYS_SOFTWARE makes Mesa pick swrast/llvmpipe up front and
         // skip the failing hardware probe entirely.
         std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
+        // Improve font rendering on Linux.
+        std::env::set_var("GDK_DPI_SCALE", "1");
     }
     helix_lib::run()
 }
