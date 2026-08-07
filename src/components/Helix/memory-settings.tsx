@@ -41,6 +41,7 @@ import { warn } from '@/lib/logger'
 
 type ProviderMeta = { id: string; label: string; type: string; best: string; env?: string; env2?: string; local?: boolean }
 const PROVIDERS: ProviderMeta[] = [
+  { id: '', label: '无', type: '仅内置记忆', best: '默认' },
   { id: 'mem0', label: 'Mem0', type: '记忆层（通用）', best: '个性化助手', env: 'MEM0_API_KEY' },
   { id: 'hindsight', label: 'Hindsight', type: '高级记忆系统', best: '企业知识 / Agent', env: 'HINDSIGHT_API_KEY', env2: 'HINDSIGHT_API_URL' },
   { id: 'holographic', label: 'Holographic', type: '本地记忆', best: '本地单机', local: true },
