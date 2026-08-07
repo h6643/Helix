@@ -107,22 +107,25 @@ export function WebSearchSettings() {
           const isSelected = activeProviders.includes(provider.id)
           return (
             <div key={provider.id}>
-              <SettingRow label={provider.name}>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setActiveProviders([...activeProviders, provider.id])
-                      } else {
-                        setActiveProviders(activeProviders.filter(id => id !== provider.id))
-                      }
-                    }}
-                    className="w-4 h-4 text-primary"
-                  />
+              <div
+                onClick={() => {
+                  if (isSelected) {
+                    setActiveProviders(activeProviders.filter(id => id !== provider.id))
+                  } else {
+                    setActiveProviders([...activeProviders, provider.id])
+                  }
+                }}
+                className="flex items-center gap-3 py-2.5 px-1 -mx-1 rounded-md hover:bg-muted/30 transition-colors cursor-pointer"
+              >
+                <span className="text-sm text-foreground min-w-0 flex-1">{provider.name}</span>
+                <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-primary border-primary' : 'border-muted-foreground/30'}`}>
+                  {isSelected && (
+                    <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
                 </div>
-              </SettingRow>
+              </div>
               {isSelected && (
                 <div className="ml-6 pl-3 border-l-2 border-primary/20 py-2 space-y-2">
                   <p className="text-xs text-muted-foreground">{provider.description}</p>
