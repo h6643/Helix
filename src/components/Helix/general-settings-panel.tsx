@@ -5,20 +5,23 @@ import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
 import { Toggle, SettingRow, SettingGroup, SectionHeading } from './settings-ui'
 import { ExternalServiceManager } from './external-services-manager'
-import { WebSearchSettings } from './web-search-settings'
 
 export function GeneralSettingsPanel() {
   const desktopNotifications = useHelixStore(s => s.desktopNotifications)
   const setDesktopNotifications = useHelixStore(s => s.setDesktopNotifications)
-  const soundEnabled = useHelixStore(s => s.soundEnabled)
-  const setSoundEnabled = useHelixStore(s => s.setSoundEnabled)
+  const voiceWakeEnabled = useHelixStore(s => s.voiceWakeEnabled)
+  const setVoiceWakeEnabled = useHelixStore(s => s.setVoiceWakeEnabled)
+  const startupGreeting = useHelixStore(s => s.startupGreeting)
+  const setStartupGreeting = useHelixStore(s => s.setStartupGreeting)
+  const showToast = useHelixStore(s => s.showToast)
 
   const {
     apiConfig, apiProfiles, activeProfileId, providers, activeModel,
+    activeProviderId, providerModels,
     fontFamily, fontSize, interfaceFont, transcriptFontSize,
     mcpServers, gitAutoCommit, gitAutoPush, gitPushConfirm,
     gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix,
-    persistToStorage, showToast,
+    persistToStorage,
   } = useHelixStore()
 
   return (
@@ -29,8 +32,23 @@ export function GeneralSettingsPanel() {
         <SettingRow label="桌面通知">
           <Toggle enabled={desktopNotifications} onToggle={() => setDesktopNotifications(!desktopNotifications)} />
         </SettingRow>
-        <SettingRow label="提示音">
-          <Toggle enabled={soundEnabled} onToggle={() => setSoundEnabled(!soundEnabled)} />
+      </SettingGroup>
+
+      <SettingGroup title="语音">
+        <SettingRow label="语音唤醒">
+          <Toggle enabled={voiceWakeEnabled} onToggle={() => setVoiceWakeEnabled(!voiceWakeEnabled)} />
+        </SettingRow>
+      </SettingGroup>
+
+      <SettingGroup title="个性化">
+        <SettingRow label="启动语">
+          <input
+            value={startupGreeting}
+            onChange={(e) => setStartupGreeting(e.target.value)}
+            onBlur={() => { if (!startupGreeting.trim()) setStartupGreeting('有什么可以帮你的？') }}
+            placeholder="有什么可以帮你的？"
+            className="w-56 px-2.5 py-1.5 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary"
+          />
         </SettingRow>
       </SettingGroup>
 
@@ -40,13 +58,11 @@ export function GeneralSettingsPanel() {
         </div>
       </SettingGroup>
 
-      <WebSearchSettings />
-
       <SettingGroup title="数据管理">
         <div className="py-3 flex flex-wrap gap-2 justify-end">
           <Button size="sm" variant="outline" onClick={async () => {
             try {
-              const data = { apiConfig, apiProfiles, activeProfileId, providers, activeModel, fontFamily, fontSize, interfaceFont, transcriptFontSize, mcpServers, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix }
+              const data = { apiConfig, apiProfiles, activeProfileId, providers, activeModel, activeProviderId, providerModels, fontFamily, fontSize, interfaceFont, transcriptFontSize, mcpServers, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix }
               const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
               const url = URL.createObjectURL(blob)
               const a = document.createElement('a'); a.href = url; a.download = `helix-config-${new Date().toISOString().slice(0, 10)}.json`; a.click()
@@ -66,10 +82,9 @@ export function GeneralSettingsPanel() {
                 const text = await file.text()
                 const data = JSON.parse(text)
                 if (!data || typeof data !== 'object') throw new Error('bad config file')
-                // Mirror every key the export writes (api-settings 导出配置), so
-                // import restores the whole configuration — not just apiConfig.
                 const keys = [
                   'apiConfig', 'apiProfiles', 'activeProfileId', 'providers', 'activeModel',
+                  'activeProviderId', 'providerModels',
                   'fontFamily', 'fontSize', 'interfaceFont', 'transcriptFontSize',
                   'mcpServers',
                   'gitAutoCommit', 'gitAutoPush', 'gitPushConfirm', 'gitAutoBranch',

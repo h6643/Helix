@@ -153,6 +153,10 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   toggleLearningView: () => void
   voiceAutoSpeak: boolean
   setVoiceAutoSpeak: (v: boolean) => void
+  voiceWakeEnabled: boolean
+  setVoiceWakeEnabled: (v: boolean) => void
+  startupGreeting: string
+  setStartupGreeting: (v: string) => void
 
   // Email integration state (secrets live in the Electron main process; only
   // non-sensitive flags/identifiers are mirrored here for UI rendering).
@@ -842,6 +846,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   rightSidebarTab: null,
   showLearningView: false,
   voiceAutoSpeak: false,
+  voiceWakeEnabled: false,
+  startupGreeting: '有什么可以帮你的？',
 
   emailConfigured: false,
   emailAccount: '',
@@ -1084,6 +1090,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   }),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
   setVoiceAutoSpeak: (v: boolean) => set((s) => ({ voiceAutoSpeak: v })),
+  setVoiceWakeEnabled: (v: boolean) => set((s) => ({ voiceWakeEnabled: v })),
+  setStartupGreeting: (v: string) => set((s) => ({ startupGreeting: v })),
   setEmailConfigured: (configured: boolean, account?: string) =>
     set((s) => ({ emailConfigured: configured, emailAccount: account !== undefined ? account : s.emailAccount })),
   setEmailNotifyEnabled: (v: boolean) => set((s) => ({ emailNotifyEnabled: v })),
@@ -2265,8 +2273,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('personality', state.personality),
         persistence.saveSetting('fastMode', state.fastMode),
         persistence.saveSetting('desktopNotifications', state.desktopNotifications),
-        persistence.saveSetting('soundEnabled', state.soundEnabled),
         persistence.saveSetting('voiceAutoSpeak', state.voiceAutoSpeak),
+        persistence.saveSetting('voiceWakeEnabled', state.voiceWakeEnabled),
+        persistence.saveSetting('startupGreeting', state.startupGreeting),
         persistence.saveSetting('editorTheme', state.editorTheme),
         persistence.saveSetting('gitAutoCommit', state.gitAutoCommit),
         persistence.saveSetting('gitAutoPush', state.gitAutoPush),
@@ -2301,7 +2310,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, soundEnabled, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, voiceWakeEnabled, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -2340,7 +2349,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<string>('personality'),
         persistence.loadSetting<boolean>('fastMode'),
         persistence.loadSetting<boolean>('desktopNotifications'),
-        persistence.loadSetting<boolean>('soundEnabled'),
         persistence.loadSetting<string>('editorTheme'),
         persistence.loadSetting<boolean>('gitAutoCommit'),
         persistence.loadSetting<boolean>('gitAutoPush'),
@@ -2350,6 +2358,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<string>('gitCommitTemplate'),
         persistence.loadSetting<string>('gitBranchPrefix'),
         persistence.loadSetting<boolean>('voiceAutoSpeak'),
+        persistence.loadSetting<boolean>('voiceWakeEnabled'),
+        persistence.loadSetting<string>('startupGreeting'),
         persistence.loadSetting<ProviderConfig[]>('providers'),
         persistence.loadSetting<string | null>('activeModel'),
         persistence.loadSetting<string | null>('activeProviderId'),
@@ -2828,7 +2838,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         personality: personality || get().personality,
         fastMode: fastMode ?? get().fastMode,
         desktopNotifications: desktopNotifications ?? get().desktopNotifications,
-        soundEnabled: soundEnabled ?? get().soundEnabled,
         availableModels: availableModels || [],
         providerModels: cleanedProviderModels,
         editorTheme: (editorTheme as 'vs-dark' | 'light' | null | undefined) ?? get().editorTheme,
@@ -2840,6 +2849,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
         voiceAutoSpeak: voiceAutoSpeak ?? get().voiceAutoSpeak,
+        voiceWakeEnabled: voiceWakeEnabled ?? get().voiceWakeEnabled,
+        startupGreeting: startupGreeting || get().startupGreeting,
         browserHomeUrl: '',
         browserBookmarks: savedBookmarks ?? get().browserBookmarks,
       })

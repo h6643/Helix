@@ -25,6 +25,7 @@ import {
   MoreHorizontal,
   FolderTree,
   Mail,
+  Users,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
@@ -77,6 +78,7 @@ const TerminalPanel = lazy(() => import('./terminal-panel').then(m => ({ default
 const WorktreePanel = lazy(() => import('./worktree-panel').then(m => ({ default: m.WorktreePanel })))
 const PluginManagerPanel = lazy(() => import('./plugin-manager').then(m => ({ default: m.PluginManager })))
 const KanbanPanel = lazy(() => import('./kanban-panel').then(m => ({ default: m.KanbanPanel })))
+const DelegationsPanel = lazy(() => import('./delegations-panel').then(m => ({ default: m.DelegationsPanel })))
 const RightSidebar = lazy(() => import('./right-sidebar').then(m => ({ default: m.RightSidebar })))
 
 // Local Suspense for the always-visible panel areas. Without a boundary the
@@ -295,6 +297,7 @@ export function HelixLayout() {
   const showRuntimePanel = useHelixStore(s => s.showRuntimePanel)
   const showWorktreePanel = useHelixStore(s => s.showWorktreePanel)
   const showKanbanPanel = useHelixStore(s => s.showKanbanPanel)
+  const showSubAgentPanel = useHelixStore(s => s.showSubAgentPanel)
   const showActivityFeed = useHelixStore(s => s.showActivityFeed)
   const showArtifactsBrowser = useHelixStore(s => s.showArtifactsBrowser)
   const showPluginManager = useHelixStore(s => s.showPluginManager)
@@ -302,7 +305,7 @@ export function HelixLayout() {
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
   // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
   // 切页面时让模型继续在后台运行，返回后还能接着看。
-  const sidePanelOpen = showScheduledTasksPanel || showPluginManager || showSkillPanel || showRuntimePanel || showWorktreePanel || showKanbanPanel
+  const sidePanelOpen = showScheduledTasksPanel || showPluginManager || showSkillPanel || showRuntimePanel || showWorktreePanel || showKanbanPanel || showSubAgentPanel
   const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
@@ -318,6 +321,9 @@ export function HelixLayout() {
   // Stable action references — these never change so getState() is safe
   const storeActions = useMemo(() => useHelixStore.getState(), [])
   const [todoPopoverOpen, setTodoPopoverOpen] = useState(false)
+  const [delegations, setDelegations] = useState<Array<{id: string; tasks: Array<{name: string; modified: number}>}>>([])
+  const [delegationsPopoverOpen, setDelegationsPopoverOpen] = useState(false)
+  const delegationsPopoverRef = useRef<HTMLDivElement>(null)
   // Close the todo popover when clicking outside of it
   const todoPopoverRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -330,6 +336,36 @@ export function HelixLayout() {
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [todoPopoverOpen])
+
+  // Close delegations popover when clicking outside
+  useEffect(() => {
+    if (!delegationsPopoverOpen) return
+    const onDocClick = (e: MouseEvent) => {
+      if (delegationsPopoverRef.current && !delegationsPopoverRef.current.contains(e.target as Node)) {
+        setDelegationsPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [delegationsPopoverOpen])
+
+  // Load delegations data
+  useEffect(() => {
+    if (!isElectron()) return
+    const loadDelegations = async () => {
+      try {
+        const api = (window as any).electron as any
+        const res = await api?.delegations?.list?.()
+        if (res?.ok) {
+          setDelegations(res.delegations || [])
+        }
+      } catch {}
+    }
+    loadDelegations()
+    // Refresh every 10 seconds
+    const interval = setInterval(loadDelegations, 10000)
+    return () => clearInterval(interval)
+  }, [isElectron()])
 
   // Apply the selected theme style (Catppuccin flavor or built-in cream) by
   // writing inline CSS variables onto <html>. Runs on mount and whenever the
@@ -899,15 +935,15 @@ export function HelixLayout() {
 
   return (
     <div className={`h-screen w-screen flex flex-col overflow-hidden ${
-      'bg-background'
+      'bg-gradient-to-br from-background via-background to-primary/5'
     }`}>
       <KeyboardShortcuts />
       <CommandPalette />
       <ContextMenuProvider />
       <ToastContainer />
 
-      {/* Title bar — frameless window drag region */}
-      <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 bg-sidebar shrink-0 select-none">
+      {/* Title bar — part of the background */}
+      <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 shrink-0 select-none">
         {/* Left: navigation buttons */}
         <div className="flex items-center gap-0.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
           <button
@@ -1100,16 +1136,16 @@ export function HelixLayout() {
         </div>
       </div>
 
-      {/* Main content */}
+      {/* Content area: sidebar + floating card */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar with resize handle */}
+        {/* Sidebar — part of the background */}
         {showSidebar && (
           <div
             className={`shrink-0 overflow-hidden relative ${isDragging ? '' : 'transition-[width] duration-200 ease-out'}`}
             style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth }}
           >
             <div
-              className="h-full overflow-hidden bg-sidebar"
+              className="h-full overflow-hidden"
               style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth }}
             >
               <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(v => !v)} />
@@ -1135,13 +1171,15 @@ export function HelixLayout() {
           </div>
         )}
 
-        {/* Main area */}
-        <div className="relative flex-1 h-full flex flex-col overflow-hidden">
+        {/* Floating card — main content */}
+        <div className="flex-1 flex flex-col m-3 ml-0 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
+          {/* Main area */}
+          <div className="relative flex-1 h-full flex flex-col overflow-hidden">
           <div className={`flex-1 flex flex-row overflow-hidden ${sidePanelOpen ? 'hidden' : ''}`}>
               <div className="flex-1 flex flex-col overflow-hidden min-w-0">
               {/* Conversation header — only visible when an active conversation has messages */}
                 {(chatMessages.length > 0 && !!currentSessionId) && (
-                  <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 bg-background">
+                  <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <button
                         onClick={handleOpenLocation}
@@ -1207,6 +1245,49 @@ export function HelixLayout() {
                               </li>
                             ))}
                           </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Delegations button */}
+                  {isElectron() && delegations.length > 0 && (
+                    <div className="relative" ref={delegationsPopoverRef}>
+                      <button
+                        onClick={() => setDelegationsPopoverOpen(v => !v)}
+                        className={`p-1.5 rounded-lg transition-colors ${delegationsPopoverOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
+                        title={`${delegations.length} 个子 Agent`}
+                      >
+                        <Users className="size-4" />
+                        <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-primary text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                          {delegations.length}
+                        </span>
+                      </button>
+                      {delegationsPopoverOpen && (
+                        <div className="absolute right-0 top-full mt-1 w-72 bg-card border border-border/80 rounded-lg shadow-xl z-50">
+                          <div className="px-3 py-2 border-b border-border/50">
+                            <h3 className="text-xs font-semibold text-foreground">子 Agent</h3>
+                          </div>
+                          <div className="max-h-64 overflow-auto">
+                            {delegations.map((del) => (
+                              <div key={del.id} className="px-3 py-2 border-b border-border/30 last:border-b-0">
+                                <div className="flex items-center gap-2">
+                                  <Terminal className="size-3 text-primary" />
+                                  <span className="text-xs font-mono text-foreground/80 truncate">{del.id}</span>
+                                </div>
+                                <div className="mt-1 text-[10px] text-muted-foreground">
+                                  {del.tasks.length} 个任务
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="px-3 py-2 border-t border-border/50">
+                            <button
+                              onClick={() => { storeActions.toggleSubAgentPanel(); setDelegationsPopoverOpen(false) }}
+                              className="w-full text-xs text-primary hover:underline"
+                            >
+                              查看详情
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -1333,7 +1414,13 @@ export function HelixLayout() {
               <KanbanPanel />
             </PanelSuspense>
           </div>
+          <div className={`absolute inset-0 z-20 ${showSubAgentPanel ? '' : 'hidden'}`}>
+            <PanelSuspense>
+              <DelegationsPanel />
+            </PanelSuspense>
+          </div>
         </div>
+      </div>
       </div>
 
       {/* Overlay panels */}

@@ -346,9 +346,9 @@ const rgb = (triplet: string): string => `rgb(${triplet.split(',').map((s) => s.
 /** Maps a Catppuccin palette onto Helix's shadcn-style CSS custom properties. */
 function buildHelixVars(c: CtpPalette): Record<string, string> {
   return {
-    '--background': rgb(c.base),
+    '--background': rgb(c.mantle),
     '--foreground': rgb(c.text),
-    '--card': rgb(c.mantle),
+    '--card': rgb(c.base),
     '--card-foreground': rgb(c.text),
     '--popover': rgb(c.crust),
     '--popover-foreground': rgb(c.text),

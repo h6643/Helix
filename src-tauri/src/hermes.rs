@@ -22,10 +22,12 @@ use crate::gateway::{
 use crate::kernel::resolve_hermes_cmd;
 use crate::paths::hermes_data_dir;
 use crate::state::{AppState, ServeGatewayInfo};
+use base64::Engine;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::State;
+use tauri::{Emitter, State};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -1346,4 +1348,730 @@ pub fn hermes_doctor() -> Value {
         }
         None => json!({ "success": false, "error": "找不到 hermes 可执行文件" }),
     }
+}
+
+// ── hermes_transcribe ─────────────────────────────────────────────────────
+
+/// Resolve (canonicalize) a path, following symlinks.
+fn resolve_symlink(p: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Resolve a Python interpreter from the same venv that hermes uses.
+fn resolve_hermes_python(hermes_bin: &std::path::Path) -> Option<PathBuf> {
+    // Canonicalize to follow symlinks (hermes may be a symlink on PATH).
+    let resolved = resolve_symlink(hermes_bin);
+    let venv_bin = resolved.parent()?;
+    let python = if cfg!(windows) {
+        venv_bin.join("python.exe")
+    } else {
+        let py3 = venv_bin.join("python3");
+        if py3.exists() {
+            py3
+        } else {
+            venv_bin.join("python")
+        }
+    };
+    if python.exists() {
+        return Some(python);
+    }
+    // Last resort: try to locate python3 on PATH.
+    let sys_python = if cfg!(windows) { "python.exe" } else { "python3" };
+    match std::process::Command::new(sys_python).arg("--version").output() {
+        Ok(o) if o.status.success() => Some(std::path::PathBuf::from(sys_python)),
+        _ => None,
+    }
+}
+
+/// Resolve the Hermes-agent repository root from the hermes binary path.
+/// hermes lives at ``<repo>/.venv/bin/hermes`` (or ``<repo>/venv/bin/hermes``),
+/// so the repo root is three directories up from the binary.
+fn resolve_hermes_agent_root(hermes_bin: &std::path::Path) -> Option<PathBuf> {
+    // Canonicalize to follow symlinks.
+    let resolved = resolve_symlink(hermes_bin);
+    let root = resolved.parent()?.parent()?.parent()?.to_path_buf();
+    if root.join("tools").is_dir() {
+        return Some(root);
+    }
+    // Maybe the binary is not inside a venv — try the managed agent location
+    // that the app installer provisions.
+    let managed = hermes_data_dir().join("hermes-agent");
+    if managed.join("tools").is_dir() {
+        return Some(managed);
+    }
+    None
+}
+
+/// Run the Helix STT bridge with inline Python (-c) when the standalone
+/// script file is not available.
+fn run_stt_inline(
+    python: &std::path::Path,
+    agent_root: &std::path::Path,
+    audio_path: &std::path::Path,
+    hermes_bin: &std::path::Path,
+) -> Result<Value, String> {
+    let python_code = "import sys,json,os\n\
+sys.path.insert(0, os.environ['_HELIX_AGENT_ROOT'])\n\
+from tools.transcription_tools import transcribe_audio\n\
+r=transcribe_audio(os.environ['_HELIX_AUDIO_FILE'])\n\
+json.dump(r,sys.stdout)\n\
+sys.stdout.flush()";
+
+    let mut cmd = std::process::Command::new(python);
+    cmd.arg("-c")
+        .arg(python_code)
+        .envs(crate::kanban::build_clean_env(hermes_bin))
+        .env("HERMES_HOME", hermes_data_dir().display().to_string())
+        .env("_HELIX_AGENT_ROOT", agent_root.display().to_string())
+        .env("_HELIX_AUDIO_FILE", audio_path.display().to_string());
+
+    match run_cmd_with_timeout(cmd, Duration::from_secs(120)) {
+        Ok((0, stdout, _stderr)) => {
+            match serde_json::from_str::<Value>(&stdout) {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    let trimmed = stdout.trim().to_string();
+                    if trimmed.is_empty() {
+                        Err(format!("STT 返回空结果（解析错误: {e}）"))
+                    } else {
+                        Ok(json!({"success": true, "transcript": trimmed, "provider": "unknown"}))
+                    }
+                }
+            }
+        }
+        Ok((code, _stdout, stderr)) => {
+            Err(if stderr.trim().is_empty() {
+                format!("STT 进程退出码 {code}")
+            } else {
+                stderr.trim().to_string()
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Transcribe an audio file using Hermes STT backends.
+///
+/// Receives base64-encoded audio bytes, writes them to a temp file, runs the
+/// Hermes Python transcription pipeline, and returns the recognised text.
+///
+/// This is the backend half of the MediaRecorder voice-input path, used on
+/// platforms where ``SpeechRecognition`` (Web Speech API) is unavailable
+/// (e.g. WebKitGTK on Linux).
+#[tauri::command]
+pub async fn hermes_transcribe(audio_b64: String, format: String) -> Value {
+    // 1. Decode base64 audio.
+    let audio_bytes = match base64::engine::general_purpose::STANDARD.decode(&audio_b64) {
+        Ok(b) => b,
+        Err(e) => return json!({"success": false, "transcript": "", "error": format!("Base64 解码失败: {e}")}),
+    };
+
+    if audio_bytes.is_empty() {
+        return json!({"success": false, "transcript": "", "error": "音频数据为空"});
+    }
+
+    // 2. Write to temp file.
+    let ext = if format == "webm" || format.is_empty() { "webm" } else { &format };
+    let temp_dir = std::env::temp_dir();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    let temp_path = temp_dir.join(format!("helix_stt_{ts}.{ext}"));
+    if let Err(e) = std::fs::write(&temp_path, &audio_bytes) {
+        return json!({"success": false, "transcript": "", "error": format!("写入临时文件失败: {e}")});
+    }
+
+    // 3. Resolve Python + hermes paths.
+    let hermes_bin = match resolve_hermes_cmd() {
+        Some(b) => b,
+        None => {
+            let _ = std::fs::remove_file(&temp_path);
+            return json!({"success": false, "transcript": "", "error": "找不到 hermes 可执行文件"});
+        }
+    };
+
+    let python = match resolve_hermes_python(&hermes_bin) {
+        Some(p) => p,
+        None => {
+            let _ = std::fs::remove_file(&temp_path);
+            return json!({"success": false, "transcript": "", "error": "找不到 Python 解释器"});
+        }
+    };
+
+    // 4. Run transcription (heavy — run on blocking thread pool).
+    let tp = temp_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(agent_root) = resolve_hermes_agent_root(&hermes_bin) {
+            let script_path = agent_root.join("scripts").join("_helix_stt.py");
+            if script_path.is_file() {
+                let mut cmd = std::process::Command::new(&python);
+                cmd.arg(&script_path)
+                    .arg("--file")
+                    .arg(tp.display().to_string())
+                    .envs(crate::kanban::build_clean_env(&hermes_bin))
+                    .env("HERMES_HOME", hermes_data_dir().display().to_string());
+
+                match run_cmd_with_timeout(cmd, Duration::from_secs(120)) {
+                    Ok((0, stdout, _stderr)) => {
+                        match serde_json::from_str::<Value>(&stdout) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                let trimmed = stdout.trim().to_string();
+                                if trimmed.is_empty() {
+                                    json!({"success": false, "transcript": "", "error": "STT 返回空结果"})
+                                } else {
+                                    json!({"success": true, "transcript": trimmed, "provider": "unknown"})
+                                }
+                            }
+                        }
+                    }
+                    Ok((code, _stdout, stderr)) => {
+                        json!({"success": false, "transcript": "", "error": if stderr.trim().is_empty() { format!("STT 退出码 {code}") } else { stderr.trim().to_string() }})
+                    }
+                    Err(e) => {
+                        json!({"success": false, "transcript": "", "error": e})
+                    }
+                }
+            } else {
+                match run_stt_inline(&python, &agent_root, &tp, &hermes_bin) {
+                    Ok(v) => v,
+                    Err(e) => json!({"success": false, "transcript": "", "error": e}),
+                }
+            }
+        } else {
+            match run_stt_inline(&python, &hermes_data_dir(), &tp, &hermes_bin) {
+                Ok(v) => v,
+                Err(e) => json!({"success": false, "transcript": "", "error": e}),
+            }
+        }
+    }).await.unwrap_or_else(|e| json!({"success": false, "transcript": "", "error": format!("任务异常: {e}")}));
+
+    // 5. Cleanup temp file.
+    let _ = std::fs::remove_file(&temp_path);
+
+    result
+}
+
+// ── Native audio recording (arecord) — Linux WebKitGTK fallback ──────────
+
+/// Start native audio recording via `arecord`.
+///
+/// Spawns ``arecord -f cd -t wav <temp_file>`` in the background and returns
+/// a ``record_id``.  The caller should call ``hermes_record_stop`` to end the
+/// recording and get the transcript.
+///
+/// This is the primary voice-input path on Linux because WebKitGTK does not
+/// support ``getUserMedia`` audio capture reliably.
+#[tauri::command]
+pub fn hermes_record_start(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let mut child_guard = state.hermes.record_child.lock().unwrap();
+    let mut file_guard = state.hermes.record_file.lock().unwrap();
+
+    // If a recording is already in progress, stop it first.
+    if let Some(mut c) = child_guard.take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    if let Some(ref p) = *file_guard {
+        let _ = std::fs::remove_file(p);
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    let temp_path = std::env::temp_dir().join(format!("helix_rec_{ts}.wav"));
+    let record_id = format!("rec_{ts}");
+
+    // Prefer arecord (ALSA, works with both ALSA and PulseAudio/PipeWire);
+    // fall back to ffmpeg (pulse input).
+    let child = if which_cmd("arecord").is_some() {
+        std::process::Command::new("arecord")
+            .args(["-f", "cd", "-t", "wav"])
+            .arg(temp_path.display().to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    } else if which_cmd("ffmpeg").is_some() {
+        std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "pulse", "-i", "default"])
+            .args(["-ac", "2", "-ar", "44100"])
+            .arg(temp_path.display().to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    } else {
+        return Err("未找到可用的录音工具（arecord / ffmpeg）".to_string());
+    };
+
+    match child {
+        Ok(c) => {
+            *child_guard = Some(c);
+            *file_guard = Some(temp_path);
+            Ok(record_id)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(format!("启动录音失败: {e}"))
+        }
+    }
+}
+
+/// Check if a command exists on PATH.
+fn which_cmd(name: &str) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("which")
+        .arg(name)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(std::path::PathBuf::from(s));
+        }
+    }
+    // Fallback: try running the command directly.
+    let path = std::path::PathBuf::from(name);
+    match std::process::Command::new(name).arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
+        Ok(s) if s.success() => Some(path),
+        _ => None,
+    }
+}
+
+/// Stop the active audio recording, transcribe the captured audio, and return
+/// the transcript.
+#[tauri::command]
+pub async fn hermes_record_stop(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    // Extract values and drop guards before any await point.
+    let (child, file_path) = {
+        let mut child_guard = state.hermes.record_child.lock().unwrap();
+        let mut file_guard = state.hermes.record_file.lock().unwrap();
+        (child_guard.take(), file_guard.take())
+    };
+
+    // Kill the recording process (fast — inline).
+    if let Some(mut c) = child {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+
+    let Some(audio_path) = file_path else {
+        return Ok(json!({"success": false, "transcript": "", "error": "没有正在进行的录音"}));
+    };
+
+    if !audio_path.exists() || audio_path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+        let _ = std::fs::remove_file(&audio_path);
+        return Ok(json!({"success": false, "transcript": "", "error": "录音文件为空"}));
+    }
+
+    // Resolve Python and transcribe (fast path resolution, heavy transcription).
+    let hermes_bin = match resolve_hermes_cmd() {
+        Some(b) => b,
+        None => {
+            let _ = std::fs::remove_file(&audio_path);
+            return Ok(json!({"success": false, "transcript": "", "error": "找不到 hermes 可执行文件"}));
+        }
+    };
+
+    let python = match resolve_hermes_python(&hermes_bin) {
+        Some(p) => p,
+        None => {
+            let _ = std::fs::remove_file(&audio_path);
+            return Ok(json!({"success": false, "transcript": "", "error": "找不到 Python 解释器"}));
+        }
+    };
+
+    // Offload the slow transcription subprocess to a blocking thread.
+    let ap = audio_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(agent_root) = resolve_hermes_agent_root(&hermes_bin) {
+            let script_path = agent_root.join("scripts").join("_helix_stt.py");
+            if script_path.is_file() {
+                let mut cmd = std::process::Command::new(&python);
+                cmd.arg(&script_path)
+                    .arg("--file")
+                    .arg(ap.display().to_string())
+                    .envs(crate::kanban::build_clean_env(&hermes_bin))
+                    .env("HERMES_HOME", hermes_data_dir().display().to_string());
+
+                match run_cmd_with_timeout(cmd, Duration::from_secs(120)) {
+                    Ok((0, stdout, _stderr)) => {
+                        match serde_json::from_str::<Value>(&stdout) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                let trimmed = stdout.trim().to_string();
+                                if trimmed.is_empty() {
+                                    json!({"success": false, "transcript": "", "error": "STT 返回空结果"})
+                                } else {
+                                    json!({"success": true, "transcript": trimmed, "provider": "unknown"})
+                                }
+                            }
+                        }
+                    }
+                    Ok((code, _stdout, stderr)) => {
+                        json!({"success": false, "transcript": "", "error": if stderr.trim().is_empty() { format!("STT 退出码 {code}") } else { stderr.trim().to_string() }})
+                    }
+                    Err(e) => {
+                        json!({"success": false, "transcript": "", "error": e})
+                    }
+                }
+            } else {
+                match run_stt_inline(&python, &agent_root, &ap, &hermes_bin) {
+                    Ok(v) => v,
+                    Err(e) => json!({"success": false, "transcript": "", "error": e}),
+                }
+            }
+        } else {
+            match run_stt_inline(&python, &hermes_data_dir(), &ap, &hermes_bin) {
+                Ok(v) => v,
+                Err(e) => json!({"success": false, "transcript": "", "error": e}),
+            }
+        }
+    }).await.unwrap_or_else(|e| json!({"success": false, "transcript": "", "error": format!("任务异常: {e}")}));
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&audio_path);
+    Ok(result)
+}
+
+// ── TTS (Text-to-Speech) ──────────────────────────────────────────────────
+
+/// Synthesize text to speech via the Hermes TTS pipeline (edge_tts by default)
+/// and play the resulting audio through the system audio player.
+#[tauri::command]
+pub async fn hermes_tts_speak(
+    state: State<'_, Arc<AppState>>,
+    text: String,
+) -> Result<Value, String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(json!({"success": true, "played": false}));
+    }
+
+    let hermes_bin = match resolve_hermes_cmd() {
+        Some(b) => b,
+        None => return Err("找不到 hermes 可执行文件".to_string()),
+    };
+    let python = match resolve_hermes_python(&hermes_bin) {
+        Some(p) => p,
+        None => return Err("找不到 Python 解释器".to_string()),
+    };
+    let agent_root = match resolve_hermes_agent_root(&hermes_bin) {
+        Some(r) => r,
+        None => return Err("找不到 hermes-agent 根目录".to_string()),
+    };
+
+    let temp_dir = std::env::temp_dir();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    let output_path = temp_dir.join(format!("helix_tts_{}.mp3", ts));
+
+    // Synthesize via Hermes TTS pipeline (edge_tts is default, free, no API key).
+    let python_code = "import sys,json,os\n\
+sys.path.insert(0, os.environ['_HELIX_AGENT_ROOT'])\n\
+from tools.tts_tool import text_to_speech_tool\n\
+r=text_to_speech_tool(text=os.environ['_HELIX_TTS_TEXT'],output_path=os.environ['_HELIX_TTS_OUTPUT'])\n\
+json.dump(r,sys.stdout)\n\
+sys.stdout.flush()";
+
+    let mut cmd = std::process::Command::new(&python);
+    cmd.arg("-c")
+        .arg(python_code)
+        .envs(crate::kanban::build_clean_env(&hermes_bin))
+        .env("HERMES_HOME", hermes_data_dir().display().to_string())
+        .env("_HELIX_AGENT_ROOT", agent_root.display().to_string())
+        .env("_HELIX_TTS_TEXT", &text)
+        .env("_HELIX_TTS_OUTPUT", output_path.display().to_string());
+
+    let synthesis_result = tokio::task::spawn_blocking(move || {
+        match run_cmd_with_timeout(cmd, Duration::from_secs(60)) {
+            Ok((0, stdout, _stderr)) => {
+                match serde_json::from_str::<Value>(&stdout) {
+                    Ok(v) => {
+                        let success = v.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+                        if success {
+                            Ok(v)
+                        } else {
+                            let err = v.get("error").and_then(|e| e.as_str()).unwrap_or("TTS 合成失败");
+                            Err(format!("TTS 合成失败: {}", err))
+                        }
+                    }
+                    Err(e) => {
+                        let trimmed = stdout.trim().to_string();
+                        if trimmed.is_empty() {
+                            Err(format!("TTS 返回空结果（解析错误: {e}）"))
+                        } else {
+                            Err(format!("TTS 解析错误: {e}"))
+                        }
+                    }
+                }
+            }
+            Ok((code, _stdout, stderr)) => {
+                Err(if stderr.trim().is_empty() {
+                    format!("TTS 退出码 {}", code)
+                } else {
+                    stderr.trim().to_string()
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }).await.unwrap_or_else(|e| Err(format!("TTS 任务异常: {e}")));
+
+    match synthesis_result {
+        Ok(_) => {
+            // Play the synthesized audio file.
+            let op = output_path.clone();
+            let player = if let Some(p) = which_cmd("paplay") {
+                Some(std::process::Command::new(p)
+                    .arg(&op)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null())
+                    .spawn())
+            } else if let Some(p) = which_cmd("ffplay") {
+                Some(std::process::Command::new(p)
+                    .args(["-nodisp", "-autoexit", "-loglevel", "quiet"])
+                    .arg(&op)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null())
+                    .spawn())
+            } else if let Some(p) = which_cmd("aplay") {
+                Some(std::process::Command::new(p)
+                    .arg("-q")
+                    .arg(&op)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .stdin(std::process::Stdio::null())
+                    .spawn())
+            } else {
+                None
+            };
+
+            match player {
+                Some(Ok(child)) => {
+                    *state.hermes.tts_playback_child.lock().unwrap() = Some(child);
+                    Ok(json!({"success": true, "played": true, "file_path": op.display().to_string()}))
+                }
+                Some(Err(e)) => {
+                    let _ = std::fs::remove_file(&op);
+                    Err(format!("无法播放音频: {}", e))
+                }
+                None => {
+                    let _ = std::fs::remove_file(&op);
+                    Err("未找到可用的音频播放器（paplay / ffplay / aplay）".to_string())
+                }
+            }
+        }
+        Err(e) => {
+            // Cleanup temp file on synthesis failure.
+            let _ = std::fs::remove_file(&output_path);
+            Err(e)
+        }
+    }
+}
+
+/// Stop any in-progress TTS playback.
+#[tauri::command]
+pub fn hermes_tts_stop(state: State<'_, Arc<AppState>>) -> Value {
+    let mut guard = state.hermes.tts_playback_child.lock().unwrap();
+    if let Some(mut child) = guard.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    json!({"ok": true})
+}
+
+// ── Wake-word detection ──────────────────────────────────────────────────
+
+/// Spawn the Python wake-word bridge (`_helix_wake.py`) as a long-running
+/// subprocess. Stdout lines are parsed as JSON events and forwarded to the
+/// renderer as `hermes:event` with method derived from the event type.
+#[tauri::command]
+pub async fn hermes_wake_start(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    {
+        let guard = state.hermes.wake_child.lock().unwrap();
+        if guard.is_some() {
+            return Ok(json!({"success": true, "already_running": true}));
+        }
+    }
+
+    let hermes_bin = match resolve_hermes_cmd() {
+        Some(b) => b,
+        None => return Err("找不到 hermes 可执行文件".to_string()),
+    };
+    let python = match resolve_hermes_python(&hermes_bin) {
+        Some(p) => p,
+        None => return Err("找不到 Python 解释器".to_string()),
+    };
+    let agent_root = match resolve_hermes_agent_root(&hermes_bin) {
+        Some(r) => r,
+        None => return Err("找不到 hermes-agent 根目录".to_string()),
+    };
+
+    let script = agent_root.join("scripts").join("_helix_wake.py");
+    if !script.exists() {
+        return Err(format!("唤醒词脚本不存在: {}", script.display()));
+    }
+
+    // Build LD_LIBRARY_PATH with ~/.local/lib prepended, so PortAudio is found.
+    let local_lib = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/home/hyt"))
+        .join(".local")
+        .join("lib");
+    let mut ld_paths: Vec<String> = vec![local_lib.display().to_string()];
+    if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+        for p in existing.split(':') {
+            let p = p.trim().to_string();
+            if !p.is_empty() && !ld_paths.contains(&p) {
+                ld_paths.push(p);
+            }
+        }
+    }
+    let ld_library_path = ld_paths.join(":");
+
+    let mut cmd = std::process::Command::new(&python);
+    cmd.arg(&script)
+        .envs(crate::kanban::build_clean_env(&hermes_bin))
+        .env("HERMES_HOME", hermes_data_dir().display().to_string())
+        .env("_HELIX_AGENT_ROOT", agent_root.display().to_string())
+        .env("LD_LIBRARY_PATH", &ld_library_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("启动唤醒词进程失败: {e}"))?;
+
+    // Take ownership of stdin and stdout.
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "无法获取唤醒词进程 stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法获取唤醒词进程 stdout".to_string())?;
+    let stderr = child.stderr.take();
+
+    // Store the child + stdin handle.
+    {
+        let mut child_guard = state.hermes.wake_child.lock().unwrap();
+        *child_guard = Some(child);
+    }
+    {
+        let mut stdin_guard = state.hermes.wake_stdin.lock().unwrap();
+        *stdin_guard = Some(stdin);
+    }
+
+    // Background task: read stdout lines and forward as Tauri events.
+    let app_handle = app.clone();
+    tokio::task::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let reader = tokio::io::BufReader::new(
+            tokio::process::ChildStdout::from_std(stdout)
+                .expect("failed to convert ChildStdout"),
+        );
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let method = match serde_json::from_str::<Value>(&line) {
+                Ok(v) => {
+                    let ev = v
+                        .get("event")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("unknown");
+                    format!("wake_word_{}", ev)
+                }
+                Err(_) => "wake_word_raw".to_string(),
+            };
+            let _ = app_handle.emit(
+                "hermes:event",
+                serde_json::json!({
+                    "method": method,
+                    "params": serde_json::from_str::<Value>(&line).unwrap_or(Value::Null),
+                }),
+            );
+        }
+        // If we get here, the child's stdout closed — collect stderr for diagnostics.
+        if let Some(stderr) = stderr {
+            // Best-effort read of stderr for logging.
+            drop(stderr);
+        }
+    });
+
+    Ok(json!({"success": true}))
+}
+
+/// Send a control command to the wake-word bridge and (optionally) stop it.
+#[tauri::command]
+pub async fn hermes_wake_control(
+    state: State<'_, Arc<AppState>>,
+    action: String,
+) -> Result<Value, String> {
+    use std::io::Write;
+
+    let action = action.trim().to_lowercase();
+
+    if action == "stop" {
+        // Tell the bridge to stop gracefully.
+        {
+            let mut stdin_guard = state.hermes.wake_stdin.lock().unwrap();
+            if let Some(ref mut stdin) = *stdin_guard {
+                let _ = writeln!(stdin, "stop");
+                let _ = stdin.flush();
+            }
+        }
+        // Wait briefly for the child to exit, then kill if needed.
+        let mut child_guard = state.hermes.wake_child.lock().unwrap();
+        if let Some(mut child) = child_guard.take() {
+            // Give it up to 3 seconds to exit gracefully.
+            let start = std::time::Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        if start.elapsed() > std::time::Duration::from_secs(3) {
+                            let _ = child.kill();
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(_) => {
+                        let _ = child.kill();
+                        break;
+                    }
+                }
+            }
+        }
+        // Clear stdin handle.
+        let mut stdin_guard = state.hermes.wake_stdin.lock().unwrap();
+        *stdin_guard = None;
+
+        return Ok(json!({"ok": true, "action": "stop"}));
+    }
+
+    // pause / resume / status
+    {
+        let mut stdin_guard = state.hermes.wake_stdin.lock().unwrap();
+        if let Some(ref mut stdin) = *stdin_guard {
+            let _ = writeln!(stdin, "{}", action);
+            let _ = stdin.flush();
+            return Ok(json!({"ok": true, "action": action}));
+        }
+    }
+
+    Err("唤醒词进程未运行".to_string())
 }

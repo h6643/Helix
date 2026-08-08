@@ -12,6 +12,7 @@ import {
   KeyRound,
   User,
 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
 import { isElectron } from '@/lib/electron-bridge'
 
@@ -316,14 +317,12 @@ export function ExternalServiceManager() {
           ))}
         </div>
       )}
-      <button
-        type="button"
-        onClick={openAdd}
-        className="flex items-center gap-1 text-[12px] px-2.5 py-1.5 rounded-md bg-primary/15 text-primary hover:bg-primary/25 transition-colors"
-      >
-        <Plus className="size-3" />
-        添加服务器 / 虚拟机
-      </button>
+      <div className="flex justify-end">
+        <Button size="sm" variant="outline" onClick={openAdd} className="gap-1.5">
+          <Plus className="size-4" />
+          添加服务器 / 虚拟机
+        </Button>
+      </div>
     </div>
   )
 }

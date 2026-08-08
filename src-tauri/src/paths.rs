@@ -1,35 +1,16 @@
 //! Cross-platform path resolution for Hermes data / runtime locations.
-//! Port of `electron/lib/platform-paths.js`.
 //!
-//! Windows: `%LOCALAPPDATA%/hermes`; POSIX: `$XDG_DATA_HOME/hermes`
-//! (default `~/.local/share/hermes`).
+//! Uses ~/.hermes/ on all platforms (matches Hermes CLI convention).
+//! Windows fallback: %LOCALAPPDATA%/hermes
 
 use std::path::{Path, PathBuf};
 
-pub fn local_app_data_dir() -> PathBuf {
-    if cfg!(windows) {
-        if let Ok(v) = std::env::var("LOCALAPPDATA") {
-            return PathBuf::from(v);
-        }
-        dirs::home_dir().map(|h| h.join("AppData").join("Local")).unwrap_or_default()
-    } else {
-        if let Ok(v) = std::env::var("XDG_DATA_HOME") {
-            if !v.is_empty() {
-                return PathBuf::from(v);
-            }
-        }
-        dirs::data_dir().unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local")
-                .join("share")
-        })
-    }
-}
-
 /// The Hermes data directory (config.yaml, state.db, skills, memories, logs…).
+/// Uses ~/.hermes/ to match Hermes CLI convention.
 pub fn hermes_data_dir() -> PathBuf {
-    local_app_data_dir().join("hermes")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".hermes")
 }
 
 /// The bundled / managed Hermes agent checkout.

@@ -107,9 +107,9 @@
      Cool blue-grey neutrals for an OLED-ish precision workspace. Deeper
      backgrounds, slightly cool-tinted cards, indigo primary. Foregrounds
      stay high-luminance for AA+ contrast on the darker surfaces. */
-  --background: oklch(0.16 0.008 250);
+  --background: oklch(0.17 0.008 250);
   --foreground: oklch(0.95 0.006 250);
-  --card: oklch(0.17 0.008 250);
+  --card: oklch(0.16 0.008 250);
   --card-foreground: oklch(0.95 0.006 250);
   --popover: oklch(0.18 0.008 250);
   --popover-foreground: oklch(0.95 0.006 250);
@@ -371,6 +371,16 @@ select {
   background-repeat: no-repeat;
   background-position: right 10px center;
   background-size: 12px;
+}
+
+/* Hide number input spinners */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
 }
 
 
@@ -1014,6 +1024,12 @@ nav::-webkit-scrollbar-thumb:hover {
 #helix-titlebar button,
 #helix-titlebar [role="button"] {
   -webkit-app-region: no-drag;
+}
+
+/* Tauri window drag region */
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+  app-region: drag;
 }
 
 /* ── Helix-style Thinking Panel ───────────────────────── */

@@ -53,7 +53,7 @@ import { isServeActive } from '@/lib/serve-gateway'
 import { debug } from '@/lib/logger'
 import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, stripEmoji, safeMarkdownSource, stripSystemReminders, extractKaomojiStatus } from '@/lib/text-utils'
 import { ContextUsageIndicator } from './context-usage'
-import { getModelContextWindow } from './context-usage'
+
 import { getToolLabel, getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
 import { InlineToolGroup } from './inline-tool-group'
 import { FileChangeSummary } from './file-change-summary'
@@ -61,6 +61,9 @@ import { ApprovalDialog, ClarifyBar, type ApprovalRequest } from './approval-dia
 import { ScheduledTaskConfirm } from './scheduled-task-confirm'
 import { useHelixStore, type ImageAttachment, type FileAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
+import { startWakeWord, stopWakeWord, pauseWakeWord, resumeWakeWord } from '@/lib/wake-word-utils'
+import { playDingSound } from '@/lib/ding-sound'
+import { speakText, splitSentences } from '@/lib/tts-utils'
 import { speak, stopSpeaking } from '@/lib/voice-utils'
 import { markdownComponents, markdownPlugins } from './markdown-components'
 import type { ChatMessage, HermesTodo } from '@/stores/helix-types'
@@ -958,6 +961,12 @@ export function AgentFlowPanel() {
   const [showNewProjectForm, setShowNewProjectForm] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [fileSkills, setFileSkills] = useState<Array<{ name: string; description: string }>>([])
+  const startupGreeting = useHelixStore(s => s.startupGreeting)
+  // Wake-word detection
+  const [wakeActive, setWakeActive] = useState(false)
+  const wakeActiveRef = useRef(false)
+  const [wakeListening, setWakeListening] = useState(false)
+  const ttsBufferRef = useRef('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const [showAtRef, setShowAtRef] = useState(false)
   const [filteredAtFiles, setFilteredAtFiles] = useState<Array<{ name: string; path: string }>>([])
@@ -1009,6 +1018,7 @@ export function AgentFlowPanel() {
       inputRef.current.style.height = '48px'
     }
   }, [])
+
 
   const abortRef = useRef<AbortController | null>(null)
   // Per-conversation AbortControllers so stopping one conversation's run never
@@ -3094,6 +3104,15 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           const parsed = mapHermesEvent(method, params)
           if (parsed) {
             enqueue('data: ' + JSON.stringify(parsed))
+            // ── TTS streaming ────────────────────────────────────────────
+            if (parsed.type === 'text' && parsed.content) {
+              ttsBufferRef.current += parsed.content as string
+              const split = splitSentences(ttsBufferRef.current)
+              ttsBufferRef.current = split.remainder
+              for (const s of split.complete) {
+                speakText(s)
+              }
+            }
           }
           // Capture Hermes's in-session todo list from dedicated todo/plan
           // session/update events (or todo_write tool results) so the header
@@ -3143,6 +3162,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           if (parsed && (parsed.type === 'done' || parsed.type === 'error')) {
             queueDone = true
             if (idleTimerRef) { clearTimeout(idleTimerRef); idleTimerRef = null }
+            // Flush remaining TTS text
+            if (ttsBufferRef.current.trim()) {
+              speakText(ttsBufferRef.current.trim())
+              ttsBufferRef.current = ''
+            }
           }
           if (parsed && (parsed.type === 'text' || parsed.type === 'thinking' || parsed.type === 'tool_call' || parsed.type === 'tool_result')) {
             streamedContent = true
@@ -3737,16 +3761,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 thoughtTokensRef.current = Number(u.thoughtTokens) || 0
                 totalTokensRef.current = Number(u.totalTokens) || 0
                 uiTotalTokens(totalTokensRef.current)
-                // serve 模式下 session/prompt 只回 {status:'streaming'}，无 usage，
-                // 上下文圆环的数据只能来自这里：用后端 message.complete 携带的真实
-                // context_used/context_max（经 mapUsage 透传），否则退回 totalTokens 估算。
+                // 只用后端 message.complete 携带的真实 context_used/context_max，
+                // 不再用客户端估算。无后端数据时上下文环显示空态。
                 const ctxMax = Number(u.context_max) || 0
                 const ctxUsed = Number(u.context_used) || 0
-                if (ctxMax && ctxUsed) {
-                  if (activeSessionId) useHelixStore.getState().setContextUsage(activeSessionId, ctxMax, ctxUsed)
-                } else if (Number(u.totalTokens)) {
-                  const size = getModelContextWindow(model) || 0
-                  if (activeSessionId) useHelixStore.getState().setContextUsage(activeSessionId, size, Number(u.totalTokens) || 0)
+                if (ctxMax && ctxUsed && activeSessionId) {
+                  useHelixStore.getState().setContextUsage(activeSessionId, ctxMax, ctxUsed)
                 }
               }
             } else if (parsed.type === 'available_commands') {
@@ -3967,6 +3987,92 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       }
     }
   }, [input, hasApiKey, currentSessionId, setStreamingDraft, clearStreamingDraft, storeActions, resolveCommand, BUILTIN_COMMANDS, setInputSynced, handleStop])
+
+  // ── Voice Conversation Mode (like Siri) ──────────────────────────────────
+
+  // ── Wake-word detection ────────────────────────────────────────────────
+
+  // Called when the wake word is detected — plays a ding to confirm.
+  const handleWakeDetected = useCallback(() => {
+    if (!wakeActiveRef.current) return
+    pauseWakeWord()
+    setWakeListening(false)
+    playDingSound()
+  }, [])
+
+  // After a voice turn ends, auto-resume wake word detection.
+  const resumeWakeAfterTurn = useCallback(() => {
+    if (!wakeActiveRef.current) return
+    pauseWakeWord().then(() => {
+      setTimeout(() => {
+        if (wakeActiveRef.current) {
+          resumeWakeWord()
+          setWakeListening(true)
+        }
+      }, 1000)
+    }).catch(() => {})
+  }, [])
+
+  // Wake-word event listener
+  useEffect(() => {
+    if (!isElectron()) return
+    const api = hermesApi()
+    if (!api) return
+    const unsub = api.onEvent((method: string, params: any) => {
+      if (method === 'wake_word_wake_word') {
+        handleWakeDetected()
+      }
+      if (method === 'wake_word_started') {
+        setWakeListening(true)
+      }
+      if (method === 'wake_word_paused' || method === 'wake_word_stopped') {
+        setWakeListening(false)
+      }
+      if (method === 'wake_word_in_use') {
+        useHelixStore.getState().showToast({
+          type: 'warning',
+          title: '唤醒词麦克风被占用',
+          description: '请关闭其他正在使用唤醒词的程序（如 CLI /wake on）',
+        })
+        setWakeActive(false)
+        wakeActiveRef.current = false
+      }
+      if (method === 'wake_word_error') {
+        const msg = typeof params?.message === 'string' ? params.message : '唤醒词引擎错误'
+        useHelixStore.getState().showToast({ type: 'error', title: '唤醒词错误', description: msg })
+      }
+    })
+    return () => { unsub() }
+  }, [handleWakeDetected])
+
+  // Auto-start wake word when enabled in settings
+  const voiceWakeEnabled = useHelixStore(s => s.voiceWakeEnabled)
+  useEffect(() => {
+    if (!isElectron() || !voiceWakeEnabled) return
+    const init = async () => {
+      const ok = await startWakeWord()
+      if (ok) {
+        setWakeActive(true)
+        wakeActiveRef.current = true
+      }
+    }
+    void init()
+    return () => {
+      if (wakeActiveRef.current) {
+        void stopWakeWord()
+      }
+    }
+  }, [voiceWakeEnabled])
+
+  // Stop wake word when setting is toggled off at runtime
+  useEffect(() => {
+    if (!voiceWakeEnabled && wakeActiveRef.current) {
+      void stopWakeWord()
+      setWakeActive(false)
+      wakeActiveRef.current = false
+      setWakeListening(false)
+    }
+  }, [voiceWakeEnabled])
 
   // External "send" trigger (Command Center / Review panel call injectAndSend,
   // which bumps requestSendSignal). Fires handleRun with the injected text.
@@ -4412,7 +4518,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               onPaste={handlePaste}
               placeholder={isEmpty ? "随心输入..." : "要求后续变更..."}
               rows={2}
-              className={`chat-input w-full resize-none bg-transparent text-foreground caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto`}
+              className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
               style={{
                 overflowX: 'hidden',
                 overflowY: 'auto',
@@ -4454,7 +4560,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         }}
                         className="w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 hover:bg-muted/30"
                       >
-                        <code className="text-[12px] font-mono text-primary/70 shrink-0">{qc.cmd}</code>
+                        <code className="text-[12px] font-mono text-primary/70 shrink-0 w-20">{qc.cmd}</code>
                         <div className="min-w-0 flex-1">
                           <span className="text-[13px] text-foreground block">{qc.label}</span>
                           <span className="text-[11px] text-muted-foreground block truncate">{qc.prompt}</span>
@@ -4860,7 +4966,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             <div className="flex flex-col items-center w-full pt-[22vh]">
               <div className="w-full max-w-[700px] mx-auto px-5">
                 <img src="/kirin.png" alt="Helix" className="w-14 h-14 opacity-70 mx-auto mb-4" />
-                <p className="text-[15px] font-normal text-foreground/50 text-center mb-6 tracking-tight">有什么可以帮你的？</p>
+                <p className="text-[15px] font-normal text-foreground/50 text-center mb-6 tracking-tight">{startupGreeting}</p>
                 {renderEmptyBreadcrumb()}
                 {renderChatInput({ isEmpty: true })}
               </div>

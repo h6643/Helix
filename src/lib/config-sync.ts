@@ -24,7 +24,24 @@ let lastPushJson = ''
  * No gateway restart required — takes effect on the next prompt.
  */
 export function pushConfigKeyValue(key: string, value: ConfigValue, sessionId?: string) {
-  if (!isElectron()) return
+  // Tauri mode: use tauri bridge via window.electron.hermes
+  if (!isElectron()) {
+    const hermes = (window as any).electron?.hermes
+    if (hermes?.setConfigKeyValue) {
+      const payload = { key, value, session_id: sessionId }
+      const json = JSON.stringify(payload)
+      if (json === lastPushJson) return
+      lastPushJson = json
+
+      if (pushCooldown) clearTimeout(pushCooldown)
+      pushCooldown = setTimeout(() => {
+        pushCooldown = null
+        hermes.setConfigKeyValue(payload).catch(() => {})
+      }, 150)
+    }
+    return
+  }
+
   const serve = isServeActive() ? getServeClient() : null
   const hermes = window.electron?.hermes as any
   if (!serve && !hermes?.setConfigKeyValue) return
@@ -58,8 +75,22 @@ export function pushModelConfig(payload: {
   baseUrl?: string
   apiKey?: string
 }) {
-  if (!isElectron()) return
   const hasModelPayload = !!(payload.model || payload.baseUrl || payload.apiKey || payload.provider)
+  if (!hasModelPayload) return
+
+  // Tauri mode: use tauri bridge via window.electron.hermes
+  if (!isElectron()) {
+    const hermes = (window as any).electron?.hermes
+    if (hermes?.setConfig) {
+      hermes.setConfig(payload).catch((e: unknown) => {
+        console.warn('[config-sync] tauri setConfig 失败:', e)
+      })
+    }
+    return
+  }
+
+  // Electron mode: serve vs IPC
+  const mode = getGatewayMode()
 
   // 按"模式"分流，而不是按"连接状态"（isServeActive）分流。
   // 关键竞态：App 启动时 helix-layout 立即调本函数，此刻 serve 还在冷启动、
@@ -133,9 +164,10 @@ export function pushAgentConfigLive(payload: {
   reasoningEffort?: string
   fastMode?: boolean
 }) {
-  if (!isElectron()) return
-  const hermes = window.electron?.hermes as any
-  if (!isServeActive() && !hermes?.setConfigKeyValue) return
+  const hermes = (window as any).electron?.hermes as any
+  const isTauri = !isElectron() && !!hermes?.setConfigKeyValue
+
+  if (!isElectron() && !isTauri) return
 
   if (payload.personality !== undefined) {
     pushConfigKeyValue('display.personality', payload.personality)

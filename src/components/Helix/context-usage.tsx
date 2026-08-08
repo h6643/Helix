@@ -39,31 +39,6 @@ function colorFor(id: string): string {
   return CATEGORY_COLORS[id] || 'bg-gray-500'
 }
 
-// ---- Model-aware context window size lookup (fallback when backend unavailable) ----
-
-const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-  'gpt-4o': 128_000, 'gpt-4o-mini': 128_000, 'gpt-4-turbo': 128_000, 'gpt-4': 8_192,
-  'o1': 200_000, 'o3-mini': 200_000,
-  'claude-sonnet-4': 200_000, 'claude-sonnet-4-20250514': 200_000,
-  'claude-3-7-sonnet-20250219': 200_000, 'claude-3-5-sonnet-20241022': 200_000,
-  'claude-3-5-haiku-20241022': 200_000, 'claude-3-opus-20240229': 200_000,
-  'gemini-2.5-pro': 1_000_000, 'gemini-2.5-flash': 1_000_000, 'gemini-2.0-flash': 1_000_000,
-  'deepseek-chat': 64_000, 'deepseek-coder': 64_000, 'deepseek-reasoner': 64_000,
-  'qwen3-235b-a22b': 131_072, 'qwen-max': 32_000, 'qwen-plus': 131_072,
-  'kimi-k2.5': 128_000, 'grok-3': 131_072, 'mistral-large-latest': 128_000,
-  'default': 128_000,
-}
-
-export function getModelContextWindow(modelName?: string): number {
-  if (!modelName) return MODEL_CONTEXT_WINDOWS['default']
-  const lower = modelName.toLowerCase()
-  if (MODEL_CONTEXT_WINDOWS[modelName]) return MODEL_CONTEXT_WINDOWS[modelName]
-  for (const [key, size] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
-    if (key !== 'default' && lower.includes(key.toLowerCase())) return size
-  }
-  return MODEL_CONTEXT_WINDOWS['default']
-}
-
 // ---- ContextUsageBar (segmented horizontal bar — Hermes Desktop style) ----
 
 function ContextUsageBar({ used, total, categories }: { used: number; total: number; categories: ContextBreakdown[] }) {
@@ -136,11 +111,6 @@ function ContextUsagePanel({ used, total, categories, onClose }: { used: number;
 export function ContextUsageIndicator() {
   const [open, setOpen] = useState(false)
   const [backendData, setBackendData] = useState<ContextUsageData | null>(null)
-  const activeModel = useHelixStore(s => s.activeModel)
-  const apiConfig = useHelixStore(s => s.apiConfig)
-  const currentSessionId = useHelixStore(s => s.currentSessionId)
-  const storeContextUsageMap = useHelixStore(s => s.contextUsage)
-  const storeContextUsage = currentSessionId ? storeContextUsageMap[currentSessionId] : null
   const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -219,22 +189,15 @@ export function ContextUsageIndicator() {
     if (open) fetchContextData()
   }, [open, fetchContextData])
 
-  const modelName = activeModel || apiConfig?.model || ''
-  // 环的 used/total 优先取后端 RPC 的 context_used/context_max，其次取
-  // store 里由 message.complete / usage_update 等真实事件写入的 contextUsage，
-  // 最后才按模型名查默认窗口大小。
-  const total = backendData?.context_max || storeContextUsage?.size || getModelContextWindow(modelName)
-  const used = backendData?.context_used || storeContextUsage?.used || 0
+  // Only backend RPC data — no client-side estimation fallback.
+  const total = backendData?.context_max || 0
+  const used = backendData?.context_used || 0
 
-  // 单一数据源：后端 `session.context_breakdown` 的分类明细。RPC 拿不到
-  // categories 时不再用本地输入/输出统计兜底——那会让同一控件在两套语义
-  // （分类 vs 输入输出）间跳变。空数据就显示空态。
   const categories: ContextBreakdown[] = backendData?.categories?.length
     ? backendData.categories.map(c => ({ ...c, color: colorFor(c.id) }))
     : []
 
-  // 无数据时也一直显示：空环（背景圆可见、进度弧为 0），有数据后填充。
-  // 注意 used 可能为 0（尚未开始对话 / 后端尚无 context_used），此时仍渲染空圈。
+  // When there's no backend data, the ring renders empty (progress arc at 0).
 
   return (
     <div className="relative" ref={panelRef}>
@@ -253,8 +216,9 @@ export function ContextUsageIndicator() {
 
 // ---- Ring component (small circular progress indicator) ----
 
-function ContextUsageRing({ used, total = 128000 }: { used: number; total?: number }) {
-  const percentage = Math.min(Math.max((used / total) * 100, 0), 100)
+function ContextUsageRing({ used, total }: { used: number; total: number }) {
+  const safeTotal = total > 0 ? total : 1
+  const percentage = Math.min(Math.max((used / safeTotal) * 100, 0), 100)
   const radius = 7
   const circumference = 2 * Math.PI * radius
   const strokeDashoffset = circumference - (percentage / 100) * circumference

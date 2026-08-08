@@ -42,9 +42,9 @@ pub fn resolve_hermes_cmd() -> Option<PathBuf> {
 }
 
 fn is_trusted_path(p: &Path) -> bool {
-    let local_app = crate::paths::local_app_data_dir();
+    let hermes_dir = crate::paths::hermes_data_dir();
     let trusted_roots = vec![
-        local_app.join("hermes"),
+        hermes_dir,
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
     ];
     if let Ok(rp) = std::fs::canonicalize(p) {

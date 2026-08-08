@@ -172,6 +172,13 @@ pub fn spawn_gateway(state: &Arc<AppState>) -> Result<(), String> {
         return Ok(());
     }
 
+    // Kill any existing child process before spawning a new one, so we don't
+    // accumulate zombie gateways across app restarts / crashes.
+    kill_current(state);
+    // Also kill any orphaned hermes-serve processes from prior sessions that
+    // share our config home, so we never end up with 7+ gateways competing.
+    kill_orphan_serve_processes();
+
     // Re-assert coding_context: off (mirror ensureCodingContextOff).
     ensure_coding_context_off();
 
@@ -578,6 +585,61 @@ fn schedule_respawn(state: Arc<AppState>) {
 }
 
 // ── kill / restart helpers (used by commands) ──────────────────────────────
+
+/// Kill any lingering `hermes serve` processes that share our HERMES_HOME, so
+/// a fresh spawn never competes with orphans from a prior app restart / crash.
+fn kill_orphan_serve_processes() {
+    let hermes_dir = hermes_data_dir();
+    let hermes_home = hermes_dir.display().to_string();
+
+    // Walk /proc (Linux) looking for hermes-serve processes that reference our
+    // HERMES_HOME in their environment.  This is best-effort: if /proc is not
+    // available or a process disappears mid-scan, just move on.
+    let proc_dir = match std::fs::read_dir("/proc") {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    for entry in proc_dir.flatten() {
+        let pid_str = entry.file_name();
+        let pid: u32 = match pid_str.to_string_lossy().parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // Skip our own pid — we haven't spawned yet.
+        if pid == std::process::id() {
+            continue;
+        }
+        // Read environ to confirm HERMES_HOME matches.
+        let environ_path = format!("/proc/{pid}/environ");
+        let environ = match std::fs::read(&environ_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let has_home = environ
+            .split(|&b| b == 0)
+            .any(|kv| kv.starts_with(b"HERMES_HOME=") && kv.len() > b"HERMES_HOME=".len()
+                 && &kv[b"HERMES_HOME=".len()..] == hermes_home.as_bytes());
+        if !has_home {
+            continue;
+        }
+        // Read cmdline — must contain "hermes" + "serve".
+        let cmdline_path = format!("/proc/{pid}/cmdline");
+        let cmdline = match std::fs::read(&cmdline_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let is_hermes_serve = cmdline
+            .split(|&b| b == 0)
+            .filter(|a| !a.is_empty())
+            .any(|arg| arg == b"serve");
+        if !is_hermes_serve {
+            continue;
+        }
+        // Kill it.
+        eprintln!("[Helix] killing orphan hermes-serve pid={pid}");
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    }
+}
 
 /// Kill the current local gateway process, if any.
 pub fn kill_current(state: &AppState) {

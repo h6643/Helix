@@ -24,7 +24,6 @@ export interface AgentSettingsSlice {
   fastMode: boolean
   // Notification settings
   desktopNotifications: boolean
-  soundEnabled: boolean
   // Agent presets (custom system prompts)
   agentPresets: Record<string, { name: string; systemPrompt: string }>
   activePreset: string | null
@@ -36,7 +35,6 @@ export interface AgentSettingsSlice {
   setPersonality: (v: string) => void
   setFastMode: (v: boolean) => void
   setDesktopNotifications: (v: boolean) => void
-  setSoundEnabled: (v: boolean) => void
   setAgentPresets: (presets: Record<string, { name: string; systemPrompt: string }>) => void
   setActivePreset: (preset: string | null) => void
 
@@ -54,7 +52,6 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   fastMode: false,
   // Notification defaults
   desktopNotifications: true,
-  soundEnabled: false,
   // Agent presets defaults
   agentPresets: {},
   activePreset: null,
@@ -66,7 +63,6 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   setPersonality: (v) => set({ personality: v }),
   setFastMode: (v) => set({ fastMode: v }),
   setDesktopNotifications: (v) => set({ desktopNotifications: v }),
-  setSoundEnabled: (v) => set({ soundEnabled: v }),
   setAgentPresets: (presets) => set({ agentPresets: presets }),
   setActivePreset: (preset) => set({ activePreset: preset }),
 

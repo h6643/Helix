@@ -1,7 +1,9 @@
 //! Helix Tauri backend crate.
 
 mod app;
+mod channels;
 mod config;
+mod delegations;
 mod diagnostics;
 mod external;
 mod fs;
@@ -18,6 +20,7 @@ mod scheduled_tasks;
 mod security;
 mod state;
 mod terminal;
+mod web_search;
 mod window;
 
 use crate::state::{AppState, APP_HANDLE};
@@ -101,6 +104,13 @@ pub fn run() {
             hermes::hermes_cron_delete,
             hermes::hermes_cron_run,
             hermes::hermes_doctor,
+            hermes::hermes_transcribe,
+            hermes::hermes_record_start,
+            hermes::hermes_record_stop,
+            hermes::hermes_tts_speak,
+            hermes::hermes_tts_stop,
+            hermes::hermes_wake_start,
+            hermes::hermes_wake_control,
             // fs
             fs::read,
             fs::write,
@@ -180,8 +190,17 @@ pub fn run() {
             // hooks
             hooks::hooks_list,
             hooks::hooks_save,
+            // web search
+            web_search::web_search_list,
+            web_search::web_search_save,
+            // channels
+            channels::channels_list,
+            channels::channels_save,
             // kanban
             kanban::command,
+            // delegations
+            delegations::delegations_list,
+            delegations::delegations_read_log,
             // diagnostics
             diagnostics::get_status,
         ])

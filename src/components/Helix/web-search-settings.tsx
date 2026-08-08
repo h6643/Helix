@@ -1,8 +1,10 @@
 'use client'
 
 import React, { useState, useEffect } from 'react'
+import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
 import { SettingRow, SettingGroup, SectionHeading } from './settings-ui'
+import { isElectron } from '@/lib/electron-bridge'
 
 type SearchProvider = {
   id: string
@@ -61,32 +63,78 @@ export function WebSearchSettings() {
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
 
-  // Load current config from hermes config.yaml
+  // Load current config from hermes config.yaml via Tauri
   useEffect(() => {
-    // For now, read from localStorage as a fallback
-    const saved = localStorage.getItem('helix-web-search')
-    if (saved) {
+    const loadConfig = async () => {
+      if (!isElectron()) {
+        // Fallback to localStorage for non-Tauri environments
+        const saved = localStorage.getItem('helix-web-search')
+        if (saved) {
+          try {
+            const data = JSON.parse(saved)
+            setActiveProviders(data.activeProviders || (data.activeProvider ? [data.activeProvider] : []))
+            setApiKeys(data.apiKeys || {})
+          } catch {}
+        }
+        return
+      }
+
       try {
-        const data = JSON.parse(saved)
-        setActiveProviders(data.activeProviders || (data.activeProvider ? [data.activeProvider] : []))
-        setApiKeys(data.apiKeys || {})
-      } catch {}
+        const api = (window as any).electron?.webSearch
+        if (!api?.getConfig) return
+        const result = await api.getConfig()
+        if (result?.ok && result.config) {
+          const { search_backend, apiKeys: keys } = result.config
+          // Map search_backend to active providers
+          const providers: string[] = []
+          if (search_backend === 'tavily' || keys?.tavily) providers.push('tavily')
+          if (search_backend === 'brave' || keys?.brave) providers.push('brave-free')
+          if (search_backend === 'exa' || keys?.exa) providers.push('exa')
+          if (search_backend === 'ddgs') providers.push('ddgs')
+          if (search_backend === 'searxng') providers.push('searxng')
+          setActiveProviders(providers)
+          setApiKeys(keys || {})
+        }
+      } catch (e) {
+        console.error('[WebSearchSettings] Failed to load config:', e)
+      }
     }
+    loadConfig()
   }, [])
 
   const save = async () => {
     setSaving(true)
     try {
-      // Save to localStorage for now
-      localStorage.setItem('helix-web-search', JSON.stringify({
-        activeProviders,
-        apiKeys,
-      }))
+      // Determine search_backend from active providers
+      let searchBackend = ''
+      if (activeProviders.includes('tavily')) searchBackend = 'tavily'
+      else if (activeProviders.includes('brave-free')) searchBackend = 'brave'
+      else if (activeProviders.includes('exa')) searchBackend = 'exa'
+      else if (activeProviders.includes('ddgs')) searchBackend = 'ddgs'
+      else if (activeProviders.includes('searxng')) searchBackend = 'searxng'
 
-      // Also set environment variables for the current session
-      for (const [key, value] of Object.entries(apiKeys)) {
-        if (value) {
-          process.env[key] = value
+      const config = {
+        backend: searchBackend,
+        search_backend: searchBackend,
+        apiKeys: apiKeys,
+      }
+
+      if (isElectron()) {
+        const api = (window as any).electron?.webSearch
+        if (api?.setConfig) {
+          await api.setConfig(config)
+        }
+      } else {
+        // Fallback to localStorage
+        localStorage.setItem('helix-web-search', JSON.stringify({
+          activeProviders,
+          apiKeys,
+        }))
+        // Also set environment variables for the current session
+        for (const [key, value] of Object.entries(apiKeys)) {
+          if (value) {
+            process.env[key] = value
+          }
         }
       }
 
@@ -162,13 +210,9 @@ export function WebSearchSettings() {
       </SettingGroup>
 
       <div className="flex justify-end pt-2">
-        <button
-          onClick={save}
-          disabled={saving}
-          className="px-4 py-1.5 text-sm font-medium text-primary-foreground bg-primary rounded-md hover:bg-primary/90 disabled:opacity-50"
-        >
+        <Button size="sm" variant="outline" onClick={save} disabled={saving}>
           {saving ? '保存中...' : '保存'}
-        </button>
+        </Button>
       </div>
     </div>
   )

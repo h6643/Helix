@@ -26,6 +26,7 @@ import { McpEditorForm, type McpFormData } from './mcp-editor-form'
 import { ShortcutsPage } from './shortcuts-page'
 import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './usage-stats'
 import { PopupSelect } from './settings-ui'
+import { WebSearchSettings } from './web-search-settings'
 
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -210,41 +211,83 @@ interface ChannelConfig {
 }
 
 const DEFAULT_CHANNELS: ChannelConfig[] = [
-  { id: 'dingtalk', name: 'DingTalk', description: 'Connect Hermes to DingTalk groups (钉钉).', enabled: false, config: { app_key: '', app_secret: '' } },
-  { id: 'feishu', name: 'Feishu / Lark', description: 'Use Hermes inside Feishu / Lark.', enabled: false, config: { app_id: '', app_secret: '' } },
-  { id: 'wecom_group', name: 'WeCom (group bot)', description: 'Send-only WeCom group bot via webhook.', enabled: false, config: {} },
-  { id: 'wecom', name: 'WeCom (app)', description: 'Two-way WeCom integration via callback app.', enabled: false, config: { corp_id: '', agent_id: '', secret: '' } },
-  { id: 'weixin', name: 'Weixin / WeChat (Personal)', description: "Connect a personal WeChat account through Tencent's iLink Bot API.", enabled: false, config: {} },
-  { id: 'qqbot', name: 'QQ Bot', description: 'Connect Hermes to a QQ Bot from the QQ Open Platform.', enabled: false, config: {} },
-  { id: 'yuanbao', name: 'Yuanbao (元宝)', description: 'Connect Hermes to Tencent Yuanbao.', enabled: false, config: {} },
-  { id: 'homeassistant', name: 'Home Assistant', description: 'Control your smart home from Hermes via Home Assistant.', enabled: false, config: {} },
-  { id: 'api_server', name: 'API server', description: 'Expose Hermes as an OpenAI-compatible HTTP API for tools like Open WebUI.', enabled: false, config: {} },
-  { id: 'webhooks', name: 'Webhooks', description: 'Receive events from GitHub, GitLab, and other webhook sources.', enabled: false, config: {} },
-  { id: 'a2a', name: 'A2A', description: 'No extra packages needed (stdlib only)', enabled: false, config: {} },
-  { id: 'ntfy', name: 'ntfy', description: 'Chat with Hermes over ntfy push topics (ntfy.sh or self-hosted).', enabled: false, config: {} },
+  { id: 'telegram', name: 'Telegram', description: 'Telegram Bot API', enabled: false, config: { TELEGRAM_BOT_TOKEN: '' } },
+  { id: 'discord', name: 'Discord', description: 'Discord Bot', enabled: false, config: { DISCORD_BOT_TOKEN: '' } },
+  { id: 'slack', name: 'Slack', description: 'Slack Bot (Socket Mode)', enabled: false, config: { SLACK_BOT_TOKEN: '', SLACK_APP_TOKEN: '' } },
+  { id: 'whatsapp', name: 'WhatsApp', description: 'WhatsApp Business API', enabled: false, config: { WHATSAPP_ACCESS_TOKEN: '' } },
+  { id: 'signal', name: 'Signal', description: 'Signal Messenger', enabled: false, config: { SIGNALPhoneNumberID: '', SIGNAL_AUTH_TOKEN: '' } },
+  { id: 'dingtalk', name: '钉钉', description: '钉钉企业应用', enabled: false, config: { DINGTALK_APP_KEY: '', DINGTALK_APP_SECRET: '' } },
+  { id: 'feishu', name: '飞书', description: '飞书企业应用', enabled: false, config: { FEISHU_APP_ID: '', FEISHU_APP_SECRET: '' } },
+  { id: 'wecom', name: '企业微信', description: '企业微信应用', enabled: false, config: { WECOM_CORP_ID: '', WECOM_APP_SECRET: '' } },
+  { id: 'webhook', name: 'Webhook', description: '通用 Webhook 接入', enabled: false, config: { WEBHOOK_SECRET: '' } },
+  { id: 'api_server', name: 'API Server', description: 'OpenAI 兼容 API 服务', enabled: false, config: { OPENAI_API_KEY: '' } },
 ]
 
 function ChannelsSettings() {
+  const showToast = useHelixStore(s => s.showToast)
   const [channels, setChannels] = useState<ChannelConfig[]>(DEFAULT_CHANNELS)
   const [expandedChannel, setExpandedChannel] = useState<string | null>(null)
+  const [savingChannels, setSavingChannels] = useState(false)
+
+  // Load from .env via Tauri or fallback to localStorage
+  useEffect(() => {
+    const loadChannels = async () => {
+      if (isElectron()) {
+        try {
+          const api = (window as any).electron?.channels
+          if (!api?.list) return
+          const result = await api.list()
+          if (result?.ok && result.channels) {
+            setChannels(result.channels)
+            return
+          }
+        } catch (e) {
+          console.error('[ChannelsSettings] Failed to load from Tauri:', e)
+        }
+      }
+      // Fallback to localStorage
+      try {
+        const saved = localStorage.getItem('helix-channels')
+        if (saved) {
+          const data = JSON.parse(saved)
+          if (data.channels) setChannels(data.channels)
+        }
+      } catch {}
+    }
+    loadChannels()
+  }, [])
 
   const handleToggle = (id: string) => {
-    setChannels(prev => prev.map(ch =>
-      ch.id === id ? { ...ch, enabled: !ch.enabled } : ch
-    ))
+    setChannels(prev => prev.map(ch => ch.id === id ? { ...ch, enabled: !ch.enabled } : ch))
   }
 
   const handleConfigChange = (id: string, key: string, value: string) => {
-    setChannels(prev => prev.map(ch =>
-      ch.id === id ? { ...ch, config: { ...ch.config, [key]: value } } : ch
-    ))
+    setChannels(prev => prev.map(ch => ch.id === id ? { ...ch, config: { ...ch.config, [key]: value } } : ch))
+  }
+
+  const saveChannels = async () => {
+    setSavingChannels(true)
+    try {
+      if (isElectron()) {
+        const api = (window as any).electron?.channels
+        if (api?.save) {
+          await api.save(channels)
+        }
+      } else {
+        // Fallback to localStorage
+        localStorage.setItem('helix-channels', JSON.stringify({ channels }))
+      }
+      showToast({ type: 'success', title: '渠道配置已保存' })
+    } catch {
+      showToast({ type: 'error', title: '保存失败' })
+    } finally {
+      setSavingChannels(false)
+    }
   }
 
   return (
     <div className="max-w-3xl space-y-4">
       <SectionTitle>Channels</SectionTitle>
-      <p className="text-sm text-muted-foreground/70">
-      </p>
       <div className="space-y-3">
         {channels.map(channel => (
           <div key={channel.id} className="border border-border/50 rounded-xl overflow-hidden">
@@ -254,11 +297,6 @@ function ChannelsSettings() {
                 <p className="text-xs text-muted-foreground/60 mt-0.5">{channel.description}</p>
               </div>
               <div className="flex items-center gap-2 shrink-0 ml-4">
-                <button
-                  className="px-3 py-1.5 text-xs font-medium text-muted-foreground/60 hover:text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
-                >
-                  Test
-                </button>
                 <button
                   onClick={() => setExpandedChannel(expandedChannel === channel.id ? null : channel.id)}
                   className="px-3 py-1.5 text-xs font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
@@ -276,7 +314,7 @@ function ChannelsSettings() {
                       {key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
                     </label>
                     <input
-                      type={key.includes('secret') || key.includes('token') || key.includes('password') ? 'password' : 'text'}
+                      type={key.includes('secret') || key.includes('token') || key.includes('password') || key.includes('SECRET') || key.includes('TOKEN') ? 'password' : 'text'}
                       value={value}
                       onChange={(e) => handleConfigChange(channel.id, key, e.target.value)}
                       placeholder={`Enter ${key.replace(/_/g, ' ')}`}
@@ -291,6 +329,11 @@ function ChannelsSettings() {
             )}
           </div>
         ))}
+      </div>
+      <div className="flex justify-end pt-2">
+        <Button size="sm" variant="outline" onClick={saveChannels} disabled={savingChannels}>
+          {savingChannels ? '保存中...' : '保存'}
+        </Button>
       </div>
     </div>
   )
@@ -323,7 +366,6 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     autoCompactContext, setAutoCompactContext,
     // Notification settings
     desktopNotifications, setDesktopNotifications,
-    soundEnabled, setSoundEnabled,
   } = useHelixStore()
 
   const settingsPage = useHelixStore(s => s.settingsPage)
@@ -791,8 +833,9 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     }
     await persistToStorage()
 
-    // Sync to Hermes if running in Electron
-    if (isElectron()) {
+    // Sync to Hermes if running in Electron or Tauri
+    const hermes = (window as any).electron?.hermes
+    if (isElectron() || hermes?.setConfig) {
       try {
         const cfg = {
           model: localConfig.model,
@@ -800,10 +843,10 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
           baseUrl: localConfig.baseUrl,
           apiKey: localConfig.apiKey,
         }
-        await window.electron.hermes.setConfig(cfg)
+        await hermes.setConfig(cfg)
         // Persist the active profile so the next cold start re-asserts it
         // into Hermes config.yaml (no hardcoded pin, free switching preserved).
-        await window.electron.profile.cacheConfig(cfg)
+        await (window as any).electron?.profile?.cacheConfig?.(cfg)
         // Invalidate the cached session so the next prompt creates a fresh one
         // with the updated config. Without this, a stale session ID could be
         // reused against a restarted gateway, producing 401 errors.
@@ -1045,11 +1088,12 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             const final = useHelixStore.getState().apiConfig
             setLocalConfig({ ...final })
             await persistToStorage()
-            if (isElectron()) {
+            const hermes = (window as any).electron?.hermes
+            if (isElectron() || hermes?.setConfig) {
               try {
                 const cfg = { model: final.model, provider: final.provider && final.provider !== '__custom__' ? final.provider : 'custom', baseUrl: final.baseUrl, apiKey: final.apiKey }
-                await window.electron.hermes.setConfig(cfg)
-                await window.electron.profile.cacheConfig(cfg)
+                await hermes.setConfig(cfg)
+                await (window as any).electron?.profile?.cacheConfig?.(cfg)
                 useHermesStore.getState().setHermesSessionId(null)
               } catch {}
             }
@@ -1431,6 +1475,10 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 </Button>
               </div>
             </SettingRow>
+
+            <div className="pt-4 border-t border-border/30">
+              <WebSearchSettings />
+            </div>
           </div>
         )
 
@@ -1515,7 +1563,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       {/* Left nav — width synced with the main sidebar */}
       {showSidebar && (
         <div
-          className={`relative bg-sidebar flex flex-col shrink-0 border-r border-border/40 h-full overflow-hidden ${isResizing ? '' : 'transition-[width] duration-200 ease-out'}`}
+          className={`relative flex flex-col shrink-0 h-full overflow-hidden ${isResizing ? '' : 'transition-[width] duration-200 ease-out'}`}
           style={{ width: sidebarCollapsed ? 48 : navWidth }}
         >
           {sidebarCollapsed ? (
@@ -1621,8 +1669,8 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       </div>
       )}
 
-      {/* Right content */}
-      <div className="flex-1 bg-background overflow-y-auto relative">
+      {/* Right content — floating card */}
+      <div className="flex-1 m-3 ml-0 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-y-auto relative">
         <div className="flex justify-center">
           <div className="px-8 pt-5 pb-10 w-full max-w-3xl">
             {renderContent()}

@@ -21,6 +21,7 @@ import {
   AlertTriangle,
   PanelLeft,
   SquareKanban,
+  Users,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
@@ -486,7 +487,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       // (hermesSessionMapRef in agent-flow-panel); resetting the legacy global
       // id would be meaningless at best and confusing at worst.
       // Same as above: navigating to a session must close the panels.
-      if (state.showScheduledTasksPanel || state.showSkillPanel) {
+      if (state.showScheduledTasksPanel || state.showSkillPanel || state.showKanbanPanel) {
         useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false, showKanbanPanel: false })
       }
       // Load just the target session (single IndexedDB read) instead of
@@ -733,13 +734,15 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
     { id: 'kanban', label: '看板', icon: SquareKanban, action: () => {
         if (showScheduledTasksPanel) toggleScheduledTasksPanel()
         if (showSkillPanel) toggleSkillPanel()
+        // 打开看板时清空对话选中，避免两者同时高亮
+        if (!showKanbanPanel) useHelixStore.setState({ currentSessionId: null })
         toggleKanbanPanel()
       }
     },
   ]
 
   return (
-    <div className="h-full flex flex-col bg-sidebar text-sidebar-foreground select-none">
+    <div className="h-full flex flex-col text-sidebar-foreground select-none">
       {/* Collapsed icon-only mode */}
       {collapsed ? (
         <div className="flex-1 flex flex-col items-center pt-3 pb-2 gap-1 overflow-y-auto">
@@ -1029,7 +1032,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         )}
 
       </div>
-      <div className="px-2 py-2 border-t border-border/30 shrink-0 space-y-0.5">
+      <div className="px-2 py-2 shrink-0 space-y-0.5">
         <button
           onClick={() => toggleSettings()}
           className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12.5px] text-sidebar-foreground/60 hover:text-sidebar-foreground/90 hover:bg-sidebar-accent/40 rounded-lg transition-colors"

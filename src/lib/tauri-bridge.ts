@@ -245,6 +245,13 @@ function buildTauriAPI(): ElectronAPI {
     cronDelete: (jobId: string) => invoke('hermes_cron_delete', { jobId }),
     cronRun: (jobId: string) => invoke('hermes_cron_run', { jobId }),
     doctor: () => invoke('hermes_doctor'),
+    transcribe: (audioB64: string, format: string) => invoke('hermes_transcribe', { audioB64, format }),
+    recordStart: () => invoke('hermes_record_start'),
+    recordStop: () => invoke('hermes_record_stop'),
+    ttsSpeak: (text: string) => invoke('hermes_tts_speak', { text }),
+    ttsStop: () => invoke('hermes_tts_stop'),
+    wakeStart: () => invoke('hermes_wake_start'),
+    wakeControl: (action: string) => invoke('hermes_wake_control', { action }),
   }
 
   // ── profile ─────────────────────────────────────────────────────────────
@@ -313,10 +320,28 @@ function buildTauriAPI(): ElectronAPI {
     setConfig: (config: unknown) => invoke('hooks_save', { config }),
   }
 
+  // ── web search ─────────────────────────────────────────────────────────
+  api.webSearch = {
+    getConfig: () => invoke('web_search_list'),
+    setConfig: (config: unknown) => invoke('web_search_save', { config }),
+  }
+
+  // ── channels ───────────────────────────────────────────────────────────
+  api.channels = {
+    list: () => invoke('channels_list'),
+    save: (channels: unknown) => invoke('channels_save', { channels }),
+  }
+
   // ── kanban ──────────────────────────────────────────────────────────────
   api.kanban = {
     invoke: (verb: string, args?: string[], json?: boolean, board?: string) =>
       invoke('command', { params: { verb, args: args ?? [], json: json ?? false, board: board ?? '' } }),
+  }
+
+  // ── delegations ─────────────────────────────────────────────────────────
+  api.delegations = {
+    list: () => invoke('delegations_list'),
+    readLog: (path: string, lines?: number) => invoke('delegations_read_log', { path, lines: lines ?? null }),
   }
 
   // ── diagnostics ─────────────────────────────────────────────────────────

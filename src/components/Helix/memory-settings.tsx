@@ -562,14 +562,14 @@ export function MemorySettings() {
                     : `需在 Hermes 启动环境设置 ${[t.env, t.env2].filter(Boolean).join(' / ')}`
                   return `${t.type} · 适合 ${t.best} · ${envLine}`
                 })()
-              : '选择接入的外部记忆服务（与内置 MEMORY.md 并存，仅可选其一）'
+              : '可选一个，与内置记忆并存'
           }
         >
           <PopupSelect
             value={cfg.provider}
             onChange={(v) => update({ provider: v })}
             placeholder="无"
-            className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+            className="w-36 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
             options={PROVIDERS.map((t) => ({
               label: `${t.label}${t.local ? '（本地）' : ''}`,
               value: t.id,

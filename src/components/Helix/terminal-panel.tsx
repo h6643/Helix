@@ -287,7 +287,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
   }, [onClose, setTerminalRawBuffer])
 
   return (
-    <div className={`shrink-0 h-64 flex flex-col bg-transparent rounded-t-lg overflow-hidden border-t border-border/40 ${isTerminalOpen ? '' : 'hidden'}`}>
+    <div className={`shrink-0 h-64 flex flex-col bg-transparent rounded-t-lg overflow-hidden ${isTerminalOpen ? '' : 'hidden'}`}>
       {/* Tab bar — Windows Terminal style */}
       <div className="flex items-center h-8 bg-black/5 backdrop-blur-sm shrink-0 select-none">
         <div className="flex items-center h-full">
