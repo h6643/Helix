@@ -588,6 +588,10 @@ fn schedule_respawn(state: Arc<AppState>) {
 
 /// Kill any lingering `hermes serve` processes that share our HERMES_HOME, so
 /// a fresh spawn never competes with orphans from a prior app restart / crash.
+#[cfg(not(target_os = "linux"))]
+fn kill_orphan_serve_processes() {}
+
+#[cfg(target_os = "linux")]
 fn kill_orphan_serve_processes() {
     let hermes_dir = hermes_data_dir();
     let hermes_home = hermes_dir.display().to_string();

@@ -4,17 +4,25 @@
 //! bridge. Output is pushed back as `terminal:data` string events.
 
 use serde_json::{json, Value};
-use std::io::Error as IoError;
-use std::path::Path;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
-use std::time::Duration;
-use tauri::Emitter;
 
 #[cfg(unix)]
+use std::io::Error as IoError;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
+use std::process::Command;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(unix)]
+use std::thread;
+#[cfg(unix)]
+use std::time::Duration;
+#[cfg(unix)]
+use tauri::Emitter;
 
 #[cfg(unix)]
 struct TerminalSession {
