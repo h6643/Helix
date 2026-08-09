@@ -2128,7 +2128,13 @@ pub async fn hermes_wake_start(
     // is launched from a .desktop file (which inherits a minimal env).
     let runtime_dir = dirs::runtime_dir()
         .or_else(|| std::env::var("XDG_RUNTIME_DIR").ok().map(std::path::PathBuf::from))
-        .unwrap_or_else(|| std::path::PathBuf::from(format!("/run/user/{}", if cfg!(unix) { unsafe { libc::getuid() } } else { 0 })));
+        .unwrap_or_else(|| {
+            #[cfg(unix)]
+            let uid: u32 = unsafe { libc::getuid() };
+            #[cfg(not(unix))]
+            let uid: u32 = 0;
+            std::path::PathBuf::from(format!("/run/user/{}", uid))
+        });
     let pulse_socket = runtime_dir.join("pulse/native");
 
     let mut cmd = std::process::Command::new(&python);
