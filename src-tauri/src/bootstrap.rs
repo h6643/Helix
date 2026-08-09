@@ -206,8 +206,8 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
 
     // ── Create venv ───────────────────────────────────────────────────
     let venv_path = target_dir.join("venv");
-    let mut venv_cmd = Command::new(&python)
-        .args(["-m", "venv", &venv_path.display().to_string()]);
+    let mut venv_cmd = Command::new(&python);
+    venv_cmd.args(["-m", "venv", &venv_path.display().to_string()]);
     #[cfg(windows)]
     venv_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let output = venv_cmd
@@ -231,11 +231,11 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     };
     // Use a timeout to prevent pip from hanging indefinitely (e.g. network issues).
     // 5 minutes should be enough for a首次 install; subsequent runs skip pip entirely.
-    let mut pip_cmd = Command::new(&pip)
-        .args(["install", "-e", "."])
-        .current_dir(&target_dir)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+    let mut pip_cmd = Command::new(&pip);
+    pip_cmd.args(["install", "-e", "."]);
+    pip_cmd.current_dir(&target_dir);
+    pip_cmd.stdout(std::process::Stdio::piped());
+    pip_cmd.stderr(std::process::Stdio::piped());
     #[cfg(windows)]
     pip_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let mut pip_child = pip_cmd

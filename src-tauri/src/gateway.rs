@@ -234,13 +234,13 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
         vec!["acp".into()]
     };
 
-    let mut serve_cmd = Command::new(cmd)
-        .args(&args)
-        .envs(&env)
-        .current_dir(&spawn_cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut serve_cmd = Command::new(cmd);
+    serve_cmd.args(&args);
+    serve_cmd.envs(&env);
+    serve_cmd.current_dir(&spawn_cwd);
+    serve_cmd.stdin(Stdio::piped());
+    serve_cmd.stdout(Stdio::piped());
+    serve_cmd.stderr(Stdio::piped());
     #[cfg(windows)]
     serve_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let child = serve_cmd
