@@ -86,7 +86,10 @@ fn find_python() -> Option<PathBuf> {
 #[cfg(target_os = "windows")]
 fn find_python() -> Option<PathBuf> {
     for name in &["python3.12", "python3.13", "python3.14", "python3", "python", "python.exe"] {
-        if let Ok(out) = Command::new(name).arg("--version").output() {
+        let mut py_cmd = Command::new(name);
+        py_cmd.arg("--version");
+        py_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        if let Ok(out) = py_cmd.output() {
             if out.status.success() {
                 let ver = String::from_utf8_lossy(&out.stdout);
                 if let Some(v) = ver.strip_prefix("Python ") {

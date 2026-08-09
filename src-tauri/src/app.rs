@@ -9,6 +9,9 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tauri::State;
 
 pub const WORKDIR_FILE: &str = "workdir.json";
@@ -92,7 +95,11 @@ pub fn sync_work_dir(state: State<'_, Arc<AppState>>, dir: String) -> Value {
 #[tauri::command]
 pub fn get_hermes_version() -> Option<String> {
     let cmd = resolve_hermes_cmd()?;
-    let out = Command::new(&cmd).arg("--version").output().ok()?;
+    let mut ver_cmd = Command::new(&cmd);
+    ver_cmd.arg("--version");
+    #[cfg(windows)]
+    ver_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let out = ver_cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }

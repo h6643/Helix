@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 /// Ordered list of candidate hermes executables, deduplicated, existing only.
 pub fn resolve_hermes_candidates() -> Vec<PathBuf> {
     let mut cands: Vec<PathBuf> = vec![
@@ -33,7 +36,10 @@ pub fn resolve_hermes_candidates() -> Vec<PathBuf> {
     // ── Windows: where hermes ──────────────────────────────────────────
     #[cfg(target_os = "windows")]
     {
-        if let Ok(out) = Command::new("where").arg("hermes").output() {
+        let mut where_cmd = Command::new("where");
+        where_cmd.arg("hermes");
+        where_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        if let Ok(out) = where_cmd.output() {
             if out.status.success() {
                 for l in String::from_utf8_lossy(&out.stdout).lines() {
                     let l = l.trim();

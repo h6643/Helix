@@ -5,6 +5,9 @@ use crate::state::AppState;
 use serde_json::{json, Value};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::time::Duration;
 use tauri::State;
 
@@ -26,12 +29,15 @@ fn git_cwd(state: &AppState, target_cwd: Option<&str>) -> std::path::PathBuf {
 
 fn git_exec<S: AsRef<str>>(state: &AppState, args: &[S], target_cwd: Option<&str>) -> Result<(String, String), String> {
     let cwd = git_cwd(state, target_cwd);
-    let mut child = Command::new("git")
-        .args(args.iter().map(|a| a.as_ref()))
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut git_cmd = Command::new("git");
+    git_cmd.args(args.iter().map(|a| a.as_ref()));
+    git_cmd.current_dir(&cwd);
+    git_cmd.stdin(Stdio::null());
+    git_cmd.stdout(Stdio::piped());
+    git_cmd.stderr(Stdio::piped());
+    #[cfg(windows)]
+    git_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let mut child = git_cmd
         .spawn()
         .map_err(|e| format!("git spawn failed: {e}"))?;
 
