@@ -27,6 +27,7 @@ import {
     Users,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
+import { getCurrentVersion } from '@/hooks/use-check-update'
 import { createPortal } from 'react-dom'
 import { useProviderStore } from '@/hermes-ui/provider-store'
 import { useCheckUpdate } from '@/hooks/use-check-update'
@@ -725,6 +726,10 @@ export function HelixLayout() {
   const [helpMenuOpen, setHelpMenuOpen] = useState(false)
   const helpMenuButtonRef = useRef<HTMLButtonElement>(null)
   const helpMenuRef = useRef<HTMLDivElement>(null)
+  const [appVersion, setAppVersion] = useState('')
+  useEffect(() => {
+    getCurrentVersion().then((v) => v && setAppVersion(v))
+  }, [])
 
   // Browser "more" menu state (the ••• button next to the browser toggle)
   const [browserMenuOpen, setBrowserMenuOpen] = useState(false)
@@ -1039,14 +1044,14 @@ export function HelixLayout() {
             >
               <div ref={helpMenuRef} className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1">
                 <div className="px-3 py-2 text-xs text-muted-foreground/60">
-                    版本 v0.2.0
+                    版本 v{appVersion || '0.3.3'}
                   </div>
                   <button
                     className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
                     onClick={async () => {
                       setHelpMenuOpen(false)
                       try {
-                        const res = await fetch('https://api.github.com/repos/NousResearch/hermes-agent/releases/latest', {
+                        const res = await fetch('https://api.github.com/repos/h6643/Helix/releases/latest', {
                           signal: AbortSignal.timeout(8000),
                         })
                         if (!res.ok) {
@@ -1055,8 +1060,7 @@ export function HelixLayout() {
                         }
                         const data = await res.json()
                         const latest = (data.tag_name || data.name || '').replace(/^v/i, '')
-                        const hermesVersion = await window.electron?.app?.getHermesVersion?.()
-                        const current = hermesVersion || '0.2.0'
+                        const current = (await getCurrentVersion()) || '0.3.3'
                         const curParts = current.split('.').map(Number)
                         const latParts = latest.split('.').map(Number)
                         let isNewer = false

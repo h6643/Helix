@@ -22,7 +22,7 @@ function isNewer(current: string, latest: string): boolean {
   return false
 }
 
-async function getCurrentVersion(): Promise<string | null> {
+export async function getCurrentVersion(): Promise<string | null> {
   // 对比 Helix 应用自身版本（来自 get_info），而非 hermes 后端版本
   try {
     const info = await (window as any).electron?.app?.getInfo?.()

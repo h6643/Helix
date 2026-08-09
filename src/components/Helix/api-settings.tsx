@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { useHermes } from '@/hooks/use-hermes'
 import { pushModelConfig } from '@/lib/config-sync'
 import { isElectron, hermesApi, electronFS, electronDialog } from '@/lib/electron-bridge'
+import { getCurrentVersion } from '@/hooks/use-check-update'
 import { persistence } from '@/lib/persist'
 import { getAllProviders, getBaseUrl } from '@/lib/providers'
 import { useHelixStore, type ApiConfig, type McpServerConfig, type BrowserBookmark } from '@/stores/helix-store'
@@ -396,6 +397,10 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   }, [settingsPage, setSettingsPage])
   const [localConfig, setLocalConfig] = useState<ApiConfig>({ ...apiConfig })
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
+  const [appVersion, setAppVersion] = useState('')
+  useEffect(() => {
+    getCurrentVersion().then((v) => v && setAppVersion(v))
+  }, [])
 
   // ── Settings nav resize (synced with the main sidebar width) ──────────────
   // The main sidebar width lives in helix-layout and is the single source of
@@ -1520,7 +1525,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-muted-foreground">版本</span>
-                      <span className="text-sm font-mono text-foreground">v0.2.0</span>
+                      <span className="text-sm font-mono text-foreground">v{appVersion || '0.3.3'}</span>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-muted-foreground">许可证</span>

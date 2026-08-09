@@ -22,6 +22,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -231,13 +234,16 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
         vec!["acp".into()]
     };
 
-    let child = Command::new(cmd)
+    let mut serve_cmd = Command::new(cmd)
         .args(&args)
         .envs(&env)
         .current_dir(&spawn_cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    serve_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let child = serve_cmd
         .spawn()
         .map_err(|e| {
             if cfg!(windows) && e.raw_os_error() == Some(2) {
