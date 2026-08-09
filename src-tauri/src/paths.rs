@@ -6,11 +6,28 @@
 use std::path::{Path, PathBuf};
 
 /// The Hermes data directory (config.yaml, state.db, skills, memories, logs…).
-/// Uses ~/.hermes/ to match Hermes CLI convention.
+/// Uses ~/.hermes/ to match Hermes CLI convention on Unix.
+/// On Windows, prefer %LOCALAPPDATA%/hermes (the location the managed
+/// install actually uses); fall back to ~/.hermes/ for any legacy layout.
 pub fn hermes_data_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".hermes")
+    #[cfg(windows)]
+    {
+        let local = dirs::data_local_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+        let candidate = local.join("hermes");
+        if candidate.exists() {
+            return candidate;
+        }
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".hermes")
+    }
+    #[cfg(not(windows))]
+    {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".hermes")
+    }
 }
 
 /// The bundled / managed Hermes agent checkout.
