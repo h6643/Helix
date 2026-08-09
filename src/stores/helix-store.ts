@@ -155,6 +155,8 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setVoiceAutoSpeak: (v: boolean) => void
   voiceWakeEnabled: boolean
   setVoiceWakeEnabled: (v: boolean) => void
+  wakeWordPhrase: string
+  setWakeWordPhrase: (v: string) => void
   startupGreeting: string
   setStartupGreeting: (v: string) => void
 
@@ -847,6 +849,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   showLearningView: false,
   voiceAutoSpeak: false,
   voiceWakeEnabled: false,
+  wakeWordPhrase: 'hey hermes',
   startupGreeting: '有什么可以帮你的？',
 
   emailConfigured: false,
@@ -1091,6 +1094,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
   setVoiceAutoSpeak: (v: boolean) => set((s) => ({ voiceAutoSpeak: v })),
   setVoiceWakeEnabled: (v: boolean) => set((s) => ({ voiceWakeEnabled: v })),
+  setWakeWordPhrase: async (v: string) => {
+    set({ wakeWordPhrase: v })
+    try {
+      const { isTauri } = await import('@/lib/tauri-bridge')
+      if (isTauri()) {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('hermes_set_yaml_key', { key: 'wake_word.phrase', value: v })
+      }
+    } catch {}
+  },
   setStartupGreeting: (v: string) => set((s) => ({ startupGreeting: v })),
   setEmailConfigured: (configured: boolean, account?: string) =>
     set((s) => ({ emailConfigured: configured, emailAccount: account !== undefined ? account : s.emailAccount })),
@@ -2275,6 +2288,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('desktopNotifications', state.desktopNotifications),
         persistence.saveSetting('voiceAutoSpeak', state.voiceAutoSpeak),
         persistence.saveSetting('voiceWakeEnabled', state.voiceWakeEnabled),
+        persistence.saveSetting('wakeWordPhrase', state.wakeWordPhrase),
         persistence.saveSetting('startupGreeting', state.startupGreeting),
         persistence.saveSetting('editorTheme', state.editorTheme),
         persistence.saveSetting('gitAutoCommit', state.gitAutoCommit),
@@ -2310,7 +2324,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, voiceWakeEnabled, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, voiceWakeEnabled, wakeWordPhrase, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -2359,6 +2373,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<string>('gitBranchPrefix'),
         persistence.loadSetting<boolean>('voiceAutoSpeak'),
         persistence.loadSetting<boolean>('voiceWakeEnabled'),
+        persistence.loadSetting<string>('wakeWordPhrase'),
         persistence.loadSetting<string>('startupGreeting'),
         persistence.loadSetting<ProviderConfig[]>('providers'),
         persistence.loadSetting<string | null>('activeModel'),
@@ -2850,6 +2865,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
         voiceAutoSpeak: voiceAutoSpeak ?? get().voiceAutoSpeak,
         voiceWakeEnabled: voiceWakeEnabled ?? get().voiceWakeEnabled,
+        wakeWordPhrase: wakeWordPhrase || get().wakeWordPhrase,
         startupGreeting: startupGreeting || get().startupGreeting,
         browserHomeUrl: '',
         browserBookmarks: savedBookmarks ?? get().browserBookmarks,

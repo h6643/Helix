@@ -10,6 +10,8 @@ export function GeneralSettingsPanel() {
   const setDesktopNotifications = useHelixStore(s => s.setDesktopNotifications)
   const voiceWakeEnabled = useHelixStore(s => s.voiceWakeEnabled)
   const setVoiceWakeEnabled = useHelixStore(s => s.setVoiceWakeEnabled)
+  const wakeWordPhrase = useHelixStore(s => s.wakeWordPhrase)
+  const setWakeWordPhrase = useHelixStore(s => s.setWakeWordPhrase)
   const startupGreeting = useHelixStore(s => s.startupGreeting)
   const setStartupGreeting = useHelixStore(s => s.setStartupGreeting)
   const showToast = useHelixStore(s => s.showToast)
@@ -34,9 +36,20 @@ export function GeneralSettingsPanel() {
       </SettingGroup>
 
       <SettingGroup title="语音">
-        <SettingRow label="语音唤醒" hint={voiceWakeEnabled ? '说 "hey hermes" 唤醒' : '开启后说 "hey hermes" 可唤醒'}>
+        <SettingRow label="语音唤醒" hint={voiceWakeEnabled ? `说 "${wakeWordPhrase}" 唤醒` : '开启后说唤醒词可唤醒'}>
           <Toggle enabled={voiceWakeEnabled} onToggle={() => setVoiceWakeEnabled(!voiceWakeEnabled)} />
         </SettingRow>
+        {voiceWakeEnabled && (
+          <SettingRow label="唤醒词">
+            <input
+              value={wakeWordPhrase}
+              onChange={(e) => setWakeWordPhrase(e.target.value)}
+              onBlur={() => { if (!wakeWordPhrase.trim()) setWakeWordPhrase('hey hermes') }}
+              placeholder="hey hermes"
+              className="w-56 px-2.5 py-1.5 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+          </SettingRow>
+        )}
       </SettingGroup>
 
       <SettingGroup title="个性化">
