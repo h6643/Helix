@@ -107,3 +107,7 @@ hermes-agent/**/*.egg-info/
 AGENTS.md
 
 .playwright-mcp/
+
+# accidental diff/artifact files
+src/hermes.rs:*
+~hermes/
