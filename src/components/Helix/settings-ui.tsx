@@ -21,9 +21,12 @@ export const Toggle = ({ enabled, onToggle }: { enabled: boolean; onToggle: () =
   </button>
 )
 
-export const SettingRow = ({ label, labelClassName = '', children }: { label: string; labelClassName?: string; children: React.ReactNode }) => (
+export const SettingRow = ({ label, hint, labelClassName = '', children }: { label: string; hint?: string; labelClassName?: string; children: React.ReactNode }) => (
   <div className="flex items-center gap-3 py-2.5 px-1 -mx-1 rounded-md hover:bg-muted/30 transition-colors">
-    <span className={`text-sm text-foreground min-w-0 flex-1 ${labelClassName}`}>{label}</span>
+    <span className={`text-sm text-foreground min-w-0 flex-1 ${labelClassName}`}>
+      {label}
+      {hint && <span className="block text-[11px] text-muted-foreground/60 mt-0.5">{hint}</span>}
+    </span>
     <div className="shrink-0">{children}</div>
   </div>
 )

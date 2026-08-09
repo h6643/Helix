@@ -4,7 +4,6 @@ import React from 'react'
 import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
 import { Toggle, SettingRow, SettingGroup, SectionHeading } from './settings-ui'
-import { ExternalServiceManager } from './external-services-manager'
 
 export function GeneralSettingsPanel() {
   const desktopNotifications = useHelixStore(s => s.desktopNotifications)
@@ -35,7 +34,7 @@ export function GeneralSettingsPanel() {
       </SettingGroup>
 
       <SettingGroup title="语音">
-        <SettingRow label="语音唤醒">
+        <SettingRow label="语音唤醒" hint={voiceWakeEnabled ? '说 "hey hermes" 唤醒' : '开启后说 "hey hermes" 可唤醒'}>
           <Toggle enabled={voiceWakeEnabled} onToggle={() => setVoiceWakeEnabled(!voiceWakeEnabled)} />
         </SettingRow>
       </SettingGroup>
@@ -50,12 +49,6 @@ export function GeneralSettingsPanel() {
             className="w-56 px-2.5 py-1.5 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary"
           />
         </SettingRow>
-      </SettingGroup>
-
-      <SettingGroup title="外部服务（服务器 / 虚拟机）">
-        <div className="pb-1">
-          <ExternalServiceManager />
-        </div>
       </SettingGroup>
 
       <SettingGroup title="数据管理">
