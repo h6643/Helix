@@ -99,6 +99,17 @@
   --helix-transcript-size: 14px;
   --helix-font-family: var(--font-geist-mono);
   --helix-font-size: 13px;
+
+  /* Context-usage category colors — match backend `session.context_breakdown`
+     payload (var(--context-usage-*), see hermes-agent context_breakdown.py). */
+  --context-usage-system: oklch(0.72 0.02 250);
+  --context-usage-tools: oklch(0.72 0.16 55);
+  --context-usage-rules: oklch(0.70 0.15 160);
+  --context-usage-skills: oklch(0.72 0.13 220);
+  --context-usage-mcp: oklch(0.72 0.16 350);
+  --context-usage-subagents: oklch(0.72 0.15 300);
+  --context-usage-memory: oklch(0.70 0.13 190);
+  --context-usage-conversation: oklch(0.72 0.14 250);
 }
 
 .dark {
@@ -222,6 +233,12 @@ h1, h2, h3, h4, h5, h6 {
   line-height: 1.65;
   font-size: 0.9rem;
   word-break: break-word;
+  /* 防止继承全局负字距(-0.006em)与 Geist 字形替换(cv11/ss01/ss03)导致
+     西文/数字被挤压或连笔粘连；中文不受影响，仅重置排版类属性。 */
+  letter-spacing: normal;
+  font-feature-settings: normal;
+  text-rendering: auto;
+  font-variant-ligatures: none;
 }
 
 .helix-md p {

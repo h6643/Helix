@@ -1,18 +1,28 @@
 // TTS (Text-to-Speech) utilities for voice conversation mode.
-// Calls the Rust backend (`hermes_tts_speak` / `hermes_tts_stop`) which
+// Calls the Rust backend (`hermes_tts_speak_stream` / `hermes_tts_stop`) which
 // delegates to the Hermes Python TTS pipeline (edge_tts by default).
+// Streaming mode: audio chunks are played as they arrive for lower latency.
 
 /**
  * Synthesize and play text as speech via the Hermes TTS backend.
- * Returns immediately — playback happens asynchronously via a spawned
- * subprocess in the Rust backend.
+ * Uses streaming mode for lower latency — audio starts playing before
+ * the full synthesis is complete.
  */
 export async function speakText(text: string): Promise<void> {
   const t = text.trim()
   if (!t) return
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('hermes_tts_speak', { text: t })
+    // Try streaming first; fall back to legacy if command not available.
+    try {
+      await invoke('hermes_tts_speak_stream', { text: t })
+    } catch (e: any) {
+      if (e?.message?.includes('command not found') || e?.includes?.('command not found')) {
+        await invoke('hermes_tts_speak', { text: t })
+      } else {
+        throw e
+      }
+    }
   } catch (err: any) {
     console.error('[tts] speakText 失败:', err.message || err)
   }

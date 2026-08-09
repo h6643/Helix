@@ -4,6 +4,7 @@ import { Plus, Trash2 } from 'lucide-react'
 import React, { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { isElectron } from '@/lib/electron-bridge'
+import { isTauri } from '@/lib/tauri-bridge'
 import {
   type HookType,
   type HookConfig,
@@ -21,25 +22,32 @@ export function HookSettings() {
   const [saving, setSaving] = useState(false)
   const [saveState, setSaveState] = useState<null | 'ok' | 'err'>(null)
 
-  const electronReady = isElectron()
+  const platformReady = isElectron() || isTauri()
 
   useEffect(() => {
-    if (!electronReady) { setLoaded(true); return }
-    window.electron.hooks.getConfig()
-      .then((r) => {
+    if (!platformReady) { setLoaded(true); return }
+
+    const loadConfig = async () => {
+      try {
+        let r: any
+        if (isTauri()) {
+          const { invoke } = await import('@tauri-apps/api/core')
+          r = await invoke('hooks_list')
+        } else {
+          r = await window.electron.hooks.getConfig()
+        }
+
         if (r.ok && r.config) {
-          // Convert legacy format if needed
           const hooks: HookConfig[] = []
           if (r.config.hooks && typeof r.config.hooks === 'object') {
-            // Legacy format: { enabled, hooks: { event: [{ command, matcher }] } }
             for (const [event, handlers] of Object.entries(r.config.hooks)) {
               if (Array.isArray(handlers)) {
                 for (const h of handlers) {
                   hooks.push({
                     id: generateHookId(),
                     type: event as HookType,
-                    command: h.command || '',
-                    matcher: h.matcher || '',
+                    command: (h as any).command || '',
+                    matcher: (h as any).matcher || '',
                     enabled: true,
                   })
                 }
@@ -48,10 +56,11 @@ export function HookSettings() {
           }
           setSettings({ enabled: r.config.enabled !== false, hooks })
         }
-      })
-      .catch(() => {})
-      .finally(() => setLoaded(true))
-  }, [electronReady])
+      } catch {}
+    }
+
+    loadConfig().finally(() => setLoaded(true))
+  }, [platformReady])
 
   const setMasterEnabled = (v: boolean) => setSettings(s => ({ ...s, enabled: v }))
 
@@ -87,10 +96,9 @@ export function HookSettings() {
   }
 
   const save = useCallback(async () => {
-    if (!electronReady) return
+    if (!platformReady) return
     setSaving(true)
     try {
-      // Convert to backend format
       const hooksConfig: Record<string, { command: string; matcher?: string }[]> = {}
       for (const hook of settings.hooks) {
         if (!hook.command.trim()) continue
@@ -100,16 +108,23 @@ export function HookSettings() {
           ...(hook.matcher ? { matcher: hook.matcher } : {}),
         })
       }
-      const r = await window.electron.hooks.setConfig({ enabled: settings.enabled, hooks: hooksConfig })
+
+      let r: any
+      if (isTauri()) {
+        const { invoke } = await import('@tauri-apps/api/core')
+        r = await invoke('hooks_save', { config: { enabled: settings.enabled, hooks: hooksConfig } })
+      } else {
+        r = await window.electron.hooks.setConfig({ enabled: settings.enabled, hooks: hooksConfig })
+      }
       setSaveState(r.ok ? 'ok' : 'err')
     } catch {
       setSaveState('err')
     } finally {
       setSaving(false)
     }
-  }, [settings, electronReady])
+  }, [settings, platformReady])
 
-  if (!electronReady) {
+  if (!platformReady) {
     return (
       <div className="max-w-3xl">
         <SectionHeading>Hooks</SectionHeading>

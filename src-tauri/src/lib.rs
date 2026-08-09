@@ -1,6 +1,7 @@
 //! Helix Tauri backend crate.
 
 mod app;
+mod bootstrap;
 mod channels;
 mod config;
 mod delegations;
@@ -49,6 +50,10 @@ pub fn run() {
             crate::profile::apply_active_profile_cache();
 
             // Boot the Hermes gateway (serve mode by default).
+            // First-run bootstrap: extract hermes-agent from resources if needed.
+            if let Err(e) = bootstrap::ensure_hermes_agent(app.handle()) {
+                eprintln!("[Helix] bootstrap failed: {e}");
+            }
             if let Err(e) = gateway::spawn_gateway(&app_state) {
                 eprintln!("[Helix] gateway failed to start: {e}");
             }
@@ -109,6 +114,7 @@ pub fn run() {
             hermes::hermes_record_stop,
             hermes::hermes_tts_speak,
             hermes::hermes_tts_stop,
+            hermes::hermes_tts_speak_stream,
             hermes::hermes_wake_start,
             hermes::hermes_wake_control,
             // fs

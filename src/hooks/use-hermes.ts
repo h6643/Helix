@@ -401,19 +401,10 @@ export function useHermes() {
         prompt: [{ type: 'text', text }],
       }).then((result: any) => {
         debug('[useHermes] session/prompt completed:', result)
-        // Record real token usage from the prompt response.
-        const usage = result?.usage
-        if (usage && typeof usage === 'object') {
-          const model = useHelixStore.getState().apiConfig.model || 'unknown'
-          useHelixStore.getState().addSessionUsageStats(model, {
-            totalTokens: Number(usage.totalTokens) || undefined,
-            inputTokens: Number(usage.inputTokens) || undefined,
-            outputTokens: Number(usage.outputTokens) || undefined,
-            thoughtTokens: Number(usage.thoughtTokens) || undefined,
-            cachedReadTokens: Number(usage.cachedReadTokens) || undefined,
-            cachedWriteTokens: Number(usage.cachedWriteTokens) || undefined,
-          })
-        }
+                // Token usage is recorded by the `usage:prompt-complete` event handler
+        // (see agent-flow-panel.tsx). serve-gateway emits that event BEFORE
+        // resolving this prompt, reusing the same `usage` object — counting here
+        // too would double the stats. Single source of truth = the event.
         // Final response received - mark loading complete
         useHelixStore.setState({ isChatLoading: false })
       }).catch((err: any) => {

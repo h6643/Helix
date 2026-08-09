@@ -376,8 +376,8 @@ export function KanbanPanel(_props: KanbanPanelProps) {
         onDragLeave={() => { if (overCol === status) setOverCol(null) }}
         onDrop={() => { if (droppable) handleDrop(status) }}
         className={cn(
-          'w-64 shrink-0 max-h-full flex flex-col rounded-xl border bg-muted/20 transition-colors',
-          isOver ? 'border-primary/60 bg-primary/5' : 'border-border/60',
+          'w-64 shrink-0 max-h-full flex flex-col rounded-xl border bg-background transition-colors',
+          isOver ? 'border-primary/60 bg-primary/5' : 'border-border/50',
         )}
       >
         <div className={cn('shrink-0 h-0.5 rounded-t-xl', colors.bar)} />
@@ -388,7 +388,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1.5">
           {tasksInCol.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border/60 py-6 text-center text-[11px] text-muted-foreground/40">
+            <div className="rounded-lg border border-dashed border-border/50 py-6 text-center text-[11px] text-muted-foreground/40">
               空
             </div>
           ) : (
@@ -400,7 +400,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
                 onDragEnd={() => { setDragId(null); setOverCol(null); setOverTrash(false) }}
                 onClick={() => setDetailId(task.id)}
                 className={cn(
-                  'group cursor-grab active:cursor-grabbing rounded-lg border border-border/60 bg-card px-2 py-1.5 hover:border-primary/40 hover:shadow-sm transition-all select-none',
+                  'group cursor-grab active:cursor-grabbing rounded-lg border border-border/50 bg-card/50 px-2 py-1.5 hover:bg-accent/30 transition-all select-none',
                   dragId === task.id && 'opacity-40',
                   busy === task.id && 'opacity-60',
                 )}
@@ -442,7 +442,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
     return (
       <div
         key={`${topStatus}-${bottomStatus}`}
-        className="w-44 shrink-0 max-h-full flex flex-col rounded-lg border border-border/60 bg-muted/10 transition-colors"
+        className="w-44 shrink-0 max-h-full flex flex-col rounded-xl border border-border/50 bg-background transition-colors"
       >
         {/* 上半部分 */}
         <div
@@ -459,7 +459,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
           </div>
           <div className="flex-1 overflow-y-auto px-1.5 pb-1 space-y-0.5">
             {topTasks.length === 0 ? (
-              <div className="rounded border border-dashed border-border/60 py-1.5 text-center text-[9px] text-muted-foreground/40">空</div>
+              <div className="rounded border border-dashed border-border/50 py-1.5 text-center text-[9px] text-muted-foreground/40">空</div>
             ) : (
               topTasks.map(task => renderCompactCard(task))
             )}
@@ -482,7 +482,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
           </div>
           <div className="flex-1 overflow-y-auto px-1.5 pb-1 space-y-0.5">
             {bottomTasks.length === 0 ? (
-              <div className="rounded border border-dashed border-border/60 py-1.5 text-center text-[9px] text-muted-foreground/40">空</div>
+              <div className="rounded border border-dashed border-border/50 py-1.5 text-center text-[9px] text-muted-foreground/40">空</div>
             ) : (
               bottomTasks.map(task => renderCompactCard(task))
             )}
@@ -501,7 +501,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
       onDragEnd={() => { setDragId(null); setOverCol(null); setOverTrash(false) }}
       onClick={() => setDetailId(task.id)}
       className={cn(
-        'group cursor-grab active:cursor-grabbing rounded bg-card px-1.5 py-0.5 hover:bg-accent/50 transition-all select-none border border-transparent hover:border-primary/30',
+        'group cursor-grab active:cursor-grabbing rounded-lg border border-border/50 bg-card/50 px-1.5 py-0.5 hover:bg-accent/30 transition-all select-none',
         dragId === task.id && 'opacity-40',
         busy === task.id && 'opacity-60',
       )}
@@ -513,8 +513,8 @@ export function KanbanPanel(_props: KanbanPanelProps) {
   return (
     <div className="h-full w-full flex flex-col bg-background relative select-none">
       {/* Header */}
-      <div className="shrink-0 flex items-center gap-3 px-5 py-3 border-b border-border/40">
-        <h2 className="text-sm font-semibold text-foreground">看板</h2>
+      <div className="shrink-0 flex items-center gap-3 px-6 py-4 border-b border-border/40">
+        <h2 className="text-lg font-semibold text-foreground">看板</h2>
 
         <div className="flex items-center gap-2 ml-2">
           <div className="relative">
@@ -613,7 +613,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
       </div>
 
       {/* Footer */}
-      <div className="shrink-0 px-5 py-2 border-t border-border/40 flex items-center gap-3">
+      <div className="shrink-0 px-6 py-2 border-t border-border/40 flex items-center gap-3">
         <span className="text-[10px] text-muted-foreground/50">
           看板 {activeBoard} · {tasks.length} 个任务 · 拖动卡片切换状态
         </span>
@@ -622,7 +622,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
       {/* Create task modal */}
       {showCreate && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/40">
-          <div className="w-[460px] max-h-[80vh] overflow-y-auto rounded-xl border border-border bg-card shadow-2xl p-5">
+          <div className="w-[460px] max-h-[80vh] overflow-y-auto rounded-xl border border-border/50 bg-card shadow-2xl p-5">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-semibold text-foreground">新建任务</h3>
               <button onClick={() => setShowCreate(false)} className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/60">
@@ -696,7 +696,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
       {/* Create board modal */}
       {showNewBoard && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/40">
-          <div className="w-[380px] rounded-xl border border-border bg-card shadow-2xl p-5">
+          <div className="w-[380px] rounded-xl border border-border/50 bg-card shadow-2xl p-5">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-semibold text-foreground">新建看板</h3>
               <button onClick={() => setShowNewBoard(false)} className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/60">
@@ -744,7 +744,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
       {detailId && (
         <div className="absolute inset-0 z-30">
           <div className="absolute inset-0 bg-black/20" onClick={() => setDetailId(null)} />
-          <div className="absolute inset-y-0 right-0 w-[400px] max-w-[85%] flex flex-col border-l border-border bg-background shadow-2xl">
+          <div className="absolute inset-y-0 right-0 w-[400px] max-w-[85%] flex flex-col border-l border-border/50 bg-background shadow-2xl">
             {/* Detail header */}
             <div className="shrink-0 px-4 py-3 border-b border-border/40 flex items-start gap-2">
               <div className="flex-1 min-w-0">

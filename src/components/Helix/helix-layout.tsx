@@ -42,6 +42,7 @@ import { CommandPalette } from './command-palette'
 import { Sidebar } from './sidebar'
 import { KeyboardShortcuts } from './keyboard-shortcuts'
 import { ContextMenuProvider } from './context-menu'
+import { WakeWordAnimation } from './wake-word-animation'
 import { ToastContainer } from './toast-container'
 import { useHermesStore } from '@/stores/hermes-store'
 import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
@@ -959,6 +960,7 @@ export function HelixLayout() {
       <CommandPalette />
       <ContextMenuProvider />
       <ToastContainer />
+      <WakeWordAnimation show={useHelixStore(s => s.showWakeAnimation)} onComplete={() => useHelixStore.getState().setShowWakeAnimation(false)} />
 
       {/* Title bar — part of the background */}
       <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 shrink-0 select-none">

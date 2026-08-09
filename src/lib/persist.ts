@@ -785,4 +785,81 @@ export const persistence = {
       return null
     }
   },
+
+  async importSessionFromMarkdown(md: string): Promise<PersistedSession | null> {
+    try {
+      const lines = md.split('\n')
+      let label = ''
+      let goal: string | null = null
+      let workDir: string | null = null
+      let exportedAt: number = Date.now()
+      const messages: Array<{ role: string; content: string; timestamp: number }> = []
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+
+        const titleMatch = line.match(/^# (.+)$/)
+        if (titleMatch) { label = titleMatch[1]; continue }
+
+        const metaMatch = line.match(/^> (\S+):\s*(.+)$/)
+        if (metaMatch) {
+          const key = metaMatch[1]
+          const val = metaMatch[2].trim()
+          if (key === '目标') goal = val
+          else if (key === '工作目录') workDir = val
+          else if (key === '导出时间') {
+            const d = new Date(val)
+            if (!isNaN(d.getTime())) exportedAt = d.getTime()
+          }
+          continue
+        }
+
+        const msgMatch = line.match(/^### (\S+\s+\S+)\s*\((.+)\)$/)
+        if (msgMatch) {
+          const roleLabel = msgMatch[1]
+          const timeStr = msgMatch[2]
+          const ts = new Date(timeStr).getTime() || exportedAt
+          const role = roleLabel.includes('用户') ? 'user' : 'assistant'
+          const contentLines: string[] = []
+          i++
+          while (i + 1 < lines.length && lines[i + 1] !== '---' && !lines[i + 1].match(/^### /) && !lines[i + 1].match(/^## /) && !lines[i + 1].match(/^# /)) {
+            i++
+            contentLines.push(lines[i])
+          }
+          if (i + 1 < lines.length && lines[i + 1].trim() === '---') i++
+          messages.push({ role, content: contentLines.join('\n').trim(), timestamp: ts })
+          continue
+        }
+      }
+
+      if (!label && messages.length === 0) return null
+
+      const now = Date.now()
+      const session: PersistedSession = {
+        id: 'imported-md-' + now,
+        label: label || '导入 Markdown ' + new Date(now).toLocaleString('zh-CN'),
+        savedAt: exportedAt,
+        workDir,
+        goal,
+        chatMessages: messages.map((m, idx) => ({
+          id: 'msg-' + now + '-' + idx,
+          role: m.role,
+          content: m.content,
+          timestamp: m.timestamp,
+          isStreaming: false,
+        })),
+        files: [],
+        openTabs: [],
+        tasks: [],
+        memories: [],
+        notes: '',
+        checkpoints: [],
+      }
+      await this.saveSession(session)
+      return session
+    } catch {
+      return null
+    }
+  }
+
 }

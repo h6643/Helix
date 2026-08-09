@@ -15,13 +15,31 @@ pub fn resolve_hermes_candidates() -> Vec<PathBuf> {
         venv_hermes_bin(Some(&hermes_agent_dir()), ".venv"),
     ];
     // A `hermes` / `hermes-agent` on PATH works as a last resort.
-    if let Ok(out) = Command::new("sh").arg("-lc").arg("command -v hermes hermes-agent 2>/dev/null").output() {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout);
-            for l in s.lines() {
-                let l = l.trim();
-                if !l.is_empty() {
-                    cands.push(PathBuf::from(l));
+    // ── Unix: sh -lc "command -v hermes hermes-agent" ──────────────────
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(out) = Command::new("sh").arg("-lc").arg("command -v hermes hermes-agent 2>/dev/null").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                for l in s.lines() {
+                    let l = l.trim();
+                    if !l.is_empty() {
+                        cands.push(PathBuf::from(l));
+                    }
+                }
+            }
+        }
+    }
+    // ── Windows: where hermes ──────────────────────────────────────────
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(out) = Command::new("where").arg("hermes").output() {
+            if out.status.success() {
+                for l in String::from_utf8_lossy(&out.stdout).lines() {
+                    let l = l.trim();
+                    if !l.is_empty() {
+                        cands.push(PathBuf::from(l));
+                    }
                 }
             }
         }

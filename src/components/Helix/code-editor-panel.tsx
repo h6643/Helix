@@ -162,7 +162,7 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
 
   if (!active) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50 gap-2 bg-background">
+      <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50 gap-2 bg-card">
         <FileCode2 className="size-10" />
         <p className="text-sm">从左侧文件树点击文件即可在此编辑</p>
         <button
@@ -176,15 +176,15 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-background">
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-card">
       {/* Tab bar */}
-      <div className="flex items-center gap-0.5 px-1.5 h-9 shrink-0 border-b border-border/40 bg-sidebar overflow-x-auto">
+      <div className="flex items-center gap-0.5 px-1.5 h-9 shrink-0 border-b border-border/40 bg-card overflow-x-auto">
         {editorTabs.map((tab) => (
           <div
             key={tab.id}
             className={`group flex items-center gap-1.5 pl-3 pr-1.5 py-1 rounded-t-md cursor-pointer text-[12px] max-w-[220px] border-b-2 ${
               tab.id === activeId
-                ? 'bg-background border-primary text-foreground'
+                ? 'bg-card border-primary text-foreground'
                 : 'text-foreground/60 border-transparent hover:bg-accent/40'
             }`}
             onClick={() => setActiveEditorTab(tab.id)}

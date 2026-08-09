@@ -5,6 +5,7 @@ import {
   FolderOpen,
   Trash2,
   Download,
+  DownloadCloud,
   Upload,
   X,
   Bot,
@@ -26,6 +27,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<PersistedSession | null>(null)
+  const [exportMenuSession, setExportMenuSession] = useState<PersistedSession | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
 
   const loadSessions = useCallback(async () => {
@@ -108,43 +110,84 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
     }
   }
 
-  const handleExportSession = (session: PersistedSession) => {
-    const data = JSON.stringify(session, null, 2)
-    const blob = new Blob([data], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `helix-session-${session.label || session.id}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+  const handleExportSession = async (session: PersistedSession, format: 'json' | 'markdown' = 'json') => {
+    try {
+      let data: string
+      let ext: string
+      let mime: string
+      if (format === 'markdown') {
+        data = await persistence.exportSessionAsMarkdown(session)
+        ext = 'md'
+        mime = 'text/markdown'
+      } else {
+        data = await persistence.exportSessionAsJson(session)
+        ext = 'json'
+        mime = 'application/json'
+      }
+      const blob = new Blob([data], { type: mime })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `helix-session-${session.label || session.id}.${ext}`
+      a.click()
+      URL.revokeObjectURL(url)
+      useHelixStore.getState().showToast({ type: 'success', title: '导出成功' })
+    } catch (e) {
+      console.error('Export failed:', e)
+      useHelixStore.getState().showToast({ type: 'error', title: '导出失败' })
+    }
+  }
+
+  const handleExportAll = async () => {
+    try {
+      const data = JSON.stringify(sessions, null, 2)
+      const blob = new Blob([data], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `helix-sessions-all-${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      useHelixStore.getState().showToast({ type: 'success', title: `已导出 ${sessions.length} 个会话` })
+    } catch (e) {
+      console.error('Export all failed:', e)
+      useHelixStore.getState().showToast({ type: 'error', title: '批量导出失败' })
+    }
   }
 
   const handleImportSession = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    try {
-      const text = await file.text()
-      const session = JSON.parse(text) as PersistedSession
-      if (!session.id || !session.chatMessages) {
-        return
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    let imported = 0
+    let failed = 0
+    for (const file of Array.from(files)) {
+      try {
+        const text = await file.text()
+        if (file.name.endsWith('.md') || file.name.endsWith('.markdown')) {
+          const session = await persistence.importSessionFromMarkdown(text)
+          if (session) { imported++ } else { failed++ }
+        } else {
+          // JSON: try wrapped format first, then raw
+          const data = JSON.parse(text)
+          const jsonStr = data.type === 'helix-session' ? text : JSON.stringify(data)
+          const session = await persistence.importSessionFromJson(jsonStr)
+          if (session) { imported++ } else { failed++ }
+        }
+      } catch {
+        failed++
       }
-      await persistence.saveSession({
-        id: session.id,
-        label: session.label || `导入 ${new Date().toLocaleString('zh-CN')}`,
-        workDir: session.workDir,
-        goal: session.goal,
-        memories: session.memories || [],
-        tasks: session.tasks || [],
-        notes: session.notes || '',
-        checkpoints: session.checkpoints || [],
-        chatMessages: session.chatMessages || [],
-        files: session.files || [],
-        openTabs: session.openTabs || [],
+    }
+    await loadSessions()
+    if (files.length === 1) {
+      useHelixStore.getState().showToast({
+        type: imported > 0 ? 'success' : 'error',
+        title: imported > 0 ? '会话已导入' : '导入失败',
       })
-      await loadSessions()
-      useHelixStore.getState().showToast({ type: 'success', title: '会话已导入' })
-    } catch {
-      useHelixStore.getState().showToast({ type: 'error', title: '导入失败' })
+    } else {
+      useHelixStore.getState().showToast({
+        type: imported > 0 ? 'success' : 'error',
+        title: `导入完成：${imported} 成功，${failed} 失败`,
+      })
     }
     e.target.value = ''
   }
@@ -220,10 +263,19 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
               {saving ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
               保存当前会话
             </Button>
+            {sessions.length > 0 && (
+              <button
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-xs font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7"
+                onClick={handleExportAll}
+              >
+                <DownloadCloud className="size-3" />
+                全部导出
+              </button>
+            )}
             <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-xs font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7">
               <Upload className="size-3" />
               导入
-              <input type="file" accept=".json" className="hidden" onChange={handleImportSession} />
+              <input type="file" accept=".json,.md,.markdown" multiple className="hidden" onChange={handleImportSession} />
             </label>
             <Button variant="ghost" size="icon" className="size-7" onClick={onClose}>
               <X className="size-4" />
@@ -290,7 +342,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                     variant="ghost"
                     size="icon"
                     className="size-6 opacity-0 group-hover:opacity-100 transition-opacity"
-                    onClick={(e) => { e.stopPropagation(); handleExportSession(session) }}
+                    onClick={(e) => { e.stopPropagation(); setExportMenuSession(exportMenuSession?.id === session.id ? null : session) }}
                     title="导出"
                   >
                     <Download className="size-3 text-muted-foreground" />
@@ -310,6 +362,35 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
           )}
         </ScrollArea>
       </div>
+
+      {/* Export format popover */}
+      {exportMenuSession && (
+        <div className="fixed inset-0 z-[10000]" onClick={() => setExportMenuSession(null)}>
+          <div className="absolute bg-card border border-border/80 rounded-xl shadow-xl py-1 w-36"
+            style={{
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+              onClick={() => { handleExportSession(exportMenuSession, 'json'); setExportMenuSession(null) }}
+            >
+              <Download className="size-3.5" />
+              导出为 JSON
+            </button>
+            <button
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+              onClick={() => { handleExportSession(exportMenuSession, 'markdown'); setExportMenuSession(null) }}
+            >
+              <Download className="size-3.5" />
+              导出为 Markdown
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Delete confirmation dialog */}
       {deleteTarget && (

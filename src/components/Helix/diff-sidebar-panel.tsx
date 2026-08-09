@@ -34,7 +34,7 @@ export function DiffSidebarPanel() {
   )
 
   return (
-    <div className="h-full w-full flex flex-col min-h-0 bg-background">
+    <div className="h-full w-full flex flex-col min-h-0 bg-card">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2 shrink-0">
         {projectChanges.length > 0 && (

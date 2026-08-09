@@ -32,9 +32,10 @@ pub(crate) fn build_clean_env(hermes_bin: &std::path::Path) -> std::collections:
         .parent()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
+    let path_sep = if cfg!(windows) { ';' } else { ':' };
     let mut clean_path: Vec<String> = std::env::var("PATH")
         .unwrap_or_default()
-        .split(':')
+        .split(path_sep)
         .filter(|p| !p.is_empty())
         .filter(|p| !p.to_lowercase().contains("node_modules/.bin") && !p.to_lowercase().contains("npm/node_modules"))
         .map(|s| s.to_string())
@@ -42,7 +43,7 @@ pub(crate) fn build_clean_env(hermes_bin: &std::path::Path) -> std::collections:
     if !hermes_bin_dir.is_empty() && !clean_path.contains(&hermes_bin_dir) {
         clean_path.insert(0, hermes_bin_dir);
     }
-    env.insert("PATH".to_string(), clean_path.join(":"));
+    env.insert("PATH".to_string(), clean_path.join(&path_sep.to_string()));
     env
 }
 

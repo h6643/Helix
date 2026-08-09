@@ -23,21 +23,6 @@ interface ContextUsageData {
   categories: ContextBreakdown[]
 }
 
-// Backend categories carry a CSS-var color; map to our own tailwind classes.
-const CATEGORY_COLORS: Record<string, string> = {
-  system_prompt: 'bg-gray-500',
-  tool_definitions: 'bg-orange-500',
-  rules: 'bg-emerald-500',
-  skills: 'bg-sky-500',
-  mcp: 'bg-pink-500',
-  subagent_definitions: 'bg-purple-500',
-  memory: 'bg-teal-500',
-  conversation: 'bg-blue-500',
-}
-
-function colorFor(id: string): string {
-  return CATEGORY_COLORS[id] || 'bg-gray-500'
-}
 
 // ---- ContextUsageBar (segmented horizontal bar — Hermes Desktop style) ----
 
@@ -64,8 +49,8 @@ function ContextUsageBar({ used, total, categories }: { used: number; total: num
           return (
             <div
               key={cat.id}
-              className={`h-full ${cat.color} transition-all duration-300 first:rounded-l-full last:rounded-r-full`}
-              style={{ width: `${Math.max(catPercent, 0.5)}%` }}
+              className="h-full transition-all duration-300 first:rounded-l-full last:rounded-r-full"
+              style={{ width: `${Math.max(catPercent, 0.5)}%`, backgroundColor: cat.color }}
               title={`${cat.label}: ~${formatTokens(cat.tokens)}`}
             />
           )
@@ -92,7 +77,7 @@ function ContextUsagePanel({ used, total, categories, onClose }: { used: number;
           return (
             <div key={item.id} className="flex items-center justify-between">
               <div className="flex items-center gap-1.5">
-                <span className={`w-2 h-2 rounded-sm ${item.color}`} />
+                <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: item.color }} />
                 <span className="text-xs text-foreground">{item.label}</span>
               </div>
               <span className="text-xs text-muted-foreground tabular-nums">
@@ -189,12 +174,20 @@ export function ContextUsageIndicator() {
     if (open) fetchContextData()
   }, [open, fetchContextData])
 
-  // Only backend RPC data — no client-side estimation fallback.
-  const total = backendData?.context_max || 0
-  const used = backendData?.context_used || 0
+  // Prefer live backend RPC data. When there is no live Hermes session
+  // (app/gateway restarted, or the conversation was never run this session) fall
+  // back to the locally persisted per-conversation store
+  // (contextUsage[currentSessionId]) so the ring does NOT reset to 0 after a
+  // restart. The snapshot is written in agent-flow-panel.tsx on
+  // `usage_prompt_complete`. (No client-side estimation - real saved values.)
+  const localCtx = useHelixStore(s =>
+    s.currentSessionId ? s.contextUsage[s.currentSessionId] : undefined,
+  )
+  const total = backendData?.context_max || localCtx?.size || 0
+  const used = backendData?.context_used || localCtx?.used || 0
 
   const categories: ContextBreakdown[] = backendData?.categories?.length
-    ? backendData.categories.map(c => ({ ...c, color: colorFor(c.id) }))
+    ? backendData.categories.map(c => ({ ...c }))
     : []
 
   // When there's no backend data, the ring renders empty (progress arc at 0).

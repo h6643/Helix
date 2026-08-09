@@ -1,17 +1,16 @@
 'use client'
 
-import { Globe, FolderTree, FileCode2, FileDiff, Mail, Maximize2, Minimize2, Plus, X, RefreshCw } from 'lucide-react'
+import { Globe, FolderTree, FileCode2, FileDiff, Maximize2, Minimize2, Plus, X, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { cleanUrl } from '@/lib/url-utils'
 import { useHelixStore } from '@/stores/helix-store'
 import { CodeEditorPanel } from './code-editor-panel'
 import { DiffSidebarPanel } from './diff-sidebar-panel'
-import { EmailPanel } from './email-panel'
 import { FileTreePanel } from './file-tree-panel'
 import { BrowserView, summarizeUrl } from './preview-rail'
 
-type PageKind = 'browser' | 'directory' | 'code' | 'email' | 'diff'
+type PageKind = 'browser' | 'directory' | 'code' | 'diff'
 interface PanelPage {
   id: string
   kind: PageKind
@@ -61,8 +60,7 @@ export function RightSidebar() {
     const start = cleanUrl(previewRailUrl ?? '') || ''
     if (tab === 'files') return [{ id: newPageId(), kind: 'directory', url: '' }]
     if (tab === 'code') return [{ id: newPageId(), kind: 'code', url: '' }]
-    if (tab === 'email') return [{ id: newPageId(), kind: 'email', url: '' }]
-    if (tab === 'diff') return [{ id: newPageId(), kind: 'diff', url: '' }]
+        if (tab === 'diff') return [{ id: newPageId(), kind: 'diff', url: '' }]
     return [{ id: newPageId(), kind: 'browser', url: start }]
   })
   const [activePageId, setActivePageId] = useState<string>(() => pages[0]?.id ?? '')
@@ -224,19 +222,19 @@ export function RightSidebar() {
   }, [pages, expandedSplit])
 
   const pageIcon = (k: PageKind) =>
-    k === 'browser' ? <Globe className="size-3" /> : k === 'directory' ? <FolderTree className="size-3" /> : k === 'code' ? <FileCode2 className="size-3" /> : k === 'diff' ? <FileDiff className="size-3" /> : <Mail className="size-3" />
+    k === 'browser' ? <Globe className="size-3" /> : k === 'directory' ? <FolderTree className="size-3" /> : k === 'code' ? <FileCode2 className="size-3" /> : k === 'diff' ? <FileDiff className="size-3" /> : <Globe className="size-3" />
   const pageTitle = (p: PanelPage) =>
-    p.kind === 'directory' ? '目录' : p.kind === 'code' ? '代码' : p.kind === 'email' ? '邮箱' : p.kind === 'diff' ? '变更' : summarizeUrl(p.url)
+    p.kind === 'directory' ? '目录' : p.kind === 'code' ? '代码': p.kind === 'diff' ? '变更' : summarizeUrl(p.url)
 
   return (
     <div
       ref={sidebarRef}
-      className={`h-full w-full bg-background flex flex-col overflow-hidden ${
+      className={`h-full w-full bg-card flex flex-col overflow-hidden ${
         isExpanded
           ? (expandedSplit
               ? 'fixed left-0 right-0 top-0 bottom-0 z-40'
               : 'fixed inset-x-0 bottom-0 z-40')
-          : 'border-l border-border/30'
+          : ''
       }`}
       style={
         isExpanded
@@ -244,7 +242,7 @@ export function RightSidebar() {
           : undefined
       }
     >
-      <div className="flex items-center gap-2 px-2 h-10 shrink-0 border-b border-border/20 bg-sidebar">
+      <div className="flex items-center gap-2 px-2 h-10 shrink-0 bg-card">
         {/* Inline tab bar — every page (browser / directory / code) lives here. */}
         <div className="flex items-center gap-1 min-w-0 flex-1 overflow-x-auto scrollbar-hide">
           {(isExpanded && hasDirectory ? pages.filter(p => p.kind !== 'code') : pages).map(p => (
@@ -298,7 +296,7 @@ export function RightSidebar() {
         {expandedSplit ? (
           // VS Code–style split: file tree on the left, code editor on the right.
           <div className="flex-1 min-h-0 flex flex-row">
-            <div className="relative shrink-0 h-full border-r border-border/30 flex flex-col min-h-0" style={{ width: treeWidth }}>
+            <div className="relative shrink-0 h-full flex flex-col min-h-0" style={{ width: treeWidth }}>
               <FileTreePanel onOpenFile={openCodePage} reloadKey={treeReloadKey} />
               {/* Resize handle overlays the tree's right edge so it adds no
                   visual gap between the tree and the editor. */}
@@ -327,9 +325,6 @@ export function RightSidebar() {
               )}
             {p.kind === 'code' && (
               <CodeEditorPanel onClose={() => closePage(p.id)} />
-            )}
-            {p.kind === 'email' && (
-              <EmailPanel onClose={() => closePage(p.id)} />
             )}
             {p.kind === 'diff' && (
               <DiffSidebarPanel />
@@ -363,13 +358,7 @@ export function RightSidebar() {
               <FolderTree className="size-3.5" />
               <span className="flex-1 text-left">目录</span>
             </button>
-            <button
-              onClick={() => addPage('email')}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
-            >
-              <Mail className="size-3.5" />
-              <span className="flex-1 text-left">邮箱</span>
-            </button>
+            
             <button
               onClick={() => addPage('diff')}
               disabled={hasDiff}

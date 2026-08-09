@@ -368,18 +368,3 @@ export function extractKaomojiStatus(thinking: string): { status: string | null;
   return { status: null, body: thinking }
 }
 
-/**
- * First non-empty line of `text`, trimmed and capped at `maxLen`.
- * Used for the one-line preview shown inside a collapsed <details> summary.
- */
-export function firstLinePreview(text: string, maxLen = 42): string {
-  if (!text) return ''
-  for (const raw of text.split('\n')) {
-    const t = raw.trim()
-    if (t.length === 0) continue
-    // Skip residual kaomoji status lines so the preview isn't just emoji noise.
-    if (KAOMOJI_STATUS_RE.test(t)) continue
-    return t.length > maxLen ? t.slice(0, maxLen) + '…' : t
-  }
-  return ''
-}

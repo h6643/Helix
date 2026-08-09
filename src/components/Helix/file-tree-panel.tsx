@@ -510,7 +510,7 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
   }
 
   return (
-    <div className="h-full w-full bg-sidebar flex flex-col overflow-hidden">
+    <div className="h-full w-full bg-card flex flex-col overflow-hidden">
       {/* Tree */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 text-sm">
         {loading && items.length === 0 ? (

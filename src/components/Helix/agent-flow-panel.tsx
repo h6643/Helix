@@ -177,6 +177,8 @@ const EXFIL_CMD_RE = /\bcurl\b[^\n]*\s(-T|-F|--upload-file|--data-binary|--data 
 const SENSITIVE_PATH_RE = /(\.ssh[\/\\]|id_rsa|id_ed25519|\.pem\b|\.key\b|\.env\b|credentials|\.aws[\/\\]|\.gnupg[\/\\]|\.kube[\/\\]config|ntuser\.dat|sam$)/i
 /** 项目内文件写工具名（这些命中且路径在项目内 → auto） */
 const FILE_WRITE_TOOL_RE = /write_file|create_file|edit|patch|str_replace|apply_patch/i
+/** 项目内文件读工具名（这些命中且路径在项目内 → auto） */
+const FILE_READ_TOOL_RE = /read_file|cat|head|tail/i
 
 /** 从命令/描述文本里提取形如绝对路径的片段（用于“项目外访问”判断） */
 function extractAbsPaths(text: string): string[] {
@@ -203,11 +205,11 @@ function classifyApproval(
   toolName: string,
   params: Record<string, any>,
   workDir: string | null,
+  mode: 'default' | 'accept_edits' | 'dont_ask',
 ): 'auto' | 'ask' {
   const patternKey = String(params?.pattern_key || '')
   const command = String(params?.command || '')
   const blob = `${toolName} ${patternKey} ${command} ${params?.description || ''} ${params?.reason || ''}`
-  const blobNorm = normPathForCompare(blob)
   const workNorm = workDir ? normPathForCompare(workDir) : ''
 
   // 1) 危险命令（删除/格式化）→ 弹
@@ -225,13 +227,15 @@ function classifyApproval(
     if (pn !== workNorm && !pn.startsWith(workNorm + '/')) return 'ask'
   }
 
-  // 5) 项目内文件修改 → 自动批准（diff 记录走 tool.complete inline_diff，不受影响）
+  // 5) 项目外文件读取（后端检测到的）→ 弹
+  if (patternKey.includes('read_file:outside_project:')) return 'ask'
+
+  // 6) 项目内文件修改 → 自动批准（diff 记录走 tool.complete inline_diff，不受影响）
   if (FILE_WRITE_TOOL_RE.test(blob)) return 'auto'
 
-  // 6) pattern_key 显示是终端/插件规则（dangerous pattern 未命中上面的正则，
-  //    例如 git reset --hard 这类后端判危险但不在用户“删除/格式化”范围的）→ 弹，
-  //    宁可多问一次也不放过。
-  if (/plugin_rule|dangerous|terminal/i.test(patternKey)) return 'ask'
+  // 模式相关分流
+  if (mode === 'dont_ask') return 'auto'        // 后端一般不发请求，前端兜底放行
+  if (mode === 'accept_edits') return 'auto'   // 替我审批：已排除危险/项目外/敏感，安全操作自动批准
 
   // 默认：弹（审批的意义就是未知操作要人确认；明确安全的上面已 auto）
   return 'ask'
@@ -317,13 +321,11 @@ function formatDuration(seconds: number): string {
   return s > 0 ? `${m}m ${s}s` : `${m}m`
 }
 
+// Delegates to formatTokens so the message bubble and the usage stats panel
+// share one formatting rule (handles M, consistent K casing). Previously this
+// local copy only handled `k` and never `M`, so >=1e6 rendered as "2000k".
 function formatTokenCount(tokens: number): string {
-  if (tokens >= 1000) {
-    const k = tokens / 1000
-    const rounded = k >= 100 ? Math.round(k) : Math.round(k * 10) / 10
-    return `${rounded}k`
-  }
-  return String(tokens)
+  return formatTokens(tokens)
 }
 
 // Isolated so the 200ms ticking only re-renders this tiny node, not the whole
@@ -857,13 +859,20 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 </ReactMarkdown>
               </div>
             )}
-            {((messageDuration ?? 0) > 0 || (msg.totalTokens ?? 0) > 0) && (
-              <div className="text-[10px] text-foreground/30 tabular-nums mt-1 px-1">
-                {messageDuration != null && messageDuration > 0 ? formatDuration(messageDuration) : ''}
-                {messageDuration != null && messageDuration > 0 && msg.totalTokens != null && msg.totalTokens > 0 ? ' · ' : ''}
-                {msg.totalTokens != null && msg.totalTokens > 0 ? `${formatTokenCount(msg.totalTokens)} tokens` : ''}
-              </div>
-            )}
+            {(() => {
+              const _out = msg.outputTokens ?? 0
+              const _thought = msg.thoughtTokens ?? 0
+              const _completion = _out + _thought || (msg.totalTokens ?? 0)
+              if ((messageDuration ?? 0) <= 0 && _completion <= 0) return null
+              const _sep = (messageDuration ?? 0) > 0 && _completion > 0 ? ' · ' : ''
+              return (
+                <div className="text-[10px] text-foreground/30 tabular-nums mt-1 px-1">
+                  {(messageDuration ?? 0) > 0 ? formatDuration(messageDuration ?? 0) : ''}
+                  {_sep}
+                  {_completion > 0 ? `${formatTokenCount(_completion)} tokens` : ''}
+                </div>
+              )
+            })()}
             {/* Copy button */}
             <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1 gap-0.5">
               <CopyButton text={stripEmoji(content)} />
@@ -957,7 +966,8 @@ export function AgentFlowPanel() {
   const [showModelDropdown, setShowModelDropdown] = useState(false)
   const [showFolderDropdown, setShowFolderDropdown] = useState(false)
   const [showApprovalModeDropdown, setShowApprovalModeDropdown] = useState(false)
-  const [approvalMode, setApprovalMode] = useState<'default' | 'accept_edits' | 'dont_ask'>('accept_edits')
+  const approvalMode = useHelixStore(s => s.approvalMode)
+  const setApprovalMode = useHelixStore(s => s.setApprovalMode)
   const [showNewProjectForm, setShowNewProjectForm] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [fileSkills, setFileSkills] = useState<Array<{ name: string; description: string }>>([])
@@ -2357,6 +2367,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const thinkingStartTimeRef = { current: 0 }
     const thinkingDurationRef = { current: 0 }
     const thoughtTokensRef = { current: 0 }
+    const outputTokensRef = { current: 0 }
     const totalTokensRef = { current: 0 }
     const synthDoneTimerRef = { current: null as ReturnType<typeof setTimeout> | null }
     const forceDoneTimerRef = { current: null as ReturnType<typeof setTimeout> | null }
@@ -3667,8 +3678,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 // the streaming area (via displayResponseBlocks) — producing exact
                 // duplicates of every tool_group block.
                 uiRB([])
-                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: discardBlocks ? undefined : (reasoning || undefined), steps: completedSteps.length ? completedSteps : undefined, blocks: finalBlocks, sessionId: activeSessionId, duration: totalSecs > 0 ? totalSecs : undefined, thoughtTokens: thoughtTokensRef.current || undefined, totalTokens: totalTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
+                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: discardBlocks ? undefined : (reasoning || undefined), steps: completedSteps.length ? completedSteps : undefined, blocks: finalBlocks, sessionId: activeSessionId, duration: totalSecs > 0 ? totalSecs : undefined, thoughtTokens: thoughtTokensRef.current || undefined, outputTokens: outputTokensRef.current || undefined, totalTokens: totalTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
                 thoughtTokensRef.current = 0
+                outputTokensRef.current = 0
                 thinkingStartTimeRef.current = 0
                 thinkingDurationRef.current = 0
                 curState.setChatMessageStreaming(msgId, false)
@@ -3759,6 +3771,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 })
                 usageReceivedRef.current = true
                 thoughtTokensRef.current = Number(u.thoughtTokens) || 0
+                outputTokensRef.current = Number(u.outputTokens) || 0
                 totalTokensRef.current = Number(u.totalTokens) || 0
                 uiTotalTokens(totalTokensRef.current)
                 // 只用后端 message.complete 携带的真实 context_used/context_max，
@@ -3780,6 +3793,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 String(parsed.toolName || ''),
                 parsed.toolParams || {},
                 useHelixStore.getState().selectedWorkDir,
+                useHelixStore.getState().approvalMode,
               )
               if (verdict === 'auto') {
                 const sid = (myCid && sessionMapRef.current.get(myCid)?.sid)
@@ -3998,6 +4012,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     pauseWakeWord()
     setWakeListening(false)
     playDingSound()
+    useHelixStore.getState().setShowWakeAnimation(true)
   }, [])
 
   // After a voice turn ends, auto-resume wake word detection.
@@ -4376,7 +4391,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 id: 'default' as const,
                 icon: Hand,
                 title: '请求批准',
-                desc: '编辑外部文件和使用互联网时始终询问',
+                desc: '所有操作均请求批准（含文件写入与命令执行）',
               },
               {
                 id: 'accept_edits' as const,

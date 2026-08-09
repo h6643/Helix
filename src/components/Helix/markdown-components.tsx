@@ -1,4 +1,4 @@
-import { Check, Copy, Download, Globe, ExternalLink } from 'lucide-react'
+import { Check, Copy, Download, Globe, ExternalLink, Play } from 'lucide-react'
 import React, { useState, useRef, useEffect, useMemo } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
@@ -175,9 +175,14 @@ function Pre({ children }: { children?: React.ReactNode }) {
   const ref = useRef<HTMLPreElement>(null)
   const [copied, setCopied] = useState(false)
   const [singleLine, setSingleLine] = useState(false)
+  const [isExecutable, setIsExecutable] = useState(false)
   useEffect(() => {
     const text = ref.current?.textContent || ''
     setSingleLine(text.trim().split('\n').length === 1)
+    // Detect executable commands (bash, shell, sh, zsh, etc.)
+    const codeEl = ref.current?.querySelector('code')
+    const className = codeEl?.className || ''
+    setIsExecutable(/language-(bash|sh|shell|zsh|fish|powershell|cmd|terminal)/.test(className))
   }, [children])
   if (isMermaid) return <>{children}</>
   const onCopy = () => {
@@ -186,15 +191,42 @@ function Pre({ children }: { children?: React.ReactNode }) {
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
   }
+  const onRun = async () => {
+    const text = ref.current?.textContent || ''
+    if (!text.trim()) return
+    try {
+      const { getElectronAPI } = await import('@/lib/electron-bridge')
+      const api = getElectronAPI()
+      if (api?.terminal) {
+        // Open terminal and send command
+        await api.terminal.start(80, 24)
+        api.terminal.write(text.trim() + '\n')
+      }
+    } catch (err) {
+      console.error('[Pre] run command failed:', err)
+    }
+  }
   return (
     <div className={`relative group my-1.5 rounded-lg overflow-hidden bg-muted/20 border border-border/50 ${singleLine ? 'w-fit max-w-full pl-10 pr-14 py-1' : 'px-6 py-1.5'}`}>
-      <button
-        type="button"
-        onClick={onCopy}
-        className="absolute right-3 top-3 z-10 px-1.5 py-1 rounded bg-muted/80 text-foreground/60 opacity-0 group-hover:opacity-100 transition-opacity"
-      >
-        {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
-      </button>
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        {isExecutable && (
+          <button
+            type="button"
+            onClick={onRun}
+            title="运行命令"
+            className="px-1.5 py-1 rounded bg-muted/80 text-foreground/60 hover:text-green-500 hover:bg-green-500/10 transition-colors"
+          >
+            <Play className="w-3.5 h-3.5" />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onCopy}
+          className="px-1.5 py-1 rounded bg-muted/80 text-foreground/60 hover:text-foreground transition-colors"
+        >
+          {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+        </button>
+      </div>
       <pre
         ref={ref}
         className={`text-[13px] leading-7 ${singleLine ? 'flex justify-center overflow-hidden whitespace-nowrap' : 'text-left whitespace-pre-wrap break-words'}`}

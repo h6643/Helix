@@ -1,6 +1,6 @@
 'use client'
 
-import { X, Folder, ChevronLeft, ChevronRight, RotateCw } from 'lucide-react'
+import { X, Folder, ChevronLeft, ChevronRight, RotateCw, ExternalLink } from 'lucide-react'
 import React, { useEffect, useRef, useState } from 'react'
 import { isElectron } from '@/lib/electron-bridge'
 import { useHelixStore, type BrowserBookmark } from '@/stores/helix-store'
@@ -237,7 +237,7 @@ export function BrowserView({
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-white">
       {/* Navigation toolbar */}
-      <div className="flex items-center gap-1 px-2.5 py-1.5 border-b border-border/20 shrink-0 bg-background">
+      <div className="flex items-center gap-1 px-2.5 py-1.5 border-b border-border/20 shrink-0 bg-card">
         <button
           onClick={goBack}
           disabled={!inElectron}
@@ -286,11 +286,24 @@ export function BrowserView({
             </button>
           )}
         </div>
+        <button
+          onClick={() => {
+            if (loaded) {
+              import('@/lib/electron-bridge').then(({ electronShell }) => {
+                electronShell.open(loaded)
+              })
+            }
+          }}
+          className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 transition-colors"
+          title="在外部浏览器中打开"
+        >
+          <ExternalLink className="size-3.5" />
+        </button>
       </div>
 
       {/* Bookmark bar (imported from Chrome etc.) */}
       {browserBookmarks.length > 0 && (
-        <div className="flex items-center gap-1 px-2.5 py-1 border-b border-border/20 shrink-0 bg-background overflow-x-auto scrollbar-hide">
+        <div className="flex items-center gap-1 px-2.5 py-1 border-b border-border/20 shrink-0 bg-card overflow-x-auto scrollbar-hide">
           {browserBookmarks.map((b, i) => (
             <BookmarkMenu key={i} node={b} onOpen={openBookmark} onDelete={deleteBookmarkAt} path={[i]} />
           ))}
@@ -314,7 +327,7 @@ export function BrowserView({
           </div>
         )}
         {loading && (
-          <div className="absolute top-2 right-2 z-10 px-2 py-0.5 text-[10px] text-muted-foreground/70 bg-background/80 rounded pointer-events-none">
+          <div className="absolute top-2 right-2 z-10 px-2 py-0.5 text-[10px] text-muted-foreground/70 bg-card/80 rounded pointer-events-none">
             加载中…
           </div>
         )}

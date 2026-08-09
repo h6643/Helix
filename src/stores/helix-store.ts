@@ -157,6 +157,10 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setVoiceWakeEnabled: (v: boolean) => void
   wakeWordPhrase: string
   setWakeWordPhrase: (v: string) => void
+  showWakeAnimation: boolean
+  setShowWakeAnimation: (v: boolean) => void
+  approvalMode: 'default' | 'accept_edits' | 'dont_ask'
+  setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask') => void
   startupGreeting: string
   setStartupGreeting: (v: string) => void
 
@@ -559,6 +563,8 @@ async function persistCurrentSessionNow(): Promise<void> {
         duration: m.duration,
         thinkingTime: m.thinkingTime,
         totalTokens: m.totalTokens,
+        thoughtTokens: m.thoughtTokens,
+        outputTokens: m.outputTokens,
         steps: m.steps,
       }))
     const draft = snapshot.streamingDrafts[sessionId]
@@ -578,6 +584,8 @@ async function persistCurrentSessionNow(): Promise<void> {
         duration: undefined,
         thinkingTime: undefined,
         totalTokens: draft.totalTokens,
+        thoughtTokens: undefined,
+        outputTokens: undefined,
         timestamp: Date.now(),
         isStreaming: false,
         steps: undefined,
@@ -659,6 +667,8 @@ async function persistSessionById(sessionId: string): Promise<void> {
         duration: m.duration,
         thinkingTime: m.thinkingTime,
         totalTokens: m.totalTokens,
+        thoughtTokens: m.thoughtTokens,
+        outputTokens: m.outputTokens,
         steps: m.steps,
       })
     }
@@ -850,6 +860,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   voiceAutoSpeak: false,
   voiceWakeEnabled: false,
   wakeWordPhrase: 'hey hermes',
+  showWakeAnimation: false,
+  approvalMode: 'accept_edits' as const,
   startupGreeting: '有什么可以帮你的？',
 
   emailConfigured: false,
@@ -1104,6 +1116,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
     } catch {}
   },
+  setShowWakeAnimation: (v: boolean) => set({ showWakeAnimation: v }),
+  setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask') => set({ approvalMode: v }),
   setStartupGreeting: (v: string) => set((s) => ({ startupGreeting: v })),
   setEmailConfigured: (configured: boolean, account?: string) =>
     set((s) => ({ emailConfigured: configured, emailAccount: account !== undefined ? account : s.emailAccount })),
@@ -1279,6 +1293,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         duration: m.duration,
         thinkingTime: m.thinkingTime,
         totalTokens: m.totalTokens,
+        thoughtTokens: m.thoughtTokens,
+        outputTokens: m.outputTokens,
         steps: m.steps,
       })),
       files: collectFiles(state.files),
@@ -1499,18 +1515,37 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const thought = usage.thoughtTokens || 0
       const cachedRead = usage.cachedReadTokens || 0
       const cachedWrite = usage.cachedWriteTokens || 0
-      const total = usage.totalTokens || input + output + thought
-      const rates: Record<string, { input: number; output: number }> = {
-        'claude-sonnet-4': { input: 3.0, output: 15.0 },
-        'claude-sonnet-4-20250514': { input: 3.0, output: 15.0 },
-        'gpt-4o': { input: 2.5, output: 10.0 },
-        'gpt-4o-mini': { input: 0.15, output: 0.6 },
-        'deepseek-chat': { input: 0.14, output: 0.28 },
-        'deepseek-reasoner': { input: 0.55, output: 2.19 },
-        'custom:step-router-v1': { input: 0.5, output: 2.0 },
+      // Backend CanonicalUsage.total_tokens = input + cache_read + cache_write
+      // + output (reasoning is tracked separately and excluded). Mirror that
+      // basis so the accumulated "total" agrees with the backend's total_tokens.
+      const total = usage.totalTokens || input + cachedRead + cachedWrite + output
+      // 4-tier pricing aligned with backend usage_pricing.py. Reasoning tokens
+      // are billed as output by every thinking-capable provider, so they enter
+      // the output bucket; cache reads/writes use their discounted tiers.
+      const rates: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
+        'claude-opus-4-8': { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 },
+        'claude-opus-4-7': { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 },
+        'claude-opus-4-6': { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 6.25 },
+        'claude-sonnet-5': { input: 2.0, output: 10.0, cacheRead: 0.2, cacheWrite: 2.5 },
+        'claude-sonnet-4-6': { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
+        'claude-sonnet-4': { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
+        'claude-sonnet-4-20250514': { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
+        'gpt-5.6-sol': { input: 5.0, output: 30.0, cacheRead: 0.5, cacheWrite: 6.25 },
+        'gpt-5.6-terra': { input: 2.5, output: 15.0, cacheRead: 0.25, cacheWrite: 3.125 },
+        'gpt-5.6-luna': { input: 1.0, output: 6.0, cacheRead: 0.1, cacheWrite: 1.25 },
+        'gpt-4o': { input: 2.5, output: 10.0, cacheRead: 1.25, cacheWrite: 5.0 },
+        'gpt-4o-mini': { input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite: 0.3 },
+        'deepseek-chat': { input: 0.14, output: 0.28, cacheRead: 0.014, cacheWrite: 0.14 },
+        'deepseek-reasoner': { input: 0.55, output: 2.19, cacheRead: 0.055, cacheWrite: 0.55 },
+        'custom:step-router-v1': { input: 0.5, output: 2.0, cacheRead: 0.05, cacheWrite: 0.25 },
       }
-      const rate = rates[model] || { input: 1.0, output: 5.0 }
-      const cost = (input * rate.input + output * rate.output) / 1_000_000
+      const rate = rates[model] || { input: 1.0, output: 5.0, cacheRead: 0.1, cacheWrite: 1.0 }
+      const cost = (
+        input * rate.input +
+        (output + thought) * rate.output +
+        cachedRead * rate.cacheRead +
+        cachedWrite * rate.cacheWrite
+      ) / 1_000_000
       // Accumulate into the current local day (used by the daily-usage treemap).
       const dayKey = dayKeyOf(new Date())
       const prevDay = state.dailyUsage[dayKey] || { totalTokens: 0, totalCost: 0, requestCount: 0, models: {} }
@@ -2289,6 +2324,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('voiceAutoSpeak', state.voiceAutoSpeak),
         persistence.saveSetting('voiceWakeEnabled', state.voiceWakeEnabled),
         persistence.saveSetting('wakeWordPhrase', state.wakeWordPhrase),
+        persistence.saveSetting('approvalMode', state.approvalMode),
         persistence.saveSetting('startupGreeting', state.startupGreeting),
         persistence.saveSetting('editorTheme', state.editorTheme),
         persistence.saveSetting('gitAutoCommit', state.gitAutoCommit),
@@ -2324,7 +2360,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, voiceWakeEnabled, wakeWordPhrase, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, voiceWakeEnabled, wakeWordPhrase, approvalMode, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
         persistence.loadMemories(),
         persistence.loadTasks(),
         persistence.loadCheckpoints(),
@@ -2374,6 +2410,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.loadSetting<boolean>('voiceAutoSpeak'),
         persistence.loadSetting<boolean>('voiceWakeEnabled'),
         persistence.loadSetting<string>('wakeWordPhrase'),
+        persistence.loadSetting<string>('approvalMode'),
         persistence.loadSetting<string>('startupGreeting'),
         persistence.loadSetting<ProviderConfig[]>('providers'),
         persistence.loadSetting<string | null>('activeModel'),
@@ -2866,6 +2903,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         voiceAutoSpeak: voiceAutoSpeak ?? get().voiceAutoSpeak,
         voiceWakeEnabled: voiceWakeEnabled ?? get().voiceWakeEnabled,
         wakeWordPhrase: wakeWordPhrase || get().wakeWordPhrase,
+        approvalMode: (approvalMode as any) || get().approvalMode,
         startupGreeting: startupGreeting || get().startupGreeting,
         browserHomeUrl: '',
         browserBookmarks: savedBookmarks ?? get().browserBookmarks,

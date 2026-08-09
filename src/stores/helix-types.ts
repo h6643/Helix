@@ -110,6 +110,7 @@ export interface ChatMessage {
   thinkingTime?: number
   tokenCount?: number
   thoughtTokens?: number
+  outputTokens?: number
   totalTokens?: number
   reasoning?: string
   steps?: ExecutionStep[]

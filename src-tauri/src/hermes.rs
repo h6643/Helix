@@ -27,6 +27,8 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::io::{BufReader, Read, Write};
+use std::process::{Command, Stdio};
 use tauri::{Emitter, State};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(120);
@@ -1889,6 +1891,177 @@ pub fn hermes_tts_stop(state: State<'_, Arc<AppState>>) -> Value {
     json!({"ok": true})
 }
 
+
+/// Streaming TTS: synthesize and play audio chunk-by-chunk.
+///
+/// Spawns the Python streaming TTS script, reads audio chunks from its stdout,
+/// and pipes them to aplay/paplay via a named pipe (FIFO). This allows audio
+/// to start playing before the full synthesis is complete.
+#[tauri::command]
+pub async fn hermes_tts_speak_stream(
+    state: State<'_, Arc<AppState>>,
+    text: String,
+) -> Result<Value, String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(json!({"success": true, "played": false}));
+    }
+
+    // Stop any existing playback first.
+    {
+        let mut guard = state.hermes.tts_playback_child.lock().unwrap();
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    let hermes_bin = match resolve_hermes_cmd() {
+        Some(b) => b,
+        None => return Err("找不到 hermes 可执行文件".to_string()),
+    };
+    let python = match resolve_hermes_python(&hermes_bin) {
+        Some(p) => p,
+        None => return Err("找不到 Python 解释器".to_string()),
+    };
+    let agent_root = match resolve_hermes_agent_root(&hermes_bin) {
+        Some(r) => r,
+        None => return Err("找不到 hermes-agent 根目录".to_string()),
+    };
+
+    let stream_script = agent_root.join("scripts").join("_helix_tts_stream.py");
+    if !stream_script.exists() {
+        return Err(format!("流式 TTS 脚本不存在: {}", stream_script.display()));
+    }
+
+    // Create a named pipe for streaming audio.
+    let pipe_name = format!(
+        "/tmp/helix_tts_stream_{}.fifo",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+
+    // Create the FIFO.
+    unsafe {
+        let c_path = std::ffi::CString::new(pipe_name.clone()).unwrap();
+        if libc::mkfifo(c_path.as_ptr(), 0o644) != 0 {
+            return Err(format!("创建命名管道失败: {}", pipe_name));
+        }
+    }
+
+    let pipe_path = pipe_name.clone();
+    let text_clone = text.clone();
+    let script_clone = stream_script.clone();
+    let agent_root_clone = agent_root.clone();
+    let hermes_bin_clone = hermes_bin.clone();
+
+    // Spawn the Python streaming script.
+    let mut child = Command::new(&python)
+        .arg(script_clone)
+        .arg("stream")
+        .arg(&text_clone)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("HERMES_HOME", hermes_data_dir().display().to_string())
+        .env("_HELIX_AGENT_ROOT", agent_root_clone.display().to_string())
+        .envs(crate::kanban::build_clean_env(&hermes_bin_clone))
+        .spawn()
+        .map_err(|e| format!("启动流式 TTS 脚本失败: {}", e))?;
+
+    let stdout = child.stdout.take().ok_or("无法获取 TTS 脚本 stdout")?;
+
+    // Spawn aplay to read from the FIFO in a separate thread.
+    let fifo_for_aplay = pipe_path.clone();
+    let aplay_handle = std::thread::spawn(move || {
+        // Wait for the FIFO to be ready.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let player = if let Some(p) = which_cmd("aplay") {
+            Command::new(p)
+                .args(["-q", "-t", "raw", "-f", "S16_LE", "-r", "24000", "-c", "1"])
+                .arg(&fifo_for_aplay)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .stdin(Stdio::null())
+                .spawn()
+                .ok()
+        } else if let Some(p) = which_cmd("paplay") {
+            Command::new(p)
+                .arg("--rate=24000")
+                .arg("--channels=1")
+                .arg("--format=s16le")
+                .arg(&fifo_for_aplay)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .stdin(Stdio::null())
+                .spawn()
+                .ok()
+        } else {
+            None
+        };
+
+        if let Some(mut player) = player {
+            let _ = player.wait();
+        }
+
+        // Cleanup FIFO.
+        let _ = std::fs::remove_file(&fifo_for_aplay);
+    });
+
+    // Read audio chunks from Python stdout and write to the FIFO.
+    let mut reader = BufReader::new(stdout);
+    let mut fifo_file = std::fs::File::create(&pipe_path)
+        .map_err(|e| format!("无法打开命名管道: {}", e))?;
+
+    // Read loop: parse length-prefixed chunks.
+    loop {
+        // Read 8-byte length header.
+        let mut len_buf = [0u8; 8];
+        match reader.read_exact(&mut len_buf) {
+            Ok(_) => {}
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    break;
+                }
+                return Err(format!("读取 TTS 数据头失败: {}", e));
+            }
+        }
+
+        let chunk_len = u64::from_le_bytes(len_buf) as usize;
+
+        // Zero length = end of stream.
+        if chunk_len == 0 {
+            break;
+        }
+
+        // Read the audio chunk.
+        let mut chunk = vec![0u8; chunk_len];
+        if let Err(e) = reader.read_exact(&mut chunk) {
+            return Err(format!("读取 TTS 音频数据失败: {}", e));
+        }
+
+        // Write to FIFO.
+        if let Err(e) = fifo_file.write_all(&chunk) {
+            return Err(format!("写入音频管道失败: {}", e));
+        }
+        let _ = fifo_file.flush();
+    }
+
+    // Close FIFO file to signal EOF to aplay.
+    drop(fifo_file);
+
+    // Store the child process handle for potential cancellation.
+    *state.hermes.tts_playback_child.lock().unwrap() = Some(child);
+
+    // Wait briefly for aplay to finish, then cleanup.
+    let _ = aplay_handle.join();
+
+    Ok(json!({"success": true, "played": true, "streaming": true}))
+}
+
+
 // ── Wake-word detection ──────────────────────────────────────────────────
 
 /// Spawn the Python wake-word bridge (`_helix_wake.py`) as a long-running
@@ -1940,12 +2113,21 @@ pub async fn hermes_wake_start(
     }
     let ld_library_path = ld_paths.join(":");
 
+    // Ensure PulseAudio / PipeWire can find the runtime socket when the app
+    // is launched from a .desktop file (which inherits a minimal env).
+    let runtime_dir = dirs::runtime_dir()
+        .or_else(|| std::env::var("XDG_RUNTIME_DIR").ok().map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })));
+    let pulse_socket = runtime_dir.join("pulse/native");
+
     let mut cmd = std::process::Command::new(&python);
     cmd.arg(&script)
         .envs(crate::kanban::build_clean_env(&hermes_bin))
         .env("HERMES_HOME", hermes_data_dir().display().to_string())
         .env("_HELIX_AGENT_ROOT", agent_root.display().to_string())
         .env("LD_LIBRARY_PATH", &ld_library_path)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("PULSE_SERVER", format!("unix:{}", pulse_socket.display()))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2007,8 +2189,18 @@ pub async fn hermes_wake_start(
         }
         // If we get here, the child's stdout closed — collect stderr for diagnostics.
         if let Some(stderr) = stderr {
-            // Best-effort read of stderr for logging.
-            drop(stderr);
+            use tokio::io::AsyncBufReadExt;
+            let reader = tokio::io::BufReader::new(
+                tokio::process::ChildStderr::from_std(stderr)
+                    .expect("failed to convert ChildStderr"),
+            );
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line = line.trim().to_string();
+                if !line.is_empty() {
+                    eprintln!("[wake-word stderr] {}", line);
+                }
+            }
         }
     });
 
