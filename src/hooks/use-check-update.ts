@@ -3,7 +3,7 @@
 import { useEffect } from 'react'
 import { useHelixStore } from '@/stores/helix-store'
 
-const GITHUB_REPO = 'NousResearch/hermes-agent'
+const GITHUB_REPO = 'h6643/Helix'
 let checked = false
 
 function parseVersion(ver: string): number[] {
@@ -23,12 +23,13 @@ function isNewer(current: string, latest: string): boolean {
 }
 
 async function getCurrentVersion(): Promise<string | null> {
-  // Only compare if we can get the actual Hermes backend version
+  // 对比 Helix 应用自身版本（来自 get_info），而非 hermes 后端版本
   try {
-    const hVer = await (window as any).electron?.app?.getHermesVersion?.()
-    if (hVer) return hVer
+    const info = await (window as any).electron?.app?.getInfo?.()
+    const v = info?.version
+    if (v) return String(v)
   } catch {}
-  return null // Can't determine Hermes version — skip update check
+  return null // 无法获取应用版本 — 跳过更新检查
 }
 
 export function useCheckUpdate() {
