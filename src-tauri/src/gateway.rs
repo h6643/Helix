@@ -19,7 +19,8 @@ use crate::state::{app_handle, AppState, ServeGatewayInfo};
 use rand::Rng;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -164,6 +165,21 @@ fn build_hermes_env(cmd: &Path, spawn_cwd: &Path) -> std::collections::HashMap<S
     env
 }
 
+fn helix_log_dir() -> std::path::PathBuf {
+    let base = dirs::data_local_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
+    let dir = base.join("Helix").join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+fn open_child_log(name: &str, header: &str) -> Option<std::fs::File> {
+    let mut f = OpenOptions::new().create(true).write(true).truncate(true)
+        .open(helix_log_dir().join(name)).ok()?;
+    let _ = writeln!(f, "{header}");
+    let _ = f.flush();
+    Some(f)
+}
+
 // ── spawn ─────────────────────────────────────────────────────────────────
 
 /// Spawn the gateway in the mode currently selected in state
@@ -254,6 +270,13 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
         })?;
 
     let pid = child.id();
+    let header = format!(
+        "=== Helix hermes spawn ===\ncmd  : {}\nargs : {:?}\ncwd  : {}\npid  : {}\ntime : {}\n===",
+        cmd.display(), args, spawn_cwd.display(), pid,
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    );
+    let out_log = open_child_log("hermes-stdout.log", &header);
+    let err_log = open_child_log("hermes-stderr.log", &header);
     {
         let mut slot = state.hermes.child.lock().unwrap();
         *slot = Some(child);
@@ -293,6 +316,7 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
 
     if let Some(stdout) = stdout {
         let state2 = Arc::clone(state);
+        let mut out_log = out_log;
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
@@ -300,6 +324,7 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
                     Ok(l) => l,
                     Err(_) => break,
                 };
+                if let Some(f) = out_log.as_mut() { let _ = writeln!(f, "{line}"); let _ = f.flush(); }
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -311,7 +336,7 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
                 }
             }
             // stdout EOF ⇒ process exited or crashed.
-            on_child_closed(&state2, pid);
+            on_child_closed(&state2, pid, None);
         });
     }
 
@@ -328,15 +353,15 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
                 match slot.as_mut() {
                     Some(c) if c.id() == pid => {
                         match c.try_wait() {
-                            Ok(Some(_)) => true,
-                            _ => false,
+                            Ok(Some(status)) => Some(status),
+                            _ => None,
                         }
                     }
                     _ => return, // replaced/removed
                 }
             };
-            if exited {
-                on_child_closed(&state_watch, pid);
+            if let Some(status) = exited {
+                on_child_closed(&state_watch, pid, Some(status));
                 return;
             }
             thread::sleep(Duration::from_millis(500));
@@ -344,6 +369,7 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
     });
 
     if let Some(stderr) = stderr {
+        let mut err_log = err_log;
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
@@ -351,6 +377,7 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
                     Ok(l) => l,
                     Err(_) => break,
                 };
+                if let Some(f) = err_log.as_mut() { let _ = writeln!(f, "{line}"); let _ = f.flush(); }
                 handle_stderr_line(&line, serve_mode);
             }
         });
@@ -476,13 +503,16 @@ fn handle_acp_line(line: &str) {
 }
 
 fn handle_stderr_line(line: &str, serve_mode: bool) {
+    let lowered = line.to_lowercase();
+    let is_error_line = lowered.contains("traceback") || lowered.contains("error")
+        || lowered.contains("exception") || lowered.contains("failed") || lowered.contains("fatal");
     // acp readiness signal
     if !serve_mode && line.to_lowercase().contains("acp client connected") {
         emit_simple("gateway.ready");
         return;
     }
     // Surface raw HTTP/auth debug.
-    if contains_http_auth(line) {
+    if contains_http_auth(line) || is_error_line {
         eprintln!("[Hermes stderr] {line}");
     }
     // gateway.retry events (upstream connection drops).
@@ -525,7 +555,7 @@ fn extract_attempt(line: &str) -> Option<u64> {
 }
 
 /// Called when a gateway exits (stdout EOF or watchdog). Deduped by pid.
-fn on_child_closed(state: &Arc<AppState>, pid: u32) {
+fn on_child_closed(state: &Arc<AppState>, pid: u32, status: Option<std::process::ExitStatus>) {
     // Guard against stale close events from a replaced process.
     {
         let mut slot = state.hermes.child.lock().unwrap();
@@ -543,7 +573,17 @@ fn on_child_closed(state: &Arc<AppState>, pid: u32) {
     *state.hermes.serve_info.write().unwrap() = None;
     READY_PIDS.lock().unwrap().clear();
 
-    emit_hermes_event("gateway.disconnected", &serde_json::json!({ "pid": pid }));
+    let exit_code = status.and_then(|s| s.code());
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(helix_log_dir().join("hermes-stderr.log")) {
+        let _ = writeln!(f, "=== child exited: pid={pid} code={exit_code:?} ===");
+        let _ = f.flush();
+    }
+
+    emit_hermes_event("gateway.disconnected", &serde_json::json!({
+        "pid": pid,
+        "exitCode": exit_code,
+        "expected": false,
+    }));
 
     // Unexpected exit (not a deliberate restart) → auto-respawn serve gateway.
     if mode == "serve" && !state.hermes.app_quitting.load(Ordering::Relaxed) {
@@ -566,7 +606,7 @@ fn schedule_respawn(state: Arc<AppState>) {
         emit_hermes_event(
             "error",
             &serde_json::json!({
-                "message": "Hermes 网关反复崩溃，已停止自动重启。请查看 Hermes 日志（hermes 数据目录下的 logs）后手动重启 Helix。",
+                "message": "Hermes 网关反复崩溃，已停止自动重启。请查看 %LOCALAPPDATA%\\Helix\\logs\\hermes-stderr.log 定位原因。",
             }),
         );
         return;

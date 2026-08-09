@@ -27,6 +27,7 @@ import {
     Users,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { getCurrentVersion } from '@/hooks/use-check-update'
 import { createPortal } from 'react-dom'
 import { useProviderStore } from '@/hermes-ui/provider-store'
@@ -560,6 +561,14 @@ export function HelixLayout() {
     }
   }, [chatMessages.length])
 
+  // ── System tray: "最近对话" menu item ────────────────────────────────
+  useEffect(() => {
+    const unlisten = listen('tray:show-recent', () => {
+      setShowSidebar(true)
+    })
+    return () => { unlisten.then(fn => fn()) }
+  }, [])
+
   // DiffPreview no longer auto-pops: per-file change stats (+green / -red) are
   // rendered inline in the conversation transcript (FileChangeSummary). The
   // top-right diff button still opens the review modal on demand.
@@ -716,6 +725,14 @@ export function HelixLayout() {
     useHelixStore.getState().clearExecutionFlow()
     useHelixStore.getState().setCurrentSessionId(null)
   }, [storeActions.clearChat])
+
+  // ── System tray: "新建对话" menu item ──────────────────────────────
+  useEffect(() => {
+    const unlisten = listen('tray:new-conversation', () => {
+      handleNewChat()
+    })
+    return () => { unlisten.then(fn => fn()) }
+  }, [handleNewChat])
 
   // Window menu state
   const [windowMenuOpen, setWindowMenuOpen] = useState(false)
@@ -958,7 +975,7 @@ export function HelixLayout() {
   const sidebarExpanded = showSidebar
 
   return (
-    <div className={`h-screen w-screen flex flex-col overflow-hidden ${
+    <div className={`relative h-screen w-screen flex flex-col overflow-hidden ${
       'bg-gradient-to-br from-background via-background to-primary/5'
     }`}>
       <KeyboardShortcuts />
@@ -1044,7 +1061,7 @@ export function HelixLayout() {
             >
               <div ref={helpMenuRef} className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1">
                 <div className="px-3 py-2 text-xs text-muted-foreground/60">
-                    版本 v{appVersion || '0.3.5'}
+                    版本 v{appVersion || '0.3.6'}
                   </div>
                   <button
                     className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
@@ -1060,7 +1077,7 @@ export function HelixLayout() {
                         }
                         const data = await res.json()
                         const latest = (data.tag_name || data.name || '').replace(/^v/i, '')
-                        const current = (await getCurrentVersion()) || '0.3.5'
+                        const current = (await getCurrentVersion()) || '0.3.6'
                         const curParts = current.split('.').map(Number)
                         const latParts = latest.split('.').map(Number)
                         let isNewer = false
@@ -1443,7 +1460,7 @@ export function HelixLayout() {
           </div>
           <div className={`absolute inset-0 z-20 ${showSubAgentPanel ? '' : 'hidden'}`}>
             <PanelSuspense>
-              <DelegationsPanel />
+              <DelegationsPanel onClose={() => storeActions.toggleSubAgentPanel()} />
             </PanelSuspense>
           </div>
 

@@ -26,6 +26,7 @@ mod window;
 
 use crate::state::{AppState, APP_HANDLE};
 use std::sync::Arc;
+use tauri::Emitter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -57,14 +58,72 @@ pub fn run() {
             if let Err(e) = gateway::spawn_gateway(&app_state) {
                 eprintln!("[Helix] gateway failed to start: {e}");
             }
+
+            // ── System tray ──────────────────────────────────────────────
+            use tauri::Manager;
+            use tauri::menu::{MenuBuilder, MenuItemBuilder};
+            use tauri::tray::TrayIconBuilder;
+
+            let show_item = MenuItemBuilder::with_id("show", "显示窗口").build(app)?;
+            let new_item = MenuItemBuilder::with_id("new", "新建对话").build(app)?;
+            let recent_item = MenuItemBuilder::with_id("recent", "最近对话").build(app)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .items(&[&show_item, &new_item, &recent_item, &quit_item])
+                .build()?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().cloned().unwrap())
+                .menu(&menu)
+                .tooltip("Helix")
+                .on_menu_event(move |app, event| {
+                    match event.id().as_ref() {
+                        "quit" => {
+                            if let Some(state) = app.try_state::<std::sync::Arc<crate::state::AppState>>() {
+                                crate::gateway::shutdown(&state);
+                            }
+                            app.exit(0);
+                        }
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "new" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = app.emit("tray:new-conversation", ());
+                            }
+                        }
+                        "recent" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = app.emit("tray:show-recent", ());
+                            }
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app)?;
+
             Ok(())
         })
         .on_window_event(|window, event| {
             use tauri::{Emitter, WindowEvent};
-            // Notify renderer of maximize state changes (custom titlebar buttons).
-            if let WindowEvent::Resized(_) = event {
-                let maximized = window.is_maximized().unwrap_or(false);
-                let _ = window.emit("window:maximized-changed", maximized);
+            match event {
+                WindowEvent::Resized(_) => {
+                    let maximized = window.is_maximized().unwrap_or(false);
+                    let _ = window.emit("window:maximized-changed", maximized);
+                }
+                WindowEvent::CloseRequested { api, .. } => {
+                    // Minimize to tray instead of closing.
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![

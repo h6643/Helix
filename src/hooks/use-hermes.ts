@@ -246,8 +246,8 @@ export function useHermes() {
     debug('[useHermes] Checking status on mount...')
     window.electron.hermes.status().then((status: { connected: boolean }) => {
       debug('[useHermes] Status:', status)
+      setHermesConnected(!!status.connected)
       if (status.connected) {
-        setHermesConnected(true)
         setHermesError(null)
       }
     }).catch((err: any) => {

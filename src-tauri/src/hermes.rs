@@ -372,36 +372,27 @@ pub async fn hermes_interrupt(state: State<'_, Arc<AppState>>, session_id: Strin
 
 
 
+fn is_gateway_ready(state: &AppState) -> bool {
+    let child_alive = state.hermes.child.lock().unwrap().is_some();
+    let serve_info_ready = state.hermes.serve_info.read().unwrap().is_some();
+    child_alive && serve_info_ready
+}
+
 #[tauri::command]
-
 pub fn hermes_status(state: State<'_, Arc<AppState>>) -> Value {
-
-    let connected = gateway_running(&state);
-
-    // Don't kill/respawn a serve process that is merely still starting up —
-
-    // the frontend polls every 1.5–3s, faster than `hermes serve` can bind.
-
+    let ready = is_gateway_ready(&state);
     let child_alive = state.hermes.child.lock().unwrap().is_some();
 
-    if !connected && !child_alive && env_gateway_mode() == "serve" {
-
+    if !ready && !child_alive && env_gateway_mode() == "serve" {
         // Lazily self-heal on the periodic health check (mirror hermes:status).
-
         let arc = Arc::clone(&state);
-
         match spawn_gateway(&arc) {
-
-            Ok(()) => return json!({ "connected": true }),
-
+            Ok(()) => return json!({ "connected": false, "spawning": true }),
             Err(e) => return json!({ "connected": false, "error": e }),
-
         }
-
     }
 
-    json!({ "connected": connected })
-
+    json!({ "connected": ready })
 }
 
 

@@ -1,6 +1,6 @@
 [package]
 name = "helix"
-version = "0.3.5"
+version = "0.3.6"
 description = "Helix — AI coding assistant (Tauri rewrite of the Electron shell)"
 authors = ["hyt"]
 edition = "2021"
@@ -14,9 +14,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = ["devtools", "tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+tray-icon = "0.19"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
