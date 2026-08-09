@@ -48,13 +48,17 @@ pub(crate) fn build_clean_env(hermes_bin: &std::path::Path) -> std::collections:
 }
 
 fn run_cli(hermes_cmd: &std::path::Path, args: &[String], timeout_ms: u64) -> (i32, String, String, Option<String>) {
-    let mut child = match Command::new(hermes_cmd)
-        .args(args)
-        .envs(build_clean_env(hermes_cmd))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = match {
+            let mut _kc = Command::new(hermes_cmd);
+            _kc.args(args)
+                .envs(build_clean_env(hermes_cmd))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            #[cfg(target_os = "windows")]
+            _kc.creation_flags(0x08000000);
+            _kc.spawn()
+        }
     {
         Ok(c) => c,
         Err(e) => return (-1, String::new(), String::new(), Some(e.to_string())),
