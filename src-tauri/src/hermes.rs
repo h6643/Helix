@@ -1943,12 +1943,18 @@ pub async fn hermes_tts_speak_stream(
             .unwrap_or(0)
     );
 
-    // Create the FIFO.
+    // Create the FIFO (Unix) or empty file (Windows).
+    #[cfg(unix)]
     unsafe {
         let c_path = std::ffi::CString::new(pipe_name.clone()).unwrap();
         if libc::mkfifo(c_path.as_ptr(), 0o644) != 0 {
             return Err(format!("创建命名管道失败: {}", pipe_name));
         }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(&pipe_name)
+            .map_err(|e| format!("创建临时音频文件失败: {}", e))?;
     }
 
     let pipe_path = pipe_name.clone();
@@ -1972,9 +1978,11 @@ pub async fn hermes_tts_speak_stream(
 
     let stdout = child.stdout.take().ok_or("无法获取 TTS 脚本 stdout")?;
 
-    // Spawn aplay to read from the FIFO in a separate thread.
-    let fifo_for_aplay = pipe_path.clone();
-    let aplay_handle = std::thread::spawn(move || {
+    // Spawn aplay to read from the FIFO in a separate thread (Unix only).
+    #[cfg(unix)]
+    let aplay_handle = {
+        let fifo_for_aplay = pipe_path.clone();
+        std::thread::spawn(move || {
         // Wait for the FIFO to be ready.
         std::thread::sleep(Duration::from_millis(50));
 
@@ -2006,9 +2014,12 @@ pub async fn hermes_tts_speak_stream(
             let _ = player.wait();
         }
 
-        // Cleanup FIFO.
-        let _ = std::fs::remove_file(&fifo_for_aplay);
-    });
+            // Cleanup FIFO.
+            let _ = std::fs::remove_file(&fifo_for_aplay);
+        })
+    };
+    #[cfg(not(unix))]
+    let aplay_handle = std::thread::spawn(|| {});
 
     // Read audio chunks from Python stdout and write to the FIFO.
     let mut reader = BufReader::new(stdout);
@@ -2117,7 +2128,7 @@ pub async fn hermes_wake_start(
     // is launched from a .desktop file (which inherits a minimal env).
     let runtime_dir = dirs::runtime_dir()
         .or_else(|| std::env::var("XDG_RUNTIME_DIR").ok().map(std::path::PathBuf::from))
-        .unwrap_or_else(|| std::path::PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })));
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("/run/user/{}", if cfg!(unix) { unsafe { libc::getuid() } } else { 0 })));
     let pulse_socket = runtime_dir.join("pulse/native");
 
     let mut cmd = std::process::Command::new(&python);
