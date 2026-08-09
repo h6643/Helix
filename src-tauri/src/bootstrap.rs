@@ -223,17 +223,42 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     } else {
         venv_path.join("bin").join("pip")
     };
-    let output = Command::new(&pip)
+    // Use a timeout to prevent pip from hanging indefinitely (e.g. network issues).
+    // 5 minutes should be enough for a首次 install; subsequent runs skip pip entirely.
+    let mut pip_child = Command::new(&pip)
         .args(["install", "-e", "."])
         .current_dir(&target_dir)
-        .output()
-        .map_err(|e| format!("pip install 失败: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        eprintln!("[bootstrap] pip install stderr: {stderr}");
-        eprintln!("[bootstrap] pip install stdout: {stdout}");
-        return Err(format!("pip install 失败: {stderr}"));
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("pip install 启动失败: {e}"))?;
+
+    let pip_timeout = std::time::Duration::from_secs(300); // 5 minutes
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Wait for the process in a background thread so we can enforce a timeout.
+    std::thread::spawn(move || {
+        let status = pip_child.wait();
+        let _ = tx.send(status);
+    });
+    match rx.recv_timeout(pip_timeout) {
+        Ok(Ok(status)) if status.success() => {
+            eprintln!("[bootstrap] pip install complete");
+        }
+        Ok(Ok(status)) => {
+            eprintln!("[bootstrap] pip install failed (exit {})", status);
+            return Err(format!("pip install 失败 (exit code: {})", status));
+        }
+        Ok(Err(e)) => {
+            return Err(format!("pip install 等待失败: {e}"));
+        }
+        Err(_) => {
+            // Timeout — the child process is owned by the spawned thread and
+            // will be cleaned up when the thread exits. For now, report the
+            // error and let the app continue (gateway will fail to start but
+            // the user can retry).
+            eprintln!("[bootstrap] pip install timed out after 300s");
+            return Err("pip install 超时（5分钟），可能是网络问题。请检查网络后重试。".to_string());
+        }
     }
 
     eprintln!("[bootstrap] hermes-agent install complete");

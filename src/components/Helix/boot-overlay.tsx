@@ -1,21 +1,83 @@
 'use client'
 
-import { Loader2, WifiOff, AlertTriangle, RefreshCw } from 'lucide-react'
-import React from 'react'
+import { Loader2, WifiOff, RefreshCw, Package, X, CheckCircle2 } from 'lucide-react'
+import React, { useEffect, useState, useRef } from 'react'
 import { useHelixStore } from '@/stores/helix-store'
+
+/** Bootstrap stage reported by the Rust backend. */
+type BootstrapStage = 'copy' | 'venv' | 'pip' | 'done' | null
+
+const STAGE_LABELS: Record<string, string> = {
+  copy: '正在准备 Hermes 运行环境...',
+  venv: '正在创建 Python 虚拟环境...',
+  pip: '正在安装 Python 依赖（首次启动约需 1-2 分钟）...',
+}
 
 /**
  * BootOverlay — shown over the app while the Hermes gateway is connecting or
  * when it fails/disconnects, mirroring the official app's boot/connecting
  * surface with clear recovery semantics.
+ *
+ * Also handles first-run bootstrap progress (extracting bundled hermes-agent).
  */
 export function BootOverlay() {
   const status = useHelixStore((s) => s.gatewayStatus)
   const setGatewayStatus = useHelixStore((s) => s.setGatewayStatus)
+  const [bootstrapStage, setBootstrapStage] = useState<BootstrapStage>(null)
+  const [bootstrapMessage, setBootstrapMessage] = useState('')
+  const [isReady, setIsReady] = useState(false)
+  const [isFadingOut, setIsFadingOut] = useState(false)
+  const [showSuccess, setShowSuccess] = useState(false)
 
-  if (status === 'ready') return null
+  // Handle fade-out animation when ready
+  useEffect(() => {
+    if (status === 'ready' && !isFadingOut) {
+      setShowSuccess(true)
+      setIsFadingOut(true)
+      const timer = setTimeout(() => {
+        setIsReady(true)
+      }, 800) // Fade out duration
+      return () => clearTimeout(timer)
+    }
+  }, [status, isFadingOut])
+
+  // Listen for bootstrap progress events from the Rust backend.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    const setup = async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event')
+        unlisten = await listen<{ method: string; params: { stage: string; message: string } }>(
+          'hermes:event',
+          (event) => {
+            if (event.payload.method === 'bootstrap:progress') {
+              const { stage, message } = event.payload.params
+              if (stage === 'done') {
+                setBootstrapStage('done')
+                setBootstrapMessage('')
+              } else {
+                setBootstrapStage(stage as BootstrapStage)
+                setBootstrapMessage(message)
+              }
+            }
+          },
+        )
+      } catch {
+        // Non-Tauri environment (dev server without backend) — silently ignore.
+      }
+    }
+    void setup()
+    return () => {
+      unlisten?.()
+    }
+  }, [])
+
+  const [dismissed, setDismissed] = useState(false)
+
+  if (isReady || dismissed) return null
 
   const isConnecting = status === 'connecting'
+  const isBootstrapping = bootstrapStage !== null && bootstrapStage !== 'done' && isConnecting
 
   const retry = () => {
     setGatewayStatus('connecting')
@@ -28,45 +90,82 @@ export function BootOverlay() {
           return
         }
       } catch {}
-      if (n < 12) setTimeout(() => probe(n + 1), 1500)
+      if (n < 20) setTimeout(() => probe(n + 1), 1500)
     }
     probe()
   }
 
   return (
-    <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-background/95 backdrop-blur-sm">
-      <div className="w-full max-w-sm text-center px-6">
-        <div className="mx-auto mb-5 w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center">
-          {isConnecting ? (
-            <Loader2 className="size-7 text-primary animate-spin" />
+    <div
+      className={`fixed bottom-4 right-4 z-[10000] w-80 rounded-xl border bg-card shadow-lg transition-all duration-500 ${
+        isFadingOut ? 'opacity-0 translate-y-2 pointer-events-none' : 'opacity-100'
+      }`}
+    >
+      <div className="p-4 text-center relative">
+        {/* Close button */}
+        <button
+          onClick={() => setDismissed(true)}
+          className="absolute top-2 right-2 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          title="关闭"
+        >
+          <X className="size-3.5" />
+        </button>
+
+        <div className="mx-auto mb-3 w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+          {isBootstrapping ? (
+            <Package className="size-5 text-primary animate-pulse" />
+          ) : isConnecting ? (
+            <Loader2 className="size-5 text-primary animate-spin" />
           ) : (
-            <WifiOff className="size-7 text-destructive" />
+            <WifiOff className="size-5 text-destructive" />
           )}
         </div>
 
-        <h1 className="text-base font-semibold mb-1.5">
-          {isConnecting ? '正在连接 Hermes 网关…' : '无法连接到 Hermes 网关'}
+        <h1 className="text-sm font-semibold mb-1">
+          {isBootstrapping
+            ? (STAGE_LABELS[bootstrapStage!] ?? bootstrapMessage)
+            : isConnecting
+              ? '正在连接 Hermes 网关…'
+              : '无法连接到 Hermes 网关'}
         </h1>
         <p className="text-xs text-muted-foreground leading-relaxed">
-          {isConnecting
-            ? 'Helix 正在启动本地 Hermes Agent 运行时，请稍候。'
-            : '网关未运行或已断开。请确认 Hermes 服务已启动，然后重试。'}
+          {isBootstrapping
+            ? '首次启动需要安装运行环境，请耐心等待。'
+            : isConnecting
+              ? '正在启动 Hermes Agent，请稍候。'
+              : '网关未运行或已断开。'}
         </p>
 
         {!isConnecting && (
           <button
             onClick={retry}
-            className="mt-5 mx-auto inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
+            className="mt-3 mx-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
           >
-            <RefreshCw className="size-3.5" />
+            <RefreshCw className="size-3" />
             重试连接
           </button>
         )}
 
-        <div className="mt-6 flex items-center justify-center gap-1.5 text-[10px] text-muted-foreground/50">
-          <AlertTriangle className="size-3" />
-          {isConnecting ? '首次启动可能需要几秒钟' : '检查 %LOCALAPPDATA%\\hermes 下的日志'}
-        </div>
+        {/* Bootstrap progress bar */}
+        {isBootstrapping && bootstrapStage && (
+          <div className="mt-3 w-full bg-muted rounded-full h-1 overflow-hidden">
+            <div
+              className="h-full bg-primary rounded-full transition-all duration-700"
+              style={{
+                width:
+                  bootstrapStage === 'copy' ? '15%' : bootstrapStage === 'venv' ? '35%' : '70%',
+              }}
+            />
+          </div>
+        )}
+
+        {/* Success animation */}
+        {showSuccess && (
+          <div className="mt-3 flex items-center justify-center gap-1.5 text-xs text-green-500">
+            <CheckCircle2 className="size-3.5" />
+            启动成功
+          </div>
+        )}
       </div>
     </div>
   )

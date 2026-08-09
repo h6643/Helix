@@ -24,8 +24,7 @@ import {
   XCircle,
   MoreHorizontal,
   FolderTree,
-  Mail,
-  Users,
+    Users,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
@@ -584,36 +583,55 @@ export function HelixLayout() {
     const hermes = (window as any).electron?.hermes
     if (!hermes?.status) return
     let timer: any = null
+    let startupTimer: any = null
+    let stopped = false
     const unsubscribe = hermes.onEvent?.((event: string) => {
       if (event === 'gateway.ready') {
         useHermesStore.getState().setHermesConnected(true)
         useHermesStore.getState().setHermesError(null)
         useHelixStore.getState().setGatewayStatus('ready')
         if (timer) { clearTimeout(timer); timer = null }
+        if (startupTimer) { clearTimeout(startupTimer); startupTimer = null }
       } else if (event === 'gateway.disconnected') {
         useHermesStore.getState().setHermesConnected(false)
         useHelixStore.getState().setGatewayStatus('disconnected')
       }
     })
     const tryConnect = async (retries = 0) => {
+      if (stopped) return
       try {
         const st = await hermes.status()
         if (st?.connected) {
           useHermesStore.getState().setHermesConnected(true)
           useHelixStore.getState().setGatewayStatus('ready')
           if (timer) { clearTimeout(timer); timer = null }
+          if (startupTimer) { clearTimeout(startupTimer); startupTimer = null }
           return
         }
       } catch {}
-      // Poll a few times so slow Hermes startup doesn't leave the badge stuck
-      // on "connecting". Once we hit connected or receive gateway.ready we stop.
       useHelixStore.getState().setGatewayStatus('connecting')
-      if (retries < 12 && timer === null) {
-        timer = setTimeout(() => tryConnect(retries + 1), 1500)
+      // Continue polling with increasing intervals: 1.5s for first 12, then 3s up to 60s total
+      const delay = retries < 12 ? 1500 : 3000
+      if (timer === null) {
+        timer = setTimeout(() => { timer = null; tryConnect(retries + 1) }, delay)
       }
     }
     tryConnect()
-    return () => { try { unsubscribe?.() } catch {}; if (timer) clearTimeout(timer) }
+    // Startup safety timeout: if gateway never becomes ready within 60s,
+    // transition to 'disconnected' so the user sees a retry button instead
+    // of being stuck on the blocking overlay forever.
+    startupTimer = setTimeout(() => {
+      const current = useHelixStore.getState().gatewayStatus
+      if (current !== 'ready') {
+        useHelixStore.getState().setGatewayStatus('disconnected')
+      }
+    }, 60_000)
+    return () => {
+      stopped = true
+      try { unsubscribe?.() } catch {}
+      if (timer) clearTimeout(timer)
+      if (startupTimer) clearTimeout(startupTimer)
+    }
   }, [])
 
   // ── Auto-speak latest assistant reply when a run completes ─────────────
@@ -1171,8 +1189,10 @@ export function HelixLayout() {
           </div>
         )}
 
+        {/* Floating cards container */}
+        <div className="flex-1 flex flex-row m-3 ml-0 overflow-hidden">
         {/* Floating card — main content */}
-        <div className="flex-1 flex flex-col m-3 ml-0 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
+        <div className="flex-1 flex flex-col rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
           {/* Main area */}
           <div className="relative flex-1 h-full flex flex-col overflow-hidden">
           <div className={`flex-1 flex flex-row overflow-hidden ${sidePanelOpen ? 'hidden' : ''}`}>
@@ -1299,7 +1319,7 @@ export function HelixLayout() {
                   >
                     <Terminal className="size-4" />
                   </button>
-                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'files' && rightSidebarTab !== 'email' && rightSidebarTab !== 'diff') && (
+                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'files' && rightSidebarTab !== 'diff') && (
                   <button
                     ref={browserMenuButtonRef}
                     onClick={() => setBrowserMenuOpen(v => !v)}
@@ -1334,14 +1354,7 @@ export function HelixLayout() {
                           <span className="flex-1 text-left">目录</span>
                           {rightSidebarTab === 'files' && <CheckCircle2 className="size-3.5" />}
                         </button>
-                        <button
-                          onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'email' ? null : 'email'); setBrowserMenuOpen(false) }}
-                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'email' ? 'text-primary' : 'text-foreground/80'}`}
-                        >
-                          <Mail className="size-3.5" />
-                          <span className="flex-1 text-left">邮箱</span>
-                          {rightSidebarTab === 'email' && <CheckCircle2 className="size-3.5" />}
-                        </button>
+                        
                         <button
                           onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'diff' ? null : 'diff'); setBrowserMenuOpen(false) }}
                           className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'diff' ? 'text-primary' : 'text-foreground/80'}`}
@@ -1362,19 +1375,27 @@ export function HelixLayout() {
               </div>
               <TerminalPanel onClose={storeActions.toggleTerminal} />
               </div>
-              {rightSidebarTab && (
-                <div className="relative shrink-0" style={{ width: rightSidebarWidth }}>
-                  <div
-                    className={`absolute top-0 -left-1 w-2 h-full cursor-col-resize z-30 group ${isRightDragging ? 'bg-primary/20' : ''}`}
-                    onMouseDown={handleRightDragStart}
-                  >
-                    <div className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${isRightDragging ? 'bg-primary/40' : 'bg-transparent group-hover:bg-border/40'}`} />
-                  </div>
-                  <RightSidebar key={rightSidebarTab} />
-                </div>
-              )}
             </div>
-          {showScheduledTasksPanel && (
+          </div>
+        </div>
+
+        {/* Floating card — right sidebar */}
+        {rightSidebarTab && (
+          <div className="relative shrink-0" style={{ width: rightSidebarWidth }}>
+            <div
+              className={`absolute top-0 -left-1 w-2 h-full cursor-col-resize z-30 group ${isRightDragging ? 'bg-primary/20' : ''}`}
+              onMouseDown={handleRightDragStart}
+            >
+              <div className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${isRightDragging ? 'bg-primary/40' : 'bg-transparent group-hover:bg-border/40'}`} />
+            </div>
+            <div className="h-full rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
+              <RightSidebar key={rightSidebarTab} />
+            </div>
+          </div>
+        )}
+        </div>
+      </div>
+        {showScheduledTasksPanel && (
             <div className="absolute inset-0 z-20">
               <PanelSuspense>
                 <ScheduledTasksPanel onClose={() => storeActions.toggleScheduledTasksPanel()} />
@@ -1419,9 +1440,6 @@ export function HelixLayout() {
               <DelegationsPanel />
             </PanelSuspense>
           </div>
-        </div>
-      </div>
-      </div>
 
       {/* Overlay panels */}
       <Suspense fallback={null}>
