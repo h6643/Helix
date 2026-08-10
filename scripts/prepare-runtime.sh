@@ -43,13 +43,18 @@ TARGET_TRIPLE=$(detect_target_triple)
 ARCHIVE_NAME="cpython-${PYTHON_VERSION}+${PBS_RELEASE}-${TARGET_TRIPLE}-install_only.tar.gz"
 PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${ARCHIVE_NAME}"
 PYTHON_BIN="$RESOURCES_DIR/python/bin/python3"
-if [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "mingw" ] || [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "msys" ] || [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "cygwin" ]; then
-  PYTHON_BIN="$RESOURCES_DIR/python/python.exe"
-fi
+case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
+  mingw*|msys*|cygwin*|windows*)
+    PYTHON_BIN="$RESOURCES_DIR/python/python.exe" ;;
+esac
 VENV_DIR="$RESOURCES_DIR/hermes-agent/venv"
 VENV_HERMES="$VENV_DIR/bin/hermes"
+VENV_PYTHON="$VENV_DIR/bin/python3"
+VENV_PIP="$VENV_DIR/bin/pip"
 if [ "${TARGET_TRIPLE##*-}" = "msvc" ]; then
   VENV_HERMES="$VENV_DIR/Scripts/hermes.exe"
+  VENV_PYTHON="$VENV_DIR/Scripts/python.exe"
+  VENV_PIP="$VENV_DIR/Scripts/pip.exe"
 fi
 
 # ── Idempotency ────────────────────────────────────────────────────────────
@@ -78,11 +83,11 @@ echo "[prepare]   python binary: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 # ── 2. Create --copies venv ─────────────────────────────────────────────────
 echo "[prepare] creating --copies venv..."
 "$PYTHON_BIN" -m venv --copies "$VENV_DIR"
-echo "[prepare]   venv python: $("$VENV_DIR/bin/python3" --version 2>&1)"
+echo "[prepare]   venv python: $("$VENV_PYTHON" --version 2>&1)"
 
 # ── 3. pip install hermes-agent ─────────────────────────────────────────────
 echo "[prepare] pip install hermes-agent..."
-HERMES_NIX_BUILD=1 "$VENV_DIR/bin/pip" install \
+HERMES_NIX_BUILD=1 "$VENV_PIP" install \
   --quiet \
   --disable-pip-version-check \
   "$REPO_ROOT/hermes-agent/"
@@ -90,7 +95,7 @@ HERMES_NIX_BUILD=1 "$VENV_DIR/bin/pip" install \
 # Verify the hermes entry point was created.
 if [ ! -f "$VENV_HERMES" ]; then
   echo "ERROR: hermes entry point not found at $VENV_HERMES after pip install" >&2
-  ls -la "$VENV_DIR/bin/" 2>/dev/null || echo "(venv/bin does not exist)"
+  ls -la "$(dirname "$VENV_HERMES")" 2>/dev/null || echo "(venv scripts dir does not exist)"
   exit 1
 fi
 echo "[prepare]   hermes entry: $VENV_HERMES"
