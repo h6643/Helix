@@ -596,7 +596,7 @@ export function HelixLayout() {
     let timer: any = null
     let startupTimer: any = null
     let stopped = false
-    const unsubscribe = hermes.onEvent?.((event: string) => {
+    const unsubscribe = hermes.onEvent?.((event: string, params?: any) => {
       if (event === 'gateway.ready') {
         useHermesStore.getState().setHermesConnected(true)
         useHermesStore.getState().setHermesError(null)
@@ -606,6 +606,15 @@ export function HelixLayout() {
       } else if (event === 'gateway.disconnected') {
         useHermesStore.getState().setHermesConnected(false)
         useHelixStore.getState().setGatewayStatus('disconnected')
+      } else if (event === 'gateway.retry') {
+        const phase = params?.phase as 'error' | 'retrying' | 'recovered' | undefined
+        if (phase === 'recovered') {
+          useHermesStore.getState().setHermesConnected(true)
+          useHelixStore.getState().setGatewayStatus('ready')
+        } else {
+          useHermesStore.getState().setHermesConnected(false)
+          useHelixStore.getState().setGatewayStatus('connecting')
+        }
       }
     })
     const tryConnect = async (retries = 0) => {
@@ -619,7 +628,10 @@ export function HelixLayout() {
           if (startupTimer) { clearTimeout(startupTimer); startupTimer = null }
           return
         }
-      } catch {}
+        useHermesStore.getState().setHermesConnected(false)
+      } catch {
+        useHermesStore.getState().setHermesConnected(false)
+      }
       useHelixStore.getState().setGatewayStatus('connecting')
       // Continue polling with increasing intervals: 1.5s for first 12, then 3s up to 60s total
       const delay = retries < 12 ? 1500 : 3000
@@ -1061,7 +1073,7 @@ export function HelixLayout() {
             >
               <div ref={helpMenuRef} className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1">
                 <div className="px-3 py-2 text-xs text-muted-foreground/60">
-                    版本 v{appVersion || '0.3.7'}
+                    版本 v{appVersion || '0.3.8'}
                   </div>
                   <button
                     className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
@@ -1077,7 +1089,7 @@ export function HelixLayout() {
                         }
                         const data = await res.json()
                         const latest = (data.tag_name || data.name || '').replace(/^v/i, '')
-                        const current = (await getCurrentVersion()) || '0.3.7'
+                        const current = (await getCurrentVersion()) || '0.3.8'
                         const curParts = current.split('.').map(Number)
                         const latParts = latest.split('.').map(Number)
                         let isNewer = false

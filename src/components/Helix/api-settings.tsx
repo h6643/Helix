@@ -1525,7 +1525,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-muted-foreground">版本</span>
-                      <span className="text-sm font-mono text-foreground">v{appVersion || '0.3.7'}</span>
+                      <span className="text-sm font-mono text-foreground">v{appVersion || '0.3.8'}</span>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-sm text-muted-foreground">许可证</span>
