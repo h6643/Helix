@@ -5,12 +5,10 @@ import React, { useEffect, useState, useRef } from 'react'
 import { useHelixStore } from '@/stores/helix-store'
 
 /** Bootstrap stage reported by the Rust backend. */
-type BootstrapStage = 'copy' | 'venv' | 'pip' | 'done' | null
+type BootstrapStage = 'preparing' | 'done' | null
 
 const STAGE_LABELS: Record<string, string> = {
-  copy: '正在准备 Hermes 运行环境...',
-  venv: '正在创建 Python 虚拟环境...',
-  pip: '正在安装 Python 依赖（首次启动约需 1-2 分钟）...',
+  preparing: '正在准备 Hermes 运行环境...',
 }
 
 /**
@@ -152,8 +150,7 @@ export function BootOverlay() {
             <div
               className="h-full bg-primary rounded-full transition-all duration-700"
               style={{
-                width:
-                  bootstrapStage === 'copy' ? '15%' : bootstrapStage === 'venv' ? '35%' : '70%',
+                width: bootstrapStage === 'preparing' ? '50%' : '100%',
               }}
             />
           </div>

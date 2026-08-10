@@ -32,6 +32,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Prepare Hermes runtime (python-build-standalone + venv)
+        run: bash scripts/prepare-runtime.sh
+
       - name: Build Tauri app
         run: npx tauri build
 

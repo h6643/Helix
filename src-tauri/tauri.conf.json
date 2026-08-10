@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Helix",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "identifier": "com.helix.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -44,42 +44,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../hermes-agent/pyproject.toml": "hermes-agent/pyproject.toml",
-      "../hermes-agent/hermes": "hermes-agent/hermes",
-      "../hermes-agent/batch_runner.py": "hermes-agent/batch_runner.py",
-      "../hermes-agent/cli.py": "hermes-agent/cli.py",
-      "../hermes-agent/hermes_bootstrap.py": "hermes-agent/hermes_bootstrap.py",
-      "../hermes-agent/hermes_constants.py": "hermes-agent/hermes_constants.py",
-      "../hermes-agent/hermes_logging.py": "hermes-agent/hermes_logging.py",
-      "../hermes-agent/hermes_state_common.py": "hermes-agent/hermes_state_common.py",
-      "../hermes-agent/hermes_state_portability.py": "hermes-agent/hermes_state_portability.py",
-      "../hermes-agent/hermes_state.py": "hermes-agent/hermes_state.py",
-      "../hermes-agent/hermes_state_schema.py": "hermes-agent/hermes_state_schema.py",
-      "../hermes-agent/hermes_state_search.py": "hermes-agent/hermes_state_search.py",
-      "../hermes-agent/hermes_time.py": "hermes-agent/hermes_time.py",
-      "../hermes-agent/mcp_serve.py": "hermes-agent/mcp_serve.py",
-      "../hermes-agent/mini_swe_runner.py": "hermes-agent/mini_swe_runner.py",
-      "../hermes-agent/model_tools.py": "hermes-agent/model_tools.py",
-      "../hermes-agent/run_agent.py": "hermes-agent/run_agent.py",
-      "../hermes-agent/setup.py": "hermes-agent/setup.py",
-      "../hermes-agent/toolset_distributions.py": "hermes-agent/toolset_distributions.py",
-      "../hermes-agent/toolsets.py": "hermes-agent/toolsets.py",
-      "../hermes-agent/trajectory_compressor.py": "hermes-agent/trajectory_compressor.py",
-      "../hermes-agent/utils.py": "hermes-agent/utils.py",
-      "../hermes-agent/acp_adapter/": "hermes-agent/acp_adapter/",
-      "../hermes-agent/agent/": "hermes-agent/agent/",
-      "../hermes-agent/gateway/": "hermes-agent/gateway/",
-      "../hermes-agent/hermes_cli/": "hermes-agent/hermes_cli/",
-      "../hermes-agent/plugins/": "hermes-agent/plugins/",
-      "../hermes-agent/providers/": "hermes-agent/providers/",
-      "../hermes-agent/scripts/": "hermes-agent/scripts/",
-      "../hermes-agent/tools/": "hermes-agent/tools/",
-      "../hermes-agent/cron/": "hermes-agent/cron/",
-      "../hermes-agent/locales/": "hermes-agent/locales/",
-      "../hermes-agent/assets/": "hermes-agent/assets/",
-      "../hermes-agent/tui_gateway/": "hermes-agent/tui_gateway/",
-      "../hermes-agent/native/": "hermes-agent/native/",
-      "../hermes-agent/LICENSE": "hermes-agent/LICENSE"
+      "resources/hermes-runtime/python/": "hermes-runtime/python/",
+      "resources/hermes-runtime/hermes-agent/": "hermes-runtime/hermes-agent/"
     }
   }
 }

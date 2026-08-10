@@ -1,0 +1,3 @@
+# CI-generated runtime directory — contents are built by scripts/prepare-runtime.sh
+*
+!.gitignore
