@@ -55,8 +55,8 @@ if [ ! -d "$SITE_PACKAGES" ]; then
 fi
 
 # ── Idempotency ────────────────────────────────────────────────────────────
-if [ -d "$SITE_PACKAGES/hermes" ]; then
-  echo "[prepare] hermes already installed in $SITE_PACKAGES — skipping."
+if [ -d "$SITE_PACKAGES/hermes_cli" ]; then
+  echo "[prepare] hermes_cli already installed in $SITE_PACKAGES — skipping."
   echo "[prepare] delete $RESOURCES_DIR to force a rebuild."
   exit 0
 fi
@@ -79,7 +79,9 @@ echo "[prepare]   python binary: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 
 # ── 2. pip install hermes-agent into the standalone interpreter ──────────────
 # No venv: deps land in the standalone Python's own site-packages, which is
-# fully portable (copies cleanly to any machine). Launching is `python -m hermes`.
+# fully portable (copies cleanly to any machine). Launching is
+# `python -m hermes_cli.main` (hermes-agent has NO top-level `hermes` module;
+# its console entry point is `hermes = "hermes_cli.main:main"`).
 echo "[prepare] pip install hermes-agent (into standalone site-packages)..."
 HERMES_NIX_BUILD=1 "$PYTHON_BIN" -m pip install \
   --quiet \
@@ -87,8 +89,10 @@ HERMES_NIX_BUILD=1 "$PYTHON_BIN" -m pip install \
   "$REPO_ROOT/hermes-agent/"
 
 # Verify the hermes package is importable from the standalone interpreter.
-if ! "$PYTHON_BIN" -c "import hermes" 2>/dev/null; then
-  echo "ERROR: hermes not importable after pip install" >&2
+# The importable package is `hermes_cli` (NOT `hermes` — that name only exists
+# as the repo's source launcher script, never as an installed module).
+if ! "$PYTHON_BIN" -c "import hermes_cli.main" 2>/dev/null; then
+  echo "ERROR: hermes_cli not importable after pip install" >&2
   "$PYTHON_BIN" -m pip show hermes 2>/dev/null || true
   exit 1
 fi

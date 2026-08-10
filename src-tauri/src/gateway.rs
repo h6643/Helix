@@ -245,7 +245,9 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
     }
 
     // When the launcher is the bundled standalone Python (not the venv
-    // `hermes.exe`), we must invoke the module: `python -m hermes …`.
+    // `hermes.exe`), we must invoke the module: `python -m hermes_cli.main …`.
+    // hermes-agent has no top-level `hermes` module; its console entry point
+    // is `hermes = "hermes_cli.main:main"`.
     let is_python = cmd
         .file_name()
         .map(|n| {
@@ -254,7 +256,7 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
         })
         .unwrap_or(false);
     let pre: Vec<String> = if is_python {
-        vec!["-m".into(), "hermes".into()]
+        vec!["-m".into(), "hermes_cli.main".into()]
     } else {
         vec![]
     };
