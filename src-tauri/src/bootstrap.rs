@@ -60,6 +60,25 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Returns true if the standalone Python runtime at `python_dir` actually has
+/// the `hermes_cli` package installed in its site-packages.
+///
+/// We can't just check that `python.exe` exists: an older runtime copied from
+/// a pre-standalone build (venv era) leaves a base interpreter without
+/// `hermes_cli`, and the naive `py.exists()` guard would then skip re-extraction
+/// forever — silently breaking every future launch (ModuleNotFoundError).
+fn hermes_cli_present(python_dir: &Path) -> bool {
+    let candidates = [
+        python_dir.join("Lib").join("site-packages").join("hermes_cli"),
+        python_dir
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages")
+            .join("hermes_cli"),
+    ];
+    candidates.iter().any(|p| p.exists())
+}
+
 /// Acquire a cross-process advisory lock so only one Helix instance runs
 /// the bootstrap at a time.
 #[cfg(target_os = "linux")]
@@ -106,9 +125,13 @@ fn bootstrap_lock() -> Option<fs::File> {
 /// gateway spawn attempt so the existing error paths handle it.
 pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> {
     let py = standalone_python();
+    let python_dir = py.parent().unwrap_or(&py).to_path_buf();
 
-    // Already bootstrapped — quick return.
-    if py.exists() {
+    // Already bootstrapped with a usable runtime — quick return.
+    // `hermes_cli` must be importable; otherwise this is a stale base
+    // interpreter (venv-era copy) that would crash on launch, so we fall
+    // through and re-extract below.
+    if py.exists() && hermes_cli_present(&python_dir) {
         return Ok(());
     }
 
@@ -116,8 +139,16 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     let _lock = bootstrap_lock();
 
     // Double-check after acquiring lock.
-    if py.exists() {
+    if py.exists() && hermes_cli_present(&python_dir) {
         return Ok(());
+    }
+
+    // Stale/missing runtime — wipe the old dir so the copy below is clean.
+    if py.exists() {
+        eprintln!(
+            "[bootstrap] python runtime present but hermes_cli missing — re-extracting"
+        );
+        let _ = fs::remove_dir_all(&python_dir);
     }
 
     // ── Locate resource directory ─────────────────────────────────────
