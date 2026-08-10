@@ -88,6 +88,27 @@ HERMES_NIX_BUILD=1 "$PYTHON_BIN" -m pip install \
   --disable-pip-version-check \
   "$REPO_ROOT/hermes-agent/"
 
+# ── 2b. Wake-word dependencies (openwakeword + PortAudio via sounddevice) ──
+# On Windows sounddevice ships its own PortAudio binary; on Linux we prepend
+# ~/.local/lib via LD_LIBRARY_PATH in the Rust spawn (same as voice mode).
+echo "[prepare] pip install wake-word deps (openwakeword, sounddevice)..."
+"$PYTHON_BIN" -m pip install \
+  --quiet \
+  --disable-pip-version-check \
+  "openwakeword" "sounddevice" "numpy" || \
+  echo "[prepare] WARNING: wake-word deps failed to install (non-fatal for build)"
+
+# Pre-download openWakeWord's shared feature models (melspectrogram.onnx,
+# embedding_model.onnx, silero_vad.onnx) into the standalone interpreter's
+# site-packages. The wake-word engine loads these on every start; without them
+# the listener crashes on a missing file and the microphone is never opened.
+# Doing it at build time (CI has network) makes the shipped runtime work fully
+# offline on the user's machine instead of failing on first launch behind a
+# firewall / without internet access.
+echo "[prepare] pre-downloading openWakeWord shared models (offline-safe)..."
+"$PYTHON_BIN" -c "import openwakeword; openwakeword.utils.download_models()" 2>/dev/null || \
+  echo "[prepare] WARNING: openWakeWord model pre-download failed (listener will need network on first run)"
+
 # Verify the hermes package is importable from the standalone interpreter.
 # The importable package is `hermes_cli` (NOT `hermes` — that name only exists
 # as the repo's source launcher script, never as an installed module).
@@ -97,6 +118,34 @@ if ! "$PYTHON_BIN" -c "import hermes_cli.main" 2>/dev/null; then
   exit 1
 fi
 echo "[prepare]   hermes importable OK"
+
+# ── 3b. Bundle wake-word agent-extra (scripts/_helix_wake.py + full tools/) ──
+# The standalone interpreter has no hermes-agent source tree, so the wake-word
+# listener needs its script + the tools package copied next to the runtime.
+# We copy the WHOLE tools/ package (not just wake_word.py) because the wake-word
+# engine imports sibling modules at runtime (e.g. tools.lazy_deps, tools.*
+# helpers). Without the package __init__.py and those modules, `import tools`
+# silently resolves to the site-packages copy (shipped without wakewords models)
+# and the listener fails to find the bundled .onnx model. Layout:
+#   hermes-runtime/agent-extra/scripts/_helix_wake.py
+#   hermes-runtime/agent-extra/tools/__init__.py  (+ all wake_word dependencies)
+#   hermes-runtime/agent-extra/tools/wakewords/*.onnx
+# The script computes its own _AGENT_ROOT from __file__, so it just works.
+AGENT_EXTRA="$RESOURCES_DIR/agent-extra"
+echo "[prepare] bundling wake-word agent-extra -> $AGENT_EXTRA"
+mkdir -p "$AGENT_EXTRA/scripts"
+cp -f "$REPO_ROOT/hermes-agent/scripts/_helix_wake.py" "$AGENT_EXTRA/scripts/" 2>/dev/null || \
+  echo "[prepare] WARNING: _helix_wake.py not found"
+# Copy the entire tools/ package so the wake-word engine has every module it
+# imports at runtime. The shebang-free Python sources keep the bundle portable.
+rm -rf "$AGENT_EXTRA/tools"
+if [ -d "$REPO_ROOT/hermes-agent/tools" ]; then
+  mkdir -p "$AGENT_EXTRA/tools"
+  cp -R "$REPO_ROOT/hermes-agent/tools/." "$AGENT_EXTRA/tools/" 2>/dev/null || \
+    echo "[prepare] WARNING: tools/ copy failed"
+fi
+# Drop the __pycache__ that may have been copied alongside the sources.
+find "$AGENT_EXTRA" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ── 3. Prune ────────────────────────────────────────────────────────────────
 echo "[prepare] pruning..."

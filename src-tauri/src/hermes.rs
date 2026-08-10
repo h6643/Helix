@@ -2836,6 +2836,16 @@ fn resolve_hermes_agent_root(hermes_bin: &std::path::Path) -> Option<PathBuf> {
 
     }
 
+    // Standalone-python packaging: the runtime ships a bundled agent-extra
+    // directory (hermes-runtime/agent-extra) next to the interpreter, containing
+    // scripts/_helix_wake.py and tools/ (wake_word + wakewords). Use it so the
+    // wake-word listener works without a full hermes-agent source tree.
+    let agent_extra = root.join("agent-extra");
+    if agent_extra.join("tools").is_dir() {
+        return Some(agent_extra);
+    }
+
+
     // Maybe the binary is not inside a venv — try the managed agent location
 
     // that the app installer provisions.
