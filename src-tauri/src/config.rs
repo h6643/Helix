@@ -110,69 +110,133 @@ pub fn set_yaml_key(yaml: &str, dotted: &str, value: &serde_json::Value) -> Stri
     lines.join("\n")
 }
 
-/// Extract the `name:` value of each `- name:` entry under `custom_providers:`.
-fn custom_provider_names(yaml: &str) -> Vec<String> {
-    let mut in_prov = false;
-    let mut names = Vec::new();
-    for l in norm_lines(yaml) {
-        if l.starts_with("custom_providers:") {
-            in_prov = true;
+#[derive(Debug)]
+struct CustomProviderEntry {
+    end: usize,
+    dash_indent: usize,
+    name: String,
+    fields: Vec<(usize, String, String)>,
+}
+
+impl CustomProviderEntry {
+    fn field(&self, key: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(_, k, _)| k == key)
+            .map(|(_, _, v)| v.as_str())
+    }
+}
+
+fn leading_spaces(s: &str) -> usize {
+    s.len() - s.trim_start().len()
+}
+
+fn yaml_scalar(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
+}
+
+fn parse_custom_provider_entries(yaml: &str) -> Vec<CustomProviderEntry> {
+    let lines = norm_lines(yaml);
+    let Some(block_start) = lines
+        .iter()
+        .position(|l| l.starts_with("custom_providers:"))
+    else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    let mut current: Option<CustomProviderEntry> = None;
+
+    for i in (block_start + 1)..lines.len() {
+        let line = &lines[i];
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if !in_prov {
-            continue;
-        }
-        if !l.starts_with(' ') && !l.starts_with('-') {
+
+        let indent = leading_spaces(line);
+        if indent == 0 && !trimmed.starts_with('-') {
             break;
         }
-        if let Some(idx) = l.find("- name:") {
-            let name = l[idx + "- name:".len()..].trim().to_string();
-            if !name.is_empty() {
-                names.push(name);
+
+        if let Some(rest) = trimmed.strip_prefix('-') {
+            let is_nested_list = current
+                .as_ref()
+                .is_some_and(|entry| indent > entry.dash_indent);
+
+            if is_nested_list {
+                if let Some(entry) = current.as_mut() {
+                    entry.end = i + 1;
+                }
+                continue;
+            }
+
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
+            let mut entry = CustomProviderEntry {
+                end: i + 1,
+                dash_indent: indent,
+                name: String::new(),
+                fields: Vec::new(),
+            };
+            let content = rest.trim_start();
+            if let Some(colon) = content.find(':') {
+                let key = content[..colon].trim().to_string();
+                let value = yaml_scalar(&content[colon + 1..]);
+                if key == "name" {
+                    entry.name = value.clone();
+                }
+                entry.fields.push((i, key, value));
+            }
+            current = Some(entry);
+            continue;
+        }
+
+        if let Some(colon) = trimmed.find(':') {
+            let key = trimmed[..colon].trim().to_string();
+            let value = yaml_scalar(&trimmed[colon + 1..]);
+            if let Some(entry) = current.as_mut() {
+                if key == "name" && entry.name.is_empty() {
+                    entry.name = value.clone();
+                }
+                entry.fields.push((i, key, value));
+                entry.end = i + 1;
             }
         }
     }
-    names
+
+    if let Some(entry) = current {
+        entries.push(entry);
+    }
+    entries
+}
+
+/// Extract the `name:` value of each custom provider entry.
+fn custom_provider_names(yaml: &str) -> Vec<String> {
+    parse_custom_provider_entries(yaml)
+        .into_iter()
+        .filter_map(|entry| (!entry.name.is_empty()).then_some(entry.name))
+        .collect()
 }
 
 fn custom_provider_base_url(yaml: &str, name: &str) -> String {
-    let mut active = false;
-    for l in norm_lines(yaml) {
-        if let Some(idx) = l.find("- name:") {
-            active = l[idx + "- name:".len()..].trim() == name;
-            continue;
-        }
-        if active {
-            let t = l.trim_start();
-            if let Some(rest) = t.strip_prefix("base_url:") {
-                return rest.trim().trim_end_matches('/').to_string();
-            }
-            if !l.starts_with(' ') && !l.starts_with('-') {
-                return String::new();
-            }
-        }
-    }
-    String::new()
+    parse_custom_provider_entries(yaml)
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .and_then(|entry| entry.field("base_url").map(|v| v.trim_end_matches('/').to_string()))
+        .unwrap_or_default()
 }
 
 pub fn custom_provider_api_key(yaml: &str, name: &str) -> String {
-    let mut active = false;
-    for l in norm_lines(yaml) {
-        if let Some(idx) = l.find("- name:") {
-            active = l[idx + "- name:".len()..].trim() == name;
-            continue;
-        }
-        if active {
-            let t = l.trim_start();
-            if let Some(rest) = t.strip_prefix("api_key:") {
-                return rest.trim().to_string();
-            }
-            if !l.starts_with(' ') && !l.starts_with('-') {
-                return String::new();
-            }
-        }
-    }
-    String::new()
+    parse_custom_provider_entries(yaml)
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .and_then(|entry| entry.field("api_key").map(|v| v.to_string()))
+        .unwrap_or_default()
 }
 
 fn provider_name_from_url(base_url: &str) -> Option<String> {
@@ -239,85 +303,62 @@ pub fn set_custom_provider_field(yaml: &str, name: &str, field: &str, value: &st
     if name.is_empty() || field.is_empty() || value.is_empty() {
         return yaml.to_string();
     }
+
     let mut lines = norm_lines(yaml);
-    let mut in_prov = false;
-    let mut entry_active = false;
-    let mut entry_found = false;
-    let mut entry_end = -1i64;
-    for i in 0..lines.len() {
-        let lp = &lines[i];
-        if lp.starts_with("custom_providers:") {
-            in_prov = true;
-            continue;
+
+    let entries = parse_custom_provider_entries(yaml);
+    if let Some(entry) = entries.iter().find(|entry| entry.name == name) {
+        if let Some((idx, _, _)) = entry.fields.iter().find(|(_, key, _)| key == field) {
+            let existing = &lines[*idx];
+            let mut lead = existing[..existing.len() - existing.trim_start().len()].to_string();
+            if let Some(rest) = existing.trim_start().strip_prefix("- ") {
+                if rest.strip_prefix(field).is_some_and(|tail| tail.starts_with(':')) {
+                    lead.push_str("- ");
+                }
+            }
+            lines[*idx] = format!("{lead}{field}: {value}");
+            return lines.join("\n");
         }
-        if !in_prov {
-            continue;
-        }
-        if !lp.starts_with(' ') && !lp.starts_with('-') {
+
+        let field_indent = " ".repeat(entry.dash_indent + 2);
+        lines.insert(entry.end, format!("{field_indent}{field}: {value}"));
+        return lines.join("\n");
+    }
+
+    let dash_indent = entries.first().map_or(2, |entry| entry.dash_indent);
+    let field_indent = dash_indent + 2;
+    let dash_pad = " ".repeat(dash_indent);
+    let field_pad = " ".repeat(field_indent);
+    let default_base_url = "https://api.openai.com/v1";
+    let default_model = "gpt-4o";
+    let fld = if field == "base_url" { value } else { default_base_url };
+    let mdl = if field == "model" { value } else { default_model };
+    let new_lines = vec![
+        format!("{dash_pad}- name: {name}"),
+        format!("{field_pad}base_url: {fld}"),
+        format!("{field_pad}api_key_env: OPENAI_API_KEY"),
+        format!("{field_pad}model: {mdl}"),
+    ];
+
+    let Some(block_start) = lines.iter().position(|l| l.starts_with("custom_providers:")) else {
+        let mut block = vec!["custom_providers:".to_string()];
+        block.extend(new_lines);
+        block.push(String::new());
+        block.extend(lines);
+        return block.join("\n");
+    };
+
+    let mut insert_at = lines.len();
+    for i in (block_start + 1)..lines.len() {
+        let trimmed = lines[i].trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('-') && leading_spaces(&lines[i]) == 0 {
+            insert_at = i;
             break;
         }
-        if let Some(idx) = lp.find("- name:") {
-            let n = lp[idx + "- name:".len()..].trim();
-            entry_active = n == name;
-            if entry_active {
-                entry_found = true;
-                entry_end = i as i64;
-            }
-            continue;
-        }
-        if entry_active {
-            let t = lp.trim_start();
-            if t.starts_with(field) && t[field.len()..].starts_with(':') {
-                let lead = &lp[..lp.len() - t.len()];
-                lines[i] = format!("{lead}{field}: {value}");
-                return lines.join("\n");
-            }
-            entry_end = i as i64;
-        }
     }
-    if !entry_found {
-        let default_base_url = "https://api.openai.com/v1";
-        let default_model = "gpt-4o";
-        let fld = if field == "base_url" { value } else { default_base_url };
-        let mdl = if field == "model" { value } else { default_model };
-        let entry_lines = vec![
-            format!("  - name: {name}"),
-            format!("    base_url: {fld}"),
-            "    api_key_env: OPENAI_API_KEY".to_string(),
-            format!("    model: {mdl}"),
-        ];
-        let has_block = yaml.contains("custom_providers:");
-        if has_block {
-            let mut in_p = false;
-            let mut last_idx = -1i64;
-            for (i, l) in lines.iter().enumerate() {
-                if l.starts_with("custom_providers:") {
-                    in_p = true;
-                    continue;
-                }
-                if in_p {
-                    if !l.starts_with(' ') && !l.starts_with('-') {
-                        in_p = false;
-                        continue;
-                    }
-                    last_idx = i as i64;
-                }
-            }
-            if last_idx >= 0 {
-                for (k, el) in entry_lines.iter().enumerate() {
-                    lines.insert((last_idx + 1) as usize + k, el.clone());
-                }
-                return lines.join("\n");
-            }
-            return format!("{}\n{}\n", yaml.replace("\r\n", "\n"), entry_lines.join("\n"));
-        }
-        let mut block = vec!["custom_providers:".to_string()];
-        block.extend(entry_lines);
-        block.push(String::new());
-        block.push(yaml.replace("\r\n", "\n"));
-        return block.join("\n");
+    for (offset, line) in new_lines.into_iter().enumerate() {
+        lines.insert(insert_at + offset, line);
     }
-    lines.insert((entry_end + 1) as usize, format!("    {field}: {value}"));
     lines.join("\n")
 }
 
@@ -484,6 +525,27 @@ pub fn read_hermes_config() -> HermesConfig {
     }
     if !cp_model.is_empty() {
         res.model = cp_model;
+    }
+
+    let custom_names = custom_provider_names(&yaml);
+    let provider_for_custom = res
+        .provider
+        .strip_prefix("custom:")
+        .unwrap_or(&res.provider);
+    if res.provider.starts_with("custom:")
+        || custom_names.iter().any(|name| name == provider_for_custom)
+    {
+        if let Some(entry) = parse_custom_provider_entries(&yaml)
+            .into_iter()
+            .find(|entry| entry.name == provider_for_custom)
+        {
+            if let Some(base_url) = entry.field("base_url") {
+                res.base_url = base_url.to_string();
+            }
+            if let Some(model) = entry.field("model") {
+                res.model = model.to_string();
+            }
+        }
     }
     // delegation block
     let mut delegation = serde_json::Map::new();
@@ -764,4 +826,69 @@ pub fn read_env_key(key: &str) -> String {
         .find(|l| l.starts_with(&needle))
         .map(|l| l[needle.len()..].trim().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIRST_STYLE: &str = r#"custom_providers:
+- api_key: sk-a
+  base_url: https://a.com/v1
+  name: a
+  model: a1
+  models:
+  - a1
+  - a2
+- api_key: sk-b
+  base_url: https://b.com/v1
+  name: b
+dashboard:
+  theme: default
+"#;
+
+    const INDENTED_STYLE: &str = r#"custom_providers:
+  - name: x
+    base_url: https://x.com/v1
+    model: x1
+dashboard:
+  theme: default
+"#;
+
+    #[test]
+    fn parses_both_custom_provider_styles() {
+        assert_eq!(custom_provider_names(FIRST_STYLE), vec!["a", "b"]);
+        assert_eq!(custom_provider_base_url(FIRST_STYLE, "a"), "https://a.com/v1");
+        assert_eq!(custom_provider_api_key(FIRST_STYLE, "b"), "sk-b");
+
+        assert_eq!(custom_provider_names(INDENTED_STYLE), vec!["x"]);
+        assert_eq!(custom_provider_base_url(INDENTED_STYLE, "x"), "https://x.com/v1");
+    }
+
+    #[test]
+    fn updates_first_style_entry_without_duplicating_it() {
+        let updated = set_custom_provider_field(FIRST_STYLE, "a", "model", "a3");
+        assert!(updated.contains("  model: a3"));
+        assert_eq!(updated.matches("name: a").count(), 1);
+
+        let updated = set_custom_provider_field(FIRST_STYLE, "a", "timeout", "60");
+        assert!(updated.contains("  timeout: 60"));
+        assert!(!updated.contains("  - timeout: 60"));
+
+        let updated = set_custom_provider_field(FIRST_STYLE, "a", "api_key", "sk-new");
+        assert!(updated.contains("- api_key: sk-new"));
+        assert!(!updated.contains("\n  api_key: sk-new"));
+    }
+
+    #[test]
+    fn appends_missing_entry_with_matching_indent() {
+        let updated = set_custom_provider_field(FIRST_STYLE, "c", "base_url", "https://c.com/v1");
+        assert!(updated.contains("- name: c"));
+        assert!(updated.contains("  base_url: https://c.com/v1"));
+        assert!(!updated.contains("    base_url: https://c.com/v1"));
+
+        let updated = set_custom_provider_field(INDENTED_STYLE, "y", "base_url", "https://y.com/v1");
+        assert!(updated.contains("  - name: y"));
+        assert!(updated.contains("    base_url: https://y.com/v1"));
+    }
 }
