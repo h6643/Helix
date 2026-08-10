@@ -165,11 +165,24 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "wake.openwakeword.tflite": (
         "ai-edge-litert==2.1.6",
     ),
+    # openwakeword itself is installed with --no-deps (see _NO_DEPS_SPECS):
+    # upstream declares tflite-runtime as a hard Linux requirement and that
+    # wheel stops at cp311, so letting pip resolve openWakeWord's metadata
+    # kills the whole feature on the bundled Python 3.12 runtime. The specs
+    # after sounddevice are openWakeWord's actual runtime imports -- scipy +
+    # scikit-learn (openwakeword.custom_verifier_model, imported by its
+    # __init__), tqdm + requests (openwakeword.utils) -- pinned to upstream's
+    # own ranges so they resolve against whatever the core venv already has
+    # instead of churning shared packages.
     "wake.openwakeword": (
         "openwakeword==0.6.0",
         "onnxruntime==1.27.0",
         "sounddevice==0.5.5",
         "numpy==2.4.3",
+        "scipy>=1.3,<2",
+        "scikit-learn>=1,<2",
+        "tqdm>=4.0,<5",
+        "requests>=2.0,<3",
     ),
     # Open-vocabulary keyword spotting: any typed phrase, zero training.
     # sentencepiece is required by sherpa_onnx.text2token (runtime phrase
@@ -317,6 +330,47 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
 # Conservative regex for spec validation — package name plus optional
 # version range. Reject anything that looks like a URL, file path, or shell
 # metacharacter.
+# Specs that MUST bypass dependency resolution (``pip install --no-deps``).
+#
+# openWakeWord 0.6.0 declares `tflite-runtime<3,>=2.8.0; platform_system ==
+# "Linux"` as a hard requirement, but tflite-runtime's final release (2.14.0)
+# ships no wheel past cp311. On Linux with the bundled Python 3.12 runtime the
+# resolver therefore fails outright -- and takes the whole wake-word feature
+# with it -- even though only the ONNX backend is ever loaded. Installing it
+# with --no-deps sidesteps the resolver; openWakeWord's real runtime imports
+# are listed explicitly next to it in LAZY_DEPS["wake.openwakeword"], so
+# nothing is silently left uninstalled.
+_NO_DEPS_SPECS: frozenset = frozenset({
+    "openwakeword==0.6.0",
+})
+
+
+def _split_no_deps(specs) -> tuple:
+    """Split specs into (resolve-normally, install-with---no-deps)."""
+    plain = tuple(s for s in specs if s not in _NO_DEPS_SPECS)
+    no_deps = tuple(s for s in specs if s in _NO_DEPS_SPECS)
+    return plain, no_deps
+
+
+def _manual_install_hint(specs, *, installer: str = "uv pip install") -> str:
+    """Copy-pasteable install command that honours the --no-deps split.
+
+    Kept in sync with :func:`_venv_pip_install` so the command we print to a
+    user is the same one we would have run ourselves -- printing a plain
+    ``pip install openwakeword`` here would just reproduce the resolver
+    failure the split exists to avoid.
+    """
+    plain, no_deps = _split_no_deps(specs)
+    parts = []
+    if plain:
+        parts.append(installer + " " + " ".join(repr(s) for s in plain))
+    if no_deps:
+        parts.append(
+            installer + " --no-deps " + " ".join(repr(s) for s in no_deps)
+        )
+    return " && ".join(parts)
+
+
 _SAFE_SPEC = re.compile(
     r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*"        # package name
     r"(?:\[[A-Za-z0-9_,\-]+\])?"            # optional [extras]
@@ -339,11 +393,12 @@ class FeatureUnavailable(RuntimeError):
         super().__init__(self._format())
 
     def _format(self) -> str:
-        spec_list = " ".join(repr(s) for s in self.missing)
+        uv_cmd = _manual_install_hint(self.missing)
+        pip_cmd = _manual_install_hint(self.missing, installer="pip install")
         return (
             f"Feature {self.feature!r} unavailable: {self.reason}. "
-            f"To enable manually: uv pip install {spec_list}  "
-            f"(or: pip install {spec_list})."
+            f"To enable manually: {uv_cmd}  "
+            f"(or: {pip_cmd})."
         )
 
 
@@ -689,7 +744,12 @@ def _core_constraints_file() -> Optional[Path]:
         return None
 
 
-def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _InstallResult:
+def _venv_pip_install(
+    specs: tuple[str, ...],
+    *,
+    timeout: int = 300,
+    extra_args: tuple[str, ...] = (),
+) -> _InstallResult:
     """Install ``specs`` using the uv → pip → ensurepip ladder.
 
     Two modes:
@@ -707,6 +767,30 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
     """
     if not specs:
         return _InstallResult(True, "", "")
+
+    # Two-pass split: specs in _NO_DEPS_SPECS get their own --no-deps
+    # invocation so an unsatisfiable upstream requirement (openWakeWord's
+    # Linux-only tflite-runtime pin) cannot poison resolution for the specs
+    # that *are* installable. Normal deps go first, so the --no-deps package
+    # lands on top of an already-complete environment rather than an empty one.
+    if not extra_args:
+        plain, no_deps = _split_no_deps(specs)
+        if no_deps:
+            first = (
+                _venv_pip_install(plain, timeout=timeout)
+                if plain
+                else _InstallResult(True, "", "")
+            )
+            if not first.success:
+                return first
+            second = _venv_pip_install(
+                no_deps, timeout=timeout, extra_args=("--no-deps",)
+            )
+            return _InstallResult(
+                second.success,
+                first.stdout + second.stdout,
+                first.stderr + second.stderr,
+            )
 
     target = _lazy_install_target()
     constraints: Optional[Path] = None
@@ -747,7 +831,8 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         if uv_bin:
             try:
                 r = subprocess.run(
-                    [uv_bin, "pip", "install", *target_args, *constraint_args, *specs],
+                    [uv_bin, "pip", "install", *target_args, *constraint_args,
+                     *extra_args, *specs],
                     capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout, env=uv_env,
                     stdin=subprocess.DEVNULL,
                     creationflags=windows_hide_flags(),
@@ -785,7 +870,8 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
 
         try:
             r = subprocess.run(
-                pip_cmd + ["install", *target_args, *constraint_args, *specs],
+                pip_cmd + ["install", *target_args, *constraint_args,
+                           *extra_args, *specs],
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
                 stdin=subprocess.DEVNULL,
                 creationflags=windows_hide_flags(),
@@ -966,8 +1052,7 @@ def feature_install_command(feature: str) -> Optional[str]:
     """Return the ``pip install`` command a user could run manually, or None."""
     if feature not in LAZY_DEPS:
         return None
-    specs = LAZY_DEPS[feature]
-    return "uv pip install " + " ".join(repr(s) for s in specs)
+    return _manual_install_hint(LAZY_DEPS[feature])
 
 
 @dataclass

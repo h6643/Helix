@@ -2337,6 +2337,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('sessionHistory', state.sessionHistory),
         persistence.saveSetting('sessionHistoryIndex', state.sessionHistoryIndex),
         persistence.saveSetting('selectedWorkDir', state.selectedWorkDir),
+        persistence.saveSetting('hasOnboarded', state.hasOnboarded),
       ])
     } catch (e) {
       logError('Failed to persist:', e)
@@ -2698,7 +2699,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         sessionHistory: prunedHistory,
         sessionHistoryIndex: prunedIndex,
         selectedWorkDir: savedSelectedWorkDir || latestSession?.workDir || get().selectedWorkDir,
-        hasOnboarded: loadedHasOnboarded === true,
+        // Never downgrade a fresh true set while restore was still loading.
+        // Startup renders from the default false before IndexedDB finishes;
+        // clicking "skip/start" in that window must not be overwritten by the
+        // stale restored false.
+        hasOnboarded: get().hasOnboarded || loadedHasOnboarded === true,
         apiConfig: (() => {
           const resolve = (cfg: any) => {
             // Validation gate: reject stale/bad profiles so a poisoned IndexedDB

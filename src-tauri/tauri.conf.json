@@ -44,7 +44,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "resources/hermes-runtime/python/": "hermes-runtime/python/"
+      "resources/hermes-runtime/python/": "hermes-runtime/python/",
+      "resources/hermes-runtime/agent-extra/": "hermes-runtime/agent-extra/"
     }
   }
 }

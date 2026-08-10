@@ -17,7 +17,7 @@ const PROVIDERS: ProviderConfig[] = [
   { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1', 'o3-mini'], envKey: 'OPENAI_API_KEY', website: 'https://platform.openai.com' },
   { id: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', models: ['claude-sonnet-4-20250514', 'claude-3-7-sonnet-20250219', 'claude-3-5-haiku-20241022'], envKey: 'ANTHROPIC_API_KEY', website: 'https://console.anthropic.com' },
   { id: 'gemini', name: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', models: ['gemini-2.5-pro-0325', 'gemini-2.5-flash-0325', 'gemini-2.0-flash-001'], envKey: 'GEMINI_API_KEY', website: 'https://aistudio.google.com' },
-  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-coder', 'deepseek-reasoner'], envKey: 'DEEPSEEK_API_KEY', website: 'https://platform.deepseek.com' },
+  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-v4-flash', 'deepseek-v4-pro'], envKey: 'DEEPSEEK_API_KEY', website: 'https://platform.deepseek.com' },
   { id: 'xai', name: 'xAI / Grok', baseUrl: 'https://api.x.ai/v1', models: ['grok-3', 'grok-3-mini', 'grok-2-1212'], envKey: 'XAI_API_KEY', website: 'https://x.ai/api' },
   // ── Aggregators / Routers ────────────────────────────────────────────────
   { id: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', models: ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'meta-llama/llama-3.2-90b-vision-instruct'], envKey: 'OPENROUTER_API_KEY', website: 'https://openrouter.ai' },

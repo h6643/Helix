@@ -2823,45 +2823,38 @@ fn resolve_hermes_python(hermes_bin: &std::path::Path) -> Option<PathBuf> {
 /// so the repo root is three directories up from the binary.
 
 fn resolve_hermes_agent_root(hermes_bin: &std::path::Path) -> Option<PathBuf> {
-
-    // Canonicalize to follow symlinks.
-
     let resolved = resolve_symlink(hermes_bin);
-
-    let root = resolved.parent()?.parent()?.parent()?.to_path_buf();
-
-    if root.join("tools").is_dir() {
-
-        return Some(root);
-
+    // The standalone interpreter lives at different depths per platform:
+    //   Linux:   <root>/hermes-runtime/python/bin/python3   (3 parents up)
+    //   Windows: <root>/hermes-runtime/python/python.exe    (2 parents up)
+    // Hard-coding a fixed parent count therefore resolves to the wrong
+    // directory on Windows, so instead walk upward from the binary and test
+    // every candidate layout until one contains the agent's `tools/` package.
+    let mut cur = Some(resolved);
+    while let Some(p) = cur {
+        // Dev / source tree: a full hermes-agent checkout with `tools/` at root.
+        if p.join("tools").is_dir() {
+            return Some(p);
+        }
+        // Standalone packaging: `agent-extra/` bundled next to the interpreter.
+        let agent_extra = p.join("agent-extra");
+        if agent_extra.join("tools").is_dir() {
+            return Some(agent_extra);
+        }
+        // Standalone packaging wrapped under a `hermes-runtime/` directory.
+        let runtime_agent_extra = p.join("hermes-runtime").join("agent-extra");
+        if runtime_agent_extra.join("tools").is_dir() {
+            return Some(runtime_agent_extra);
+        }
+        cur = p.parent().map(|x| x.to_path_buf());
     }
-
-    // Standalone-python packaging: the runtime ships a bundled agent-extra
-    // directory (hermes-runtime/agent-extra) next to the interpreter, containing
-    // scripts/_helix_wake.py and tools/ (wake_word + wakewords). Use it so the
-    // wake-word listener works without a full hermes-agent source tree.
-    let agent_extra = root.join("agent-extra");
-    if agent_extra.join("tools").is_dir() {
-        return Some(agent_extra);
-    }
-
-
-    // Maybe the binary is not inside a venv — try the managed agent location
-
-    // that the app installer provisions.
-
+    // Managed location provisioned by the installer (e.g. %LOCALAPPDATA%/hermes).
     let managed = hermes_data_dir().join("hermes-agent");
-
     if managed.join("tools").is_dir() {
-
         return Some(managed);
-
     }
-
     None
-
 }
-
 
 
 /// Run the Helix STT bridge with inline Python (-c) when the standalone

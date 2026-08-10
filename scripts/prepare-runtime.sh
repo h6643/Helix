@@ -91,12 +91,38 @@ HERMES_NIX_BUILD=1 "$PYTHON_BIN" -m pip install \
 # ── 2b. Wake-word dependencies (openwakeword + PortAudio via sounddevice) ──
 # On Windows sounddevice ships its own PortAudio binary; on Linux we prepend
 # ~/.local/lib via LD_LIBRARY_PATH in the Rust spawn (same as voice mode).
-echo "[prepare] pip install wake-word deps (openwakeword, sounddevice)..."
+#
+# openWakeWord is installed in a SECOND pass with --no-deps on purpose.
+# Upstream declares `tflite-runtime<3,>=2.8.0; platform_system == "Linux"` as a
+# hard requirement, but tflite-runtime's final release (2.14.0) ships no wheel
+# past cp311 -- so on Linux with this 3.12 runtime the resolver fails and drops
+# openwakeword entirely, even though only the ONNX backend is ever used. The
+# first pass installs openWakeWord's real runtime imports (onnxruntime for
+# openwakeword.vad, scipy + scikit-learn for openwakeword.custom_verifier_model,
+# tqdm + requests for openwakeword.utils), which makes --no-deps safe.
+# Keep this list in sync with LAZY_DEPS["wake.openwakeword"] in
+# hermes-agent/tools/lazy_deps.py.
+echo "[prepare] pip install wake-word deps (onnxruntime, sounddevice, scipy, scikit-learn)..."
 "$PYTHON_BIN" -m pip install \
   --quiet \
   --disable-pip-version-check \
-  "openwakeword" "sounddevice" "numpy" || \
-  echo "[prepare] WARNING: wake-word deps failed to install (non-fatal for build)"
+  "onnxruntime" "sounddevice" "numpy" "scipy" "scikit-learn" "tqdm" "requests"
+
+echo "[prepare] pip install openwakeword (--no-deps; see comment above)..."
+"$PYTHON_BIN" -m pip install \
+  --quiet \
+  --disable-pip-version-check \
+  --no-deps \
+  "openwakeword==0.6.0"
+
+# Fail the build instead of shipping a bundle whose wake word can never start.
+# A silent WARNING here is exactly how the Linux runtime ended up with no
+# openwakeword at all while the app still advertised the feature.
+if ! "$PYTHON_BIN" -c "import openwakeword, openwakeword.model, sounddevice"; then
+  echo "ERROR: wake-word deps not importable after install" >&2
+  exit 1
+fi
+echo "[prepare]   wake-word deps importable OK"
 
 # Pre-download openWakeWord's shared feature models (melspectrogram.onnx,
 # embedding_model.onnx, silero_vad.onnx) into the standalone interpreter's
@@ -106,7 +132,7 @@ echo "[prepare] pip install wake-word deps (openwakeword, sounddevice)..."
 # offline on the user's machine instead of failing on first launch behind a
 # firewall / without internet access.
 echo "[prepare] pre-downloading openWakeWord shared models (offline-safe)..."
-"$PYTHON_BIN" -c "import openwakeword; openwakeword.utils.download_models()" 2>/dev/null || \
+"$PYTHON_BIN" -c "import openwakeword; openwakeword.utils.download_models()" || \
   echo "[prepare] WARNING: openWakeWord model pre-download failed (listener will need network on first run)"
 
 # Verify the hermes package is importable from the standalone interpreter.

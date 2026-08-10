@@ -148,8 +148,6 @@ export function WebSearchSettings() {
 
   return (
     <div className="space-y-1">
-      <SectionHeading>网页搜索</SectionHeading>
-
       <SettingGroup title="搜索引擎">
         {SEARCH_PROVIDERS.map((provider) => {
           const isSelected = activeProviders.includes(provider.id)

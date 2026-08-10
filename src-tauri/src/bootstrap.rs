@@ -127,11 +127,18 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     let py = standalone_python();
     let python_dir = py.parent().unwrap_or(&py).to_path_buf();
 
+    // Resolve the data dir up-front so we can also gate on agent-extra
+    // (the wake-word/TTS tools package + scripts) being present, not just the
+    // python runtime itself.
+    let data_dir = crate::paths::hermes_data_dir();
+    let agent_extra = data_dir.join("agent-extra");
+
     // Already bootstrapped with a usable runtime — quick return.
     // `hermes_cli` must be importable; otherwise this is a stale base
     // interpreter (venv-era copy) that would crash on launch, so we fall
-    // through and re-extract below.
-    if py.exists() && hermes_cli_present(&python_dir) {
+    // through and re-extract below. We also require agent-extra/tools to exist
+    // (wake-word + TTS live there) — if missing, fall through and copy it.
+    if py.exists() && hermes_cli_present(&python_dir) && agent_extra.join("tools").is_dir() {
         return Ok(());
     }
 
@@ -139,7 +146,7 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     let _lock = bootstrap_lock();
 
     // Double-check after acquiring lock.
-    if py.exists() && hermes_cli_present(&python_dir) {
+    if py.exists() && hermes_cli_present(&python_dir) && agent_extra.join("tools").is_dir() {
         return Ok(());
     }
 
@@ -171,8 +178,6 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     // ── Copy standalone Python runtime (portable, no venv) ────────────
     emit_progress(app_handle, "preparing", "正在准备 Hermes 运行环境...");
 
-    let data_dir = crate::paths::hermes_data_dir();
-
     // Copy standalone Python runtime. Hermes + all deps are pre-installed
     // into this interpreter's site-packages at build time
     // (scripts/prepare-runtime.sh), so no venv / shebang fix is needed.
@@ -186,6 +191,24 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
         );
         copy_dir_recursive(&src_python, &dst_python)
             .map_err(|e| format!("复制 Python 运行时失败: {e}"))?;
+    }
+
+    // ── Copy agent-extra (wake-word listener + TTS scripts / tools pkg) ──
+    let src_extra = runtime_dir.join("agent-extra");
+    let dst_extra = data_dir.join("agent-extra");
+    if src_extra.exists() {
+        eprintln!(
+            "[bootstrap] extracting agent-extra {} → {}",
+            src_extra.display(),
+            dst_extra.display()
+        );
+        copy_dir_recursive(&src_extra, &dst_extra)
+            .map_err(|e| format!("复制 agent-extra 失败: {e}"))?;
+    } else {
+        eprintln!(
+            "[bootstrap] bundled agent-extra not found at {} — wake-word/TTS may be unavailable",
+            src_extra.display()
+        );
     }
 
     eprintln!("[bootstrap] hermes runtime ready");
