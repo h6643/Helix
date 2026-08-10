@@ -307,7 +307,9 @@ export function HelixLayout() {
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
   // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
   // 切页面时让模型继续在后台运行，返回后还能接着看。
-  const sidePanelOpen = showScheduledTasksPanel || showPluginManager || showSkillPanel || showRuntimePanel || showWorktreePanel || showKanbanPanel
+  // Only hide chat for overlay panels (delegations, runtime, worktree, plugin manager)
+  // Kanban/Plan/Skill panels render as floating cards inside the main area — chat stays visible behind them.
+  const sidePanelOpen = showPluginManager || showRuntimePanel || showWorktreePanel || showSubAgentPanel
   const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
@@ -322,6 +324,7 @@ export function HelixLayout() {
   const hermesTodos = useHelixStore(s => s.hermesTodos)
   // Stable action references — these never change so getState() is safe
   const storeActions = useMemo(() => useHelixStore.getState(), [])
+  const [restoreReady, setRestoreReady] = useState(startupSyncDone)
   const [todoPopoverOpen, setTodoPopoverOpen] = useState(false)
   const [delegations, setDelegations] = useState<Array<{id: string; tasks: Array<{name: string; modified: number}>}>>([])
   const [delegationsPopoverOpen, setDelegationsPopoverOpen] = useState(false)
@@ -396,6 +399,18 @@ export function HelixLayout() {
       await storeActions.restoreFromStorage()
       if (cancelled) return
       const st = useHelixStore.getState()
+      // Model setup counts as having completed first-run onboarding. Avoid a
+      // first-use modal when the user already configured providers/models but
+      // the old race never persisted hasOnboarded=true.
+      if (!st.hasOnboarded) {
+        const hasConfiguredModel =
+          st.apiProfiles.length > 0 ||
+          st.apiHistory.length > 0 ||
+          st.providers.length > 0 ||
+          !!(st.apiConfig?.baseUrl && st.apiConfig?.model && st.apiConfig?.apiKey)
+        if (hasConfiguredModel) st.setHasOnboarded(true)
+      }
+      setRestoreReady(true)
       if (!isElectron()) return
       const cfg = st.apiConfig
       if (!cfg || !cfg.model) return
@@ -1226,7 +1241,7 @@ export function HelixLayout() {
         )}
 
         {/* Floating cards container */}
-        <div className="flex-1 flex flex-row m-3 ml-0 overflow-hidden">
+        <div className="flex-1 flex flex-row m-3 ml-0 overflow-hidden relative">
         {/* Floating card — main content */}
         <div className="flex-1 flex flex-col rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
           {/* Main area */}
@@ -1410,11 +1425,30 @@ export function HelixLayout() {
                 <AgentFlowPanel />
               </div>
               <TerminalPanel onClose={storeActions.toggleTerminal} />
+
               </div>
             </div>
+           </div>
+          {showScheduledTasksPanel && (
+            <div className="absolute inset-0 z-20 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden flex flex-col">
+              <PanelSuspense>
+                <ScheduledTasksPanel onClose={() => storeActions.toggleScheduledTasksPanel()} />
+              </PanelSuspense>
+            </div>
+          )}
+          {showSkillPanel && (
+            <div className="absolute inset-0 z-20 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden flex flex-col">
+              <PanelSuspense>
+                <SkillPanel onClose={() => storeActions.toggleSkillPanel()} />
+              </PanelSuspense>
+            </div>
+          )}
+          <div className={`absolute inset-0 z-20 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden flex flex-col ${showKanbanPanel ? '' : 'hidden'}`}>
+            <PanelSuspense>
+              <KanbanPanel />
+            </PanelSuspense>
           </div>
         </div>
-
         {/* Floating card — right sidebar */}
         {rightSidebarTab && (
           <div className="relative shrink-0" style={{ width: rightSidebarWidth }}>
@@ -1429,26 +1463,10 @@ export function HelixLayout() {
             </div>
           </div>
         )}
-        </div>
-      </div>
-        {showScheduledTasksPanel && (
-            <div className="absolute inset-0 z-20">
-              <PanelSuspense>
-                <ScheduledTasksPanel onClose={() => storeActions.toggleScheduledTasksPanel()} />
-              </PanelSuspense>
-            </div>
-          )}
-          {showPluginManager && (
+        {showPluginManager && (
             <div className="absolute inset-0 z-20">
               <PanelSuspense>
                 <PluginManagerPanel onClose={() => storeActions.togglePluginManager()} />
-              </PanelSuspense>
-            </div>
-          )}
-          {showSkillPanel && (
-            <div className="absolute inset-0 z-20">
-              <PanelSuspense>
-                <SkillPanel onClose={() => storeActions.toggleSkillPanel()} />
               </PanelSuspense>
             </div>
           )}
@@ -1466,17 +1484,14 @@ export function HelixLayout() {
               </PanelSuspense>
             </div>
           )}
-          <div className={`absolute inset-0 z-20 ${showKanbanPanel ? '' : 'hidden'}`}>
-            <PanelSuspense>
-              <KanbanPanel />
-            </PanelSuspense>
-          </div>
           <div className={`absolute inset-0 z-20 ${showSubAgentPanel ? '' : 'hidden'}`}>
             <PanelSuspense>
               <DelegationsPanel onClose={() => storeActions.toggleSubAgentPanel()} />
             </PanelSuspense>
           </div>
 
+        </div>
+      </div>
       {/* Overlay panels */}
       <Suspense fallback={null}>
         {showTaskListPanel && <TaskListPanel onClose={() => setShowTaskListPanel(false)} />}
@@ -1499,7 +1514,7 @@ export function HelixLayout() {
         {/* New surfaces */}
         {showActivityFeed && <ActivityFeed onClose={() => storeActions.toggleActivityFeed()} />}
         {showArtifactsBrowser && <ArtifactsBrowser onClose={() => storeActions.toggleArtifactsBrowser()} />}
-        <Onboarding />
+        {restoreReady && <Onboarding />}
         <BootOverlay />
       </Suspense>
     </div>

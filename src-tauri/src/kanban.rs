@@ -52,6 +52,7 @@ pub(crate) fn build_clean_env(hermes_bin: &std::path::Path) -> std::collections:
 fn run_cli(hermes_cmd: &std::path::Path, args: &[String], timeout_ms: u64) -> (i32, String, String, Option<String>) {
     let mut child = match {
             let mut _kc = Command::new(hermes_cmd);
+        _kc.args(crate::kernel::hermes_subcommand_prefix(hermes_cmd));
             _kc.args(args)
                 .envs(build_clean_env(hermes_cmd))
                 .stdin(Stdio::null())

@@ -62,6 +62,24 @@ pub fn resolve_hermes_candidates() -> Vec<PathBuf> {
 }
 
 /// Preferred hermes executable (first existing candidate), or None.
+/// When the resolved Hermes command is the bundled standalone Python
+/// interpreter, invoking a subcommand requires `python -m hermes_cli.main <sub> …`;
+/// when it is a `hermes` entry-point executable the prefix is empty.
+pub fn hermes_subcommand_prefix(cmd: &Path) -> Vec<String> {
+    let is_python = cmd
+        .file_name()
+        .map(|n| {
+            let s = n.to_string_lossy().to_lowercase();
+            s == "python.exe" || s == "python3" || s == "python"
+        })
+        .unwrap_or(false);
+    if is_python {
+        vec!["-m".into(), "hermes_cli.main".into()]
+    } else {
+        vec![]
+    }
+}
+
 pub fn resolve_hermes_cmd() -> Option<PathBuf> {
     resolve_hermes_candidates().into_iter().next()
 }

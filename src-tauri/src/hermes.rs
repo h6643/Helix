@@ -1325,6 +1325,7 @@ pub fn hermes_update() -> Value {
             let hermes_dir = hermes_data_dir();
 
             let mut _cmd = std::process::Command::new(&cmd);
+            _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
 
                 _cmd.arg("update")
 
@@ -1763,6 +1764,7 @@ async fn install_memory_provider_official(provider: String, force: bool, hermes_
         {
 
             let mut c = Command::new(hermes_bin);
+            c.args(crate::kernel::hermes_subcommand_prefix(hermes_bin));
 
             c.arg("plugins")
 
@@ -1865,6 +1867,7 @@ pub async fn hermes_install_plugin(identifier: String, force: Option<bool>) -> V
     let result = tokio::task::spawn_blocking(move || {
 
         let mut child = Command::new(&hermes_bin);
+        child.args(crate::kernel::hermes_subcommand_prefix(&hermes_bin));
 
         child
 
@@ -2447,6 +2450,7 @@ pub fn hermes_cron_list() -> Value {
         Some(cmd) => {
 
             let mut _cmd = std::process::Command::new(&cmd);
+            _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(["cron", "list", "--json"])
 
                 .envs(crate::kanban::build_clean_env(&cmd))
@@ -2519,6 +2523,7 @@ pub fn hermes_cron_create(schedule: String, command: String, name: Option<String
             }
 
             let mut _cmd = std::process::Command::new(&cmd);
+            _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(&args)
 
                 .envs(crate::kanban::build_clean_env(&cmd))
@@ -2575,6 +2580,7 @@ pub fn hermes_cron_delete(job_id: String) -> Value {
         Some(cmd) => {
 
             let mut _cmd = std::process::Command::new(&cmd);
+            _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(["cron", "delete", &job_id])
 
                 .envs(crate::kanban::build_clean_env(&cmd))
@@ -2631,6 +2637,7 @@ pub fn hermes_cron_run(job_id: String) -> Value {
         Some(cmd) => {
 
             let mut _cmd = std::process::Command::new(&cmd);
+            _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(["cron", "run", &job_id])
 
                 .envs(crate::kanban::build_clean_env(&cmd))
@@ -2687,6 +2694,7 @@ pub fn hermes_doctor() -> Value {
         Some(cmd) => {
 
             let mut _cmd = std::process::Command::new(&cmd);
+            _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(["doctor"])
 
                 .envs(crate::kanban::build_clean_env(&cmd))

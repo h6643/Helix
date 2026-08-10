@@ -372,7 +372,7 @@ _REVEAL_WINDOW_SECONDS = 30
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^tauri://localhost$",
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?$|^tauri://localhost$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -14527,7 +14527,11 @@ def _ws_client_reason(ws: "WebSocket") -> Optional[str]:
         # ws.client == None or "" — treating that as "allowed" would let
         # an unidentified peer reach a loopback-only surface.
         return f"missing_or_empty_peer bound={bound_host or '?'}"
-    if client_host in _LOOPBACK_HOSTS:
+    # Normalize IPv4-mapped IPv6 loopback (common on Windows WebSockets).
+    normalized = client_host
+    if normalized.startswith("::ffff:"):
+        normalized = normalized[7:]
+    if normalized in _LOOPBACK_HOSTS:
         return None
     return f"peer_not_loopback peer={client_host} bound={bound_host or '?'}"
 
@@ -14572,7 +14576,11 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
         # client_host on a loopback-bound dashboard with auth disabled
         # must be rejected, not accepted as a default-allow.
         return False
-    return client_host in _LOOPBACK_HOSTS
+    # Accept IPv4-mapped IPv6 loopback (e.g. ::ffff:127.0.0.1) on Windows.
+    normalized = client_host
+    if normalized.startswith("::ffff:"):
+        normalized = normalized[7:]
+    return normalized in _LOOPBACK_HOSTS
 
 
 def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
@@ -14603,6 +14611,15 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
 
     if not parsed.netloc:
         return f"origin_mismatch origin={origin} bound={bound_host}"
+
+    # Tauri v2 WebView issues the dashboard WS with Origin "http://tauri.localhost"
+    # (and the scheme-only "tauri://localhost" form, which is already accepted
+    # above because its scheme is non-http(s)). That Origin is the app's own
+    # embedded browser surface, not a remote site, so accept it on loopback
+    # binds alongside the usual loopback hosts. Without this the embedded-chat
+    # WS upgrade is refused with an HTTP 403 (ws.close before accept).
+    if parsed.netloc.lower() == "tauri.localhost":
+        return None
 
     if not _is_accepted_host(parsed.netloc, bound_host):
         return f"origin_mismatch origin={origin} bound={bound_host}"
