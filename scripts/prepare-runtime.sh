@@ -102,11 +102,17 @@ HERMES_NIX_BUILD=1 "$PYTHON_BIN" -m pip install \
 # tqdm + requests for openwakeword.utils), which makes --no-deps safe.
 # Keep this list in sync with LAZY_DEPS["wake.openwakeword"] in
 # hermes-agent/tools/lazy_deps.py.
+# The pins below MUST match LAZY_DEPS["wake.openwakeword"] exactly. If they
+# drift, feature_missing() is non-empty on the user's machine and the first
+# wake-word start triggers a network lazy-install on a runtime that is meant
+# to be self-contained -- the invariant check further down fails the build
+# rather than let that ship.
 echo "[prepare] pip install wake-word deps (onnxruntime, sounddevice, scipy, scikit-learn)..."
 "$PYTHON_BIN" -m pip install \
   --quiet \
   --disable-pip-version-check \
-  "onnxruntime" "sounddevice" "numpy" "scipy" "scikit-learn" "tqdm" "requests"
+  "onnxruntime==1.27.0" "sounddevice==0.5.5" "numpy==2.4.3" \
+  "scipy>=1.3,<2" "scikit-learn>=1,<2" "tqdm>=4.0,<5" "requests>=2.0,<3"
 
 echo "[prepare] pip install openwakeword (--no-deps; see comment above)..."
 "$PYTHON_BIN" -m pip install \
@@ -118,11 +124,36 @@ echo "[prepare] pip install openwakeword (--no-deps; see comment above)..."
 # Fail the build instead of shipping a bundle whose wake word can never start.
 # A silent WARNING here is exactly how the Linux runtime ended up with no
 # openwakeword at all while the app still advertised the feature.
-if ! "$PYTHON_BIN" -c "import openwakeword, openwakeword.model, sounddevice"; then
-  echo "ERROR: wake-word deps not importable after install" >&2
+#
+# Two assertions, both load-bearing:
+#   1. the modules actually import (catches a --no-deps pass that skipped a
+#      real runtime dependency, e.g. scipy/sklearn via custom_verifier_model);
+#   2. lazy_deps.feature_missing() is empty (catches version drift between
+#      these pins and LAZY_DEPS, which would make the shipped runtime
+#      lazy-install over the network on first use).
+if ! "$PYTHON_BIN" - <<'PYEOF'
+import sys
+
+import openwakeword  # noqa: F401
+import openwakeword.model  # noqa: F401
+import openwakeword.vad  # noqa: F401
+import sounddevice  # noqa: F401
+
+from tools import lazy_deps
+
+missing = lazy_deps.feature_missing("wake.openwakeword")
+if missing:
+    print("wake-word pins not satisfied after install: %r" % (missing,), file=sys.stderr)
+    print("  -> keep scripts/prepare-runtime.sh in sync with "
+          "LAZY_DEPS['wake.openwakeword'] in hermes-agent/tools/lazy_deps.py",
+          file=sys.stderr)
+    sys.exit(1)
+print("[prepare]   wake-word deps importable + pins satisfied")
+PYEOF
+then
+  echo "ERROR: wake-word dependency verification failed" >&2
   exit 1
 fi
-echo "[prepare]   wake-word deps importable OK"
 
 # Pre-download openWakeWord's shared feature models (melspectrogram.onnx,
 # embedding_model.onnx, silero_vad.onnx) into the standalone interpreter's
