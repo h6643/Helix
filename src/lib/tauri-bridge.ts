@@ -340,7 +340,7 @@ function buildTauriAPI(): ElectronAPI {
 
   // ── delegations ─────────────────────────────────────────────────────────
   api.delegations = {
-    list: () => invoke('delegations_list'),
+    list: (sessionId?: string) => invoke('delegations_list', { sessionId: sessionId ?? null }),
     readLog: (path: string, lines?: number) => invoke('delegations_read_log', { path, lines: lines ?? null }),
   }
 

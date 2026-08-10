@@ -313,6 +313,7 @@ def create_live_transcripts(
     task_list: List[Dict[str, Any]],
     context: Optional[str] = None,
     delegation_id: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> tuple[Optional[str], List[Optional[LiveTranscriptWriter]], List[str]]:
     """Create one pre-headered writer per task + a manifest.json.
 
@@ -339,7 +340,7 @@ def create_live_transcripts(
                 paths.append(str(w.path))
         if not paths:
             return None, [None] * n, []
-        _write_manifest(deleg_id, task_list, paths)
+        _write_manifest(deleg_id, task_list, paths, session_id=session_id)
         return deleg_id, writers, paths
     except Exception as exc:
         logger.debug("Live transcript creation failed: %s", exc)
@@ -351,7 +352,7 @@ def _manifest_path(delegation_id: str) -> Path:
 
 
 def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
-                    paths: List[str]) -> None:
+                    paths: List[str], session_id: Optional[str] = None) -> None:
     try:
         manifest = {
             "delegation_id": delegation_id,
@@ -372,6 +373,8 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                 for i, t in enumerate(task_list)
             ],
         }
+        if session_id:
+            manifest["session_id"] = session_id
         _manifest_path(delegation_id).write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
         )

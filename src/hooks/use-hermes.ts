@@ -459,9 +459,8 @@ export function useHermes() {
       await setHermesModel()
       // Wait for the gateway to be ready after model config update
       await waitForGatewayReady()
-      const cwd = useHelixStore.getState().selectedWorkDir || (typeof process !== 'undefined' && typeof (process as any).cwd === 'function' ? (process as any).cwd() : '')
       const mcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers)
-      const sessionId = await hermesApi()!.send('session/new', { cwd, mcpServers }) as string
+      const sessionId = await hermesApi()!.send('session/new', { mcpServers }) as string
       if (sessionId) {
         setHermesSessionId(sessionId)
       }

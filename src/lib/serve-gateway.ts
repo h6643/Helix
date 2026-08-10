@@ -634,7 +634,6 @@ export class ServeGatewayClient {
   private async createSession(params?: any): Promise<any> {
     await this.ensureModelSynced()
     const res = await this.rpc('session.create', {
-      cwd: params?.cwd,
       source: 'helix',
     })
     const newId = res?.session_id

@@ -2915,8 +2915,14 @@ def delegate_task(
         wrap_progress_callback,
     )
 
+    # Read the origin session id before creating transcripts so we can
+    # stamp it into the manifest — lets UIs scope delegations per session.
+    from tools.async_delegation import _current_origin_session_id
+
+    _origin_wake_sid = _current_origin_session_id()
+
     live_deleg_id, live_writers, live_paths = create_live_transcripts(
-        task_list, context
+        task_list, context, session_id=_origin_wake_sid
     )
 
     # Capture the ORIGINATING session's wake target BEFORE any child agent is
@@ -2927,9 +2933,6 @@ def delegate_task(
     # request-scoped chat_id binding (the raw X-Hermes-Session-Id on
     # api_server) is untouched by child construction, so read it here and
     # thread it through the dispatch.
-    from tools.async_delegation import _current_origin_session_id
-
-    _origin_wake_sid = _current_origin_session_id()
 
     # Build all child agents on the main thread (thread-safe construction).
     # _build_child_preserving_parent_tools saves/restores the parent's

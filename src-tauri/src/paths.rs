@@ -7,20 +7,26 @@ use std::path::{Path, PathBuf};
 
 /// The Hermes data directory (config.yaml, state.db, skills, memories, logs…).
 /// Uses ~/.hermes/ to match Hermes CLI convention on Unix.
-/// On Windows, prefer %LOCALAPPDATA%/hermes (the location the managed
-/// install actually uses); fall back to ~/.hermes/ for any legacy layout.
+/// On Windows, uses %LOCALAPPDATA%/hermes (the location the official
+/// Hermes installer and managed runtime use). Falls back to ~/.hermes/
+/// only when a legacy install already exists there.
 pub fn hermes_data_dir() -> PathBuf {
     #[cfg(windows)]
     {
+        // %LOCALAPPDATA%/hermes is the canonical Windows location used by the
+        // official hermes-agent installer. Use it as the default even before
+        // the directory exists, so first-run bootstrap creates content there.
         let local = dirs::data_local_dir()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
-        let candidate = local.join("hermes");
-        if candidate.exists() {
-            return candidate;
-        }
-        dirs::home_dir()
+        let canonical = local.join("hermes");
+        // Preserve legacy ~/.hermes/ if it already has a config (migration).
+        let legacy = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".hermes")
+            .join(".hermes");
+        if legacy.join("config.yaml").exists() && !canonical.join("config.yaml").exists() {
+            return legacy;
+        }
+        canonical
     }
     #[cfg(not(windows))]
     {

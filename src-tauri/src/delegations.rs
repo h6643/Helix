@@ -8,8 +8,20 @@ fn delegation_live_root() -> PathBuf {
     hermes_data_dir().join("cache").join("delegation").join("live")
 }
 
+/// Read the manifest.json for a delegation directory, returning the
+/// `session_id` field if present.
+fn delegation_session_id(deleg_dir: &PathBuf) -> Option<String> {
+    let manifest_path = deleg_dir.join("manifest.json");
+    let content = std::fs::read_to_string(&manifest_path).ok()?;
+    let manifest: Value = serde_json::from_str(&content).ok()?;
+    manifest
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 #[tauri::command]
-pub fn delegations_list() -> Value {
+pub fn delegations_list(session_id: Option<String>) -> Value {
     let root = delegation_live_root();
     if !root.exists() {
         return json!({ "ok": true, "delegations": [] });
@@ -22,6 +34,14 @@ pub fn delegations_list() -> Value {
             if !path.is_dir() {
                 continue;
             }
+
+            // Filter by session if requested — read manifest.json.
+            if let Some(ref sid) = session_id {
+                if delegation_session_id(&path).as_ref() != Some(sid) {
+                    continue;
+                }
+            }
+
             let dir_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
             // Read task logs

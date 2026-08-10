@@ -307,7 +307,7 @@ export function HelixLayout() {
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
   // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
   // 切页面时让模型继续在后台运行，返回后还能接着看。
-  const sidePanelOpen = showScheduledTasksPanel || showPluginManager || showSkillPanel || showRuntimePanel || showWorktreePanel || showKanbanPanel || showSubAgentPanel
+  const sidePanelOpen = showScheduledTasksPanel || showPluginManager || showSkillPanel || showRuntimePanel || showWorktreePanel || showKanbanPanel
   const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
@@ -351,13 +351,14 @@ export function HelixLayout() {
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [delegationsPopoverOpen])
 
-  // Load delegations data
+  // Load delegations data — scoped to the current session.
   useEffect(() => {
     if (!isElectron()) return
     const loadDelegations = async () => {
       try {
         const api = (window as any).electron as any
-        const res = await api?.delegations?.list?.()
+        const sid = useHelixStore.getState().currentSessionId || undefined
+        const res = await api?.delegations?.list?.(sid)
         if (res?.ok) {
           setDelegations(res.delegations || [])
         }
@@ -367,7 +368,7 @@ export function HelixLayout() {
     // Refresh every 10 seconds
     const interval = setInterval(loadDelegations, 10000)
     return () => clearInterval(interval)
-  }, [isElectron()])
+  }, [currentSessionId])
 
   // Apply the selected theme style (Catppuccin flavor or built-in cream) by
   // writing inline CSS variables onto <html>. Runs on mount and whenever the
@@ -1073,7 +1074,7 @@ export function HelixLayout() {
             >
               <div ref={helpMenuRef} className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1">
                 <div className="px-3 py-2 text-xs text-muted-foreground/60">
-                    版本 v{appVersion || '0.3.8'}
+                    版本 v{appVersion || '0.3.9'}
                   </div>
                   <button
                     className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
@@ -1089,7 +1090,7 @@ export function HelixLayout() {
                         }
                         const data = await res.json()
                         const latest = (data.tag_name || data.name || '').replace(/^v/i, '')
-                        const current = (await getCurrentVersion()) || '0.3.8'
+                        const current = (await getCurrentVersion()) || '0.3.9'
                         const curParts = current.split('.').map(Number)
                         const latParts = latest.split('.').map(Number)
                         let isNewer = false

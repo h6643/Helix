@@ -2593,9 +2593,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         persistSessionMap(sessionMapRef.current)
       }
       if (!sessionId) {
-        const cwd = selectedWorkDir || state.selectedWorkDir || (typeof process !== 'undefined' && typeof (process as any).cwd === 'function' ? (process as any).cwd() : '')
         const res = await hermesApi()!.send('session/new', {
-          cwd,
           mcpServers: buildAcpMcpServers(useHelixStore.getState().mcpServers),
         }) as any
         sessionId = res?._meta?.hermes?.sessionProvenance?.acpSessionId
