@@ -66,7 +66,7 @@ echo "[prepare] output:   $RESOURCES_DIR"
 # ── 1. Download python-build-standalone ─────────────────────────────────────
 echo "[prepare] downloading python-build-standalone..."
 mkdir -p "$RESOURCES_DIR"
-curl -sL --retry 3 --retry-delay 5 "$PBS_URL" | tar xz -C "$RESOURCES_DIR/
+curl -sL --retry 3 --retry-delay 5 "$PBS_URL" | tar xz -C "$RESOURCES_DIR/"
 
 if [ ! -f "$PYTHON_BIN" ]; then
   echo "ERROR: python binary not found at $PYTHON_BIN after extraction" >&2
