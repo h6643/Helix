@@ -5,6 +5,8 @@ use crate::kernel::resolve_hermes_cmd;
 use serde_json::{json, Value};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 pub(crate) fn build_clean_env(hermes_bin: &std::path::Path) -> std::collections::HashMap<String, String> {
     let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();

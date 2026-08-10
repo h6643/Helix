@@ -61,6 +61,9 @@ use std::io::{BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
 use tauri::{Emitter, State};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 
 
 
