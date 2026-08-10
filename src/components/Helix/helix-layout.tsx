@@ -1074,7 +1074,7 @@ export function HelixLayout() {
             >
               <div ref={helpMenuRef} className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1">
                 <div className="px-3 py-2 text-xs text-muted-foreground/60">
-                    版本 v{appVersion || '0.3.12'}
+                    版本 v{appVersion || '0.1.0'}
                   </div>
                   <button
                     className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
@@ -1090,7 +1090,7 @@ export function HelixLayout() {
                         }
                         const data = await res.json()
                         const latest = (data.tag_name || data.name || '').replace(/^v/i, '')
-                        const current = (await getCurrentVersion()) || '0.3.12'
+                        const current = (await getCurrentVersion()) || '0.1.0'
                         const curParts = current.split('.').map(Number)
                         const latParts = latest.split('.').map(Number)
                         let isNewer = false
