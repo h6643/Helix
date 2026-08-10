@@ -244,10 +244,33 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
         *state.hermes.serve_info.write().unwrap() = None;
     }
 
-    let args: Vec<String> = if serve_mode {
-        vec!["serve".into(), "--host".into(), "127.0.0.1".into(), "--port".into(), "0".into()]
+    // When the launcher is the bundled standalone Python (not the venv
+    // `hermes.exe`), we must invoke the module: `python -m hermes …`.
+    let is_python = cmd
+        .file_name()
+        .map(|n| {
+            let s = n.to_string_lossy().to_lowercase();
+            s == "python.exe" || s == "python3" || s == "python"
+        })
+        .unwrap_or(false);
+    let pre: Vec<String> = if is_python {
+        vec!["-m".into(), "hermes".into()]
     } else {
-        vec!["acp".into()]
+        vec![]
+    };
+
+    let args: Vec<String> = if serve_mode {
+        let mut a = pre;
+        a.push("serve".into());
+        a.push("--host".into());
+        a.push("127.0.0.1".into());
+        a.push("--port".into());
+        a.push("0".into());
+        a
+    } else {
+        let mut a = pre;
+        a.push("acp".into());
+        a
     };
 
     let mut serve_cmd = Command::new(cmd);

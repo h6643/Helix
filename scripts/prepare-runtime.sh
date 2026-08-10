@@ -47,19 +47,16 @@ case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
   mingw*|msys*|cygwin*|windows*)
     PYTHON_BIN="$RESOURCES_DIR/python/python.exe" ;;
 esac
-VENV_DIR="$RESOURCES_DIR/hermes-agent/venv"
-VENV_HERMES="$VENV_DIR/bin/hermes"
-VENV_PYTHON="$VENV_DIR/bin/python3"
-VENV_PIP="$VENV_DIR/bin/pip"
-if [ "${TARGET_TRIPLE##*-}" = "msvc" ]; then
-  VENV_HERMES="$VENV_DIR/Scripts/hermes.exe"
-  VENV_PYTHON="$VENV_DIR/Scripts/python.exe"
-  VENV_PIP="$VENV_DIR/Scripts/pip.exe"
+# Site-packages location differs by OS for python-build-standalone.
+# Windows: python/Lib/site-packages  | Unix: python/lib/python3.12/site-packages
+SITE_PACKAGES="$RESOURCES_DIR/python/Lib/site-packages"
+if [ ! -d "$SITE_PACKAGES" ]; then
+  SITE_PACKAGES="$RESOURCES_DIR/python/lib/python3.12/site-packages"
 fi
 
 # ── Idempotency ────────────────────────────────────────────────────────────
-if [ -x "$VENV_HERMES" ]; then
-  echo "[prepare] hermes runtime already exists at $VENV_HERMES — skipping."
+if [ -d "$SITE_PACKAGES/hermes" ]; then
+  echo "[prepare] hermes already installed in $SITE_PACKAGES — skipping."
   echo "[prepare] delete $RESOURCES_DIR to force a rebuild."
   exit 0
 fi
@@ -80,27 +77,24 @@ if [ ! -f "$PYTHON_BIN" ]; then
 fi
 echo "[prepare]   python binary: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 
-# ── 2. Create --copies venv ─────────────────────────────────────────────────
-echo "[prepare] creating --copies venv..."
-"$PYTHON_BIN" -m venv --copies "$VENV_DIR"
-echo "[prepare]   venv python: $("$VENV_PYTHON" --version 2>&1)"
-
-# ── 3. pip install hermes-agent ─────────────────────────────────────────────
-echo "[prepare] pip install hermes-agent..."
-HERMES_NIX_BUILD=1 "$VENV_PIP" install \
+# ── 2. pip install hermes-agent into the standalone interpreter ──────────────
+# No venv: deps land in the standalone Python's own site-packages, which is
+# fully portable (copies cleanly to any machine). Launching is `python -m hermes`.
+echo "[prepare] pip install hermes-agent (into standalone site-packages)..."
+HERMES_NIX_BUILD=1 "$PYTHON_BIN" -m pip install \
   --quiet \
   --disable-pip-version-check \
   "$REPO_ROOT/hermes-agent/"
 
-# Verify the hermes entry point was created.
-if [ ! -f "$VENV_HERMES" ]; then
-  echo "ERROR: hermes entry point not found at $VENV_HERMES after pip install" >&2
-  ls -la "$(dirname "$VENV_HERMES")" 2>/dev/null || echo "(venv scripts dir does not exist)"
+# Verify the hermes package is importable from the standalone interpreter.
+if ! "$PYTHON_BIN" -c "import hermes" 2>/dev/null; then
+  echo "ERROR: hermes not importable after pip install" >&2
+  "$PYTHON_BIN" -m pip show hermes 2>/dev/null || true
   exit 1
 fi
-echo "[prepare]   hermes entry: $VENV_HERMES"
+echo "[prepare]   hermes importable OK"
 
-# ── 4. Prune ────────────────────────────────────────────────────────────────
+# ── 3. Prune ────────────────────────────────────────────────────────────────
 echo "[prepare] pruning..."
 find "$RESOURCES_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 find "$RESOURCES_DIR" -name "*.pyc" -delete 2>/dev/null || true

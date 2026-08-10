@@ -61,3 +61,18 @@ pub fn venv_hermes_bin(agent_dir: Option<&Path>, venv_name: &str) -> PathBuf {
         base.join(venv_name).join("bin").join("hermes")
     }
 }
+
+/// Portable standalone Python interpreter bundled with Helix (no venv).
+///
+/// python-build-standalone layout: `python/python.exe` on Windows,
+/// `python/bin/python3` on Unix. Hermes + all deps are pre-installed into
+/// this interpreter's site-packages at build time, so launching is simply
+/// `python -m hermes …` — no venv, no hardcoded CI paths.
+pub fn standalone_python() -> PathBuf {
+    let base = hermes_data_dir().join("python");
+    if cfg!(windows) {
+        base.join("python.exe")
+    } else {
+        base.join("bin").join("python3")
+    }
+}

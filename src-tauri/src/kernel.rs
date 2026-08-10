@@ -1,7 +1,7 @@
 //! Hermes executable resolution + kernel (runtime) verification.
 //! Port of `electron/lib/kernel.js`.
 
-use crate::paths::{hermes_agent_dir, venv_hermes_bin};
+use crate::paths::{hermes_agent_dir, standalone_python, venv_hermes_bin};
 use ed25519_dalek::{Signature, SignatureError, Verifier, VerifyingKey};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ use std::os::windows::process::CommandExt;
 /// Ordered list of candidate hermes executables, deduplicated, existing only.
 pub fn resolve_hermes_candidates() -> Vec<PathBuf> {
     let mut cands: Vec<PathBuf> = vec![
+        standalone_python(),
         venv_hermes_bin(Some(&hermes_agent_dir()), "venv"),
         venv_hermes_bin(Some(&hermes_agent_dir()), ".venv"),
     ];

@@ -11,7 +11,7 @@
 //! Idempotent — if the venv hermes binary already exists, this is a near-instant
 //! no-op.
 
-use crate::paths::{hermes_agent_dir, venv_hermes_bin};
+use crate::paths::standalone_python;
 use serde_json::json;
 use std::fs;
 use std::io;
@@ -56,54 +56,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
         } else {
             fs::copy(&src_path, &dst_path)?;
         }
-    }
-    Ok(())
-}
-
-/// Fix shebangs in `venv/bin/` (or `venv/Scripts/` on Windows) so they
-/// reference the runtime Python path instead of the CI build path.
-///
-/// Only rewrites shebang lines that contain the word "python" — pip entry
-/// points always have `#!/path/to/python3`. Shell wrappers (`#!/bin/sh`)
-/// and native binaries are left untouched.
-fn fix_venv_shebangs(venv_dir: &Path, python_bin: &Path) -> io::Result<()> {
-    let bin_dir = if cfg!(windows) {
-        venv_dir.join("Scripts")
-    } else {
-        venv_dir.join("bin")
-    };
-    if !bin_dir.exists() {
-        return Ok(());
-    }
-    let new_shebang = format!("#!{}", python_bin.display());
-    for entry in fs::read_dir(&bin_dir)? {
-        let path = entry?.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Ok(content) = fs::read(&path) else { continue };
-        if !content.starts_with(b"#!") {
-            continue;
-        }
-        let first_line_end = content
-            .iter()
-            .position(|&b| b == b'\n')
-            .unwrap_or(content.len());
-        let first_line = &content[..first_line_end];
-        // Only fix Python entry points — not shell wrappers.
-        if !first_line
-            .windows(b"python".len())
-            .any(|w| w == b"python")
-        {
-            continue;
-        }
-        let mut fixed = new_shebang.as_bytes().to_vec();
-        fixed.extend_from_slice(&content[first_line_end..]);
-        fs::write(&path, fixed)?;
-        eprintln!(
-            "[bootstrap] fixed shebang in {}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        );
     }
     Ok(())
 }
@@ -153,10 +105,10 @@ fn bootstrap_lock() -> Option<fs::File> {
 /// via eprintln but never propagated — we always fall through to the normal
 /// gateway spawn attempt so the existing error paths handle it.
 pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> {
-    let venv_bin = venv_hermes_bin(Some(&hermes_agent_dir()), "venv");
+    let py = standalone_python();
 
     // Already bootstrapped — quick return.
-    if venv_bin.exists() {
+    if py.exists() {
         return Ok(());
     }
 
@@ -164,7 +116,7 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     let _lock = bootstrap_lock();
 
     // Double-check after acquiring lock.
-    if venv_bin.exists() {
+    if py.exists() {
         return Ok(());
     }
 
@@ -185,12 +137,14 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
         return Ok(());
     }
 
-    // ── Copy runtime ──────────────────────────────────────────────────
+    // ── Copy standalone Python runtime (portable, no venv) ────────────
     emit_progress(app_handle, "preparing", "正在准备 Hermes 运行环境...");
 
     let data_dir = crate::paths::hermes_data_dir();
 
-    // Copy standalone Python runtime.
+    // Copy standalone Python runtime. Hermes + all deps are pre-installed
+    // into this interpreter's site-packages at build time
+    // (scripts/prepare-runtime.sh), so no venv / shebang fix is needed.
     let src_python = runtime_dir.join("python");
     let dst_python = data_dir.join("python");
     if src_python.exists() {
@@ -201,32 +155,6 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
         );
         copy_dir_recursive(&src_python, &dst_python)
             .map_err(|e| format!("复制 Python 运行时失败: {e}"))?;
-    }
-
-    // Copy pre-built hermes-agent venv.
-    let src_venv = runtime_dir.join("hermes-agent").join("venv");
-    let dst_venv = hermes_agent_dir().join("venv");
-    if src_venv.exists() {
-        eprintln!(
-            "[bootstrap] extracting venv {} → {}",
-            src_venv.display(),
-            dst_venv.display()
-        );
-        copy_dir_recursive(&src_venv, &dst_venv)
-            .map_err(|e| format!("复制 venv 失败: {e}"))?;
-    }
-
-    // ── Fix shebangs ─────────────────────────────────────────────────
-    // The venv was built at a CI path; rewrite entry-point shebangs to
-    // point at the runtime Python (which was copied with --copies, so
-    // it lives in both python/ and venv/bin/).
-    let venv_python = if cfg!(windows) {
-        dst_venv.join("Scripts").join("python.exe")
-    } else {
-        dst_venv.join("bin").join("python3")
-    };
-    if let Err(e) = fix_venv_shebangs(&dst_venv, &venv_python) {
-        eprintln!("[bootstrap] shebang fix warning: {e}");
     }
 
     eprintln!("[bootstrap] hermes runtime ready");
