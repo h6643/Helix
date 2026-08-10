@@ -40,7 +40,7 @@ detect_target_triple() {
 }
 
 TARGET_TRIPLE=$(detect_target_triple)
-ARCHIVE_NAME="cpython-${PYTHON_VERSION}-${TARGET_TRIPLE}-install_only-${PBS_RELEASE}.tar.gz"
+ARCHIVE_NAME="cpython-${PYTHON_VERSION}+${PBS_RELEASE}-${TARGET_TRIPLE}-install_only.tar.gz"
 PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${ARCHIVE_NAME}"
 PYTHON_BIN="$RESOURCES_DIR/python/bin/python3"
 if [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "mingw" ] || [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "msys" ] || [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "cygwin" ]; then
