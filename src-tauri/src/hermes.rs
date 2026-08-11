@@ -4197,6 +4197,40 @@ pub async fn hermes_tts_speak_stream(
 
 /// renderer as `hermes:event` with method derived from the event type.
 
+/// Kill any leftover `_helix_wake.py` bridge processes from a previous app
+/// instance. If the app exits uncleanly (crash / killed during dev), the pushed
+/// bridge can be orphaned while still holding the cross-process
+/// `wake-word.lock`, so the next launch would report "mic in use" even though
+/// nothing user-facing is using it. Sweep those before spawning a fresh bridge.
+fn reap_stale_wake_bridges() {
+    #[cfg(unix)]
+    {
+        use std::path::PathBuf;
+        let own_pid = std::process::id();
+        let Ok(entries) = std::fs::read_dir("/proc") else { return };
+        for entry in entries.flatten() {
+            let dir = entry.file_name();
+            let Ok(pid) = dir.to_string_lossy().parse::<u32>() else { continue };
+            let cmdline = PathBuf::from(format!("/proc/{pid}/cmdline"));
+            let Ok(raw) = std::fs::read(&cmdline) else { continue };
+            let args: Vec<&str> = raw.split(|&b| b == 0).filter(|s| !s.is_empty()).map(|s| std::str::from_utf8(s).unwrap_or("")).collect();
+            if args.iter().any(|a| a.ends_with("_helix_wake.py")) {
+                // A bridge is stale if its parent isn't the current app process.
+                // This covers both reparented-to-init cases and bridges whose
+                // owner app was killed (reparented to a shell / terminal).
+                let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else { continue };
+                let ppid = status.split('\n')
+                    .find_map(|l| l.strip_prefix("PPid:"))
+                    .map(|v| v.trim().parse::<u32>().unwrap_or(0))
+                    .unwrap_or(0);
+                if ppid != own_pid {
+                    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 
 pub async fn hermes_wake_start(
@@ -4219,7 +4253,7 @@ pub async fn hermes_wake_start(
 
     }
 
-
+    reap_stale_wake_bridges();
 
     let hermes_bin = match resolve_hermes_cmd() {
 

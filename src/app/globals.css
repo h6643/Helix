@@ -96,7 +96,6 @@
      They are deliberately independent so the two never bleed into each other. */
   --helix-interface-font: var(--font-geist-sans);
   --helix-transcript-size: 14px;
-  --helix-font-family: var(--font-geist-mono);
   --helix-font-size: 13px;
 
   /* Context-usage category colors — match backend `session.context_breakdown`
@@ -211,33 +210,23 @@
 }
 
 html, body {
-  font-feature-settings: 'cv11', 'ss01', 'ss03';
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  text-rendering: optimizeLegibility;
-  font-hinting: normal;
-  letter-spacing: -0.006em;
   /* UI font scope: chat + settings inherit this. The code editor overrides
      its own font via --helix-font-family on the CodeMirror element. */
-  font-family: var(--helix-interface-font, var(--font-geist-sans));
+  /* 关闭 WebKitGTK 的 text-autospace 自动 CJK-Latin 间距：其在部分 WebKitGTK
+     版本下会误算文本宽高，导致模型输出文字重叠/折叠成一行。仅去掉自动留白，
+     不影响字形。Chromium 无此 bug。 */
+  text-autospace: none;
+  -webkit-text-autospace: none;
 }
 
 /* Headings: tighter tracking for cleaner hierarchy */
 h1, h2, h3, h4, h5, h6 {
-  letter-spacing: -0.02em;
 }
 
 /* Message content: balanced line height */
 .helix-md {
-  line-height: 1.65;
-  font-size: 0.9rem;
-  word-break: break-word;
   /* 防止继承全局负字距(-0.006em)与 Geist 字形替换(cv11/ss01/ss03)导致
      西文/数字被挤压或连笔粘连；中文不受影响，仅重置排版类属性。 */
-  letter-spacing: normal;
-  font-feature-settings: normal;
-  text-rendering: auto;
-  font-variant-ligatures: none;
 }
 
 .helix-md p {
@@ -246,7 +235,6 @@ h1, h2, h3, h4, h5, h6 {
 
 .helix-md h1, .helix-md h2, .helix-md h3 {
   font-weight: 600;
-  letter-spacing: -0.015em;
   margin-top: 1.2em;
   margin-bottom: 0.5em;
 }
@@ -662,30 +650,32 @@ pre code.hljs {
 
 /* ── Scrollbar polish ─────────────────────────────── */
 
-[data-radix-scroll-area-viewport]::-webkit-scrollbar {
+
+
+.msg-scroll-viewport::-webkit-scrollbar {
   width: 5px;
   height: 5px;
 }
 
-[data-radix-scroll-area-viewport]::-webkit-scrollbar-track {
+.msg-scroll-viewport::-webkit-scrollbar-track {
   background: transparent;
 }
 
-[data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb {
+.msg-scroll-viewport::-webkit-scrollbar-thumb {
   background: oklch(0.85 0.004 250);
   border-radius: 3px;
   transition: background 0.15s ease;
 }
 
-[data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb:hover {
+.msg-scroll-viewport::-webkit-scrollbar-thumb:hover {
   background: oklch(0.75 0.006 250);
 }
 
-.dark [data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb {
+.dark .msg-scroll-viewport::-webkit-scrollbar-thumb {
   background: oklch(0.25 0.005 250);
 }
 
-.dark [data-radix-scroll-area-viewport]::-webkit-scrollbar-thumb:hover {
+.dark .msg-scroll-viewport::-webkit-scrollbar-thumb:hover {
   background: oklch(0.32 0.006 250);
 }
 
@@ -721,12 +711,11 @@ pre code.hljs {
 .helix-md {
   font-size: var(--helix-transcript-size, 14px);  /* 界面字号：对话界面跟随设置 */
   line-height: 1.8;          /* 更宽松的行高，缓解密集感 */
+  overflow-wrap: break-word;
+  text-spacing-trim: space-all;
   color: var(--foreground);
   word-wrap: break-word;
-  overflow-wrap: break-word;
   /* 中英文混排自动留白（渐进增强：Chrome 132+ 等支持） */
-  text-autospace: normal;
-  text-spacing-trim: space-all;
 }
 
 .helix-md p {
@@ -746,7 +735,6 @@ pre code.hljs {
   font-weight: 600;
   margin: 1.5em 0 0.7em;     /* 标题前后更多呼吸感，强化层级 */
   color: var(--primary);      /* 暖橙色标题，像截图里的“表达链接” */
-  letter-spacing: -0.01em;
   text-wrap: balance;
 }
 
@@ -781,7 +769,6 @@ pre code.hljs {
 
 /* 仅作用于真正的 inline code（代码块内的 code 已被下方 .helix-md pre code 重置） */
 .helix-md code {
-  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'JetBrains Mono', ui-monospace, monospace;
   font-size: 0.8em;
   background: none;
   padding: 0 0.15em;
@@ -948,7 +935,6 @@ nav::-webkit-scrollbar-thumb:hover {
 .file-ref {
   color: oklch(0.82 0.14 250);
   text-decoration: none;
-  font-family: var(--font-geist-mono);
   font-size: 0.8125rem;
 }
 
@@ -959,7 +945,6 @@ nav::-webkit-scrollbar-thumb:hover {
 /* Prompt symbol */
 .prompt-symbol {
   color: oklch(0.82 0.14 250);
-  font-family: var(--font-geist-mono);
   font-weight: 600;
 }
 
@@ -1055,7 +1040,6 @@ nav::-webkit-scrollbar-thumb:hover {
   border: 1px solid var(--border);
   border-radius: 3px;
   overflow: hidden;
-  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', 'JetBrains Mono', monospace;
   font-size: 12px;
 }
 
@@ -1073,7 +1057,6 @@ nav::-webkit-scrollbar-thumb:hover {
   font-size: 10px;
   font-weight: 600;
   color: var(--muted-foreground);
-  letter-spacing: 0.8px;
 }
 
 .helix-titlebar-right {
@@ -1105,7 +1088,6 @@ nav::-webkit-scrollbar-thumb:hover {
   border-radius: 2px;
   padding: 1px 6px;
   cursor: pointer;
-  font-family: inherit;
   transition: color 0.15s, border-color 0.15s;
 }
 
@@ -1254,8 +1236,10 @@ nav::-webkit-scrollbar-thumb:hover {
 .xterm *,
 .xterm-char-measure-element,
 .xterm-char-measure-element * {
-  letter-spacing: normal !important;
-  font-feature-settings: normal !important;
   font-kerning: auto !important;
   font-variant-ligatures: none !important;
 }
+
+/* 隐藏滚动条（空会话时），与原 ScrollArea hideScrollbar 等价 */
+.hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.hide-scrollbar::-webkit-scrollbar { display: none; }

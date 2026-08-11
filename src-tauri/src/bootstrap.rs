@@ -118,6 +118,16 @@ fn bootstrap_lock() -> Option<fs::File> {
     }
 }
 
+/// Read the RUNTIME_VERSION integer from a directory, if present.
+fn read_runtime_version(dir: &Path) -> Option<u64> {
+    let bytes = fs::read(dir.join("RUNTIME_VERSION")).ok()?;
+    std::str::from_utf8(&bytes)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
 /// Ensure the pre-built hermes runtime is extracted and ready to launch.
 ///
 /// Returns `Ok(())` whether we bootstrapped or skipped. Errors are surfaced
@@ -133,12 +143,38 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     let data_dir = crate::paths::hermes_data_dir();
     let agent_extra = data_dir.join("agent-extra");
 
-    // Already bootstrapped with a usable runtime — quick return.
-    // `hermes_cli` must be importable; otherwise this is a stale base
+    // Locate the bundled runtime (may not exist in dev mode).
+    let resource_dir = app_handle
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("无法获取资源目录: {e}"))?;
+    let runtime_dir = resource_dir.join("hermes-runtime");
+
+    // Version comparison decides whether an already-installed runtime must be
+    // re-extracted. The bundled RUNTIME_VERSION is stamped by
+    // prepare-runtime.sh on every build; when it differs from the installed
+    // marker, Python-side changes (e.g. tools/wake_word.py, _helix_wake.py)
+    // have shipped and must propagate to this machine — otherwise a stale
+    // agent-extra can leave the wake-word listener broken across restarts.
+    let bundled_version = read_runtime_version(&runtime_dir);
+    let installed_version = read_runtime_version(&data_dir);
+    let version_needs_upgrade = match bundled_version {
+        // No version file in the bundle (older build / dev mode): treat as in
+        // sync unless a newer-looking installed marker exists.
+        None => false,
+        Some(v) => installed_version != Some(v),
+    };
+
+    // Already bootstrapped with a usable runtime at the bundled version — quick
+    // return. `hermes_cli` must be importable; otherwise this is a stale base
     // interpreter (venv-era copy) that would crash on launch, so we fall
     // through and re-extract below. We also require agent-extra/tools to exist
     // (wake-word + TTS live there) — if missing, fall through and copy it.
-    if py.exists() && hermes_cli_present(&python_dir) && agent_extra.join("tools").is_dir() {
+    let ready = py.exists()
+        && hermes_cli_present(&python_dir)
+        && agent_extra.join("tools").is_dir()
+        && !version_needs_upgrade;
+    if ready {
         return Ok(());
     }
 
@@ -146,24 +182,13 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     let _lock = bootstrap_lock();
 
     // Double-check after acquiring lock.
-    if py.exists() && hermes_cli_present(&python_dir) && agent_extra.join("tools").is_dir() {
+    let ready = py.exists()
+        && hermes_cli_present(&python_dir)
+        && agent_extra.join("tools").is_dir()
+        && !version_needs_upgrade;
+    if ready {
         return Ok(());
     }
-
-    // Stale/missing runtime — wipe the old dir so the copy below is clean.
-    if py.exists() {
-        eprintln!(
-            "[bootstrap] python runtime present but hermes_cli missing — re-extracting"
-        );
-        let _ = fs::remove_dir_all(&python_dir);
-    }
-
-    // ── Locate resource directory ─────────────────────────────────────
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("无法获取资源目录: {e}"))?;
-    let runtime_dir = resource_dir.join("hermes-runtime");
 
     if !runtime_dir.exists() {
         // Dev mode — resources aren't bundled. Let spawn_gateway fall
@@ -175,25 +200,34 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
         return Ok(());
     }
 
-    // ── Copy standalone Python runtime (portable, no venv) ────────────
     emit_progress(app_handle, "preparing", "正在准备 Hermes 运行环境...");
 
-    // Copy standalone Python runtime. Hermes + all deps are pre-installed
-    // into this interpreter's site-packages at build time
-    // (scripts/prepare-runtime.sh), so no venv / shebang fix is needed.
+    // ── Copy standalone Python runtime (portable, no venv) ────────────
+    // Only re-extract the (large) interpreter when it's missing or unusable.
+    // A version bump alone must not force a full re-copy of the Python tree.
     let src_python = runtime_dir.join("python");
     let dst_python = data_dir.join("python");
-    if src_python.exists() {
-        eprintln!(
-            "[bootstrap] extracting python runtime {} → {}",
-            src_python.display(),
-            dst_python.display()
-        );
-        copy_dir_recursive(&src_python, &dst_python)
-            .map_err(|e| format!("复制 Python 运行时失败: {e}"))?;
+    if !(py.exists() && hermes_cli_present(&python_dir)) {
+        // Wipe the old dir so the copy below is clean.
+        if py.exists() {
+            eprintln!(
+                "[bootstrap] python runtime present but hermes_cli missing — re-extracting"
+            );
+            let _ = fs::remove_dir_all(&python_dir);
+        }
+        if src_python.exists() {
+            eprintln!(
+                "[bootstrap] extracting python runtime {} → {}",
+                src_python.display(),
+                dst_python.display()
+            );
+            copy_dir_recursive(&src_python, &dst_python)
+                .map_err(|e| format!("复制 Python 运行时失败: {e}"))?;
+        }
     }
 
     // ── Copy agent-extra (wake-word listener + TTS scripts / tools pkg) ──
+    // Always (re)copy on a version bump so script/tool changes propagate.
     let src_extra = runtime_dir.join("agent-extra");
     let dst_extra = data_dir.join("agent-extra");
     if src_extra.exists() {
@@ -209,6 +243,11 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
             "[bootstrap] bundled agent-extra not found at {} — wake-word/TTS may be unavailable",
             src_extra.display()
         );
+    }
+
+    // ── Record the extracted runtime version ──────────────────────────
+    if let Some(v) = bundled_version {
+        let _ = fs::write(data_dir.join("RUNTIME_VERSION"), format!("{v}\n"));
     }
 
     eprintln!("[bootstrap] hermes runtime ready");

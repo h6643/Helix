@@ -55,15 +55,22 @@ if [ ! -d "$SITE_PACKAGES" ]; then
 fi
 
 # ── Idempotency ────────────────────────────────────────────────────────────
+# If the Python runtime is already built, skip the heavy download/pip steps.
+# The agent-extra bundle + RUNTIME_VERSION stamp still run below so Python-side
+# script changes are always rebundled and re-versioned on every build.
+BUILT=0
 if [ -d "$SITE_PACKAGES/hermes_cli" ]; then
-  echo "[prepare] hermes_cli already installed in $SITE_PACKAGES — skipping."
-  echo "[prepare] delete $RESOURCES_DIR to force a rebuild."
-  exit 0
+  BUILT=1
+  echo "[prepare] hermes_cli already installed in $SITE_PACKAGES — skipping pip install."
+else
+  echo "[prepare] building runtime from scratch"
 fi
 
 echo "[prepare] target:  $TARGET_TRIPLE"
 echo "[prepare] python:   $PYTHON_VERSION"
 echo "[prepare] output:   $RESOURCES_DIR"
+
+if [ "$BUILT" -eq 0 ]; then
 
 # ── 1. Download python-build-standalone ─────────────────────────────────────
 echo "[prepare] downloading python-build-standalone..."
@@ -176,6 +183,8 @@ if ! "$PYTHON_BIN" -c "import hermes_cli.main" 2>/dev/null; then
 fi
 echo "[prepare]   hermes importable OK"
 
+fi # ^ heavy build steps (skipped when the Python runtime already exists)
+
 # ── 3b. Bundle wake-word agent-extra (scripts/_helix_wake.py + full tools/) ──
 # The standalone interpreter has no hermes-agent source tree, so the wake-word
 # listener needs its script + the tools package copied next to the runtime.
@@ -203,6 +212,17 @@ if [ -d "$REPO_ROOT/hermes-agent/tools" ]; then
 fi
 # Drop the __pycache__ that may have been copied alongside the sources.
 find "$AGENT_EXTRA" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# ── 4. Stamp runtime version ─────────────────────────────────────────────
+# RUNTIME_VERSION is read by the Rust bootstrap (bootstrap.rs) to decide whether
+# an already-installed ~/.hermes runtime must be re-extracted. Bump it on every
+# build (build epoch) so any change to the Python runtime / agent-extra scripts
+# — including _helix_wake.py / tools/wake_word.py — propagates to existing
+# installs, fixing "mic in use after restart" caused by stale bundled scripts.
+# The file is kept out of the git ignore (see .gitignore `!RUNTIME_VERSION`).
+VERSION_FILE="$RESOURCES_DIR/RUNTIME_VERSION"
+echo "[prepare] stamping $VERSION_FILE"
+date +%s > "$VERSION_FILE"
 
 # ── 3. Prune ────────────────────────────────────────────────────────────────
 echo "[prepare] pruning..."

@@ -38,7 +38,7 @@ export function extractThinkTags(text: string): { content: string; reasoning: st
  * Normalize ACP content to plain text.
  * Handles string, array, object, and null/undefined inputs.
  */
-export function normalizeAcpContent(content: unknown): string {
+export function normalizeAcpContent(content: unknown, opts?: { stripSystemReminder?: boolean }): string {
   let text = ''
   if (typeof content === 'string') text = content
   else if (content === null || content === undefined) text = ''
@@ -50,10 +50,34 @@ export function normalizeAcpContent(content: unknown): string {
     else text = JSON.stringify(obj)
   } else text = String(content)
 
-  // Strip <system-reminder> tags only — do NOT trim, because Hermes streams
-  // messages as word/token chunks and any trim() here would eat the leading
-  // space of each chunk and glue words together ("I'llhelpyouexplore").
-  return text.replace(SYSTEM_REMINDER_RE, '')
+  // Strip <system-reminder> tags only when requested — do NOT trim, because
+  // Hermes streams messages as word/token chunks and any trim() here would eat
+  // the leading space of each chunk and glue words together ("I'llhelpyouexplore").
+  const stripSystemReminder = opts?.stripSystemReminder ?? true
+  const cleaned = stripSystemReminder ? text.replace(SYSTEM_REMINDER_RE, '') : text
+  // Strip invisible transport control chars that overlap lines in WebKitGTK's
+  // pre-wrap (lone CR = progress-bar carriage-return; ANSI CSI sequences).
+  // Visible text, emoji and <system-reminder> are preserved.
+  return sanitizeControlChars(cleaned)
+}
+
+/**
+ * Flatten ACP content to a string WITHOUT any content modification:
+ * does NOT strip <system-reminder> tags and does NOT strip emoji.
+ * Use for verbatim ("raw") model output display.
+ */
+export function normalizeAcpContentRaw(content: unknown): string {
+  return normalizeAcpContent(content, { stripSystemReminder: false })
+}
+
+// Remove control characters that cause line overlap in WebKitGTK (Tauri on Linux):
+//  - CR not followed by LF -> LF (prevents "carriage return to line start" overlap)
+//  - ANSI CSI escape sequences (\x1b[...m / cursor moves) -> removed (rendered as garbage)
+export function sanitizeControlChars(s: string): string {
+  return s
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
 }
 
 const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F1FF}\u{1F200}-\u{1F2FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA70}-\u{1FAFF}\u{2B00}-\u{2BFF}\u{2300}-\u{23FF}\u{FE00}-\u{FE0F}\u{200D}]/gu

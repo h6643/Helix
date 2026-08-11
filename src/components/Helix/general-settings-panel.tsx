@@ -44,7 +44,7 @@ export function GeneralSettingsPanel() {
             <input
               value={wakeWordPhrase}
               onChange={(e) => setWakeWordPhrase(e.target.value)}
-              onBlur={() => { if (!wakeWordPhrase.trim()) setWakeWordPhrase('hey hermes') }}
+              onBlur={() => { if (!wakeWordPhrase.trim()) setWakeWordPhrase('hey hermes'); persistToStorage() }}
               placeholder="hey hermes"
               className="w-56 px-2.5 py-1.5 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary"
             />
@@ -57,7 +57,7 @@ export function GeneralSettingsPanel() {
           <input
             value={startupGreeting}
             onChange={(e) => setStartupGreeting(e.target.value)}
-            onBlur={() => { if (!startupGreeting.trim()) setStartupGreeting('有什么可以帮你的？') }}
+            onBlur={() => { if (!startupGreeting.trim()) setStartupGreeting('有什么可以帮你的？'); persistToStorage() }}
             placeholder="有什么可以帮你的？"
             className="w-56 px-2.5 py-1.5 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary"
           />

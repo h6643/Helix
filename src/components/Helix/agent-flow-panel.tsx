@@ -39,7 +39,6 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion'
 import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import type { ReasoningEffortLevel } from '@/hermes-ui/types'
 import { useProviderStore } from '@/hermes-ui/provider-store'
 import { pushModelConfig } from '@/lib/config-sync'
@@ -50,7 +49,7 @@ import { buildAcpMcpServers } from '@/lib/mcp'
 import { detectScheduledTasks, syncTaskToBackend, type DetectedTask } from '@/lib/schedule-utils'
 import { isServeActive } from '@/lib/serve-gateway'
 import { debug } from '@/lib/logger'
-import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, stripEmoji, stripSystemReminders, extractKaomojiStatus } from '@/lib/text-utils'
+import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, normalizeAcpContentRaw, stripEmoji, stripSystemReminders, extractKaomojiStatus } from '@/lib/text-utils'
 import { ContextUsageIndicator } from './context-usage'
 
 import { getToolLabel, getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
@@ -715,7 +714,7 @@ function SummarizedHistoryBlock({ count, preview, startTs, endTs }: { count: num
         <ChevronRight className="size-3 transition-transform group-open/details:rotate-90 shrink-0" />
         <span>已压缩 {count} 条较早消息{range}，点击展开预览</span>
       </summary>
-      <div className="pl-4 pr-2 text-xs text-muted-foreground/45 whitespace-pre-wrap leading-relaxed mb-2">
+      <div className="pl-4 pr-2 text-xs text-muted-foreground/45  leading-relaxed mb-2">
         {preview}
       </div>
     </details>
@@ -783,24 +782,21 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   onFork: (id: string) => void
 }) {
   const content = useMemo(() => normalizeAcpContent(msg.content), [msg.content])
-  const mdContent = useMemo(() => stripEmoji(normalizeAcpContent(msg.content)), [msg.content])
-  const reasoning = useMemo(() => normalizeAcpContent(msg.reasoning || ''), [msg.reasoning])
+  const mdContent = useMemo(() => normalizeAcpContentRaw(msg.content), [msg.content])
+  const reasoning = useMemo(() => normalizeAcpContentRaw(msg.reasoning || ''), [msg.reasoning])
   const messageDuration = msg.duration ?? msg.thinkingTime
 
   return (
     <div
       data-message-id={msg.id}
       className={`flex w-full step-enter ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-      // 有界渲染：视口外的消息跳过布局/绘制，等价终端的「只画可见行」。
-      // contain-intrinsic-size 给未渲染消息一个占位高度，避免滚动条跳动。
-      style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 120px' }}
     >
       {msg.role === 'assistant' ? (
         <div className={`group w-full rounded-xl transition-all duration-200 ${
           isSearchMatch
             ? isSearchActive
-              ? 'ring-2 ring-yellow-400/70 bg-yellow-400/5'
-              : 'ring-1 ring-yellow-400/30 bg-yellow-400/[0.03]'
+              ? 'ring-2 ring-yellow-400/40'
+              : 'ring-1 ring-yellow-400/20'
             : ''
         }`}>
           <div className="flex-1 min-w-0">
@@ -811,8 +807,8 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                   <span>{extractKaomojiStatus(reasoning).status || '思考'}</span>
                   <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                 </summary>
-                <div className="mt-1 pl-4 text-foreground/50 whitespace-pre-wrap break-all leading-relaxed" style={{ fontSize }}>
-                  {stripEmoji(reasoning)}
+                <div className="mt-1 pl-4 text-foreground/50  break-all leading-relaxed" style={{ fontSize }}>
+                  {searchOpen && searchQuery.trim() ? <HighlightText text={reasoning} query={searchQuery} active={isSearchActive} /> : reasoning}
                 </div>
               </details>
             )}
@@ -826,14 +822,14 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                         <span>{extractKaomojiStatus(block.content).status || '思考'}</span>
                         <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                       </summary>
-                      <div className="mt-1 pl-4 text-foreground/50 whitespace-pre-wrap break-all leading-relaxed" style={{ fontSize }}>
-                        {stripEmoji(normalizeAcpContent(block.content))}
+                      <div className="mt-1 pl-4 text-foreground/50  break-all leading-relaxed" style={{ fontSize }}>
+                        {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} /> : normalizeAcpContentRaw(block.content)}
                       </div>
                     </details>
                   ) : block.type === 'text' ? (
-                    <pre key={idx} className="whitespace-pre-wrap break-words font-sans text-sm" style={{ fontSize }}>
-                      {stripEmoji(normalizeAcpContent(block.content))}
-                    </pre>
+                    <div key={idx} className="whitespace-pre-wrap break-words" style={{ fontSize }}>
+                      {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} /> : normalizeAcpContentRaw(block.content)}
+                    </div>
                   ) : block.type === 'file_change' ? (
                     <FileChangeSummary key={idx} changes={block.changes} />
                   ) : (
@@ -843,8 +839,8 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             ) : (
               <div className="helix-md" style={{ fontSize }}>
-                <pre className="whitespace-pre-wrap break-words font-sans text-sm" style={{ fontSize }}>
-                  {mdContent}
+                <pre className="whitespace-pre-wrap break-words" style={{ fontSize }}>
+                  {searchOpen && searchQuery.trim() ? <HighlightText text={mdContent} query={searchQuery} active={isSearchActive} /> : mdContent}
                 </pre>
               </div>
             )}
@@ -864,8 +860,8 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
             })()}
             {/* Copy button */}
             <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1 gap-0.5">
-              <CopyButton text={stripEmoji(content)} />
-              <SpeakButton text={stripEmoji(content)} />
+              <CopyButton text={mdContent} />
+              <SpeakButton text={mdContent} />
               <button
                 onClick={() => onFork(msg.id)}
                 className="p-1 rounded-lg text-muted-foreground/40 hover:text-blue-500 hover:bg-blue-500/10 transition-colors"
@@ -912,7 +908,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             )}
             {content && (
-              <div className="whitespace-pre-wrap leading-normal" style={{ fontSize }}>
+              <div className="helix-md  leading-relaxed" style={{ fontSize }}>
                 {searchOpen && searchQuery.trim()
                   ? <HighlightText text={content} query={searchQuery} active={isSearchActive} />
                   : content}
@@ -1893,9 +1889,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const scrollToBottom = useCallback(() => {
     if (!scrollRef.current || userScrolledUpRef.current) return
-    const viewport =
-      scrollRef.current.querySelector('[data-radix-scroll-area-viewport]') ||
-      scrollRef.current.querySelector('[data-slot="scroll-area-viewport"]')
+    const viewport = scrollRef.current
     if (viewport) {
       requestAnimationFrame(() => {
         viewport.scrollTop = viewport.scrollHeight
@@ -1906,9 +1900,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     userScrolledUpRef.current = false
     setUserScrolledUp(false)
     if (!scrollRef.current) return
-    const viewport =
-      scrollRef.current.querySelector('[data-radix-scroll-area-viewport]') ||
-      scrollRef.current.querySelector('[data-slot="scroll-area-viewport"]')
+    const viewport = scrollRef.current
     if (viewport) {
       requestAnimationFrame(() => {
         viewport.scrollTop = viewport.scrollHeight
@@ -1917,9 +1909,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   }, [])
 
   useEffect(() => {
-    const viewport =
-      scrollRef.current?.querySelector('[data-radix-scroll-area-viewport]') ||
-      scrollRef.current?.querySelector('[data-slot="scroll-area-viewport"]')
+    const viewport = scrollRef.current
     if (!viewport) return
     const handleScroll = () => {
       const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 100
@@ -1939,9 +1929,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   useEffect(() => {
     userScrolledUpRef.current = false
     setUserScrolledUp(false)
-    const viewport =
-      scrollRef.current?.querySelector('[data-radix-scroll-area-viewport]') ||
-      scrollRef.current?.querySelector('[data-slot="scroll-area-viewport"]')
+    const viewport = scrollRef.current
     if (!viewport) return
     // Two rAFs to ensure the newly loaded messages are laid out first.
     requestAnimationFrame(() => {
@@ -3535,25 +3523,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 // more complete accumulated buffer to avoid truncation.
                 newText = cur
               } else {
-                // Check for content overlap to avoid duplication on partial resends.
-                // For streaming tokens (chunk < 100 chars), skip expensive overlap scan —
-                // the overhead isn't worth it for normal token-by-token delivery.
-                let overlap = 0
-                if (incTrim.length < 100) {
-                  // Small chunk: just append (normal streaming path)
-                  overlap = 0
-                } else {
-                  // Large chunk (full resend / retry): check overlap but cap at
-                  // min(incoming, 500) chars to bound worst-case cost.
-                  const maxCheck = Math.min(incTrim.length, 500)
-                  for (let len = maxCheck; len > 1; len--) {
-                    if (curTrim.endsWith(incTrim.substring(0, len))) {
-                      overlap = len
-                      break
-                    }
-                  }
-                }
-                newText = overlap > 0 ? cur + incRaw.slice(overlap) : cur + incRaw
+                // Simple append — no overlap scan (avoid false-positive duplication
+                // on full resends when the 500-char cap misses the real overlap).
+                newText = cur + incRaw
               }
               textBufferRef.current = newText
               pendingTextRef.current = newText
@@ -4520,7 +4492,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               onPaste={handlePaste}
               placeholder={isEmpty ? "随心输入..." : "要求后续变更..."}
               rows={2}
-              className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
+              className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
               style={{
                 overflowX: 'hidden',
                 overflowY: 'auto',
@@ -4536,8 +4508,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 target.style.height = nextHeight + 'px'
                 // 输入框长高时自动把视口滚到底，防止输入框跑到可见区域下方
                 if (nextHeight > prevHeight && scrollRef.current) {
-                  const vp = scrollRef.current.querySelector('[data-radix-scroll-area-viewport]')
-                    || scrollRef.current.querySelector('[data-slot="scroll-area-viewport"]')
+                  const vp = scrollRef.current
                   if (vp) {
                     requestAnimationFrame(() => { vp.scrollTop = vp.scrollHeight })
                   }
@@ -4962,7 +4933,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       {/* Flow area */}
       {/* 模型在执行危险操作、弹出确认弹窗时，不显示聊天对话框（对话区+输入框）。
           只保留确认弹窗，让用户专注审批；审批结束后聊天恢复显示。 */}
-      <ScrollArea ref={scrollRef} className={`flex-1 min-h-0 ${approvalRequest ? 'hidden' : ''}`} hideScrollbar={sessionMessages.length === 0 && !hasSteps}>
+      <div ref={scrollRef} className={`flex-1 min-h-0 overflow-y-auto msg-scroll-viewport ${approvalRequest ? 'hidden' : ''} ${sessionMessages.length === 0 && !hasSteps ? 'hide-scrollbar' : ''}`}>
         <div className="max-w-[700px] mx-auto px-5 py-4 pb-12 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (
             <div className="flex flex-col items-center w-full pt-[22vh]">
@@ -5049,7 +5020,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                             <span>{thinkingStatus || 'thinking...'}</span>
                             <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                           </summary>
-                          <div className="mt-1 pl-3 text-foreground/60 whitespace-pre-wrap break-all leading-relaxed max-h-[50vh] overflow-y-auto" style={{ fontSize: transcriptFontSize }}>
+                          <div className="mt-1 pl-3 text-foreground/60  break-all leading-relaxed max-h-[50vh] overflow-y-auto" style={{ fontSize: transcriptFontSize }}>
                             {thinkingBody}
                           </div>
                         </details>
@@ -5070,14 +5041,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                                   <span>{extractKaomojiStatus(block.content).status || 'thinking'}</span>
                                   <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                                 </summary>
-                                <div className="mt-1 pl-3 text-foreground/50 whitespace-pre-wrap break-all leading-relaxed" style={{ fontSize: transcriptFontSize }}>
-                                  {stripEmoji(normalizeAcpContent(block.content))}
+                                <div className="mt-1 pl-3 text-foreground/50  break-all leading-relaxed" style={{ fontSize: transcriptFontSize }}>
+                                  {normalizeAcpContentRaw(block.content)}
                                 </div>
                               </details>
                             ) : block.type === 'text' ? (
                             <div key={idx}>
-                              <pre className="whitespace-pre-wrap break-words font-sans text-sm" style={{ fontSize: transcriptFontSize }}>
-                                {stripEmoji(normalizeAcpContent(block.content))}
+                              <pre className="" style={{ fontSize: transcriptFontSize }}>
+                                {normalizeAcpContentRaw(block.content)}
                               </pre>
                             </div>
                           ) : block.type === 'file_change' ? (
@@ -5116,7 +5087,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             </div>
           )}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* API key warning */}
 
@@ -5211,6 +5182,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           onRespond={handleClarifyRespond}
         />
       )}
+
     </div>
   )
 }
