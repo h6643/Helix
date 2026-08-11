@@ -110,6 +110,86 @@ pub fn set_yaml_key(yaml: &str, dotted: &str, value: &serde_json::Value) -> Stri
     lines.join("\n")
 }
 
+/// Like `set_yaml_key` but supports arbitrarily-deep dotted keys
+/// (e.g. `auxiliary.vision.model`). `set_yaml_key` (2-level only) silently
+/// drops deeper keys, which is exactly why the vision config command needs
+/// this variant to write the `auxiliary.vision.*` block.
+pub fn set_yaml_key_deep(yaml: &str, dotted: &str, value: &serde_json::Value) -> String {
+    let parts: Vec<&str> = dotted.split('.').collect();
+    if parts.is_empty() {
+        return yaml.to_string();
+    }
+    let value_str = yaml_scalar_string(value);
+    let mut lines: Vec<String> = norm_lines(yaml);
+    set_deep(&mut lines, &parts, &value_str, 0);
+    lines.join("\n")
+}
+
+fn yaml_scalar_string(value: &serde_json::Value) -> String {
+    if let Some(b) = value.as_bool() {
+        if b { "true".to_string() } else { "false".to_string() }
+    } else if let Some(s) = value.as_str() {
+        let needs_quote = s.is_empty()
+            || s.chars().any(|c| {
+                c == ':' || c == '#' || c == '"' || c == '\'' || c == '%' || c.is_whitespace()
+            });
+        if needs_quote {
+            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        } else {
+            s.to_string()
+        }
+    } else if value.is_null() {
+        "\"\"".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Find the index of a `key:` header at exactly `indent` spaces. Returns None
+/// if absent. A deeper-indented line (more spaces) is intentionally not matched
+/// so we don't confuse a child block with a sibling.
+fn find_at_indent(lines: &[String], key: &str, indent: usize) -> Option<usize> {
+    let prefix = " ".repeat(indent);
+    for (i, l) in lines.iter().enumerate() {
+        if l.len() >= indent && l.starts_with(&prefix) {
+            let rest = &l[indent..];
+            if !rest.starts_with(' ') {
+                if rest == format!("{key}:") || rest.starts_with(&format!("{key}:")) {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Recursively locate/create the nested block for `parts[depth..]` and set its
+/// leaf to `value_str`. When a parent header exists but the child is missing,
+/// the child header is inserted right after the parent header (keeps the block
+/// cohesive). When the top-level key is absent it is appended at EOF (the only
+/// caller writes `auxiliary.*`, so this stays correct).
+fn set_deep(lines: &mut Vec<String>, parts: &[&str], value_str: &str, indent: usize) {
+    let key = parts[0];
+    let idx = find_at_indent(lines, key, indent);
+    match idx {
+        None => {
+            lines.push(format!("{}{}:", " ".repeat(indent), key));
+            set_deep(lines, &parts[1..], value_str, indent + 2);
+        }
+        Some(i) => {
+            if parts.len() == 1 {
+                lines[i] = format!("{}{}: {}", " ".repeat(indent), key, value_str);
+                return;
+            }
+            let child = parts[1];
+            if find_at_indent(lines, child, indent + 2).is_none() {
+                lines.insert(i + 1, format!("{}{}:", " ".repeat(indent + 2), child));
+            }
+            set_deep(lines, &parts[1..], value_str, indent + 2);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct CustomProviderEntry {
     end: usize,

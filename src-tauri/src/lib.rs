@@ -22,6 +22,8 @@ mod security;
 mod state;
 mod terminal;
 mod web_search;
+mod vision;
+mod mcp;
 mod window;
 
 use crate::state::{AppState, APP_HANDLE};
@@ -258,6 +260,11 @@ pub fn run() {
             // web search
             web_search::web_search_list,
             web_search::web_search_save,
+            // vision model
+            vision::vision_config_list,
+            vision::vision_config_save,
+            // gateway MCP servers (config.yaml mcp_servers, read-only)
+            mcp::mcp_config_list,
             // channels
             channels::channels_list,
             channels::channels_save,

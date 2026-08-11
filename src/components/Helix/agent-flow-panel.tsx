@@ -37,7 +37,6 @@ import {
 } from 'lucide-react'
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import ReactMarkdown from 'react-markdown'
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -51,7 +50,7 @@ import { buildAcpMcpServers } from '@/lib/mcp'
 import { detectScheduledTasks, syncTaskToBackend, type DetectedTask } from '@/lib/schedule-utils'
 import { isServeActive } from '@/lib/serve-gateway'
 import { debug } from '@/lib/logger'
-import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, stripEmoji, safeMarkdownSource, stripSystemReminders, extractKaomojiStatus } from '@/lib/text-utils'
+import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, stripEmoji, stripSystemReminders, extractKaomojiStatus } from '@/lib/text-utils'
 import { ContextUsageIndicator } from './context-usage'
 
 import { getToolLabel, getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
@@ -65,7 +64,6 @@ import { startWakeWord, stopWakeWord, pauseWakeWord, resumeWakeWord } from '@/li
 import { playDingSound } from '@/lib/ding-sound'
 import { speakText, splitSentences } from '@/lib/tts-utils'
 import { speak, stopSpeaking } from '@/lib/voice-utils'
-import { markdownComponents, markdownPlugins } from './markdown-components'
 import type { ChatMessage, HermesTodo } from '@/stores/helix-types'
 
 // ── Persisted per-conversation Hermes session map ──────────────────────────
@@ -785,7 +783,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   onFork: (id: string) => void
 }) {
   const content = useMemo(() => normalizeAcpContent(msg.content), [msg.content])
-  const mdContent = useMemo(() => safeMarkdownSource(stripEmoji(normalizeAcpContent(msg.content))), [msg.content])
+  const mdContent = useMemo(() => stripEmoji(normalizeAcpContent(msg.content)), [msg.content])
   const reasoning = useMemo(() => normalizeAcpContent(msg.reasoning || ''), [msg.reasoning])
   const messageDuration = msg.duration ?? msg.thinkingTime
 
@@ -833,14 +831,9 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                       </div>
                     </details>
                   ) : block.type === 'text' ? (
-                    <ReactMarkdown
-                      key={idx}
-                      components={markdownComponents}
-                      remarkPlugins={markdownPlugins.remarkPlugins}
-                      rehypePlugins={markdownPlugins.rehypePlugins}
-                    >
-                      {safeMarkdownSource(stripEmoji(normalizeAcpContent(block.content)))}
-                    </ReactMarkdown>
+                    <pre key={idx} className="whitespace-pre-wrap break-words font-sans text-sm" style={{ fontSize }}>
+                      {stripEmoji(normalizeAcpContent(block.content))}
+                    </pre>
                   ) : block.type === 'file_change' ? (
                     <FileChangeSummary key={idx} changes={block.changes} />
                   ) : (
@@ -850,13 +843,9 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             ) : (
               <div className="helix-md" style={{ fontSize }}>
-                <ReactMarkdown
-                  components={markdownComponents}
-                  remarkPlugins={markdownPlugins.remarkPlugins}
-                  rehypePlugins={markdownPlugins.rehypePlugins}
-                >
+                <pre className="whitespace-pre-wrap break-words font-sans text-sm" style={{ fontSize }}>
                   {mdContent}
-                </ReactMarkdown>
+                </pre>
               </div>
             )}
             {(() => {
@@ -3757,7 +3746,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               if (activeSessionId) useHelixStore.getState().setContextUsage(activeSessionId, parsed.size, parsed.used)
             } else if (parsed.type === 'usage_prompt_complete') {
               const u = parsed.usage
-              if (u && typeof u === 'object') {
+              if (u && typeof u === 'object' && !usageReceivedRef.current) {
                 const model = useHelixStore.getState().apiConfig.model || 'unknown'
                 useHelixStore.getState().addSessionUsageStats(model, {
                   totalTokens: Number(u.totalTokens) || undefined,
@@ -5087,13 +5076,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                               </details>
                             ) : block.type === 'text' ? (
                             <div key={idx}>
-                              <ReactMarkdown
-                                components={markdownComponents}
-                                remarkPlugins={markdownPlugins.remarkPlugins}
-                                rehypePlugins={markdownPlugins.rehypePlugins}
-                              >
-                                {safeMarkdownSource(stripEmoji(normalizeAcpContent(block.content)))}
-                              </ReactMarkdown>
+                              <pre className="whitespace-pre-wrap break-words font-sans text-sm" style={{ fontSize: transcriptFontSize }}>
+                                {stripEmoji(normalizeAcpContent(block.content))}
+                              </pre>
                             </div>
                           ) : block.type === 'file_change' ? (
                             <FileChangeSummary key={idx} changes={block.changes} />

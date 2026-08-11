@@ -2,11 +2,8 @@
 
 import { ChevronRight, X, Copy, CheckCheck, Image as ImageIcon } from 'lucide-react'
 import React, { useState, useRef, useEffect, useMemo } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkBreaks from 'remark-breaks'
-import remarkGfm from 'remark-gfm'
 import { formatDurationSeconds } from '@/lib/format'
-import { normalizeAcpContent, stripEmoji, safeMarkdownSource } from '@/lib/text-utils'
+import { normalizeAcpContent, stripEmoji } from '@/lib/text-utils'
 import { getToolLabel, getToolIcon, getToolDisplayLabel, extractToolPath } from '@/lib/tool-display-utils'
 import type { ExecutionStep } from '@/stores/helix-store'
 
@@ -57,7 +54,7 @@ function extractDiffStats(content: string): string {
 
 // ── Content type detection ──────────────────────────────────────────────
 
-type ResultKind = 'diff' | 'image' | 'search' | 'markdown' | 'plain'
+type ResultKind = 'diff' | 'image' | 'search' | 'plain'
 
 function detectResultKind(toolName: string, content: string): ResultKind {
   const name = (toolName || '').toLowerCase()
@@ -75,9 +72,7 @@ function detectResultKind(toolName: string, content: string): ResultKind {
   if (name.includes('grep') || name.includes('search') || name.includes('list_directory')) return 'search'
   if (/^\s*\d+\s*[│|]/.test(content) || /^[\w/.]+\.\w+:\d+/.test(content)) return 'search'
 
-  // Markdown detection (has markdown syntax)
-  if (/^#{1,6}\s|```|^\*|^-\s|\[.*?\]\(|^\|.*\|/m.test(content)) return 'markdown'
-
+  // 工具输出一律按纯文本处理 —— 不解析 markdown（标题/表格/代码块原样显示）
   return 'plain'
 }
 
@@ -180,16 +175,6 @@ function ImageRenderer({ content }: { content: string }) {
   )
 }
 
-function MarkdownRenderer({ content }: { content: string }) {
-  return (
-    <div className="text-[11px] prose prose-xs dark:prose-invert max-w-none prose-p:my-1 prose-pre:my-1 prose-pre:bg-transparent prose-pre:p-0">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
-        {safeMarkdownSource(content)}
-      </ReactMarkdown>
-    </div>
-  )
-}
-
 function PlainRenderer({ content }: { content: string }) {
   return (
     <div className="text-[11px] text-foreground/50 whitespace-pre-wrap break-all leading-relaxed font-mono">
@@ -204,7 +189,6 @@ function ResultRenderer({ content, toolName }: { content: string; toolName: stri
     case 'diff': return <DiffRenderer content={content} />
     case 'image': return <ImageRenderer content={content} />
     case 'search': return <SearchRenderer content={content} toolName={toolName} />
-    case 'markdown': return <MarkdownRenderer content={content} />
     default: return <PlainRenderer content={content} />
   }
 }

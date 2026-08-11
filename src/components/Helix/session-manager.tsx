@@ -167,17 +167,32 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
           const session = await persistence.importSessionFromMarkdown(text)
           if (session) { imported++ } else { failed++ }
         } else {
-          // JSON: try wrapped format first, then raw
+          // JSON: 支持单会话包裹格式、裸单会话，以及「导出全部」裸数组 / {sessions:[...]}
           const data = JSON.parse(text)
-          const jsonStr = data.type === 'helix-session' ? text : JSON.stringify(data)
-          const session = await persistence.importSessionFromJson(jsonStr)
-          if (session) { imported++ } else { failed++ }
+          const arr = Array.isArray(data)
+            ? data
+            : data && Array.isArray((data as any).sessions) ? (data as any).sessions : null
+          if (arr && arr.length > 0) {
+            for (const item of arr) {
+              const wrapped = typeof item === 'string'
+                ? item
+                : JSON.stringify({ type: 'helix-session', session: item })
+              const s = await persistence.importSessionFromJson(wrapped)
+              if (s) { imported++ } else { failed++ }
+            }
+          } else {
+            const jsonStr = data.type === 'helix-session' ? text : JSON.stringify(data)
+            const session = await persistence.importSessionFromJson(jsonStr)
+            if (session) { imported++ } else { failed++ }
+          }
         }
       } catch {
         failed++
       }
     }
     await loadSessions()
+    // 通知左侧边栏（sidebar）刷新：sidebar 监听 sessionSaveVersion，import 走 persist 直接写库、不经过 store action，需手动 bump
+    useHelixStore.setState((st) => ({ sessionSaveVersion: (st.sessionSaveVersion || 0) + 1 }))
     if (files.length === 1) {
       useHelixStore.getState().showToast({
         type: imported > 0 ? 'success' : 'error',

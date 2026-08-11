@@ -162,13 +162,18 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
     } else {
         base.join(&d)
     };
-    *state.work_dir.write().unwrap() = target.clone();
-    state.add_allowed_root(target.to_str().unwrap_or(""));
     // Ensure the directory exists — explicit_cwd requires isdir() == true.
     if let Err(e) = std::fs::create_dir_all(&target) {
         eprintln!("[setWorkDir] failed to create directory: {} {e}", target.display());
     }
-    persist_work_dir(target.to_str().unwrap_or(""));
+    // Canonicalize so the path returned to the renderer matches the canonicalized
+    // form stored in allowed_roots. Windows paths are case-insensitive but compared
+    // as strings, so a case/separator mismatch would make a later scanTree fail
+    // with "Path is outside working directory".
+    let canonical = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+    *state.work_dir.write().unwrap() = canonical.clone();
+    state.add_allowed_root(canonical.to_str().unwrap_or(""));
+    persist_work_dir(canonical.to_str().unwrap_or(""));
     // serve mode: cwd applied per-session via explicit_cwd — no restart.
     // acp mode: gateway cwd is fixed at spawn time — restart to apply.
     if env_gateway_mode() != "serve" {
@@ -176,7 +181,7 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
         std::thread::sleep(std::time::Duration::from_millis(300));
         let _ = spawn_gateway(&state);
     }
-    json!({ "success": true, "workDir": target.display().to_string() })
+    json!({ "success": true, "workDir": canonical.display().to_string() })
 }
 
 /// Kill + respawn the gateway. serve mode: no-op (config re-read per session).

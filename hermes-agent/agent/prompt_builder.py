@@ -356,6 +356,23 @@ TASK_COMPLETION_GUIDANCE = (
     "is always better than inventing a result."
 )
 
+# Markdown output formatting — keep rendered output well-formed so tables
+# and headings survive strict renderers (react-markdown / GFM). A common
+# model failure is gluing a heading or prose onto the same line as a table
+# header row, which breaks the renderer's table detection. Shipped in the
+# cached system prompt to every session; keep it tight.
+MARKDOWN_FORMATTING_GUIDANCE = (
+    "# Markdown formatting\n"
+    "When you output a markdown table:\n"
+    "- Put a blank line BEFORE the table (never glue a heading, sentence, or "
+    "paragraph onto the same line as the header row).\n"
+    "- Put the header row (`| col1 | col2 |`) on its own line, immediately "
+    "followed by a separator row (`| --- | --- |`).\n"
+    "- Keep every column aligned and each row a separate line.\n"
+    "Headings (`## ...`) must also sit on their own line with a space after "
+    "the hashes, never concatenated with following content."
+)
+
 # Universal parallel-tool-call guidance — applied to ALL models.
 #
 # Why this matters for cost: every assistant turn resends the entire

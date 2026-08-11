@@ -173,18 +173,18 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
   }
 
   return (
-    <div className="absolute bottom-36 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-2 w-[min(32rem,92vw)]">
-      <div className="flex flex-col gap-2.5 px-3.5 py-3 rounded-xl bg-popover border border-border/60 text-xs shadow-2xl">
+    <div className="flex justify-center px-5 pb-4">
+      <div className="w-full max-w-[460px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-4">
         {/* 问题 */}
-        <div className="flex items-start gap-2">
+        <div className="flex items-start gap-2 mb-2.5">
           <AlertTriangle className="size-3.5 text-sky-500 mt-0.5 shrink-0" />
-          <span className="text-foreground/90 whitespace-pre-wrap break-words leading-relaxed">
+          <span className="text-[13px] text-foreground/90 whitespace-pre-wrap break-words leading-relaxed">
             {request.question || '模型需要你的选择'}
           </span>
         </div>
         {/* 选项按钮 */}
         {request.choices && request.choices.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap gap-1.5 mb-2.5">
             {request.choices.map((c) => (
               <Button
                 key={c}

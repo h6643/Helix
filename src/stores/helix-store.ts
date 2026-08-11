@@ -2353,8 +2353,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // MCP config is now managed by Hermes
       const fileMcpConfig: Record<string, any> = {}
 
+      // Helper: load a setting without throwing — a single corrupted key
+      // must not fail the entire restore (common on Windows after crashes).
+      const safeLoad = <T>(promise: Promise<T | null>, key: string): Promise<T | null> =>
+        promise.catch((e) => { logError(`[restore] failed to load ${key}:`, e); return null })
+
       // Try loading the latest saved session first (full state)
-      const sessions = await persistence.loadSessions()
+      const sessions = (await safeLoad(persistence.loadSessions(), 'sessions')) || []
       const archivedSessions = sessions.filter(s => s.isArchived)
       const latestSession = sessions.filter(s => !s.isArchived).length > 0
         ? sessions.filter(s => !s.isArchived).sort((a, b) => b.savedAt - a.savedAt)[0]
@@ -2362,21 +2367,21 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
       // Load individual pieces for settings and non-session state
       const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, voiceWakeEnabled, wakeWordPhrase, approvalMode, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
-        persistence.loadMemories(),
-        persistence.loadTasks(),
-        persistence.loadCheckpoints(),
-        persistence.loadNotes(),
-        persistence.loadChatMessagesBySession(sessionId),
-        persistence.loadSetting<string | null>('goal'),
-        persistence.loadSetting<ApiConfig>('apiConfig'),
-        persistence.loadSetting<ApiConfig[]>('apiHistory'),
-        persistence.loadSetting<ApiProfile[]>('apiProfiles'),
-        persistence.loadSetting<string>('fontFamily'),
-        persistence.loadSetting<number>('fontSize'),
-        persistence.loadSetting<string>('interfaceFont'),
-        persistence.loadSetting<number>('transcriptFontSize'),
-        persistence.loadSetting<string>('themeStyle'),
-        persistence.loadSetting<{
+        safeLoad(persistence.loadMemories(), 'memories'),
+        safeLoad(persistence.loadTasks(), 'tasks'),
+        safeLoad(persistence.loadCheckpoints(), 'checkpoints'),
+        safeLoad(persistence.loadNotes(), 'notes'),
+        safeLoad(persistence.loadChatMessagesBySession(sessionId), 'chatMessages'),
+        safeLoad(persistence.loadSetting<string | null>('goal'), 'goal'),
+        safeLoad(persistence.loadSetting<ApiConfig>('apiConfig'), 'apiConfig'),
+        safeLoad(persistence.loadSetting<ApiConfig[]>('apiHistory'), 'apiHistory'),
+        safeLoad(persistence.loadSetting<ApiProfile[]>('apiProfiles'), 'apiProfiles'),
+        safeLoad(persistence.loadSetting<string>('fontFamily'), 'fontFamily'),
+        safeLoad(persistence.loadSetting<number>('fontSize'), 'fontSize'),
+        safeLoad(persistence.loadSetting<string>('interfaceFont'), 'interfaceFont'),
+        safeLoad(persistence.loadSetting<number>('transcriptFontSize'), 'transcriptFontSize'),
+        safeLoad(persistence.loadSetting<string>('themeStyle'), 'themeStyle'),
+        safeLoad(persistence.loadSetting<{
           requestCount: number
           totalTokens: number
           inputTokens: number
@@ -2385,43 +2390,43 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           cachedReadTokens: number
           cachedWriteTokens: number
           totalCost: number
-        }>('sessionUsageStats'),
-        persistence.loadSetting<Record<string, DailyUsageEntry>>('dailyUsage'),
-        persistence.loadSetting<any[]>('scheduledTasks'),
-        persistence.loadSetting<Record<string, McpServerConfig>>('mcpServers'),
-        persistence.loadSetting<Record<string, { keys: string[], action: string, description: string }>>('customShortcuts'),
-        persistence.loadSetting<string[]>('customizedShortcutIds'),
-        persistence.loadSetting<number>('agentMaxIterations'),
-        persistence.loadSetting<boolean>('autoCompactContext'),
-        persistence.loadSetting<boolean>('autoSaveSession'),
-        persistence.loadSetting<string[]>('availableModels'),
-        persistence.loadSetting<Record<string, string[]>>('providerModels'),
-        persistence.loadSetting<string>('reasoningEffort'),
-        persistence.loadSetting<string>('personality'),
-        persistence.loadSetting<boolean>('fastMode'),
-        persistence.loadSetting<boolean>('desktopNotifications'),
-        persistence.loadSetting<string>('editorTheme'),
-        persistence.loadSetting<boolean>('gitAutoCommit'),
-        persistence.loadSetting<boolean>('gitAutoPush'),
-        persistence.loadSetting<boolean>('gitPushConfirm'),
-        persistence.loadSetting<boolean>('gitAutoBranch'),
-        persistence.loadSetting<string>('gitRemoteUrl'),
-        persistence.loadSetting<string>('gitCommitTemplate'),
-        persistence.loadSetting<string>('gitBranchPrefix'),
-        persistence.loadSetting<boolean>('voiceAutoSpeak'),
-        persistence.loadSetting<boolean>('voiceWakeEnabled'),
-        persistence.loadSetting<string>('wakeWordPhrase'),
-        persistence.loadSetting<string>('approvalMode'),
-        persistence.loadSetting<string>('startupGreeting'),
-        persistence.loadSetting<ProviderConfig[]>('providers'),
-        persistence.loadSetting<string | null>('activeModel'),
-        persistence.loadSetting<string | null>('activeProviderId'),
-        persistence.loadSetting<string[]>('sessionHistory'),
-        persistence.loadSetting<number>('sessionHistoryIndex'),
-        persistence.loadSetting<string | null>('selectedWorkDir'),
-        persistence.loadSetting<boolean>('hasOnboarded'),
-        persistence.loadSetting<{ size: number; used: number } | null>('contextUsage'),
-        persistence.loadSetting<ExternalService[]>('externalServices'),
+        }>('sessionUsageStats'), 'sessionUsageStats'),
+        safeLoad(persistence.loadSetting<Record<string, DailyUsageEntry>>('dailyUsage'), 'dailyUsage'),
+        safeLoad(persistence.loadSetting<any[]>('scheduledTasks'), 'scheduledTasks'),
+        safeLoad(persistence.loadSetting<Record<string, McpServerConfig>>('mcpServers'), 'mcpServers'),
+        safeLoad(persistence.loadSetting<Record<string, { keys: string[], action: string, description: string }>>('customShortcuts'), 'customShortcuts'),
+        safeLoad(persistence.loadSetting<string[]>('customizedShortcutIds'), 'customizedShortcutIds'),
+        safeLoad(persistence.loadSetting<number>('agentMaxIterations'), 'agentMaxIterations'),
+        safeLoad(persistence.loadSetting<boolean>('autoCompactContext'), 'autoCompactContext'),
+        safeLoad(persistence.loadSetting<boolean>('autoSaveSession'), 'autoSaveSession'),
+        safeLoad(persistence.loadSetting<string[]>('availableModels'), 'availableModels'),
+        safeLoad(persistence.loadSetting<Record<string, string[]>>('providerModels'), 'providerModels'),
+        safeLoad(persistence.loadSetting<string>('reasoningEffort'), 'reasoningEffort'),
+        safeLoad(persistence.loadSetting<string>('personality'), 'personality'),
+        safeLoad(persistence.loadSetting<boolean>('fastMode'), 'fastMode'),
+        safeLoad(persistence.loadSetting<boolean>('desktopNotifications'), 'desktopNotifications'),
+        safeLoad(persistence.loadSetting<string>('editorTheme'), 'editorTheme'),
+        safeLoad(persistence.loadSetting<boolean>('gitAutoCommit'), 'gitAutoCommit'),
+        safeLoad(persistence.loadSetting<boolean>('gitAutoPush'), 'gitAutoPush'),
+        safeLoad(persistence.loadSetting<boolean>('gitPushConfirm'), 'gitPushConfirm'),
+        safeLoad(persistence.loadSetting<boolean>('gitAutoBranch'), 'gitAutoBranch'),
+        safeLoad(persistence.loadSetting<string>('gitRemoteUrl'), 'gitRemoteUrl'),
+        safeLoad(persistence.loadSetting<string>('gitCommitTemplate'), 'gitCommitTemplate'),
+        safeLoad(persistence.loadSetting<string>('gitBranchPrefix'), 'gitBranchPrefix'),
+        safeLoad(persistence.loadSetting<boolean>('voiceAutoSpeak'), 'voiceAutoSpeak'),
+        safeLoad(persistence.loadSetting<boolean>('voiceWakeEnabled'), 'voiceWakeEnabled'),
+        safeLoad(persistence.loadSetting<string>('wakeWordPhrase'), 'wakeWordPhrase'),
+        safeLoad(persistence.loadSetting<string>('approvalMode'), 'approvalMode'),
+        safeLoad(persistence.loadSetting<string>('startupGreeting'), 'startupGreeting'),
+        safeLoad(persistence.loadSetting<ProviderConfig[]>('providers'), 'providers'),
+        safeLoad(persistence.loadSetting<string | null>('activeModel'), 'activeModel'),
+        safeLoad(persistence.loadSetting<string | null>('activeProviderId'), 'activeProviderId'),
+        safeLoad(persistence.loadSetting<string[]>('sessionHistory'), 'sessionHistory'),
+        safeLoad(persistence.loadSetting<number>('sessionHistoryIndex'), 'sessionHistoryIndex'),
+        safeLoad(persistence.loadSetting<string | null>('selectedWorkDir'), 'selectedWorkDir'),
+        safeLoad(persistence.loadSetting<boolean>('hasOnboarded'), 'hasOnboarded'),
+        safeLoad(persistence.loadSetting<{ size: number; used: number } | null>('contextUsage'), 'contextUsage'),
+        safeLoad(persistence.loadSetting<ExternalService[]>('externalServices'), 'externalServices'),
       ])
 
       // Do NOT restore the latest session's chatMessages on startup.
@@ -2432,8 +2437,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const defaults = { provider: 'custom' as const, apiKey: '', baseUrl: 'https://api.ant-ling.com/v1', model: 'Ling-2.6-1T' }
       // Restore which named profile was active before the restart, so the selection
       // survives a cold start (the profile list itself is persisted to IndexedDB).
-      const loadedActiveProfileId = await persistence.loadSetting<string | null>('activeProfileId')
-      const savedBookmarks = await persistence.loadSetting<BrowserBookmark[]>('browserBookmarks')
+      const loadedActiveProfileId = (await safeLoad(persistence.loadSetting<string | null>('activeProfileId'), 'activeProfileId')) ?? null
+      const savedBookmarks = (await safeLoad(persistence.loadSetting<BrowserBookmark[]>('browserBookmarks'), 'browserBookmarks')) ?? null
 
       // ── Build multi-provider config for the flattened model selector ──
       // Always rebuild `builtProviders` from the authoritative declared sources
@@ -2958,7 +2963,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const isDriveRoot = typeof currentDir === 'string' && /^[a-zA-Z]:[\\/]?$/.test(currentDir)
       if (!currentDir || currentDir === '/' || currentDir === '\\' || isDriveRoot) {
         const fallbackDir = typeof process !== 'undefined' && typeof (process as any).cwd === 'function' ? (process as any).cwd() : ''
-        const info = isElectron() ? await electronApp.getInfo() : { workDir: fallbackDir }
+        let info = { workDir: fallbackDir }
+        if (isElectron()) {
+          try {
+            info = await electronApp.getInfo()
+          } catch { /* fall through to fallbackDir */ }
+        }
         set({ selectedWorkDir: info.workDir || fallbackDir })
       }
 

@@ -12,9 +12,9 @@ interface Props {
 }
 
 /**
- * Modal shown when the AI's reply contains scheduled-task declarations. We do NOT
+ * Inline card shown when the AI's reply contains scheduled-task declarations. We do NOT
  * auto-create them — the user must confirm (and can uncheck individual tasks).
- * Mirrors the approval-dialog style (fixed overlay + centered card).
+ * Mirrors the approval-dialog style (centered inline card at the bottom of the panel).
  */
 export function ScheduledTaskConfirm({ tasks, onConfirm, onDismiss }: Props) {
   const [selected, setSelected] = useState<Set<number>>(() => new Set(tasks.map((_, i) => i)))
@@ -32,14 +32,8 @@ export function ScheduledTaskConfirm({ tasks, onConfirm, onDismiss }: Props) {
   const allSelected = chosen.length === tasks.length
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[1px] animate-in fade-in"
-      onClick={onDismiss}
-    >
-      <div
-        className="w-[440px] max-w-[92vw] max-h-[80vh] overflow-hidden rounded-2xl border border-border/50 bg-popover shadow-2xl flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="flex justify-center px-5 pb-4">
+      <div className="w-full max-w-[460px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[60vh]">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border/40">
           <Clock className="size-4 text-primary" />
           <span className="text-sm font-semibold text-foreground">

@@ -38,31 +38,34 @@ fn safe_path(state: &AppState, file_path: &str) -> Option<PathBuf> {
         return Some(resolved);
     }
 
+    // Canonicalize the input (when it exists) before checking root membership.
+    // Windows paths are case-insensitive but compared as strings, and the roots
+    // in allowed_roots are themselves canonicalized — so a case/separator/symlink
+    // difference makes a string prefix check fail with "outside working directory".
+    // Fall back to the raw path when it does not exist yet (e.g. a file about to
+    // be created): try canonicalizing the parent and re-attaching the file name.
+    let candidate = if let Ok(real) = std::fs::canonicalize(&resolved) {
+        real
+    } else if let Some(parent) = resolved.parent() {
+        if let Ok(real_parent) = std::fs::canonicalize(parent) {
+            real_parent.join(resolved.file_name().unwrap_or_default())
+        } else {
+            resolved.clone()
+        }
+    } else {
+        resolved.clone()
+    };
+
     let roots = allowed_roots(state);
     let in_any_root = roots.iter().any(|root| {
         let r = norm(&root.display().to_string());
-        let p = norm(&resolved.display().to_string());
+        let p = norm(&candidate.display().to_string());
         p == r || p.starts_with(&format!("{r}/"))
     });
     if !in_any_root {
         return None;
     }
-    // Symlink-resolve and re-check (avoid escaping via symlink).
-    match std::fs::canonicalize(&resolved) {
-        Ok(real) => {
-            let ok = roots.iter().any(|root| {
-                let rr = norm(&std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()).display().to_string());
-                let rp = norm(&real.display().to_string());
-                rp == rr || rp.starts_with(&format!("{rr}/"))
-            });
-            if ok {
-                Some(real)
-            } else {
-                None
-            }
-        }
-        Err(_) => Some(resolved),
-    }
+    Some(candidate)
 }
 
 fn outside_err() -> String {

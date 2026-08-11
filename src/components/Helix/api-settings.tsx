@@ -28,6 +28,7 @@ import { ShortcutsPage } from './shortcuts-page'
 import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './usage-stats'
 import { PopupSelect } from './settings-ui'
 import { WebSearchSettings } from './web-search-settings'
+import { VisionModelSettings } from './vision-model-settings'
 
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -525,6 +526,8 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   const [isCustomProvider, setIsCustomProvider] = useState(false)
   const [customInputFocused, setCustomInputFocused] = useState(false)
   const [showAddModelModal, setShowAddModelModal] = useState(false)
+  type ModelTab = 'main' | 'vision'
+  const [modelTab, setModelTab] = useState<ModelTab>('main')
 
   // Hermes config-backed toggles (streaming / compression / guardrails / stt / personality)
   const { dispatchCommand, setHermesPersonality } = useHermes()
@@ -582,6 +585,11 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   })
   const mcpServerNames = Object.keys(mcpServers)
   const [mcpStatus, setMcpStatus] = useState<Record<string, boolean>>({})
+  // Gateway MCP servers — read-only view of config.yaml `mcp_servers` (loaded
+  // by the gateway at startup; separate from the app-managed list above, which
+  // is persisted locally and sent per-session via session/new).
+  const [gatewayMcp, setGatewayMcp] = useState<Record<string, any>>({})
+  const [gatewayMcpLoaded, setGatewayMcpLoaded] = useState(false)
 
   // MCP status - query tools/list to detect which MCP servers are connected
   const fetchMcpStatus = useCallback(async () => {
@@ -590,20 +598,46 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       if (!sessionId) { setMcpStatus({}); return }
       const result = await hermesApi()!.send('tools/list', { session_id: sessionId }) as any
       const tools: string[] = result?.tools?.map((t: any) => t.name) || result?.map((t: any) => t.name) || []
-      // Match tool names to MCP server names (e.g. "tavily_search" -> "tavily")
+      // Match tool names to MCP server names (e.g. "tavily_search" -> "tavily").
+      // Hermes exposes gateway MCP tools as `mcp__<server>__<tool>` with
+      // hyphens→underscores, so a bare prefix match misses e.g. "ssh-bridge"
+      // → "mcp__ssh_bridge__remote_exec".
+      const norm = (s: string) => s.toLowerCase().replace(/-/g, '_')
       const status: Record<string, boolean> = {}
-      for (const name of Object.keys(mcpServers)) {
-        status[name] = tools.some(t => t.toLowerCase().startsWith(name.toLowerCase()))
+      const allNames = [...new Set([...Object.keys(mcpServers), ...Object.keys(gatewayMcp)])]
+      for (const name of allNames) {
+        const n = norm(name)
+        status[name] = tools.some(t => {
+          const tl = t.toLowerCase()
+          return tl.startsWith(n) || tl.startsWith('mcp__' + n + '__')
+        })
       }
       setMcpStatus(status)
     } catch {
       setMcpStatus({})
     }
-  }, [mcpServers])
+  }, [mcpServers, gatewayMcp])
 
   useEffect(() => {
     fetchMcpStatus()
   }, [fetchMcpStatus])
+
+  // Load gateway MCP servers from config.yaml (Tauri IPC)
+  useEffect(() => {
+    if (!isElectron()) { setGatewayMcpLoaded(true); return }
+    ;(async () => {
+      try {
+        const api = (window as any).electron?.mcpConfig
+        if (!api?.list) { setGatewayMcpLoaded(true); return }
+        const r = await api.list()
+        if (r?.ok && r.servers) setGatewayMcp(r.servers || {})
+      } catch {
+        // settings page must not break on IPC failure
+      } finally {
+        setGatewayMcpLoaded(true)
+      }
+    })()
+  }, [])
 
   // Archive state
   const [archives, setArchives] = useState<Array<{ id: string; label: string; savedAt: number; messageCount: number }>>([])
@@ -1163,13 +1197,33 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       case 'api':
         return (
           <div className="space-y-6">
-            {/* Title bar — always visible */}
+            {/* Title bar with sub-tabs */}
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-foreground">模型</h3>
-              {!showAddModelModal ? (
+              <div className="flex items-center gap-1 bg-muted/60 rounded-full p-1">
+                <button
+                  onClick={() => setModelTab('main')}
+                  className={`px-3.5 py-1 text-xs font-medium rounded-full transition-colors ${
+                    modelTab === 'main'
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  主模型
+                </button>
+                <button
+                  onClick={() => setModelTab('vision')}
+                  className={`px-3.5 py-1 text-xs font-medium rounded-full transition-colors ${
+                    modelTab === 'vision'
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  视觉模型
+                </button>
+              </div>
+              {modelTab === 'main' && !showAddModelModal && (
                 <button
                   onClick={() => {
-                    // 每次打开都给一张空白表单，不沿用上次填的内容
                     setLocalConfig({ provider: '', apiKey: '', baseUrl: '', model: '' })
                     setIsCustomProvider(false)
                     setAvailableModels([])
@@ -1180,7 +1234,8 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 >
                   添加模型
                 </button>
-              ) : (
+              )}
+              {modelTab === 'main' && showAddModelModal && (
                 <button
                   onClick={() => setShowAddModelModal(false)}
                   className="text-sm text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
@@ -1191,13 +1246,14 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               )}
             </div>
 
-            {!showAddModelModal ? (
-              <div className="max-w-3xl space-y-6">
-                <ModelHistoryList />
-                <ModelUsageStats />
-              </div>
-            ) : (
-              /* Add model form — normal flow, centered card */
+            {modelTab === 'main' ? (
+              !showAddModelModal ? (
+                <div className="max-w-3xl space-y-6">
+                  <ModelHistoryList />
+                  <ModelUsageStats />
+                </div>
+              ) : (
+                /* Add model form */
               <div className="flex justify-center py-4">
                 <div className="p-6 space-y-5 w-full max-w-2xl">
                   {/* Provider */}
@@ -1333,6 +1389,9 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                   </div>
                 </div>
               </div>
+            )
+            ) : (
+              <VisionModelSettings />
             )}
           </div>
         )
@@ -1366,6 +1425,49 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 </button>
               )}
             </div>
+
+            {/* Gateway-loaded MCP servers (config.yaml mcp_servers) — read-only */}
+            {gatewayMcpLoaded && !isAddingMcp && !editingMcpName && (
+              <section className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-medium text-foreground/70">网关已加载（config.yaml）</h4>
+                  <span className="text-[10px] text-muted-foreground/50">只读 · 由 Hermes config.yaml 的 mcp_servers 管理</span>
+                </div>
+                {Object.keys(gatewayMcp).length === 0 ? (
+                  <p className="text-xs text-muted-foreground/50 px-4 py-3 border border-dashed border-border/40 rounded-lg">
+                    config.yaml 未配置 mcp_servers —— 在该文件的 mcp_servers 段添加的网关级服务器会显示在这里
+                  </p>
+                ) : (
+                  <div className="max-w-3xl space-y-2">
+                    {Object.entries(gatewayMcp).map(([name, cfg]) => {
+                      const connected = mcpStatus[name]
+                      const cmd = [cfg?.command, ...(cfg?.args || [])].filter(Boolean).join(' ')
+                      return (
+                        <div key={name} className="flex items-center gap-3 px-4 py-3 border border-border/20 bg-muted/20 rounded-lg">
+                          <div className="relative shrink-0">
+                            <div className={`w-2.5 h-2.5 rounded-full ${cfg?.enabled === false ? 'bg-gray-300' : connected ? 'bg-green-500' : connected === false ? 'bg-red-400' : 'bg-amber-400'}`} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium text-foreground">{name}</span>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${cfg?.url ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}>
+                                {cfg?.url ? '远程' : '本地'}
+                              </span>
+                            </div>
+                            <p className="text-xs text-muted-foreground/70 font-mono truncate mt-0.5">
+                              {cfg?.url || cmd || '(环境变量式配置)'}
+                            </p>
+                          </div>
+                          <span className="text-[10px] text-muted-foreground/50 shrink-0">
+                            {cfg?.enabled === false ? '已停用' : connected ? '已连接' : connected === false ? '未连接' : '检测中'}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </section>
+            )}
 
             {!isAddingMcp && !editingMcpName ? (
               <>
