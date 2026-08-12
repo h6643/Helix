@@ -116,16 +116,145 @@ function pinToolGroupsToTop(blocks: StreamingResponseBlock[]): StreamingResponse
 
 // Older streamed messages may store cumulative text per block. Convert those
 // to incremental text blocks so completed messages never render duplicates.
+function normalizeForCompare(s: string): string {
+  // 归一化用于判重比较：去空白 + 去标点 + 小写。
+  // Hermes 全文重发时经常带微小差异（"CLI和配置" vs "CLI 和配置"、
+  // "File" vs "file"），不归一化直接比会判定为两段不同内容 → 拼接重复。
+  return s.replace(/[\s\p{P}]/gu, '').toLowerCase()
+}
+
+function textSimilarityRatio(a: string, b: string): number {
+  // 先归一化再算重叠度。快路径：公共前缀+后缀；慢路径：最长连续公共
+  // 子串（滑动近似），覆盖差异散布在中段的改写。
+  const na = normalizeForCompare(a)
+  const nb = normalizeForCompare(b)
+  if (na.length === 0 || nb.length === 0) return 0
+  const short = na.length <= nb.length ? na : nb
+  const long = na.length <= nb.length ? nb : na
+  if (short.length < 8) return 0
+  let pref = 0
+  while (pref < short.length && short[pref] === long[pref]) pref++
+  let suf = 0
+  while (suf < short.length - pref && short[short.length - 1 - suf] === long[long.length - 1 - suf]) suf++
+  const prefixSuffix = pref + suf
+  if (prefixSuffix >= short.length * 0.6) return prefixSuffix / short.length
+  // 慢路径：长度差过大或文本超长时不再深入（子集场景已被 includes 分支覆盖）
+  if (long.length > 8000 || long.length > short.length * 2) return prefixSuffix / short.length
+  let best = prefixSuffix
+  for (let i = 0; i < short.length && best < short.length; i++) {
+    let idx = long.indexOf(short[i], 0)
+    while (idx !== -1 && best < short.length) {
+      let k = 0
+      const maxK = Math.min(short.length - i, long.length - idx)
+      while (k < maxK && short[i + k] === long[idx + k]) k++
+      if (k > best) {
+        best = k
+        if (best >= short.length * 0.6) return best / short.length
+      }
+      idx = long.indexOf(short[i], idx + 1)
+    }
+  }
+  return best / short.length
+}
+
+function isNearDuplicate(aN: string, bN: string): boolean {
+  // Both args must already be normalized. True when one is an equal/prefix/
+  // substring/close-rewrite of the other — the signature of a resend.
+  return aN === bN || aN.startsWith(bN) || bN.startsWith(aN) ||
+    aN.includes(bN) || bN.includes(aN) || textSimilarityRatio(aN, bN) >= 0.6
+}
+
 function normalizeTextBlocks(blocks: NonNullable<ChatMessage['blocks']>): NonNullable<ChatMessage['blocks']> {
-  let seen = ''
-  return blocks.map(block => {
-    if (block.type !== 'text') return block
-    const content = seen && block.content.startsWith(seen)
-      ? block.content.slice(seen.length)
-      : block.content
-    seen += content
-    return { ...block, content }
-  })
+  // Hermes frequently RE-SENDS the full accumulated text as another
+  // agent_message_chunk (update_agent_message_text). When such a resend lands
+  // on its own text block (e.g. after a thinking/tool_group in between), naive
+  // rendering shows the same paragraph twice — "完全重复紧挨着".
+  //
+  // Dedupe each text block against:
+  //   - the whole accumulated text (prevConcat) — catches full-text resends
+  //     even when they grow ("keep only the tail") or shrink ("drop the
+  //     prefix/shortened version");
+  //   - the last kept text block (lastKept, tracked across thinking/tool_group
+  //     blocks) — catches near-duplicate rewrites whose bytes differ only in
+  //     spacing/punctuation/case (normalized comparison, e.g. "CLI和配置" vs
+  //     "CLI 和配置"). A rewrite at least as long as the older one supersedes
+  //     it (blank the older block, final wording wins); a shorter
+  //     near-duplicate is a spurious partial resend and is dropped.
+  //   - otherwise -> distinct paragraph, keep as-is
+  let prevConcat = ''
+  let lastKept = ''
+  const rendered: NonNullable<ChatMessage['blocks']> = []
+  for (const block of blocks) {
+    if (block.type !== 'text') {
+      rendered.push(block)
+      continue
+    }
+    const cur = typeof block.content === 'string' ? block.content : String(block.content || '')
+    const curN = normalizeForCompare(cur)
+    let out: string | null = null // null -> keep cur unchanged
+    let matched = false
+    if (prevConcat && prevConcat.length > 0) {
+      if (cur.startsWith(prevConcat)) {
+        // Full-text resend that grew: keep only the tail delta.
+        out = cur.slice(prevConcat.length)
+        matched = true
+      } else if (prevConcat.startsWith(cur) && cur.length >= 4) {
+        // Resend arrived as a shorter/prefix version of the accumulated text.
+        out = ''
+        matched = true
+      } else if (lastKept && lastKept.length > 0) {
+        const lastN = normalizeForCompare(lastKept)
+        if (curN.length >= 8 && lastN.length >= 8 && isNearDuplicate(lastN, curN)) {
+          if (curN.length >= lastN.length) {
+            // Near-identical rewrite that kept or grew: the newer block
+            // supersedes the older one — blank it, keep the new wording.
+            for (let i = rendered.length - 1; i >= 0; i--) {
+              const b = rendered[i]
+              if (b.type === 'text' && b.content !== '') {
+                rendered[i] = { ...b, content: '' }
+                break
+              }
+            }
+          } else {
+            // Near-identical subset of the previous block (spurious partial
+            // resend): nothing new to show.
+            out = ''
+          }
+          matched = true
+        }
+      }
+      if (!matched && curN.length >= 12) {
+        // Not caught by the adjacent-pair rules: test against the FULL
+        // accumulated text for a resend that landed after other blocks in
+        // between (e.g. tool_group / thinking) and differs in bytes.
+        const concatN = normalizeForCompare(prevConcat)
+        if (concatN.length >= 12 &&
+          (curN === concatN || concatN.includes(curN) || curN.includes(concatN) ||
+            textSimilarityRatio(concatN, curN) >= 0.6)) {
+          if (curN.length >= concatN.length) {
+            // Newer block contains (a rewrite of) everything so far — it IS
+            // the whole message now: blank all older text, reset accumulators.
+            for (let i = 0; i < rendered.length; i++) {
+              const b = rendered[i]
+              if (b.type === 'text') rendered[i] = { ...b, content: '' }
+            }
+            prevConcat = ''
+            lastKept = ''
+          } else {
+            out = ''
+          }
+          matched = true
+        }
+      }
+    }
+    const final = out ?? cur
+    if (final) {
+      rendered.push({ ...block, content: final })
+      lastKept = final
+      prevConcat = prevConcat + final
+    }
+  }
+  return rendered.filter((b) => b.type !== 'text' || b.content.length > 0)
 }
 
 // ── Diff capture from Hermes inline_diff ──────────────────────────────────
@@ -445,7 +574,7 @@ function CopyButton({ text, className = '' }: { text: string; className?: string
         }).catch(() => {})
       }}
       className={`p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors ${className}`}
-      title="复制"
+      data-tip="复制"
     >
       {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
     </button>
@@ -481,7 +610,7 @@ function SpeakButton({ text, className = '' }: { text: string; className?: strin
           ? 'text-primary bg-primary/10'
           : 'text-muted-foreground hover:text-foreground hover:bg-accent/50'
       } ${className}`}
-      title={speaking ? '停止朗读' : '朗读'}
+      data-tip={speaking ? '停止朗读' : '朗读'}
     >
       <Volume2 className={`size-3.5 ${speaking ? 'animate-pulse' : ''}`} />
     </button>
@@ -876,7 +1005,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               <button
                 onClick={() => onFork(msg.id)}
                 className="p-1 rounded-lg text-muted-foreground/40 hover:text-blue-500 hover:bg-blue-500/10 transition-colors"
-                title="分叉对话"
+                data-tip="分叉对话"
               >
                 <GitBranch className="size-3" />
               </button>
@@ -952,11 +1081,8 @@ export function AgentFlowPanel() {
   const setStreamingDraft = useHelixStore(s => s.setStreamingDraft)
   const clearStreamingDraft = useHelixStore(s => s.clearStreamingDraft)
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([])
-  const approvalRequest = approvalQueue[0] || null
-  const pendingApprovalCount = approvalQueue.length
   // 模型反问多选（clarify）：一次只显示最旧一条，回应后出队
-  const [clarifyQueue, setClarifyQueue] = useState<Array<{ id: string; question: string; choices: string[] | null }>>([])
-  const clarifyRequest = clarifyQueue[0] || null
+  const [clarifyQueue, setClarifyQueue] = useState<Array<{ id: string; question: string; choices: string[] | null; sessionId?: string }>>([])
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null)
 
   const [showModelDropdown, setShowModelDropdown] = useState(false)
@@ -1098,6 +1224,23 @@ const setTabInput = useHelixStore(s => s.setTabInput)
 const clearTabInput = useHelixStore(s => s.clearTabInput)
   const chatMessages = useHelixStore(s => s.chatMessages)
   const currentSessionId = useHelixStore(s => s.currentSessionId)
+  const setSessionPendingApproval = useHelixStore(s => s.setSessionPendingApproval)
+  // 仅显示/统计当前会话的待确认（审批/反问/定时任务），避免切会话时串台
+  const approvalRequest = approvalQueue.find(r => r.sessionId === currentSessionId) || null
+  const pendingApprovalCount = approvalQueue.filter(r => r.sessionId === currentSessionId).length
+  const clarifyRequest = clarifyQueue.find(c => c.sessionId === currentSessionId) || null
+  // 把每个会话的待确认状态同步到全局 store，供侧边栏标记
+  useEffect(() => {
+    const map: Record<string, boolean> = {}
+    for (const r of approvalQueue) if (r.sessionId) map[r.sessionId] = true
+    for (const c of clarifyQueue) if (c.sessionId) map[c.sessionId] = true
+    for (const t of pendingTaskCreations) if (t.sessionId) map[t.sessionId] = true
+    const prev = useHelixStore.getState().sessionPendingApproval
+    const next: Record<string, boolean> = { ...prev }
+    for (const k of Object.keys(next)) if (!(k in map)) next[k] = false
+    for (const k of Object.keys(map)) next[k] = true
+    setSessionPendingApproval(next)
+  }, [approvalQueue, clarifyQueue, pendingTaskCreations, currentSessionId, setSessionPendingApproval])
   const sessionMessages = useMemo(() => {
     // 永远按会话过滤：currentSessionId 为 null（新对话）时只显示无 sessionId
     // 的历史消息，绝不能把其他会话（含仍在后台运行的旧 run）的消息漏进来。
@@ -2402,12 +2545,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       draftSyncPending = true
       requestAnimationFrame(() => {
         draftSyncPending = false
-        // Only assert isAgentRunning while the run is still live.
-        // After the finally block fires, a straggler rAF callback must NOT
-        // flip isAgentRunning back to true — that causes the thinking timer
-        // to tick forever (the rAF race condition).
+        // The run is over: the completed message is already committed to
+        // chatMessages, and finally already cleared the draft's responseBlocks.
+        // A straggler rAF must NOT re-populate the draft (that would re-render
+        // the blocks in the streaming area on top of the committed message →
+        // duplicate output). Skip the write entirely once runCompleted.
+        if (runCompleted) return
         setStreamingDraft(activeSessionId ?? '', {
-          ...(runCompleted ? {} : { isAgentRunning: true }),
+          isAgentRunning: true,
           responseBlocks: responseBlocksRef.current,
           steps: stepsRef.current,
           streamThinking: streamThinkingRef.current,
@@ -2658,7 +2803,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             case 'agent_thought_chunk':
               return { type: 'thinking', content: normalizeAcpContent(u.content) }
             case 'tool_call': {
-              const title = typeof u.title === 'string' ? u.title : ''
+              const data-tip= typeof u.data-tip=== 'string' ? u.title : ''
               const kind = typeof u.kind === 'string' ? u.kind : ''
               const toolCallId = typeof u.toolCallId === 'string' ? u.toolCallId : ''
               let args = u.rawInput
@@ -2987,14 +3132,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             setTimeout(() => useHelixStore.getState().setConnectionNotice(null), 2000)
             return
           }
-          // serve-gateway 检测到本 run 的会话被更新的 session.create 挤掉
-          // （后端单活跃会话限制）。立即收尾，避免静默挂到 5 分钟兜底；
-          // 用户重发该消息即可在新会话上重新执行。
+          // serve-gateway 已不再主动驱逐并行会话；保留此分支仅作防御：
+          // 若未来后端在个别配置下真的回收/挤掉本 run 的会话，立即收尾，
+          // 避免静默挂到 5 分钟兜底。用户重发该消息即可在新会话上重新执行。
           if (method === 'session.evicted') {
             debug('[HelixTrace] session.evicted →', params)
             enqueue('data: ' + JSON.stringify({
               type: 'error',
-              content: '后台会话被新的对话挤占（Hermes 后端仅支持单活跃会话），此任务已中断，请重发该消息以重新执行。',
+              content: '后台会话被新的对话挤占，此任务已中断，请重发该消息以重新执行。',
             }))
             queueDone = true
             return
@@ -3533,6 +3678,16 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 // Incoming is a subset of accumulated (retry sent shorter text) — keep the
                 // more complete accumulated buffer to avoid truncation.
                 newText = cur
+              } else if (textSimilarityRatio(curTrim, incTrim) >= 0.6) {
+                // 归一化后高度相似：Hermes 全文重发微差版 / 模型重试改写。
+                // 直接拼接会把同一内容写两遍（"输出重复两次"的根因）。
+                // 仅当传入文本达到"全文重发"尺度（≥累积文本一半）才替换——
+                // 否则它只是与某段相关的独立新段落，替换会把已累积内容截断。
+                if (incRaw.length >= cur.length * 0.5) {
+                  newText = incRaw.length >= cur.length ? incRaw : cur
+                } else {
+                  newText = cur + incRaw
+                }
               } else {
                 // Simple append — no overlap scan (avoid false-positive duplication
                 // on full resends when the 500-char cap misses the real overlap).
@@ -3558,9 +3713,24 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 }
               }
               pendingTextRef.current = renderText
-              const delta = renderText.startsWith(lastStreamedTextRef.current)
-                ? renderText.slice(lastStreamedTextRef.current.length)
-                : renderText
+              let delta: string
+              if (renderText.startsWith(lastStreamedTextRef.current)) {
+                delta = renderText.slice(lastStreamedTextRef.current.length)
+              } else if (lastStreamedTextRef.current) {
+                // Byte-different full-text resend (replaced above): the content
+                // is already on screen via the incremental blocks — suppress
+                // the duplicate block unless the resend actually grew (that
+                // case is collapsed at render time by normalizeTextBlocks).
+                const lastN = normalizeForCompare(lastStreamedTextRef.current)
+                const newN = normalizeForCompare(renderText)
+                if (lastN.length >= 8 && newN.length >= 8 && (newN === lastN || lastN.includes(newN))) {
+                  delta = ''
+                } else {
+                  delta = renderText
+                }
+              } else {
+                delta = renderText
+              }
               lastStreamedTextRef.current = renderText
               pendingBlocksRef.current.push({ type: 'text', content: delta })
 
@@ -3615,7 +3785,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 const detected = detectScheduledTasks(content)
                 content = detected.cleaned
                 if (detected.tasks.length > 0) {
-                  setPendingTaskCreations(prev => [...prev, ...detected.tasks])
+                  setPendingTaskCreations(prev => [...prev, ...detected.tasks.map(t => ({ ...t, sessionId: currentSessionId ?? undefined }))])
                 }
                 const curState = useHelixStore.getState()
                 const endTs = Date.now()
@@ -3779,6 +3949,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               } else {
                 setApprovalQueue(prev => [...prev, {
                   id: parsed.approvalId,
+                  sessionId: currentSessionId ?? undefined,
                   toolName: parsed.toolName,
                   params: parsed.toolParams || {},
                   timestamp: Date.now(),
@@ -3787,6 +3958,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             } else if (parsed.type === 'clarify_request') {
               setClarifyQueue(prev => [...prev, {
                 id: parsed.requestId,
+                sessionId: currentSessionId ?? undefined,
                 question: parsed.question || '',
                 choices: parsed.choices || null,
               }])
@@ -3880,7 +4052,15 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       runCompleted = true
       const sid = activeSessionId
       if (sid) {
-        setStreamingDraft(sid, { isAgentRunning: false })
+        // Clear the draft's responseBlocks at the same time we drop isAgentRunning:
+        // the completed message was already committed to chatMessages (it renders
+        // via TranscriptMessage), so any blocks still sitting in the draft would
+        // make the streaming area render them a SECOND time — "输出重复两遍".
+        // The completed message carries its own finalBlocks, so the draft copy is
+        // redundant from this point on. Clearing here (instead of waiting for the
+        // setTimeout clearStreamingDraft) closes the window where both containers
+        // render the same blocks.
+        setStreamingDraft(sid, { isAgentRunning: false, responseBlocks: [] })
         debug('[HelixTrace] handleRun finally setStreamingDraft false', { sid })
         // Once the reply is persisted, the draft is no longer needed; clear it
         // on the next tick so any render this cycle still sees the final steps.
@@ -4342,7 +4522,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           type="button"
           onClick={() => setShowApprovalModeDropdown(!showApprovalModeDropdown)}
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
-          title="审批模式"
+          data-tip="审批模式"
         >
           {approvalMode === 'default' && <Hand className="size-3.5" />}
           {approvalMode === 'accept_edits' && <Clock className="size-3.5" />}
@@ -4649,7 +4829,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       type="button"
                       onClick={() => uploadFileInputRef.current?.click()}
                       className="p-2 rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-muted/40 transition-all duration-200"
-                      title="上传附件"
+                      data-tip="上传附件"
                     >
                       <Plus className="size-4" />
                     </button>
@@ -4664,7 +4844,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   </div>
                   <div className="flex items-center gap-1.5">
                     <ContextUsageIndicator />
-                    {hasApiKey ? (
+                    {hasApiKey || isServeActive() ? (
                       renderModelSelector()
                     ) : (
                       <button
@@ -4685,7 +4865,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                           ? 'text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40'
                           : 'text-muted-foreground hover:text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40'
                       }`}
-                      title={isBusy ? '停止' : '发送'}
+                      data-tip={isBusy ? '停止' : '发送'}
                     >
                       {isBusy ? <Square className="size-3 text-foreground fill-foreground" /> : <ArrowUp className="size-4" />}
                     </button>
@@ -4698,7 +4878,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       type="button"
                       onClick={() => uploadFileInputRef.current?.click()}
                       className="p-2 rounded-xl text-muted-foreground/60 hover:text-foreground hover:bg-muted/30 transition-all"
-                      title="上传文件"
+                      data-tip="上传文件"
                     >
                       <Plus className="size-4" />
                     </button>
@@ -4713,7 +4893,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   </div>
                   <div className="flex items-center gap-1.5">
                     <ContextUsageIndicator />
-                    {hasApiKey && renderModelSelector()}
+                    {(hasApiKey || isServeActive()) && renderModelSelector()}
                     <ReasoningEffortControl value={reasoningEffort} onChange={(v) => storeActions.setReasoningEffort(v)} />
                     <button
                       type="button"
@@ -4724,7 +4904,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                           ? 'text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40'
                           : 'text-muted-foreground hover:text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40'
                       }`}
-                      title={isBusy ? '停止' : '发送'}
+                      data-tip={isBusy ? '停止' : '发送'}
                     >
                       {isBusy ? <Square className="size-3 text-foreground fill-foreground" /> : <ArrowUp className="size-4" />}
                     </button>
@@ -4753,7 +4933,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             }
           }}
           className="flex items-center gap-1.5 text-[12px] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
-          title={selectedWorkDir || '选择项目目录'}
+          data-tip={selectedWorkDir || '选择项目目录'}
         >
           <Folder className="size-3.5 text-amber-500" />
           <span className="max-w-[160px] truncate">{projectName}</span>
@@ -4792,7 +4972,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }
             }}
             className="flex items-center gap-1.5 text-[12px] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
-            title={`当前分支：${currentBranch}（点击查看全部分支）`}
+            data-tip={`当前分支：${currentBranch}（点击查看全部分支）`}
           >
             <GitBranch className="size-3.5 text-emerald-500" />
             <span>{currentBranch}</span>
@@ -4919,7 +5099,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             onClick={goToPrevSearchMatch}
             disabled={!searchMatches.length}
             className="p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-accent/60 transition-colors disabled:opacity-30 disabled:pointer-events-none"
-            title="上一个匹配 (Shift+Enter)"
+            data-tip="上一个匹配 (Shift+Enter)"
           >
             <ArrowUp className="size-3.5" />
           </button>
@@ -4927,14 +5107,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             onClick={goToNextSearchMatch}
             disabled={!searchMatches.length}
             className="p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-accent/60 transition-colors disabled:opacity-30 disabled:pointer-events-none"
-            title="下一个匹配 (Enter)"
+            data-tip="下一个匹配 (Enter)"
           >
             <ArrowDown className="size-3.5" />
           </button>
           <button
             onClick={closeConversationSearch}
             className="p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-accent/60 transition-colors"
-            title="关闭 (Esc)"
+            data-tip="关闭 (Esc)"
           >
             <X className="size-3.5" />
           </button>
@@ -5042,7 +5222,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
                     {/* Interleaved response blocks: thinking, text, and tool groups in chronological order */}
                     {displayResponseBlocks.length > 0 && (() => {
-                      const filtered = pinToolGroupsToTop(displayResponseBlocks)
+                      const normalizedBlocks = normalizeTextBlocks(displayResponseBlocks)
+                      const filtered = pinToolGroupsToTop(normalizedBlocks)
                       return (
                         <div className="helix-md" style={{ fontSize: transcriptFontSize }}>
                           {filtered.map((block, idx) =>
@@ -5161,7 +5342,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       )}
 
       {/* Bottom input */}
-      {sessionMessages.length > 0 && !approvalRequest && (
+      {sessionMessages.length > 0 && !approvalRequest && !clarifyRequest && pendingTaskCreations.length === 0 && (
         <div className="bg-transparent shrink-0 mb-2 mt-2 w-full px-5">
           <div className="w-full max-w-[700px] mx-auto">
             {renderChatInput()}
@@ -5182,9 +5363,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       )}
 
       {/* Scheduled task creation confirmation */}
-      {pendingTaskCreations.length > 0 && (
+      {pendingTaskCreations.some(t => t.sessionId === currentSessionId) && (
         <ScheduledTaskConfirm
-          tasks={pendingTaskCreations}
+          tasks={pendingTaskCreations.filter(t => t.sessionId === currentSessionId)}
           onConfirm={handleConfirmTasks}
           onDismiss={handleDismissTasks}
         />

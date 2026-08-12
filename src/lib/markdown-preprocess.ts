@@ -413,6 +413,54 @@ function neutralizeSetextUnderlines(text: string): string {
   )
 }
 
+// LLMs often write ATX headings without the required space after the marker:
+// `##标题`, `##　标题` (full-width space), `##"引用"`. CommonMark only accepts
+// `#` followed by an ASCII space/tab, so those lines render as literal text.
+// Repair the space for 2-6 hashes; a lone `#` is left alone (ambiguous with
+// hashtags like `#话题`), as is a line whose content char is another `#`
+// (`### 1.` is already well-formed and must not be re-split). Fenced code is
+// excluded upstream, so only prose lines are touched.
+const ATX_HEADING_BROKEN_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})([\u3000]|[^\s#])([^\n]*)$/gm
+
+/**
+ * Insert/replace the space after a `##`+ heading marker that lacks one, so
+ * `##标题` parses as an `<h2>` instead of showing literal `##标题` text.
+ * The line's leading indent is deliberately not re-emitted — the pipeline
+ * preserves it separately via the `leading` slice, so keeping it here would
+ * double it (2 spaces → 4 spaces = indented code block).
+ */
+function normalizeAtxHeadings(text: string): string {
+  return text.replace(
+    ATX_HEADING_BROKEN_RE,
+    (_match, _indent: string, prefix: string, hashes: string, ch: string, rest: string) =>
+      ch === '\u3000' ? `${prefix}${hashes} ${rest}` : `${prefix}${hashes} ${ch}${rest}`
+  )
+}
+
+// LLMs pad emphasis with spaces/full-width spaces around the `**` markers —
+// `** 有。第一版填的就。这里的 **` — and CommonMark's strong rule is the
+// OPPOSITE of ATX headings: the opener must NOT be followed by whitespace and
+// the closer must NOT be preceded by it. Spaced `**` pairs render as literal
+// asterisks, exactly the "bold doesn't render" complaint. Strip the padding to
+// recover the emphasis. Three passes (double-sided, opener-side, closer-side)
+// so single-sided padding is covered too.
+//
+// Safety: content excludes `*` so a closer of one pair can't be re-read as an
+// opener of another (`**a** **b**` stays untouched), and the closing `**` must
+// be followed by end-of-line/punctuation/whitespace — or, when followed by
+// text (legal after a strong closer), no other `**` may remain on the line —
+// so `**加粗** 之后 ** 再来 **` fixes the broken pair without letting the
+// first pair's closer get captured as an opener.
+const STRONG_PADDED_DOUBLE_RE = /\*\*[ \t\u3000]+([^\n*][^*\n]*?)[ \t\u3000]+\*\*(?=[\s。，、；：！？）》」』….!?;:)\]}]|$|(?=[^\s])(?![^\n]*\*\*))/g
+const STRONG_PADDED_OPEN_RE = /\*\*[ \t\u3000]+([^\n*][^*\n]*?[^\s*])\*\*(?=[\s。，、；：！？）》」』….!?;:)\]}]|$|(?=[^\s])(?![^\n]*\*\*))/g
+const STRONG_PADDED_CLOSE_RE = /\*\*([^\n*][^*\n]*?[^\s*])[ \t\u3000]+\*\*(?=[\s。，、；：！？）》」』….!?;:)\]}]|$|(?=[^\s])(?![^\n]*\*\*))/g
+
+function normalizeSpacedEmphasis(text: string): string {
+  let out = text.replace(STRONG_PADDED_DOUBLE_RE, '**$1**')
+  out = out.replace(STRONG_PADDED_OPEN_RE, '**$1**')
+  return out.replace(STRONG_PADDED_CLOSE_RE, '**$1**')
+}
+
 const processCache = new Map<string, string>()
 
 /**
@@ -448,7 +496,9 @@ export function preprocessMarkdown(text: string): string {
       const leading = part.match(/^\s*/)?.[0] ?? ''
       const trailing = part.match(/\s*$/)?.[0] ?? ''
 
-      const transformed = normalizeVisibleProse(normalizeProseMath(neutralizeSetextUnderlines(part)))
+      const transformed = normalizeSpacedEmphasis(
+        normalizeAtxHeadings(normalizeVisibleProse(normalizeProseMath(neutralizeSetextUnderlines(part))))
+      )
 
       return leading + transformed + trailing
     })
