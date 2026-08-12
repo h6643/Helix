@@ -51,7 +51,7 @@ function ContextUsageBar({ used, total, categories }: { used: number; total: num
               key={cat.id}
               className="h-full transition-all duration-300 first:rounded-l-full last:rounded-r-full"
               style={{ width: `${Math.max(catPercent, 0.5)}%`, backgroundColor: cat.color }}
-              title={`${cat.label}: ~${formatTokens(cat.tokens)}`}
+              data-tip={`${cat.label}: ~${formatTokens(cat.tokens)}`}
             />
           )
         })}
@@ -198,7 +198,7 @@ export function ContextUsageIndicator() {
         type="button"
         onClick={() => setOpen(!open)}
         className="size-10 rounded-lg flex items-center justify-center text-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors"
-        title="上下文使用情况"
+        data-tip="上下文使用情况"
       >
         <ContextUsageRing used={used} total={total} />
       </button>

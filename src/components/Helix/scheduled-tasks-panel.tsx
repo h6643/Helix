@@ -254,7 +254,7 @@ function TaskItem({
           'mt-0.5 shrink-0 transition-colors',
           task.enabled ? 'text-emerald-500 hover:text-emerald-600' : 'text-foreground/30 hover:text-foreground/60'
         )}
-        title={task.enabled ? '暂停' : '启用'}
+        data-tip={task.enabled ? '暂停' : '启用'}
       >
         <Circle className={cn('size-4', task.enabled && 'fill-current')} />
       </button>
@@ -533,14 +533,14 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
           <button
             onClick={() => { setActiveTab('tasks'); setIsAdding(true) }}
             className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
-            title="添加"
+            data-tip="添加"
           >
             <Plus className="size-4" />
           </button>
           <button
             onClick={onClose}
             className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
-            title="关闭"
+            data-tip="关闭"
           >
             <X className="size-4" />
           </button>

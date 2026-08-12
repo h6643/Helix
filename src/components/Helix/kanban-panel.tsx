@@ -522,7 +522,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
               value={activeBoard ?? ''}
               onChange={e => setActiveBoard(e.target.value)}
               className="h-8 pl-3 pr-8 rounded-lg border border-border/60 bg-muted/40 text-xs text-foreground appearance-none focus:outline-none focus:ring-2 focus:ring-ring"
-              title="切换看板"
+              data-tip="切换看板"
             >
               {boards.length === 0 && <option value="">加载中…</option>}
               {boards.map(b => {
@@ -539,7 +539,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
           <button
             onClick={() => setShowNewBoard(true)}
             className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
-            title="新建看板"
+            data-tip="新建看板"
           >
             <Plus className="size-3.5" />
           </button>
@@ -547,7 +547,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
             onClick={handleDeleteBoard}
             disabled={!activeBoard || busy === 'deleteboard'}
             className="p-1.5 rounded-lg text-muted-foreground hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40"
-            title="删除当前看板"
+            data-tip="删除当前看板"
           >
             {busy === 'deleteboard' ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
           </button>
@@ -574,7 +574,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
           <button
             onClick={refresh}
             className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
-            title="刷新"
+            data-tip="刷新"
           >
             <RefreshCw className="size-4" />
           </button>

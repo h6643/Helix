@@ -250,7 +250,7 @@ export function RightSidebar() {
               key={p.id}
               onClick={() => setActivePageId(p.id)}
               className={`flex items-center gap-1 pl-1.5 pr-0.5 py-0.5 rounded cursor-pointer whitespace-nowrap transition-colors ${p.id === activePageId ? 'bg-accent text-foreground' : 'text-foreground/60 hover:bg-accent/50'}`}
-              title={pageTitle(p)}
+              data-tip={pageTitle(p)}
             >
               {pageIcon(p.kind)}
               <span className="max-w-[100px] truncate text-[11px]">{pageTitle(p)}</span>
@@ -258,7 +258,7 @@ export function RightSidebar() {
                 <button
                   onClick={e => { e.stopPropagation(); setTreeReloadKey(k => k + 1) }}
                   className="p-0.5 rounded text-muted-foreground/40 hover:text-foreground hover:bg-accent/80 transition-colors"
-                  title="刷新目录"
+                  data-tip="刷新目录"
                 >
                   <RefreshCw className="size-2.5" />
                 </button>
@@ -266,7 +266,7 @@ export function RightSidebar() {
               <button
                 onClick={e => { e.stopPropagation(); closePage(p.id) }}
                 className="p-0.5 rounded text-muted-foreground/40 hover:text-foreground hover:bg-accent/80 transition-colors"
-                title="关闭标签页"
+                data-tip="关闭标签页"
               >
                 <X className="size-2.5" />
               </button>
@@ -277,14 +277,14 @@ export function RightSidebar() {
           ref={plusBtnRef}
           onClick={() => setPlusMenuOpen(v => !v)}
           className={`p-1 rounded text-muted-foreground/60 hover:text-foreground hover:bg-accent/60 transition-colors ${plusMenuOpen ? 'bg-accent/60 text-foreground' : ''}`}
-          title="新建页面"
+          data-tip="新建页面"
         >
           <Plus className="size-3.5" />
         </button>
         <button
           onClick={() => setIsExpanded(v => !v)}
           className={`p-1 rounded transition-colors ${isExpanded ? 'text-primary bg-primary/10' : 'text-muted-foreground/40 hover:text-foreground hover:bg-accent/60'}`}
-          title={isExpanded ? '退出全屏' : '切换全屏'}
+          data-tip={isExpanded ? '退出全屏' : '切换全屏'}
         >
           {isExpanded ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
         </button>
@@ -303,7 +303,7 @@ export function RightSidebar() {
               <div
                 onMouseDown={onTreeDragStart}
                 className={`absolute top-0 right-0 w-1.5 h-full cursor-col-resize z-10 transition-colors ${treeDragging ? 'bg-primary/30' : 'hover:bg-primary/30'}`}
-                title="拖动调整目录宽度"
+                data-tip="拖动调整目录宽度"
               />
             </div>
             <div className="flex-1 min-w-0 h-full flex flex-col min-h-0">

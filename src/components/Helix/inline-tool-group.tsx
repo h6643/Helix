@@ -91,7 +91,7 @@ function CopyButton({ text }: { text: string }) {
     <button
       onClick={handleCopy}
       className="p-0.5 rounded text-foreground/30 hover:text-foreground/60 hover:bg-muted/50 transition-colors"
-      title="复制"
+      data-tip="复制"
     >
       {copied ? <CheckCheck className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
     </button>
@@ -213,17 +213,17 @@ export function InlineToolGroup({ steps, isRunning }: { steps: ExecutionStep[]; 
     })
   }
 
-  let title = ''
+  let title= ''
   if (calls.length === 0) {
-    title = '工具结果'
+    title= '工具结果'
   } else if (calls.length === 1) {
-    title = calls[0].content || getToolDisplayLabel(calls[0].toolName || '', calls[0].toolKind, undefined, calls[0].toolParams)
+    title= calls[0].content || getToolDisplayLabel(calls[0].toolName || '', calls[0].toolKind, undefined, calls[0].toolParams)
   } else {
     const names = Array.from(new Set(calls.map(s => getToolLabel(s.toolName || ''))))
     if (names.length === 1) {
-      title = `${names[0]} × ${calls.length}`
+      title= `${names[0]} × ${calls.length}`
     } else {
-      title = `执行了 ${calls.length} 个工具`
+      title= `执行了 ${calls.length} 个工具`
     }
   }
 

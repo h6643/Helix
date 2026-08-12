@@ -32,8 +32,8 @@ export function ScheduledTaskConfirm({ tasks, onConfirm, onDismiss }: Props) {
   const allSelected = chosen.length === tasks.length
 
   return (
-    <div className="flex justify-center px-5 pb-4">
-      <div className="w-full max-w-[460px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[60vh]">
+    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[60vh]">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border/40">
           <Clock className="size-4 text-primary" />
           <span className="text-sm font-semibold text-foreground">

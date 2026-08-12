@@ -215,7 +215,17 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
       useHermesStore.getState().setHermesSessionId(null)
       const all = await persistence.loadSessions()
       const fresh = all.find(s => s.id === session.id) || session
-      const msgs = fresh.chatMessages.map(msg => ({
+      // 丢弃 draft-partial 占位（同 sidebar/navigateSession）：并发下切换/打开
+      // 会话不中断后台 run，占位消息不应展示（会与最终提交的完整回复重复）。
+      const seen = new Set<string>()
+      const msgs = fresh.chatMessages
+        .filter(msg => {
+          if (seen.has(msg.id)) return false
+          seen.add(msg.id)
+          if (typeof msg.id === 'string' && msg.id.startsWith('draft-partial-')) return false
+          return true
+        })
+        .map(msg => ({
         id: msg.id,
         role: msg.role as 'user' | 'assistant' | 'system',
         content: msg.content,
@@ -358,7 +368,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                     size="icon"
                     className="size-6 opacity-0 group-hover:opacity-100 transition-opacity"
                     onClick={(e) => { e.stopPropagation(); setExportMenuSession(exportMenuSession?.id === session.id ? null : session) }}
-                    title="导出"
+                    data-tip="导出"
                   >
                     <Download className="size-3 text-muted-foreground" />
                   </Button>
@@ -367,7 +377,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                     size="icon"
                     className="size-6 opacity-0 group-hover:opacity-100 transition-opacity"
                     onClick={(e) => { e.stopPropagation(); setDeleteTarget(session) }}
-                    title="删除"
+                    data-tip="删除"
                   >
                     <Trash2 className="size-3 text-destructive/60" />
                   </Button>

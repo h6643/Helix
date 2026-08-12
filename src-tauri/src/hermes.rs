@@ -2756,6 +2756,26 @@ fn resolve_symlink(p: &std::path::Path) -> std::path::PathBuf {
 
 
 
+/// True when the system dynamic loader already resolves a PortAudio library.
+/// On Linux that means ``ldconfig -p`` finds ``libportaudio.so.2``; in that
+/// case prepending ``~/.local/lib`` would shadow it with a possibly-broken
+/// local build. Non-Linux platforms return false so the existing locator
+/// behavior (which uses a different mechanism there) is preserved.
+fn system_portaudio_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(out) = std::process::Command::new("ldconfig").arg("-p").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                return s.contains("libportaudio.so.2");
+            }
+        }
+    }
+    false
+}
+
+
+
 /// Resolve a Python interpreter from the same venv that hermes uses.
 
 fn resolve_hermes_python(hermes_bin: &std::path::Path) -> Option<PathBuf> {
@@ -4291,7 +4311,12 @@ pub async fn hermes_wake_start(
 
 
 
-    // Build LD_LIBRARY_PATH with ~/.local/lib prepended, so PortAudio is found.
+    // Build LD_LIBRARY_PATH so PortAudio is found. A user-installed copy often
+    // lands in ~/.local/lib, so prepend it — but only when the system loader
+    // has no libportaudio of its own. Preferring ~/.local/lib blindly lets a
+    // broken local build (e.g. compiled without any audio backend) SHADOW the
+    // working system library, after which every stream open fails with
+    // "Error querying device -1" / "Failed to open the wake-word microphone".
 
     let local_lib = dirs::home_dir()
 
@@ -4301,9 +4326,29 @@ pub async fn hermes_wake_start(
 
         .join("lib");
 
-    let mut ld_paths: Vec<String> = vec![local_lib.display().to_string()];
+    let system_has_portaudio = system_portaudio_available();
 
-    if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+    let existing = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+
+    let mut ld_paths: Vec<String> = Vec::new();
+
+    if system_has_portaudio {
+
+        for p in existing.split(':') {
+
+            let p = p.trim().to_string();
+
+            if !p.is_empty() && !ld_paths.contains(&p) {
+
+                ld_paths.push(p);
+
+            }
+
+        }
+
+    } else {
+
+        ld_paths.push(local_lib.display().to_string());
 
         for p in existing.split(':') {
 

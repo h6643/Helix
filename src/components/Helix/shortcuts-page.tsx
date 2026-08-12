@@ -80,7 +80,7 @@ export function ShortcutsPage() {
                   <button
                     onClick={() => startRecording(id)}
                     className="ml-3 px-1.5 py-1 rounded text-xs text-muted-foreground/20 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all"
-                    title="编辑快捷键"
+                    data-tip="编辑快捷键"
                   >
                     编辑
                   </button>

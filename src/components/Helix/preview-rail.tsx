@@ -111,7 +111,7 @@ function BookmarkMenu({ node, onOpen, onDelete, path = [], nested }: {
       <div className="group flex items-center gap-0.5 rounded text-[11px] text-foreground/70 hover:bg-accent/60 whitespace-nowrap max-w-[220px]">
         <button
           onClick={() => node.url && onOpen(node.url)}
-          title={node.url}
+          data-tip={node.url}
           className="flex items-center gap-1 px-2 py-1 min-w-0"
         >
           <span className="truncate">{node.name || node.url}</span>
@@ -119,7 +119,7 @@ function BookmarkMenu({ node, onOpen, onDelete, path = [], nested }: {
         {onDelete && (
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(path) }}
-            title="删除书签"
+            data-tip="删除书签"
             className="shrink-0 px-1 py-1 rounded opacity-0 group-hover:opacity-100 text-muted-foreground/60 hover:text-red-500 transition-opacity"
           >
             <X className="size-3" />
@@ -242,7 +242,7 @@ export function BrowserView({
           onClick={goBack}
           disabled={!inElectron}
           className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-          title="后退"
+          data-tip="后退"
         >
           <ChevronLeft className="size-4" />
         </button>
@@ -250,7 +250,7 @@ export function BrowserView({
           onClick={goForward}
           disabled={!inElectron}
           className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-          title="前进"
+          data-tip="前进"
         >
           <ChevronRight className="size-4" />
         </button>
@@ -258,7 +258,7 @@ export function BrowserView({
           onClick={reload}
           disabled={!inElectron}
           className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-          title="刷新"
+          data-tip="刷新"
         >
           <RotateCw className="size-3.5" />
         </button>
@@ -280,7 +280,7 @@ export function BrowserView({
             <button
               onClick={startUrlEdit}
               className="text-[11px] text-foreground/70 truncate hover:text-foreground hover:bg-accent/60 rounded px-2 py-0.5 transition-colors"
-              title={loaded}
+              data-tip={loaded}
             >
               {summarizeUrl(loaded)}
             </button>
@@ -295,7 +295,7 @@ export function BrowserView({
             }
           }}
           className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 transition-colors"
-          title="在外部浏览器中打开"
+          data-tip="在外部浏览器中打开"
         >
           <ExternalLink className="size-3.5" />
         </button>
@@ -499,7 +499,7 @@ function WebviewFrame({
           src={url}
           className="w-full h-full border-0"
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-          title="Preview"
+          data-tip="Preview"
         />
       )}
     </div>

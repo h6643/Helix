@@ -184,14 +184,14 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
               }
             }}
             className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
-            title={activeTab === 'plugins' ? '插件需通过配置添加' : '打开技能目录'}
+            data-tip={activeTab === 'plugins' ? '插件需通过配置添加' : '打开技能目录'}
           >
             <Plus className="size-4" />
           </button>
           <button
             onClick={onClose}
             className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
-            title="关闭"
+            data-tip="关闭"
           >
             <X className="size-4" />
           </button>
@@ -253,7 +253,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
                             ? 'text-emerald-500 hover:bg-emerald-500/10'
                             : 'text-muted-foreground/60 hover:bg-accent/60'
                         }`}
-                        title={plugin.status === 'enabled' ? '点击禁用' : '点击启用'}
+                        data-tip={plugin.status === 'enabled' ? '点击禁用' : '点击启用'}
                       >
                         {plugin.status === 'enabled' ? (
                           <ToggleRight className="size-5" />
@@ -265,7 +265,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
                         <button
                           onClick={() => handleDeletePlugin(plugin)}
                           className="p-1.5 rounded-lg text-muted-foreground/60 hover:text-red-500 hover:bg-red-500/10 transition-colors"
-                          title="删除插件"
+                          data-tip="删除插件"
                         >
                           <Trash2 className="size-4" />
                         </button>
@@ -308,7 +308,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
                     <button
                       onClick={() => onDeleteSkill(skill)}
                       className="p-1.5 text-muted-foreground/60 hover:text-red-500 rounded-lg transition-colors shrink-0"
-                      title="删除技能"
+                      data-tip="删除技能"
                     >
                       <Trash2 className="size-3.5" />
                     </button>

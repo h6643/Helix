@@ -92,7 +92,7 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
                     }
                   }}
                   className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-                  title="在资源管理器中打开文件位置"
+                  data-tip="在资源管理器中打开文件位置"
                 >
                   打开位置
                 </button>

@@ -76,6 +76,7 @@ export interface DetectedTask {
   prompt: string
   scheduleText: string
   nextRunAt: number | null
+  sessionId?: string
 }
 
 /**

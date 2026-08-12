@@ -184,14 +184,14 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
             onClick={handlePrune}
             disabled={actionLoading === 'prune'}
             className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-50"
-            title="清理过期 worktree"
+            data-tip="清理过期 worktree"
           >
             {actionLoading === 'prune' ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
           </button>
           <button
             onClick={() => setShowAddForm(v => !v)}
             className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-            title="添加 worktree"
+            data-tip="添加 worktree"
           >
             <Plus className="size-3.5" />
           </button>
@@ -299,7 +299,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
                       <button
                         onClick={() => handleSwitchTo(wt)}
                         className="p-1.5 text-muted-foreground/40 hover:text-primary hover:bg-primary/10 rounded-lg transition-colors"
-                        title="切换到此目录"
+                        data-tip="切换到此目录"
                       >
                         <FolderOpen className="size-3.5" />
                       </button>
@@ -308,7 +308,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
                       onClick={() => handleToggleLock(wt)}
                       disabled={actionLoading === wt.path}
                       className="p-1.5 text-muted-foreground/40 hover:text-amber-500 hover:bg-amber-500/10 rounded-lg transition-colors disabled:opacity-50"
-                      title={wt.locked ? '解锁' : '锁定'}
+                      data-tip={wt.locked ? '解锁' : '锁定'}
                     >
                       {actionLoading === wt.path ? (
                         <Loader2 className="size-3.5 animate-spin" />
@@ -323,7 +323,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
                         onClick={() => handleRemove(wt)}
                         disabled={actionLoading === wt.path}
                         className="p-1.5 text-muted-foreground/40 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-colors disabled:opacity-50"
-                        title="删除"
+                        data-tip="删除"
                       >
                         <Trash2 className="size-3.5" />
                       </button>

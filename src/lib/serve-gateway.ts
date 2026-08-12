@@ -22,6 +22,32 @@
 
 import { warn, error as logError, debug } from '@/lib/logger'
 
+// ── PROBE v2: WS 接收层原始字节记录（临时调试，验证后删除）──
+// 记录 onmessage 拿到的每个文本事件帧完整字节，用于对比：
+//   客户端 onmessage 原始字节 vs state.db 真源 vs IndexedDB 快照
+// 判定「serve 写出坏 / 传输层丢 / 客户端内部处理坏」三层归属。
+const PROBE_KEY = 'helix-ws-bytes-v2'
+function probeWsBytes(data: string): void {
+  try {
+    for (const line of data.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let obj: any
+      try { obj = JSON.parse(trimmed) } catch { continue }
+      const t = obj?.params?.type
+      if (t !== 'message.delta' && t !== 'message.complete' && t !== 'run.completed' && t !== 'message.start' && t !== 'run.cancelled') continue
+      const text = obj?.params?.payload?.text ?? obj?.params?.payload?.output ?? ''
+      const sid = obj?.params?.session_id ?? ''
+      const rec = { at: Date.now(), kind: t, sid: String(sid).slice(-6), len: typeof text === 'string' ? text.length : -1, body: typeof text === 'string' ? text : null }
+      let buf: any[] = []
+      try { const b = JSON.parse(localStorage.getItem(PROBE_KEY) || '[]'); if (Array.isArray(b)) buf = b } catch { buf = [] }
+      buf.push(rec)
+      if (buf.length > 400) buf.splice(0, buf.length - 400)
+      try { localStorage.setItem(PROBE_KEY, JSON.stringify(buf)) } catch { buf.splice(0, Math.floor(buf.length / 2)); try { localStorage.setItem(PROBE_KEY, JSON.stringify(buf)) } catch { /* noop */ } }
+    }
+  } catch { /* noop */ }
+}
+
 // ── 类型 ────────────────────────────────────────────────────────────────
 
 export interface ServeGatewayInfo {
@@ -86,6 +112,29 @@ function lastAssistantText(messages: any): string {
     }
   }
   return ''
+}
+
+/**
+ * 归一化用于判重比较（与 agent-flow-panel.normalizeForCompare 等价：去空白+标点+小写）。
+ * Hermes 全文重发时经常带微小差异（"CLI和配置" vs "CLI 和配置"），不归一化直接比会判为不同。
+ */
+function normText(s: string): string {
+  return s.replace(/[\s\p{P}]/gu, '').toLowerCase()
+}
+
+/**
+ * 权威全文自愈判定：权威版（session.resume / state.db 同源，字节完好）是否覆盖事件版。
+ * 内容一致性看归一化（去空白+标点+小写：相等 / 包含 / 被包含），长度保护看**原始字节**：
+ * 权威版不显著短于事件版（≥90%）才覆盖——坏文本只是丢空白（字节略短 ~1-3%），
+ * 截断/中断版则明显短（≥10%），拒绝覆盖防截断吞全文。仅替换为原文，不猜补空格，
+ * 绝不会改坏正常文本。
+ */
+function authoritativeOverrides(authoritative: string, eventText: string): boolean {
+  const na = normText(authoritative)
+  const ne = normText(eventText)
+  if (!na || !ne) return false
+  if (!(na === ne || na.includes(ne) || ne.includes(na))) return false
+  return authoritative.length >= eventText.length * 0.9
 }
 
 /**
@@ -201,6 +250,7 @@ export class ServeGatewayClient {
 
       ws.onmessage = (ev) => {
         const data = typeof ev.data === 'string' ? ev.data : ''
+        probeWsBytes(data) // PROBE: 接收层原始字节
         // 换行分隔：一帧可能含多行 JSON
         for (const line of data.split('\n')) {
           const trimmed = line.trim()
@@ -379,13 +429,12 @@ export class ServeGatewayClient {
         this.pending.delete(msg.id)
         clearTimeout(p.timer)
         if (msg.error) {
-          // "session not found" 等 RPC 错误：并发多 session 时可能发生
-          // （后端可能不支持真正的多 session 并发，一个 session 被另一个挤掉）。
-          // 不让 reject 直接 throw 到未捕获区域——用 warn 记录后正常 reject，
-          // 调用方的 try/catch 会处理。
+          // "session not found" 等 RPC 错误：防御性兜底。正常并发下后端不挤
+          // 会话，但网关重启/会话被回收时旧 id 会失效，这里 warn 后正常 reject，
+          // 调用方（session/prompt 的 catch）会自动重建会话并重放 prompt。
           const errMsg = msg.error.message || 'RPC 错误'
           if (/session.*not.*found|not found/i.test(errMsg)) {
-            warn('[ServeGateway] RPC session 错误(并发?):', errMsg)
+            warn('[ServeGateway] RPC session 错误:', errMsg)
           }
           p.reject(new Error(errMsg))
         } else {
@@ -412,6 +461,11 @@ export class ServeGatewayClient {
 
   private translateEvent(type: string, sessionId: string | undefined, payload: any): void {
     const base = { session_id: sessionId, ...payload }
+    // ── 并发串台诊断日志（临时）：记录事件帧所属 sid ──
+    if (type === 'message.start' || type === 'message.delta' || type === 'message.complete'
+        || type === 'run.completed' || type === 'run.cancelled' || type === 'run.failed') {
+      console.log('[ServeEvent]', JSON.stringify({ type, sid: sessionId }))
+    }
 
     switch (type) {
       case 'gateway.ready':
@@ -431,9 +485,20 @@ export class ServeGatewayClient {
         // renderer accumulates every text delta into one in-progress message,
         // so interim comments are surfaced the same way as message.delta — the
         // text streams in and the authoritative run_complete still finalizes it.
-        const text = payload?.text ?? ''
+        //
+        // CRITICAL dedup: the backend sets `already_streamed=true` when this
+        // interim text has ALREADY been rendered via message.delta for the same
+        // message (see agent/codex_runtime.py: "The gateway's already_streamed
+        // check dedupes against any text the stream-delta callback already
+        // rendered for the same message"). Blindly appending it as another
+        // agent_message_chunk makes the same paragraph render TWICE — the
+        // "内容重复两次" bug. Skip the injection for already-streamed text;
+        // only surface interim comments that never flowed through delta
+        // (already_streamed=false).
+        const alreadyStreamed = payload?.already_streamed === true
         this.emit(type, base)
-        if (text) {
+        const text = payload?.text ?? ''
+        if (text && !alreadyStreamed) {
           this.emit('session/update', {
             session_id: sessionId,
             update: { sessionUpdate: 'agent_message_chunk', content: text },
@@ -487,16 +552,35 @@ export class ServeGatewayClient {
         // 先发原生 + usage 事件，再 resolve pending prompt（顺序与 ACP 主进程一致）
         this.emit('message.complete', base)
         if (usage) this.emit('usage:prompt-complete', { session_id: sessionId, usage })
-        this.emit('session/update', {
-          session_id: sessionId,
-          update: { sessionUpdate: 'run_complete', content: text },
-        })
-        this.resolvePending(sessionId, {
-          status: payload?.status ?? 'complete',
-          usage,
-          text,
-          stopReason: payload?.status === 'interrupted' ? 'cancelled' : 'end_turn',
-        })
+        // 权威全文自愈（与 run.completed 同模式）：事件正文可能携带流式链损坏，
+        // 用 session.resume 拉权威正文（state.db 同源）归一化判定后覆盖。
+        const emitComplete = (content: string) => {
+          this.emit('session/update', {
+            session_id: sessionId,
+            update: { sessionUpdate: 'run_complete', content },
+          })
+          this.resolvePending(sessionId, {
+            status: payload?.status ?? 'complete',
+            usage,
+            text: content,
+            stopReason: payload?.status === 'interrupted' ? 'cancelled' : 'end_turn',
+          })
+        }
+        if (sessionId && text) {
+          this.rpc('session.resume', { session_id: sessionId }, 5_000)
+            .then((res: any) => {
+              const authoritative = lastAssistantText(res?.messages)
+              if (authoritative && authoritative.trim() && authoritativeOverrides(authoritative, text)) {
+                debug('[ServeGateway] message.complete 权威全文覆盖事件文本:', text.length, '→', authoritative.length)
+                emitComplete(authoritative)
+              } else {
+                emitComplete(text)
+              }
+            })
+            .catch(() => emitComplete(text))
+        } else {
+          emitComplete(text)
+        }
         return
       }
 
@@ -509,11 +593,35 @@ export class ServeGatewayClient {
           payload?.output ?? payload?.text ?? payload?.final_response ?? payload?.delta ?? payload?.content ?? ''
         const usage = mapUsage(payload?.usage)
         if (usage) this.emit('usage:prompt-complete', { session_id: sessionId, usage })
-        this.emit('session/update', {
-          session_id: sessionId,
-          update: { sessionUpdate: 'run_complete', content: text },
-        })
-        this.resolvePending(sessionId, { status: 'complete', usage, text, stopReason: 'end_turn' })
+        // 权威全文自愈（观测案例 absent/corrupt）：事件 payload 的最终文本可能携带
+        // 流式链损坏（"##当前实时验证\n\n" 黏成 "##当前实时验证"），而前端 done 分支的
+        // 归一化覆盖依赖 done 事件自带正文——它没到/也坏时自愈不触发。这里用
+        // session.resume 从网关拉一次权威正文（与 state.db 持久化同源，字节完好），
+        // authoritativeOverrides 判定后以权威为准。resume 对已结束会话是幂等只读
+        // 操作（同 resumeInflightSessions 模式）；本地网关 RPC 通常 <50ms，前端有
+        // 90s 兜底不受延迟影响，失败时回退事件版。
+        const emitComplete = (content: string) => {
+          this.emit('session/update', {
+            session_id: sessionId,
+            update: { sessionUpdate: 'run_complete', content },
+          })
+          this.resolvePending(sessionId, { status: 'complete', usage, text: content, stopReason: 'end_turn' })
+        }
+        if (sessionId && text) {
+          this.rpc('session.resume', { session_id: sessionId }, 5_000)
+            .then((res: any) => {
+              const authoritative = lastAssistantText(res?.messages)
+              if (authoritative && authoritative.trim() && authoritativeOverrides(authoritative, text)) {
+                debug('[ServeGateway] run.completed 权威全文覆盖事件文本:', text.length, '→', authoritative.length)
+                emitComplete(authoritative)
+              } else {
+                emitComplete(text)
+              }
+            })
+            .catch(() => emitComplete(text))
+        } else {
+          emitComplete(text)
+        }
         return
       }
       case 'run.cancelled': {
@@ -699,25 +807,18 @@ export class ServeGatewayClient {
 
   /**
    * 建会话（session/new 与「session not found 自动重试」共用）。
-   * 后端疑似只保留一个活跃会话：每次成功 session.create 都可能把此前正在
-   * 运行的会话挤掉（后续其 RPC 报 "session not found"）。因此创建成功后，
-   * 把其余 in-flight 会话标记为已驱逐（session.evicted），前端据此快速收尾
-   * 被挤掉的 run，而不是静默挂到 5 分钟兜底。
+   * 后端 serve 网关按会话独立管理（session.create 纯新增，不挤旧会话；
+   * 会话并发上限由 max_concurrent_sessions 控制，默认无限制）。因此创建
+   * 新会话**不驱逐**其他 in-flight 会话——多对话并行时各自保持独立的
+   * 事件流，由前端按 session_id 过滤路由（agent-flow-panel.tsx 的
+   * "true-concurrency" 设计）。断连重连后 resumeInflightSessions 会逐个
+   * 恢复所有 in-flight 会话的事件流。
    */
   private async createSession(params?: any): Promise<any> {
     await this.ensureModelSynced()
     const res = await this.rpc('session.create', {
       source: 'helix',
     })
-    const newId = res?.session_id
-    if (newId) {
-      for (const other of [...this.inflightSessions]) {
-        if (other !== newId) {
-          this.inflightSessions.delete(other)
-          this.emit('session.evicted', { session_id: other, replacedBy: newId })
-        }
-      }
-    }
     return res
   }
 
@@ -752,13 +853,14 @@ export class ServeGatewayClient {
         // agent-flow-panel 据此收尾）。只把 session 记为 in-flight，供 WS 断连重连后
         // session.resume 恢复事件流（见 resumeInflightSessions）。
         try {
+          // ── 并发串台诊断日志（临时） ──
+          console.log('[ServePrompt]', JSON.stringify({ sid: sessionId, text: text.slice(0, 50) }))
           await this.rpc('prompt.submit', { session_id: sessionId, text })
         } catch (err) {
-          // 并发多 session 的 "session not found" 恢复（对齐主进程 ACP 路径：
-          // electron/main.js hermes:send → recreate + retry）。后端疑似只保留一个
-          // 活跃会话：新的 session.create 会把旧会话挤掉，旧会话上的 RPC 报
-          // "session not found"。这里自动重建会话并重放 prompt，尽力让该对话也
-          // 跑完；返回新 session_id 让前端把 conversation→session 映射改绑。
+          // "session not found" 的自动恢复兜底（对齐主进程 ACP 路径）。正常
+          // 并发下后端不挤会话，但网关重启/会话回收会让旧 id 失效。这里自动
+          // 重建会话并重放 prompt，尽力让该对话也跑完；返回新 session_id 让
+          // 前端把 conversation→session 映射改绑。
           const msg = (err as Error)?.message || ''
           if (/session.*not.*found|not found|no such session|unknown session/i.test(msg)) {
             warn('[ServeGateway] session not found on prompt — recreating session and retrying')

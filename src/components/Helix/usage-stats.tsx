@@ -4,6 +4,7 @@ import React, { useState, useEffect } from 'react'
 import { formatTokens } from '@/lib/format'
 import { useHelixStore } from '@/stores/helix-store'
 import { DailyUsageChart, type DailyUsagePoint } from './usage-daily-chart'
+import { UsageHeatmap } from './usage-heatmap'
 
 export function ModelUsageStats() {
   const modelUsage = useHelixStore(s => s.modelUsage)
@@ -228,10 +229,13 @@ export function TokenUsagePanel() {
         </div>
       </div>
 
-      {/* Activity heatmap */}
+      {/* Activity heatmap — real dailyUsage data (GitHub-style grid), replaces the old static placeholder PNG */}
       <div className="rounded-xl border border-border/40 bg-card p-4">
-        <h3 className="text-sm font-medium text-foreground">活跃热力图</h3>
-        <img src="/usage-heatmap.png" alt="活跃热力图" className="mt-3 w-full h-auto rounded-lg" />
+        <div className="flex items-center justify-between px-0.5">
+          <h3 className="text-sm font-medium text-foreground">活跃热力图</h3>
+          <span className="text-xs text-muted-foreground/60">最近 90 天</span>
+        </div>
+        <UsageHeatmap dailyUsage={dailyUsage} days={90} selectedDay={activeDay} onDaySelect={setSelectedDay} />
       </div>
 
       {/* Per-model breakdown for the selected day */}

@@ -182,7 +182,7 @@ export function HookSettings() {
                       className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
                       onClick={() => removeHook(hook.id)}
                       aria-label="删除 hook"
-                      title="删除"
+                      data-tip="删除"
                     >
                       <Trash2 className="size-4" />
                     </Button>

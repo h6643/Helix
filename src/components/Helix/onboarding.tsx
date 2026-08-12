@@ -25,7 +25,7 @@ export function Onboarding() {
         <button
           onClick={finish}
           className="absolute right-4 top-4 p-1.5 rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-accent/60"
-          title="跳过"
+          data-tip="跳过"
         >
           <X className="size-4" />
         </button>

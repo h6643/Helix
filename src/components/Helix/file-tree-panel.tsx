@@ -495,7 +495,7 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
             {style && (
               <span
                 className={`shrink-0 text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded ${style.color} ${style.bg}`}
-                title={status || ''}
+                data-tip={status || ''}
               >
                 {style.label}
               </span>

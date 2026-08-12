@@ -104,7 +104,7 @@ export function BootOverlay() {
         <button
           onClick={() => setDismissed(true)}
           className="absolute top-2 right-2 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-          title="关闭"
+          data-tip="关闭"
         >
           <X className="size-3.5" />
         </button>

@@ -99,7 +99,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
         ref={buttonRef}
         onClick={(e) => { e.stopPropagation(); setOpen(v => !v) }}
         className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
-        title="更多操作"
+        data-tip="更多操作"
       >
         <MoreVertical className="size-3.5" />
       </button>
@@ -219,7 +219,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
         ref={buttonRef}
         onClick={(e) => { e.stopPropagation(); setOpen(v => !v) }}
         className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
-        title="更多操作"
+        data-tip="更多操作"
       >
         <MoreVertical className="size-3.5" />
       </button>
@@ -308,6 +308,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir)
 
   const currentSessionId = useHelixStore(s => s.currentSessionId)
+  const sessionPendingApproval = useHelixStore(s => s.sessionPendingApproval)
   const streamingDrafts = useHelixStore(s => s.streamingDrafts)
   const hermesConnected = useHermesStore(s => s.hermesConnected)
   const [sessions, setSessions] = useState<PersistedSession[]>([])
@@ -494,7 +495,18 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       // fetching every session from disk just to pick one. Fall back to the
       // in-memory snapshot if the record is missing (e.g. just-deleted).
       const fresh = (await persistence.loadSession(session.id)) || session
-      const msgs = fresh.chatMessages.map(msg => ({
+      // 恢复时丢弃 draft-partial 占位消息（与 navigateSession 一致）。并发设计
+      // 下切换会话并不会中断后台 run——该占位只是持久化快照，若展示会与最终
+      // 提交的完整回复重复，并误导显示"生成中断"。
+      const seen = new Set<string>()
+      const msgs = fresh.chatMessages
+        .filter(msg => {
+          if (seen.has(msg.id)) return false
+          seen.add(msg.id)
+          if (typeof msg.id === 'string' && msg.id.startsWith('draft-partial-')) return false
+          return true
+        })
+        .map(msg => ({
         id: msg.id,
         role: msg.role as 'user' | 'assistant' | 'system',
         content: msg.content,
@@ -755,7 +767,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
               <button
                 key={item.id}
                 onClick={() => item.action()}
-                title={item.label}
+                data-tip={item.label}
                 className={`p-2.5 rounded-lg transition-colors outline-none ${
                   isActive
                     ? 'bg-sidebar-accent/70 text-sidebar-accent-foreground'
@@ -769,7 +781,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
           <div className="flex-1" />
           <button
             onClick={() => toggleSettings()}
-            title="设置"
+            data-tip="设置"
             className="p-2.5 rounded-lg text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40 transition-colors"
           >
             <Settings className="size-[18px]" />
@@ -857,7 +869,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                         <button
                           onClick={(e) => { e.stopPropagation(); handleNewProjectChat(project.dir) }}
                           className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
-                          title="在该项目下新建对话"
+                          data-tip="在该项目下新建对话"
                         >
                           <Plus className="size-3.5" />
                         </button>
@@ -941,13 +953,16 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                                   )}
                                   <p
                                     className="text-[12px] truncate flex-1"
-                                    title="双击重命名"
+                                    data-tip="双击重命名"
                                     onDoubleClick={(e) => { e.stopPropagation(); setRenamingId(session.id) }}
                                   >{session.label}</p>
                                 </div>
                               )}
                             </div>
                             
+                            {sessionPendingApproval[session.id] && (
+                              <span className="shrink-0 size-2 rounded-full bg-amber-500" data-tip="需要确认" />
+                            )}
                             <SessionActionsMenu
                               isPinned={session.isPinned}
                               onArchive={() => handleToggleArchive(session.id)}
@@ -1012,11 +1027,14 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                       ) : (
                         <p
                           className="text-[13px] truncate"
-                          title="双击重命名"
+                          data-tip="双击重命名"
                           onDoubleClick={(e) => { e.stopPropagation(); setRenamingId(session.id) }}
                         >{session.label}</p>
                       )}
                     </div>
+                    {sessionPendingApproval[session.id] && (
+                      <span className="shrink-0 size-2 rounded-full bg-amber-500" data-tip="需要确认" />
+                    )}
                     <SessionActionsMenu
                       isPinned={session.isPinned}
                       onArchive={() => handleToggleArchive(session.id)}

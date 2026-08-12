@@ -34,6 +34,7 @@ import {
   Trash,
   BookOpen,
   Volume2,
+  Mic,
 } from 'lucide-react'
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
@@ -43,7 +44,7 @@ import type { ReasoningEffortLevel } from '@/hermes-ui/types'
 import { useProviderStore } from '@/hermes-ui/provider-store'
 import { pushModelConfig } from '@/lib/config-sync'
 import { isElectron, electronDialog, electronHermes, electronGit, hermesApi } from '@/lib/electron-bridge'
-import { generateId, timeAgo, formatTokens } from '@/lib/format'
+import { generateId, timeAgo } from '@/lib/format'
 import { processClipboardImage, canAddMoreImages, blobToDataUrl, compressImage } from '@/lib/image-utils'
 import { buildAcpMcpServers } from '@/lib/mcp'
 import { detectScheduledTasks, syncTaskToBackend, type DetectedTask } from '@/lib/schedule-utils'
@@ -60,6 +61,7 @@ import { ScheduledTaskConfirm } from './scheduled-task-confirm'
 import { useHelixStore, type ImageAttachment, type FileAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
 import { startWakeWord, stopWakeWord, pauseWakeWord, resumeWakeWord } from '@/lib/wake-word-utils'
+import { startStt, startNativeRecordStt, startMediaRecorderStt, isSpeechRecognitionSupported, isNativeRecordingSupported, isMediaRecorderSupported, type SttCallbacks, type SttHandle } from '@/lib/voice-input-utils'
 import { playDingSound } from '@/lib/ding-sound'
 import { speakText, splitSentences } from '@/lib/tts-utils'
 import { speak, stopSpeaking } from '@/lib/voice-utils'
@@ -112,6 +114,30 @@ function pinToolGroupsToTop(blocks: StreamingResponseBlock[]): StreamingResponse
   if (tools.length === 0) return blocks
   const rest = blocks.filter((b) => b.type !== 'tool_group')
   return [...tools, ...rest]
+}
+
+// pinToolGroupsToTop hoists ALL tool_groups to the top, so thinking blocks
+// that were chronologically interleaved with tool calls become ADJACENT at
+// render time (e.g. [thinking, tool, thinking, tool] → [tool, tool, thinking,
+// thinking]). Each thinking block also carries the full accumulated thought
+// (isCumulative replace), so they'd render as several stacked "思考" collapsibles
+// with overlapping content — the "连续出现多个 thinking" symptom. Merge runs of
+// consecutive thinking blocks: a cumulative superset replaces the earlier one,
+// disjoint segments are concatenated.
+function mergeAdjacentThinking(blocks: StreamingResponseBlock[]): StreamingResponseBlock[] {
+  const out: StreamingResponseBlock[] = []
+  for (const block of blocks) {
+    const prev = out[out.length - 1]
+    if (block.type === 'thinking' && prev && prev.type === 'thinking') {
+      const prevC = String(prev.content || '')
+      const curC = String(block.content || '')
+      const content = curC.includes(prevC) ? curC : prevC.includes(curC) ? prevC : `${prevC}\n\n${curC}`
+      out[out.length - 1] = { ...prev, content }
+    } else {
+      out.push(block)
+    }
+  }
+  return out
 }
 
 // Older streamed messages may store cumulative text per block. Convert those
@@ -204,7 +230,22 @@ function normalizeTextBlocks(blocks: NonNullable<ChatMessage['blocks']>): NonNul
         matched = true
       } else if (lastKept && lastKept.length > 0) {
         const lastN = normalizeForCompare(lastKept)
-        if (curN.length >= 8 && lastN.length >= 8 && isNearDuplicate(lastN, curN)) {
+        // Tail/head overlap: the new chunk begins with the same words the
+        // previous chunk ended with (Hermes re-prefixes the sentence boundary
+        // on the next delta). Rendering both yields "文字叠在一起" — strip the
+        // duplicated head.
+        if (cur.length >= 8 && lastKept.length >= 8) {
+          let _hit = 0
+          const _maxK = Math.min(Math.min(cur.length, lastKept.length), 20)
+          for (let _k = _maxK; _k >= 4; _k--) {
+            if (lastKept.slice(-_k) === cur.slice(0, _k)) { _hit = _k; break }
+          }
+          if (_hit >= 4 && cur.slice(_hit).trim()) {
+            out = cur.slice(_hit)
+            matched = true
+          }
+        }
+        if (!matched && curN.length >= 8 && lastN.length >= 8 && isNearDuplicate(lastN, curN)) {
           if (curN.length >= lastN.length) {
             // Near-identical rewrite that kept or grew: the newer block
             // supersedes the older one — blank it, keep the new wording.
@@ -446,13 +487,6 @@ function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return s > 0 ? `${m}m ${s}s` : `${m}m`
-}
-
-// Delegates to formatTokens so the message bubble and the usage stats panel
-// share one formatting rule (handles M, consistent K casing). Previously this
-// local copy only handled `k` and never `M`, so >=1e6 rendered as "2000k".
-function formatTokenCount(tokens: number): string {
-  return formatTokens(tokens)
 }
 
 // Isolated so the 200ms ticking only re-renders this tiny node, not the whole
@@ -932,28 +966,28 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
           <div className="flex-1 min-w-0">
             {/* Inline thinking block (collapsible) — skip if blocks already contain thinking (prevents duplicate) */}
             {msg.reasoning && msg.reasoning.trim().length > 0 && !(msg.blocks && msg.blocks.some(b => b.type === 'thinking')) && (
-              <details className="mb-2 group/details">
+              <details className="mb-2 mt-3 group/details">
                 <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
                   <span>{extractKaomojiStatus(reasoning).status || '思考'}</span>
                   <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                 </summary>
-                <div className="mt-1 pl-4 text-foreground/50  break-all leading-relaxed" style={{ fontSize }}>
-                  {searchOpen && searchQuery.trim() ? <HighlightText text={reasoning} query={searchQuery} active={isSearchActive} /> : reasoning}
+                <div className="mt-1 pl-4 text-foreground/50  break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
+                  {searchOpen && searchQuery.trim() ? <HighlightText text={reasoning} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={reasoning} />}
                 </div>
               </details>
             )}
             {/* Interleaved blocks: thinking, text, and tool groups in chronological order */}
             {(msg.blocks && msg.blocks.length > 0) ? (
-              <div className="helix-md" style={{ fontSize }}>
-                {pinToolGroupsToTop(normalizeTextBlocks(msg.blocks)).map((block, idx) =>
+              <div className="helix-md thinking-cap-body thinking-scroll" style={{ fontSize }}>
+                {mergeAdjacentThinking(pinToolGroupsToTop(normalizeTextBlocks(msg.blocks))).map((block, idx) =>
                   block.type === 'thinking' ? (
-                    <details key={idx} className="mb-2 group/details">
+                    <details key={idx} className="mb-2 mt-3 group/details">
                       <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
                         <span>{extractKaomojiStatus(block.content).status || '思考'}</span>
                         <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                       </summary>
-                      <div className="mt-1 pl-4 text-foreground/50  break-all leading-relaxed" style={{ fontSize }}>
-                        {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} /> : normalizeAcpContentRaw(block.content)}
+                      <div className="mt-1 pl-4 text-foreground/50  break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
+                        {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />}
                       </div>
                     </details>
                   ) : block.type === 'text' ? (
@@ -974,7 +1008,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 )}
               </div>
             ) : (
-              <div className="helix-md" style={{ fontSize }}>
+              <div className="helix-md thinking-cap-body thinking-scroll" style={{ fontSize }}>
                 {searchOpen && searchQuery.trim() ? (
                   <pre className="whitespace-pre-wrap break-words" style={{ fontSize }}>
                     <HighlightText text={mdContent} query={searchQuery} active={isSearchActive} />
@@ -984,20 +1018,11 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 )}
               </div>
             )}
-            {(() => {
-              const _out = msg.outputTokens ?? 0
-              const _thought = msg.thoughtTokens ?? 0
-              const _completion = _out + _thought || (msg.totalTokens ?? 0)
-              if ((messageDuration ?? 0) <= 0 && _completion <= 0) return null
-              const _sep = (messageDuration ?? 0) > 0 && _completion > 0 ? ' · ' : ''
-              return (
-                <div className="text-[10px] text-foreground/30 tabular-nums mt-1 px-1">
-                  {(messageDuration ?? 0) > 0 ? formatDuration(messageDuration ?? 0) : ''}
-                  {_sep}
-                  {_completion > 0 ? `${formatTokenCount(_completion)} tokens` : ''}
-                </div>
-              )
-            })()}
+            {(messageDuration ?? 0) > 0 && (
+              <div className="text-[10px] text-foreground/30 tabular-nums mt-1 px-1">
+                {formatDuration(messageDuration ?? 0)}
+              </div>
+            )}
             {/* Copy button */}
             <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1 gap-0.5">
               <CopyButton text={mdContent} />
@@ -1075,6 +1100,10 @@ export function AgentFlowPanel() {
   const [steps, setSteps] = useState<ExecutionStep[]>([])
   useEffect(() => { stepsRef.current = steps }, [steps])
   const [input, setInput] = useState('')
+  // Voice input (STT) session state — mic pill next to the send button.
+  const [voiceInputActive, setVoiceInputActive] = useState(false)
+  const [voiceInputInterim, setVoiceInputInterim] = useState('')
+  const sttHandleRef = useRef<SttHandle | null>(null)
   // Per-session streaming drafts let the running thinking/steps survive
   // conversation switches. `isRunning` is derived from the current session's draft.
   const streamingDrafts = useHelixStore(s => s.streamingDrafts)
@@ -1142,6 +1171,67 @@ export function AgentFlowPanel() {
     inputValueRef.current = value
     const sid = useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY
     useHelixStore.getState().setTabInput(sid, value)
+  }, [])
+
+  // ── Voice input (STT) ────────────────────────────────────────────────
+  // Pick the best available backend: browser SpeechRecognition (zero-latency
+  // interim results), then native arecord→Hermes STT (Linux WebKitGTK has no
+  // getUserMedia audio), then MediaRecorder→Hermes STT.
+  const handleVoiceInputToggle = useCallback(() => {
+    // A click while a session exists (or marked listening) means STOP.
+    // Flip the UI state synchronously so the red mic reverts at once,
+    // regardless of how long the STT backend (e.g. Hermes) takes to tear down.
+    if (voiceInputActive || sttHandleRef.current) {
+      setVoiceInputActive(false)
+      setVoiceInputInterim('')
+      sttHandleRef.current?.stop()
+      sttHandleRef.current = null
+      inputRef.current?.focus()
+      return
+    }
+
+    const appendFinal = (text: string) => {
+      const clean = text.trim()
+      if (!clean) return
+      const existing = inputValueRef.current
+      const next = existing.trim() ? `${existing}${existing.endsWith(' ') ? '' : ' '}${clean}` : clean
+      setInputSynced(next)
+    }
+    const onError = (message: string) => {
+      sttHandleRef.current = null
+      setVoiceInputActive(false)
+      setVoiceInputInterim('')
+      useHelixStore.getState().showToast({ type: 'error', title: '语音输入', description: message })
+    }
+    const callbacks: SttCallbacks = {
+      onFinal: appendFinal,
+      onInterim: (text) => setVoiceInputInterim(text),
+      onStatus: (status) => setVoiceInputActive(status === 'listening'),
+      onError,
+    }
+
+    let session: SttHandle | null = null
+    const lang = 'zh-CN'
+    if (isSpeechRecognitionSupported()) {
+      session = startStt(lang, callbacks)
+    } else if (isNativeRecordingSupported()) {
+      session = startNativeRecordStt(lang, callbacks)
+    } else if (isMediaRecorderSupported()) {
+      session = startMediaRecorderStt(lang, callbacks)
+    }
+
+    if (!session) {
+      onError('当前平台不支持语音输入')
+      return
+    }
+    sttHandleRef.current = session
+    session.start()
+  }, [voiceInputActive, setInputSynced])
+
+  // Abort any in-flight STT session when the panel unmounts.
+  React.useEffect(() => () => {
+    sttHandleRef.current?.abort()
+    sttHandleRef.current = null
   }, [])
 
   // Reset input height to default
@@ -2226,8 +2316,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
   // Stop running agent (accepts optional sessionId to target specific session)
   const handleStop = useCallback((targetSessionId?: string) => {
-    const sid = targetSessionId || sessionMapRef.current.get(currentSessionId || '')?.sid || runningSessionIdRef.current || currentSessionId
-    debug('[HelixTrace] handleStop start', { sid })
+    // `cid` 必须是「前端对话 id」——abortControllersRef 和 streamingDrafts 都
+    // 以它为 key（handleRun 里 set(activeSessionId, controller)）。旧代码用
+    // sessionMapRef.get(currentSessionId)?.sid（后端 sid）作 lookup key，
+    // 两个 map 都 miss → 落到 abortRef.current（最近启动的 run）→ 并发时停错
+    // 对话；且 setStreamingDraft(后端sid) 写进幻影 key，当前对话的 running 态
+    // 永远不清除 → 「点暂停没用，只能回车」。
+    const cid = targetSessionId || currentSessionId || runningSessionIdRef.current
+    debug('[HelixTrace] handleStop start', { cid })
     if (synthDoneTimerRef.current) {
       clearTimeout(synthDoneTimerRef.current)
       synthDoneTimerRef.current = null
@@ -2235,21 +2331,21 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // Abort the targeted conversation's run only. Parallel runs in other
     // conversations keep streaming — abortRef points at the most recent run,
     // so prefer the per-session controller when a specific session is targeted.
-    const ctl = (sid && abortControllersRef.current.get(sid)) || abortRef.current
+    const ctl = (cid && abortControllersRef.current.get(cid)) || abortRef.current
     if (ctl) {
       ctl.abort()
       if (abortRef.current === ctl) abortRef.current = null
-      if (sid) abortControllersRef.current.delete(sid)
+      if (cid) abortControllersRef.current.delete(cid)
     }
-    if (sid) {
-      setStreamingDraft(sid, { isAgentRunning: false })
+    if (cid) {
+      setStreamingDraft(cid, { isAgentRunning: false })
     }
     useHelixStore.setState({ isChatLoading: false })
     try {
-      // Look up THIS conversation's Hermes session — NOT the global ref.
-      const sessionId = (sid && sessionMapRef.current.get(sid)?.sid) || null
+      // 后端 session id = sessionMapRef[cid].sid（新建对话可能为 null，跳过取消）。
+      const sessionId = (cid && sessionMapRef.current.get(cid)?.sid) || null
       if (sessionId && isElectron()) {
-        debug('[HelixTrace] handleStop cancel', { sessionId })
+        debug('[HelixTrace] handleStop cancel', { cid, sessionId })
         // session/cancel via the serve-aware bridge. The run's own AbortController
         // listener (registered at the run site) also fires this on abort; keep an
         // explicit send here as a safety net. (interrupt === notify('session/cancel')
@@ -2721,11 +2817,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // "session not found". Treat stale/epoch-mismatched ids as missing and
       // recreate below.
       let sessionId = existing && existing.epoch === liveEpoch ? existing.sid : null
+      let wasCreated = false
       if (!sessionId && existing) {
         sessionMapRef.current.delete(myCid)
         persistSessionMap(sessionMapRef.current)
       }
       if (!sessionId) {
+        wasCreated = true
         const res = await hermesApi()!.send('session/new', {
           mcpServers: buildAcpMcpServers(useHelixStore.getState().mcpServers),
         }) as any
@@ -2739,9 +2837,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         sessionMapRef.current.set(myCid, { sid: sessionId, epoch: liveEpoch })
         persistSessionMap(sessionMapRef.current)
         sessionEpochRef.current = liveEpoch
-        // Keep the store in sync so external invalidation (profile switch,
-        // gateway restart) can reliably clear this ref via its own effect.
-        try { useHermesStore.getState().setHermesSessionId(sessionId) } catch {}
+        // 不要在这里无条件写全局 hermesSessionId：后台 run 建会话时会把全局
+        // 改成后台会话的 sid，让 ContextUsageIndicator（读全局）查错会话 → 空
+        // 分类。全局只由「前台 run」（下方 isFrontRun 分支）和「切换对话时的
+        // sync effect」写入。
         // Auto-approve edits for this session (no manual approval UI): switch
         // Hermes into "don't ask" mode. Hermes has no `session/approve` RPC — it
         // waits for an approval response to a permission_request, so the only
@@ -2803,7 +2902,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             case 'agent_thought_chunk':
               return { type: 'thinking', content: normalizeAcpContent(u.content) }
             case 'tool_call': {
-              const data-tip= typeof u.data-tip=== 'string' ? u.title : ''
+              const title= typeof u.title=== 'string' ? u.title : ''
               const kind = typeof u.kind === 'string' ? u.kind : ''
               const toolCallId = typeof u.toolCallId === 'string' ? u.toolCallId : ''
               let args = u.rawInput
@@ -3370,6 +3469,16 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // Fire the prompt — events stream back via onEvent (don't await the promise itself).
       // ACP expects prompt as a list of content blocks, not a plain string
       promptSentAtRef.current = Date.now()
+      // ── 并发串台诊断日志（临时）：记录本 run 的对话 id → 后端 sid 映射 ──
+      console.log('[HelixSend]', JSON.stringify({
+        conversation: activeSessionId,
+        sid: sessionId,
+        sidSource: wasCreated ? 'new' : 'map',
+        frontRun: isFrontRun(),
+        globalSid: useHermesStore.getState().hermesSessionId,
+        map: Object.fromEntries(sessionMapRef.current),
+        text: promptText.slice(0, 50),
+      }))
       hermesApi()!.send('session/prompt', {
         session_id: sessionId,
         prompt: [{ type: 'text', text: promptText }],
@@ -3717,14 +3826,29 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               if (renderText.startsWith(lastStreamedTextRef.current)) {
                 delta = renderText.slice(lastStreamedTextRef.current.length)
               } else if (lastStreamedTextRef.current) {
-                // Byte-different full-text resend (replaced above): the content
-                // is already on screen via the incremental blocks — suppress
-                // the duplicate block unless the resend actually grew (that
-                // case is collapsed at render time by normalizeTextBlocks).
+                // Byte-different (rewritten) full-text resend: the model rebuilt
+                // the whole accumulated text with minor edits (spacing/case/
+                // punctuation) instead of appending. The older text is already
+                // on screen via the incremental blocks, so pushing the rewritten
+                // full text again would render the same paragraph twice
+                // ("正文重复" root cause). If the new text is close to the last
+                // streamed text and at full-message scale, only emit the tail
+                // delta that actually differs; if it's merely equal-or-a-subset,
+                // suppress it entirely.
                 const lastN = normalizeForCompare(lastStreamedTextRef.current)
                 const newN = normalizeForCompare(renderText)
-                if (lastN.length >= 8 && newN.length >= 8 && (newN === lastN || lastN.includes(newN))) {
-                  delta = ''
+                if (lastN.length >= 8 && newN.length >= 8 &&
+                    (newN === lastN || lastN.includes(newN) || newN.includes(lastN) ||
+                     (textSimilarityRatio(lastN, newN) >= 0.6 && newN.length >= lastN.length * 0.5))) {
+                  if (newN === lastN || lastN.includes(newN) || newN.includes(lastN)) {
+                    delta = ''
+                  } else {
+                    // Near-duplicate rewrite at full-message scale: the delta is
+                    // whatever this sentence introduced beyond the tail overlap;
+                    // fall back to a single trailing chunk of the new text that
+                    // isn't already shown (render-time normalize also collapses it).
+                    delta = renderText.slice(0, 0) // empty — the rewrite is visually identical enough that re-rendering the text would just duplicate it
+                  }
                 } else {
                   delta = renderText
                 }
@@ -3749,9 +3873,25 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               // run.completed 的 text)。当模型不流式发 message.delta 时 textBuffer 为空,
               // 必须回退用事件自带正文,否则表现为"只思考不输出"。流式场景 textBuffer 已填满,
               // 优先用它(避免 run_complete 自带内容截断已流出的全文)。
+              //
+              // 权威全文自愈:message.complete 的 text 来自后端 final_response,与 state.db
+              // 持久化同源(字节完好),而流式累积 textBuffer 可能因转发链间歇丢空白/换行而损坏
+              // (症状:"##当前实时验证\n\n" 黏成 "##当前实时验证")。若 complete 全文在归一化
+              // 比较下覆盖流式累积(相同、包含或更长),用权威全文替换——只替换为原文,不猜补
+              // 空格,所以绝不会改坏正常文本。仅当 complete 更短(可能为截断/中断)时保留流式累积。
               let content = textBufferRef.current
-              if (!content.trim() && parsed.content && typeof parsed.content === 'string' && parsed.content.trim()) {
-                content = parsed.content
+              const finalText = typeof parsed.content === 'string' ? parsed.content : ''
+              if (!content.trim()) {
+                content = finalText
+              } else if (finalText && finalText.trim()) {
+                const normBuf = normalizeForCompare(content)
+                const normFinal = normalizeForCompare(finalText)
+                if (
+                  normBuf && normFinal && normFinal.length >= normBuf.length &&
+                  (normFinal === normBuf || normFinal.includes(normBuf) || normBuf.includes(normFinal))
+                ) {
+                  content = finalText
+                }
               }
               let reasoning = thoughtBufferRef.current
               const completedSteps = stepsRef.current
@@ -4337,10 +4477,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
-        // Toggle send/stop for the current session only (other tabs keep running).
-        const draft = streamingDrafts[currentSessionId || runningSessionIdRef.current || '']
+        // Toggle send/stop for the CURRENT session only (other tabs keep running).
+        // 新建对话（currentSessionId === null）没有自己的 draft——绝不 fallback
+        // 到 runningSessionIdRef 去停别的对话的 run；它总是走 handleRun 开新 run。
+        const cid = currentSessionId
+        const draft = cid ? streamingDrafts[cid] : undefined
         if (draft?.isAgentRunning) {
-          handleStop(currentSessionId || runningSessionIdRef.current || '')
+          handleStop(cid ?? undefined)
         } else {
           handleRun()
         }
@@ -4707,6 +4850,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }}
             />
 
+            {/* Live voice transcription preview */}
+            {voiceInputActive && (
+              <div className="voice-interim">
+                {voiceInputInterim ? (
+                  <>{voiceInputInterim}<span className="caret" /></>
+                ) : (
+                  <span className="listening">正在聆听…</span>
+                )}
+              </div>
+            )}
+
             {/* Unified slash command dropdown */}
             {showSlashMenu && (
               <div className="absolute bottom-full left-0 right-0 mb-2 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 z-50 max-h-[300px] overflow-y-auto mx-3">
@@ -4858,6 +5012,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     <ReasoningEffortControl value={reasoningEffort} onChange={(v) => storeActions.setReasoningEffort(v)} />
                     <button
                       type="button"
+                      onClick={handleVoiceInputToggle}
+                      className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center ${
+                        voiceInputActive
+                          ? 'text-white bg-destructive/85 hover:bg-destructive shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40'
+                      }`}
+                      data-tip={voiceInputActive ? '停止语音输入' : '语音输入'}
+                    >
+                      <Mic className={`size-4 ${voiceInputActive ? 'animate-pulse' : ''}`} />
+                    </button>
+                    <button
+                      type="button"
                       onClick={isBusy ? () => handleStop() : handleRun}
                       disabled={!isBusy && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
                       className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center ${
@@ -4895,6 +5061,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     <ContextUsageIndicator />
                     {(hasApiKey || isServeActive()) && renderModelSelector()}
                     <ReasoningEffortControl value={reasoningEffort} onChange={(v) => storeActions.setReasoningEffort(v)} />
+                    <button
+                      type="button"
+                      onClick={handleVoiceInputToggle}
+                      className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center ${
+                        voiceInputActive
+                          ? 'text-white bg-destructive/85 hover:bg-destructive shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40'
+                      }`}
+                      data-tip={voiceInputActive ? '停止语音输入' : '语音输入'}
+                    >
+                      <Mic className={`size-4 ${voiceInputActive ? 'animate-pulse' : ''}`} />
+                    </button>
                     <button
                       type="button"
                       onClick={isBusy ? () => handleStop() : handleRun}
@@ -5184,7 +5362,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         was already committed (e.g. think→done→think again within one run). */}
                     {streamingActive && displayResponseBlocks.length === 0 && !displayStreamThinking && !hasCompletedAssistant && (
                       <div className="flex items-center my-1 text-sm text-foreground/50">
-                        <span>(¬_¬) reasoning...</span>
+                        <span>推理中...</span>
                       </div>
                     )}
 
@@ -5195,8 +5373,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                           {thinkingStatus
                             ? thinkingStatus
                             : runningToolLabels.length > 0
-                              ? `(•_•) executing: ${runningToolLabels.join(' / ')}`
-                              : '(•_•) executing...'}
+                              ? `执行中：${runningToolLabels.join(' / ')}`
+                              : displayStreamThinking ? '思考中...' : '执行中...'}
                         </span>
                       </div>
                     )}
@@ -5208,10 +5386,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       <div className="my-2">
                         <details className="group/details">
                           <summary className="text-muted-foreground cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
-                            <span>{thinkingStatus || 'thinking...'}</span>
+                            <span>{thinkingStatus || '思考中...'}</span>
                             <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                           </summary>
-                          <div className="mt-1 pl-3 text-foreground/60  break-all leading-relaxed max-h-[50vh] overflow-y-auto" style={{ fontSize: transcriptFontSize }}>
+                          <div className="mt-1 pl-3 text-foreground/60  break-all leading-relaxed thinking-cap-tall thinking-scroll" style={{ fontSize: transcriptFontSize }}>
                             {thinkingBody}
                           </div>
                         </details>
@@ -5223,18 +5401,22 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     {/* Interleaved response blocks: thinking, text, and tool groups in chronological order */}
                     {displayResponseBlocks.length > 0 && (() => {
                       const normalizedBlocks = normalizeTextBlocks(displayResponseBlocks)
-                      const filtered = pinToolGroupsToTop(normalizedBlocks)
+                      const filtered = mergeAdjacentThinking(pinToolGroupsToTop(normalizedBlocks))
                       return (
-                        <div className="helix-md" style={{ fontSize: transcriptFontSize }}>
+                        <div className="helix-md thinking-cap-body thinking-scroll" style={{ fontSize: transcriptFontSize }}>
                           {filtered.map((block, idx) =>
                             block.type === 'thinking' ? (
-                              <details key={idx} className="mb-2 group/details">
+                              <details key={idx} className="mb-2 mt-3 group/details">
                                 <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
-                                  <span>{extractKaomojiStatus(block.content).status || 'thinking'}</span>
+                                  <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
                                   <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                                 </summary>
-                                <div className="mt-1 pl-3 text-foreground/50  break-all leading-relaxed" style={{ fontSize: transcriptFontSize }}>
-                                  {normalizeAcpContentRaw(block.content)}
+                                <div className="mt-1 pl-3 text-foreground/50  break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                                  {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                                    <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
+                                  ) : (
+                                    <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
+                                  )}
                                 </div>
                               </details>
                             ) : block.type === 'text' ? (
@@ -5263,10 +5445,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         from clearing isChatLoading), causing the timer to tick forever. */}
                     {isRunning && (
                       <div className="text-xs text-foreground/30 tabular-nums mt-1 ml-3">
-                        <ThinkingTimer questionStartTs={streamingDrafts[currentSessionId || '']?.startedAt ?? questionStartTs} isRunning={isRunning} />{(() => {
-                          const total = streamingDrafts[currentSessionId || '']?.totalTokens ?? streamTotalTokens
-                          return total > 0 ? ` · ${formatTokenCount(total)} tokens` : ''
-                        })()}
+                        <ThinkingTimer questionStartTs={streamingDrafts[currentSessionId || '']?.startedAt ?? questionStartTs} isRunning={isRunning} />
                       </div>
                     )}
 

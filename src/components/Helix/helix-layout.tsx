@@ -28,6 +28,7 @@ import {
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 import { getCurrentVersion } from '@/hooks/use-check-update'
 import { createPortal } from 'react-dom'
 import { useProviderStore } from '@/hermes-ui/provider-store'
@@ -40,6 +41,7 @@ import { speak, stripAcp } from '@/lib/voice-utils'
 import { useHelixStore } from '@/stores/helix-store'
 import { applyHelixPalette } from '@/lib/themes'
 import { AgentFlowPanel } from './agent-flow-panel'
+import { GlobalTooltip } from './global-tooltip'
 import { CommandPalette } from './command-palette'
 import { Sidebar } from './sidebar'
 import { KeyboardShortcuts } from './keyboard-shortcuts'
@@ -313,6 +315,15 @@ export function HelixLayout() {
   const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
+  const [gitBranch, setGitBranch] = useState<string | null>(null)
+  useEffect(() => {
+    if (!selectedWorkDir) { setGitBranch(null); return }
+    let cancelled = false
+    invoke<{ ok: boolean; branch?: string }>('current_branch', { targetCwd: selectedWorkDir })
+      .then((r) => { if (!cancelled && r.ok) setGitBranch(r.branch || null) })
+      .catch(() => { if (!cancelled) setGitBranch(null) })
+    return () => { cancelled = true }
+  }, [selectedWorkDir])
   const editorTheme = useHelixStore(s => s.editorTheme)
   const themeStyle = useHelixStore(s => s.themeStyle)
   const setThemeStyle = useHelixStore(s => s.setThemeStyle)
@@ -1030,7 +1041,7 @@ export function HelixLayout() {
           <button
             onClick={() => setShowSidebar(v => !v)}
             className={`p-1.5 rounded-lg transition-colors ${showSidebar ? 'text-primary bg-primary/10' : 'text-foreground/40 hover:text-foreground/80 hover:bg-accent/50'}`}
-            title="侧边栏"
+            data-tip="侧边栏"
           >
             <PanelLeft className="size-4" />
           </button>
@@ -1050,7 +1061,7 @@ export function HelixLayout() {
             }}
             disabled={!storeActions.canGoBack()}
             className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-30"
-            title="后退"
+            data-tip="后退"
           >
             <ArrowLeft className="size-4" />
           </button>
@@ -1070,7 +1081,7 @@ export function HelixLayout() {
             }}
             disabled={!storeActions.canGoForward()}
             className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-30"
-            title="前进"
+            data-tip="前进"
           >
             <ArrowRight className="size-4" />
           </button>
@@ -1078,7 +1089,7 @@ export function HelixLayout() {
             ref={windowMenuButtonRef}
             onClick={toggleWindowMenu}
             className="px-2 py-1 text-xs font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-            title="窗口"
+            data-tip="窗口"
           >
             窗口
           </button>
@@ -1086,7 +1097,7 @@ export function HelixLayout() {
             ref={helpMenuButtonRef}
             onClick={() => setHelpMenuOpen(v => !v)}
             className="px-2 py-1 text-xs font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-            title="帮助"
+            data-tip="帮助"
           >
             帮助
           </button>
@@ -1194,21 +1205,21 @@ export function HelixLayout() {
             <button
               onClick={() => (window as any).electron?.window?.minimize()}
               className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-              title="最小化"
+              data-tip="最小化"
             >
               <Minus className="size-3.5" />
             </button>
             <button
               onClick={handleMaximizeToggle}
               className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-              title={isMaximized ? '还原' : '最大化'}
+              data-tip={isMaximized ? '还原' : '最大化'}
             >
               {isMaximized ? <Copy className="size-3.5" /> : <Square className="size-3.5" />}
             </button>
             <button
               onClick={() => (window as any).electron?.window?.close()}
               className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg transition-colors"
-              title="关闭"
+              data-tip="关闭"
             >
               <X className="size-3.5" />
             </button>
@@ -1266,11 +1277,20 @@ export function HelixLayout() {
                       <button
                         onClick={handleOpenLocation}
                         className="flex items-center gap-1.5 text-[12px] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
-                        title={selectedWorkDir ? '在资源管理器中打开' : '选择位置'}
+                        data-tip={selectedWorkDir ? '在资源管理器中打开' : '选择位置'}
                       >
                         <Folder className="size-3.5 text-muted-foreground" />
                         <span className="max-w-[200px] truncate">{selectedWorkDir ? (selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir) : '未选择位置'}</span>
                       </button>
+                      {gitBranch && (
+                        <div
+                          className="flex items-center gap-1 text-[12px] text-foreground/60 bg-accent/40 px-2 py-1 rounded-lg shrink-0"
+                          data-tip={`当前分支：${gitBranch}`}
+                        >
+                          <GitBranch className="size-3.5 text-muted-foreground" />
+                          <span className="max-w-[160px] truncate">{gitBranch}</span>
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                   {(hermesTodos.length > 0 || hasTaskList) && (
@@ -1281,7 +1301,7 @@ export function HelixLayout() {
                           else if (hasTaskList) setShowTaskListPanel(true)
                         }}
                         className={`relative p-1.5 rounded-lg transition-colors ${todoPopoverOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
-                        title="任务清单"
+                        data-tip="任务清单"
                       >
                         <ListTodo className="size-4" />
                         {hermesTodos.length > 0 && (
@@ -1302,7 +1322,7 @@ export function HelixLayout() {
                                 <button
                                   onClick={() => { setTodoPopoverOpen(false); setShowTaskListPanel(true) }}
                                   className="text-[11px] text-primary hover:underline"
-                                  title="编辑任务"
+                                  data-tip="编辑任务"
                                 >
                                   编辑
                                 </button>
@@ -1337,7 +1357,7 @@ export function HelixLayout() {
                       <button
                         onClick={() => setDelegationsPopoverOpen(v => !v)}
                         className={`p-1.5 rounded-lg transition-colors ${delegationsPopoverOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
-                        title={`${delegations.length} 个子 Agent`}
+                        data-tip={`${delegations.length} 个子 Agent`}
                       >
                         <Users className="size-4" />
                         <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-primary text-white text-[9px] font-bold rounded-full flex items-center justify-center">
@@ -1377,7 +1397,7 @@ export function HelixLayout() {
                   <button
                     onClick={() => storeActions.toggleTerminal()}
                     className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
-                    title="终端"
+                    data-tip="终端"
                   >
                     <Terminal className="size-4" />
                   </button>
@@ -1386,7 +1406,7 @@ export function HelixLayout() {
                     ref={browserMenuButtonRef}
                     onClick={() => setBrowserMenuOpen(v => !v)}
                     className={`p-1.5 rounded-lg transition-colors ${browserMenuOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
-                    title="更多操作"
+                    data-tip="更多操作"
                   >
                     <MoreHorizontal className="size-4" />
                   </button>
@@ -1527,6 +1547,7 @@ export function HelixLayout() {
         {showArtifactsBrowser && <ArtifactsBrowser onClose={() => storeActions.toggleArtifactsBrowser()} />}
         {restoreReady && <Onboarding />}
         <BootOverlay />
+        <GlobalTooltip />
       </Suspense>
     </div>
   )

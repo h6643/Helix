@@ -209,6 +209,27 @@
     transparent;
 }
 
+
+/* Thinking block max-height cap — hand-written (NOT a Tailwind utility) so it always takes effect regardless of utility generation timing */
+.thinking-cap { max-height: 15rem; overflow-y: auto; }
+.thinking-cap-tall { max-height: 50vh; overflow-y: auto; }
+.thinking-cap-body { max-height: 60vh; overflow-y: auto; }
+
+/* Thinking block scrollbar — clearly visible (global quiet scrollbar is too faint to notice) */
+.thinking-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 45%, transparent) transparent;
+}
+.thinking-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.thinking-scroll::-webkit-scrollbar-track { background: transparent; }
+.thinking-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--muted-foreground) 45%, transparent);
+  border-radius: 4px;
+}
+.thinking-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
+}
+
 html, body {
   /* UI font scope: chat + settings inherit this. The code editor overrides
      its own font via --helix-font-family on the CodeMirror element. */
@@ -221,7 +242,12 @@ h1, h2, h3, h4, h5, h6 {
 /* Message content: balanced line height */
 .helix-md {
   /* 防止继承全局负字距(-0.006em)与 Geist 字形替换(cv11/ss01/ss03)导致
-     西文/数字被挤压或连笔粘连；中文不受影响，仅重置排版类属性。 */
+     西文/数字被挤压或连笔粘连；中文不受影响，仅重置排版类属性。
+     另：显式关闭 WebKitGTK 的 text-autospace 自动 CJK-Latin 间距——其实现
+     在部分 WebKitGTK 版本表现异常（字间距被错误裁剪 → 字重叠），
+     text-spacing-trim 交给 Chromium 132+ 的渐进增强即可。 */
+  text-autospace: none;
+  -webkit-text-autospace: none;
 }
 
 .helix-md p {
@@ -770,6 +796,7 @@ pre code.hljs {
   border-radius: 3px;
   vertical-align: -0.05em;
   line-height: 1;
+  overflow-wrap: break-word;
   color: color-mix(in oklch, var(--foreground) 75%, var(--primary));
 }
 
@@ -786,7 +813,7 @@ pre code.hljs {
   border: 1px solid oklch(0.86 0.012 100);
   border-radius: 6px;
   padding: 0.75em 1em;
-  overflow-x: auto;
+  overflow-x: hidden;
   font-size: 0.85em;
 }
 
@@ -1280,3 +1307,29 @@ nav::-webkit-scrollbar-thumb:hover {
 /* 隐藏滚动条（空会话时），与原 ScrollArea hideScrollbar 等价 */
 .hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
 .hide-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Live voice transcription preview (during voice input) */
+.voice-interim {
+  padding: 0 1rem 0.375rem;
+  font-size: 0.875rem;
+  line-height: 1.625;
+  color: var(--foreground);
+  opacity: 0.6;
+  font-style: italic;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.voice-interim .listening { opacity: 0.5; font-style: normal; }
+.voice-interim .caret {
+  display: inline-block;
+  width: 0.25rem;
+  height: 1rem;
+  margin-left: 0.125rem;
+  vertical-align: middle;
+  background: var(--foreground);
+  opacity: 0.4;
+  border-radius: 0.125rem;
+  animation: voiceCaret 1s steps(2, start) infinite;
+}
+@keyframes voiceCaret { 0%,100% { opacity: 0.4; } 50% { opacity: 0.05; } }

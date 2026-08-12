@@ -413,27 +413,49 @@ function neutralizeSetextUnderlines(text: string): string {
   )
 }
 
-// LLMs often write ATX headings without the required space after the marker:
-// `##标题`, `##　标题` (full-width space), `##"引用"`. CommonMark only accepts
-// `#` followed by an ASCII space/tab, so those lines render as literal text.
-// Repair the space for 2-6 hashes; a lone `#` is left alone (ambiguous with
-// hashtags like `#话题`), as is a line whose content char is another `#`
-// (`### 1.` is already well-formed and must not be re-split). Fenced code is
-// excluded upstream, so only prose lines are touched.
-const ATX_HEADING_BROKEN_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})([\u3000]|[^\s#])([^\n]*)$/gm
+// LLMs often write ATX headings with a full-width space after the marker:
+// `##　标题`. CommonMark only accepts `#` followed by an ASCII space/tab, so
+// those lines would render as literal text. Only a full-width space is
+// repaired — a space-like separator is unambiguous heading intent. Lines
+// where the marker is glued DIRECTLY to the content (`##标题`, `##"引用"`)
+// are deliberately left as literal text: the marker there is usually
+// decoration, and repair would promote plain prose to a heading out of
+// nowhere. A lone `#` is always left alone (ambiguous with hashtags like
+// `#话题`). Fenced code is excluded upstream, so only prose lines are
+// touched.
+const ATX_HEADING_BROKEN_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^\n]*)$/gm
+
+// LLMs sometimes glue a table header straight onto an ATX heading with no
+// newline: `##　做了什么|步骤 |结果 |`. The plain broken-heading fix above
+// would turn the WHOLE line into a heading, swallowing the table header —
+// the `|---|---|` separator then has no header row to pair with, so the GFM
+// table collapses into a plain paragraph. Detect a heading (full-width-space
+// form) whose remainder contains a `|...|...` table-header shape (≥2 pipes)
+// and split it into heading + table row instead. A single pipe
+// (`##　标题|a`) is left alone — could be a legit pipe inside heading text.
+const ATX_HEADING_GLUED_TABLE_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^|\n]*)(\|[^|\n]*\|[^\n]*)$/gm
 
 /**
- * Insert/replace the space after a `##`+ heading marker that lacks one, so
- * `##标题` parses as an `<h2>` instead of showing literal `##标题` text.
- * The line's leading indent is deliberately not re-emitted — the pipeline
- * preserves it separately via the `leading` slice, so keeping it here would
- * double it (2 spaces → 4 spaces = indented code block).
+ * Replace a full-width space after a `##`+ heading marker with an ASCII
+ * space, so `##　标题` parses as an `<h2>` instead of showing literal
+ * `##　标题` text. Glued markers (`##标题`) are NOT repaired — CommonMark
+ * already renders them as literal text, keeping plain prose from spuriously
+ * turning into a heading. The line's leading indent is deliberately not
+ * re-emitted — the pipeline preserves it separately via the `leading` slice,
+ * so keeping it here would double it (2 spaces → 4 spaces = indented code
+ * block).
  */
 function normalizeAtxHeadings(text: string): string {
-  return text.replace(
+  const unglued = text.replace(
+    ATX_HEADING_GLUED_TABLE_RE,
+    (_match, _indent: string, prefix: string, hashes: string, _fwSpace: string, rest: string, tablePart: string) =>
+      `${prefix}${hashes} ${rest}\n${tablePart}`
+  )
+
+  return unglued.replace(
     ATX_HEADING_BROKEN_RE,
-    (_match, _indent: string, prefix: string, hashes: string, ch: string, rest: string) =>
-      ch === '\u3000' ? `${prefix}${hashes} ${rest}` : `${prefix}${hashes} ${ch}${rest}`
+    (_match, _indent: string, prefix: string, hashes: string, _fwSpace: string, rest: string) =>
+      `${prefix}${hashes} ${rest}`
   )
 }
 

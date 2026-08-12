@@ -187,9 +187,14 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # Open-vocabulary keyword spotting: any typed phrase, zero training.
     # sentencepiece is required by sherpa_onnx.text2token (runtime phrase
     # tokenization) even though sherpa-onnx doesn't declare it.
+    # pypinyin is the same class of hole: sherpa_onnx.utils.text2token
+    # imports it UNCONDITIONALLY (for the ppinyin/fpinyin token types) but
+    # sherpa-onnx 1.13.4 does NOT declare it — so an otherwise-successful
+    # wake.sherpa install left "No module named 'pypinyin'" at wake start.
     "wake.sherpa": (
         "sherpa-onnx==1.13.4",
         "sentencepiece==0.2.2",
+        "pypinyin==0.55.0",
         "sounddevice==0.5.5",
         "numpy==2.4.3",
     ),

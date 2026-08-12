@@ -1,12 +1,13 @@
 'use client'
 
-import { AlertTriangle, Loader2, Play } from 'lucide-react'
+import { AlertTriangle, Loader2 } from 'lucide-react'
 import React, { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import type { ApprovalLevel } from '@/hermes-ui/api-client'
 
 export interface ApprovalRequest {
   id: string
+  sessionId?: string
   toolName: string
   params: Record<string, unknown>
   command?: string
@@ -31,13 +32,15 @@ interface ApprovalBarProps {
 }
 
 /**
- * Inline approval card (light, non-blocking) — rendered at the bottom of the
- * panel where the chat input normally sits. No modal overlay, so the user can
- * still switch conversations while it is open.
- * Keyboard: ⌘/Ctrl+Enter = allow, Escape = deny.
+ * Inline approval card (light, non-blocking) — anchored to the bottom-center of
+ * the panel via the parent <ApprovalDialog> absolute wrapper, so it is always
+ * visible regardless of how long the message list is. No modal overlay, so the
+ * user can still switch conversations while it is open.
+ * Keyboard: ⌘/Ctrl+Enter = allow · Esc = deny · ↑/↓ = move selection · Enter = confirm.
  */
 function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
   const [submitting, setSubmitting] = useState<ApprovalLevel | null>(null)
+  const [selected, setSelected] = useState<ApprovalLevel>('once')
   const command =
     request.command ||
     (typeof request.params.command === 'string' ? request.params.command : '')
@@ -60,11 +63,21 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
         e.preventDefault()
         e.stopPropagation()
         handleApprove('deny')
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelected((s) => (s === 'deny' ? 'session' : s === 'session' ? 'once' : 'once'))
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelected((s) => (s === 'once' ? 'session' : s === 'session' ? 'deny' : 'deny'))
+      } else if (e.key === 'Enter') {
+        e.preventDefault()
+        e.stopPropagation()
+        handleApprove(selected)
       }
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
-  }, [handleApprove])
+  }, [handleApprove, selected])
 
   const options: { key: string; level: ApprovalLevel; label: string }[] = [
     { key: '1', level: 'once', label: '允许' },
@@ -73,40 +86,59 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
   ]
 
   return (
-    <div className="w-full max-w-[460px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-5">
-      <h3 className="text-[15px] font-semibold leading-snug mb-3">
-        {getApprovalTitle(request.toolName)}
-      </h3>
+    <div className="w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-6">
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <h3 className="text-lg font-semibold leading-snug">
+          {getApprovalTitle(request.toolName)}
+        </h3>
+        <span className="shrink-0 mt-0.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
+          等待确认
+        </span>
+      </div>
       {command && (
-        <pre className="bg-muted rounded-xl p-3 text-[12px] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-4 max-h-32 overflow-auto">
+        <pre className="bg-muted rounded-xl p-4 text-[14px] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-5 max-h-40 overflow-auto">
           {command}
         </pre>
       )}
-      <div className="flex flex-col gap-2">
-        {options.map((o) => (
-          <button
-            key={o.key}
-            type="button"
-            onClick={() => handleApprove(o.level)}
-            disabled={submitting !== null}
-            className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-transparent hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-colors text-left disabled:opacity-60"
-          >
-            <span className="w-6 h-6 rounded-full bg-muted text-muted-foreground flex items-center justify-center text-[12px] font-semibold shrink-0">
-              {o.key}
-            </span>
-            <span className="text-[13.5px]">{o.label}</span>
-          </button>
-        ))}
+      <div className="flex flex-col gap-3">
+        {options.map((o) => {
+          const isSel = selected === o.level
+          return (
+            <button
+              key={o.key}
+              type="button"
+              onClick={() => handleApprove(o.level)}
+              onMouseEnter={() => setSelected(o.level)}
+              disabled={submitting !== null}
+              className={
+                'flex items-center gap-3.5 px-4 py-3.5 rounded-xl border text-left transition-colors disabled:opacity-60 ' +
+                (isSel
+                  ? 'border-ring bg-accent ring-1 ring-ring'
+                  : 'border-transparent hover:bg-accent/60')
+              }
+            >
+              <span
+                className={
+                  'w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-semibold shrink-0 ' +
+                  (isSel ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')
+                }
+              >
+                {o.key}
+              </span>
+              <span className="text-[15px]">{o.label}</span>
+            </button>
+          )
+        })}
       </div>
-      <div className="text-[11px] text-muted-foreground/60 text-center mt-4">
-        内容由 AI 生成，请核实重要信息
+      <div className="text-[12px] text-muted-foreground/60 text-center mt-5">
+        内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · ⌘/Ctrl+Enter 允许 · Esc 拒绝
       </div>
     </div>
   )
 }
 
 // Keep the old dialog for backwards compatibility — now renders the inline ApprovalBar
-// without a full-screen modal (non-blocking, can switch conversations while open).
+// as a bottom-anchored, non-blocking card (can switch conversations while open).
 interface LegacyProps {
   request: ApprovalRequest
   pendingCount?: number
@@ -129,8 +161,10 @@ export function ApprovalDialog(props: LegacyProps) {
   )
   if (!request) return null
   return (
-    <div className="flex justify-center px-5 pb-4">
-      <ApprovalBar request={request} onApprove={handleApprove} />
+    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
+      <div className="pointer-events-auto mx-auto max-w-[700px]">
+        <ApprovalBar request={request} onApprove={handleApprove} />
+      </div>
     </div>
   )
 }
@@ -153,6 +187,8 @@ interface ClarifyBarProps {
 export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
   const [freeText, setFreeText] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const choices = request.choices || []
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(choices.length > 0 ? 0 : null)
 
   const submit = useCallback(
     (answer: string) => {
@@ -164,62 +200,103 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
     [request.id, onRespond, submitting],
   )
 
-  // Enter 提交自由输入
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      submit(freeText)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedIdx((i) => {
+          if (choices.length === 0) return null
+          if (i === null) return 0
+          return i > 0 ? i - 1 : 0
+        })
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedIdx((i) => {
+          if (choices.length === 0) return null
+          if (i === null) return choices.length - 1
+          return i < choices.length - 1 ? i + 1 : choices.length - 1
+        })
+      } else if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        if (freeText.trim()) {
+          submit(freeText)
+        } else if (selectedIdx !== null && choices[selectedIdx]) {
+          submit(choices[selectedIdx])
+        }
+      }
     }
-  }
+    window.addEventListener('keydown', handler, true)
+    return () => window.removeEventListener('keydown', handler, true)
+  }, [choices, freeText, selectedIdx, submit])
 
   return (
-    <div className="flex justify-center px-5 pb-4">
-      <div className="w-full max-w-[460px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-4">
-        {/* 问题 */}
-        <div className="flex items-start gap-2 mb-2.5">
-          <AlertTriangle className="size-3.5 text-sky-500 mt-0.5 shrink-0" />
-          <span className="text-[13px] text-foreground/90 whitespace-pre-wrap break-words leading-relaxed">
-            {request.question || '模型需要你的选择'}
+    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-6">
+        <div className="flex items-start justify-between gap-3 mb-4">
+          <h3 className="text-lg font-semibold leading-snug">需要你的确认</h3>
+          <span className="shrink-0 mt-0.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
+            等待确认
           </span>
         </div>
-        {/* 选项按钮 */}
-        {request.choices && request.choices.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-2.5">
-            {request.choices.map((c) => (
-              <Button
-                key={c}
-                variant="outline"
-                size="sm"
-                disabled={submitting}
-                onClick={() => submit(c)}
-                className="h-6 px-2.5 text-[11px] border-border/60 hover:bg-accent/60"
-              >
-                {submitting ? <Loader2 className="size-3 animate-spin" /> : null}
-                {c}
-              </Button>
-            ))}
+
+        <div className="bg-muted rounded-xl p-4 text-[14px] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-5 max-h-40 overflow-auto">
+          {request.question || '模型需要你的选择'}
+        </div>
+
+        {choices.length > 0 && (
+          <div className="flex flex-col gap-3 mb-5">
+            {choices.map((c, idx) => {
+              const isSel = selectedIdx === idx
+              return (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => submit(c)}
+                  onMouseEnter={() => setSelectedIdx(idx)}
+                  disabled={submitting}
+                  className={
+                    'flex items-center gap-3.5 px-4 py-3.5 rounded-xl border text-left transition-colors disabled:opacity-60 ' +
+                    (isSel
+                      ? 'border-ring bg-accent ring-1 ring-ring'
+                      : 'border-transparent hover:bg-accent/60')
+                  }
+                >
+                  <span
+                    className={
+                      'w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-semibold shrink-0 ' +
+                      (isSel ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')
+                    }
+                  >
+                    {idx + 1}
+                  </span>
+                  <span className="text-[15px]">{c}</span>
+                </button>
+              )
+            })}
           </div>
         )}
-        {/* 自由输入 */}
-        <div className="flex items-center gap-1.5">
+
+        <div className="flex items-center gap-2.5">
           <input
             value={freeText}
             onChange={(e) => setFreeText(e.target.value)}
-            onKeyDown={onKeyDown}
             disabled={submitting}
-            placeholder={request.choices?.length ? '或输入其他回答…' : '输入回答…'}
-            className="flex-1 h-7 px-2 rounded-md bg-background/60 border border-border/50 text-[12px] text-foreground outline-none focus:border-sky-500/50 disabled:opacity-50"
+            placeholder={choices.length ? '或输入其他回答…' : '输入回答…'}
+            className="flex-1 h-11 px-4 rounded-xl bg-background/60 border border-border/50 text-[15px] text-foreground outline-none focus:border-ring disabled:opacity-50"
           />
           <Button
-            variant="outline"
             size="sm"
             disabled={submitting || !freeText.trim()}
             onClick={() => submit(freeText)}
-            className="h-7 px-2.5 text-[11px] gap-1"
+            className="h-11 px-5 text-[15px]"
           >
-            {submitting ? <Loader2 className="size-3 animate-spin" /> : <Play className="size-3" />}
-            回复
+            {submitting ? <Loader2 className="size-4 animate-spin" /> : '回复'}
           </Button>
+        </div>
+
+        <div className="text-[12px] text-muted-foreground/60 text-center mt-5">
+          内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · Enter 确认 · 也可自由输入
         </div>
       </div>
     </div>

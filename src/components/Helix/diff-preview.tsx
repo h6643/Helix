@@ -366,7 +366,7 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
                 className={`p-1.5 rounded transition-colors ${
                   viewMode === 'unified' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'
                 }`}
-                title="统一视图"
+                data-tip="统一视图"
               >
                 <Rows3 className="size-3.5" />
               </button>
@@ -375,7 +375,7 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
                 className={`p-1.5 rounded transition-colors ${
                   viewMode === 'side-by-side' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'
                 }`}
-                title="并排视图"
+                data-tip="并排视图"
               >
                 <Split className="size-3.5" />
               </button>

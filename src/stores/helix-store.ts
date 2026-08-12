@@ -161,6 +161,9 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setShowWakeAnimation: (v: boolean) => void
   approvalMode: 'default' | 'accept_edits' | 'dont_ask'
   setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask') => void
+  // 每个会话是否有待用户确认（审批/反问/定时任务），侧边栏据此显示标记
+  sessionPendingApproval: Record<string, boolean>
+  setSessionPendingApproval: (patch: Record<string, boolean>) => void
   startupGreeting: string
   setStartupGreeting: (v: string) => void
 
@@ -574,11 +577,15 @@ async function persistCurrentSessionNow(): Promise<void> {
     const existingPartial = msgsToSave.findIndex(m => m.id === draftPartialId)
     if (existingPartial !== -1) msgsToSave.splice(existingPartial, 1)
     if (draft?.isAgentRunning && draft.textBuffer && draft.textBuffer.trim()) {
+      // 并发多会话下，运行中切换会话并不会中断后台 run——该占位只是持久化
+      // 快照（崩溃/退出时部分回复不静默丢失），文案须如实说明"仍在生成"，
+      // 而非旧串行假设下的"生成中断"。加载端（sidebar / navigateSession）
+      // 统一丢弃 draft-partial，避免与最终提交的完整回复重复显示。
       msgsToSave.push({
         id: draftPartialId,
         sessionId,
         role: 'assistant',
-        content: draft.textBuffer + '\n\n*[生成中断，仅保存部分内容]*',
+        content: draft.textBuffer + '\n\n*（回复生成中，以下为切换时暂存的部分内容）*',
         images: undefined,
         reasoning: draft.thoughtBuffer || undefined,
         duration: undefined,
@@ -1123,6 +1130,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   },
   setShowWakeAnimation: (v: boolean) => set({ showWakeAnimation: v }),
   setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask') => set({ approvalMode: v }),
+  sessionPendingApproval: {},
+  setSessionPendingApproval: (patch: Record<string, boolean>) => set((s) => ({ sessionPendingApproval: { ...s.sessionPendingApproval, ...patch } })),
   setStartupGreeting: (v: string) => set((s) => ({ startupGreeting: v })),
   setEmailConfigured: (configured: boolean, account?: string) =>
     set((s) => ({ emailConfigured: configured, emailAccount: account !== undefined ? account : s.emailAccount })),
@@ -1646,8 +1655,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           // 导致恢复后 chatMessages 含同 id 消息 → React 渲染 duplicate key。
           if (seen.has(msg.id)) return false
           seen.add(msg.id)
-          // 恢复时丢弃 draft-partial 消息（只在运行意外中断时才有用，
-          // 恢复后它只是"中断的残本"，不再是当前运行的草稿）。
+          // 恢复时丢弃 draft-partial 占位消息（同 sidebar/session-manager）。
+          // 并发下切换会话不中断后台 run，占位仅是持久化快照，加载端统一
+          // 丢弃，避免与最终提交的完整回复重复显示。只在应用真正崩溃退出
+          // 时才作为部分回复的兜底保留在磁盘上。
           if (typeof msg.id === 'string' && msg.id.startsWith('draft-partial-')) return false
           return true
         })

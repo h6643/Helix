@@ -592,11 +592,20 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   const [gatewayMcpLoaded, setGatewayMcpLoaded] = useState(false)
 
   // MCP status - query tools/list to detect which MCP servers are connected
+  // Reactive: subscribes to hermesSessionId so the check re-runs once a session
+  // exists (previously it only ran on mount, leaving every server stuck on
+  // "检测中" when the settings page opened with no active session).
+  const hermesSessionId = useHermesStore(s => s.hermesSessionId)
+  const [mcpStatusAttempt, setMcpStatusAttempt] = useState(0)
   const fetchMcpStatus = useCallback(async () => {
     try {
-      const sessionId = useHermesStore.getState().hermesSessionId
-      if (!sessionId) { setMcpStatus({}); return }
-      const result = await hermesApi()!.send('tools/list', { session_id: sessionId }) as any
+      if (!hermesSessionId) {
+        // No active session yet — keep previous status (don't wipe to {} which
+        // would render every server as "检测中" forever). The effect below
+        // re-runs automatically once a session id appears.
+        return
+      }
+      const result = await hermesApi()!.send('tools/list', { session_id: hermesSessionId }) as any
       const tools: string[] = result?.tools?.map((t: any) => t.name) || result?.map((t: any) => t.name) || []
       // Match tool names to MCP server names (e.g. "tavily_search" -> "tavily").
       // Hermes exposes gateway MCP tools as `mcp__<server>__<tool>` with
@@ -613,14 +622,35 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
         })
       }
       setMcpStatus(status)
+      setMcpStatusAttempt(0)  // success resets the retry counter
     } catch {
-      setMcpStatus({})
+      // Transient failure (WS not ready, RPC timeout): keep last status and
+      // schedule a retry instead of wiping to {} (which shows "检测中" forever).
+      setMcpStatusAttempt(a => a + 1)
     }
-  }, [mcpServers, gatewayMcp])
+  }, [mcpServers, gatewayMcp, hermesSessionId])
 
+  // Run on mount + whenever session id / server list changes.
   useEffect(() => {
     fetchMcpStatus()
   }, [fetchMcpStatus])
+
+  // Bounded retry with backoff (2s, 4s, 8s, 16s, 32s) after a failed probe.
+  useEffect(() => {
+    if (mcpStatusAttempt === 0) return
+    if (mcpStatusAttempt > 5) return
+    const delay = 2000 * Math.pow(2, mcpStatusAttempt - 1)
+    const t = setTimeout(() => { fetchMcpStatus() }, delay)
+    return () => clearTimeout(t)
+  }, [mcpStatusAttempt, fetchMcpStatus])
+
+  // Gentle polling while a session is live so status reflects late MCP
+  // discovery / reconnects without needing to reopen the settings page.
+  useEffect(() => {
+    if (!hermesSessionId) return
+    const t = setInterval(() => { fetchMcpStatus() }, 15000)
+    return () => clearInterval(t)
+  }, [hermesSessionId, fetchMcpStatus])
 
   // Load gateway MCP servers from config.yaml (Tauri IPC)
   useEffect(() => {
@@ -1169,7 +1199,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               <button
                 onClick={() => toggleGroup(g.baseUrl)}
                 className="flex items-center gap-1.5 w-full px-1 py-1 text-left text-xs hover:bg-accent/40 rounded transition-colors"
-                title={g.baseUrl}
+                data-tip={g.baseUrl}
               >
                 <span className="truncate font-mono text-muted-foreground">{g.baseUrl}</span>
                 <span className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground/70">{g.items.length}</span>
@@ -1239,7 +1269,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 <button
                   onClick={() => setShowAddModelModal(false)}
                   className="text-sm text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
-                  title="关闭"
+                  data-tip="关闭"
                 >
                   关闭
                 </button>
@@ -1287,7 +1317,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                           type="button"
                           onClick={() => { setIsCustomProvider(false); setCustomInputFocused(false) }}
                           className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground hover:bg-accent/50 transition-colors"
-                          title="返回列表"
+                          data-tip="返回列表"
                         >
                           返回
                         </button>
@@ -1419,7 +1449,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 <button
                   onClick={() => { setIsAddingMcp(false); setEditingMcpName(null); resetMcpForm() }}
                   className="text-sm text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
-                  title="关闭"
+                  data-tip="关闭"
                 >
                   关闭
                 </button>
@@ -1677,7 +1707,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             <div className="flex-1 flex flex-col items-center pt-2 gap-1 overflow-y-auto">
               <button
                 onClick={() => useHelixStore.getState().toggleSettings()}
-                title="返回"
+                data-tip="返回"
                 className="p-2.5 rounded-lg text-foreground/60 hover:text-foreground hover:bg-muted/50 transition-colors"
               >
                 <ChevronLeft className="size-[18px]" />
@@ -1689,7 +1719,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                     setPage(item.id)
                     pushNavigation({ type: 'settings', page: item.id })
                   }}
-                  title={item.label}
+                  data-tip={item.label}
                   className={`p-2.5 rounded-lg transition-colors ${
                     page === item.id
                       ? 'bg-muted text-foreground'

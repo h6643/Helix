@@ -55,7 +55,7 @@ const SubagentCard = ({
           className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
           onClick={() => remove(i.id)}
           aria-label="删除 Subagent"
-          title="删除"
+          data-tip="删除"
         >
           <Trash2 className="size-4" />
         </Button>
@@ -88,7 +88,7 @@ const SubagentItem = ({ i, remove }: { i: SubagentDraft; remove: (id: string) =>
       className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
       onClick={() => remove(i.id)}
       aria-label="删除 Subagent"
-      title="删除"
+      data-tip="删除"
     >
       <Trash2 className="size-4" />
     </Button>

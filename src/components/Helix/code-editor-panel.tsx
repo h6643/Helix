@@ -188,11 +188,11 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
                 : 'text-foreground/60 border-transparent hover:bg-accent/40'
             }`}
             onClick={() => setActiveEditorTab(tab.id)}
-            title={tab.path}
+            data-tip={tab.path}
           >
             <span className="truncate">{tab.name}</span>
             {tab.dirty && (
-              <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0" title="未保存" />
+              <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0" data-tip="未保存" />
             )}
             <button
               className="opacity-40 hover:opacity-100 hover:text-destructive transition-opacity ml-0.5"
@@ -200,7 +200,7 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
                 e.stopPropagation()
                 requestCloseTab(tab.id)
               }}
-              title={tab.dirty ? '关闭（未保存）' : '关闭'}
+              data-tip={tab.dirty ? '关闭（未保存）' : '关闭'}
             >
               <X className="size-3" />
             </button>

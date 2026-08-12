@@ -116,8 +116,8 @@ export const HighlightedCode = memo(function HighlightedCode({ code, language }:
   }, [language, trimmed])
 
   if (html) {
-    return <code dir="ltr" className="block whitespace-pre" dangerouslySetInnerHTML={{ __html: html }} />
+    return <code dir="ltr" className="block whitespace-pre-wrap break-words" dangerouslySetInnerHTML={{ __html: html }} />
   }
 
-  return <code dir="ltr" className="block whitespace-pre">{trimmed}</code>
+  return <code dir="ltr" className="block whitespace-pre-wrap break-words">{trimmed}</code>
 })

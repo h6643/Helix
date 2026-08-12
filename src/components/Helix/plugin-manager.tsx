@@ -95,7 +95,7 @@ export function PluginManager({ onClose }: PluginManagerProps) {
             <button
               onClick={() => loadBackendPlugins()}
               className="p-1.5 rounded-lg text-muted-foreground/40 hover:text-foreground hover:bg-accent/60 transition-colors"
-              title="刷新"
+              data-tip="刷新"
             >
               <RefreshCw className={`size-3.5 ${backendLoading ? 'animate-spin' : ''}`} />
             </button>
@@ -153,7 +153,7 @@ export function PluginManager({ onClose }: PluginManagerProps) {
                           ? 'text-emerald-500 hover:bg-emerald-500/10'
                           : 'text-muted-foreground/40 hover:text-foreground hover:bg-accent/60'
                       }`}
-                      title={p.status === 'enabled' ? '禁用' : '启用'}
+                      data-tip={p.status === 'enabled' ? '禁用' : '启用'}
                     >
                       {p.status === 'enabled' ? <ToggleRight className="size-4" /> : <ToggleLeft className="size-4" />}
                     </button>

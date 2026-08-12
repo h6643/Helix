@@ -302,7 +302,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
         <button
           onClick={handleCloseAndClear}
           className="px-2.5 h-full flex items-center text-muted-foreground hover:text-foreground hover:bg-black/5 transition-colors"
-          title="关闭并清空终端"
+          data-tip="关闭并清空终端"
         >
           <X className="size-3.5" />
         </button>

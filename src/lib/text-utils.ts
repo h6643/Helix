@@ -115,6 +115,27 @@ const KAOMOJI_INLINE_STATUS_RE = /(\((?=[^)]*[^\w\s])[^)]{1,40}\)[^\s\w]*)\s+([a
  * For inline markers the body is left unchanged and only the latest marker
  * is surfaced as the status.
  */
+// 常见英文状态词 → 中文（用于去掉 kaomoji 后统一显示）
+const STATUS_ZH: Record<string, string> = {
+  reasoning: '推理中', thinking: '思考中', computing: '计算中', reflecting: '反思中',
+  contemplating: '沉思中', analyzing: '分析中', searching: '搜索中', planning: '规划中',
+  loading: '加载中', processing: '处理中', reading: '读取中', writing: '写入中',
+  executing: '执行中', generating: '生成中', summarizing: '总结中',
+}
+
+// 去掉 kaomoji 前缀，并将英文状态词映射为中文
+function normalizeKaomojiStatus(raw: string): string {
+  if (!raw) return raw
+  const wordMatch = raw.match(/([a-zA-Z]{3,})/)
+  if (wordMatch) {
+    const word = wordMatch[1].toLowerCase()
+    const zh = STATUS_ZH[word]
+    if (zh) return zh + '...'
+  }
+  const ascii = raw.replace(/[^\x00-\x7F]/g, '').trim()
+  const cleaned = ascii.replace(/^\s*[^A-Za-z0-9\s]+/, '').trim()
+  return cleaned || raw
+}
 export function extractKaomojiStatus(thinking: string): { status: string | null; body: string } {
   if (!thinking) return { status: null, body: '' }
 
@@ -132,7 +153,7 @@ export function extractKaomojiStatus(thinking: string): { status: string | null;
   }
   if (statusLine !== null) {
     const bodyLines = lines.slice(0, statusIdx).concat(lines.slice(statusIdx + 1))
-    return { status: statusLine, body: bodyLines.join('\n').trim() }
+    return { status: normalizeKaomojiStatus(statusLine), body: bodyLines.join('\n').trim() }
   }
 
   // 2) Inline markers (no newline separation); return the latest one and keep the body intact.
@@ -142,7 +163,7 @@ export function extractKaomojiStatus(thinking: string): { status: string | null;
     inlineMatch = m
   }
   if (inlineMatch) {
-    return { status: inlineMatch[0].trim(), body: thinking }
+    return { status: normalizeKaomojiStatus(inlineMatch[0].trim()), body: thinking }
   }
 
   return { status: null, body: thinking }

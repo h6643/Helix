@@ -117,7 +117,7 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
           <button
             onClick={loadDelegations}
             className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-            title="刷新"
+            data-tip="刷新"
           >
             <RefreshCw className="size-3.5" />
           </button>

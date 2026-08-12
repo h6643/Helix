@@ -78,7 +78,7 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
         <button
           onClick={onClose}
           className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
-          title="关闭"
+          data-tip="关闭"
         >
           <X className="size-4" />
         </button>

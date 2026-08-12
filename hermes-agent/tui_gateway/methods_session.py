@@ -1221,6 +1221,35 @@ def _(rid, params: dict) -> dict:
 
 @method("session.context_breakdown")
 def _(rid, params: dict) -> dict:
+    """Live context-window usage breakdown for the session's agent.
+
+    Returns Cursor-style category sizes so the desktop's ContextUsageIndicator
+    can render the segmented bar. Uses agent/context_breakdown.py's rough
+    char/4 estimate — the same heuristic as compression thresholds.
+    """
+    try:
+        from agent.context_breakdown import compute_session_context_breakdown
+    except Exception as exc:  # noqa: BLE001 - never break the surface on import
+        logger.debug("context_breakdown import failed: %s", exc)
+        return _ok(rid, {"categories": [], "context_max": 0, "context_used": 0, "context_percent": 0})
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    agent = session.get("agent")
+    if agent is None:
+        # Agent not built yet — nothing to measure; the UI falls back to its
+        # local per-conversation store for the ring.
+        return _ok(rid, {"categories": [], "context_max": 0, "context_used": 0, "context_percent": 0})
+    try:
+        data = compute_session_context_breakdown(agent, session.get("history") or [])
+        return _ok(rid, data)
+    except Exception as exc:  # noqa: BLE001 - cosmetic, never break the surface
+        logger.warning("session.context_breakdown failed: %s", exc)
+        return _ok(rid, {"categories": [], "context_max": 0, "context_used": 0, "context_percent": 0})
+
+
+@method("pet.info.meta")
+def _(rid, params: dict) -> dict:
     """Cheap active-pet metadata used to avoid full payload refreshes."""
     try:
         enabled, pet, scale = _pet_active_selection()

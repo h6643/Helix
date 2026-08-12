@@ -283,7 +283,7 @@ function handleSessionUpdate(su: string, u: any, _method: string) {
       const text = u?.content ?? ''
       if (text) {
         thoughtBuffer += text
-        thinkingStatus = '(¬_¬) thinking...'
+        thinkingStatus = '思考中...'
         toolLabel = ''
         resetIdle(8_000)
         markDirty()
