@@ -376,15 +376,26 @@ export function HelixLayout() {
   // Apply the selected theme style (Catppuccin flavor or built-in cream) by
   // writing inline CSS variables onto <html>. Runs on mount and whenever the
   // style changes — including when the light/dark toggle switches to a paired
-  // flavor. Editor theme follows the resolved light/dark state (a flavor's
-  // mode, or the built-in's 亮色/暗色 choice) so it never goes stale after a
-  // 深色 flavor → 内置 switch.
+  // flavor.
   useEffect(() => {
     applyHelixPalette(themeStyle)
-    storeActions.setEditorTheme(
-      document.documentElement.classList.contains('dark') ? 'vs-dark' : 'light',
-    )
   }, [themeStyle])
+
+  // Editor theme follows the resolved light/dark state of <html>. Snapshot it
+  // on mount, then watch the class attribute so a 深色 flavor → 内置 switch (or
+  // any theme toggle) re-syncs the editor immediately.
+  useEffect(() => {
+    const syncEditorTheme = () =>
+      storeActions.setEditorTheme(
+        document.documentElement.classList.contains('dark') ? 'vs-dark' : 'light',
+      )
+
+    syncEditorTheme()
+    const observer = new MutationObserver(syncEditorTheme)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+
+    return () => observer.disconnect()
+  }, [])
 
   // Re-assert the frontend's restored model config into Hermes on startup so
   // the backend always matches the user's choice. This runs once after the

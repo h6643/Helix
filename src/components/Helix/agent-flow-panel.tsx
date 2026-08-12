@@ -64,6 +64,7 @@ import { playDingSound } from '@/lib/ding-sound'
 import { speakText, splitSentences } from '@/lib/tts-utils'
 import { speak, stopSpeaking } from '@/lib/voice-utils'
 import type { ChatMessage, HermesTodo } from '@/stores/helix-types'
+import { HelixMarkdown } from './helix-markdown'
 
 // ── Persisted per-conversation Hermes session map ──────────────────────────
 // `sessionMapRef` lives in component memory and is wiped on every app restart.
@@ -827,8 +828,14 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                       </div>
                     </details>
                   ) : block.type === 'text' ? (
-                    <div key={idx} className="whitespace-pre-wrap break-words" style={{ fontSize }}>
-                      {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} /> : normalizeAcpContentRaw(block.content)}
+                    <div key={idx} style={{ fontSize }}>
+                      {searchOpen && searchQuery.trim() ? (
+                        <div className="whitespace-pre-wrap break-words" style={{ fontSize }}>
+                          <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} />
+                        </div>
+                      ) : (
+                        <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
+                      )}
                     </div>
                   ) : block.type === 'file_change' ? (
                     <FileChangeSummary key={idx} changes={block.changes} />
@@ -839,9 +846,13 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             ) : (
               <div className="helix-md" style={{ fontSize }}>
-                <pre className="whitespace-pre-wrap break-words" style={{ fontSize }}>
-                  {searchOpen && searchQuery.trim() ? <HighlightText text={mdContent} query={searchQuery} active={isSearchActive} /> : mdContent}
-                </pre>
+                {searchOpen && searchQuery.trim() ? (
+                  <pre className="whitespace-pre-wrap break-words" style={{ fontSize }}>
+                    <HighlightText text={mdContent} query={searchQuery} active={isSearchActive} />
+                  </pre>
+                ) : (
+                  <HelixMarkdown text={mdContent} />
+                )}
               </div>
             )}
             {(() => {
@@ -908,7 +919,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             )}
             {content && (
-              <div className="helix-md  leading-relaxed" style={{ fontSize }}>
+              <div className="whitespace-pre-wrap leading-normal" style={{ fontSize }}>
                 {searchOpen && searchQuery.trim()
                   ? <HighlightText text={content} query={searchQuery} active={isSearchActive} />
                   : content}
@@ -5047,9 +5058,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                               </details>
                             ) : block.type === 'text' ? (
                             <div key={idx}>
-                              <pre className="" style={{ fontSize: transcriptFontSize }}>
-                                {normalizeAcpContentRaw(block.content)}
-                              </pre>
+                              {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                                <div className="whitespace-pre-wrap break-words">
+                                  <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
+                                </div>
+                              ) : (
+                                <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
+                              )}
                             </div>
                           ) : block.type === 'file_change' ? (
                             <FileChangeSummary key={idx} changes={block.changes} />

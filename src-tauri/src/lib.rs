@@ -37,6 +37,18 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+.plugin(
+    tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        // A second Helix process was launched. Instead of opening another
+        // window, focus the already-running one (mirror tray "show").
+        use tauri::Manager;
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }),
+)
         .manage(app_state.clone())
         .setup(move |app| {
             // Expose the AppHandle globally so background gateway threads can

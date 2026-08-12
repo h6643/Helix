@@ -228,6 +228,12 @@ export function TokenUsagePanel() {
         </div>
       </div>
 
+      {/* Activity heatmap */}
+      <div className="rounded-xl border border-border/40 bg-card p-4">
+        <h3 className="text-sm font-medium text-foreground">活跃热力图</h3>
+        <img src="/usage-heatmap.png" alt="活跃热力图" className="mt-3 w-full h-auto rounded-lg" />
+      </div>
+
       {/* Per-model breakdown for the selected day */}
       <div className="rounded-xl border border-border/40 bg-card">
         <div className="flex items-center justify-between px-4 pt-3 pb-2">

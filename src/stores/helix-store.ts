@@ -1105,7 +1105,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   }),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
   setVoiceAutoSpeak: (v: boolean) => set((s) => ({ voiceAutoSpeak: v })),
-  setVoiceWakeEnabled: (v: boolean) => set((s) => ({ voiceWakeEnabled: v })),
+  setVoiceWakeEnabled: (v: boolean) => {
+    set((s) => ({ voiceWakeEnabled: v }))
+    import('@/lib/persist').then(({ persistence }) => {
+      persistence.saveSetting('voiceWakeEnabled', v).catch(() => {})
+    })
+  },
   setWakeWordPhrase: async (v: string) => {
     set({ wakeWordPhrase: v })
     try {

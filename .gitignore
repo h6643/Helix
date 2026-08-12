@@ -111,3 +111,6 @@ AGENTS.md
 # accidental diff/artifact files
 src/hermes.rs:*
 ~hermes/
+
+# nested hermes-agent .git must not be tracked (vendored dir keeps its own git)
+hermes-agent/.git/

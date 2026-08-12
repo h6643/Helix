@@ -212,11 +212,6 @@
 html, body {
   /* UI font scope: chat + settings inherit this. The code editor overrides
      its own font via --helix-font-family on the CodeMirror element. */
-  /* 关闭 WebKitGTK 的 text-autospace 自动 CJK-Latin 间距：其在部分 WebKitGTK
-     版本下会误算文本宽高，导致模型输出文字重叠/折叠成一行。仅去掉自动留白，
-     不影响字形。Chromium 无此 bug。 */
-  text-autospace: none;
-  -webkit-text-autospace: none;
 }
 
 /* Headings: tighter tracking for cleaner hierarchy */
@@ -802,13 +797,33 @@ pre code.hljs {
   border: none;
 }
 
+/* shiki token lines — keep each `.line` on its own row so the emitted
+   newlines don't double up with wrapping */
+.helix-md pre code .line {
+  display: inline-block;
+  width: 100%;
+}
+
+/* shiki dual-theme tokens: shiki (defaultColor: 'light-dark()') emits each
+   token with BOTH an inline `color: light-dark(...)` AND the custom properties
+   `--shiki-light` / `--shiki-dark`. The inline `light-dark()` form only works
+   on engines that support it (Chromium); the Linux WebKitGTK build predates
+   `light-dark()` and drops the invalid declaration, leaving tokens monochrome.
+   This rule maps the custom properties to `color` so highlighting renders on
+   every engine, switching on Helix's `.dark` class (not the OS scheme). */
+.helix-md pre code span {
+  color: var(--shiki-light, inherit);
+}
+.dark .helix-md pre code span {
+  color: var(--shiki-dark, inherit);
+}
+
 .helix-md blockquote {
-  border-left: 3px solid color-mix(in oklch, var(--muted-foreground) 28%, transparent);
-  padding: 0.4em 0 0.4em 1em;
+  border-left: 2px solid color-mix(in oklch, var(--border) 60%, transparent);
+  padding: 0 0 0 0.75em;
   margin: 0.85em 0;
-  color: color-mix(in oklch, var(--foreground) 80%, transparent);
-  background: color-mix(in oklch, var(--muted-foreground) 4%, transparent);
-  border-radius: 0 6px 6px 0;
+  color: var(--muted-foreground);
+  font-style: italic;
 }
 
 .helix-md a {
@@ -833,19 +848,41 @@ pre code.hljs {
 
 .helix-md table {
   border-collapse: collapse;
-  margin: 0.75em 0;
-  font-size: 0.9em;
+  margin: 0;
+  font-size: 0.8125rem;
+  width: 100%;
+  min-width: 18rem;
+}
+
+.helix-md thead {
+  background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
+  color: var(--muted-foreground);
 }
 
 .helix-md th, .helix-md td {
-  border: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
-  padding: 0.4em 0.8em;
+  padding: 0.375rem 0.625rem;
   text-align: left;
 }
 
 .helix-md th {
-  font-weight: 600;
-  background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
+  white-space: nowrap;
+  vertical-align: middle;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.helix-md td {
+  vertical-align: top;
+  line-height: 1.375;
+}
+
+.helix-md tbody tr {
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+}
+
+.helix-md tbody tr:last-child {
+  border-bottom: none;
 }
 
 .helix-md hr {

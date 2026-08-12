@@ -129,6 +129,10 @@ export class ServeGatewayClient {
   private approvalSeq = 0
   /** 等待 WS 首次 OPEN 的挂起者（修 CONNECTING 窗口内 rpc 被误拒的竞态） */
   private openWaiters: Array<() => void> = []
+  /** 已把哪个阻塞式输入请求（clarify/sudo/secret）映射为 clarify_request 浮条。
+   *  值为此请求解锁后端需调用的 RPC 方法名（clarify.respond / sudo.respond /
+   *  secret.respond）。前端回应经 clarify/respond 到达时据此路由。 */
+  private inputRoutes = new Map<string, 'clarify.respond' | 'sudo.respond' | 'secret.respond'>()
 
   constructor(public info: Required<Pick<ServeGatewayInfo, 'baseUrl' | 'wsUrl'>> & ServeGatewayInfo) {}
 
@@ -418,9 +422,17 @@ export class ServeGatewayClient {
         this.emit('message.start', base)
         return
 
-      case 'message.delta': {
+      case 'message.delta':
+      case 'message.interim': {
+        // message.interim = the agent's interim commentary (text alongside tool
+        // calls, or the attempted final answer before a verify-on-stop nudge).
+        // The official gateway finalizes it as its own sealed bubble so
+        // message.complete doesn't wipe the already-streamed deltas. Helix's
+        // renderer accumulates every text delta into one in-progress message,
+        // so interim comments are surfaced the same way as message.delta — the
+        // text streams in and the authoritative run_complete still finalizes it.
         const text = payload?.text ?? ''
-        this.emit('message.delta', base)
+        this.emit(type, base)
         if (text) {
           this.emit('session/update', {
             session_id: sessionId,
@@ -430,10 +442,9 @@ export class ServeGatewayClient {
         return
       }
 
-      case 'reasoning.delta':
-      case 'thinking.delta': {
+      case 'reasoning.delta': {
         const text = payload?.text ?? ''
-        this.emit(type, base)
+        this.emit('reasoning.delta', base)
         if (text) {
           this.emit('session/update', {
             session_id: sessionId,
@@ -443,23 +454,47 @@ export class ServeGatewayClient {
         return
       }
 
-      case 'reasoning.available':
+      case 'reasoning.available': {
+        // 官方语义：带 replace 的最终推理正文（一次性完整段，替换而非追加）。
+        // 前端月面已有的 agent_thought_chunk 分支按 "完整文本是否为已缓冲超集"
+        // 自动判别追加/替换（isCumulative），因此把完整富文本也注入该流即可，
+        // 无需额外 replace 标记。此前只 emit 原生事件，前端 default 丢弃 → 最终推理丢失。
+        const text = payload?.text ?? ''
         this.emit('reasoning.available', base)
+        if (text) {
+          this.emit('session/update', {
+            session_id: sessionId,
+            update: { sessionUpdate: 'agent_thought_chunk', content: text },
+          })
+        }
+        return
+      }
+
+      case 'thinking.delta':
+        // 官方语义：thinking.delta 携带的是 kawaii 旋转指示状态（face + verb），
+        // 并非真实推理。官方桌面端明确忽略它，避免在推理折页上方出现重复的
+        // "Thinking" 指示器。Helix 与官方对齐——只透传原生产，不再把它当作
+        // 思考内容注入 agent_thought_chunk 流（否则会把 spinner 文案当文本渲染）。
+        this.emit('thinking.delta', base)
         return
 
       case 'message.complete': {
         const usage = mapUsage(payload?.usage)
+        // Official protocol carries the final text in payload.text with
+        // payload.rendered as a rendered-fallback — accept both like the
+        // official frontend (coerceGatewayText(payload.text) || rendered).
+        const text = payload?.text ?? payload?.rendered ?? ''
         // 先发原生 + usage 事件，再 resolve pending prompt（顺序与 ACP 主进程一致）
         this.emit('message.complete', base)
         if (usage) this.emit('usage:prompt-complete', { session_id: sessionId, usage })
         this.emit('session/update', {
           session_id: sessionId,
-          update: { sessionUpdate: 'run_complete', content: payload?.text ?? '' },
+          update: { sessionUpdate: 'run_complete', content: text },
         })
         this.resolvePending(sessionId, {
           status: payload?.status ?? 'complete',
           usage,
-          text: payload?.text,
+          text,
           stopReason: payload?.status === 'interrupted' ? 'cancelled' : 'end_turn',
         })
         return
@@ -584,6 +619,7 @@ export class ServeGatewayClient {
         const requestId = typeof payload?.request_id === 'string' && payload.request_id
           ? payload.request_id
           : `gw-clarify-${Date.now()}`
+        this.inputRoutes.set(requestId, 'clarify.respond')
         this.emit('session/update', {
           session_id: sessionId,
           update: {
@@ -595,6 +631,43 @@ export class ServeGatewayClient {
         })
         return
       }
+
+      // sudo.request / secret.request — 模型阻塞等待密码/密钥输入（terminal
+      // sudo 提权、skills 凭据）。官方桌面端各自弹独立输入框（sudo.respond
+      // /secret.respond）。Helix 无专用输入框，复用 clarify_request 浮条
+      // （可自由文本/选择 + 回应），问题文案带上上下文；respond 时按
+      // respondMethod 路由到 sudo.respond / secret.respond 解锁后端。
+      case 'sudo.request':
+      case 'secret.request': {
+        const requestId = typeof payload?.request_id === 'string' && payload.request_id
+          ? payload.request_id
+          : `gw-${type}-${Date.now()}`
+        const isSudo = type === 'sudo.request'
+        const envVar = typeof payload?.env_var === 'string' ? payload.env_var : ''
+        const promptText = typeof payload?.prompt === 'string' ? payload.prompt : ''
+        const question = isSudo
+          ? '需要 sudo 密码才能继续执行该命令，请在下方输入密码。'
+          : (promptText || `需要 ${envVar || '环境变量'} 密钥才能继续执行技能，请在下方输入。`)
+        this.emit(type, base)
+        this.inputRoutes.set(requestId, isSudo ? 'sudo.respond' : 'secret.respond')
+        this.emit('session/update', {
+          session_id: sessionId,
+          update: {
+            sessionUpdate: 'clarify_request',
+            requestId,
+            respondMethod: isSudo ? 'sudo/' : 'secret/',
+            question,
+            choices: null,
+          },
+        })
+        return
+      }
+
+      case 'background.complete':
+        // Informational: 后台（非活跃）会话的远端 turn 已结束。Helix 前端
+        // 只渲染活跃会话流，此事件原样透传（default 分支兜底），不注入正文。
+        this.emit(type, base)
+        return
 
       case 'session.info':
         this.emit('session.info', base)
@@ -754,6 +827,19 @@ export class ServeGatewayClient {
       case 'clarify/respond': {
         // 用户的澄清回答 → 解锁后端阻塞在 clarify.respond 上的 Python 侧。
         // 参数对齐官方桌面端（clarify-tool.tsx:344）：{ request_id, answer }。
+        // sudo.request / secret.request 也复用该浮条；其 request_id 已登记在
+        // inputRoutes，此处路由到 sudo.respond / secret.respond 解锁对应端点。
+        const rid = params?.request_id
+        const route = typeof rid === 'string' ? this.inputRoutes.get(rid) : undefined
+        if (route && route !== 'clarify.respond') {
+          this.inputRoutes.delete(rid)
+          return this.rpc(route, {
+            session_id: params?.session_id,
+            request_id: rid,
+            ...(route === 'sudo.respond' ? { password: params?.answer ?? '' } : { value: params?.answer ?? '' }),
+          })
+        }
+        if (typeof rid === 'string') this.inputRoutes.delete(rid)
         return this.rpc('clarify.respond', {
           session_id: params?.session_id,
           request_id: params?.request_id,
