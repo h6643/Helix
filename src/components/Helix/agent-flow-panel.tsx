@@ -1073,10 +1073,12 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             )}
             {content && (
-              <div className="whitespace-pre-wrap leading-normal" style={{ fontSize }}>
-                {searchOpen && searchQuery.trim()
-                  ? <HighlightText text={content} query={searchQuery} active={isSearchActive} />
-                  : content}
+              <div className="helix-md leading-normal" style={{ fontSize }}>
+                {searchOpen && searchQuery.trim() ? (
+                  <div className="whitespace-pre-wrap"><HighlightText text={content} query={searchQuery} active={isSearchActive} /></div>
+                ) : (
+                  <HelixMarkdown text={content} />
+                )}
               </div>
             )}
           </div>
