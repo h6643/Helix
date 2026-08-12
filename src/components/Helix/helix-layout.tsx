@@ -1138,7 +1138,7 @@ export function HelixLayout() {
                           if (b < a) break
                         }
                         if (isNewer) {
-                          useHelixStore.getState().showToast({ type: 'info', title: '有新版本可用', description: 'v' + latest + ' 已发布', duration: 8000, onClick: () => window.open('https://github.com/NousResearch/hermes-agent/releases/latest', '_blank') })
+                          useHelixStore.getState().showToast({ type: 'info', title: '有新版本可用', description: 'v' + latest + ' 已发布', duration: 8000, onClick: () => window.open('https://github.com/h6643/Helix/releases/latest', '_blank') })
                         } else {
                           useHelixStore.getState().showToast({ type: 'success', title: '已是最新版本', description: 'v' + current })
                         }
@@ -1155,7 +1155,7 @@ export function HelixLayout() {
                   className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
                   onClick={() => {
                     setHelpMenuOpen(false)
-                    window.open('https://github.com/NousResearch/hermes-agent', '_blank')
+                    window.open('https://github.com/h6643/Helix', '_blank')
                   }}
                 >
                   <Globe className="size-4" />

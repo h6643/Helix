@@ -35,8 +35,10 @@ jobs:
       - name: Prepare Hermes runtime (python-build-standalone + venv)
         run: bash scripts/prepare-runtime.sh
 
-      - name: Build Tauri app
+      - name: Build Tauri app (diagnostic: HELIX_DEBUG on)
         run: npx tauri build
+        env:
+          NEXT_PUBLIC_HELIX_DEBUG: "1"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

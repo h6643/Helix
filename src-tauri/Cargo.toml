@@ -1,6 +1,6 @@
 [package]
 name = "helix"
-version = "0.1.13"
+version = "0.1.14"
 description = "Helix — AI coding assistant (Tauri rewrite of the Electron shell)"
 authors = ["hyt"]
 edition = "2021"

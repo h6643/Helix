@@ -9,11 +9,29 @@ const enabled = typeof process !== 'undefined' && (
 )
 
 export function debug(...args: unknown[]) {
-  if (enabled) console.log('[helix]', ...args)
+  if (enabled) {
+    console.log('[helix]', ...args)
+    try {
+      const k = 'helix_trace'
+      const arr = JSON.parse(localStorage.getItem(k) || '[]')
+      arr.push({ t: Date.now(), m: args.map(a => (typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a))).join(' ') })
+      while (arr.length > 3000) arr.shift()
+      localStorage.setItem(k, JSON.stringify(arr))
+    } catch (e) {}
+  }
 }
 
 export function warn(...args: unknown[]) {
-  if (enabled) console.warn('[helix]', ...args)
+  if (enabled) {
+    console.warn('[helix]', ...args)
+    try {
+      const k = 'helix_trace'
+      const arr = JSON.parse(localStorage.getItem(k) || '[]')
+      arr.push({ t: Date.now(), m: '[warn] ' + args.map(a => (typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a))).join(' ') })
+      while (arr.length > 3000) arr.shift()
+      localStorage.setItem(k, JSON.stringify(arr))
+    } catch (e) {}
+  }
 }
 
 export function error(...args: unknown[]) {

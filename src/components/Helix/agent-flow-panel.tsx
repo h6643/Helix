@@ -2290,6 +2290,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // Restore input for target session
     const savedInput = state.tabInputs[sessionId] || ''
     setInputSynced(savedInput)
+    debug('[HelixTrace] switchTab', { from: useHelixStore.getState().currentSessionId, to: sessionId })
     state.setCurrentSessionId(sessionId)
   }, [setInputSynced])
 
@@ -2663,6 +2664,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // its own responseBlocksRef and (when front) the live UI state.
     const flushStreamRender = () => {
       rafPendingRef.current = false
+      debug('[HelixTrace] flush rAF', { pending: pendingBlocksRef.current.length, textLen: (textBufferRef.current || '').length })
       const blocks = pendingBlocksRef.current.splice(0)
       if (!blocks.length) return
       const lastThinking = [...blocks].reverse().find(b => b.type === 'thinking')
@@ -5561,3 +5563,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     </div>
   )
 }
+
+// ── 诊断期：Ctrl+Shift+D 导出 HelixTrace 日志（诊断完可删） ──
+;(function () {
+  if (typeof window === 'undefined') return
+  try {
+    ;(window as any).__helixExportTrace = () => (localStorage.getItem('helix_trace') || '')
+    window.addEventListener('keydown', function (e) {
+      if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+        e.preventDefault()
+        var t = localStorage.getItem('helix_trace') || '(无日志)'
+        window.prompt('Helix 诊断日志（Ctrl+C 复制后发给我）', t.slice(-20000))
+      }
+    })
+  } catch (err) {}
+})()
