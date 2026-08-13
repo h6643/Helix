@@ -239,6 +239,10 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
         chatMessages: msgs,
         activeSessionWorkDir: fresh.workDir ?? null,
       })
+      // selectedWorkDir 同步到对话所属项目，让 Git 分支选择器等 UI 跟随对话。
+      if (fresh.workDir) {
+        useHelixStore.getState().setSelectedWorkDir(fresh.workDir)
+      }
       useHelixStore.getState().setCurrentSessionId(session.id)
       useHelixStore.getState().pushNavigation({ type: 'chat', sessionId: session.id })
       await useHelixStore.getState().persistToStorage()

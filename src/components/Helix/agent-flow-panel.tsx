@@ -98,25 +98,11 @@ async function loadSessionMap(): Promise<Map<string, SessionMapEntry>> {
 }
 
 
-// Pin tool_group blocks to the top while preserving the relative order within
-// each group. This makes an execute_code / shell-call header render ABOVE the
-// model's prose (claude-code style) instead of being buried at the very end.
-function pinToolGroupsToTop(blocks: StreamingResponseBlock[]): StreamingResponseBlock[] {
-  if (!blocks || blocks.length <= 1) return blocks
-  const tools = blocks.filter((b) => b.type === 'tool_group')
-  if (tools.length === 0) return blocks
-  const rest = blocks.filter((b) => b.type !== 'tool_group')
-  return [...tools, ...rest]
-}
-
-// pinToolGroupsToTop hoists ALL tool_groups to the top, so thinking blocks
-// that were chronologically interleaved with tool calls become ADJACENT at
-// render time (e.g. [thinking, tool, thinking, tool] → [tool, tool, thinking,
-// thinking]). Each thinking block also carries the full accumulated thought
-// (isCumulative replace), so they'd render as several stacked "思考" collapsibles
-// with overlapping content — the "连续出现多个 thinking" symptom. Merge runs of
-// consecutive thinking blocks: a cumulative superset replaces the earlier one,
-// disjoint segments are concatenated.
+// mergeAdjacentThinking merges runs of consecutive thinking blocks: a
+// cumulative superset replaces the earlier one, disjoint segments are
+// concatenated. Runs only become adjacent when there was no tool/text between
+// them, so interleaved thinking/tool turns stay chronologically separated —
+// each thinking segment keeps its own fold.
 function mergeAdjacentThinking(blocks: StreamingResponseBlock[]): StreamingResponseBlock[] {
   const out: StreamingResponseBlock[] = []
   for (const block of blocks) {
@@ -128,36 +114,6 @@ function mergeAdjacentThinking(blocks: StreamingResponseBlock[]): StreamingRespo
       out[out.length - 1] = { ...prev, content }
     } else {
       out.push(block)
-    }
-  }
-  return out
-}
-
-// Collapse ALL thinking blocks in a message into a SINGLE fold. Thought chunks
-// are cumulative (each carries the full accumulated text), so the LAST one is
-// already the complete superset — joining every block would duplicate content.
-// We keep the merged block at the position of the FIRST thinking occurrence so
-// chronological order vs. text/tool blocks is preserved.
-function collapseAllThinking(blocks: StreamingResponseBlock[]): StreamingResponseBlock[] {
-  const thinkingIdx: number[] = []
-  for (let i = 0; i < blocks.length; i++) {
-    if (blocks[i].type === 'thinking') thinkingIdx.push(i)
-  }
-  if (thinkingIdx.length <= 1) return blocks
-  // thinking blocks are cumulative: the last one already holds the full text.
-  const lastThinking = blocks[thinkingIdx[thinkingIdx.length - 1]] as Extract<StreamingResponseBlock, { type: 'thinking' }>
-  const mergedContent = String(lastThinking.content ?? '')
-  const firstIdx = thinkingIdx[0]
-  const out: StreamingResponseBlock[] = []
-  for (let i = 0; i < blocks.length; i++) {
-    const b = blocks[i]
-    if (b.type === 'thinking') {
-      if (i === firstIdx) {
-        out.push({ ...(b as Extract<StreamingResponseBlock, { type: 'thinking' }>), content: mergedContent })
-      }
-      // skip the rest of the (now-duplicate) thinking blocks
-    } else {
-      out.push(b)
     }
   }
   return out
@@ -955,7 +911,10 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
         }`}>
             <div className="flex-1 min-w-0">
             {(msg.blocks && msg.blocks.length > 0) ? (() => {
-              const normalizedBlocks = collapseAllThinking(pinToolGroupsToTop(normalizeTextBlocks(msg.blocks)))
+              // 按时间序交替渲染 thinking / tool_group / text（不置顶工具、不合并
+              // 所有思考）：被工具隔开的思考段各自独立折叠，工具卡按事件顺序出现，
+              // 模型"思考→执行→再思考→再执行"的节奏原样呈现。仅合并相邻思考块。
+              const normalizedBlocks = mergeAdjacentThinking(normalizeTextBlocks(msg.blocks))
               const lastTextIndex = normalizedBlocks.reduce((acc, b, i) => b.type === 'text' ? i : acc, -1)
               const processBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(0, lastTextIndex) : normalizedBlocks
               const answerBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(lastTextIndex) : []
@@ -965,18 +924,18 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               <>
                 {hasProcess && (
                   <details className="mb-2 mt-3 group/process">
-                    <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: 16 }}>
+                    <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
                       <span>已结束</span>
                       <svg className="size-3.5 transition-transform group-open/process:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                     </summary>
                     <div className="mt-1 pl-3 space-y-1">
                       {showInlineReasoning && (
                         <details className="mb-2 mt-3 group/details">
-                          <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: 16 }}>
+                          <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
                             <span>{extractKaomojiStatus(reasoning).status || '思考'}</span>
                             <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                           </summary>
-                          <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: 16 }}>
+                          <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
                             {searchOpen && searchQuery.trim() ? <HighlightText text={reasoning} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={reasoning} />}
                           </div>
                         </details>
@@ -984,11 +943,11 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                       {processBlocks.map((block, idx) =>
                         block.type === 'thinking' ? (
                           <details key={idx} className="mb-2 mt-3 group/details">
-                            <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: 16 }}>
+                            <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
                               <span>{extractKaomojiStatus(block.content).status || '思考'}</span>
                               <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                             </summary>
-                            <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: 16 }}>
+                            <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
                               {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />}
                             </div>
                           </details>
@@ -1042,7 +1001,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             )}
             {(messageDuration ?? 0) > 0 && (
-              <div className="text-[10px] text-foreground/30 tabular-nums mt-1 px-1">
+              <div className="text-foreground/30 tabular-nums mt-1 px-1" style={{ fontSize }}>
                 {formatDuration(messageDuration ?? 0)}
               </div>
             )}
@@ -1499,6 +1458,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // Detect whether this session already has a completed assistant message.
   const transcriptFontSize = useHelixStore(s => s.transcriptFontSize)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
+  const activeSessionWorkDir = useHelixStore(s => s.activeSessionWorkDir)
   const activeProviderId = useHelixStore(s => s.activeProviderId)
   const activeModel = useHelixStore(s => s.activeModel)
   const reasoningEffort = useHelixStore(s => s.reasoningEffort)
@@ -1577,6 +1537,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     setSteps([])
     setStreamThinking('')
     setStreamTotalTokens(0)
+    // live UI state 的所有者重置：切换会话后，responseBlocks/steps/streamThinking
+    // 这些组件 state 已被清空，若 liveStateOwnerRef 仍指向旧会话，切回来时会命中
+    // displayResponseBlocks 的 "owner === currentSessionId" 分支而返回空数组——
+    // 后台 run 的真实内容在 draft 里，但读不到 → "切回来只剩工作中和时间，思考消失"。
+    // 重置为 null 让恢复走 streamingDrafts 分支。
+    liveStateOwnerRef.current = null
     // Sync the GLOBAL hermesSessionId to this conversation's backend session so
     // that consumers outside handleRun (ContextUsageIndicator, compaction, etc.)
     // target the RIGHT session.  Without this they read a stale global that still
@@ -1651,10 +1617,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return () => { try { unsubSsh?.() } catch {} }
   }, [currentSessionId])
   // Resolve current git branch for the empty-state breadcrumb.
-  // Queries the *currently-selected project directory* (passed as cwd) rather than
-  // relying on the Electron main-process workDir, so the branch follows the active
-  // project/conversation instead of the last manually-picked folder.
+  // Queries the selected project directory (passed as cwd) rather than relying
+  // on the Electron main-process workDir. Loading a conversation keeps
+  // selectedWorkDir in sync with that conversation's own project (see
+  // handleLoadSession / navigateSession), so the branch follows whichever
+  // project is currently active — conversation switch or plain browse.
   useEffect(() => {
+    // 切换项目时立即隐藏分支按钮并清空旧分支，避免在探活间隙残留上一个仓库的
+    // 分支名（比如切到非 git 目录仍短暂显示旧项目的 "tauri"）。gitAvailable 恢复
+    // 为 null = 隐藏，探活确认是 git 仓库后才重新显示。
+    setGitAvailable(null)
+    setCurrentBranch('')
     if (!selectedWorkDir || !isElectron()) return
     let cancelled = false
     const refresh = () => {
@@ -2617,6 +2590,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     if (!activeSessionId) {
       activeSessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
       useHelixStore.getState().setCurrentSessionId(activeSessionId)
+      // 新对话归属当前所选项目：activeSessionWorkDir 从此始终反映「当前对话所属项目」
+      // （加载的项目外对话为 null），界面据此决定是否显示项目目录与分支。
+      useHelixStore.setState({ activeSessionWorkDir: useHelixStore.getState().selectedWorkDir })
       useHelixStore.getState().pushNavigation({ type: 'chat', sessionId: activeSessionId })
       useHelixStore.getState().persistToStorage()
     }
@@ -2746,8 +2722,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       }
       if (!sessionId) {
         wasCreated = true
+        const st0 = useHelixStore.getState()
         const res = await hermesApi()!.send('session/new', {
-          mcpServers: buildAcpMcpServers(useHelixStore.getState().mcpServers),
+          mcpServers: buildAcpMcpServers(st0.mcpServers),
+          // 会话必须绑定当前对话所属项目，否则 serve 后端用配置/TERMINAL_CWD/
+          // 启动目录，模型读到的目录和界面显示的项目脱节（"在 agentchat 对话，
+          // 但模型读到之前选过的目录"）。
+          cwd: st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined,
         }) as any
         sessionId = res?._meta?.hermes?.sessionProvenance?.acpSessionId
           || res?.session_id
@@ -2862,6 +2843,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               // Streaming output delta: forward content to the latest tool_call step
               if (u.status === 'in_progress' && u.content) {
                 return { type: 'tool_output_delta', toolCallId: tcId, content: normalizeAcpContent(u.content) }
+              }
+              // 工具完成/失败：serve 模式下 tool.complete 走这里（status='completed'/'failed'），
+              // 没有独立的 tool_result 事件。必须转发为 tool_result，否则 tool_call
+              // 一直保持 running，卡片永远显示"执行"而不是"已执行"。
+              if (u.status === 'completed' || u.status === 'failed' || u.status === 'complete') {
+                return {
+                  type: 'tool_result',
+                  toolName: u.toolName || u.title || '',
+                  content: normalizeAcpContent(u.content || ''),
+                  failed: u.status === 'failed',
+                }
               }
               return null
             }
@@ -3616,6 +3608,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               })
               // tool_result 归到第一个尚未收到结果的 tool_group 块
               // （串行时即当前块；并行时按调用顺序依次填充，避免全堆到最后一块）。
+              // 同时把该块中 status==='running' 的 tool_call 标记 completed/failed——
+              // 否则工具已完成但卡片仍显示"执行"（tool_group 块的状态只在
+              // 这里维护，done 分支只更新独立的 steps 数组，不动 responseBlocks）。
               uiRB(prev => {
                 const idx = prev.findIndex(b => {
                   if (b.type !== 'tool_group') return false
@@ -3624,7 +3619,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 if (idx !== -1) {
                   const cur = prev[idx] as Extract<ResponseBlock, { type: 'tool_group' }>
                   const nb = prev.slice()
-                  nb[idx] = { type: 'tool_group', steps: [...cur.steps, step] }
+                  nb[idx] = {
+                    type: 'tool_group',
+                    steps: [
+                      ...cur.steps.map(s =>
+                        s.type === 'tool_call' && s.status === 'running'
+                          ? { ...s, status: parsed.failed ? ('failed' as const) : ('completed' as const) }
+                          : s
+                      ),
+                      step,
+                    ],
+                  }
                   return nb
                 }
                 return [...prev, { type: 'tool_group', steps: [step] }]
@@ -4880,6 +4885,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   )}
 
   const renderEmptyBreadcrumb = () => {
+    // 项目外对话（已加载但 workDir 为空）不显示项目目录与分支。新对话（无会话，
+    // currentSessionId 为 null）仍显示所选项目或「选择项目」提示。
+    const showProjectContext = currentSessionId === null || !!activeSessionWorkDir
+    if (!showProjectContext) return null
     const projectName = selectedWorkDir ? (selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir) : '选择项目'
     return (
       <div className="flex items-center justify-start gap-1 mb-3">
@@ -5148,7 +5157,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         was already committed (e.g. think→done→think again within one run). */}
                     {/* Top status bar — 执行中显示「工作中」，完成后显示「已结束」 */}
                     {(streamingActive || displayResponseBlocks.length > 0) && (
-                      <div className="flex items-center gap-1.5 my-1 text-foreground/50" style={{ fontSize: 17 }}>
+                      <div className="flex items-center gap-1.5 my-1 text-foreground/50" style={{ fontSize: transcriptFontSize }}>
                         <span>{streamingActive ? '工作中' : '已结束'}</span>
                       </div>
                     )}
@@ -5159,11 +5168,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     {streamingActive && thinkingBody && !displayResponseBlocks.some(b => b.type === 'thinking') && (
                       <div className="my-2">
                         <details className="group/details">
-                          <summary className="text-muted-foreground cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: 16 }}>
+                          <summary className="text-muted-foreground cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
                             <span>{thinkingStatus || '思考中...'}</span>
                             <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                           </summary>
-                          <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/60 break-all leading-relaxed thinking-cap-tall thinking-scroll" style={{ fontSize: 16 }}>
+                          <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/60 break-all leading-relaxed thinking-cap-tall thinking-scroll" style={{ fontSize: transcriptFontSize }}>
                             {thinkingBody}
                           </div>
                         </details>
@@ -5174,27 +5183,60 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
                     {/* Interleaved response blocks: thinking, text, and tool groups in chronological order */}
                     {displayResponseBlocks.length > 0 && (() => {
-                      // 一条消息里所有思考片段折叠进同一个折叠块；累积式思考取最后一个块完整内容，避免重复。
-                      const normalizedBlocks = collapseAllThinking(pinToolGroupsToTop(normalizeTextBlocks(displayResponseBlocks)))
+                      // 按时间序交替渲染思考/工具/正文，但把最终 text 之前的中间过程
+                      // （thinking + tool_group + 中间文本）整体包进一个折叠块，减少
+                      // 空间占用。流式中展开（实时可见过程），完成后自动收起——与
+                      // 已完成消息的 group/process 折叠一致。
+                      const normalizedBlocks = mergeAdjacentThinking(normalizeTextBlocks(displayResponseBlocks))
+                      const lastTextIndex = normalizedBlocks.reduce((acc, b, i) => b.type === 'text' ? i : acc, -1)
+                      const processBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(0, lastTextIndex) : normalizedBlocks
+                      const answerBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(lastTextIndex) : []
                       return (
-                        <div className="helix-md" style={{ fontSize: transcriptFontSize }}>
-                          {normalizedBlocks.map((block, idx) =>
-                            block.type === 'thinking' ? (
-                            <details key={idx} className="mb-2 mt-3 group/details">
-                              <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: 16 }}>
-                                <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
-                                <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
-                              </summary>
-                              <div className="mt-1 pl-3 text-foreground/50  break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: 16 }}>
-                                {conversationSearchOpen && conversationSearchQuery.trim() ? (
-                                  <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
-                                ) : (
-                                  <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
-                                )}
-                              </div>
-                            </details>
-                          ) : block.type === 'text' ? (
-                            <div key={idx}>
+                      <>
+                        {processBlocks.length > 0 && (
+                          <details className="mb-2 mt-3 group/process" open={streamingActive}>
+                            <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
+                              <span>{streamingActive ? '思考过程' : '已结束'}</span>
+                              <svg className="size-3.5 transition-transform group-open/process:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                            </summary>
+                            <div className="mt-1 pl-3 space-y-1">
+                              {processBlocks.map((block, idx) =>
+                                block.type === 'thinking' ? (
+                                <details key={idx} className="mb-2 mt-3 group/details">
+                                  <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
+                                    <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
+                                    <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                                  </summary>
+                                  <div className="mt-1 pl-3 text-foreground/50  break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                                    {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                                      <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
+                                    ) : (
+                                      <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
+                                    )}
+                                  </div>
+                                </details>
+                              ) : block.type === 'text' ? (
+                                <div key={idx} style={{ fontSize: transcriptFontSize }}>
+                                  {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                                    <div className="whitespace-pre-wrap break-words">
+                                      <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
+                                    </div>
+                                  ) : (
+                                    <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
+                                  )}
+                                </div>
+                              ) : block.type === 'file_change' ? (
+                                <FileChangeSummary key={idx} changes={block.changes} />
+                              ) : (
+                                <InlineToolGroup key={idx} steps={block.steps} isRunning={isRunning} fontSize={transcriptFontSize} />
+                              )
+                              )}
+                            </div>
+                          </details>
+                        )}
+                        {answerBlocks.map((block, idx) =>
+                          block.type === 'text' ? (
+                            <div key={idx} style={{ fontSize: transcriptFontSize }}>
                               {conversationSearchOpen && conversationSearchQuery.trim() ? (
                                 <div className="whitespace-pre-wrap break-words">
                                   <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
@@ -5203,13 +5245,27 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                                 <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
                               )}
                             </div>
+                          ) : block.type === 'thinking' ? (
+                            <details key={idx} className="mb-2 mt-3 group/details">
+                              <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
+                                <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
+                                <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                              </summary>
+                              <div className="mt-1 pl-3 text-foreground/50  break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                                {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                                  <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
+                                ) : (
+                                  <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
+                                )}
+                              </div>
+                            </details>
                           ) : block.type === 'file_change' ? (
                             <FileChangeSummary key={idx} changes={block.changes} />
                           ) : (
                             <InlineToolGroup key={idx} steps={block.steps} isRunning={isRunning} fontSize={transcriptFontSize} />
                           )
-                          )}
-                      </div>
+                        )}
+                      </>
                       )
                     })()}
 
@@ -5218,7 +5274,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         after completion (e.g. session-id drift prevents the finally block
                         from clearing isChatLoading), causing the timer to tick forever. */}
                     {isRunning && (
-                      <div className="text-xs text-foreground/30 tabular-nums mt-1 ml-3">
+                      <div className="text-foreground/30 tabular-nums mt-1 ml-3" style={{ fontSize: transcriptFontSize }}>
                         <ThinkingTimer questionStartTs={streamingDrafts[currentSessionId || '']?.startedAt ?? questionStartTs} isRunning={isRunning} />
                       </div>
                     )}

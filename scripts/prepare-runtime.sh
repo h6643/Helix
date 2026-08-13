@@ -15,6 +15,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESOURCES_DIR="$REPO_ROOT/src-tauri/resources/hermes-runtime"
 
+# Ensure the runtime's .gitignore exists — it keeps the CI-built tree out of
+# git (only .gitignore + RUNTIME_VERSION are tracked). Restore it when the
+# runtime was deleted wholesale (`rm -rf`) ahead of a rebuild.
+if [ ! -f "$RESOURCES_DIR/.gitignore" ]; then
+  mkdir -p "$RESOURCES_DIR"
+  printf '# CI-generated runtime directory — contents are built by scripts/prepare-runtime.sh\n*\n!.gitignore\n!RUNTIME_VERSION\n' > "$RESOURCES_DIR/.gitignore"
+fi
+
 # ── Configuration ──────────────────────────────────────────────────────────
 PYTHON_VERSION="3.12.10"
 PBS_RELEASE="20250409"
@@ -55,15 +63,25 @@ if [ ! -d "$SITE_PACKAGES" ]; then
 fi
 
 # ── Idempotency ────────────────────────────────────────────────────────────
-# If the Python runtime is already built, skip the heavy download/pip steps.
-# The agent-extra bundle + RUNTIME_VERSION stamp still run below so Python-side
-# script changes are always rebundled and re-versioned on every build.
+# Skip the heavy download/pip steps only when the runtime is already built
+# AND its dependency signature matches the current hermes-agent source. The
+# signature hashes pyproject.toml + uv.lock, so any dependency change forces
+# a rebuild instead of silently reusing a stale runtime (the previous
+# "hermes_cli exists" check kept shipping voice-era runtimes forever after
+# the voice stack was removed — that's how the bundle ballooned).
 BUILT=0
-if [ -d "$SITE_PACKAGES/hermes_cli" ]; then
+DEPS_FILE="$REPO_ROOT/hermes-agent/pyproject.toml"
+LOCK_FILE="$REPO_ROOT/hermes-agent/uv.lock"
+SIG="none"
+if [ -f "$DEPS_FILE" ]; then
+  SIG=$(cat "$DEPS_FILE" "$LOCK_FILE" 2>/dev/null | sha256sum | cut -d' ' -f1)
+fi
+SIG_FILE="$RESOURCES_DIR/.deps-sig"
+if [ -d "$SITE_PACKAGES/hermes_cli" ] && [ -f "$SIG_FILE" ] && [ "$(cat "$SIG_FILE" 2>/dev/null)" = "$SIG" ]; then
   BUILT=1
-  echo "[prepare] hermes_cli already installed in $SITE_PACKAGES — skipping pip install."
+  echo "[prepare] hermes_cli already installed and dependency signature unchanged — skipping pip install."
 else
-  echo "[prepare] building runtime from scratch"
+  echo "[prepare] building runtime from scratch (deps changed or runtime unbuilt)"
 fi
 
 echo "[prepare] target:  $TARGET_TRIPLE"
@@ -134,8 +152,21 @@ find "$AGENT_EXTRA" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null ||
 VERSION_FILE="$RESOURCES_DIR/RUNTIME_VERSION"
 echo "[prepare] stamping $VERSION_FILE"
 date +%s > "$VERSION_FILE"
+# Stamp the dependency signature so the next build can skip the heavy pip step
+# only while it still matches (see the Idempotency block above).
+echo "$SIG" > "$SIG_FILE"
 
 # ── 3. Prune ────────────────────────────────────────────────────────────────
+# The voice stack (faster-whisper / sherpa-onnx / openwakeword / ctranslate2 /
+# onnxruntime / av / scipy / scikit-learn) was removed from hermes-agent's
+# dependencies. Runtimes built before the removal can still carry those
+# packages (the old idempotency check skipped rebuilds); drop them so they
+# never ship in the app bundle or get re-deployed to ~/.hermes.
+echo "[prepare] removing retired voice-stack packages (if any)..."
+"$PYTHON_BIN" -m pip uninstall -y \
+  faster-whisper sherpa-onnx openwakeword ctranslate2 onnxruntime \
+  av scipy scikit-learn sounddevice >/dev/null 2>&1 || true
+
 echo "[prepare] pruning..."
 find "$RESOURCES_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 find "$RESOURCES_DIR" -name "*.pyc" -delete 2>/dev/null || true

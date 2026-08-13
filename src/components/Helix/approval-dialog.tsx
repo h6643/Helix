@@ -232,20 +232,22 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
 
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
-      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-6">
-        <div className="flex items-start justify-between gap-3 mb-4">
-          <h3 className="text-lg font-semibold leading-snug">需要你的确认</h3>
-          <span className="shrink-0 mt-0.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-3">
+        <div className="flex items-center justify-between gap-3 mb-1.5">
+          <h3 className="text-[13px] font-semibold leading-snug">需要你的确认</h3>
+          <span className="shrink-0 text-[10px] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
             等待确认
           </span>
         </div>
 
-        <div className="bg-muted rounded-xl p-4 text-[14px] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-5 max-h-40 overflow-auto">
+        <div className="bg-muted rounded-lg px-2.5 py-1.5 text-[12px] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-1.5 max-h-16 overflow-auto">
           {request.question || '模型需要你的选择'}
         </div>
 
         {choices.length > 0 && (
-          <div className="flex flex-col gap-3 mb-5">
+          // 选项列表限制高度：模型一次可能给很多选项，全部平铺会把弹窗撑到
+          // 占满整个对话界面。max-h-28(112px,约 3 个选项)以上滚动。
+          <div className="flex flex-col gap-1 mb-1.5 max-h-28 overflow-y-auto pr-0.5">
             {choices.map((c, idx) => {
               const isSel = selectedIdx === idx
               return (
@@ -256,7 +258,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
                   onMouseEnter={() => setSelectedIdx(idx)}
                   disabled={submitting}
                   className={
-                    'flex items-center gap-3.5 px-4 py-3.5 rounded-xl border text-left transition-colors disabled:opacity-60 ' +
+                    'flex items-center gap-2 px-2.5 py-1 rounded-lg border text-left transition-colors disabled:opacity-60 ' +
                     (isSel
                       ? 'border-ring bg-accent ring-1 ring-ring'
                       : 'border-transparent hover:bg-accent/60')
@@ -264,38 +266,38 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
                 >
                   <span
                     className={
-                      'w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-semibold shrink-0 ' +
+                      'w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-semibold shrink-0 ' +
                       (isSel ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')
                     }
                   >
                     {idx + 1}
                   </span>
-                  <span className="text-[15px]">{c}</span>
+                  <span className="text-[13px] truncate">{c}</span>
                 </button>
               )
             })}
           </div>
         )}
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2">
           <input
             value={freeText}
             onChange={(e) => setFreeText(e.target.value)}
             disabled={submitting}
             placeholder={choices.length ? '或输入其他回答…' : '输入回答…'}
-            className="flex-1 h-11 px-4 rounded-xl bg-background/60 border border-border/50 text-[15px] text-foreground outline-none focus:border-ring disabled:opacity-50"
+            className="flex-1 h-8 px-3 rounded-lg bg-background/60 border border-border/50 text-[13px] text-foreground outline-none focus:border-ring disabled:opacity-50"
           />
           <Button
             size="sm"
             disabled={submitting || !freeText.trim()}
             onClick={() => submit(freeText)}
-            className="h-11 px-5 text-[15px]"
+            className="h-8 px-4 text-[13px]"
           >
-            {submitting ? <Loader2 className="size-4 animate-spin" /> : '回复'}
+            {submitting ? <Loader2 className="size-3.5 animate-spin" /> : '回复'}
           </Button>
         </div>
 
-        <div className="text-[12px] text-muted-foreground/60 text-center mt-5">
+        <div className="text-[10px] text-muted-foreground/60 text-center mt-1">
           内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · Enter 确认 · 也可自由输入
         </div>
       </div>

@@ -818,6 +818,11 @@ export class ServeGatewayClient {
     await this.ensureModelSynced()
     const res = await this.rpc('session.create', {
       source: 'helix',
+      // serve 模式的工作目录是 per-session 的（见 main.rs setWorkDir 注释：
+      // "serve mode: cwd applied per-session via explicit_cwd"）。前端选中的项目
+      // 必须随 session.create 传给后端，否则会话 cwd 落到配置/TERMINAL_CWD/
+      // 启动目录，模型读到的目录和界面显示的项目脱节。
+      ...(params?.cwd ? { cwd: params.cwd } : {}),
     })
     return res
   }

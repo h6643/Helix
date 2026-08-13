@@ -3,13 +3,80 @@
 
 use crate::config::{config_yaml_path, env_path, set_yaml_key};
 use crate::gateway::{env_gateway_mode, kill_current, spawn_gateway};
+use crate::paths::{hermes_agent_dir, hermes_data_dir, standalone_python};
 use crate::state::AppState;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
+
+/// Find every directory that may contain Hermes web-search provider plugins.
+/// Hermes loads built-in providers from its runtime's `site-packages/plugins/web`
+/// and user providers from `~/.hermes/plugins/web`. We scan all known locations
+/// and merge, so the UI can show exactly what is actually installed.
+fn web_provider_search_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // 1) Runtime hermes (standalone_python → lib/python3.x/site-packages/plugins/web).
+    let py = standalone_python();
+    if let Some(lib) = py.parent().map(|p| p.join("lib")) {
+        // Hard-coded python3.12 fallback (Helix pins this — see paths.rs).
+        dirs.push(lib.join("python3.12").join("site-packages").join("plugins").join("web"));
+        // Be resilient to version bumps: also walk any lib/python3.x.
+        if let Ok(entries) = std::fs::read_dir(&lib) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("python3.") && e.path().is_dir() {
+                    dirs.push(e.path().join("site-packages").join("plugins").join("web"));
+                }
+            }
+        }
+    }
+
+    // 2) User plugins: ~/.hermes/plugins/web
+    dirs.push(hermes_data_dir().join("plugins").join("web"));
+    // 3) Agent checkout: ~/.hermes/hermes-agent/plugins/web
+    dirs.push(hermes_agent_dir().join("plugins").join("web"));
+    // 4) Bundled resources: <resource_dir>/hermes-runtime/python/lib/python3.12/site-packages/plugins/web
+    if let Ok(res) = app.path().resource_dir() {
+        dirs.push(
+            res.join("hermes-runtime")
+                .join("python")
+                .join("lib")
+                .join("python3.12")
+                .join("site-packages")
+                .join("plugins")
+                .join("web"),
+        );
+    }
+
+    dirs
+}
+
+/// Returns the set of web-search provider plugin names actually present on disk.
+fn scan_web_providers(app: &AppHandle) -> Vec<String> {
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    for dir in web_provider_search_dirs(app) {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if !p.is_dir() {
+                    continue;
+                }
+                let name = e.file_name().to_string_lossy().to_string();
+                // Skip dunder dirs like __pycache__.
+                if name.starts_with("__") {
+                    continue;
+                }
+                found.insert(name);
+            }
+        }
+    }
+    found.into_iter().collect()
+}
 
 #[tauri::command]
-pub fn web_search_list(_state: State<'_, Arc<AppState>>) -> Value {
+pub fn web_search_list(app: AppHandle, _state: State<'_, Arc<AppState>>) -> Value {
     let yaml_path = config_yaml_path();
     let text = match std::fs::read_to_string(&yaml_path) {
         Ok(t) => t,
@@ -64,7 +131,10 @@ pub fn web_search_list(_state: State<'_, Arc<AppState>>) -> Value {
             "backend": backend,
             "search_backend": search_backend,
             "apiKeys": Value::Object(api_keys),
-        }
+        },
+        "availableProviders": Value::Array(
+            scan_web_providers(&app).into_iter().map(Value::String).collect()
+        ),
     })
 }
 

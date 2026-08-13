@@ -500,6 +500,22 @@ function collectAllFileIds(nodes: FileNode[]): string[] {
 
 // Debounced chat persistence: saves to IndexedDB after messages change
 let sessionPersistTimer: ReturnType<typeof setTimeout> | null = null
+
+// Resolve a session's workDir at persist time.
+//   - Session already on disk: keep its existing workDir, INCLUDING a null one
+//     (a project-less conversation must stay project-less). Falling back to
+//     selectedWorkDir here would wrongly re-home it: "新对话选了目录但没发消息"
+//     leaves selectedWorkDir = that dir, so clicking a project-less conversation
+//     next would silently attach it to the picked directory.
+//   - Brand-new session (no disk record): home it to the current project.
+function resolveSessionWorkDir(
+  existing: { workDir?: string | null } | undefined,
+  activeSessionWorkDir: string | null,
+  selectedWorkDir: string | null,
+): string | null {
+  if (existing) return existing.workDir ?? null
+  return activeSessionWorkDir ?? selectedWorkDir
+}
 function collectFiles(nodes: FileNode[]) {
   return nodes.map(n => ({
     id: n.id, name: n.name, type: n.type,
@@ -605,7 +621,7 @@ async function persistCurrentSessionNow(): Promise<void> {
     await persistence.saveSession({
       id: sessionId,
       label,
-      workDir: existing?.workDir ?? snapshot.activeSessionWorkDir ?? snapshot.selectedWorkDir,
+      workDir: resolveSessionWorkDir(existing, snapshot.activeSessionWorkDir, snapshot.selectedWorkDir),
       goal: snapshot.goal,
       memories: snapshot.memories,
       tasks: snapshot.tasks,
@@ -688,7 +704,7 @@ async function persistSessionById(sessionId: string): Promise<void> {
     await persistence.saveSession({
       id: sessionId,
       label: existing?.label || (firstUser ? String(firstUser.content).slice(0, 50) : new Date().toLocaleString('zh-CN')),
-      workDir: existing?.workDir ?? state.activeSessionWorkDir ?? state.selectedWorkDir,
+      workDir: resolveSessionWorkDir(existing, state.activeSessionWorkDir, state.selectedWorkDir),
       goal: existing?.goal ?? null,
       memories: existing?.memories || [],
       tasks: existing?.tasks || [],
@@ -1689,6 +1705,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
       if (session.workDir) {
         await persistence.saveProjectFolder(session.workDir)
+        // 分支选择器等 selectedWorkDir 驱动的 UI 跟随当前对话所属项目。
+        // 只改 selectedWorkDir，不走 setWorkDir（避免切换项目副作用打断运行中对话）。
+        set({ selectedWorkDir: session.workDir })
       }
     } catch (e) {
       logError('[navigateSession] failed:', e)

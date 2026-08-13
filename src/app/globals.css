@@ -730,7 +730,7 @@ pre code.hljs {
 
 .helix-md {
   font-size: var(--helix-transcript-size, 14px);  /* 界面字号：对话界面跟随设置 */
-  line-height: 1.8;          /* 更宽松的行高，缓解密集感 */
+  line-height: 2.0;          /* 更宽松的行高，缓解密集感 */
   overflow-wrap: break-word;
   text-spacing-trim: space-all;
   color: var(--foreground);
@@ -739,8 +739,12 @@ pre code.hljs {
 }
 
 .helix-md p {
-  margin: 0.75em 0;
+  margin: 1em 0;
   text-wrap: pretty;         /* 更优雅的换行，避免孤字/标点悬挂 */
+  /* 段落内保留软换行：模型常写 "1第一点\n2第二点" 这类单换行分点，
+     CommonMark 把段落内单个 \n 当软换行渲染成空格，white-space: normal 下
+     会黏成一行。pre-wrap 让软换行可见，同时不破坏空行分段的正常段落结构。 */
+  white-space: pre-wrap;
 }
 
 .helix-md p:first-child {
@@ -753,7 +757,7 @@ pre code.hljs {
 
 .helix-md h1, .helix-md h2, .helix-md h3, .helix-md h4 {
   font-weight: 600;
-  margin: 1.5em 0 0.7em;     /* 标题前后更多呼吸感，强化层级 */
+  margin: 1.8em 0 0.9em;     /* 标题前后更多呼吸感，强化层级 */
   color: var(--primary);      /* 暖橙色标题，像截图里的“表达链接” */
   text-wrap: balance;
 }
@@ -765,12 +769,12 @@ pre code.hljs {
 
 .helix-md ul, .helix-md ol {
   padding-left: 1.6em;
-  margin: 0.75em 0;
+  margin: 1em 0;
   list-style-position: outside;
 }
 
 .helix-md li {
-  margin: 0.5em 0;
+  margin: 0.6em 0;
 }
 
 /* 列表项标记用柔和灰，弱化“噪音” */
@@ -802,7 +806,7 @@ pre code.hljs {
 }
 
 .helix-md pre {
-  margin: 0.75em 0;
+  margin: 1em 0;
   padding: 0;
   background: transparent;
   border: none;

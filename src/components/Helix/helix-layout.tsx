@@ -334,7 +334,9 @@ export function HelixLayout() {
     if (!selectedWorkDir) { setGitBranch(null); return }
     let cancelled = false
     invoke<{ ok: boolean; branch?: string }>('current_branch', { targetCwd: selectedWorkDir })
-      .then((r) => { if (!cancelled && r.ok) setGitBranch(r.branch || null) })
+      // ok:false（目录不是 git 仓库）时同样要清空，否则 gitBranch 残留上一个仓库
+      // 的分支名 → 切到非 git 目录仍显示 "tauri"。
+      .then((r) => { if (!cancelled) setGitBranch(r.ok ? (r.branch || null) : null) })
       .catch(() => { if (!cancelled) setGitBranch(null) })
     return () => { cancelled = true }
   }, [selectedWorkDir])
@@ -343,6 +345,7 @@ export function HelixLayout() {
   const setThemeStyle = useHelixStore(s => s.setThemeStyle)
   const chatMessages = useHelixStore(s => s.chatMessages)
   const currentSessionId = useHelixStore(s => s.currentSessionId)
+  const activeSessionWorkDir = useHelixStore(s => s.activeSessionWorkDir)
   const navigationHistory = useHelixStore(s => s.navigationHistory)
   const navigationIndex = useHelixStore(s => s.navigationIndex)
   const customShortcuts = useHelixStore(s => s.customShortcuts)
@@ -1264,6 +1267,8 @@ export function HelixLayout() {
                 {(chatMessages.length > 0 && !!currentSessionId) && (
                   <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3">
                     <div className="flex items-center gap-1.5 min-w-0">
+                      {/* 项目外对话（activeSessionWorkDir 为空）不显示项目目录与分支 */}
+                      {activeSessionWorkDir && (
                       <button
                         onClick={handleOpenLocation}
                         className="flex items-center gap-1.5 text-[12px] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
@@ -1272,7 +1277,8 @@ export function HelixLayout() {
                         <Folder className="size-3.5 text-muted-foreground" />
                         <span className="max-w-[200px] truncate">{selectedWorkDir ? (selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir) : '未选择位置'}</span>
                       </button>
-                      {gitBranch && (
+                      )}
+                      {activeSessionWorkDir && gitBranch && (
                         <div
                           className="flex items-center gap-1 text-[12px] text-foreground/60 bg-accent/40 px-2 py-1 rounded-lg shrink-0"
                           data-tip={`当前分支：${gitBranch}`}

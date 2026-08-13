@@ -102,6 +102,13 @@ export function isLikelyProseFence(info: string, body: string): boolean {
     return true
   }
 
+  // 围栏 info 串本身带 JSX/模板串/操作符等强代码标记（如 ```tsxul: (...) => <ul ...、
+  // ```tsx<div className={...} />）→ 明显是代码围栏，不是散文包装。散文围栏的
+  // info（```summary、```总结要点）不含这些标记，不受影响。
+  if (codeSignalCount(rawInfo) > 0) {
+    return false
+  }
+
   const signals = codeSignals(body)
 
   if (!signals.trimmed) {

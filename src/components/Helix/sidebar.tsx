@@ -538,6 +538,10 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       })
       if (fresh.workDir) {
         await persistence.saveProjectFolder(fresh.workDir)
+        // 加载对话后把 selectedWorkDir 也切到对话所属项目，让 Git 分支选择器
+        // （agent-flow-panel 用 selectedWorkDir 作为 cwd）跟着对话走。只同步
+        // selectedWorkDir，绝不走 setWorkDir——那会触发"切换项目"副作用。
+        useHelixStore.getState().setSelectedWorkDir(fresh.workDir)
         // 对齐主进程 workDir：历史对话只改前端 selectedWorkDir，主进程会残留在旧
         // 项目 → 相对路径的 fs IPC（打开文件/diff 预览等）被拼到旧目录 → ENOENT。
         // 用轻量 syncWorkDir（不重启网关、不持久化），绝不能走 setWorkDir——那会
@@ -698,6 +702,12 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   const handleConfirmDeleteProject = useCallback(async () => {
     if (!deleteProjectDir) return
     try {
+      // 先取被删项目下的会话 id（deleteSessionsByWorkDir 删完就查不到了），
+      // 用于随后清理内存里残留的消息与运行中草稿。
+      const sessionsBefore = await persistence.loadSessions()
+      const deletedIds = new Set(
+        sessionsBefore.filter((s) => s.workDir === deleteProjectDir).map((s) => s.id),
+      )
       const count = await persistence.deleteSessionsByWorkDir(deleteProjectDir)
       await persistence.deleteProjectFolder(deleteProjectDir)
       // Drop the dir from pinned folders (if it was pinned) so it can't re-appear.
@@ -719,6 +729,27 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       })
       if (selectedWorkDir === deleteProjectDir) {
         setSelectedWorkDir(null)
+      }
+      // 清理内存中仍指向被删项目的会话状态。磁盘会话已删，但内存里的
+      // chatMessages / streamingDrafts 若还留着它们，后续点击其他对话触发的
+      // flushSessionPersist（或后台 run 完成时 persistSessionById）会按
+      // activeSessionWorkDir/selectedWorkDir 把这些会话重新写回磁盘——刚删除的
+      // 项目因此"复活"。这里用上面删前取的 deletedIds 同步清掉被删项目下
+      // 所有会话的消息 + 运行中草稿。
+      const st = useHelixStore.getState()
+      if (st.currentSessionId && deletedIds.has(st.currentSessionId)) {
+        useHelixStore.getState().setCurrentSessionId(null)
+      }
+      if (st.activeSessionWorkDir === deleteProjectDir) {
+        useHelixStore.setState({ activeSessionWorkDir: null })
+      }
+      if (deletedIds.size > 0) {
+        useHelixStore.setState((prev) => ({
+          chatMessages: prev.chatMessages.filter((m) => !deletedIds.has(m.sessionId || '')),
+          streamingDrafts: Object.fromEntries(
+            Object.entries(prev.streamingDrafts).filter(([sid]) => !deletedIds.has(sid)),
+          ),
+        }))
       }
     } catch (e) {
       console.error('Failed to delete project:', e)
@@ -840,10 +871,11 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             <div className="space-y-1">
               {projects.map(project => {
                 const isExpanded = expandedProjects.has(project.dir)
-                // 项目仅在「选中了项目、未选中其中具体会话、且没打开任何顶部面板」时高亮。
+                // 点击对话后项目不高亮：只有「未打开任何对话、正在浏览所选项目」时
+                // 才高亮该项目的目录行，避免点开对话后某项目行一直亮着。
                 const isSelectedProject =
+                  !currentSessionId &&
                   selectedWorkDir === project.dir &&
-                  !(sessions.find(s => s.id === currentSessionId)?.workDir === project.dir) &&
                   // 计划/插件/看板等全屏面板打开时，项目不高亮——避免两处同时亮
                   !showScheduledTasksPanel &&
                   !showSkillPanel &&
@@ -863,7 +895,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                       >
                         {isSelectedProject && <div className="w-[3px] h-4 bg-primary rounded-full shrink-0 -ml-1.5 mr-0.5" />}
                         <Folder className={`size-3.5 shrink-0 ${isSelectedProject ? 'text-primary' : 'text-sidebar-foreground/30'}`} />
-                        <span className="text-[12.5px] truncate flex-1">{project.label}</span>
+                        <span className="text-[12.5px] truncate flex-1" title={project.label}>{project.label.length > 15 ? project.label.slice(0, 15) + '…' : project.label}</span>
                       </div>
                       <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
                         <button

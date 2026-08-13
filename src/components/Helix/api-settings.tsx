@@ -1085,6 +1085,10 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       chatMessages: msgs,
       activeSessionWorkDir: session.workDir ?? null,
     })
+    // selectedWorkDir 同步到恢复的对话所属项目，让 Git 分支选择器等 UI 跟随对话。
+    if (session.workDir) {
+      useHelixStore.getState().setSelectedWorkDir(session.workDir)
+    }
     useHelixStore.getState().setCurrentSessionId(session.id)
     pushNavigation({ type: 'chat', sessionId: session.id })
     await persistToStorage()

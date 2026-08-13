@@ -92,6 +92,21 @@ function scrubBacktickNoise(text: string): string {
     }
   }
 
+  // 围栏语言后同行直接跟正文（模型常把第一行拼到 ```lang 上，如 ```tsxul: (...) => ...）。
+  // 平衡围栏与「语言+换行」悬空围栏都覆盖不到这里 → 之前 ``` 会被剥成纯文本。
+  // 这里保留围栏标记（到文本末尾），交给 normalizeFenceBlocks 拆分语言与正文。
+  // 语言以拉丁/数字开头才保护——中文式的散文围栏（```总结要点）不在此列。
+  // 正文允许含反引号（JSX 模板串），所以匹配到行尾任意字符。
+  const mergedFenceRe = /(^|\n)[ \t]*(`{3,}|~{3,})[A-Za-z0-9][^\n]*(?=\n|$)/g
+
+  while ((match = mergedFenceRe.exec(text)) !== null) {
+    const start = match.index + match[1].length
+
+    protectedRanges.push({ end: text.length, start })
+
+    break
+  }
+
   protectedRanges.sort((a, b) => a.start - b.start)
 
   const fenceNoiseRe = /`{3,}/g
@@ -99,8 +114,13 @@ function scrubBacktickNoise(text: string): string {
   let cursor = 0
 
   for (const range of protectedRanges) {
-    out += text.slice(cursor, range.start).replace(fenceNoiseRe, '')
-    out += text.slice(range.start, range.end)
+    // 区间可能重叠（merged 保护到末尾、会包住更早的平衡围栏区间）：跳过已被
+    // 覆盖的部分，避免重复切片导致围栏内容被复制两份。
+    const sliceStart = Math.max(cursor, range.start)
+
+    if (sliceStart >= range.end) continue
+    out += text.slice(cursor, sliceStart).replace(fenceNoiseRe, '')
+    out += text.slice(sliceStart, range.end)
     cursor = range.end
   }
 
@@ -349,7 +369,13 @@ function normalizeFenceBlocks(text: string): string {
     const infoRaw = (match[3] || '').trim()
     const languageToken = infoRaw.split(/\s+/, 1)[0] || ''
     const language = sanitizeLanguageTag(languageToken)
-    const openerValid = !infoRaw || Boolean(language)
+    // 模型常把正文第一行拼到围栏语言后面（```tsxul: (...) => ...）。语言 token
+    // 之后的剩余内容拆出来当正文首行，别让它在 info 串里丢失。
+    const infoTail = infoRaw.slice(languageToken.length).trim()
+    // 语言不在严格白名单（如 tsx.js、拼了正文的 tsxul:...）不等于散文——只要语言
+    // token 以拉丁/数字开头就当代码围栏，由 isLikelyProseFence 判断正文是代码还是
+    // 散文；中文式 info（```总结要点）仍按散文拆开，保持原行为。
+    const openerValid = !infoRaw || Boolean(language) || Boolean(infoTail) || /^[A-Za-z0-9]/.test(languageToken)
 
     if (!openerValid) {
       out.push(`${indent}${infoRaw}`.trimEnd())
@@ -359,7 +385,8 @@ function normalizeFenceBlocks(text: string): string {
     }
 
     const closeIndex = findClosingFence(sourceLines, index, marker)
-    const bodyLines = sourceLines.slice(index + 1, closeIndex === -1 ? sourceLines.length : closeIndex)
+    const rawBodyLines = sourceLines.slice(index + 1, closeIndex === -1 ? sourceLines.length : closeIndex)
+    const bodyLines = infoTail ? [infoTail, ...rawBodyLines] : rawBodyLines
     const body = bodyLines.join('\n')
 
     if (closeIndex === -1) {
