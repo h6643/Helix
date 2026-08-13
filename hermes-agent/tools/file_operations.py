@@ -27,6 +27,7 @@ Usage:
 
 import os
 import re
+import sys
 import difflib
 import hashlib
 from abc import ABC, abstractmethod
@@ -440,6 +441,31 @@ def _parse_search_context_line(line: str) -> tuple[str, int, str] | None:
         return None
 
     return path, int(match.group(1)), line[match.end():]
+
+
+def _enhanced_search_engine() -> bool:
+    """Whether the current session opted into enhanced Find/Grep (ripgrep-only).
+
+    Desktop's 常规「增强 Find 和 Grep」pins ``search_engine: rg`` on the session
+    at ``session.create``; the gateway binds it as a session ContextVar so each
+    session keeps its own choice (the current session keeps what it was created
+    with; sessions restored after an app restart re-pin from the persisted
+    session). Read via :func:`gateway.session_context.get_session_env` (falls
+    back to ``os.environ`` for CLI/cron where no session context is bound).
+
+    Windows is excluded: the legacy ``find`` path is a native tool there and the
+    wrapper pipelines differ, so the enhanced engine never applies on Windows.
+    """
+    if sys.platform.startswith("win"):
+        return False
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return False
+    try:
+        return get_session_env("HERMES_SEARCH_ENGINE", "").strip().lower() == "rg"
+    except Exception:
+        return False
 
 
 # =============================================================================
@@ -2356,6 +2382,14 @@ class ShellFileOperations(FileOperations):
         # Prefer ripgrep: respects .gitignore, excludes hidden dirs by
         # default, and has parallel directory traversal (~200x faster than
         # find on wide trees).  Mirrors _search_content which already uses rg.
+        # 增强 Find 和 Grep 会话强制走 rg（无 rg 时明确报错而非降级到 find）。
+        if _enhanced_search_engine():
+            if not self._has_command('rg'):
+                return SearchResult(
+                    error="Enhanced Find and Grep requires ripgrep (rg). "
+                          "Install ripgrep: https://github.com/BurntSushi/ripgrep#installation"
+                )
+            return self._search_files_rg(search_pattern, path, limit, offset)
         if self._has_command('rg'):
             return self._search_files_rg(search_pattern, path, limit, offset)
 
@@ -2474,9 +2508,19 @@ class ShellFileOperations(FileOperations):
     def _search_content(self, pattern: str, path: str, file_glob: Optional[str],
                         limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
         """Search for content inside files (grep-like)."""
-        # Try ripgrep first (fast), fallback to grep (slower but works)
+        # Try ripgrep first (fast), fallback to grep (slower but works).
+        # 增强 Find 和 Grep 会话强制走 rg（无 rg 时明确报错而非降级到 grep）。
         used_rg = False
-        if self._has_command('rg'):
+        if _enhanced_search_engine():
+            if not self._has_command('rg'):
+                return SearchResult(
+                    error="Enhanced Find and Grep requires ripgrep (rg). "
+                          "Install ripgrep: https://github.com/BurntSushi/ripgrep#installation"
+                )
+            used_rg = True
+            result = self._search_with_rg(pattern, path, file_glob, limit, offset,
+                                          output_mode, context)
+        elif self._has_command('rg'):
             used_rg = True
             result = self._search_with_rg(pattern, path, file_glob, limit, offset,
                                           output_mode, context)

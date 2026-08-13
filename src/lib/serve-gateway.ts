@@ -816,6 +816,19 @@ export class ServeGatewayClient {
    */
   private async createSession(params?: any): Promise<any> {
     await this.ensureModelSynced()
+    // 常规「增强 Find 和 Grep」：显式传入的 search_engine 优先（'' = 用默认
+    // 引擎），未传时（如「session not found」自动重建路径）回退到当前设置值。
+    let searchEngine = params?.search_engine
+    if (searchEngine === undefined) {
+      const { useHelixStore } = await import('@/stores/helix-store')
+      searchEngine = useHelixStore.getState().enhancedFindGrep ? 'rg' : ''
+    }
+    // 常规「集成终端 Shell」：仅新会话生效（未传时回退到当前设置值）。
+    let terminalShell = params?.terminal_shell
+    if (terminalShell === undefined) {
+      const { useHelixStore } = await import('@/stores/helix-store')
+      terminalShell = useHelixStore.getState().terminalShell
+    }
     const res = await this.rpc('session.create', {
       source: 'helix',
       // serve 模式的工作目录是 per-session 的（见 main.rs setWorkDir 注释：
@@ -823,6 +836,8 @@ export class ServeGatewayClient {
       // 必须随 session.create 传给后端，否则会话 cwd 落到配置/TERMINAL_CWD/
       // 启动目录，模型读到的目录和界面显示的项目脱节。
       ...(params?.cwd ? { cwd: params.cwd } : {}),
+      ...(searchEngine ? { search_engine: searchEngine } : {}),
+      ...(terminalShell ? { terminal_shell: terminalShell } : {}),
     })
     return res
   }

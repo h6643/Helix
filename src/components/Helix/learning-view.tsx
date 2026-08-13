@@ -36,7 +36,16 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
         (list as { name: string; isDirectory: boolean }[])
           // Skip editor/process lockfiles and dotfiles — they are not memory
           // content (e.g. MEMORY.md.lock is Hermes's concurrent-write lock).
-          .filter((n) => !n.name.startsWith('.') && !n.name.endsWith('.lock') && n.name !== 'MEMORY.md' && n.name !== 'USER.md')
+          .filter(
+            (n) =>
+              // Skip editor/process lockfiles and dotfiles — not memory content.
+              !n.name.startsWith('.') &&
+              !n.name.endsWith('.lock') &&
+              // Skip Hermes auto-backups: `MEMORY.md.bak.<ts>`, `USER.md.bak.<ts>`, etc.
+              !/\.bak(\.|$)/.test(n.name) &&
+              n.name !== 'MEMORY.md' &&
+              n.name !== 'USER.md'
+          )
           .map((n) => ({ name: n.name, path: `${MEMORY_DIR}/${n.name}`.replace(/\\/g, '/'), isDir: n.isDirectory }))
           .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
       )

@@ -34,9 +34,10 @@ import { createPortal } from 'react-dom'
 import { useProviderStore } from '@/hermes-ui/provider-store'
 import { useCheckUpdate } from '@/hooks/use-check-update'
 import { pushModelConfig, pushAgentConfigLive, pushConfigKeyValue } from '@/lib/config-sync'
-import { isElectron, electronHermes, electronNotification, electronShell } from '@/lib/electron-bridge'
+import { isElectron, electronHermes, electronShell } from '@/lib/electron-bridge'
 import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
 import { isServeActive, getServeClient } from '@/lib/serve-gateway'
+import { markScanDone, runAutoArchiveScan, shouldScanNow } from '@/lib/auto-archive'
 import { useHelixStore } from '@/stores/helix-store'
 import { applyHelixPalette } from '@/lib/themes'
 import { AgentFlowPanel } from './agent-flow-panel'
@@ -306,6 +307,7 @@ export function HelixLayout() {
   }, [isRightDragging])
 
   // State selectors (only re-render when this specific slice changes)
+  const uiFontSize = useHelixStore(s => s.fontSize)
   const openTabs = useHelixStore(s => s.openTabs)
   const showSessionManager = useHelixStore(s => s.showSessionManager)
   const showSettings = useHelixStore(s => s.showSettings)
@@ -712,18 +714,6 @@ export function HelixLayout() {
     }
   }, [])
 
-  // Native OS notification when an agent run finishes — respects desktopNotifications setting
-  useEffect(() => {
-    let prev = useHelixStore.getState().isAgentRunning
-    const unsub = useHelixStore.subscribe((s) => {
-      if (prev && !s.isAgentRunning && s.desktopNotifications) {
-        electronNotification.notify('Helix', 'Agent 任务已完成')
-      }
-      prev = s.isAgentRunning
-    })
-    return unsub
-  }, [])
-
   const handleMaximizeToggle = useCallback(async () => {
     try {
       const win = (window as any).electron?.window
@@ -946,6 +936,30 @@ export function HelixLayout() {
 
   // Start global scheduled task runner
   useEffect(() => { startScheduledTaskRunner() }, [])
+
+  // 自动归档旧任务：开启后按 6h 节奏扫一次最近打开的工作区（重启后由
+  // autoArchiveLastScanAt 兜底去重）。仅桌面端（看板 IPC 在 Electron/Tauri 桥
+  // 上可用），失败静默——不影响正常使用。
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setInterval> | null = null
+
+    const scan = async () => {
+      const st = useHelixStore.getState()
+      if (!st.autoArchiveOldTasks) return
+      if (!(await shouldScanNow())) return
+      await markScanDone()
+      if (cancelled) return
+      const res = await runAutoArchiveScan(st.archiveRetentionHours)
+      if (!cancelled && res.archived.length > 0) {
+        st.showToast({ type: 'success', title: '自动归档', description: `已归档 ${res.archived.length} 个旧任务` })
+      }
+    }
+
+    void scan()
+    timer = setInterval(scan, 6 * 60 * 60 * 1000)
+    return () => { cancelled = true; if (timer) clearInterval(timer) }
+  }, [])
 
   // Check if Hermes backend has a task list
   useEffect(() => {
@@ -1226,11 +1240,11 @@ export function HelixLayout() {
         {showSidebar && (
           <div
             className={`shrink-0 overflow-hidden relative ${isDragging ? '' : 'transition-[width] duration-200 ease-out'}`}
-            style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth }}
+            style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth * (uiFontSize / 14) }}
           >
             <div
               className="h-full overflow-hidden"
-              style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth }}
+              style={{ width: sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth * (uiFontSize / 14) }}
             >
               <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(v => !v)} />
             </div>

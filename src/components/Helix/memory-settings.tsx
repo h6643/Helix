@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Toggle, SettingGroup, PopupSelect } from './settings-ui'
+import { Toggle, PopupSelect, NumberField } from './settings-ui'
 import {
   getHermesConfig,
   patchHermesConfig,
@@ -141,58 +141,12 @@ function Row({
   dim?: boolean
 }) {
   return (
-    <div className={`flex items-start gap-3 py-2.5 px-1 -mx-1 rounded-md hover:bg-muted/30 transition-colors ${dim ? 'opacity-45' : ''}`}>
+    <div className={`flex items-start gap-3 py-3 px-4 hover:bg-muted/40 transition-colors ${dim ? 'opacity-45' : ''}`}>
       <div className="min-w-0 flex-1">
-        <div className="text-sm text-foreground">{label}</div>
-        {hint && <div className="text-xs text-muted-foreground/60 mt-0.5">{hint}</div>}
+        <div className="ui-text text-foreground">{label}</div>
+        {hint && <div className="ui-text text-muted-foreground/60 mt-0.5">{hint}</div>}
       </div>
       <div className="shrink-0 pt-0.5">{children}</div>
-    </div>
-  )
-}
-
-/**
- * 数字输入：内部维护字符串草稿，只在 blur / Enter 时提交，
- * 避免每敲一个字符就往后端 PUT 一次（也避免清空输入框瞬间被回填成 0）。
- */
-function NumberField({
-  value,
-  onCommit,
-  min,
-  max,
-  suffix,
-  disabled,
-}: {
-  value: number
-  onCommit: (v: number) => void
-  min: number
-  max: number
-  suffix?: string
-  disabled?: boolean
-}) {
-  const [draft, setDraft] = useState(String(value))
-  useEffect(() => { setDraft(String(value)) }, [value])
-
-  const commit = () => {
-    const n = Number(draft)
-    if (!Number.isFinite(n)) { setDraft(String(value)); return }
-    const clamped = Math.min(max, Math.max(min, Math.round(n)))
-    setDraft(String(clamped))
-    if (clamped !== value) onCommit(clamped)
-  }
-
-  return (
-    <div className="flex items-center gap-1.5">
-      <input
-        type="number"
-        value={draft}
-        disabled={disabled}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-        className="w-24 px-2 py-1 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed"
-      />
-      {suffix && <span className="text-xs text-muted-foreground/60 w-8">{suffix}</span>}
     </div>
   )
 }
@@ -203,7 +157,7 @@ function NumberField({
 // 后端没有该 provider 插件时字段为空 → 显示「未安装」状态与安装指引。
 
 const FIELD_INPUT_CLS =
-  'px-2.5 py-1.5 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary transition-colors'
+  'px-2.5 py-1.5 rounded-lg bg-muted/20 ui-text text-foreground text-center border border-border focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-colors'
 
 function renderProviderField(field: MemoryProviderField, value: any, onChange: (v: any) => void) {
   switch (field.kind) {
@@ -213,7 +167,7 @@ function renderProviderField(field: MemoryProviderField, value: any, onChange: (
           value={String(value ?? '')}
           onChange={onChange}
           placeholder="请选择"
-          className={`${FIELD_INPUT_CLS} w-56`}
+          className="w-56 ui-text text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 focus:outline-none focus:border-primary/40 transition-colors"
           options={(field.options || []).map((o) => ({
             label: o.label,
             value: o.value,
@@ -367,20 +321,20 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
   }
 
   return (
-    <div className="py-2.5 px-1 -mx-1 space-y-3">
+    <div className="py-3 px-4 space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0 text-sm text-foreground">
+        <div className="min-w-0 ui-text text-foreground">
           配置 <span className="font-mono">{label}</span>
-          <span className="ml-1 text-xs text-muted-foreground/60">（写入后新建会话生效）</span>
+          <span className="ml-1 ui-text text-muted-foreground/60">（写入后新建会话生效）</span>
         </div>
         {state === 'ready' && (
           <div className="flex items-center gap-2 shrink-0">
             {err
-              ? <span className="text-[11px] text-red-400">{err}</span>
+              ? <span className="ui-text text-red-400">{err}</span>
               : saving
-                ? <span className="text-[11px] text-muted-foreground/60">保存中…</span>
+                ? <span className="ui-text text-muted-foreground/60">保存中…</span>
                 : savedTick > 0
-                  ? <span className="text-[11px] text-muted-foreground/60">已保存</span>
+                  ? <span className="ui-text text-muted-foreground/60">已保存</span>
                   : null}
             <button
               type="button"
@@ -395,15 +349,15 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
       </div>
 
       {state === 'loading' && (
-        <div className="text-xs text-muted-foreground/60">读取 Provider 配置…</div>
+        <div className="ui-text text-muted-foreground/60">读取 Provider 配置…</div>
       )}
 
       {state === 'error' && (
-        <div className="text-xs text-red-400">读取配置失败：{err}</div>
+        <div className="ui-text text-red-400">读取配置失败：{err}</div>
       )}
 
       {state === 'not-installed' && (
-        <div className="text-xs text-muted-foreground/70 leading-relaxed">
+        <div className="ui-text text-muted-foreground/70 leading-relaxed">
           未检测到 <span className="text-foreground">{label}</span> 的已安装插件，暂无可配置项。
           点击「运行」自动从官方仓库安装该 Provider 的插件（命令可编辑以换源）：
           <div className="mt-2 flex items-center gap-2">
@@ -414,7 +368,7 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
               onFocus={(e) => e.target.select()}
               spellCheck={false}
               disabled={installing}
-              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-muted/50 font-mono text-xs text-foreground/80 border border-border focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60 transition-colors"
+              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-muted/50 font-mono ui-text text-foreground/80 text-center border border-border focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60 transition-colors"
             />
             <button
               type="button"
@@ -425,7 +379,7 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
               {installing ? '安装中…' : '运行'}
             </button>
           </div>
-          <div className="mt-1 text-[11px] text-muted-foreground/50">
+          <div className="mt-1 ui-text text-muted-foreground/50">
             安装到 <code className="font-mono">~/.local/share/hermes/plugins/</code>，完成后本页会自动刷新并显示配置项。
           </div>
           {installOutput && (
@@ -441,17 +395,17 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
           {fields.map((field) => (
             <div key={field.key} className="flex items-start gap-3">
               <div className="min-w-0 flex-1">
-                <div className="text-xs text-foreground/90">
+                <div className="ui-text text-foreground/90">
                   {field.label}
                   {field.required && <span className="ml-1 text-red-400">*</span>}
                   {field.kind === 'secret' && (
-                    <span className={`ml-2 text-[10px] ${secretSet[field.key] ? 'text-emerald-500' : 'text-amber-500'}`}>
+                    <span className={`ml-2 ui-text ${secretSet[field.key] ? 'text-emerald-500' : 'text-amber-500'}`}>
                       {secretSet[field.key] ? '已设置' : '未设置'}
                     </span>
                   )}
                 </div>
                 {field.description && (
-                  <div className="text-[11px] text-muted-foreground/60 mt-0.5">{field.description}</div>
+                  <div className="ui-text text-muted-foreground/60 mt-0.5">{field.description}</div>
                 )}
               </div>
               <div className="shrink-0 pt-0.5">
@@ -538,17 +492,23 @@ export function MemorySettings() {
         : null
 
   return (
-    <div className="">
+    <div className="space-y-4">
       <div className="flex items-center justify-between gap-3 mb-4">
-        <h3 className="text-lg font-semibold text-foreground">记忆</h3>
+        <h3 className="ui-title font-semibold text-foreground">记忆</h3>
         {status}
       </div>
-      <div className="divide-y divide-border/25">
+      <div className="rounded-xl border border-border bg-card shadow-sm overflow-hidden divide-y divide-border/30">
         <Row label="持久记忆" hint="把对话要点写入 MEMORY.md，跨会话保留">
           <Toggle enabled={cfg.memoryEnabled} onToggle={() => update({ memoryEnabled: !cfg.memoryEnabled })} />
         </Row>
         <Row label="用户画像" hint="自动维护 USER.md 中的长期偏好">
           <Toggle enabled={cfg.userProfileEnabled} onToggle={() => update({ userProfileEnabled: !cfg.userProfileEnabled })} />
+        </Row>
+        <Row label="记忆预算" hint="MEMORY.md 的字符上限，超出会触发裁剪" dim={memOff}>
+          <NumberField value={cfg.memoryCharLimit} min={200} max={40000} suffix="字符" disabled={memOff} onCommit={(v) => update({ memoryCharLimit: v })} />
+        </Row>
+        <Row label="画像预算" hint="USER.md 的字符上限" dim={memOff}>
+          <NumberField value={cfg.userCharLimit} min={200} max={40000} suffix="字符" disabled={memOff} onCommit={(v) => update({ userCharLimit: v })} />
         </Row>
         <Row
           label="外置记忆 Provider"
@@ -569,7 +529,7 @@ export function MemorySettings() {
             value={cfg.provider}
             onChange={(v) => update({ provider: v })}
             placeholder="无"
-            className="w-36 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+            className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 focus:outline-none focus:border-primary/40 transition-colors"
             options={PROVIDERS.map((t) => ({
               label: `${t.label}${t.local ? '（本地）' : ''}`,
               value: t.id,
@@ -577,15 +537,10 @@ export function MemorySettings() {
           />
         </Row>
         {cfg.provider && <ProviderConfigPanel provider={cfg.provider} />}
-        <Row label="记忆预算" hint="MEMORY.md 的字符上限，超出会触发裁剪" dim={memOff}>
-          <NumberField value={cfg.memoryCharLimit} min={200} max={40000} suffix="字符" disabled={memOff} onCommit={(v) => update({ memoryCharLimit: v })} />
-        </Row>
-        <Row label="画像预算" hint="USER.md 的字符上限" dim={memOff}>
-          <NumberField value={cfg.userCharLimit} min={200} max={40000} suffix="字符" disabled={memOff} onCommit={(v) => update({ userCharLimit: v })} />
-        </Row>
       </div>
 
-      <SettingGroup title="上下文压缩">
+      <h3 className="ui-title font-semibold text-foreground mb-4">上下文管理</h3>
+      <div className="rounded-xl border border-border bg-card shadow-sm overflow-hidden divide-y divide-border/30">
         <Row label="压缩阈值" hint="上下文占用达到该比例时自动压缩">
           <NumberField value={cfg.thresholdPct} min={10} max={95} suffix="%" onCommit={(v) => update({ thresholdPct: v })} />
         </Row>
@@ -595,7 +550,7 @@ export function MemorySettings() {
         <Row label="保留最近消息" hint="压缩时末尾这些消息原样保留，不被摘要">
           <NumberField value={cfg.protectLastN} min={0} max={200} suffix="条" onCommit={(v) => update({ protectLastN: v })} />
         </Row>
-      </SettingGroup>
+      </div>
 
     </div>
   )

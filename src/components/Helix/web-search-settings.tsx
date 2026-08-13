@@ -66,7 +66,7 @@ const SEARCH_PROVIDERS: SearchProvider[] = [
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <div className={`flex items-center gap-2 mb-4 ${className || ''}`}>
-      <h3 className="text-lg font-semibold text-foreground">{children}</h3>
+      <h3 className="ui-text text-foreground">{children}</h3>
     </div>
   )
 }
@@ -210,15 +210,15 @@ export function WebSearchSettings() {
           暂无后端搜索插件，请在 hermes 中安装 plugins/web/&lt;name&gt; 后再来此处配置。
         </p>
       ) : (
-        <div className="space-y-3">
+        <div className="border border-border/50 rounded-xl overflow-hidden divide-y divide-border/50">
           {displayProviders.map((provider) => {
             const isSelected = activeProviders.includes(provider.id)
             const known = SEARCH_PROVIDERS.some((p) => p.pluginName === provider.pluginName)
             return (
-              <div key={provider.id} className="border border-border/50 rounded-xl overflow-hidden">
+              <div key={provider.id}>
                 <div className="flex items-center justify-between p-4 hover:bg-accent/30 transition-colors">
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-foreground">{provider.name}</p>
+                    <p className="ui-text font-medium text-foreground">{provider.name}</p>
                     <p className="text-xs text-muted-foreground/60 mt-0.5">{provider.description}</p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0 ml-4">
@@ -241,7 +241,7 @@ export function WebSearchSettings() {
                   </div>
                 </div>
                 {expandedId === provider.id && (
-                  <div className="px-4 pb-4 pt-2 border-t border-border/30 bg-muted/20 space-y-3">
+                  <div className="px-4 pb-4 pt-2 bg-muted/20 space-y-3">
                     {provider.freeQuota && (
                       <p className="text-xs text-muted-foreground">免费额度: {provider.freeQuota}</p>
                     )}
@@ -265,7 +265,7 @@ export function WebSearchSettings() {
                           value={apiKeys[provider.envKey] || ''}
                           onChange={(e) => setApiKeys({ ...apiKeys, [provider.envKey]: e.target.value })}
                           placeholder={`输入 ${provider.envKey}`}
-                          className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring"
+                          className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring"
                         />
                       </div>
                     ) : (

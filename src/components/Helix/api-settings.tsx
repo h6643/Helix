@@ -260,9 +260,17 @@ function ChannelsSettings() {
     setChannels(prev => [...prev, { id, name: 'New Channel', description: '', enabled: false, config: {}, envKeys: [] }])
   }
 
-  const removeChannel = (id: string) => {
-    setChannels(prev => prev.filter(ch => ch.id !== id))
+  const removeChannel = async (id: string) => {
+    const remaining = channels.filter(ch => ch.id !== id)
+    setChannels(remaining)
     if (expandedChannel === id) setExpandedChannel(null)
+    // 立即持久化删除——否则重进设置页会从 channels.json 读回旧数据（"过一会又回来"）。
+    try {
+      await persistChannels(remaining)
+      showToast({ type: 'success', title: '渠道已删除' })
+    } catch {
+      showToast({ type: 'error', title: '删除保存失败' })
+    }
   }
 
   const updateChannelMeta = (id: string, patch: Partial<Pick<ChannelConfig, 'name' | 'description'>>) => {
@@ -297,11 +305,13 @@ function ChannelsSettings() {
     }))
   }
 
-  const saveChannels = async () => {
+  // 持久化给定的渠道列表（删除/添加/编辑后即时调用，避免重进设置页时从
+  // channels.json 读回旧数据——"删除过一会又回来"的根因）。
+  const persistChannels = async (list: ChannelConfig[]) => {
     setSavingChannels(true)
     try {
       // Ensure envKeys stays in sync with the actual config keys before persisting.
-      const payload = channels.map(ch => ({ ...ch, envKeys: Object.keys(ch.config) }))
+      const payload = list.map(ch => ({ ...ch, envKeys: Object.keys(ch.config) }))
       if (isElectron()) {
         const api = (window as any).electron?.channels
         if (api?.save) {
@@ -311,19 +321,23 @@ function ChannelsSettings() {
         // Fallback to localStorage
         localStorage.setItem('helix-channels', JSON.stringify({ channels: payload }))
       }
-      showToast({ type: 'success', title: '渠道配置已保存' })
-    } catch {
-      showToast({ type: 'error', title: '保存失败' })
     } finally {
       setSavingChannels(false)
     }
+  }
+
+  const saveChannels = async () => {
+    await persistChannels(channels)
+    showToast({ type: 'success', title: '渠道配置已保存' })
   }
 
   return (
     <div className="max-w-3xl space-y-4">
       <div className="flex items-center justify-between">
         <SectionTitle>Channels</SectionTitle>
-        <Button size="sm" variant="outline" onClick={addChannel}>+ 添加渠道</Button>
+        <button onClick={addChannel} className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 transition-colors">
+          + 添加渠道
+        </button>
       </div>
       <div className="space-y-3">
         {channels.map(channel => (
@@ -357,7 +371,7 @@ function ChannelsSettings() {
                     <input
                       value={channel.name}
                       onChange={e => updateChannelMeta(channel.id, { name: e.target.value })}
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                   </div>
                   <div>
@@ -365,7 +379,7 @@ function ChannelsSettings() {
                     <input
                       value={channel.description}
                       onChange={e => updateChannelMeta(channel.id, { description: e.target.value })}
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                   </div>
                 </div>
@@ -376,7 +390,7 @@ function ChannelsSettings() {
                       <input
                         value={key}
                         onChange={e => renameConfigKey(channel.id, key, e.target.value)}
-                        className="w-2/5 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                        className="w-2/5 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                       />
                       <input
                         type={key.toLowerCase().includes('secret') || key.toLowerCase().includes('token') || key.toLowerCase().includes('password') ? 'password' : 'text'}
@@ -445,8 +459,6 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     personality, setPersonality,
     // Agent settings
     autoCompactContext, setAutoCompactContext,
-    // Notification settings
-    desktopNotifications, setDesktopNotifications,
   } = useHelixStore()
 
   const settingsPage = useHelixStore(s => s.settingsPage)
@@ -1378,8 +1390,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         value={localConfig.provider}
                         onChange={handleSelectProvider}
                         placeholder="请选择 Provider"
-                        popupWidth={300}
-                        className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+                        className="w-full ui-text text-foreground"
                         options={[
                           ...ALL_PROVIDERS.map(p => ({ label: `${p.name} (${p.id})`, value: p.id })),
                           { label: '＋ 自定义', value: CUSTOM_PROVIDER_ID },
@@ -1394,7 +1405,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                           onFocus={() => setCustomInputFocused(true)}
                           onBlur={handleBlurCustomInput}
                           placeholder="输入 Provider 名称"
-                          className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                          className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                           autoFocus
                         />
                         <button
@@ -1417,7 +1428,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                       value={localConfig.baseUrl}
                       onChange={(e) => setLocalConfig(prev => ({ ...prev, baseUrl: e.target.value }))}
                       placeholder="https://api.openai.com/v1"
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                     />
                   </div>
 
@@ -1430,7 +1441,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         value={localConfig.apiKey}
                         onChange={(e) => setLocalConfig(prev => ({ ...prev, apiKey: e.target.value }))}
                         placeholder="sk-..."
-                        className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                       />
                       <button
                         type="button"
@@ -1460,7 +1471,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         <button
                           type="button"
                           onClick={() => setShowModelDropdown(!showModelDropdown)}
-                          className="w-full flex items-center justify-between px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground hover:bg-accent/50 transition-colors font-mono"
+                          className="w-full flex items-center justify-between ui-text text-foreground hover:text-foreground/80 transition-colors"
                         >
                           <span>{localConfig.model || '选择模型'}</span>
                           <svg className={`size-4 text-muted-foreground transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -1490,7 +1501,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         value={localConfig.model}
                         onChange={(e) => setLocalConfig(prev => ({ ...prev, model: e.target.value }))}
                         placeholder="gpt-4o-mini"
-                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                       />
                     )}
                   </div>
@@ -1693,9 +1704,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               </div>
             </SettingRow>
 
-            <div className="pt-4 border-t border-border/30">
-              <WebSearchSettings />
-            </div>
+            <WebSearchSettings />
           </div>
         )
 

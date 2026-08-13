@@ -211,8 +211,8 @@ export function KanbanPanel(_props: KanbanPanelProps) {
     }
   }
 
-  const handleDrop = (toStatus: KanbanStatus) => {
-    const id = dragId
+  const handleDrop = (e: React.DragEvent, toStatus: KanbanStatus) => {
+    const id = e.dataTransfer.getData('text/plain') || dragId
     setOverCol(null)
     setDragId(null)
     if (!id) return
@@ -221,8 +221,8 @@ export function KanbanPanel(_props: KanbanPanelProps) {
     void moveTask(task, toStatus)
   }
 
-  const handleTrashDrop = async () => {
-    const id = dragId
+  const handleTrashDrop = async (e: React.DragEvent) => {
+    const id = e.dataTransfer.getData('text/plain') || dragId
     setOverTrash(false)
     setOverCol(null)
     setDragId(null)
@@ -374,7 +374,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
         key={status + (label ?? '')}
         onDragOver={e => { if (droppable) { e.preventDefault(); if (overCol !== status) setOverCol(status) } }}
         onDragLeave={() => { if (overCol === status) setOverCol(null) }}
-        onDrop={() => { if (droppable) handleDrop(status) }}
+        onDrop={(e) => { if (droppable) handleDrop(e, status) }}
         className={cn(
           'w-64 shrink-0 max-h-full flex flex-col rounded-xl border bg-background transition-colors',
           isOver ? 'border-primary/60 bg-primary/5' : 'border-border/50',
@@ -396,7 +396,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
               <div
                 key={task.id}
                 draggable
-                onDragStart={e => { setDragId(task.id); e.dataTransfer.effectAllowed = 'move' }}
+                onDragStart={e => { setDragId(task.id); e.dataTransfer.setData('text/plain', task.id); e.dataTransfer.effectAllowed = 'move' }}
                 onDragEnd={() => { setDragId(null); setOverCol(null); setOverTrash(false) }}
                 onClick={() => setDetailId(task.id)}
                 className={cn(
@@ -448,7 +448,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
         <div
           onDragOver={e => { e.preventDefault(); if (overCol !== topStatus) setOverCol(topStatus) }}
           onDragLeave={() => { if (overCol === topStatus) setOverCol(null) }}
-          onDrop={() => handleDrop(topStatus)}
+          onDrop={(e) => handleDrop(e, topStatus)}
           className={cn('flex-1 flex flex-col transition-colors min-h-0', isTopOver && 'bg-primary/5')}
         >
           <div className={cn('shrink-0 h-0.5 rounded-t-lg', topColors.bar)} />
@@ -471,7 +471,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
         <div
           onDragOver={e => { e.preventDefault(); if (overCol !== bottomStatus) setOverCol(bottomStatus) }}
           onDragLeave={() => { if (overCol === bottomStatus) setOverCol(null) }}
-          onDrop={() => handleDrop(bottomStatus)}
+          onDrop={(e) => handleDrop(e, bottomStatus)}
           className={cn('flex-1 flex flex-col transition-colors min-h-0', isBottomOver && 'bg-primary/5')}
         >
           <div className={cn('shrink-0 h-0.5', bottomColors.bar)} />
@@ -497,7 +497,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
     <div
       key={task.id}
       draggable
-      onDragStart={e => { setDragId(task.id); e.dataTransfer.effectAllowed = 'move' }}
+      onDragStart={e => { setDragId(task.id); e.dataTransfer.setData('text/plain', task.id); e.dataTransfer.effectAllowed = 'move' }}
       onDragEnd={() => { setDragId(null); setOverCol(null); setOverTrash(false) }}
       onClick={() => setDetailId(task.id)}
       className={cn(
@@ -514,7 +514,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
     <div className="h-full w-full flex flex-col bg-background relative select-none">
       {/* Header */}
       <div className="shrink-0 flex items-center gap-3 px-6 py-4 border-b border-border/40">
-        <h2 className="text-lg font-semibold text-foreground">看板</h2>
+        <h2 className="text-lg font-semibold text-foreground whitespace-nowrap shrink-0">看板</h2>
 
         <div className="flex items-center gap-2 ml-2">
           <div className="relative">
@@ -556,7 +556,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
         <div className="flex items-center gap-1 ml-auto shrink-0">
           {/* Trash zone */}
           <div
-            onDragOver={e => { if (dragId) { e.preventDefault(); setOverTrash(true) } }}
+            onDragOver={e => { e.preventDefault(); if (dragId) setOverTrash(true) }}
             onDragLeave={() => setOverTrash(false)}
             onDrop={handleTrashDrop}
             className={cn(

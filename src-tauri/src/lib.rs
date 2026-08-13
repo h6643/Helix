@@ -17,6 +17,7 @@ mod kernel;
 mod memory;
 mod paths;
 mod profile;
+mod proxy;
 mod scheduled_tasks;
 mod security;
 mod state;
@@ -55,6 +56,23 @@ pub fn run() {
             // emit `hermes:event` without threading a handle through every call.
             let _ = APP_HANDLE.set(app.handle().clone());
 
+            // Main window is created manually here (config has "create": false)
+            // so we can attach the HTTP proxy to the renderer at creation time.
+            // proxy_url is cross-platform: WebKitGTK (Linux) / WebView2
+            // --proxy-server (Windows) / WKWebView (macOS). Empty → no override
+            // (Linux explicitly sets NoProxy below in apply_webview_proxy).
+            let proxy_url = crate::proxy::load_proxy_url();
+            for window_config in app.config().app.windows.iter() {
+                let mut builder =
+                    tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?;
+                if !proxy_url.is_empty() {
+                    if let Ok(url) = tauri::Url::parse(&proxy_url) {
+                        builder = builder.proxy_url(url);
+                    }
+                }
+                builder.build()?;
+            }
+
             // Restore the persisted work dir (mirror getPersistedWorkDir).
             if let Some(dir) = crate::app::persisted_work_dir() {
                 *app_state.work_dir.write().unwrap() = dir;
@@ -69,6 +87,9 @@ pub fn run() {
             if let Err(e) = bootstrap::ensure_hermes_agent(app.handle()) {
                 eprintln!("[Helix] bootstrap failed: {e}");
             }
+            // Apply the HTTP proxy to the renderer (WebKitGTK default context)
+            // BEFORE the gateway spawns so the webview fetches already honor it.
+            crate::proxy::apply_webview_proxy();
             if let Err(e) = gateway::spawn_gateway(&app_state) {
                 eprintln!("[Helix] gateway failed to start: {e}");
             }
@@ -100,12 +121,14 @@ pub fn run() {
                         }
                         "show" => {
                             if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.unminimize();
                                 let _ = window.show();
                                 let _ = window.set_focus();
                             }
                         }
                         "new" => {
                             if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.unminimize();
                                 let _ = window.show();
                                 let _ = window.set_focus();
                                 let _ = app.emit("tray:new-conversation", ());
@@ -113,6 +136,7 @@ pub fn run() {
                         }
                         "recent" => {
                             if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.unminimize();
                                 let _ = window.show();
                                 let _ = window.set_focus();
                                 let _ = app.emit("tray:show-recent", ());
@@ -245,6 +269,11 @@ pub fn run() {
             app::sync_work_dir,
             app::get_hermes_version,
             app::set_work_dir,
+            app::get_data_root,
+            app::set_data_root,
+            // proxy
+            proxy::proxy_get,
+            proxy::proxy_set,
             app::restart_gateway,
             app::quit,
             // profile

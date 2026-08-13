@@ -3,8 +3,14 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 
-// Obsidian 风格设置界面基础组件：平铺设置行 + 分组标题 + 开关。
-// 无卡片、无折叠，设置项以行列出，控件右对齐。
+// 设置界面基础组件：每个 SettingGroup 渲染为一张卡片，
+// 卡片内设置项以分隔线区分，控件右对齐。
+
+// 统一排版令牌：所有卡片的标题 / 正文 / 说明共用同一套字号与颜色，
+// 避免各处单独写 ui-text / text-xs 导致大小不一致。
+const CARD_TITLE = 'ui-text text-foreground'                // 卡片标题（字号跟随界面字号，不加粗）
+const BODY = 'ui-text text-foreground'                        // 正文（行标签，字号跟随界面字号）
+const DESC = 'ui-text text-muted-foreground/60'              // 说明（行提示 / 描述，字号跟随界面字号）
 
 export const Toggle = ({ enabled, onToggle }: { enabled: boolean; onToggle: () => void }) => (
   <button
@@ -22,34 +28,84 @@ export const Toggle = ({ enabled, onToggle }: { enabled: boolean; onToggle: () =
 )
 
 export const SettingRow = ({ label, hint, labelClassName = '', children }: { label: string; hint?: string; labelClassName?: string; children: React.ReactNode }) => (
-  <div className="flex items-center gap-3 py-2.5 px-1 -mx-1 rounded-md hover:bg-muted/30 transition-colors">
-    <span className={`text-sm text-foreground min-w-0 flex-1 ${labelClassName}`}>
+  <div className="flex items-center gap-3 py-3 px-4 hover:bg-muted/40 transition-colors">
+    <span className={`${BODY} min-w-0 flex-1 ${labelClassName}`}>
       {label}
-      {hint && <span className="block text-[11px] text-muted-foreground/60 mt-0.5">{hint}</span>}
+      {hint && <span className={`block ${DESC} mt-0.5`}>{hint}</span>}
     </span>
     <div className="shrink-0">{children}</div>
   </div>
 )
 
-export const SettingGroup = ({ title, action, children, className = '', divider = 'bottom' }: { title?: string; action?: React.ReactNode; children?: React.ReactNode; className?: string; divider?: 'top' | 'bottom' }) => (
-  <div className={`pt-5 first:pt-0 ${className}`}>
-    {(title || action) && (
-      <div className={`mb-1 px-0.5 flex items-center justify-between gap-2 ${
-        divider === 'top'
-          ? 'pt-2 border-t border-border/25'
-          : 'pb-2 border-b border-border/25'
-      }`}>
-        <h4 className="text-base font-semibold text-foreground">{title}</h4>
-        {action}
+export const SettingGroup = ({ title, action, description, children, className = '' }: { title?: string; action?: React.ReactNode; description?: React.ReactNode; children?: React.ReactNode; className?: string }) => (
+  <div className={`rounded-xl border border-border bg-card shadow-sm overflow-hidden ${className}`}>
+    {(title || action || description) && (
+      <div className={`px-4 py-3 ${children ? 'border-b border-border/30' : ''}`}>
+        {(title || action) && (
+          <div className="flex items-center justify-between gap-2">
+            <h4 className={CARD_TITLE}>{title}</h4>
+            {action}
+          </div>
+        )}
+        {description && <div className="mt-0.5 ui-text text-muted-foreground/60">{description}</div>}
       </div>
     )}
-    {children && <div className="divide-y divide-border/25">{children}</div>}
+    {children && <div className="divide-y divide-border/30">{children}</div>}
   </div>
 )
 
 export const SectionHeading = ({ children }: { children: React.ReactNode }) => (
-  <h3 className="text-lg font-semibold text-foreground tracking-tight mb-5">{children}</h3>
+  <h3 className="ui-title font-semibold text-foreground tracking-tight mb-5">{children}</h3>
 )
+
+/**
+ * 数字输入：内部维护字符串草稿，只在 blur / Enter 时提交，
+ * 避免每敲一个字符就往后端 PUT 一次（也避免清空输入框瞬间被回填成 0）。
+ * 与「记忆预算」等数字输入保持同一套样式（淡边框 + 淡背景）。
+ */
+export function NumberField({
+  value,
+  onCommit,
+  min,
+  max,
+  suffix,
+  disabled,
+  small,
+}: {
+  value: number
+  onCommit: (v: number) => void
+  min: number
+  max: number
+  suffix?: string
+  disabled?: boolean
+  small?: boolean
+}) {
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => { setDraft(String(value)) }, [value])
+
+  const commit = () => {
+    const n = Number(draft)
+    if (!Number.isFinite(n)) { setDraft(String(value)); return }
+    const clamped = Math.min(max, Math.max(min, Math.round(n)))
+    setDraft(String(clamped))
+    if (clamped !== value) onCommit(clamped)
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        type="number"
+        value={draft}
+        disabled={disabled}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+        className={`w-24 px-2 py-1 rounded-lg bg-muted/50 ${small ? 'ui-text-sm2' : 'ui-text'} text-foreground text-center border border-border focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed`}
+      />
+      {suffix && <span className="text-xs text-muted-foreground/60 w-8">{suffix}</span>}
+    </div>
+  )
+}
 
 export interface PopupSelectOption {
   label: string
@@ -83,7 +139,7 @@ export function PopupSelect({
   disabled = false,
 }: PopupSelectProps) {
   const [open, setOpen] = useState(false)
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
 
@@ -112,13 +168,14 @@ export function PopupSelect({
     }
   }, [open])
 
-  // 锚定在触发器下方、右对齐；超出视口则翻转到上方。
+  // 锚定在触发器下方、右对齐；宽度与触发器一致。
   useEffect(() => {
     if (!open) return
     const btn = btnRef.current
     if (!btn) return
     const r = btn.getBoundingClientRect()
-    setPos({ left: r.right - popupWidth, top: r.bottom + 4 })
+    const w = r.width || popupWidth
+    setPos({ left: r.right - w, top: r.bottom + 4, width: w })
   }, [open, popupWidth])
 
   useEffect(() => {
@@ -150,8 +207,8 @@ export function PopupSelect({
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed z-50 bg-popover border border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto backdrop-blur-sm"
-          style={{ left: pos.left, top: pos.top, width: popupWidth }}
+          className="fixed z-50 bg-popover border-2 border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto backdrop-blur-sm"
+          style={{ left: pos.left, top: pos.top, width: pos.width }}
         >
           {options.map((o) => {
             const selected = String(o.value) === value
@@ -160,7 +217,7 @@ export function PopupSelect({
                 key={String(o.value)}
                 type="button"
                 onClick={() => { onChange(String(o.value)); setOpen(false) }}
-                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors text-left ${
+                className={`w-full flex items-center gap-2 px-3 py-1.5 ui-text-sm2 transition-colors text-left ${
                   selected
                     ? 'bg-accent text-accent-foreground'
                     : 'text-foreground hover:bg-accent/50'

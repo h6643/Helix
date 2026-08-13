@@ -10,7 +10,34 @@ use std::path::{Path, PathBuf};
 /// On Windows, uses %LOCALAPPDATA%/hermes (the location the official
 /// Hermes installer and managed runtime use). Falls back to ~/.hermes/
 /// only when a legacy install already exists there.
+///
+/// The location can be overridden (Settings → 数据存储路径) via either an
+/// explicit `HERMES_DATA_DIR` env var or a pointer file at
+/// `<config_dir>/helix/data_root`. The pointer file intentionally lives
+/// OUTSIDE the data dir so it does not move when the data dir is relocated.
 pub fn hermes_data_dir() -> PathBuf {
+    // 1) Explicit env override (dev / test / CI).
+    if let Ok(env) = std::env::var("HERMES_DATA_DIR") {
+        let p = env.trim();
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    // 2) Persisted override pointer (set via Settings → 数据存储路径).
+    if let Some(ptr) = data_root_pointer_path() {
+        if let Ok(raw) = std::fs::read_to_string(&ptr) {
+            let p = raw.trim();
+            if !p.is_empty() {
+                return PathBuf::from(p);
+            }
+        }
+    }
+    // 3) Default.
+    default_hermes_data_dir()
+}
+
+/// The default Hermes data directory (no override applied).
+pub fn default_hermes_data_dir() -> PathBuf {
     #[cfg(windows)]
     {
         // %LOCALAPPDATA%/hermes is the canonical Windows location used by the
@@ -34,6 +61,14 @@ pub fn hermes_data_dir() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".hermes")
     }
+}
+
+/// Pointer file (outside the data dir) that overrides `hermes_data_dir()`.
+/// Lives in the platform config dir (e.g. `~/.config/helix/data_root` on Unix)
+/// so it survives relocation of the data dir itself.
+pub fn data_root_pointer_path() -> Option<PathBuf> {
+    let base = dirs::config_dir()?;
+    Some(base.join("helix").join("data_root"))
 }
 
 /// The bundled / managed Hermes agent checkout.

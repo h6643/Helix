@@ -1,6 +1,5 @@
 import { getServeHermesFacade } from '@/lib/serve-gateway'
 import { installTauriBridge, isTauri } from '@/lib/tauri-bridge'
-import { useHelixStore } from '@/stores/helix-store'
 import type { ElectronAPI } from '@/types/electron'
 
 /**
@@ -284,6 +283,38 @@ export const electronApp = {
     }
     throw new Error('App not available in browser mode')
   },
+
+  async getDataRoot(): Promise<{ dataRoot: string; dataRootDefault: string; dataRootCustom: boolean }> {
+    const api = getElectronAPI()
+    if (api) {
+      return api.app.getDataRoot()
+    }
+    return { dataRoot: '', dataRootDefault: '', dataRootCustom: false }
+  },
+
+  async setDataRoot(path: string): Promise<{ success: boolean; dataRoot: string; dataRootDefault: string; dataRootCustom: boolean; copied: boolean; bytes?: number }> {
+    const api = getElectronAPI()
+    if (api) {
+      return api.app.setDataRoot(path)
+    }
+    throw new Error('App not available in browser mode')
+  },
+
+  async proxyGet(): Promise<{ url: string }> {
+    const api = getElectronAPI()
+    if (api) {
+      return api.app.proxyGet()
+    }
+    return { url: '' }
+  },
+
+  async proxySet(url: string): Promise<{ success: boolean; url: string }> {
+    const api = getElectronAPI()
+    if (api) {
+      return api.app.proxySet(url)
+    }
+    throw new Error('App not available in browser mode')
+  },
 }
 
 /**
@@ -481,49 +512,6 @@ export const electronGit = {
     const api = getElectronAPI()
     if (api?.git) return api.git.fetch(opts)
     return { ok: false, error: 'Git not available in browser mode' }
-  },
-}
-
-/**
- * Native (OS-level) notifications.
- *
- * In Electron the renderer can raise a real OS notification through the HTML5
- * Notification API — no main-process wiring required. When that is unavailable
- * (non-Electron / denied permission) we fall back to the in-app toast so the
- * call site never has to branch.
- */
-export const electronNotification = {
-  get permission(): NotificationPermission {
-    if (typeof Notification !== 'undefined') return Notification.permission
-    return 'denied'
-  },
-
-  async requestPermission(): Promise<NotificationPermission> {
-    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-      try {
-        return await Notification.requestPermission()
-      } catch {
-        return 'denied'
-      }
-    }
-    return this.permission
-  },
-
-  notify(title: string, body?: string): void {
-    try {
-      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-        new Notification(title, { body })
-        return
-      }
-    } catch {
-      /* fall through to toast */
-    }
-    // Fallback: keep the user informed in-app.
-    try {
-      useHelixStore.getState().showToast({ type: 'info', title, description: body })
-    } catch {
-      /* store unavailable — nothing else we can do */
-    }
   },
 }
 

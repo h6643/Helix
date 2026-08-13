@@ -2344,7 +2344,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('reasoningEffort', state.reasoningEffort),
         persistence.saveSetting('personality', state.personality),
         persistence.saveSetting('fastMode', state.fastMode),
-        persistence.saveSetting('desktopNotifications', state.desktopNotifications),
+        persistence.saveSetting('autoArchiveOldTasks', state.autoArchiveOldTasks),
+        persistence.saveSetting('archiveRetentionHours', state.archiveRetentionHours),
+        persistence.saveSetting('enhancedFindGrep', state.enhancedFindGrep),
+        persistence.saveSetting('terminalShell', state.terminalShell),
         persistence.saveSetting('approvalMode', state.approvalMode),
         persistence.saveSetting('startupGreeting', state.startupGreeting),
         persistence.saveSetting('editorTheme', state.editorTheme),
@@ -2387,7 +2390,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, approvalMode, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, autoArchiveOldTasks, archiveRetentionHours, enhancedFindGrep, terminalShell, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, approvalMode, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
         safeLoad(persistence.loadMemories(), 'memories'),
         safeLoad(persistence.loadTasks(), 'tasks'),
         safeLoad(persistence.loadCheckpoints(), 'checkpoints'),
@@ -2425,7 +2428,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(persistence.loadSetting<string>('reasoningEffort'), 'reasoningEffort'),
         safeLoad(persistence.loadSetting<string>('personality'), 'personality'),
         safeLoad(persistence.loadSetting<boolean>('fastMode'), 'fastMode'),
-        safeLoad(persistence.loadSetting<boolean>('desktopNotifications'), 'desktopNotifications'),
+        safeLoad(persistence.loadSetting<boolean>('autoArchiveOldTasks'), 'autoArchiveOldTasks'),
+        safeLoad(persistence.loadSetting<number>('archiveRetentionHours'), 'archiveRetentionHours'),
+        safeLoad(persistence.loadSetting<boolean>('enhancedFindGrep'), 'enhancedFindGrep'),
+        safeLoad(persistence.loadSetting<'auto' | 'cmd'>('terminalShell'), 'terminalShell'),
         safeLoad(persistence.loadSetting<string>('editorTheme'), 'editorTheme'),
         safeLoad(persistence.loadSetting<boolean>('gitAutoCommit'), 'gitAutoCommit'),
         safeLoad(persistence.loadSetting<boolean>('gitAutoPush'), 'gitAutoPush'),
@@ -2917,7 +2923,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         reasoningEffort: (reasoningEffort as any) || get().reasoningEffort,
         personality: personality || get().personality,
         fastMode: fastMode ?? get().fastMode,
-        desktopNotifications: desktopNotifications ?? get().desktopNotifications,
+        autoArchiveOldTasks: autoArchiveOldTasks ?? get().autoArchiveOldTasks,
+        archiveRetentionHours: archiveRetentionHours ?? get().archiveRetentionHours,
+        enhancedFindGrep: enhancedFindGrep ?? get().enhancedFindGrep,
+        terminalShell: (terminalShell === 'cmd' ? 'cmd' : 'auto'),
         availableModels: availableModels || [],
         providerModels: cleanedProviderModels,
         editorTheme: (editorTheme as 'vs-dark' | 'light' | null | undefined) ?? get().editorTheme,

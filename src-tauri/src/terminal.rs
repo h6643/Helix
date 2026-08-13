@@ -332,31 +332,266 @@ pub fn terminal_kill() -> Result<Value, String> {
     Ok(json!({ "ok": true }))
 }
 
-#[cfg(not(unix))]
+// ===========================================================================
+// Windows (ConPTY) backend — mirrors the Unix PTY backend above.
+//
+// On Windows there is no POSIX PTY, so the interactive terminal is powered by
+// the Windows Pseudo Console (ConPTY) API. The flow:
+//   1. create two anon pipes (in/out) shared with the pseudo console,
+//   2. CreatePseudoConsole(COORD, inRead, outWrite) -> HPCON,
+//   3. spawn cmd.exe attached to the pseudo console,
+//   4. read the out-pipe in a thread and push bytes as `terminal:data`.
+// Handles are stored directly; the session struct is Send+Sync so it can live
+// in a global Mutex.
+// ===========================================================================
+
+#[cfg(windows)]
+use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::thread;
+#[cfg(windows)]
+use tauri::Emitter;
+#[cfg(windows)]
+use windows::core::{PCWSTR, PWSTR};
+#[cfg(windows)]
+use windows::Win32::Foundation::{CloseHandle, FALSE, HANDLE};
+#[cfg(windows)]
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+#[cfg(windows)]
+use windows::Win32::System::Console::{
+    ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole, COORD,
+};
+#[cfg(windows)]
+use windows::Win32::System::IO::{ReadFile, WriteFile};
+#[cfg(windows)]
+use windows::Win32::System::Pipes::CreatePipe;
+#[cfg(windows)]
+use windows::Win32::System::Threading::{
+    CreateProcessW, InitializeStartupInfoAttachedToPseudoConsole, PROCESS_INFORMATION,
+    STARTUPINFO, STARTUPINFOEXW, TerminateProcess, CREATE_NO_WINDOW,
+    EXTENDED_STARTUPINFO_PRESENT,
+};
+
+#[cfg(windows)]
+fn emit_terminal_data(data: &[u8]) {
+    let text = String::from_utf8_lossy(data).into_owned();
+    let _ = crate::state::app_handle().emit("terminal:data", text);
+}
+
+#[cfg(windows)]
+struct WindowsTerminalSession {
+    hpc: HPCON,
+    h_in_write: HANDLE,
+    h_out_read: HANDLE,
+    process: PROCESS_INFORMATION,
+    stop: Arc<AtomicBool>,
+    // NB: the proc-thread attribute list allocated by
+    // InitializeStartupInfoAttachedToPseudoConsole is intentionally leaked (not
+    // freed) so this struct stays Send+Sync. It is a tiny one-time allocation
+    // per terminal session.
+}
+
+#[cfg(windows)]
+static WINDOWS_TERMINAL: OnceLock<Mutex<Option<WindowsTerminalSession>>> = OnceLock::new();
+
+#[cfg(windows)]
+fn windows_terminal_state() -> &'static Mutex<Option<WindowsTerminalSession>> {
+    WINDOWS_TERMINAL.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(windows)]
+fn kill_current() {
+    let mut guard = windows_terminal_state().lock().unwrap();
+    if let Some(session) = guard.take() {
+        session.stop.store(true, Ordering::Relaxed);
+        unsafe {
+            let _ = TerminateProcess(session.process.hProcess, 0);
+            let _ = CloseHandle(session.process.hThread);
+            let _ = CloseHandle(session.process.hProcess);
+            let _ = CloseHandle(session.h_in_write);
+            let _ = CloseHandle(session.h_out_read);
+            ClosePseudoConsole(session.hpc);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_loop(h_out_read: HANDLE, stop: Arc<AtomicBool>) {
+    let mut buf = [0u8; 8192];
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut bytes_read: u32 = 0;
+        let ok = unsafe {
+            ReadFile(
+                h_out_read,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as u32,
+                &mut bytes_read,
+                None,
+            )
+        };
+        if !ok.is_ok() || bytes_read == 0 {
+            break;
+        }
+        emit_terminal_data(&buf[..bytes_read as usize]);
+    }
+}
+
+#[cfg(windows)]
 #[tauri::command]
 pub fn terminal_start(
-    _cols: Option<u16>,
-    _rows: Option<u16>,
-    _cwd: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    cwd: Option<String>,
 ) -> Result<Value, String> {
-    Err("Interactive terminal is not supported on this platform".to_string())
+    let cols = cols.unwrap_or(80).max(2) as i16;
+    let rows = rows.unwrap_or(24).max(2) as i16;
+    kill_current();
+
+    unsafe {
+        // ConPTY requires the calling thread to be in the multithreaded COM
+        // apartment. If COM is already initialised (any mode) this returns an
+        // error which we safely ignore — ConPTY still functions.
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let mut h_in_read: HANDLE = HANDLE::NULL;
+        let mut h_in_write: HANDLE = HANDLE::NULL;
+        let mut h_out_read: HANDLE = HANDLE::NULL;
+        let mut h_out_write: HANDLE = HANDLE::NULL;
+
+        if !CreatePipe(&mut h_in_read, &mut h_in_write, None, 0).is_ok() {
+            return Err("failed to create conpty input pipe".to_string());
+        }
+        if !CreatePipe(&mut h_out_read, &mut h_out_write, None, 0).is_ok() {
+            let _ = CloseHandle(h_in_read);
+            let _ = CloseHandle(h_in_write);
+            return Err("failed to create conpty output pipe".to_string());
+        }
+
+        let size = COORD { X: cols, Y: rows };
+        let mut hpc: HPCON = std::mem::zeroed();
+        if CreatePseudoConsole(size, h_in_read, h_out_write, 0, &mut hpc).is_err() {
+            let _ = CloseHandle(h_in_read);
+            let _ = CloseHandle(h_in_write);
+            let _ = CloseHandle(h_out_read);
+            let _ = CloseHandle(h_out_write);
+            return Err("CreatePseudoConsole failed".to_string());
+        }
+
+        // ConPTY duplicates the endpoints it needs; close our local copies so
+        // EOF is delivered when the shell exits.
+        let _ = CloseHandle(h_in_read);
+        let _ = CloseHandle(h_out_write);
+
+        let mut si_ex = STARTUPINFOEXW::default();
+        si_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        if InitializeStartupInfoAttachedToPseudoConsole(&mut si_ex, hpc).is_err() {
+            let _ = CloseHandle(h_in_write);
+            let _ = CloseHandle(h_out_read);
+            ClosePseudoConsole(hpc);
+            return Err("InitializeStartupInfoAttachedToPseudoConsole failed".to_string());
+        }
+
+        let mut cmd_line: Vec<u16> = "cmd.exe\0".encode_utf16().collect();
+        let cwd_wide: Option<Vec<u16>> = cwd
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| c.encode_utf16().chain(std::iter::once(0u16)).collect());
+        let cwd_pcwstr: Option<PCWSTR> = cwd_wide.as_ref().map(|v| PCWSTR(v.as_ptr()));
+
+        let mut pi = PROCESS_INFORMATION::default();
+        let creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
+        let ok = CreateProcessW(
+            None,
+            PWSTR(cmd_line.as_mut_ptr()),
+            None,
+            None,
+            FALSE,
+            creation_flags,
+            None,
+            cwd_pcwstr,
+            &si_ex as *const STARTUPINFOEXW as *const STARTUPINFO,
+            &mut pi,
+        );
+        if !ok.is_ok() {
+            let _ = CloseHandle(h_in_write);
+            let _ = CloseHandle(h_out_read);
+            ClosePseudoConsole(hpc);
+            return Err("CreateProcessW(cmd.exe) failed".to_string());
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+        thread::spawn(move || read_loop(h_out_read, reader_stop));
+
+        *windows_terminal_state().lock().unwrap() = Some(WindowsTerminalSession {
+            hpc,
+            h_in_write,
+            h_out_read,
+            process: pi,
+            stop,
+        });
+
+        Ok(json!({ "ok": true }))
+    }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 #[tauri::command]
-pub fn terminal_write(_data: String) -> Result<(), String> {
-    Err("Terminal is not running".to_string())
+pub fn terminal_write(data: String) -> Result<(), String> {
+    let guard = windows_terminal_state().lock().unwrap();
+    match guard.as_ref() {
+        Some(session) => {
+            let bytes = data.as_bytes();
+            let mut offset = 0;
+            while offset < bytes.len() {
+                let mut written: u32 = 0;
+                let ok = unsafe {
+                    WriteFile(
+                        session.h_in_write,
+                        bytes[offset..].as_ptr() as *const std::ffi::c_void,
+                        (bytes.len() - offset) as u32,
+                        &mut written,
+                        None,
+                    )
+                };
+                if !ok.is_ok() {
+                    return Err("failed to write to terminal".to_string());
+                }
+                offset += written as usize;
+            }
+            Ok(())
+        }
+        None => Err("Terminal is not running".to_string()),
+    }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 #[tauri::command]
-pub fn terminal_resize(_cols: u16, _rows: u16) -> Result<(), String> {
-    Err("Terminal is not running".to_string())
+pub fn terminal_resize(cols: u16, rows: u16) -> Result<(), String> {
+    let guard = windows_terminal_state().lock().unwrap();
+    match guard.as_ref() {
+        Some(session) => {
+            let size = COORD {
+                X: cols.max(2) as i16,
+                Y: rows.max(2) as i16,
+            };
+            if unsafe { ResizePseudoConsole(session.hpc, size) }.is_err() {
+                return Err("failed to resize terminal".to_string());
+            }
+            Ok(())
+        }
+        None => Err("Terminal is not running".to_string()),
+    }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 #[tauri::command]
 pub fn terminal_kill() -> Result<Value, String> {
+    kill_current();
     Ok(json!({ "ok": true }))
 }
 

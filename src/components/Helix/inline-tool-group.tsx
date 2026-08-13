@@ -288,9 +288,6 @@ function ToolCard({
         ) : (
           getToolIcon(step.toolName || '')
         )}
-        {stepStatus === 'completed' && !failed && (
-          <CheckCheck className="size-3.5 text-emerald-500/80 shrink-0" />
-        )}
         <span className={`font-medium truncate ${running ? 'flowing-text' : ''}`}>
           {verbText} {action || getToolDisplayLabel(step.toolName || '', step.toolKind, path, step.toolParams)}
         </span>

@@ -87,15 +87,31 @@ fn build_hermes_env(cmd: &Path, spawn_cwd: &Path) -> std::collections::HashMap<S
     // Pin HERMES_HOME so Hermes loads the same config.yaml/.env we write.
     env.insert("HERMES_HOME".into(), hermes_dir.display().to_string());
 
-    // Strip proxy settings that make httpx chat-completion requests hang.
+    // Proxy policy: 设置面板「HTTP 代理」配置了 URL 时注入 HTTP(S)/ALL_PROXY
+    //（覆盖模型 httpx、MCP、命令工具的出口流量）；留空时保持直连——剥离任何
+    // 继承的代理环境变量并设 NO_PROXY=*（不读取系统环境变量）。
+    let proxy_url = crate::proxy::load_proxy_url();
     for k in [
         "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
         "ALL_PROXY", "all_proxy",
     ] {
         env.remove(k);
     }
-    env.insert("NO_PROXY".into(), "*".into());
-    env.insert("no_proxy".into(), "*".into());
+    if proxy_url.is_empty() {
+        env.insert("NO_PROXY".into(), "*".into());
+        env.insert("no_proxy".into(), "*".into());
+    } else {
+        // 代理开启时 NO_PROXY=* 会屏蔽代理本身（httpx 认为所有主机都不代理），
+        // 只绕过本地回环，避免代理环路打到自己。
+        for k in ["NO_PROXY", "no_proxy"] {
+            env.remove(k);
+        }
+        env.insert("NO_PROXY".into(), "localhost,127.0.0.1,[::1]".into());
+        env.insert("no_proxy".into(), "localhost,127.0.0.1,[::1]".into());
+        env.insert("HTTP_PROXY".into(), proxy_url.clone());
+        env.insert("HTTPS_PROXY".into(), proxy_url.clone());
+        env.insert("ALL_PROXY".into(), proxy_url);
+    }
 
     // Strip inherited OPENAI_* so Hermes' own .env / config.yaml is authoritative.
     for k in [

@@ -69,6 +69,19 @@ def _(rid, params: dict) -> dict:
         create_service_tier_override = (
             "priority" if is_truthy_value(params.get("fast")) else ""
         )
+    # Desktop 常规「增强 Find 和 Grep」：新建会话时把 search_engine 钉在会话上
+    # （"rg" = 该会话的 find/grep 强制走 ripgrep；空 = 用默认引擎）。只作用于
+    # 本会话——当前会话保持创建时的设置，重启后恢复的会话按持久化的会话设置
+    # 重新绑定（见 server.py _set_session_context）。
+    search_engine = str(params.get("search_engine") or "").strip().lower()
+    if search_engine and search_engine != "rg":
+        search_engine = ""
+    # Desktop 常规「集成终端 Shell」：Windows 下 Bash 工具用此 shell（仅新会话
+    # 生效）。"cmd" = 始终 cmd.exe；"auto"（或空） = 优先 Git Bash，找不到回退
+    # cmd.exe。绑定方式同 search_engine。
+    terminal_shell = str(params.get("terminal_shell") or "").strip().lower()
+    if terminal_shell and terminal_shell != "cmd":
+        terminal_shell = "auto"
 
     ready = threading.Event()
     now = time.time()
@@ -96,6 +109,8 @@ def _(rid, params: dict) -> dict:
             "model_override": session_model_override,
             "create_reasoning_override": create_reasoning_override,
             "create_service_tier_override": create_service_tier_override,
+            "search_engine": search_engine,
+            "terminal_shell": terminal_shell,
             "parent_session_id": parent_session_id,
             "pending_title": title or None,
             "profile_home": str(profile_home) if profile_home is not None else None,

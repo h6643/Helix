@@ -3052,6 +3052,8 @@ def _set_session_context(
         # fall back to the session_key (matching the id derivation used at
         # session-finalize), so an identified session is never left blank.
         session_id = session_key
+        search_engine = ""
+        terminal_shell = ""
         with _sessions_lock:
             for sess in list(_sessions.values()):
                 if sess.get("session_key") == session_key:
@@ -3059,6 +3061,8 @@ def _set_session_context(
                     session_id = (
                         getattr(sess.get("agent"), "session_id", None) or session_key
                     )
+                    search_engine = str(sess.get("search_engine") or "")
+                    terminal_shell = str(sess.get("terminal_shell") or "")
                     break
         return set_session_vars(
             session_key=session_key,
@@ -3067,6 +3071,8 @@ def _set_session_context(
             cwd=resolved,
             ui_session_id=ui_session_id,
             cron_session="",
+            search_engine=search_engine,
+            terminal_shell=terminal_shell,
         )
     except Exception:
         return []

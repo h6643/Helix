@@ -369,6 +369,10 @@ export function useHermes() {
         const result = await hermesApi()!.send('session/new', {
           cwd,
           mcpServers: [],
+          // 常规「增强 Find 和 Grep」：新建会话时带上 search_engine=rg。
+          search_engine: useHelixStore.getState().enhancedFindGrep ? 'rg' : '',
+          // 常规「集成终端 Shell」：仅新会话生效。
+          terminal_shell: useHelixStore.getState().terminalShell,
         }) as any
         debug('[useHermes] session/new result:', JSON.stringify(result).substring(0, 500))
         // Extract session_id from ACP response structure
@@ -460,7 +464,13 @@ export function useHermes() {
       // Wait for the gateway to be ready after model config update
       await waitForGatewayReady()
       const mcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers)
-      const sessionId = await hermesApi()!.send('session/new', { mcpServers }) as string
+      const sessionId = await hermesApi()!.send('session/new', {
+        mcpServers,
+        // 常规「增强 Find 和 Grep」：新建会话时带上 search_engine=rg。
+        search_engine: useHelixStore.getState().enhancedFindGrep ? 'rg' : '',
+        // 常规「集成终端 Shell」：仅新会话生效。
+        terminal_shell: useHelixStore.getState().terminalShell,
+      }) as string
       if (sessionId) {
         setHermesSessionId(sessionId)
       }

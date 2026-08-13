@@ -115,6 +115,7 @@ export function ContextUsageIndicator() {
   const fetchContextData = useCallback(async () => {
     try {
       const sessionId = useHermesStore.getState().hermesSessionId
+      const currentSessionId = useHelixStore.getState().currentSessionId
       // No live Hermes session for THIS conversation (e.g. it was never run this
       // session, or the gateway restarted and invalidated it). Don't query with an
       // empty id — the backend would return the GLOBAL session's breakdown and the
@@ -134,7 +135,7 @@ export function ContextUsageIndicator() {
         // so without this they vanish the moment the Hermes session ends (and
         // the panel would fall back to the "需要正在运行的 Hermes 会话" empty state).
         useHelixStore.getState().setContextUsage(
-          sessionId,
+          currentSessionId ?? sessionId,
           data.context_max,
           data.context_used,
           data.categories?.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),

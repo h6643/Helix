@@ -33,6 +33,7 @@ import {
   Download,
   Trash,
   BookOpen,
+  Archive,
 } from 'lucide-react'
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
@@ -449,7 +450,13 @@ async function fileToAttachment(file: File): Promise<FileAttachment> {
     mime: file.type || 'application/octet-stream',
     kind: isImage ? 'image' : (isTextualFile(file) ? 'text' : 'file'),
     dataUrl: isImage ? compressedDataUrl : undefined,
-    base64: isImage ? compressedDataUrl.split(',')[1] || '' : '',
+    // 文本/其他文件也要填 base64，否则 prompt 构建时无法 inline 内容
+    // （原先只对图片填 base64，导致文本文件内容永远发不出去）
+    base64: isImage
+      ? compressedDataUrl.split(',')[1] || ''
+      : isTextualFile(file)
+        ? (dataUrl.split(',')[1] || '')
+        : '',
     // Only available in Electron (File has a `path` prop injected by Chromium)
     path: (file as any).path,
   }
@@ -753,6 +760,7 @@ const TRUNC_MARK = '…[内容过长已截断]'
 type DisplayItem =
   | { kind: 'summary'; id: string; count: number; preview: string; startTs?: number; endTs?: number }
   | { kind: 'message'; msg: ChatMessage }
+  | { kind: 'status'; id: string; text: string }
 
 function truncateStr(s: string | undefined, max: number): string | undefined {
   if (!s || s.length <= max) return s
@@ -1135,6 +1143,8 @@ export function AgentFlowPanel() {
     st.showToast({ type: 'success', title: `已创建 ${tasks.length} 个定时任务` })
   }
   const handleDismissTasks = () => setPendingTaskCreations([])
+  // Inline notices for automatic context compression events (shown inside transcript).
+  const [autoCompressNotices, setAutoCompressNotices] = useState<Array<{ id: string; ts: number; text: string }>>([])
   const workspaceFilesRef = useRef<Array<{ name: string; path: string }>>([])
   const workspaceFilesLoadedRef = useRef(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -1244,6 +1254,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     for (const k of Object.keys(map)) next[k] = true
     setSessionPendingApproval(next)
   }, [approvalQueue, clarifyQueue, pendingTaskCreations, currentSessionId, setSessionPendingApproval])
+  // 切换会话时清空上一次的自动压缩内联提示，避免把旧提示带进新对话。
+  useEffect(() => {
+    setAutoCompressNotices([])
+  }, [currentSessionId])
   const sessionMessages = useMemo(() => {
     // 永远按会话过滤：currentSessionId 为 null（新对话）时只显示无 sessionId
     // 的历史消息，绝不能把其他会话（含仍在后台运行的旧 run）的消息漏进来。
@@ -1279,8 +1293,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     for (let i = recentStart; i < n; i++) {
       items.push({ kind: 'message', msg: truncateMessage(sessionMessages[i]) })
     }
+    // 自动压缩事件以居中状态行的形式插入对话流末尾
+    for (const notice of autoCompressNotices) {
+      items.push({ kind: 'status', id: notice.id, text: notice.text })
+    }
     return items
-  }, [sessionMessages])
+  }, [sessionMessages, autoCompressNotices])
 
   // ── Conversation content search (Ctrl+F) ──────────────────────────────
   const [conversationSearchOpen, setConversationSearchOpen] = useState(false)
@@ -2729,6 +2747,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           // 启动目录，模型读到的目录和界面显示的项目脱节（"在 agentchat 对话，
           // 但模型读到之前选过的目录"）。
           cwd: st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined,
+          // 常规「增强 Find 和 Grep」：新建会话 / 应用重启后恢复的会话（走
+          // session/new 重建后端会话）带上 search_engine=rg；当前会话保持创建
+          // 时的设置，Windows 的 Find 后端不启用。
+          search_engine: st0.enhancedFindGrep ? 'rg' : '',
+          // 常规「集成终端 Shell」：仅新会话生效，Windows 下 Bash 工具用此 shell。
+          terminal_shell: st0.terminalShell,
         }) as any
         sessionId = res?._meta?.hermes?.sessionProvenance?.acpSessionId
           || res?.session_id
@@ -2884,6 +2908,16 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             case 'available_commands_update':
               return { type: 'available_commands', commands: u.commands || u.availableCommands || u.available_commands || [] }
             case 'session_info_update': {
+              // 自动压缩信号：压缩会轮换内部 Hermes session id，ACP server 随即
+              // 发出 session_info_update 并携带 field_meta.hermes.sessionProvenance
+              // （previous_hermes_session_id 非空即表示发生过轮转 = 压缩）。
+              // 普通标题/元数据更新该字段为 null，不会误触发。
+              {
+                const _prov = u?.field_meta?.hermes?.sessionProvenance
+                if (_prov && _prov.previous_hermes_session_id) {
+                  return { type: 'auto_compressed' }
+                }
+              }
               // Backends sometimes carry errors, notices, or even the final
               // reply inside session_info_update. We used to silently drop it
               // (default: return null), which produced a blank UI with no clue.
@@ -3260,6 +3294,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           if (parsed) {
             enqueue('data: ' + JSON.stringify(parsed))
           }
+          // 自动压缩实时提示：检测到压缩驱动的 session 轮转事件时，在对话流中插入一条居中状态行。
+          if (parsed && parsed.type === 'auto_compressed') {
+            setAutoCompressNotices(prev => {
+              const text = '上下文已自动压缩'
+              if (prev.some(n => n.text === text)) return prev
+              return [...prev, { id: generateId(), ts: Date.now(), text }]
+            })
+          }
           // Capture Hermes's in-session todo list from dedicated todo/plan
           // session/update events (or todo_write tool results) so the header
           // button can surface it. Silently ignored when no list is present.
@@ -3342,21 +3384,25 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       }
       let fileContext = ''
       for (const f of filesSnapshot || []) {
-        if (f.kind === 'text' && f.base64) {
-          // Inline small text files only; large ones get a path hint instead.
-          const maxInline = 50 * 1024
-          if (f.size && f.size > maxInline) {
-            if (f.path) fileContext += `\n\n[已附加大文件: ${f.name} (${formatBytes(f.size)})]\n 文件路径: ${f.path.replace(/\\/g, '/')}`
-            else fileContext += `\n\n[已附加大文件: ${f.name} (${formatBytes(f.size)})]`
-          } else {
-            try {
-              const content = decodeBase64Utf8(f.base64)
+        // 只要有可解码的文本内容就 inline，不依赖 kind（覆盖扩展名未识别的文本文件）
+        const hasText = f.base64
+          ? (() => { try { decodeBase64Utf8(f.base64!); return true } catch { return false } })()
+          : false
+        if (hasText) {
+          const maxInline = 200 * 1024
+          try {
+            const content = decodeBase64Utf8(f.base64!)
+            if (f.size && f.size > maxInline) {
+              const head = content.slice(0, maxInline)
+              const tail = f.path ? ` 完整内容可用 Read 工具读取: ${f.path.replace(/\\/g, '/')}` : ''
+              fileContext += `\n\n--- 文件 ${f.name} 的内容(前 ${formatBytes(maxInline)}) ---\n${head}\n...(内容较长已截断)${tail}`
+            } else {
               fileContext += `\n\n--- 文件 ${f.name} 的内容 ---\n${content}`
-            } catch { /* skip undecodable */ }
-          }
-        } else if (f.kind === 'file') {
+            }
+          } catch { /* not text */ }
+        } else {
+          // 二进制或无法解码：仅给路径提示，依赖 Electron/Tauri 提供真实路径让模型 Read
           fileContext += `\n\n[已附加文件: ${f.name} (${formatBytes(f.size)})]`
-          // Inject the absolute path so the model can read it using Read tool
           if (f.path) {
             const normalizedPath = f.path.replace(/\\/g, '/')
             fileContext += ` 文件路径: ${normalizedPath}`
@@ -5132,6 +5178,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     startTs={item.startTs}
                     endTs={item.endTs}
                   />
+                ) : item.kind === 'status' ? (
+                  <div
+                    key={item.id}
+                    className="flex w-full items-center justify-center gap-1.5 py-2 text-[11px] text-muted-foreground/60"
+                  >
+                    <Archive className="size-3 shrink-0" />
+                    <span>{item.text}</span>
+                  </div>
                 ) : (
                   <TranscriptMessage
                     key={item.msg.id}

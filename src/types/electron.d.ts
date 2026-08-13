@@ -92,6 +92,10 @@ export interface ElectronAPI {
     setWorkDir: (dir: string) => Promise<{ success: boolean; workDir: string }>
     syncWorkDir: (dir: string) => Promise<{ success: boolean; workDir: string }>
     getHermesVersion: () => Promise<string | null>;
+    getDataRoot: () => Promise<{ dataRoot: string; dataRootDefault: string; dataRootCustom: boolean }>;
+    setDataRoot: (path: string) => Promise<{ success: boolean; dataRoot: string; dataRootDefault: string; dataRootCustom: boolean; copied: boolean; bytes?: number }>;
+    proxyGet: () => Promise<{ url: string }>;
+    proxySet: (url: string) => Promise<{ success: boolean; url: string }>;
   }
 
   hermes: {

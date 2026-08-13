@@ -202,6 +202,11 @@ function buildTauriAPI(): ElectronAPI {
     setWorkDir: (dir: string) => invoke('set_work_dir', { dir }),
     syncWorkDir: (dir: string) => invoke('sync_work_dir', { dir }),
     getHermesVersion: () => invoke('get_hermes_version'),
+    getDataRoot: () => invoke('get_data_root'),
+    setDataRoot: (path: string) => invoke('set_data_root', { path }),
+    // HTTP 代理（修改后需重启应用生效）
+    proxyGet: () => invoke('proxy_get'),
+    proxySet: (url: string) => invoke('proxy_set', { url }),
   }
 
   // ── hermes ──────────────────────────────────────────────────────────────

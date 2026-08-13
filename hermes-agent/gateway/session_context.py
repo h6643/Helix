@@ -93,6 +93,19 @@ _SESSION_UI_SESSION_ID: ContextVar = ContextVar("HERMES_UI_SESSION_ID", default=
 # private-chat topic (those lanes route only with thread id + reply anchor).
 _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", default=_UNSET)
 
+# Search engine override bound per-session. Desktop's 常规「增强 Find 和 Grep」
+# pins ``HERMES_SEARCH_ENGINE=rg`` on the session at session.create; tools read
+# it via get_session_env to force ripgrep-backed find/grep for that session only
+# (see tools/file_operations._enhanced_search_engine).
+_SEARCH_ENGINE: ContextVar = ContextVar("HERMES_SEARCH_ENGINE", default=_UNSET)
+
+# Terminal shell override bound per-session. Desktop's 常规「集成终端 Shell」
+# pins ``HERMES_TERMINAL_SHELL`` (``auto``/``cmd``) on the session at
+# session.create; the local environment's shell resolution reads it via
+# get_session_env so each session keeps the shell it was created with
+# (see tools/environments/local.py ``_resolve_windows_shell_mode``).
+_TERMINAL_SHELL: ContextVar = ContextVar("HERMES_TERMINAL_SHELL", default=_UNSET)
+
 _SESSION_PROFILE: ContextVar = ContextVar("HERMES_SESSION_PROFILE", default=_UNSET)
 
 # Per-session cron marker. Unlike the process-global legacy env var, this is
@@ -142,6 +155,8 @@ _VAR_MAP = {
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "HERMES_SESSION_PROFILE": _SESSION_PROFILE,
     "HERMES_CRON_SESSION": _CRON_SESSION,
+    "HERMES_SEARCH_ENGINE": _SEARCH_ENGINE,
+    "HERMES_TERMINAL_SHELL": _TERMINAL_SHELL,
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
@@ -220,6 +235,8 @@ def set_session_vars(
     async_delivery: bool = True,
     ui_session_id: str = "",
     cron_session: Any = _UNSET,
+    search_engine: str = "",
+    terminal_shell: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
 
@@ -235,6 +252,14 @@ def set_session_vars(
     background completion back to the agent after the turn ends (see
     ``_SESSION_ASYNC_DELIVERY`` / ``async_delivery_supported``). Stateless
     request/response adapters (the API server) pass ``False``.
+
+    ``search_engine`` is an optional per-session search-engine override
+    (e.g. ``"rg"`` from the desktop's 增强 Find 和 Grep). Empty means the
+    session keeps the default engine selection.
+
+    ``terminal_shell`` is an optional per-session terminal-shell override
+    (``"cmd"`` = Windows Bash tool uses cmd.exe; ``"auto"`` = prefer Git Bash,
+    fall back to cmd.exe). Empty means the session keeps the default.
 
     ``cron_session`` is tri-state: ``_UNSET`` preserves legacy
     ``os.environ["HERMES_CRON_SESSION"]`` fallback, ``"1"`` marks a cron job,
@@ -261,6 +286,8 @@ def set_session_vars(
         _SESSION_PROFILE.set(profile),
         _CRON_SESSION.set(cron_session),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
+        _SEARCH_ENGINE.set(search_engine),
+        _TERMINAL_SHELL.set(terminal_shell),
     ]
     try:
         from agent.runtime_cwd import set_session_cwd
@@ -297,6 +324,8 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_MESSAGE_ID,
         _SESSION_PROFILE,
         _CRON_SESSION,
+        _SEARCH_ENGINE,
+        _TERMINAL_SHELL,
     ):
         var.set("")
     # Reset async-delivery capability to the "never set" sentinel rather than a

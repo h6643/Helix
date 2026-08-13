@@ -17,6 +17,10 @@ async function getOrCreateTaskSession(): Promise<string | null> {
     const res = await hermesApi()!.send('session/new', {
       cwd: useHelixStore.getState().selectedWorkDir || '',
       mcpServers: [],
+      // 增强 Find 和 Grep 对定时任务会话同样生效（新建会话时带上）。
+      search_engine: useHelixStore.getState().enhancedFindGrep ? 'rg' : '',
+      // 集成终端 Shell：仅新会话生效。
+      terminal_shell: useHelixStore.getState().terminalShell,
     }) as any
     const sid = res?._meta?.hermes?.sessionProvenance?.acpSessionId
       || res?.session_id

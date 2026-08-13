@@ -4,9 +4,11 @@
 
 use crate::gateway::{env_gateway_mode, kill_current, shutdown, spawn_gateway};
 use crate::kernel::resolve_hermes_cmd;
+use crate::paths::{data_root_pointer_path, default_hermes_data_dir, hermes_data_dir};
 use crate::state::{user_data_dir, AppState};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -200,5 +202,138 @@ pub fn quit(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     shutdown(&state);
     let handle = crate::state::app_handle();
     handle.exit(0);
+    Ok(())
+}
+
+// ── data-root relocation (Settings → 数据存储路径) ─────────────────────────
+
+/// Returns the effective data-root info for the Settings UI.
+#[tauri::command]
+pub fn get_data_root() -> Value {
+    let default = default_hermes_data_dir();
+    let current = hermes_data_dir();
+    let custom = current != default;
+    json!({
+        "dataRoot": current.display().to_string(),
+        "dataRootDefault": default.display().to_string(),
+        "dataRootCustom": custom,
+    })
+}
+
+/// Set (or clear) the Hermes data-root override.
+///
+/// - `path` empty  → restore the default location (copy current data there,
+///   then delete the pointer so the default is used on next launch).
+/// - `path` set    → copy current data into `path`, then write the pointer so
+///   the new location is used on next launch. The running process keeps using
+///   the old location until Helix is restarted.
+#[tauri::command]
+pub fn set_data_root(path: String) -> Result<Value, String> {
+    let current = hermes_data_dir();
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let default = default_hermes_data_dir();
+
+    // Resolve the requested target path.
+    let raw = path.trim();
+    let target = if raw.is_empty() {
+        default.clone()
+    } else {
+        let expanded = if raw.starts_with('~') {
+            home.join(raw.trim_start_matches('~').trim_start_matches('/').trim_start_matches('\\'))
+        } else if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            home.join(raw)
+        };
+        // Canonicalize only if it already exists; otherwise keep as-is so we
+        // can create it below.
+        expanded.canonicalize().unwrap_or(expanded)
+    };
+
+    // No-op: already at the requested location. Make sure the pointer reflects
+    // the intent (default ⇒ no pointer file).
+    if target == current {
+        if target == default {
+            remove_pointer()?;
+        }
+        return Ok(json!({
+            "success": true,
+            "dataRoot": current.display().to_string(),
+            "dataRootDefault": default.display().to_string(),
+            "dataRootCustom": target != default,
+            "copied": false,
+        }));
+    }
+
+    // Create the target directory.
+    std::fs::create_dir_all(&target)
+        .map_err(|e| format!("无法创建目标目录 {}: {e}", target.display()))?;
+
+    // Copy existing data (if any) into the target.
+    let mut copied: u64 = 0;
+    if current.exists() {
+        copied = copy_tree(&current, &target).map_err(|e| format!("复制数据失败: {e}"))?;
+    }
+
+    // Persist the pointer (or clear it when targeting the default).
+    if target == default {
+        remove_pointer()?;
+    } else {
+        write_pointer(&target).map_err(|e| format!("写入数据路径配置失败: {e}"))?;
+    }
+
+    Ok(json!({
+        "success": true,
+        "dataRoot": target.display().to_string(),
+        "dataRootDefault": default.display().to_string(),
+        "dataRootCustom": target != default,
+        "copied": copied > 0,
+        "bytes": copied,
+    }))
+}
+
+/// Recursively copy `src` into `dst` (merge, overwrite). Symlinks are skipped
+/// to avoid following (and duplicating) external trees. Returns bytes copied.
+fn copy_tree(src: &Path, dst: &Path) -> io::Result<u64> {
+    let mut total: u64 = 0;
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_symlink() {
+            // Skip symlinks to avoid loops / external duplication.
+            continue;
+        } else if file_type.is_dir() {
+            total += copy_tree(&src_path, &dst_path)?;
+        } else {
+            let mut reader = std::fs::File::open(&src_path)?;
+            let mut writer = std::fs::File::create(&dst_path)?;
+            total += io::copy(&mut reader, &mut writer)?;
+        }
+    }
+    Ok(total)
+}
+
+/// Write the override pointer (absolute target path, no trailing newline).
+fn write_pointer(target: &Path) -> io::Result<()> {
+    if let Some(ptr) = data_root_pointer_path() {
+        if let Some(parent) = ptr.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&ptr, target.display().to_string())?;
+    }
+    Ok(())
+}
+
+/// Remove the override pointer if present.
+fn remove_pointer() -> Result<(), String> {
+    if let Some(ptr) = data_root_pointer_path() {
+        if ptr.exists() {
+            std::fs::remove_file(&ptr)
+                .map_err(|e| format!("无法清除数据路径配置: {e}"))?;
+        }
+    }
     Ok(())
 }

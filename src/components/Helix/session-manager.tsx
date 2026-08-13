@@ -1,7 +1,6 @@
 'use client'
 
 import {
-  Save,
   FolderOpen,
   Trash2,
   Download,
@@ -24,7 +23,6 @@ import { useHermesStore } from '@/stores/hermes-store'
 export function SessionManager({ onClose }: { onClose: () => void }) {
   const [sessions, setSessions] = useState<PersistedSession[]>([])
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<PersistedSession | null>(null)
   const [exportMenuSession, setExportMenuSession] = useState<PersistedSession | null>(null)
@@ -45,59 +43,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     loadSessions()
   }, [loadSessions])
-
-  const handleSave = async () => {
-    setSaving(true)
-    try {
-      const state = useHelixStore.getState()
-      const label = prompt('保存会话名称：', new Date().toLocaleString('zh-CN'))
-      if (!label) { setSaving(false); return }
-
-      const collectFiles = (nodes: typeof state.files): PersistedSession['files'] => {
-        return nodes.map(n => ({
-          id: n.id,
-          name: n.name,
-          type: n.type,
-          content: n.content,
-          language: n.language,
-          children: n.children ? collectFiles(n.children) : undefined,
-        }))
-      }
-
-      await persistence.saveSession({
-        label,
-        workDir: state.selectedWorkDir,
-        goal: state.goal,
-        memories: state.memories,
-        tasks: state.tasks,
-        notes: state.notes,
-        checkpoints: state.checkpoints,
-        chatMessages: state.chatMessages.map(m => ({
-          id: m.id,
-          sessionId: 'session-' + Date.now(),
-          role: m.role,
-          content: m.content,
-          timestamp: m.timestamp,
-          isStreaming: m.isStreaming ?? false,
-        })),
-        files: collectFiles(state.files),
-        openTabs: state.openTabs.map(tab => ({
-          id: tab.id,
-          fileId: tab.fileId,
-          name: tab.name,
-          language: tab.language,
-          isDirty: tab.isDirty,
-        })),
-      })
-
-      await loadSessions()
-    } catch (e) {
-      console.error('Failed to save session:', e)
-      useHelixStore.getState().showToast({ type: 'error', title: '保存失败' })
-    } finally {
-      setSaving(false)
-    }
-  }
 
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return
@@ -282,16 +227,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
             </span>
           </div>
           <div className="flex items-center gap-1">
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-xs gap-1.5"
-              onClick={handleSave}
-              disabled={saving}
-            >
-              {saving ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
-              保存当前会话
-            </Button>
             {sessions.length > 0 && (
               <button
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-xs font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7"
@@ -341,11 +276,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
               <p className="text-sm text-muted-foreground">
                 {searchQuery ? '没有匹配的会话' : '暂无保存的会话'}
               </p>
-              {!searchQuery && (
-                <p className="text-xs text-muted-foreground/60 mt-1">
-                  点击「保存当前会话」创建你的第一个快照
-                </p>
-              )}
             </div>
           ) : (
             <div className="p-2">

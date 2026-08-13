@@ -70,13 +70,13 @@ export function ShortcutsPage() {
     <div className="space-y-6">
       {systemShortcuts.length > 0 && (
         <section className="space-y-3">
-          <h3 className="text-lg font-semibold text-foreground">系统快捷键</h3>
+          <h3 className="ui-title font-semibold text-foreground">快捷键</h3>
           <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
             <div className="divide-y divide-border/50">
               {systemShortcuts.map(([id, s]) => (
                 <div key={id} className="flex items-center px-4 py-2.5 hover:bg-accent/20 transition-colors group">
-                  <span className="text-sm font-medium text-foreground/80">{s.description}</span>
-                  <span className="ml-auto text-sm font-mono text-foreground/80 bg-muted px-2.5 py-1 rounded shrink-0">{s.keys.join(' + ')}</span>
+                  <span className="ui-text font-medium text-foreground/80">{s.description}</span>
+                  <span className="ml-auto ui-text font-mono text-foreground/80 bg-muted px-2.5 py-1 rounded shrink-0">{s.keys.join(' + ')}</span>
                   <button
                     onClick={() => startRecording(id)}
                     className="ml-3 px-1.5 py-1 rounded text-xs text-muted-foreground/20 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all"
@@ -97,7 +97,7 @@ export function ShortcutsPage() {
           <div className="bg-card/50 border border-border/50 rounded-xl p-6 shadow-xl max-w-sm w-full">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse" />
-              <span className="text-sm font-medium text-foreground">正在录制快捷键</span>
+              <span className="ui-text font-medium text-foreground">正在录制快捷键</span>
             </div>
             <div className="flex items-center justify-center gap-2 py-4 bg-muted rounded-lg mb-4">
               <input
@@ -113,14 +113,14 @@ export function ShortcutsPage() {
             <div className="flex gap-2">
               <button
                 onClick={cancelRecording}
-                className="flex-1 py-2 text-sm text-foreground/60 hover:text-foreground rounded-lg hover:bg-muted transition-colors"
+                className="flex-1 py-2 ui-text text-foreground/60 hover:text-foreground rounded-lg hover:bg-muted transition-colors"
               >
                 取消
               </button>
               <button
                 onClick={confirmRecording}
                 disabled={pendingKeys.length === 0}
-                className="flex-1 py-2 text-sm font-medium text-white bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
+                className="flex-1 py-2 ui-text font-medium text-white bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
               >
                 确定
               </button>
@@ -130,7 +130,7 @@ export function ShortcutsPage() {
       )}
 
       {shortcuts.length === 0 && (
-        <p className="text-sm text-muted-foreground/50 text-center py-4">暂无快捷键</p>
+        <p className="ui-text text-muted-foreground/50 text-center py-4">暂无快捷键</p>
       )}
     </div>
   )

@@ -35,6 +35,15 @@ jobs:
       - name: Prepare Hermes runtime (python-build-standalone + venv)
         run: bash scripts/prepare-runtime.sh
 
+      - name: Sync version from git tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = \".*\"/version = \"$VER\"/" src-tauri/Cargo.toml
+          sed -i "s/\"version\": \".*\"/\"version\": \"$VER\"/" src-tauri/tauri.conf.json
+          echo "Synced version -> $VER"
+
       - name: Build Tauri app
         run: npx tauri build
 

@@ -719,6 +719,53 @@ def build_subprocess_env(
     return env
 
 
+def _windows_shell_mode() -> str:
+    """Per-session terminal-shell override for the Bash tool (Windows only).
+
+    Desktop 常规「集成终端 Shell」pins ``HERMES_TERMINAL_SHELL`` on the session
+    at ``session.create`` (bound as a session ContextVar, see
+    ``gateway.session_context.set_session_vars``). ``"cmd"`` = always use
+    cmd.exe; ``"auto"`` (default) = prefer Git Bash, fall back to cmd.exe.
+    Read via :func:`gateway.session_context.get_session_env` (falls back to
+    ``os.environ`` for CLI/cron processes with no session context bound) so
+    each session keeps the shell it was created with. Off Windows this is
+    always ``"auto"`` and the Bash tool keeps its existing behaviour.
+    """
+    if not _IS_WINDOWS:
+        return "auto"
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return "auto"
+    try:
+        mode = get_session_env("HERMES_TERMINAL_SHELL", "").strip().lower()
+    except Exception:
+        return "auto"
+    return "cmd" if mode == "cmd" else "auto"
+
+
+def _find_cmd() -> str:
+    """Locate ``cmd.exe`` for the Bash tool's cmd shell mode.
+
+    Prefers ``%COMSPEC%``, then the System32 / SysWOW64 copies under
+    ``%WINDIR%``. Raises with a clear message when none can be found.
+    """
+    comspec = os.environ.get("COMSPEC") or os.environ.get("ComSpec")
+    if comspec and os.path.isfile(comspec):
+        return comspec
+    windir = os.environ.get("WINDIR") or r"C:\Windows"
+    for candidate in (
+        os.path.join(windir, "System32", "cmd.exe"),
+        os.path.join(windir, "SysWOW64", "cmd.exe"),
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    raise RuntimeError(
+        "cmd.exe not found (COMSPEC/System32). Cannot run the Bash tool with "
+        "cmd.exe as the terminal shell."
+    )
+
+
 def _find_bash() -> str:
     """Find bash for command execution."""
     if not _IS_WINDOWS:
@@ -1486,18 +1533,33 @@ class LocalEnvironment(BaseEnvironment):
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
-        bash = _find_bash()
-        # For login-shell invocations (used by init_session to build the
-        # environment snapshot), prepend sources for the user's bashrc /
-        # custom init files so tools registered outside bash_profile
-        # (nvm, asdf, pyenv, …) end up on PATH in the captured snapshot.
-        # Non-login invocations are already sourcing the snapshot and
-        # don't need this.
-        if login:
-            init_files = _resolve_shell_init_files()
-            if init_files:
-                cmd_string = _prepend_shell_init(cmd_string, init_files)
-        args = [bash, "-l", "-c", cmd_string] if login else [bash, "-c", cmd_string]
+        # 集成终端 Shell = cmd（Windows）：Bash 工具改用 cmd.exe。cmd 没有
+        # bash 的 login / init-file 语义，命令用 ``cmd /d /s /c`` 执行；cwd
+        # 安全恢复与 Popen 参数与 bash 分支共用。auto 模式下 Git Bash 找不到
+        # 时同样回退 cmd.exe（见 _find_bash 的 RuntimeError）。
+        use_cmd = _windows_shell_mode() == "cmd"
+        if use_cmd:
+            bash = _find_cmd()
+            args = [bash, "/d", "/s", "/c", cmd_string]
+        else:
+            try:
+                bash = _find_bash()
+            except Exception:
+                # 自动模式回退：Git Bash 不可用时用 cmd.exe 兜底。
+                bash = _find_cmd()
+                args = [bash, "/d", "/s", "/c", cmd_string]
+            else:
+                # For login-shell invocations (used by init_session to build the
+                # environment snapshot), prepend sources for the user's bashrc /
+                # custom init files so tools registered outside bash_profile
+                # (nvm, asdf, pyenv, …) end up on PATH in the captured snapshot.
+                # Non-login invocations are already sourcing the snapshot and
+                # don't need this.
+                if login:
+                    init_files = _resolve_shell_init_files()
+                    if init_files:
+                        cmd_string = _prepend_shell_init(cmd_string, init_files)
+                args = [bash, "-l", "-c", cmd_string] if login else [bash, "-c", cmd_string]
         run_env = _make_run_env(self.env)
 
         # Recover when the cwd has been deleted out from under us — usually by

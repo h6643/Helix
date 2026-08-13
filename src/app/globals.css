@@ -1419,3 +1419,17 @@ nav::-webkit-scrollbar-thumb:hover {
   animation: voiceCaret 1s steps(2, start) infinite;
 }
 @keyframes voiceCaret { 0%,100% { opacity: 0.4; } 50% { opacity: 0.05; } }
+
+/* 界面字号跟随「界面字号」设置（--helix-transcript-size，默认 16px）。
+   .ui-text  = 界面默认字号（正文 / 卡片标题 / 说明共用，不再写死 text-sm）；
+   .ui-title = 界面字号 + 4px（各页主标题）；
+   .ui-text-sm2 = 界面字号 − 4px（比界面字号小两个字号，用于设置项右侧的值/输入）。 */
+.ui-text {
+  font-size: var(--helix-transcript-size, 16px);
+}
+.ui-title {
+  font-size: calc(var(--helix-transcript-size, 16px) + 4px);
+}
+.ui-text-sm2 {
+  font-size: calc(var(--helix-transcript-size, 16px) - 4px);
+}

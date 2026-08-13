@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import { useHelixStore } from '@/stores/helix-store'
-import { SettingRow, SettingGroup, SectionHeading, PopupSelect } from './settings-ui'
+import { SettingRow, SettingGroup, SectionHeading, PopupSelect, NumberField } from './settings-ui'
 import { THEME_SELECT_GROUPS } from '@/lib/themes'
 
 /**
@@ -68,7 +68,7 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
         ref={btnRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors flex items-center justify-between gap-2 text-left"
+        className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 flex items-center justify-between gap-2 text-left focus:outline-none focus:border-primary/40 transition-colors"
       >
         <span className="truncate">{currentLabel}</span>
         <ChevronDown className={`size-3.5 shrink-0 text-muted-foreground/60 transition-transform ${open ? 'rotate-180' : ''}`} />
@@ -133,18 +133,12 @@ const fontSelect = (value: string, onChange: (v: string) => void, options: { lab
     onChange={onChange}
     options={options}
     placeholder="默认"
-    className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+    className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 focus:outline-none focus:border-primary/40 transition-colors"
   />
 )
 
 const stepper = (value: number, min: number, max: number, onChange: (v: number) => void) => (
-  <div className="flex items-center gap-1.5 justify-self-end">
-    <button onClick={() => onChange(Math.max(min, value - 1))}
-      className="w-6 h-6 rounded border border-border/20 bg-muted/20 text-muted-foreground/50 hover:text-foreground text-xs flex items-center justify-center">−</button>
-    <span className="w-7 text-center text-xs font-mono">{value}</span>
-    <button onClick={() => onChange(Math.min(max, value + 1))}
-      className="w-6 h-6 rounded border border-border/20 bg-muted/20 text-muted-foreground/50 hover:text-foreground text-xs flex items-center justify-center">+</button>
-  </div>
+  <NumberField value={value} min={min} max={max} onCommit={onChange} small />
 )
 
 export function AppearanceSettingsPanel({ themeStyle, onSelectThemeStyle }: {
@@ -161,27 +155,29 @@ export function AppearanceSettingsPanel({ themeStyle, onSelectThemeStyle }: {
   const setTranscriptFontSize = useHelixStore(s => s.setTranscriptFontSize)
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-4">
       <SectionHeading>外观</SectionHeading>
 
-      <SettingRow label="配色风格">
-        <ThemeStylePicker value={themeStyle} onChange={onSelectThemeStyle} />
-      </SettingRow>
+      <SettingGroup>
+        <SettingRow label="配色风格" hint="选择浅色、深色或跟随系统主题。">
+          <ThemeStylePicker value={themeStyle} onChange={onSelectThemeStyle} />
+        </SettingRow>
+      </SettingGroup>
 
-      <SettingGroup title="编辑器">
-        <SettingRow label="代码字体">
+      <SettingGroup title="编辑器" description="设置代码内容的字体和字号，不受界面字号影响。">
+        <SettingRow label="代码字体" hint="调整代码内容使用的等宽字体。">
           {fontSelect(fontFamily, setFontFamily, FONT_OPTIONS)}
         </SettingRow>
-        <SettingRow label="字号">
+        <SettingRow label="代码字号" hint="调整代码块、文件预览和差异视图的默认字号。">
           {stepper(fontSize, 10, 32, setFontSize)}
         </SettingRow>
       </SettingGroup>
 
-      <SettingGroup title="界面">
-        <SettingRow label="UI 字体">
+      <SettingGroup title="界面" description="调整应用界面文字的大小与字体，图标和布局尺寸不受影响。">
+        <SettingRow label="UI 字体" hint="调整界面文字使用的字体。">
           {fontSelect(interfaceFont, setInterfaceFont, UI_FONT_OPTIONS)}
         </SettingRow>
-        <SettingRow label="界面字号">
+        <SettingRow label="界面字号" hint="调整应用界面的文字大小，图标和布局尺寸不受影响。">
           {stepper(transcriptFontSize, 10, 28, setTranscriptFontSize)}
         </SettingRow>
       </SettingGroup>

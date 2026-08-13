@@ -47,7 +47,7 @@ const SubagentCard = ({
           value={i.name}
           onChange={(e) => update(i.id, { name: e.target.value })}
           placeholder="如 researcher"
-          className="flex-1 min-w-0 px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md text-sm font-semibold text-foreground placeholder:text-muted-foreground/30 placeholder:font-normal focus:outline-none focus:border-primary/40 transition-colors"
+          className="flex-1 min-w-0 px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md ui-text font-semibold text-foreground text-center placeholder:text-muted-foreground/30 placeholder:font-normal focus:outline-none focus:border-primary/40 transition-colors"
         />
         <Button
           size="icon"
@@ -65,7 +65,7 @@ const SubagentCard = ({
       value={i.system_prompt}
       onChange={(e) => update(i.id, { system_prompt: e.target.value })}
       placeholder="系统提示词 / 人格描述…"
-      className="w-full min-h-[80px] px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md text-sm text-foreground placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/40 resize-y transition-colors"
+      className="w-full min-h-[80px] px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md ui-text text-foreground text-center placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/40 resize-y transition-colors"
     />
   </div>
 )
@@ -75,7 +75,7 @@ const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…'
 const SubagentItem = ({ i, remove }: { i: SubagentDraft; remove: (id: string) => void }) => (
   <div className="rounded-lg border border-border/30 bg-muted/10 px-3 py-2.5 flex items-center justify-between gap-3">
     <div className="min-w-0 space-y-0.5">
-      <p className="text-sm font-semibold text-foreground truncate">{i.name.trim() || '未命名'}</p>
+      <p className="ui-text font-semibold text-foreground truncate">{i.name.trim() || '未命名'}</p>
       <p className="text-xs text-muted-foreground/70 truncate">
         {i.system_prompt.trim()
           ? truncate(i.system_prompt.trim(), 20)
@@ -211,9 +211,10 @@ export function AgentsSettings() {
     label: string,
     key: keyof DelegationConfig,
     placeholder: string,
-    type: 'text' | 'number' = 'text'
+    type: 'text' | 'number' = 'text',
+    hint?: string
   ) => (
-    <SettingRow label={label}>
+    <SettingRow label={label} hint={hint}>
       <input
         type={type}
         value={cfg[key] as any}
@@ -221,7 +222,7 @@ export function AgentsSettings() {
         onChange={(e) =>
           setCfg((c) => ({ ...c, [key]: type === 'number' ? Number(e.target.value) : e.target.value }))
         }
-        className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-sm font-mono text-foreground/70 placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/30 transition-colors"
+        className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text font-mono text-foreground/70 text-center placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/30 transition-colors"
       />
     </SettingRow>
   )
@@ -229,16 +230,16 @@ export function AgentsSettings() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold text-foreground">Subagent</h3>
+        <h3 className="ui-title font-semibold text-foreground">Subagent</h3>
         <button
           onClick={startAdd}
-          className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 transition-colors"
+          className="flex items-center gap-1.5 ui-text font-medium text-primary hover:text-primary/80 transition-colors"
         >
           添加 Subagent
         </button>
       </div>
 
-      <div className="max-w-3xl space-y-1">
+      <div className="max-w-3xl space-y-4">
       {loading ? (
         <div className="text-xs text-muted-foreground/60 mt-2">读取配置中…</div>
       ) : (
@@ -252,7 +253,7 @@ export function AgentsSettings() {
                       value={matchedHistory >= 0 ? String(matchedHistory) : ''}
                       onChange={applyHistory}
                       placeholder={matchedHistory >= 0 ? '手动配置' : '选择历史模型配置…'}
-                      className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+                      className="w-56 ui-text text-foreground"
                       options={apiHistory.map((h, i) => ({
                         value: String(i),
                         label: `${h.model}${h.baseUrl ? ` · ${hostOf(h.baseUrl)}` : ''}`,
@@ -262,14 +263,14 @@ export function AgentsSettings() {
                   </SettingRow>
                 ) : (
                   <SettingRow label="模型配置">
-                    <span className="text-sm text-muted-foreground/60">
+                    <span className="ui-text text-muted-foreground/60">
                       暂无历史配置，请先在「API 配置」中添加模型
                     </span>
                   </SettingRow>
                 )}
-                {field('最大迭代次数', 'max_iterations', '50', 'number')}
-                {field('推理强度', 'reasoning_effort', 'ultra / max / high（可选）')}
-                <SettingRow label="子智能体危险命令自动通过（非交互式）">
+                {field('最大迭代次数', 'max_iterations', '50', 'number', '子智能体单次任务最多执行的步骤数，超过即停止。')}
+                {field('推理强度', 'reasoning_effort', 'ultra / max / high（可选）', 'text', '控制子智能体的思考深度与耗时，留空使用默认。')}
+                <SettingRow label="子智能体危险命令自动通过（非交互式）" hint="开启后，子智能体执行危险命令前不再逐条请求确认。">
                   <input
                     type="checkbox"
                     checked={cfg.subagent_auto_approve}

@@ -140,7 +140,7 @@ function ShortcutsSection() {
     <div className="space-y-6">
       {systemShortcuts.length > 0 && (
         <section className="space-y-3">
-          <h3 className="text-base font-bold text-foreground">系统快捷键</h3>
+          <h3 className="text-base font-bold text-foreground">快捷键</h3>
           <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
             <div className="divide-y divide-border/50">
               {systemShortcuts.map(([id, s]) => (
