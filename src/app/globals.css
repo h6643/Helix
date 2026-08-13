@@ -787,16 +787,18 @@ pre code.hljs {
   margin: 0.25em 0;
 }
 
-/* 仅作用于真正的 inline code（代码块内的 code 已被下方 .helix-md pre code 重置） */
+/* 仅作用于真正的 inline code（代码块内的 code 已被下方 .helix-md pre code 重置）
+   背景用 --muted（浅色/深色各自定义），自适应主题；代码块内 pre code 已重置为无背景。 */
 .helix-md code {
   font-size: 0.8em;
-  background: none;
-  padding: 0 0.15em;
-  border-radius: 3px;
+  background: var(--muted);
+  box-shadow: 0 1px 2px color-mix(in oklch, var(--muted-foreground) 25%, transparent);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
   vertical-align: -0.05em;
   line-height: 1;
   overflow-wrap: break-word;
-  color: color-mix(in oklch, var(--foreground) 75%, var(--primary));
+  color: color-mix(in oklch, var(--foreground) 80%, var(--primary));
 }
 
 .helix-md pre {
@@ -821,6 +823,11 @@ pre code.hljs {
   padding: 0;
   border-radius: 0;
   border: none;
+  /* 重置 .helix-md code 的行内规则泄漏：line-height:1 会让代码块行距=字号（行行贴死），
+     font-size:0.8em 会与 pre>div 的 0.85em 叠乘成 0.68em 小字。inherit 让代码块
+     跟随卡片自己的 0.85em 字号与 1.8 行高。 */
+  line-height: inherit;
+  font-size: inherit;
 }
 
 /* shiki token lines — keep each `.line` on its own row so the emitted
