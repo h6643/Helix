@@ -1,14 +1,13 @@
 'use client'
 
 import { ChevronRight, X, Copy, CheckCheck, Image as ImageIcon } from 'lucide-react'
-import React, { useState, useRef, useEffect, useMemo } from 'react'
+import React, { useState, useMemo } from 'react'
 import { formatDurationSeconds } from '@/lib/format'
 import { normalizeAcpContent, stripEmoji } from '@/lib/text-utils'
-import { getToolLabel, getToolIcon, getToolDisplayLabel, extractToolPath } from '@/lib/tool-display-utils'
+import { getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
 import type { ExecutionStep } from '@/stores/helix-store'
 
 const TOOL_RESULT_CLAMP = 20_000
-const AUTO_SCROLL_THRESHOLD = 3
 
 // ── ANSI escape code stripper ───────────────────────────────────────────
 
@@ -103,7 +102,7 @@ function CopyButton({ text }: { text: string }) {
 function DiffRenderer({ content }: { content: string }) {
   const lines = content.split('\n')
   return (
-    <div className="text-[11px] font-mono leading-relaxed">
+    <div className="text-[0.85em] font-mono leading-relaxed">
       {lines.map((line, i) => {
         let className = 'text-foreground/50'
         if (line.startsWith('+') && !line.startsWith('+++')) className = 'text-emerald-500/80 bg-emerald-500/5'
@@ -129,7 +128,7 @@ function SearchRenderer({ content, toolName }: { content: string; toolName: stri
   const hasFileLine = lines.some(l => /^[\w/.]+\.\w+:\d+/.test(l.trim()))
   if (hasFileLine || name.includes('grep') || name.includes('search')) {
     return (
-      <div className="text-[11px] font-mono space-y-0.5">
+      <div className="text-[0.85em] font-mono space-y-0.5">
         {lines.map((line, i) => {
           const match = line.match(/^([\w/.]+\.\w+):(\d+):?(.*)$/)
           if (match) {
@@ -149,7 +148,7 @@ function SearchRenderer({ content, toolName }: { content: string; toolName: stri
 
   // Fallback: numbered lines
   return (
-    <div className="text-[11px] font-mono space-y-0.5">
+    <div className="text-[0.85em] font-mono space-y-0.5">
       {lines.map((line, i) => (
         <div key={i} className="flex gap-2">
           <span className="text-muted-foreground/60 shrink-0 w-5 text-right">{i + 1}</span>
@@ -162,7 +161,7 @@ function SearchRenderer({ content, toolName }: { content: string; toolName: stri
 
 function ImageRenderer({ content }: { content: string }) {
   const [error, setError] = useState(false)
-  if (error) return <span className="text-[11px] text-muted-foreground">[图片加载失败]</span>
+  if (error) return <span className="text-[0.85em] text-muted-foreground">[图片加载失败]</span>
   return (
     <div className="relative group/img">
       <img
@@ -177,7 +176,7 @@ function ImageRenderer({ content }: { content: string }) {
 
 function PlainRenderer({ content }: { content: string }) {
   return (
-    <div className="text-[11px] text-foreground/50 whitespace-pre-wrap break-all leading-relaxed font-mono">
+    <div className="text-[0.85em] text-foreground/50 whitespace-pre-wrap break-all leading-relaxed font-mono">
       {stripAnsi(content)}
     </div>
   )
@@ -194,15 +193,77 @@ function ResultRenderer({ content, toolName }: { content: string; toolName: stri
 }
 
 // ── Main component ──────────────────────────────────────────────────────
+//
+// ZCode-style flat layout: each tool call is its own card (icon + status +
+// duration + action), expanded on click to reveal params / sub-steps / result.
+// No whole-group collapse wrapper — a multi-tool turn reads as a flat stack.
 
-export function InlineToolGroup({ steps, isRunning }: { steps: ExecutionStep[]; isRunning: boolean }) {
+// The tool's concrete action: the command/script for bash, the path for
+// file tools, etc. — shown WITHOUT the Chinese action prefix.
+function toolActionText(step: ExecutionStep): string {
+  const path = extractToolPath(step)
+  if (path) return path
+  const cmd = extractCommandSnippet(step.toolParams)
+  if (cmd) {
+    // For bash commands, show only the first line.
+    const firstLine = cmd.split('\n')[0]
+    return firstLine.length > 50 ? firstLine.slice(0, 50) + '…' : firstLine
+  }
+  return ''
+}
+
+// Action verb shown before the concrete action, derived from the tool type:
+// a command shows "执行", a search shows "搜索", a read shows "读取" — NOT a
+// generic "执行中" that doesn't describe what the tool does.
+function toolVerb(toolName: string): string {
+  const name = (toolName || '').toLowerCase()
+  if (name.includes('grep') || name.includes('search') || name.includes('glob') || name.includes('find')) return '搜索'
+  if (name.includes('read') || name.includes('view') || name.includes('list') || name.includes('directory')) return '读取'
+  if (name.includes('write') || name.includes('create') || name.includes('edit') || name.includes('patch')) return '写入'
+  if (name.includes('fetch') || name.includes('web')) return '获取网页'
+  if (name.includes('memory')) return '读取记忆'
+  if (name.includes('git')) return '查看'
+  // bash / terminal / run / execute / default
+  return '执行'
+}
+
+// Pair tool_result / error steps with their preceding tool_call so the result
+// renders inside that tool's card. An orphan result (no preceding call) becomes
+// a standalone card.
+function groupSteps(steps: ExecutionStep[]): Array<{ call: ExecutionStep; results: ExecutionStep[] }> {
+  const rows: Array<{ call: ExecutionStep; results: ExecutionStep[] }> = []
+  for (const s of steps) {
+    if (s.type === 'tool_call') {
+      rows.push({ call: s, results: [] })
+    } else if (rows.length > 0) {
+      rows[rows.length - 1].results.push(s)
+    } else {
+      rows.push({ call: s, results: [] })
+    }
+  }
+  return rows
+}
+
+function ToolCard({
+  step,
+  results,
+  isRunning,
+}: {
+  step: ExecutionStep
+  results: ExecutionStep[]
+  isRunning: boolean
+}) {
   const [open, setOpen] = useState(false)
   const [expandedResults, setExpandedResults] = useState<Set<string>>(new Set())
-  const [dismissed, setDismissed] = useState<Set<string>>(new Set())
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const visible = steps.filter(s => !dismissed.has(s.id))
-  const calls = visible.filter(s => s.type === 'tool_call')
-  const hasError = visible.some(s => s.type === 'error')
+  const path = extractToolPath(step)
+  const hasSubSteps = step.subSteps && step.subSteps.length > 0
+  const stepStatus = step.status || (step.finishedAt ? 'completed' : step.startedAt ? 'running' : undefined)
+  const running = stepStatus === 'running' && isRunning
+  const failed = stepStatus === 'failed'
+  const action = toolActionText(step)
+  // 动词随状态变化:运行中"执行/搜索/读取",完成态加"已"前缀("已执行/已搜索/已读取")。
+  const verb = toolVerb(step.toolName || '')
+  const verbText = stepStatus === 'completed' && !failed ? `已${verb}` : verb
 
   const toggleResult = (id: string) => {
     setExpandedResults(prev => {
@@ -213,180 +274,165 @@ export function InlineToolGroup({ steps, isRunning }: { steps: ExecutionStep[]; 
     })
   }
 
-  let title= ''
-  if (calls.length === 0) {
-    title= '工具结果'
-  } else if (calls.length === 1) {
-    title= calls[0].content || getToolDisplayLabel(calls[0].toolName || '', calls[0].toolKind, undefined, calls[0].toolParams)
-  } else {
-    const names = Array.from(new Set(calls.map(s => getToolLabel(s.toolName || ''))))
-    if (names.length === 1) {
-      title= `${names[0]} × ${calls.length}`
-    } else {
-      title= `执行了 ${calls.length} 个工具`
-    }
-  }
-
-  const running = isRunning && !visible.some(s => s.type === 'tool_result' || s.type === 'error')
-  const useAutoScroll = steps.length >= AUTO_SCROLL_THRESHOLD
-
-  useEffect(() => {
-    if (open && useAutoScroll && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [open, useAutoScroll, steps.length])
-
-  if (visible.length === 0) return null
-
   return (
-    <div className="my-2 overflow-hidden group">
+    <div className="group">
+      {/* Tool title row — click to expand/collapse.
+          动作词(执行/搜索/读取) + 具体动作，完成态显示"已执行/已搜索/已读取"。 */}
       <button
         type="button"
         onClick={() => setOpen(prev => !prev)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-[12px] text-foreground/70 hover:bg-muted/50 transition-colors text-left"
+        className="w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80"
       >
-        {hasError ? (
+        {failed ? (
           <X className="size-3.5 text-red-500 shrink-0" />
-        ) : null}
-        <span className={`font-medium ${running ? 'flowing-text' : ''}`}>{title}</span>
-        {hasError && <span className="text-red-500/80 text-[11px]">失败</span>}
-        <ChevronRight className={`size-3.5 shrink-0 ml-auto text-foreground/30 transition-all ${open ? 'rotate-90 opacity-100' : 'opacity-0 group-hover:opacity-100'}`} />
+        ) : (
+          getToolIcon(step.toolName || '')
+        )}
+        {stepStatus === 'completed' && !failed && (
+          <CheckCheck className="size-3.5 text-emerald-500/80 shrink-0" />
+        )}
+        <span className={`font-medium truncate ${running ? 'flowing-text' : ''}`}>
+          {verbText} {action || getToolDisplayLabel(step.toolName || '', step.toolKind, path, step.toolParams)}
+        </span>
+        {step.duration_s != null && step.duration_s > 0 && (
+          <span className="text-[0.72em] text-muted-foreground shrink-0">{formatDurationSeconds(step.duration_s)}</span>
+        )}
+        {(() => {
+          const count = step.output ? extractResultCount(step.output, step.toolName || '', step.toolParams) : ''
+          return count ? <span className="text-[0.72em] text-muted-foreground/50 shrink-0">{count}</span> : null
+        })()}
+        {(() => {
+          const diff = step.output ? extractDiffStats(step.output) : ''
+          return diff ? <span className="text-[0.72em] text-emerald-500/60 shrink-0">{diff}</span> : null
+        })()}
+        <ChevronRight className={`size-3.5 shrink-0 text-foreground/30 transition-all ${open ? 'rotate-90' : ''}`} />
       </button>
-      {open && (
-        <div
-          ref={scrollRef}
-          className={`px-3 pb-3 pt-1 border-t border-border/30 space-y-2 ${useAutoScroll ? 'max-h-80 overflow-y-auto' : ''}`}
-          style={useAutoScroll ? { maskImage: 'linear-gradient(to bottom, transparent 0%, black 4%, black 96%, transparent 100%)' } : undefined}
-        >
-          {useAutoScroll && <div className="sticky top-0 h-1 bg-gradient-to-b from-card/80 to-transparent pointer-events-none -mt-1" />}
-          {steps.map((step) => {
-            if (step.type === 'tool_call') {
-              const path = extractToolPath(step)
-              const hasSubSteps = step.subSteps && step.subSteps.length > 0
-              const stepStatus = step.status || (step.finishedAt ? 'completed' : step.startedAt ? 'running' : undefined)
-              return (
-                <div key={step.id} className="group/step text-[11px] text-foreground/60 font-mono">
-                  <div className="flex items-center gap-1.5">
-                    {stepStatus === 'failed' ? (
-                      <X className="size-3 text-red-500 shrink-0" />
-                    ) : stepStatus === 'running' ? null : (
-                      getToolIcon(step.toolName || '')
-                    )}
-                    <span className={`font-medium ${stepStatus === 'running' ? 'flowing-text' : ''}`}>{getToolDisplayLabel(step.toolName || '', step.toolKind, path, step.toolParams)}</span>
-                    {stepStatus === 'failed' && <span className="text-red-500/80 text-[10px]">✗</span>}
-                    {step.duration_s != null && step.duration_s > 0 && (
-                      <span className="text-[10px] text-muted-foreground ml-1">{formatDurationSeconds(step.duration_s)}</span>
-                    )}
-                    {(() => {
-                      const count = step.output ? extractResultCount(step.output, step.toolName || '', step.toolParams) : ''
-                      return count ? <span className="text-[10px] text-muted-foreground/50 ml-1">{count}</span> : null
-                    })()}
-                    {(() => {
-                      const diff = step.output ? extractDiffStats(step.output) : ''
-                      return diff ? <span className="text-[10px] text-emerald-500/60 ml-1">{diff}</span> : null
-                    })()}
-                    {(stepStatus === 'completed' || stepStatus === 'failed') && (
-                      <button
-                        onClick={() => setDismissed(prev => new Set(prev).add(step.id))}
-                        className="ml-auto opacity-0 group-hover/step:opacity-100 transition-opacity p-0.5 rounded text-foreground/20 hover:text-foreground/60"
-                      >
-                        <X className="size-2.5" />
-                      </button>
-                    )}
-                  </div>
-                  {/* Streaming output preview — shown while tool is running */}
-                  {stepStatus === 'running' && step.output && (
-                    <div className="mt-1 pl-5 text-[11px] text-foreground/40 font-mono max-h-16 overflow-hidden leading-relaxed">
-                      {stripAnsi(step.output.slice(-200))}
-                    </div>
-                  )}
-                  {hasSubSteps && (
-                    <div className="mt-1.5 pl-4 border-l border-border/30 space-y-1.5">
-                      {step.subSteps!.map((sub) => (
-                        <div key={sub.id} className="flex items-center gap-1.5">
-                          {getToolIcon(sub.toolName || '')}
-                          <span className="text-foreground/50">{getToolDisplayLabel(sub.toolName || '', sub.toolKind, undefined, sub.toolParams)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {/* Parameters — hidden by default */}
-                  {!hasSubSteps && step.toolParams && Object.keys(step.toolParams).length > 0 && (
-                    <details className="mt-1.5 pl-5 group/params">
-                      <summary className="text-[10px] text-foreground/40 cursor-pointer hover:text-foreground/60 transition-colors">
-                        参数 ({Object.keys(step.toolParams).length})
-                      </summary>
-                      <div className="mt-1 space-y-1.5">
-                        {Object.entries(step.toolParams).map(([k, v]) => (
-                          <div key={k} className="flex flex-col">
-                            <span className="text-[10px] text-foreground/40 font-medium uppercase tracking-wide">{k}</span>
-                            <pre className="text-[11px] text-foreground/70 bg-card/50 rounded px-2 py-1.5 overflow-x-auto font-mono border border-border/50 whitespace-pre-wrap break-all">{typeof v === 'string' ? v : JSON.stringify(v, null, 2)}</pre>
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                </div>
-              )
-            }
-            if (step.type === 'tool_result') {
-              const isExpanded = expandedResults.has(step.id)
-              const raw = stripEmoji(normalizeAcpContent(step.content || ''))
-              const clamped = raw.length > TOOL_RESULT_CLAMP ? raw.slice(0, TOOL_RESULT_CLAMP) + `\n\n… (${raw.length - TOOL_RESULT_CLAMP} 字符已截断)` : raw
-              const isLong = clamped.length > 500 || clamped.split('\n').length > 10
-              const fullText = step.content || ''
-              // Detect image for compact view
-              const isImage = detectResultKind(step.toolName || '', raw) === 'image'
 
-              return (
-                <div key={step.id} className="pl-5 text-[11px] font-mono">
-                  <div className="flex items-center gap-1.5 mb-0.5">
-                    <span className="text-[10px] text-foreground/40">结果</span>
-                    <CopyButton text={fullText} />
+      {open && (
+        <div className="pb-1 pt-1 pl-3 border-l-2 border-border/60 space-y-1.5">
+          {/* Streaming output preview — shown while tool is running */}
+          {running && step.output && (
+            <div className="text-[0.85em] text-foreground/40 font-mono max-h-16 overflow-hidden leading-relaxed whitespace-pre-wrap break-all">
+              {stripAnsi(step.output.slice(-200))}
+            </div>
+          )}
+          {/* Sub-agent sub-steps */}
+          {hasSubSteps && (
+            <div className="space-y-1.5 pl-3">
+              {step.subSteps!.map((sub) => {
+                const subRunning = sub.status === 'running'
+                const subFailed = sub.status === 'failed'
+                return (
+                  <div key={sub.id} className="flex items-center gap-1.5">
+                    {subFailed ? (
+                      <X className="size-3 text-red-500 shrink-0" />
+                    ) : (
+                      getToolIcon(sub.toolName || '')
+                    )}
+                    <span className="text-[0.85em] text-foreground/50">{getToolDisplayLabel(sub.toolName || '', sub.toolKind, undefined, sub.toolParams)}</span>
+                    {subRunning ? (
+                      <span className="text-[0.72em] text-primary/70 shrink-0 flowing-text">执行中</span>
+                    ) : sub.status === 'completed' ? (
+                      <span className="text-[0.72em] text-muted-foreground/50 shrink-0">已执行</span>
+                    ) : subFailed ? (
+                      <span className="text-[0.72em] text-red-500/80 shrink-0">失败</span>
+                    ) : null}
                   </div>
-                  {isLong && !isExpanded && !isImage ? (
-                    <div>
-                      <div className="relative overflow-hidden max-h-20 rounded border border-border/20">
-                        <ResultRenderer content={clamped} toolName={step.toolName || ''} />
-                        <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-card to-transparent" />
-                      </div>
-                      <button
-                        onClick={() => toggleResult(step.id)}
-                        className="mt-1 text-foreground/40 hover:text-foreground/70 transition-colors"
-                      >
-                        展开 ▼
-                      </button>
-                    </div>
-                  ) : (
-                    <div className={`rounded border border-border/20 ${isLong ? 'max-h-40 overflow-y-auto' : ''}`}>
-                      <div className="p-1.5">
-                        <ResultRenderer content={isExpanded ? raw : clamped} toolName={step.toolName || ''} />
-                      </div>
-                      {isLong && (
-                        <button
-                          onClick={() => toggleResult(step.id)}
-                          className="block w-full text-center py-0.5 text-foreground/40 hover:text-foreground/70 hover:bg-muted/30 transition-colors border-t border-border/20"
-                        >
-                          折叠 ▲
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )
-            }
-            if (step.type === 'error') {
+                )
+              })}
+            </div>
+          )}
+          {/* Parameters — hidden by default */}
+          {!hasSubSteps && step.toolParams && Object.keys(step.toolParams).length > 0 && (
+            <details className="pl-1 group/params">
+              <summary className="text-[0.72em] text-foreground/40 cursor-pointer hover:text-foreground/60 transition-colors">
+                参数 ({Object.keys(step.toolParams).length})
+              </summary>
+              <div className="mt-1.5 space-y-1.5">
+                {Object.entries(step.toolParams).map(([k, v]) => (
+                  <div key={k} className="flex flex-col">
+                    <span className="text-[0.72em] text-foreground/40 font-medium uppercase tracking-wide">{k}</span>
+                    <pre className="text-[0.85em] text-foreground/70 bg-muted/20 rounded px-2 py-1.5 overflow-x-auto font-mono whitespace-pre-wrap break-all">{typeof v === 'string' ? v : JSON.stringify(v, null, 2)}</pre>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+          {/* Result(s) — multi-typed render inside this tool's card */}
+          {results.map((r) => {
+            if (r.type === 'error') {
               return (
-                <div key={step.id} className="pl-5 text-[11px] text-red-500/80 font-mono whitespace-pre-wrap break-all leading-relaxed">
-                  {stripEmoji(normalizeAcpContent(step.content || ''))}
+                <div key={r.id} className="pl-1 text-[0.85em] text-red-500/80 font-mono whitespace-pre-wrap break-all leading-relaxed">
+                  {stripEmoji(normalizeAcpContent(r.content || ''))}
                 </div>
               )
             }
-            return null
+            const isExpanded = expandedResults.has(r.id)
+            const raw = stripEmoji(normalizeAcpContent(r.content || ''))
+            const clamped = raw.length > TOOL_RESULT_CLAMP ? raw.slice(0, TOOL_RESULT_CLAMP) + `\n\n… (${raw.length - TOOL_RESULT_CLAMP} 字符已截断)` : raw
+            const isLong = clamped.length > 500 || clamped.split('\n').length > 10
+            const fullText = r.content || ''
+            const isImage = detectResultKind(r.toolName || '', raw) === 'image'
+
+            return (
+              <div key={r.id} className="pl-1">
+                <div className="flex items-center gap-1.5 mb-0.5">
+                  <span className="text-[0.72em] text-foreground/40">结果</span>
+                  <CopyButton text={fullText} />
+                </div>
+                {isLong && !isExpanded && !isImage ? (
+                  <div>
+                    <div className="relative overflow-hidden max-h-20 rounded border border-border/20">
+                      <ResultRenderer content={clamped} toolName={r.toolName || ''} />
+                      <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-card to-transparent" />
+                    </div>
+                    <button
+                      onClick={() => toggleResult(r.id)}
+                      className="mt-1 text-foreground/40 hover:text-foreground/70 transition-colors text-[0.85em]"
+                    >
+                      展开 ▼
+                    </button>
+                  </div>
+                ) : (
+                  <div className={`rounded border border-border/20 ${isLong ? 'max-h-40 overflow-y-auto' : ''}`}>
+                    <div className="p-1.5">
+                      <ResultRenderer content={isExpanded ? raw : clamped} toolName={r.toolName || ''} />
+                    </div>
+                    {isLong && (
+                      <button
+                        onClick={() => toggleResult(r.id)}
+                        className="block w-full text-center py-0.5 text-foreground/40 hover:text-foreground/70 hover:bg-muted/30 transition-colors border-t border-border/20 text-[0.85em]"
+                      >
+                        折叠 ▲
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
           })}
-          {useAutoScroll && <div className="sticky bottom-0 h-1 bg-gradient-to-t from-card/80 to-transparent pointer-events-none" />}
         </div>
       )}
+    </div>
+  )
+}
+
+export function InlineToolGroup({ steps, isRunning, fontSize = 14 }: { steps: ExecutionStep[]; isRunning: boolean; fontSize?: number }) {
+  const visible = steps
+  if (visible.length === 0) return null
+
+  const rows = groupSteps(visible)
+
+  return (
+    <div className="my-2 space-y-1.5" style={{ fontSize }}>
+      {rows.map(({ call, results }) => (
+        <ToolCard
+          key={call.id}
+          step={call}
+          results={results}
+          isRunning={isRunning}
+        />
+      ))}
     </div>
   )
 }

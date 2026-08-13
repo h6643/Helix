@@ -44,7 +44,7 @@ _DEP_DESCRIPTIONS = {
     "node": "Node.js (required for browser tools and TUI)",
     "browser": "Browser engine (Chromium, for web browsing tools)",
     "ripgrep": "ripgrep (fast file search)",
-    "ffmpeg": "ffmpeg (TTS voice messages)",
+    "ffmpeg": "ffmpeg (audio processing)",
 }
 
 

@@ -52,15 +52,6 @@ pub struct HermesState {
     pub respawn_count: AtomicU64,
     pub respawn_window_start: AtomicU64,
     pub app_quitting: AtomicBool,
-    /// Active voice-recording session (arecord child + temp file path).
-    pub record_child: Mutex<Option<std::process::Child>>,
-    pub record_file: Mutex<Option<std::path::PathBuf>>,
-    /// Active TTS playback child process (paplay / ffplay / aplay).
-    pub tts_playback_child: Mutex<Option<std::process::Child>>,
-    /// Wake-word listener bridge process (_helix_wake.py).
-    pub wake_child: Mutex<Option<std::process::Child>>,
-    /// Stdin handle for the wake-word bridge (for sending commands).
-    pub wake_stdin: Mutex<Option<std::process::ChildStdin>>,
 }
 
 impl Default for HermesState {
@@ -74,11 +65,6 @@ impl Default for HermesState {
             respawn_count: AtomicU64::new(0),
             respawn_window_start: AtomicU64::new(0),
             app_quitting: AtomicBool::new(false),
-            record_child: Mutex::new(None),
-            record_file: Mutex::new(None),
-            tts_playback_child: Mutex::new(None),
-            wake_child: Mutex::new(None),
-            wake_stdin: Mutex::new(None),
         }
     }
 }

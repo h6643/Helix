@@ -11,13 +11,14 @@
  * code fences emit `<pre><div>` so `.helix-md pre > div` paints the code card.
  */
 
-import { cloneElement, isValidElement, memo, useMemo, type ReactNode } from 'react'
+import { cloneElement, isValidElement, memo, useMemo, useState, type MouseEvent, type ReactNode } from 'react'
 import { AlertCircle, AlertTriangle, Info, type LucideIcon, Zap } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import 'katex/dist/katex.min.css'
+import { useHelixStore } from '@/stores/helix-store'
 
 import { sanitizeLanguageTag } from '@/lib/markdown-code'
 import { preprocessMarkdown } from '@/lib/markdown-preprocess'
@@ -144,32 +145,114 @@ function MarkdownAlert({ children, type }: { children: ReactNode; type: AlertTyp
 
 // ── Code cards ───────────────────────────────────────────────────────────
 
-function CodeCard({ language, code }: { language: string; code: string }) {
+// Box Drawing (U+2500–U+257F) plus Block Elements (U+2580–U+259F): tree
+// connectors (├── └── │) and progress-bar/shading glyphs (█ ░ ▒ ▓).
+// Ported from hermes-desktop AgentMarkdown: a fence is a "box diagram" only
+// when box-drawing characters dominate it (≥ half of its non-empty lines).
+// Such output must never go through shiki — per-glyph token spans fragment
+// and misalign under imperfect Unicode metrics. A stray │ in a comment must
+// NOT demote a real source file.
+const BOX_DRAWING_RE = /[\u2500-\u259F]/
+
+function isBoxDiagram(code: string): boolean {
+  const lines = code.split('\n').filter(line => line.trim() !== '')
+  if (lines.length === 0) return false
+  const boxLines = lines.filter(line => BOX_DRAWING_RE.test(line)).length
+  return boxLines * 2 >= lines.length
+}
+
+// Diff viewer with colored +/-/@@ lines (ported from hermes-desktop).
+function DiffView({ code }: { code: string }) {
+  const lines = code.split('\n')
+
+  return (
+    <div className="helix-diff-content">
+      {lines.map((line, i) => {
+        let cls = 'helix-diff-line'
+        if (line.startsWith('+')) cls += ' helix-diff-add'
+        else if (line.startsWith('-')) cls += ' helix-diff-remove'
+        else if (line.startsWith('@@')) cls += ' helix-diff-hunk'
+        return (
+          <div key={i} className={cls}>
+            {line || '\u00A0'}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// Source-position ids of code blocks the user has expanded. Kept at module
+// scope so the choice survives the remounts react-markdown causes while a
+// message is still streaming (index-based keys shift as the AST grows, which
+// would otherwise reset a per-component useState back to collapsed).
+const expandedCodeBlocks = new Set<string>()
+
+function CodeCard({ language, code, blockId }: { language: string; code: string; blockId?: string }) {
   const trimmed = code.replace(/^\n+/, '').trimEnd()
+  const [copied, setCopied] = useState(false)
+  const [collapsed, setCollapsed] = useState(() => (blockId ? !expandedCodeBlocks.has(blockId) : true))
+  const isDiff = language === 'diff'
+  // Diffs win over the box-diagram check: DiffView is already a plain
+  // per-line renderer (no shiki), so a patch touching a tree diagram must
+  // keep its colored +/- view.
+  const boxDiagram = !isDiff && isBoxDiagram(trimmed)
+  const lineCount = trimmed.split('\n').length
+  const isLong = lineCount > 15 || trimmed.length > 800
+
+  const body = isDiff ? (
+    <DiffView code={trimmed} />
+  ) : boxDiagram ? (
+    <code dir="ltr" className="helix-box-diagram block">
+      {trimmed}
+    </code>
+  ) : (
+    <HighlightedCode code={trimmed} language={language} />
+  )
 
   return (
     <pre>
       <div>
         <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[10px] uppercase tracking-wider text-foreground/40 select-none font-medium">
-            {language || 'code'}
-          </span>
-          <button
-            type="button"
-            aria-label="复制代码"
-            onClick={() => {
-              try {
-                void navigator.clipboard?.writeText(trimmed)
-              } catch {
-                /* clipboard unavailable */
+        <span className="text-[10px] uppercase tracking-wider text-foreground/40 select-none font-medium">
+          {isDiff ? 'diff' : language || (boxDiagram ? 'text' : 'code')}
+        </span>
+        <button
+          type="button"
+          aria-label="复制代码"
+          onClick={() => {
+            try {
+              void navigator.clipboard?.writeText(trimmed)
+              setCopied(true)
+              setTimeout(() => setCopied(false), 2000)
+            } catch {
+              /* clipboard unavailable */
+            }
+          }}
+          className="text-[10px] text-foreground/40 hover:text-foreground/70 transition-colors cursor-pointer"
+        >
+          {copied ? '已复制' : '复制'}
+        </button>
+      </div>
+      <div className={isLong && collapsed ? 'helix-code-collapsed' : ''}>{body}</div>
+      {isLong && (
+        <button
+          type="button"
+          className="helix-code-expand-btn"
+          onClick={() =>
+            setCollapsed(prev => {
+              const next = !prev
+              if (blockId) {
+                if (next) expandedCodeBlocks.delete(blockId)
+                else expandedCodeBlocks.add(blockId)
               }
-            }}
-            className="text-[10px] text-foreground/40 hover:text-foreground/70 transition-colors cursor-pointer"
-          >
-            复制
-          </button>
-        </div>
-        <HighlightedCode code={trimmed} language={language} />
+              return next
+            })
+          }
+        >
+          {collapsed ? '展开全部' : '收起'}
+        </button>
+      )}
       </div>
     </pre>
   )
@@ -185,6 +268,8 @@ function codeText(children: unknown): string {
 
 const HelixMarkdown = memo(function HelixMarkdown({ text, className }: HelixMarkdownProps) {
   const processed = useMemo(() => (text ? preprocessMarkdown(text) : ''), [text])
+  const setPreviewRailUrl = useHelixStore(s => s.setPreviewRailUrl)
+  const setRightSidebarTab = useHelixStore(s => s.setRightSidebarTab)
 
   return (
     <div className={className}>
@@ -198,11 +283,28 @@ const HelixMarkdown = memo(function HelixMarkdown({ text, className }: HelixMark
         h3: (props) => <h3 className="my-1 font-semibold text-[0.875rem]" {...props} />,
         h4: (props) => <h4 className="my-1 font-semibold text-[0.8125rem]" {...props} />,
         p: (props) => <p {...props} />,
-        a: ({ children, href, ...props }) => (
-          <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-            {children}
-          </a>
-        ),
+        a: ({ children, href, ...props }) => {
+          const isExternal = !!href && /^https?:\/\//i.test(href)
+          const handleClick = (e: MouseEvent<HTMLAnchorElement>) => {
+            if (!isExternal) return
+            // 修饰键 / 中键 → 放行系统默认（在外部浏览器打开）
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return
+            e.preventDefault()
+            setPreviewRailUrl(href!)
+            setRightSidebarTab('browser')
+          }
+          return (
+            <a
+              href={href}
+              onClick={handleClick}
+              {...(isExternal ? {} : { target: '_blank' })}
+              rel="noopener noreferrer"
+              {...props}
+            >
+              {children}
+            </a>
+          )
+        },
         // Inline code must not vote when an ancestor resolves `dir="auto"`
         // (mirrors the official `inlineCode` override). Fenced code goes
         // through the `pre` override below, never here.
@@ -257,7 +359,7 @@ const HelixMarkdown = memo(function HelixMarkdown({ text, className }: HelixMark
           <img alt={alt || ''} src={src} className="my-2 block h-auto max-w-full rounded-lg object-contain" {...props} />
         ),
         // Fenced code → the `.helix-md pre > div` code card.
-        pre: ({ children }) => {
+        pre: ({ children, node }) => {
           const child = Array.isArray(children) ? children[0] : children
           const codeEl = (child as React.ReactElement | null) || null
           const classNameRaw =
@@ -267,7 +369,13 @@ const HelixMarkdown = memo(function HelixMarkdown({ text, className }: HelixMark
           const match = /language-([\w+#-]+)/.exec(classNameRaw)
           const language = match ? sanitizeLanguageTag(match[1]) : ''
           const code = codeText((codeEl?.props as { children?: unknown } | undefined)?.children)
-          return <CodeCard language={language} code={code} />
+          // Source offset of the opening fence is stable as the block streams,
+          // so it survives react-markdown's streaming remounts (unlike index
+          // keys) and uniquely identifies this block within the message.
+          const start = node?.position?.start
+          const blockId = start != null ? `${start.offset ?? start.line}:${classNameRaw}` : undefined
+
+          return <CodeCard language={language} code={code} blockId={blockId} />
         },
       }}
     >

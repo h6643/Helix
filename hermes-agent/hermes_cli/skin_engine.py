@@ -60,7 +60,6 @@ All fields are optional. Missing values inherit from the ``default`` skin.
       session_label: "#DAA520"           # Session label color
       session_border: "#8B8682"          # Session ID dim color
       status_bar_bg: "#1a1a2e"          # TUI status/usage bar background
-      voice_status_bg: "#1a1a2e"        # TUI voice status background
       selection_bg: "#333355"           # TUI mouse-selection highlight background
       completion_menu_bg: "#1a1a2e"      # Completion menu background
       completion_menu_current_bg: "#333355"  # Active completion row background
@@ -232,7 +231,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_current_bg": "#333355",
             "selection_bg": "#3a3a55",
             "shell_dollar": "#4dabf7",
-            "voice_status_bg": "#1a1a2e",
         },
         # Light overlay (merged onto `colors`; dark mode renders the vivid
         # block above untouched). The goldenrod ladder: on white, the vivid
@@ -268,7 +266,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_current_bg": "#E0D1BF",
             "selection_bg": "#D4E4F7",
             "status_bar_bg": "#F5F5F5",
-            "voice_status_bg": "#F5F5F5",
         },
         "spinner": {
             # Empty = use hardcoded defaults in display.py
@@ -314,7 +311,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_current_bg": "#5C221D",
             "selection_bg": "#692620",
             "shell_dollar": "#DD4A3A",
-            "voice_status_bg": "#2A1212",
         },
         "spinner": {
             "waiting_faces": ["(⚔)", "(⛨)", "(▲)", "(<>)", "(/)"],
@@ -391,7 +387,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_current_bg": "#464646",
             "selection_bg": "#505050",
             "shell_dollar": "#aaaaaa",
-            "voice_status_bg": "#1F1F1F",
         },
         "spinner": {},
         "branding": {
@@ -435,7 +430,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_current_bg": "#324867",
             "selection_bg": "#3A5375",
             "shell_dollar": "#7eb8f6",
-            "voice_status_bg": "#151C2F",
         },
         "spinner": {},
         "branding": {
@@ -481,7 +475,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_meta_current_bg": "#BFDBFE",
             "selection_bg": "#D3E0FB",
             "shell_dollar": "#2563EB",
-            "voice_status_bg": "#E5EDF8",
         },
         "spinner": {},
         "branding": {
@@ -527,7 +520,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_meta_current_bg": "#DFCFB0",
             "selection_bg": "#E8DAD0",
             "shell_dollar": "#8B4513",
-            "voice_status_bg": "#F5F0E8",
         },
         "spinner": {},
         "branding": {
@@ -571,7 +563,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_current_bg": "#254D73",
             "selection_bg": "#2A587F",
             "shell_dollar": "#5DB8F5",
-            "voice_status_bg": "#0F2440",
         },
         "spinner": {
             "waiting_faces": ["(≈)", "(Ψ)", "(∿)", "(◌)", "(◠)"],
@@ -648,7 +639,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_current_bg": "#585858",
             "selection_bg": "#666666",
             "shell_dollar": "#E7E7E7",
-            "voice_status_bg": "#202020",
         },
         "spinner": {
             "waiting_faces": ["(◉)", "(◌)", "(◬)", "(⬤)", "(::)"],
@@ -728,7 +718,6 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "completion_menu_meta_current_bg": "#5A260D",
             "selection_bg": "#5A260D",
             "shell_dollar": "#F29C38",
-            "voice_status_bg": "#2B160E",
         },
         "spinner": {
             "waiting_faces": ["(✦)", "(▲)", "(◇)", "(<>)", "(🔥)"],
@@ -1016,7 +1005,6 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
     status_warn = skin.get_color("status_bar_warn", warn)
     status_bad = skin.get_color("status_bar_bad", skin.get_color("banner_accent", warn))
     status_critical = skin.get_color("status_bar_critical", error)
-    voice_bg = skin.get_color("voice_status_bg", status_bg)
     menu_bg = skin.get_color("completion_menu_bg", "#1a1a2e")
     menu_current_bg = skin.get_color("completion_menu_current_bg", "#333355")
     menu_meta_bg = skin.get_color("completion_menu_meta_bg", menu_bg)
@@ -1063,6 +1051,4 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
         "approval-cmd": f"{dim} italic",
         "approval-choice": dim,
         "approval-selected": f"{title} bold",
-        "voice-status": f"bg:{voice_bg} {label}",
-        "voice-status-recording": f"bg:{voice_bg} {error} bold",
     }

@@ -128,19 +128,6 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
         "opentelemetry-exporter-otlp-proto-http==1.39.1",
     ),
 
-    # ─── TTS providers ─────────────────────────────────────────────────────
-    # Pinned to exact versions to match pyproject.toml's no-ranges policy
-    # (see comment at top of [project.dependencies]). When bumping, update
-    # both this map AND the corresponding extra in pyproject.toml.
-    #
-    # mistralai pin tracks the `mistral` extra in pyproject.toml. PyPI
-    # quarantined the project 2026-05-12 (malicious 2.4.6, Mini Shai-Hulud);
-    # 2.4.6 was removed and clean releases resumed (2.4.7, 2.4.8). Voxtral
-    # STT + TTS share the same SDK.
-    "tts.mistral": ("mistralai==2.4.8",),
-    "tts.edge": ("edge-tts==7.2.7",),
-    "tts.elevenlabs": ("elevenlabs==1.59.0",),
-
     # ─── Speech-to-text providers ──────────────────────────────────────────
     "stt.mistral": ("mistralai==2.4.8",),
     "stt.faster_whisper": (
@@ -151,58 +138,6 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # SILK voice-note decoding (WeChat/QQ .silk voice messages). pilk is a
     # small silk-v3 codec binding; installed on first .silk transcription.
     "stt.silk": ("pilk==0.2.4",),
-
-    # ─── Wake word ("Hey Hermes") engines ──────────────────────────────────
-    # Keep in sync with the `wake` extra in pyproject.toml. openWakeWord is the
-    # free, local default (ONNX runtime); Porcupine is the premium engine.
-    # openWakeWord's ONNX embedding model returns near-zero scores on macOS
-    # ARM64 (dscripka/openWakeWord#336), so the wake word runs on the tflite
-    # backend there. Upstream declares tflite-runtime for Linux only;
-    # ai-edge-litert is the macOS equivalent, bridged in tools/wake_word.py.
-    # It lives in its own feature because lazy-dep specs cannot carry PEP 508
-    # environment markers (_spec_is_safe rejects ";"), so the platform gate is
-    # applied by the caller instead.
-    "wake.openwakeword.tflite": (
-        "ai-edge-litert==2.1.6",
-    ),
-    # openwakeword itself is installed with --no-deps (see _NO_DEPS_SPECS):
-    # upstream declares tflite-runtime as a hard Linux requirement and that
-    # wheel stops at cp311, so letting pip resolve openWakeWord's metadata
-    # kills the whole feature on the bundled Python 3.12 runtime. The specs
-    # after sounddevice are openWakeWord's actual runtime imports -- scipy +
-    # scikit-learn (openwakeword.custom_verifier_model, imported by its
-    # __init__), tqdm + requests (openwakeword.utils) -- pinned to upstream's
-    # own ranges so they resolve against whatever the core venv already has
-    # instead of churning shared packages.
-    "wake.openwakeword": (
-        "openwakeword==0.6.0",
-        "onnxruntime==1.27.0",
-        "sounddevice==0.5.5",
-        "numpy==2.4.3",
-        "scipy>=1.3,<2",
-        "scikit-learn>=1,<2",
-        "tqdm>=4.0,<5",
-        "requests>=2.0,<3",
-    ),
-    # Open-vocabulary keyword spotting: any typed phrase, zero training.
-    # sentencepiece is required by sherpa_onnx.text2token (runtime phrase
-    # tokenization) even though sherpa-onnx doesn't declare it.
-    # pypinyin is the same class of hole: sherpa_onnx.utils.text2token
-    # imports it UNCONDITIONALLY (for the ppinyin/fpinyin token types) but
-    # sherpa-onnx 1.13.4 does NOT declare it — so an otherwise-successful
-    # wake.sherpa install left "No module named 'pypinyin'" at wake start.
-    "wake.sherpa": (
-        "sherpa-onnx==1.13.4",
-        "sentencepiece==0.2.2",
-        "pypinyin==0.55.0",
-        "sounddevice==0.5.5",
-        "numpy==2.4.3",
-    ),
-    "wake.porcupine": (
-        "pvporcupine==4.0.3",
-        "sounddevice==0.5.5",
-        "numpy==2.4.3",
-    ),
 
     # ─── Image generation backends ─────────────────────────────────────────
     "image.fal": ("fal-client==0.13.1",),
@@ -336,18 +271,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
 # version range. Reject anything that looks like a URL, file path, or shell
 # metacharacter.
 # Specs that MUST bypass dependency resolution (``pip install --no-deps``).
-#
-# openWakeWord 0.6.0 declares `tflite-runtime<3,>=2.8.0; platform_system ==
-# "Linux"` as a hard requirement, but tflite-runtime's final release (2.14.0)
-# ships no wheel past cp311. On Linux with the bundled Python 3.12 runtime the
-# resolver therefore fails outright -- and takes the whole wake-word feature
-# with it -- even though only the ONNX backend is ever loaded. Installing it
-# with --no-deps sidesteps the resolver; openWakeWord's real runtime imports
-# are listed explicitly next to it in LAZY_DEPS["wake.openwakeword"], so
-# nothing is silently left uninstalled.
-_NO_DEPS_SPECS: frozenset = frozenset({
-    "openwakeword==0.6.0",
-})
+_NO_DEPS_SPECS: frozenset = frozenset()
 
 
 def _split_no_deps(specs) -> tuple:
@@ -361,9 +285,7 @@ def _manual_install_hint(specs, *, installer: str = "uv pip install") -> str:
     """Copy-pasteable install command that honours the --no-deps split.
 
     Kept in sync with :func:`_venv_pip_install` so the command we print to a
-    user is the same one we would have run ourselves -- printing a plain
-    ``pip install openwakeword`` here would just reproduce the resolver
-    failure the split exists to avoid.
+    user is the same one we would have run ourselves.
     """
     plain, no_deps = _split_no_deps(specs)
     parts = []

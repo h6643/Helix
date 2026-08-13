@@ -514,6 +514,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         timestamp: msg.timestamp,
         reasoning: msg.reasoning,
         steps: msg.steps,
+        blocks: msg.blocks,
         // Tag with the owning session so concurrent sessions' messages can
         // coexist in the store without leaking across the per-session filter.
         sessionId: session.id,
@@ -533,7 +534,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       const loadedIds = new Set(msgs.map(m => m.id))
       useHelixStore.setState({
         chatMessages: [...msgs, ...preserved.filter(m => !loadedIds.has(m.id))],
-        selectedWorkDir: fresh.workDir || null,
         activeSessionWorkDir: fresh.workDir ?? null,
       })
       if (fresh.workDir) {

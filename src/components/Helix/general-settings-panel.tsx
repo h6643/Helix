@@ -8,12 +8,6 @@ import { Toggle, SettingRow, SettingGroup, SectionHeading } from './settings-ui'
 export function GeneralSettingsPanel() {
   const desktopNotifications = useHelixStore(s => s.desktopNotifications)
   const setDesktopNotifications = useHelixStore(s => s.setDesktopNotifications)
-  const voiceWakeEnabled = useHelixStore(s => s.voiceWakeEnabled)
-  const setVoiceWakeEnabled = useHelixStore(s => s.setVoiceWakeEnabled)
-  const wakeWordPhrase = useHelixStore(s => s.wakeWordPhrase)
-  const setWakeWordPhrase = useHelixStore(s => s.setWakeWordPhrase)
-  const startupGreeting = useHelixStore(s => s.startupGreeting)
-  const setStartupGreeting = useHelixStore(s => s.setStartupGreeting)
   const showToast = useHelixStore(s => s.showToast)
 
   const {
@@ -32,35 +26,6 @@ export function GeneralSettingsPanel() {
       <SettingGroup title="通知">
         <SettingRow label="桌面通知">
           <Toggle enabled={desktopNotifications} onToggle={() => setDesktopNotifications(!desktopNotifications)} />
-        </SettingRow>
-      </SettingGroup>
-
-      <SettingGroup title="语音">
-        <SettingRow label="语音唤醒" hint={voiceWakeEnabled ? `说 "${wakeWordPhrase}" 唤醒` : '开启后说唤醒词可唤醒'}>
-          <Toggle enabled={voiceWakeEnabled} onToggle={() => setVoiceWakeEnabled(!voiceWakeEnabled)} />
-        </SettingRow>
-        {voiceWakeEnabled && (
-          <SettingRow label="唤醒词">
-            <input
-              value={wakeWordPhrase}
-              onChange={(e) => setWakeWordPhrase(e.target.value)}
-              onBlur={() => { if (!wakeWordPhrase.trim()) setWakeWordPhrase('hey hermes'); persistToStorage() }}
-              placeholder="hey hermes"
-              className="w-56 px-2.5 py-1.5 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary"
-            />
-          </SettingRow>
-        )}
-      </SettingGroup>
-
-      <SettingGroup title="个性化">
-        <SettingRow label="启动语">
-          <input
-            value={startupGreeting}
-            onChange={(e) => setStartupGreeting(e.target.value)}
-            onBlur={() => { if (!startupGreeting.trim()) setStartupGreeting('有什么可以帮你的？'); persistToStorage() }}
-            placeholder="有什么可以帮你的？"
-            className="w-56 px-2.5 py-1.5 rounded-lg bg-muted/50 text-sm text-foreground border border-border focus:outline-none focus:ring-1 focus:ring-primary"
-          />
         </SettingRow>
       </SettingGroup>
 

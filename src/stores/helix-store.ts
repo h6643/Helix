@@ -76,7 +76,7 @@ import { createTerminalSlice, type TerminalSlice } from './slices/terminal-slice
 import { createToastSlice, type ToastSlice } from './slices/toast-slice'
 
 export type {
-  FileNode, ImageAttachment, FileAttachment, ExecutionStep,
+  FileNode, ImageAttachment, FileAttachment, ExecutionStep, ChatMessage,
   StreamingResponseBlock, PendingChange,
   ApiConfig, ApiProfile,
   TaskNode,
@@ -151,14 +151,6 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setRightSidebarTab: (tab: 'browser' | 'code' | 'files' | 'email' | 'diff' | null) => void
   showLearningView: boolean
   toggleLearningView: () => void
-  voiceAutoSpeak: boolean
-  setVoiceAutoSpeak: (v: boolean) => void
-  voiceWakeEnabled: boolean
-  setVoiceWakeEnabled: (v: boolean) => void
-  wakeWordPhrase: string
-  setWakeWordPhrase: (v: string) => void
-  showWakeAnimation: boolean
-  setShowWakeAnimation: (v: boolean) => void
   approvalMode: 'default' | 'accept_edits' | 'dont_ask'
   setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask') => void
   // 每个会话是否有待用户确认（审批/反问/定时任务），侧边栏据此显示标记
@@ -241,8 +233,8 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   clearExecutionFlow: () => void
   modelUsage: Record<string, { prompt: number; completion: number; total: number; cost: number }>
   addModelUsage: (model: string, usage: { prompt: number; completion: number; total: number; cost: number }) => void
-  contextUsage: Record<string, { size: number; used: number }>
-  setContextUsage: (sessionId: string, size: number, used: number) => void
+  contextUsage: Record<string, { size: number; used: number; categories?: Array<{ id: string; label: string; tokens: number; color: string }> }>
+  setContextUsage: (sessionId: string, size: number, used: number, categories?: Array<{ id: string; label: string; tokens: number; color: string }>) => void
   sessionUsageStats: {
     requestCount: number
     totalTokens: number
@@ -553,6 +545,15 @@ async function persistCurrentSessionNow(): Promise<void> {
     // handleNewTask saves the abandoned session correctly.
     const { persistence } = await import('@/lib/persist')
 
+    // Preserve the session's EXISTING workDir when it's already on disk.
+    // Double-clicking a sidebar session fires handleLoadSession twice: the
+    // second flush can capture a snapshot whose activeSessionWorkDir was
+    // already switched to the TARGET session's project, and saving with
+    // `activeSessionWorkDir ?? selectedWorkDir` would then RE-STAMP the
+    // current session into the wrong project ("对话跑到第一个项目里去").
+    // existing?.workDir wins, matching persistSessionById's merge semantics.
+    const existing = (await persistence.loadSessions()).find(s => s.id === sessionId)
+
     // Concurrency guard: only persist messages that belong to THIS session
     // (or legacy untagged ones). The in-memory array may also hold messages of
     // OTHER sessions still running in the background — stamping those with the
@@ -569,6 +570,7 @@ async function persistCurrentSessionNow(): Promise<void> {
         thoughtTokens: m.thoughtTokens,
         outputTokens: m.outputTokens,
         steps: m.steps,
+        blocks: m.blocks,
       }))
     const draft = snapshot.streamingDrafts[sessionId]
     const draftPartialId = 'draft-partial-' + sessionId
@@ -596,13 +598,14 @@ async function persistCurrentSessionNow(): Promise<void> {
         timestamp: Date.now(),
         isStreaming: false,
         steps: undefined,
+        blocks: undefined,
       })
     }
 
     await persistence.saveSession({
       id: sessionId,
       label,
-      workDir: snapshot.activeSessionWorkDir ?? snapshot.selectedWorkDir,
+      workDir: existing?.workDir ?? snapshot.activeSessionWorkDir ?? snapshot.selectedWorkDir,
       goal: snapshot.goal,
       memories: snapshot.memories,
       tasks: snapshot.tasks,
@@ -677,6 +680,7 @@ async function persistSessionById(sessionId: string): Promise<void> {
         thoughtTokens: m.thoughtTokens,
         outputTokens: m.outputTokens,
         steps: m.steps,
+        blocks: m.blocks,
       })
     }
     const merged = [...byId.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
@@ -735,7 +739,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   fontFamily: "'Geist Mono', 'Fira Code', 'Consolas', monospace" as const,
   fontSize: 14 as const,
   interfaceFont: 'var(--font-geist-sans)' as const,
-  transcriptFontSize: 14,
+  transcriptFontSize: 16,
   themeStyle: typeof window !== 'undefined'
     ? (window.localStorage.getItem('helix-theme-style') || 'default')
     : 'default',
@@ -864,10 +868,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   browserBookmarks: [],
   rightSidebarTab: null,
   showLearningView: false,
-  voiceAutoSpeak: false,
-  voiceWakeEnabled: false,
-  wakeWordPhrase: 'hey hermes',
-  showWakeAnimation: false,
   approvalMode: 'accept_edits' as const,
   startupGreeting: '有什么可以帮你的？',
 
@@ -1111,24 +1111,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     return { rightSidebarTab: null, showPreviewRail: false, editorOpen: false }
   }),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
-  setVoiceAutoSpeak: (v: boolean) => set((s) => ({ voiceAutoSpeak: v })),
-  setVoiceWakeEnabled: (v: boolean) => {
-    set((s) => ({ voiceWakeEnabled: v }))
-    import('@/lib/persist').then(({ persistence }) => {
-      persistence.saveSetting('voiceWakeEnabled', v).catch(() => {})
-    })
-  },
-  setWakeWordPhrase: async (v: string) => {
-    set({ wakeWordPhrase: v })
-    try {
-      const { isTauri } = await import('@/lib/tauri-bridge')
-      if (isTauri()) {
-        const { invoke } = await import('@tauri-apps/api/core')
-        await invoke('hermes_set_yaml_key', { key: 'wake_word.phrase', value: v })
-      }
-    } catch {}
-  },
-  setShowWakeAnimation: (v: boolean) => set({ showWakeAnimation: v }),
   setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask') => set({ approvalMode: v }),
   sessionPendingApproval: {},
   setSessionPendingApproval: (patch: Record<string, boolean>) => set((s) => ({ sessionPendingApproval: { ...s.sessionPendingApproval, ...patch } })),
@@ -1310,6 +1292,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         thoughtTokens: m.thoughtTokens,
         outputTokens: m.outputTokens,
         steps: m.steps,
+        blocks: m.blocks,
       })),
       files: collectFiles(state.files),
       openTabs: state.openTabs.map(tab => ({
@@ -1512,8 +1495,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         },
       }
     }),
-  setContextUsage: (sessionId, size, used) => {
-    set((s) => ({ contextUsage: { ...s.contextUsage, [sessionId]: { size, used } } }))
+  setContextUsage: (sessionId, size, used, categories) => {
+    set((s) => {
+      const prev = s.contextUsage[sessionId]
+      const next: { size: number; used: number; categories?: Array<{ id: string; label: string; tokens: number; color: string }> } = { size, used }
+      if (categories) next.categories = categories
+      else if (prev?.categories) next.categories = prev.categories
+      return { contextUsage: { ...s.contextUsage, [sessionId]: next } }
+    })
     // Persist immediately so a cold restart restores the latest usage snapshot
     // instead of resetting to zero (the backend never reports a session's
     // accumulated token count on launch, and the in-memory field is only
@@ -1673,6 +1662,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           thinkingTime: msg.thinkingTime,
           totalTokens: msg.totalTokens,
           steps: msg.steps,
+          blocks: msg.blocks,
         }))
 
       useHelixStore.getState().clearExecutionFlow()
@@ -1685,7 +1675,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
       set({
         chatMessages: msgs,
-        selectedWorkDir: session.workDir || null,
         activeSessionWorkDir: session.workDir ?? null,
         currentSessionId: targetId,
         sessionHistoryIndex: newIndex,
@@ -2337,9 +2326,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('personality', state.personality),
         persistence.saveSetting('fastMode', state.fastMode),
         persistence.saveSetting('desktopNotifications', state.desktopNotifications),
-        persistence.saveSetting('voiceAutoSpeak', state.voiceAutoSpeak),
-        persistence.saveSetting('voiceWakeEnabled', state.voiceWakeEnabled),
-        persistence.saveSetting('wakeWordPhrase', state.wakeWordPhrase),
         persistence.saveSetting('approvalMode', state.approvalMode),
         persistence.saveSetting('startupGreeting', state.startupGreeting),
         persistence.saveSetting('editorTheme', state.editorTheme),
@@ -2382,7 +2368,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, voiceAutoSpeak, voiceWakeEnabled, wakeWordPhrase, approvalMode, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, desktopNotifications, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, approvalMode, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
         safeLoad(persistence.loadMemories(), 'memories'),
         safeLoad(persistence.loadTasks(), 'tasks'),
         safeLoad(persistence.loadCheckpoints(), 'checkpoints'),
@@ -2429,9 +2415,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(persistence.loadSetting<string>('gitRemoteUrl'), 'gitRemoteUrl'),
         safeLoad(persistence.loadSetting<string>('gitCommitTemplate'), 'gitCommitTemplate'),
         safeLoad(persistence.loadSetting<string>('gitBranchPrefix'), 'gitBranchPrefix'),
-        safeLoad(persistence.loadSetting<boolean>('voiceAutoSpeak'), 'voiceAutoSpeak'),
-        safeLoad(persistence.loadSetting<boolean>('voiceWakeEnabled'), 'voiceWakeEnabled'),
-        safeLoad(persistence.loadSetting<string>('wakeWordPhrase'), 'wakeWordPhrase'),
         safeLoad(persistence.loadSetting<string>('approvalMode'), 'approvalMode'),
         safeLoad(persistence.loadSetting<string>('startupGreeting'), 'startupGreeting'),
         safeLoad(persistence.loadSetting<ProviderConfig[]>('providers'), 'providers'),
@@ -2926,9 +2909,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitRemoteUrl: gitRemoteUrl || get().gitRemoteUrl,
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
-        voiceAutoSpeak: voiceAutoSpeak ?? get().voiceAutoSpeak,
-        voiceWakeEnabled: voiceWakeEnabled ?? get().voiceWakeEnabled,
-        wakeWordPhrase: wakeWordPhrase || get().wakeWordPhrase,
         approvalMode: (approvalMode as any) || get().approvalMode,
         startupGreeting: startupGreeting || get().startupGreeting,
         browserHomeUrl: '',

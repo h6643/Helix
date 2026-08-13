@@ -107,12 +107,6 @@ class TurnContext:
     result_holder: list = field(default_factory=lambda: [None])
     tools_holder: list = field(default_factory=lambda: [None])
     stream_consumer_holder: list = field(default_factory=lambda: [None])
-    streaming_tts_consumer_holder: list = field(default_factory=lambda: [None])
-
-    # --- voice-ack wiring --------------------------------------------------
-    _voice_ack_fired: list = field(default_factory=lambda: [False])
-    _voice_ack_guild: list = field(default_factory=lambda: [None])
-    _voice_ack_loop: Any = None
 
     # --- hook / status bridge wiring (published at original binding sites) -
     _loop_for_step: Any = None
@@ -125,7 +119,6 @@ class TurnContext:
     #     reads them through the ctx exactly where it used to close over
     #     the sibling closures) ---------------------------------------------
     progress_callback: Optional[Callable] = None
-    voice_ack_callback: Optional[Callable] = None
     _step_callback_sync: Optional[Callable] = None
     _event_callback_sync: Optional[Callable] = None
     _status_callback_sync: Optional[Callable] = None

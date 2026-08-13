@@ -37,7 +37,6 @@ import { pushModelConfig, pushAgentConfigLive, pushConfigKeyValue } from '@/lib/
 import { isElectron, electronHermes, electronNotification, electronShell } from '@/lib/electron-bridge'
 import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
 import { isServeActive, getServeClient } from '@/lib/serve-gateway'
-import { speak, stripAcp } from '@/lib/voice-utils'
 import { useHelixStore } from '@/stores/helix-store'
 import { applyHelixPalette } from '@/lib/themes'
 import { AgentFlowPanel } from './agent-flow-panel'
@@ -46,7 +45,8 @@ import { CommandPalette } from './command-palette'
 import { Sidebar } from './sidebar'
 import { KeyboardShortcuts } from './keyboard-shortcuts'
 import { ContextMenuProvider } from './context-menu'
-import { WakeWordAnimation } from './wake-word-animation'
+
+
 import { ToastContainer } from './toast-container'
 import { useHermesStore } from '@/stores/hermes-store'
 import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
@@ -129,6 +129,15 @@ function rightSidebarCap(leftWidth: number): number {
   return Math.max(RIGHT_SIDEBAR_MIN, Math.min(RIGHT_SIDEBAR_MAX, Math.floor(cap)))
 }
 
+// Mirror of rightSidebarCap for the LEFT (session) sidebar. The upper bound is
+// window-relative so the chat column never drops below CHAT_MIN_WIDTH even when
+// the window is narrow; the lower bound stays the fixed SIDEBAR_MIN.
+function leftSidebarCap(rightWidth: number): number {
+  if (typeof window === 'undefined') return SIDEBAR_MAX
+  const cap = window.innerWidth - rightWidth - CHAT_MIN_WIDTH
+  return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.floor(cap)))
+}
+
 function loadSidebarWidth(): number {
   if (typeof localStorage === 'undefined') return SIDEBAR_DEFAULT
   try {
@@ -142,7 +151,7 @@ function loadSidebarWidth(): number {
         try { localStorage.removeItem(STORAGE_KEY) } catch {}
         return SIDEBAR_DEFAULT
       }
-      if (n >= SIDEBAR_MIN && n <= SIDEBAR_MAX) return n
+      if (n >= SIDEBAR_MIN && n <= leftSidebarCap(RIGHT_SIDEBAR_DEFAULT)) return n
     }
   } catch {}
   return SIDEBAR_DEFAULT
@@ -187,6 +196,10 @@ export function HelixLayout() {
   // without re-subscribing the drag effect on every sidebar width change.
   const sidebarWidthRef = useRef(sidebarWidth)
   sidebarWidthRef.current = sidebarWidth
+  // Mirror rightSidebarWidth so the left-sidebar resize clamp can read it live
+  // without re-subscribing the drag effect on every right-sidebar width change.
+  const rightSidebarWidthRef = useRef(rightSidebarWidth)
+  rightSidebarWidthRef.current = rightSidebarWidth
   const [isMaximized, setIsMaximized] = useState(false)
   const [hasTaskList, setHasTaskList] = useState(false)
   const [showTaskListPanel, setShowTaskListPanel] = useState(false)
@@ -229,7 +242,8 @@ export function HelixLayout() {
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const delta = e.clientX - dragStartX.current
-        const next = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, dragStartW.current + delta))
+        const cap = leftSidebarCap(rightSidebarWidthRef.current)
+        const next = Math.max(SIDEBAR_MIN, Math.min(cap, dragStartW.current + delta))
         setSidebarWidth(next)
       })
     }
@@ -695,29 +709,6 @@ export function HelixLayout() {
     }
   }, [])
 
-  // ── Auto-speak latest assistant reply when a run completes ─────────────
-  // Driven by the persisted `voiceAutoSpeak` setting (moved out of the old
-  // standalone Voice panel into Settings). Always mounted so it works with no
-  // panel open.
-  useEffect(() => {
-    let lastRunning = useHelixStore.getState().isAgentRunning
-    let lastSpokenId: string | null = null
-    const unsub = useHelixStore.subscribe((st) => {
-      const running = st.isAgentRunning
-      if (lastRunning && !running && st.voiceAutoSpeak) {
-        const msgs = st.chatMessages
-        const last = msgs[msgs.length - 1]
-        if (last && last.role === 'assistant' && last.id !== lastSpokenId) {
-          lastSpokenId = last.id
-          const text = stripAcp(last.content)
-          if (text) speak(text)
-        }
-      }
-      lastRunning = running
-    })
-    return unsub
-  }, [])
-
   // Native OS notification when an agent run finishes — respects desktopNotifications setting
   useEffect(() => {
     let prev = useHelixStore.getState().isAgentRunning
@@ -1032,7 +1023,6 @@ export function HelixLayout() {
       <CommandPalette />
       <ContextMenuProvider />
       <ToastContainer />
-      <WakeWordAnimation show={useHelixStore(s => s.showWakeAnimation)} onComplete={() => useHelixStore.getState().setShowWakeAnimation(false)} />
 
       {/* Title bar — part of the background */}
       <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 shrink-0 select-none">
@@ -1421,6 +1411,7 @@ export function HelixLayout() {
                     >
                       <div ref={browserMenuRef} className="w-52 bg-card border border-border/80 rounded-lg shadow-xl py-1">
                         <button
+                          data-tip="浏览器"
                           onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'browser' ? null : 'browser'); setBrowserMenuOpen(false) }}
                           className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'browser' ? 'text-primary' : 'text-foreground/80'}`}
                         >
@@ -1429,6 +1420,7 @@ export function HelixLayout() {
                           {rightSidebarTab === 'browser' && <CheckCircle2 className="size-3.5" />}
                         </button>
                         <button
+                          data-tip="目录"
                           onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'files' ? null : 'files'); setBrowserMenuOpen(false) }}
                           className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'files' ? 'text-primary' : 'text-foreground/80'}`}
                         >
@@ -1436,8 +1428,8 @@ export function HelixLayout() {
                           <span className="flex-1 text-left">目录</span>
                           {rightSidebarTab === 'files' && <CheckCircle2 className="size-3.5" />}
                         </button>
-                        
                         <button
+                          data-tip="变更"
                           onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'diff' ? null : 'diff'); setBrowserMenuOpen(false) }}
                           className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'diff' ? 'text-primary' : 'text-foreground/80'}`}
                         >
@@ -1480,20 +1472,25 @@ export function HelixLayout() {
             </PanelSuspense>
           </div>
         </div>
-        {/* Floating card — right sidebar */}
-        {rightSidebarTab && (
-          <div className="relative shrink-0" style={{ width: rightSidebarWidth }}>
-            <div
-              className={`absolute top-0 -left-1 w-2 h-full cursor-col-resize z-30 group ${isRightDragging ? 'bg-primary/20' : ''}`}
-              onMouseDown={handleRightDragStart}
-            >
-              <div className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${isRightDragging ? 'bg-primary/40' : 'bg-transparent group-hover:bg-border/40'}`} />
-            </div>
-            <div className="h-full rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
-              <RightSidebar key={rightSidebarTab} />
-            </div>
+        {/* Floating card — right sidebar. Kept mounted at all times so switching
+            tabs (and the browser <webview>) never rebuilds; visibility is toggled
+            with the `hidden` class + width instead of a conditional mount, which
+            removes the "flash / white-screen on first open and on every tab
+            switch". */}
+        <div
+          className={`relative shrink-0 ${rightSidebarTab ? '' : 'hidden'}`}
+          style={{ width: rightSidebarTab ? rightSidebarWidth : 0 }}
+        >
+          <div
+            className={`absolute top-0 -left-1 w-2 h-full cursor-col-resize z-30 group ${isRightDragging ? 'bg-primary/20' : ''}`}
+            onMouseDown={handleRightDragStart}
+          >
+            <div className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${isRightDragging ? 'bg-primary/40' : 'bg-transparent group-hover:bg-border/40'}`} />
           </div>
-        )}
+          <div className="h-full rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
+            <RightSidebar />
+          </div>
+        </div>
         {showPluginManager && (
             <div className="absolute inset-0 z-20">
               <PanelSuspense>

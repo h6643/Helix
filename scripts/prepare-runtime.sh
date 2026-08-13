@@ -95,84 +95,6 @@ HERMES_NIX_BUILD=1 "$PYTHON_BIN" -m pip install \
   --disable-pip-version-check \
   "$REPO_ROOT/hermes-agent/"
 
-# ── 2b. Wake-word dependencies (openwakeword + PortAudio via sounddevice) ──
-# On Windows sounddevice ships its own PortAudio binary; on Linux we prepend
-# ~/.local/lib via LD_LIBRARY_PATH in the Rust spawn (same as voice mode).
-#
-# openWakeWord is installed in a SECOND pass with --no-deps on purpose.
-# Upstream declares `tflite-runtime<3,>=2.8.0; platform_system == "Linux"` as a
-# hard requirement, but tflite-runtime's final release (2.14.0) ships no wheel
-# past cp311 -- so on Linux with this 3.12 runtime the resolver fails and drops
-# openwakeword entirely, even though only the ONNX backend is ever used. The
-# first pass installs openWakeWord's real runtime imports (onnxruntime for
-# openwakeword.vad, scipy + scikit-learn for openwakeword.custom_verifier_model,
-# tqdm + requests for openwakeword.utils), which makes --no-deps safe.
-# Keep this list in sync with LAZY_DEPS["wake.openwakeword"] in
-# hermes-agent/tools/lazy_deps.py.
-# The pins below MUST match LAZY_DEPS["wake.openwakeword"] exactly. If they
-# drift, feature_missing() is non-empty on the user's machine and the first
-# wake-word start triggers a network lazy-install on a runtime that is meant
-# to be self-contained -- the invariant check further down fails the build
-# rather than let that ship.
-echo "[prepare] pip install wake-word deps (onnxruntime, sounddevice, scipy, scikit-learn)..."
-"$PYTHON_BIN" -m pip install \
-  --quiet \
-  --disable-pip-version-check \
-  "onnxruntime==1.27.0" "sounddevice==0.5.5" "numpy==2.4.3" \
-  "scipy>=1.3,<2" "scikit-learn>=1,<2" "tqdm>=4.0,<5" "requests>=2.0,<3"
-
-echo "[prepare] pip install openwakeword (--no-deps; see comment above)..."
-"$PYTHON_BIN" -m pip install \
-  --quiet \
-  --disable-pip-version-check \
-  --no-deps \
-  "openwakeword==0.6.0"
-
-# Fail the build instead of shipping a bundle whose wake word can never start.
-# A silent WARNING here is exactly how the Linux runtime ended up with no
-# openwakeword at all while the app still advertised the feature.
-#
-# Two assertions, both load-bearing:
-#   1. the modules actually import (catches a --no-deps pass that skipped a
-#      real runtime dependency, e.g. scipy/sklearn via custom_verifier_model);
-#   2. lazy_deps.feature_missing() is empty (catches version drift between
-#      these pins and LAZY_DEPS, which would make the shipped runtime
-#      lazy-install over the network on first use).
-if ! "$PYTHON_BIN" - <<'PYEOF'
-import sys
-
-import openwakeword  # noqa: F401
-import openwakeword.model  # noqa: F401
-import openwakeword.vad  # noqa: F401
-import sounddevice  # noqa: F401
-
-from tools import lazy_deps
-
-missing = lazy_deps.feature_missing("wake.openwakeword")
-if missing:
-    print("wake-word pins not satisfied after install: %r" % (missing,), file=sys.stderr)
-    print("  -> keep scripts/prepare-runtime.sh in sync with "
-          "LAZY_DEPS['wake.openwakeword'] in hermes-agent/tools/lazy_deps.py",
-          file=sys.stderr)
-    sys.exit(1)
-print("[prepare]   wake-word deps importable + pins satisfied")
-PYEOF
-then
-  echo "ERROR: wake-word dependency verification failed" >&2
-  exit 1
-fi
-
-# Pre-download openWakeWord's shared feature models (melspectrogram.onnx,
-# embedding_model.onnx, silero_vad.onnx) into the standalone interpreter's
-# site-packages. The wake-word engine loads these on every start; without them
-# the listener crashes on a missing file and the microphone is never opened.
-# Doing it at build time (CI has network) makes the shipped runtime work fully
-# offline on the user's machine instead of failing on first launch behind a
-# firewall / without internet access.
-echo "[prepare] pre-downloading openWakeWord shared models (offline-safe)..."
-"$PYTHON_BIN" -c "import openwakeword; openwakeword.utils.download_models()" || \
-  echo "[prepare] WARNING: openWakeWord model pre-download failed (listener will need network on first run)"
-
 # Verify the hermes package is importable from the standalone interpreter.
 # The importable package is `hermes_cli` (NOT `hermes` — that name only exists
 # as the repo's source launcher script, never as an installed module).
@@ -185,25 +107,15 @@ echo "[prepare]   hermes importable OK"
 
 fi # ^ heavy build steps (skipped when the Python runtime already exists)
 
-# ── 3b. Bundle wake-word agent-extra (scripts/_helix_wake.py + full tools/) ──
-# The standalone interpreter has no hermes-agent source tree, so the wake-word
-# listener needs its script + the tools package copied next to the runtime.
-# We copy the WHOLE tools/ package (not just wake_word.py) because the wake-word
-# engine imports sibling modules at runtime (e.g. tools.lazy_deps, tools.*
-# helpers). Without the package __init__.py and those modules, `import tools`
-# silently resolves to the site-packages copy (shipped without wakewords models)
-# and the listener fails to find the bundled .onnx model. Layout:
-#   hermes-runtime/agent-extra/scripts/_helix_wake.py
-#   hermes-runtime/agent-extra/tools/__init__.py  (+ all wake_word dependencies)
-#   hermes-runtime/agent-extra/tools/wakewords/*.onnx
-# The script computes its own _AGENT_ROOT from __file__, so it just works.
+# ── 3b. Bundle agent-extra (full tools/ package) ──
+# The standalone interpreter has no hermes-agent source tree, so extra tools
+# are copied next to the runtime. Layout:
+#   hermes-runtime/agent-extra/tools/__init__.py  (+ all tool modules)
 AGENT_EXTRA="$RESOURCES_DIR/agent-extra"
-echo "[prepare] bundling wake-word agent-extra -> $AGENT_EXTRA"
+echo "[prepare] bundling agent-extra -> $AGENT_EXTRA"
 mkdir -p "$AGENT_EXTRA/scripts"
-cp -f "$REPO_ROOT/hermes-agent/scripts/_helix_wake.py" "$AGENT_EXTRA/scripts/" 2>/dev/null || \
-  echo "[prepare] WARNING: _helix_wake.py not found"
-# Copy the entire tools/ package so the wake-word engine has every module it
-# imports at runtime. The shebang-free Python sources keep the bundle portable.
+# Copy the entire tools/ package so the tools have every module they import
+# at runtime. The shebang-free Python sources keep the bundle portable.
 rm -rf "$AGENT_EXTRA/tools"
 if [ -d "$REPO_ROOT/hermes-agent/tools" ]; then
   mkdir -p "$AGENT_EXTRA/tools"
@@ -217,8 +129,7 @@ find "$AGENT_EXTRA" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null ||
 # RUNTIME_VERSION is read by the Rust bootstrap (bootstrap.rs) to decide whether
 # an already-installed ~/.hermes runtime must be re-extracted. Bump it on every
 # build (build epoch) so any change to the Python runtime / agent-extra scripts
-# — including _helix_wake.py / tools/wake_word.py — propagates to existing
-# installs, fixing "mic in use after restart" caused by stale bundled scripts.
+# propagates to existing installs.
 # The file is kept out of the git ignore (see .gitignore `!RUNTIME_VERSION`).
 VERSION_FILE="$RESOURCES_DIR/RUNTIME_VERSION"
 echo "[prepare] stamping $VERSION_FILE"

@@ -233,10 +233,10 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
         timestamp: msg.timestamp,
         reasoning: msg.reasoning,
         steps: msg.steps,
+        blocks: msg.blocks,
       }))
       useHelixStore.setState({
         chatMessages: msgs,
-        selectedWorkDir: fresh.workDir || null,
         activeSessionWorkDir: fresh.workDir ?? null,
       })
       useHelixStore.getState().setCurrentSessionId(session.id)

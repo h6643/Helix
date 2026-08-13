@@ -20,6 +20,16 @@ interface PanelPage {
 let pageSeq = 0
 const newPageId = () => `pg-${++pageSeq}`
 
+// Maps the store's `rightSidebarTab` value to the internal page kind. The
+// directory panel is stored as 'files' in the tab but as 'directory' as a page.
+const tabToKind = (t: string | null): PageKind | null => {
+  if (t === 'files') return 'directory'
+  if (t === 'code') return 'code'
+  if (t === 'diff') return 'diff'
+  if (t === 'browser') return 'browser'
+  return null
+}
+
 // Resizable file-tree column in the fullscreen split view.
 const TREE_COL_MIN = 220
 const TREE_COL_MAX = 560
@@ -99,6 +109,29 @@ export function RightSidebar() {
   const activePageIdRef = useRef(activePageId)
   activePageIdRef.current = activePageId
 
+  const pagesRef = useRef(pages)
+  pagesRef.current = pages
+
+  // Keep a matching page in sync with the selected sidebar tab WITHOUT remounting
+  // (the header "目录/变更/浏览器" menu just sets `rightSidebarTab`). This replaces
+  // the old `key={rightSidebarTab}` remount that rebuilt the whole panel — and the
+  // browser <webview> — on every tab switch (the white flash). Opening a tab now
+  // only ensures a page of that kind exists and activates it; switching tabs just
+  // flips the active page, leaving every other page (and its webview) mounted.
+  useEffect(() => {
+    const kind = tabToKind(tab)
+    if (!kind) return
+    const existing = pagesRef.current.find(p => p.kind === kind)
+    if (existing) {
+      setActivePageId(existing.id)
+      return
+    }
+    const np = { id: newPageId(), kind, url: '' }
+    setPages(prev => [...prev, np])
+    setActivePageId(np.id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab])
+
   // External link (e.g. a message link click) → open / navigate a browser page.
   // Only reacts to changes AFTER mount: the initial `pages` state already seeds
   // a browser page from previewRailUrl, so a stale URL (e.g. from a previous
@@ -123,8 +156,6 @@ export function RightSidebar() {
     if (addedId) setActivePageId(addedId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewRailUrl])
-
-  if (!tab) return null
 
   const updatePageUrl = (id: string, url: string) =>
     setPages(prev => prev.map(p => p.id === id ? { ...p, url } : p))
@@ -225,6 +256,16 @@ export function RightSidebar() {
     k === 'browser' ? <Globe className="size-3" /> : k === 'directory' ? <FolderTree className="size-3" /> : k === 'code' ? <FileCode2 className="size-3" /> : k === 'diff' ? <FileDiff className="size-3" /> : <Globe className="size-3" />
   const pageTitle = (p: PanelPage) =>
     p.kind === 'directory' ? '目录' : p.kind === 'code' ? '代码': p.kind === 'diff' ? '变更' : summarizeUrl(p.url)
+
+  // The sidebar is always mounted (the parent toggles visibility via the `hidden`
+  // class). Render a minimal shell when there are no pages so the component stays
+  // alive — but this early return MUST come AFTER every hook above, otherwise the
+  // hooks defined below it would be skipped on the empty-pages render, producing a
+  // different hook count than the non-empty render ("Rendered fewer hooks than
+  // expected"). All hooks run on every render; only the rendered output differs.
+  if (pages.length === 0) {
+    return <div ref={sidebarRef} className="h-full w-full bg-card" />
+  }
 
   return (
     <div

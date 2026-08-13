@@ -129,6 +129,16 @@ export function ContextUsageIndicator() {
       if (result && typeof result === 'object') {
         const data = result as ContextUsageData
         setBackendData(data)
+        // Persist the category breakdown into the local per-session snapshot so
+        // it survives a cold restart. Categories only live on the live backend,
+        // so without this they vanish the moment the Hermes session ends (and
+        // the panel would fall back to the "需要正在运行的 Hermes 会话" empty state).
+        useHelixStore.getState().setContextUsage(
+          sessionId,
+          data.context_max,
+          data.context_used,
+          data.categories?.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
+        )
 
         // Auto-compaction check (Hermes Desktop style)
         if (data.context_percent >= 80 && !autoCompactCooldownRef.current) {
@@ -188,7 +198,9 @@ export function ContextUsageIndicator() {
 
   const categories: ContextBreakdown[] = backendData?.categories?.length
     ? backendData.categories.map(c => ({ ...c }))
-    : []
+    : (localCtx?.categories?.length
+        ? localCtx.categories.map(c => ({ ...c }))
+        : [])
 
   // When there's no backend data, the ring renders empty (progress arc at 0).
 

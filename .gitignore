@@ -114,3 +114,6 @@ src/hermes.rs:*
 
 # nested hermes-agent .git must not be tracked (vendored dir keeps its own git)
 hermes-agent/.git/
+
+# KaTeX fonts copied to repo root by vite build
+KaTeX_*

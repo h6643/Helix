@@ -16,8 +16,8 @@ _profile_scoped = _registry.profile_scoped
 def _pending_reaction_notes(session: dict) -> str:
     """Note block describing reactions the user added since the last turn, or "".
 
-    Applied to the MODEL INPUT only (``run_message``, beside the
-    speech-interrupted note) — never to the text that gets persisted. Prefixing
+    Applied to the MODEL INPUT only (``run_message``, beside the attached-image
+    enrichment) — never to the text that gets persisted. Prefixing
     the persisted prompt bakes scaffolding into the transcript, which every
     surface then renders as a garbled user message on reload. Each reaction is
     announced once — the row is stamped ``seen`` on read.
@@ -71,43 +71,7 @@ def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
     raw_text = params.get("text", "")
     text = sanitize_user_prompt_text(raw_text) if isinstance(raw_text, str) else raw_text
-    # Typed bare stop phrase while backend voice mode is active ends the
-    # voice chat instead of sending "stop" to the agent — the typed twin of
-    # the spoken stop phrase (PR #73106), applied at the ONE server-side
-    # choke point every TUI submit passes through. Guarded on voice mode
-    # being ON: typed "stop" outside a voice chat is a normal message.
-    # (The desktop's voice conversation is renderer-owned and never flips
-    # the backend flag, so it handles its own typed stop client-side.)
-    if isinstance(text, str) and _voice_mode_enabled():
-        try:
-            from tools.voice_mode import is_voice_stop_phrase
-
-            typed_stop = is_voice_stop_phrase(text)
-        except Exception:
-            typed_stop = False
-        if typed_stop:
-            os.environ["HERMES_VOICE"] = "0"
-            os.environ["HERMES_VOICE_TTS"] = "0"
-            try:
-                from hermes_cli.voice import stop_continuous
-
-                stop_continuous()
-            except Exception:
-                pass
-            try:
-                _tts_stream_stop(user_barge=False)
-            except Exception:
-                pass
-            _voice_emit("voice.transcript", {"stop_phrase": True, "typed": True})
-            logger.info("prompt.submit: typed stop phrase — voice chat ended")
-            return _ok(rid, {"voice_stopped": True})
     truncate_user_ordinal = params.get("truncate_before_user_ordinal")
-    if params.get("interrupted"):
-        # Client-side barge-in (desktop VAD / typing over playback) — latch it
-        # so this turn's model message carries the interruption note.
-        from tools.tts_streaming import mark_speech_interrupted
-
-        mark_speech_interrupted()
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -930,8 +894,8 @@ def register(server) -> None:
     """Bind this module's handlers onto ``server``'s globals and registry."""
     _registry.install(server)
     # Module-level helpers aren't @method handlers, so install() doesn't see
-    # them — but server.py's run path calls this one (run_message enrichment,
-    # beside the speech-interrupted note). Rebind and publish it the same way.
+    # them — but server.py's run path calls this one (run_message enrichment).
+    # Rebind and publish it the same way.
     server._pending_reaction_notes = types.FunctionType(
         _pending_reaction_notes.__code__,
         vars(server),

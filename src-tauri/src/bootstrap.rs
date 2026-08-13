@@ -138,7 +138,7 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     let python_dir = py.parent().unwrap_or(&py).to_path_buf();
 
     // Resolve the data dir up-front so we can also gate on agent-extra
-    // (the wake-word/TTS tools package + scripts) being present, not just the
+    // (extra tools package + scripts) being present, not just the
     // python runtime itself.
     let data_dir = crate::paths::hermes_data_dir();
     let agent_extra = data_dir.join("agent-extra");
@@ -153,9 +153,9 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     // Version comparison decides whether an already-installed runtime must be
     // re-extracted. The bundled RUNTIME_VERSION is stamped by
     // prepare-runtime.sh on every build; when it differs from the installed
-    // marker, Python-side changes (e.g. tools/wake_word.py, _helix_wake.py)
-    // have shipped and must propagate to this machine — otherwise a stale
-    // agent-extra can leave the wake-word listener broken across restarts.
+    // marker, Python-side changes have shipped and must propagate to this
+    // machine — otherwise a stale agent-extra can leave the runtime broken
+    // across restarts.
     let bundled_version = read_runtime_version(&runtime_dir);
     let installed_version = read_runtime_version(&data_dir);
     let version_needs_upgrade = match bundled_version {
@@ -169,7 +169,7 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
     // return. `hermes_cli` must be importable; otherwise this is a stale base
     // interpreter (venv-era copy) that would crash on launch, so we fall
     // through and re-extract below. We also require agent-extra/tools to exist
-    // (wake-word + TTS live there) — if missing, fall through and copy it.
+    // (extra tools live there) — if missing, fall through and copy it.
     let ready = py.exists()
         && hermes_cli_present(&python_dir)
         && agent_extra.join("tools").is_dir()
@@ -226,7 +226,7 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
         }
     }
 
-    // ── Copy agent-extra (wake-word listener + TTS scripts / tools pkg) ──
+    // ── Copy agent-extra (extra tools / scripts pkg) ──
     // Always (re)copy on a version bump so script/tool changes propagate.
     let src_extra = runtime_dir.join("agent-extra");
     let dst_extra = data_dir.join("agent-extra");
@@ -240,7 +240,7 @@ pub fn ensure_hermes_agent(app_handle: &tauri::AppHandle) -> Result<(), String> 
             .map_err(|e| format!("复制 agent-extra 失败: {e}"))?;
     } else {
         eprintln!(
-            "[bootstrap] bundled agent-extra not found at {} — wake-word/TTS may be unavailable",
+            "[bootstrap] bundled agent-extra not found at {}",
             src_extra.display()
         );
     }

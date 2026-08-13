@@ -245,13 +245,6 @@ function buildTauriAPI(): ElectronAPI {
     cronDelete: (jobId: string) => invoke('hermes_cron_delete', { jobId }),
     cronRun: (jobId: string) => invoke('hermes_cron_run', { jobId }),
     doctor: () => invoke('hermes_doctor'),
-    transcribe: (audioB64: string, format: string) => invoke('hermes_transcribe', { audioB64, format }),
-    recordStart: () => invoke('hermes_record_start'),
-    recordStop: () => invoke('hermes_record_stop'),
-    ttsSpeak: (text: string) => invoke('hermes_tts_speak', { text }),
-    ttsStop: () => invoke('hermes_tts_stop'),
-    wakeStart: () => invoke('hermes_wake_start'),
-    wakeControl: (action: string) => invoke('hermes_wake_control', { action }),
   }
 
   // ── profile ─────────────────────────────────────────────────────────────

@@ -122,7 +122,7 @@ export function isLikelyProseFence(info: string, body: string): boolean {
 
   return (
     (signals.bulletLines >= 2 && signals.hasMarkdown && signals.codeSignals <= 2) ||
-    (signals.proseLines >= 3 && signals.codeSignals === 0)
+    (signals.proseLines >= 3 && signals.codeSignals === 0 && signals.hasMarkdown)
   )
 }
 

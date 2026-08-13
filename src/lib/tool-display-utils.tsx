@@ -26,6 +26,7 @@ const TOOL_LABELS: Record<string, string> = {
   create_artifact: '创建制品',
   spawn_agent: '启动子代理',
   get_sub_agent_result: '获取子代理结果',
+  session_search: '搜索会话',
   memory_add: '添加记忆',
   memory_read: '读取记忆',
   git_status: '查看状态',

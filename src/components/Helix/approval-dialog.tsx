@@ -86,21 +86,21 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
   ]
 
   return (
-    <div className="w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-6">
-      <div className="flex items-start justify-between gap-3 mb-4">
-        <h3 className="text-lg font-semibold leading-snug">
+    <div className="w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-3">
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <h3 className="text-[13px] font-semibold leading-snug">
           {getApprovalTitle(request.toolName)}
         </h3>
-        <span className="shrink-0 mt-0.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
+        <span className="shrink-0 mt-0.5 text-[10px] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
           等待确认
         </span>
       </div>
       {command && (
-        <pre className="bg-muted rounded-xl p-4 text-[14px] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-5 max-h-40 overflow-auto">
+        <pre className="bg-muted rounded-xl p-2 text-[12px] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-2 max-h-16 overflow-auto">
           {command}
         </pre>
       )}
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1.5">
         {options.map((o) => {
           const isSel = selected === o.level
           return (
@@ -111,7 +111,7 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
               onMouseEnter={() => setSelected(o.level)}
               disabled={submitting !== null}
               className={
-                'flex items-center gap-3.5 px-4 py-3.5 rounded-xl border text-left transition-colors disabled:opacity-60 ' +
+                'flex items-center gap-2.5 px-3 py-1.5 rounded-xl border text-left transition-colors disabled:opacity-60 ' +
                 (isSel
                   ? 'border-ring bg-accent ring-1 ring-ring'
                   : 'border-transparent hover:bg-accent/60')
@@ -119,18 +119,18 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
             >
               <span
                 className={
-                  'w-8 h-8 rounded-full flex items-center justify-center text-[14px] font-semibold shrink-0 ' +
+                  'w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-semibold shrink-0 ' +
                   (isSel ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')
                 }
               >
                 {o.key}
               </span>
-              <span className="text-[15px]">{o.label}</span>
+              <span className="text-[12px]">{o.label}</span>
             </button>
           )
         })}
       </div>
-      <div className="text-[12px] text-muted-foreground/60 text-center mt-5">
+      <div className="text-[10px] text-muted-foreground/60 text-center mt-2">
         内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · ⌘/Ctrl+Enter 允许 · Esc 拒绝
       </div>
     </div>

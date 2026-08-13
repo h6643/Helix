@@ -42,6 +42,10 @@ export interface PersistedChatMessage {
   thinkingTime?: number
   totalTokens?: number
   steps?: import('@/stores/helix-store').ExecutionStep[]
+  /** Interleaved thinking/text/tool_group/file_change blocks. Was dropped from
+   *  persistence for a long time, so reloaded messages lost their thinking
+   *  cards and tool cards ("重启后思考卡片不能展开"). */
+  blocks?: import('@/stores/helix-store').ChatMessage['blocks']
   images?: Array<{
     id: string
     dataUrl: string

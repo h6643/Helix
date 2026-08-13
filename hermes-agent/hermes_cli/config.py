@@ -2436,8 +2436,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge *override* into *base*, preserving nested defaults.
 
     Keys in *override* take precedence. If both values are dicts the merge
-    recurses, so a user who overrides only ``tts.elevenlabs.voice_id`` will
-    keep the default ``tts.elevenlabs.model_id`` intact.
+    recurses, so a user who overrides only ``auxiliary.vision.provider`` will
+    keep the default ``auxiliary.vision.model`` intact.
 
     An empty section key in config.yaml (``terminal:`` with no value) parses
     as YAML ``None``; treating that as an override would replace the entire
@@ -4293,7 +4293,7 @@ def show_config():
     
     keys = [
         ("OPENROUTER_API_KEY", "OpenRouter"),
-        ("VOICE_TOOLS_OPENAI_KEY", "OpenAI (STT/TTS)"),
+        ("VOICE_TOOLS_OPENAI_KEY", "OpenAI (STT)"),
         ("EXA_API_KEY", "Exa"),
         ("PARALLEL_API_KEY", "Parallel"),
         ("FIRECRAWL_API_KEY", "Firecrawl"),
@@ -4892,7 +4892,7 @@ def set_config_value(key: str, value: str, force: bool = False):
             )
             sys.exit(1)
     
-    # Handle nested keys (e.g., "tts.provider") including numeric list
+    # Handle nested keys (e.g., "stt.provider") including numeric list
     # indices (e.g., "custom_providers.0.api_key").  Delegates to
     # _set_nested which preserves list-typed nodes; before #17876 the
     # inline navigation here silently overwrote lists with dicts.

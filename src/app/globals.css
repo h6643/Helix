@@ -213,7 +213,6 @@
 /* Thinking block max-height cap — hand-written (NOT a Tailwind utility) so it always takes effect regardless of utility generation timing */
 .thinking-cap { max-height: 15rem; overflow-y: auto; }
 .thinking-cap-tall { max-height: 50vh; overflow-y: auto; }
-.thinking-cap-body { max-height: 60vh; overflow-y: auto; }
 
 /* Thinking block scrollbar — clearly visible (global quiet scrollbar is too faint to notice) */
 .thinking-scroll {
@@ -813,7 +812,7 @@ pre code.hljs {
   border: 1px solid oklch(0.86 0.012 100);
   border-radius: 6px;
   padding: 0.75em 1em;
-  overflow-x: hidden;
+  overflow-x: auto;   /* auto（原 hidden）：盒图/diff 需要横向滚动 */
   font-size: 0.85em;
 }
 
@@ -843,6 +842,82 @@ pre code.hljs {
 }
 .dark .helix-md pre code span {
   color: var(--shiki-dark, inherit);
+}
+
+/* ── 代码块折叠：长块（>15 行或 >800 字符）默认收起，底部渐隐遮罩 + 展开按钮
+   （参考 hermes-desktop AgentMarkdown 的 chat-code-collapsed/expand-btn） ── */
+.helix-md .helix-code-collapsed {
+  max-height: 180px;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
+}
+
+.helix-md .helix-code-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 6px 0 2px;
+  margin-top: 6px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+
+.helix-md .helix-code-expand-btn:hover {
+  color: var(--foreground);
+  background: color-mix(in oklch, var(--muted-foreground) 6%, transparent);
+}
+
+/* ── 盒图/树形图输出：箱线字符（U+2500–U+259F）≥ 半数行的围栏不走 shiki，
+   原样渲染并保留对齐（white-space: pre 不折行，横向滚动） ── */
+.helix-md .helix-box-diagram {
+  white-space: pre;
+  overflow-x: auto;
+  font-variant-ligatures: none;
+}
+
+/* ── diff 视图：+ 绿 / - 红 / @@ 色块（参考 hermes-desktop chat-diff-*） ── */
+.helix-md .helix-diff-content {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  line-height: 1.5;
+  padding: 4px 0;
+  overflow-x: auto;
+}
+
+.helix-md .helix-diff-line {
+  padding: 0 0.25em;
+  white-space: pre;
+}
+
+.helix-md .helix-diff-add {
+  background: rgba(34, 197, 94, 0.12);
+  color: #16a34a;
+}
+
+.helix-md .helix-diff-remove {
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+}
+
+.helix-md .helix-diff-hunk {
+  color: var(--primary);
+  opacity: 0.7;
+}
+
+.dark .helix-md .helix-diff-add {
+  color: #4ade80;
+}
+
+.dark .helix-md .helix-diff-remove {
+  color: #f87171;
 }
 
 .helix-md blockquote {

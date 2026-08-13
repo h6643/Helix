@@ -153,13 +153,6 @@ export interface ElectronAPI {
     cronDelete: (jobId: string) => Promise<{ success: boolean; output?: string; error?: string }>
     cronRun: (jobId: string) => Promise<{ success: boolean; output?: string; error?: string }>
     doctor: () => Promise<{ success: boolean; output?: string; error?: string }>
-    transcribe: (audioB64: string, format: string) => Promise<{ success: boolean; transcript: string; error?: string }>
-    recordStart: () => Promise<string>
-    recordStop: () => Promise<{ success: boolean; transcript: string; error?: string }>
-    ttsSpeak: (text: string) => Promise<{ success: boolean; played: boolean; file_path?: string }>
-    ttsStop: () => Promise<{ ok: boolean }>
-    wakeStart: () => Promise<{ success: boolean; already_running?: boolean }>
-    wakeControl: (action: string) => Promise<{ ok: boolean; action: string }>
   }
 
   profile: {

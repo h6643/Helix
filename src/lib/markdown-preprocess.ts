@@ -24,14 +24,17 @@ const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g
 const LATEX_DISPLAY_OPEN_LINE_RE = /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\\{1,2}\[[ \t]*\r?$/
 const LATEX_DISPLAY_CLOSE_LINE_RE = /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\\{1,2}\][ \t]*\r?$/
 const CUSTOM_DISPLAY_MATH_LINE_RE = /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\[\/math\][ \t]*\r?$/
-// Bare-URL autolink matcher. The character classes EXCLUDE `*` so a URL that
-// abuts markdown emphasis with no separating space (e.g. `**label: https://x**`,
-// a very common LLM pattern) doesn't swallow the trailing `**` into the href.
-// `*` is never meaningful in a real URL path, and GFM's own autolink extension
-// likewise strips trailing emphasis/punctuation — so dropping it here is safe
-// and keeps the emphasis run intact. Other trailing punctuation is still peeled
-// off by the final `[^\s<>"'`*.,;:!?]` class.
-const RAW_URL_RE = /https?:\/\/[^\s<>"'`*]+[^\s<>"'`*.,;:!?]/g
+// Bare-URL autolink matcher. The character classes EXCLUDE `*` (so a URL that
+// abuts markdown emphasis like `**label: https://x**` doesn't swallow the
+// trailing `**`) AND exclude every non-ASCII code point (`\u0080-\uFFFF`, which
+// also covers CJK and astral emoji via their surrogate halves). Without the
+// latter, a bare URL glued directly to CJK text — e.g.
+// `https://github.com/x参考这个代码` — is greedily extended across the Chinese
+// run, turning the whole sentence into one link. Real URLs are pure ASCII
+// (non-ASCII must be percent-encoded), so stopping at the first non-ASCII char
+// is safe. Other trailing ASCII punctuation is still peeled off by the final
+// `[^\s<>"'`*.,;:!?\u0080-\uFFFF]` class.
+const RAW_URL_RE = /https?:\/\/[^\s<>"'`*\u0080-\uFFFF]+[^\s<>"'`*.,;:!?\u0080-\uFFFF]/g
 const CITATION_MARKER_RE = /(?<=[\p{L}\p{N})\].,!?:;"'”’])\[(?:\d+(?:\s*,\s*\d+)*)\](?!\()/gu
 
 /**

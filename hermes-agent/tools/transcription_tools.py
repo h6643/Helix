@@ -500,8 +500,7 @@ def _get_command_stt_output_format(config: Dict[str, Any]) -> str:
 def _shell_quote_context_stt(command_template: str, position: int) -> Optional[str]:
     """Return the shell quote character active right before *position*.
 
-    Mirrors ``tools.tts_tool._shell_quote_context`` — kept local to avoid
-    cross-module import of a private helper. Returns ``"'"`` / ``'"'`` when
+    Returns the shell quote character active right before *position*. Returns ``"'"`` / ``'"'`` when
     inside a quoted region, ``None`` for bare context.
     """
     quote: Optional[str] = None
@@ -532,7 +531,7 @@ def _shell_quote_context_stt(command_template: str, position: int) -> Optional[s
 def _quote_command_stt_placeholder(value: str, quote_context: Optional[str]) -> str:
     """Quote a placeholder value for its position in a shell command template.
 
-    Mirrors ``tools.tts_tool._quote_command_tts_placeholder``.
+    Renders the ``{input_path}`` placeholder for a command-STT provider.
     """
     if quote_context == "'":
         return value.replace("'", r"'\''")
@@ -555,7 +554,7 @@ def _render_command_stt_template(
 ) -> str:
     """Replace supported placeholders while preserving ``{{`` / ``}}``.
 
-    Mirrors ``tools.tts_tool._render_command_tts_template``. Placeholders
+    Renders the command template. Placeholders
     are shell-quote-aware: ``{voice}`` inside single quotes gets
     single-quote-safe escaping, inside double quotes gets ``$``/`` ` ``/`` " ``
     escaping, outside quotes gets ``shlex.quote``. Doubled braces ``{{`` and
@@ -592,7 +591,7 @@ def _render_command_stt_template(
 def _terminate_command_stt_process_tree(proc: subprocess.Popen) -> None:
     """Best-effort termination of a shell process and all of its children.
 
-    Mirrors ``tools.tts_tool._terminate_command_tts_process_tree``.
+    Terminates the provider process tree.
     """
     if proc.poll() is not None:
         return
@@ -661,7 +660,7 @@ def _command_stt_env_passthrough(config: Dict[str, Any]) -> list:
     template (curl one-liners). The child env is scrubbed of Hermes secrets by
     default; ``env_passthrough: [MY_API_KEY, ...]`` copies the named variables
     back from the parent environment so a trusted template keeps working.
-    Mirrors ``tools.tts_tool._command_provider_env_passthrough``.
+    Builds the env-var passthrough for command providers.
     """
     raw = config.get("env_passthrough")
     if not isinstance(raw, (list, tuple)):
@@ -676,7 +675,7 @@ def _run_command_stt(
 ) -> subprocess.CompletedProcess:
     """Run a command-provider shell command with process-tree idle cleanup.
 
-    Mirrors ``tools.tts_tool._run_command_tts``: ``timeout`` is an IDLE
+    ``timeout`` is an IDLE
     timeout, reset whenever the command emits output on stdout/stderr —
     a slow-but-alive provider survives, a silently stalled one is killed
     (same progress-based stuck detection as the TTS runner, #50081).

@@ -210,24 +210,12 @@ interface ChannelConfig {
   description: string
   enabled: boolean
   config: Record<string, string>
+  envKeys?: string[]
 }
-
-const DEFAULT_CHANNELS: ChannelConfig[] = [
-  { id: 'telegram', name: 'Telegram', description: 'Telegram Bot API', enabled: false, config: { TELEGRAM_BOT_TOKEN: '' } },
-  { id: 'discord', name: 'Discord', description: 'Discord Bot', enabled: false, config: { DISCORD_BOT_TOKEN: '' } },
-  { id: 'slack', name: 'Slack', description: 'Slack Bot (Socket Mode)', enabled: false, config: { SLACK_BOT_TOKEN: '', SLACK_APP_TOKEN: '' } },
-  { id: 'whatsapp', name: 'WhatsApp', description: 'WhatsApp Business API', enabled: false, config: { WHATSAPP_ACCESS_TOKEN: '' } },
-  { id: 'signal', name: 'Signal', description: 'Signal Messenger', enabled: false, config: { SIGNALPhoneNumberID: '', SIGNAL_AUTH_TOKEN: '' } },
-  { id: 'dingtalk', name: '钉钉', description: '钉钉企业应用', enabled: false, config: { DINGTALK_APP_KEY: '', DINGTALK_APP_SECRET: '' } },
-  { id: 'feishu', name: '飞书', description: '飞书企业应用', enabled: false, config: { FEISHU_APP_ID: '', FEISHU_APP_SECRET: '' } },
-  { id: 'wecom', name: '企业微信', description: '企业微信应用', enabled: false, config: { WECOM_CORP_ID: '', WECOM_APP_SECRET: '' } },
-  { id: 'webhook', name: 'Webhook', description: '通用 Webhook 接入', enabled: false, config: { WEBHOOK_SECRET: '' } },
-  { id: 'api_server', name: 'API Server', description: 'OpenAI 兼容 API 服务', enabled: false, config: { OPENAI_API_KEY: '' } },
-]
 
 function ChannelsSettings() {
   const showToast = useHelixStore(s => s.showToast)
-  const [channels, setChannels] = useState<ChannelConfig[]>(DEFAULT_CHANNELS)
+  const [channels, setChannels] = useState<ChannelConfig[]>([])
   const [expandedChannel, setExpandedChannel] = useState<string | null>(null)
   const [savingChannels, setSavingChannels] = useState(false)
 
@@ -267,17 +255,61 @@ function ChannelsSettings() {
     setChannels(prev => prev.map(ch => ch.id === id ? { ...ch, config: { ...ch.config, [key]: value } } : ch))
   }
 
+  const addChannel = () => {
+    const id = `ch_${Date.now()}`
+    setChannels(prev => [...prev, { id, name: 'New Channel', description: '', enabled: false, config: {}, envKeys: [] }])
+  }
+
+  const removeChannel = (id: string) => {
+    setChannels(prev => prev.filter(ch => ch.id !== id))
+    if (expandedChannel === id) setExpandedChannel(null)
+  }
+
+  const updateChannelMeta = (id: string, patch: Partial<Pick<ChannelConfig, 'name' | 'description'>>) => {
+    setChannels(prev => prev.map(ch => ch.id === id ? { ...ch, ...patch } : ch))
+  }
+
+  const renameConfigKey = (id: string, oldKey: string, newKey: string) => {
+    const key = newKey.trim()
+    if (!key || key === oldKey) return
+    setChannels(prev => prev.map(ch => {
+      if (ch.id !== id) return ch
+      const config: Record<string, string> = {}
+      for (const [k, v] of Object.entries(ch.config)) config[k === oldKey ? key : k] = v
+      return { ...ch, config, envKeys: Object.keys(config) }
+    }))
+  }
+
+  const addConfigKey = (id: string) => {
+    setChannels(prev => prev.map(ch => {
+      if (ch.id !== id) return ch
+      const key = `NEW_KEY_${Object.keys(ch.config).length + 1}`
+      return { ...ch, config: { ...ch.config, [key]: '' }, envKeys: [...Object.keys(ch.config), key] }
+    }))
+  }
+
+  const removeConfigKey = (id: string, key: string) => {
+    setChannels(prev => prev.map(ch => {
+      if (ch.id !== id) return ch
+      const config = { ...ch.config }
+      delete config[key]
+      return { ...ch, config, envKeys: Object.keys(config) }
+    }))
+  }
+
   const saveChannels = async () => {
     setSavingChannels(true)
     try {
+      // Ensure envKeys stays in sync with the actual config keys before persisting.
+      const payload = channels.map(ch => ({ ...ch, envKeys: Object.keys(ch.config) }))
       if (isElectron()) {
         const api = (window as any).electron?.channels
         if (api?.save) {
-          await api.save(channels)
+          await api.save(payload)
         }
       } else {
         // Fallback to localStorage
-        localStorage.setItem('helix-channels', JSON.stringify({ channels }))
+        localStorage.setItem('helix-channels', JSON.stringify({ channels: payload }))
       }
       showToast({ type: 'success', title: '渠道配置已保存' })
     } catch {
@@ -289,13 +321,16 @@ function ChannelsSettings() {
 
   return (
     <div className="max-w-3xl space-y-4">
-      <SectionTitle>Channels</SectionTitle>
+      <div className="flex items-center justify-between">
+        <SectionTitle>Channels</SectionTitle>
+        <Button size="sm" variant="outline" onClick={addChannel}>+ 添加渠道</Button>
+      </div>
       <div className="space-y-3">
         {channels.map(channel => (
           <div key={channel.id} className="border border-border/50 rounded-xl overflow-hidden">
             <div className="flex items-center justify-between p-4 hover:bg-accent/30 transition-colors">
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-foreground">{channel.name}</p>
+                <p className="text-sm font-medium text-foreground">{channel.name || channel.id}</p>
                 <p className="text-xs text-muted-foreground/60 mt-0.5">{channel.description}</p>
               </div>
               <div className="flex items-center gap-2 shrink-0 ml-4">
@@ -306,31 +341,75 @@ function ChannelsSettings() {
                   Configure
                 </button>
                 <Toggle enabled={channel.enabled} onToggle={() => handleToggle(channel.id)} />
+                <button
+                  onClick={() => removeChannel(channel.id)}
+                  className="px-2 py-1.5 text-xs text-red-600/80 border border-border/50 rounded-lg hover:bg-red-500/10 transition-colors"
+                >
+                  删除
+                </button>
               </div>
             </div>
             {expandedChannel === channel.id && (
               <div className="px-4 pb-4 pt-2 border-t border-border/30 bg-muted/20 space-y-3">
-                {Object.entries(channel.config).map(([key, value]) => (
-                  <div key={key}>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">
-                      {key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-                    </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">名称</label>
                     <input
-                      type={key.includes('secret') || key.includes('token') || key.includes('password') || key.includes('SECRET') || key.includes('TOKEN') ? 'password' : 'text'}
-                      value={value}
-                      onChange={(e) => handleConfigChange(channel.id, key, e.target.value)}
-                      placeholder={`Enter ${key.replace(/_/g, ' ')}`}
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      value={channel.name}
+                      onChange={e => updateChannelMeta(channel.id, { name: e.target.value })}
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                   </div>
-                ))}
-                {Object.keys(channel.config).length === 0 && (
-                  <p className="text-xs text-muted-foreground/60">No configuration required</p>
-                )}
+                  <div>
+                    <label className="block text-xs font-medium text-muted-foreground mb-1">描述</label>
+                    <input
+                      value={channel.description}
+                      onChange={e => updateChannelMeta(channel.id, { description: e.target.value })}
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-xs font-medium text-muted-foreground">配置字段（环境变量）</label>
+                  {Object.entries(channel.config).map(([key, value]) => (
+                    <div key={key} className="flex items-center gap-2">
+                      <input
+                        value={key}
+                        onChange={e => renameConfigKey(channel.id, key, e.target.value)}
+                        className="w-2/5 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                      />
+                      <input
+                        type={key.toLowerCase().includes('secret') || key.toLowerCase().includes('token') || key.toLowerCase().includes('password') ? 'password' : 'text'}
+                        value={value}
+                        onChange={e => handleConfigChange(channel.id, key, e.target.value)}
+                        placeholder={`Enter ${key.replace(/_/g, ' ')}`}
+                        className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      />
+                      <button
+                        onClick={() => removeConfigKey(channel.id, key)}
+                        className="px-2 py-2 text-xs text-red-600/80 border border-border/50 rounded-lg hover:bg-red-500/10"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  {Object.keys(channel.config).length === 0 && (
+                    <p className="text-xs text-muted-foreground/60">暂无配置字段，点击下方添加。</p>
+                  )}
+                  <button
+                    onClick={() => addConfigKey(channel.id)}
+                    className="px-3 py-1.5 text-xs font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
+                  >
+                    + 添加字段
+                  </button>
+                </div>
               </div>
             )}
           </div>
         ))}
+        {channels.length === 0 && (
+          <p className="text-xs text-muted-foreground/60">尚无渠道，点击右上角「添加渠道」。</p>
+        )}
       </div>
       <div className="flex justify-end pt-2">
         <Button size="sm" variant="outline" onClick={saveChannels} disabled={savingChannels}>
@@ -999,11 +1078,12 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       timestamp: msg.timestamp,
       reasoning: msg.reasoning,
       steps: msg.steps,
+      blocks: msg.blocks,
     }))
     useHelixStore.getState().clearExecutionFlow()
     useHelixStore.setState({
       chatMessages: msgs,
-      selectedWorkDir: session.workDir || null,
+      activeSessionWorkDir: session.workDir ?? null,
     })
     useHelixStore.getState().setCurrentSessionId(session.id)
     pushNavigation({ type: 'chat', sessionId: session.id })
@@ -1459,10 +1539,6 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             {/* Gateway-loaded MCP servers (config.yaml mcp_servers) — read-only */}
             {gatewayMcpLoaded && !isAddingMcp && !editingMcpName && (
               <section className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-sm font-medium text-foreground/70">网关已加载（config.yaml）</h4>
-                  <span className="text-[10px] text-muted-foreground/50">只读 · 由 Hermes config.yaml 的 mcp_servers 管理</span>
-                </div>
                 {Object.keys(gatewayMcp).length === 0 ? (
                   <p className="text-xs text-muted-foreground/50 px-4 py-3 border border-dashed border-border/40 rounded-lg">
                     config.yaml 未配置 mcp_servers —— 在该文件的 mcp_servers 段添加的网关级服务器会显示在这里
