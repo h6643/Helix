@@ -125,7 +125,7 @@ export function VisionModelSettings() {
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 placeholder="如 openai/gpt-4o、glm-5v-turbo、gemini-2.5-pro-0325"
-                className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
               />
             )}
           </div>
@@ -139,7 +139,7 @@ export function VisionModelSettings() {
                 value={knownBaseUrl}
                 readOnly
                 disabled
-                className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground/70 text-center font-mono cursor-not-allowed"
+                className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground/70 font-mono cursor-not-allowed"
               />
             </div>
           ) : (
@@ -151,7 +151,7 @@ export function VisionModelSettings() {
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
                   placeholder="https://your-vlm-endpoint/v1"
-                  className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                  className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                 />
               </div>
             )
@@ -166,7 +166,7 @@ export function VisionModelSettings() {
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder="sk-..."
-                className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
               />
             </div>
           )}
