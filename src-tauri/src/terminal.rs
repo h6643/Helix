@@ -546,12 +546,16 @@ pub fn terminal_start(
 
         let mut pi = PROCESS_INFORMATION::default();
         let creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
+        // bInheritHandles 必须为 TRUE：Microsoft 的 ConPTY 文档要求附加了
+        // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 的进程以 TRUE 创建，否则子进程
+        // （cmd.exe）无法访问伪控制台句柄，输出永远到不了管道读端 —— 终端
+        // 会一片空白（Windows 下「终端无法正常显示」的根因）。
         let ok = CreateProcessW(
             None,
             Some(PWSTR(cmd_line.as_mut_ptr())),
             None,
             None,
-            false,
+            true,
             creation_flags,
             None,
             // windows-core 0.61 的 `Param<PCWSTR>` 只实现于 `Option<&T>`

@@ -3874,8 +3874,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 }
                 // If the model only emitted thinking tokens and no visible text,
                 // surface the reasoning as the message content so the user sees
-                // something useful instead of a blank reply.
-                if (!content && reasoning) {
+                // something useful instead of a blank reply. 例外：暂停/停止时
+                //（无正文 + responseBlocks 里已有 thinking/tool 块）不把思考塞进
+                // 正文——保留 blocks 让已完成消息按折叠的「思考过程」渲染，而不是
+                // 所有思考过程平铺冒出来（且 discardBlocks 会把 thinking 块丢掉）。
+                if (!content && reasoning && responseBlocksRef.current.length === 0) {
                   content = reasoning
                   reasoning = ''
                 }
