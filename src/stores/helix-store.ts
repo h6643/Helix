@@ -390,7 +390,7 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   // API Config — see slices/api-config-slice.ts
 
   // Actions - Sub-agents
-  spawnSubAgent: (name: string, description: string, parentId?: string) => string
+  spawnSubAgent: (name: string, description: string, parentId?: string, agentId?: string) => string
   completeSubAgent: (agentId: string, result?: string, filesModified?: string[]) => void
   failSubAgent: (agentId: string, error?: string) => void
   cancelSubAgent: (agentId: string) => void
@@ -2239,8 +2239,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // API Config — in slices/api-config-slice.ts
 
   // Actions - Sub-agents
-  spawnSubAgent: (name, description, parentId) => {
-    const id = generateId()
+  spawnSubAgent: (name, description, parentId, agentId) => {
+    // 外部传入 agentId（serve 后端 subagent_id）时沿用，保证后续 subagent.*
+    // 事件（tool/complete）能按同一 id 命中；无则本地生成。
+    const id = agentId || generateId()
     const agent: SubAgent = {
       id,
       name,
@@ -2258,7 +2260,17 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set((s) => ({
       subAgents: s.subAgents.map(a =>
         a.id === agentId
-          ? { ...a, status: 'completed' as const, completedAt: Date.now(), result, filesModified }
+          ? {
+              ...a,
+              status: 'completed' as const,
+              completedAt: Date.now(),
+              result,
+              filesModified,
+              // 未收尾的工具调用统一标记成功，避免残留"运行中"状态
+              toolCalls: (a.toolCalls || []).map(tc =>
+                tc.status === 'running' ? { ...tc, status: 'success' as const } : tc
+              ),
+            }
           : a
       ),
     })),
@@ -2267,7 +2279,15 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set((s) => ({
       subAgents: s.subAgents.map(a =>
         a.id === agentId
-          ? { ...a, status: 'failed' as const, completedAt: Date.now(), result: error }
+          ? {
+              ...a,
+              status: 'failed' as const,
+              completedAt: Date.now(),
+              result: error,
+              toolCalls: (a.toolCalls || []).map(tc =>
+                tc.status === 'running' ? { ...tc, status: 'error' as const } : tc
+              ),
+            }
           : a
       ),
     })),
