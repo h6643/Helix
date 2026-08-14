@@ -48,9 +48,9 @@ export function ToastContainer() {
             >
               <ToastIcon type={toast.type} />
               <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium">{toast.title}</p>
+                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">{toast.title}</p>
                 {toast.description && (
-                  <p className="text-[10px] text-muted-foreground mt-0.5 leading-relaxed">{toast.description}</p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground mt-0.5 leading-relaxed">{toast.description}</p>
                 )}
               </div>
               <button
@@ -76,9 +76,9 @@ export function ToastContainer() {
             >
               <ToastIcon type={toast.type} />
               <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium">{toast.title}</p>
+                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">{toast.title}</p>
                 {toast.description && (
-                  <p className="text-[10px] text-muted-foreground mt-0.5">{toast.description}</p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground mt-0.5">{toast.description}</p>
                 )}
               </div>
               <button

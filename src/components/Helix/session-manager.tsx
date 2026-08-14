@@ -221,22 +221,22 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between px-5 py-4 border-b border-border/60">
           <div className="flex items-center gap-2">
             <FolderOpen className="size-4 text-amber-400" />
-            <h2 className="text-sm font-semibold">会话管理</h2>
-            <span className="text-[10px] text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded-full">
+            <h2 className="text-[var(--helix-transcript-size)] font-semibold">会话管理</h2>
+            <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded-full">
               {sessions.length} 个会话
             </span>
           </div>
           <div className="flex items-center gap-1">
             {sessions.length > 0 && (
               <button
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-xs font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7"
                 onClick={handleExportAll}
               >
                 <DownloadCloud className="size-3" />
                 全部导出
               </button>
             )}
-            <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-xs font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7">
+            <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:bg-accent/50 cursor-pointer transition-colors h-7">
               <Upload className="size-3" />
               导入
               <input type="file" accept=".json,.md,.markdown" multiple className="hidden" onChange={handleImportSession} />
@@ -258,7 +258,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="搜索会话（按名称或内容）..."
-                className="w-full pl-8 pr-3 py-1.5 text-xs bg-muted/50 border border-border/50 rounded-lg focus:outline-none focus:ring-1 focus:ring-ring"
+                className="w-full pl-8 pr-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-muted/50 border border-border/50 rounded-lg focus:outline-none focus:ring-1 focus:ring-ring"
               />
             </div>
           </div>
@@ -273,7 +273,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
           ) : filteredSessions.length === 0 ? (
             <div className="px-5 py-12 text-center">
               <FolderOpen className="size-8 text-muted-foreground/20 mx-auto mb-3" />
-              <p className="text-sm text-muted-foreground">
+              <p className="text-[var(--helix-transcript-size)] text-muted-foreground">
                 {searchQuery ? '没有匹配的会话' : '暂无保存的会话'}
               </p>
             </div>
@@ -289,10 +289,10 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                     <Bot className="size-4 text-amber-400" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium truncate">{session.label}</p>
+                    <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium truncate">{session.label}</p>
                     <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-[10px] text-muted-foreground">{timeAgo(session.savedAt)}</span>
-                      <span className="text-[10px] text-muted-foreground/50">
+                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">{timeAgo(session.savedAt)}</span>
+                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50">
                         {session.chatMessages.length} 条消息
                       </span>
                     </div>
@@ -334,14 +334,14 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
             onClick={(e) => e.stopPropagation()}
           >
             <button
-              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+              className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
               onClick={() => { handleExportSession(exportMenuSession, 'json'); setExportMenuSession(null) }}
             >
               <Download className="size-3.5" />
               导出为 JSON
             </button>
             <button
-              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+              className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
               onClick={() => { handleExportSession(exportMenuSession, 'markdown'); setExportMenuSession(null) }}
             >
               <Download className="size-3.5" />
@@ -361,8 +361,8 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                 <AlertTriangle className="size-5 text-red-500" />
               </div>
               <div>
-                <h3 className="text-sm font-semibold text-foreground">删除会话</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">
+                <h3 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">删除会话</h3>
+                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mt-0.5">
                   确定要删除「{deleteTarget.label}」吗？此操作不可撤销。
                 </p>
               </div>

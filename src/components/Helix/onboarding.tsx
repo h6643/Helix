@@ -34,7 +34,7 @@ export function Onboarding() {
           <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center">
             <Sparkles className="size-5 text-primary" />
           </div>
-          <h1 className="text-lg font-semibold">欢迎使用 Helix</h1>
+          <h1 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold">欢迎使用 Helix</h1>
         </div>
 
         {/* progress */}
@@ -58,9 +58,9 @@ export function Onboarding() {
                   <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
                     <Icon className="size-5 text-primary" />
                   </div>
-                  <h2 className="text-sm font-semibold">{s.title}</h2>
+                  <h2 className="text-[var(--helix-transcript-size)] font-semibold">{s.title}</h2>
                 </div>
-                <p className="text-xs text-muted-foreground leading-relaxed">{s.desc}</p>
+                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground leading-relaxed">{s.desc}</p>
               </div>
             )
           })}
@@ -69,7 +69,7 @@ export function Onboarding() {
         <div className="flex justify-between items-center mt-6">
           <button
             onClick={finish}
-            className="text-xs text-muted-foreground hover:text-foreground"
+            className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground"
           >
             跳过引导
           </button>
@@ -77,7 +77,7 @@ export function Onboarding() {
             {step > 0 && (
               <button
                 onClick={() => setStep((s) => s - 1)}
-                className="px-3 py-1.5 rounded-lg text-xs border border-border/50 hover:bg-accent/50"
+                className="px-3 py-1.5 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/50 hover:bg-accent/50"
               >
                 上一步
               </button>
@@ -85,14 +85,14 @@ export function Onboarding() {
             {step < STEPS.length - 1 ? (
               <button
                 onClick={() => setStep((s) => s + 1)}
-                className="px-3 py-1.5 rounded-lg text-xs bg-primary text-primary-foreground hover:bg-primary/90"
+                className="px-3 py-1.5 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 下一步
               </button>
             ) : (
               <button
                 onClick={finish}
-                className="px-3 py-1.5 rounded-lg text-xs bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1.5"
+                className="px-3 py-1.5 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1.5"
               >
                 <Check className="size-3.5" />
                 开始使用

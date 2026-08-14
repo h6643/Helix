@@ -294,7 +294,7 @@ export function RightSidebar() {
               data-tip={pageTitle(p)}
             >
               {pageIcon(p.kind)}
-              <span className="max-w-[100px] truncate text-[11px]">{pageTitle(p)}</span>
+              <span className="max-w-[100px] truncate text-[calc(var(--helix-transcript-size)*0.7857)]">{pageTitle(p)}</span>
               {p.kind === 'directory' && (
                 <button
                   onClick={e => { e.stopPropagation(); setTreeReloadKey(k => k + 1) }}
@@ -386,7 +386,7 @@ export function RightSidebar() {
           <div ref={plusMenuRef} className="w-40 bg-card border border-border/80 rounded-lg shadow-xl py-1">
             <button
               onClick={() => addPage('browser')}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
             >
               <Globe className="size-3.5" />
               <span className="flex-1 text-left">浏览器</span>
@@ -394,7 +394,7 @@ export function RightSidebar() {
             <button
               onClick={() => addPage('directory')}
               disabled={hasDirectory}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
             >
               <FolderTree className="size-3.5" />
               <span className="flex-1 text-left">目录</span>
@@ -403,7 +403,7 @@ export function RightSidebar() {
             <button
               onClick={() => addPage('diff')}
               disabled={hasDiff}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
             >
               <FileDiff className="size-3.5" />
               <span className="flex-1 text-left">变更</span>

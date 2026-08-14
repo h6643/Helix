@@ -28,7 +28,7 @@ export function CustomizePanel({ onClose }: CustomizePanelProps) {
         <div className="flex items-center justify-between px-5 py-4 border-b border-border/60 shrink-0">
           <div className="flex items-center gap-2">
             <Palette className="size-4 text-primary" />
-            <h2 className="text-lg font-semibold text-foreground">自定义设置</h2>
+            <h2 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold text-foreground">自定义设置</h2>
           </div>
           <button onClick={onClose} className="p-1 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors">
             <X className="size-4" />
@@ -43,7 +43,7 @@ export function CustomizePanel({ onClose }: CustomizePanelProps) {
                 <button
                   key={section.id}
                   onClick={() => setActiveSection(section.id)}
-                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm transition-colors ${
+                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-[var(--helix-transcript-size)] transition-colors ${
                     activeSection === section.id
                       ? 'bg-muted font-medium'
                       : 'hover:bg-muted/50'
@@ -140,13 +140,13 @@ function ShortcutsSection() {
     <div className="space-y-6">
       {systemShortcuts.length > 0 && (
         <section className="space-y-3">
-          <h3 className="text-base font-bold text-foreground">快捷键</h3>
+          <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-bold text-foreground">快捷键</h3>
           <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
             <div className="divide-y divide-border/50">
               {systemShortcuts.map(([id, s]) => (
                 <div key={id} className="flex items-center px-4 py-2.5 hover:bg-accent/20 transition-colors group">
-                  <span className="text-sm font-medium text-foreground/80">{s.description}</span>
-                  <span className="ml-auto text-sm font-mono text-foreground/80 bg-muted px-2.5 py-1 rounded shrink-0">{s.keys.join(' + ')}</span>
+                  <span className="text-[var(--helix-transcript-size)] font-medium text-foreground/80">{s.description}</span>
+                  <span className="ml-auto text-[var(--helix-transcript-size)] font-mono text-foreground/80 bg-muted px-2.5 py-1 rounded shrink-0">{s.keys.join(' + ')}</span>
                   <button
                     onClick={() => startRecording(id)}
                     className="ml-3 p-1.5 rounded text-muted-foreground/20 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all"
@@ -167,7 +167,7 @@ function ShortcutsSection() {
           <div className="bg-card/50 border border-border/50 rounded-xl p-6 shadow-xl max-w-sm w-full">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse" />
-              <span className="text-sm font-medium text-foreground">正在录制快捷键</span>
+              <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">正在录制快捷键</span>
             </div>
             <div className="flex items-center justify-center gap-2 py-4 bg-muted rounded-lg mb-4">
               <input
@@ -176,21 +176,21 @@ function ShortcutsSection() {
                 readOnly
                 value={pendingKeys.length > 0 ? pendingKeys.join(' + ') : ''}
                 placeholder="按快捷键..."
-                className="bg-transparent text-center text-lg font-mono text-foreground/80 outline-none w-full"
+                className="bg-transparent text-center text-[calc(var(--helix-transcript-size)*1.2857)] font-mono text-foreground/80 outline-none w-full"
               />
             </div>
-            <p className="text-xs text-foreground/40 text-center mb-3">按下新的按键组合，然后点击确定保存</p>
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/40 text-center mb-3">按下新的按键组合，然后点击确定保存</p>
             <div className="flex gap-2">
               <button
                 onClick={cancelRecording}
-                className="flex-1 py-2 text-sm text-foreground/60 hover:text-foreground rounded-lg hover:bg-muted transition-colors"
+                className="flex-1 py-2 text-[var(--helix-transcript-size)] text-foreground/60 hover:text-foreground rounded-lg hover:bg-muted transition-colors"
               >
                 取消
               </button>
               <button
                 onClick={confirmRecording}
                 disabled={pendingKeys.length === 0}
-                className="flex-1 py-2 text-sm font-medium text-white bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
+                className="flex-1 py-2 text-[var(--helix-transcript-size)] font-medium text-white bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
               >
                 确定
               </button>
@@ -200,7 +200,7 @@ function ShortcutsSection() {
       )}
 
       {shortcuts.length === 0 && (
-        <p className="text-sm text-muted-foreground/50 text-center py-4">暂无快捷键</p>
+        <p className="text-[var(--helix-transcript-size)] text-muted-foreground/50 text-center py-4">暂无快捷键</p>
       )}
     </div>
   )
@@ -219,15 +219,15 @@ function InstructionsSection() {
   return (
     <div className="space-y-6">
       <section className="space-y-3">
-        <h3 className="text-base font-medium text-foreground">个性设定</h3>
-        <p className="text-sm text-muted-foreground">
+        <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-medium text-foreground">个性设定</h3>
+        <p className="text-[var(--helix-transcript-size)] text-muted-foreground">
           设定 AI 的个性和行为风格，影响 AI 的回复方式。
         </p>
         <textarea
           value={localPersonality}
           onChange={(e) => setLocalPersonality(e.target.value)}
           placeholder="例如：你是一个耐心友好的助手..."
-          className="w-full h-48 p-3 text-sm rounded-xl border border-border/50 bg-card/50 resize-none focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40"
+          className="w-full h-48 p-3 text-[var(--helix-transcript-size)] rounded-xl border border-border/50 bg-card/50 resize-none focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40"
         />
         <div className="flex justify-end">
           <Button size="sm" onClick={handleSave}>
@@ -267,7 +267,7 @@ function ThemeToggleButton({ mode }: { mode: 'light' | 'dark' }) {
   return (
     <button
       onClick={() => applyTheme(mode)}
-      className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all duration-200 ${
+      className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-[var(--helix-transcript-size)] font-medium transition-all duration-200 ${
         active
           ? 'bg-primary/10 border-primary/30 text-primary shadow-sm'
           : 'bg-card/50 border-border/40 text-muted-foreground hover:bg-muted/40 hover:text-foreground'
@@ -299,7 +299,7 @@ function AppearanceSection() {
     <div className="space-y-6">
       {/* ── Theme ── */}
       <section className="space-y-3">
-        <h3 className="text-base font-medium text-foreground">主题</h3>
+        <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-medium text-foreground">主题</h3>
         <div className="flex gap-2">
           <ThemeToggleButton mode="light" />
           <ThemeToggleButton mode="dark" />
@@ -307,19 +307,19 @@ function AppearanceSection() {
       </section>
 
       <section className="space-y-3">
-        <h3 className="text-base font-medium text-foreground">编辑器字体</h3>
+        <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-medium text-foreground">编辑器字体</h3>
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <label className="text-sm text-muted-foreground">字体系列</label>
+            <label className="text-[var(--helix-transcript-size)] text-muted-foreground">字体系列</label>
             <PopupSelect
               value={fontFamily}
               onChange={setFontFamily}
-              className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+              className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
               options={fontOptions}
             />
           </div>
           <div className="space-y-2">
-            <label className="text-sm text-muted-foreground">字体大小</label>
+            <label className="text-[var(--helix-transcript-size)] text-muted-foreground">字体大小</label>
             <input
               type="number"
               min={10}
@@ -328,20 +328,20 @@ function AppearanceSection() {
               onChange={(e) => {
                 setFontSize(Number(e.target.value))
               }}
-              className="w-full px-3 py-2 text-sm rounded-lg border border-border/50 bg-card/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+              className="w-full px-3 py-2 text-[var(--helix-transcript-size)] rounded-lg border border-border/50 bg-card/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
             />
           </div>
         </div>
       </section>
 
       <section className="space-y-3">
-        <h3 className="text-base font-medium text-foreground">界面字体</h3>
+        <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-medium text-foreground">界面字体</h3>
         <div className="space-y-2">
-          <label className="text-sm text-muted-foreground">字体系列</label>
+          <label className="text-[var(--helix-transcript-size)] text-muted-foreground">字体系列</label>
           <PopupSelect
             value={interfaceFont}
             onChange={setInterfaceFont}
-            className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-xs font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+            className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
             options={interfaceFontOptions}
           />
         </div>

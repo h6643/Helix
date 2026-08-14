@@ -291,7 +291,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
       {/* Tab bar — Windows Terminal style */}
       <div className="flex items-center h-8 bg-black/5 backdrop-blur-sm shrink-0 select-none">
         <div className="flex items-center h-full">
-          <div className="flex items-center gap-2 h-full px-3 bg-white/60 border-t-2 border-primary text-foreground text-[12px]">
+          <div className="flex items-center gap-2 h-full px-3 bg-white/60 border-t-2 border-primary text-foreground text-[calc(var(--helix-transcript-size)*0.8571)]">
             <Terminal className="size-3.5" />
             <span className="max-w-[180px] truncate">
               {selectedWorkDir ? selectedWorkDir.split(/[\\/]/).pop() || 'Terminal' : 'Terminal'}
@@ -316,10 +316,10 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
       />
 
       {!electronReady && (
-        <div className="px-3 py-2 text-[12px] text-[#999]">Terminal not available in browser mode</div>
+        <div className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-[#999]">Terminal not available in browser mode</div>
       )}
       {terminalError && (
-        <div className="px-3 py-2 text-[12px] text-red-500">{terminalError}</div>
+        <div className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-500">{terminalError}</div>
       )}
     </div>
   )

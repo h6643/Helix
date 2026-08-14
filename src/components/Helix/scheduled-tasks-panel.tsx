@@ -115,7 +115,7 @@ function AddTaskForm({
         <input
           value={label}
           onChange={(e) => setLabel(e.target.value)}
-          className="flex-1 min-w-0 bg-transparent text-sm font-medium text-foreground placeholder:text-muted-foreground focus:outline-none"
+          className="flex-1 min-w-0 bg-transparent text-[var(--helix-transcript-size)] font-medium text-foreground placeholder:text-muted-foreground focus:outline-none"
           placeholder="任务名称"
           autoFocus
         />
@@ -123,21 +123,21 @@ function AddTaskForm({
       <textarea
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-xs font-mono min-h-[70px] focus:outline-none focus:ring-2 focus:ring-primary/20"
+        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono min-h-[70px] focus:outline-none focus:ring-2 focus:ring-primary/20"
         placeholder="输入要 agent 执行的 prompt..."
       />
       <input
         value={schedule}
         onChange={(e) => setSchedule(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/20"
+        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono focus:outline-none focus:ring-2 focus:ring-primary/20"
         placeholder="e.g. every day at 9:00, every 30 minutes, in 5 minutes"
       />
       <div className="flex justify-end gap-2">
-        <button onClick={onCancel} className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground rounded-lg transition-colors">取消</button>
+        <button onClick={onCancel} className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground rounded-lg transition-colors">取消</button>
         <button
           onClick={() => canSubmit && onAdd(label.trim(), prompt.trim(), schedule.trim())}
           disabled={!canSubmit}
-          className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg disabled:opacity-50 transition-colors"
+          className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground rounded-lg disabled:opacity-50 transition-colors"
         >
           创建
         </button>
@@ -178,25 +178,25 @@ function EditTaskForm({
         <input
           value={editLabel}
           onChange={(e) => setEditLabel(e.target.value)}
-          className="flex-1 min-w-0 bg-transparent text-sm font-medium text-foreground placeholder:text-muted-foreground focus:outline-none"
+          className="flex-1 min-w-0 bg-transparent text-[var(--helix-transcript-size)] font-medium text-foreground placeholder:text-muted-foreground focus:outline-none"
           placeholder="任务名称"
         />
       </div>
       <textarea
         value={editPrompt}
         onChange={(e) => setEditPrompt(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-xs font-mono min-h-[70px] focus:outline-none focus:ring-2 focus:ring-primary/20"
+        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono min-h-[70px] focus:outline-none focus:ring-2 focus:ring-primary/20"
         placeholder="prompt 内容"
       />
       <input
         value={editSchedule}
         onChange={(e) => setEditSchedule(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/20"
+        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono focus:outline-none focus:ring-2 focus:ring-primary/20"
         placeholder="e.g. every day at 9:00, every 30 minutes"
       />
       <div className="flex justify-end gap-2">
-        <button onClick={onCancel} className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground rounded-lg transition-colors">取消</button>
-        <button onClick={handleSave} className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg transition-colors">保存</button>
+        <button onClick={onCancel} className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground rounded-lg transition-colors">取消</button>
+        <button onClick={handleSave} className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground rounded-lg transition-colors">保存</button>
       </div>
     </div>
   )
@@ -260,13 +260,13 @@ function TaskItem({
       </button>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-medium text-foreground/90">{task.label}</span>
-          <span className="text-xs text-muted-foreground">
+          <span className="text-[var(--helix-transcript-size)] font-medium text-foreground/90">{task.label}</span>
+          <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
             {workDirName ? `心跳 • ${workDirName}` : task.scheduleText}
           </span>
         </div>
-        <p className="text-xs text-muted-foreground/70 mt-0.5 line-clamp-2">{task.prompt}</p>
-        <div className="flex items-center gap-3 mt-2 text-[10px] text-muted-foreground/60">
+        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-0.5 line-clamp-2">{task.prompt}</p>
+        <div className="flex items-center gap-3 mt-2 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60">
           <span className="flex items-center gap-1">
             <Clock className="size-3" />
             {task.scheduleText}
@@ -291,21 +291,21 @@ function TaskItem({
             <div className="absolute right-0 top-full mt-1 w-36 bg-card border border-border/60 rounded-lg shadow-lg py-1 z-10">
               <button
                 onClick={() => { setMenuOpen(false); onRunNow() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground hover:bg-accent/60"
               >
                 <RefreshCw className="size-3.5" />
                 立即执行
               </button>
               <button
                 onClick={() => { setMenuOpen(false); setEditing(true) }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-foreground hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground hover:bg-accent/60"
               >
                 <RefreshCw className="size-3.5" />
                 编辑
               </button>
               <button
                 onClick={() => { setMenuOpen(false); onDelete() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-500 hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-500 hover:bg-accent/60"
               >
                 <Trash2 className="size-3.5" />
                 删除
@@ -512,7 +512,7 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
           <button
             onClick={() => setActiveTab('tasks')}
             className={cn(
-              'px-3.5 py-1 text-xs font-medium rounded-full transition-colors',
+              'px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors',
               activeTab === 'tasks' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
             )}
           >
@@ -521,7 +521,7 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
           <button
             onClick={() => setActiveTab('templates')}
             className={cn(
-              'px-3.5 py-1 text-xs font-medium rounded-full transition-colors',
+              'px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors',
               activeTab === 'templates' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
             )}
           >
@@ -559,7 +559,7 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="搜索计划任务"
-                  className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+                  className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
                 />
               </div>
 
@@ -567,9 +567,9 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
               <div>
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3">
-                    <h2 className="text-sm font-semibold text-foreground">当前</h2>
+                    <h2 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">当前</h2>
                     {filteredTasks.length > 0 && (
-                      <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                      <label className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground cursor-pointer">
                         <input
                           type="checkbox"
                           checked={selectedIds.size === filteredTasks.length && filteredTasks.length > 0}
@@ -584,13 +584,13 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
                     {selectedIds.size > 0 && (
                       <button
                         onClick={handleDeleteSelected}
-                        className="flex items-center gap-1 text-xs text-red-500 hover:text-red-600 transition-colors"
+                        className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-500 hover:text-red-600 transition-colors"
                       >
                         <Trash2 className="size-3" />
                         删除 ({selectedIds.size})
                       </button>
                     )}
-                    <span className="text-xs text-muted-foreground">{enabledCount} 运行中</span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">{enabledCount} 运行中</span>
                   </div>
                 </div>
 
@@ -598,8 +598,8 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
                   {filteredTasks.length === 0 && !isAdding ? (
                     <div className="text-center py-14">
                       <Clock className="size-10 text-muted-foreground/20 mx-auto mb-3" />
-                      <p className="text-sm text-muted-foreground">暂无定时任务</p>
-                      <p className="text-xs text-muted-foreground/60 mt-1">添加定时任务，agent 将按时自动执行</p>
+                      <p className="text-[var(--helix-transcript-size)] text-muted-foreground">暂无定时任务</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-1">添加定时任务，agent 将按时自动执行</p>
                     </div>
                   ) : (
                     <>
@@ -629,7 +629,7 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
             </>
           ) : (
             <div>
-              <h2 className="text-sm font-semibold text-foreground mb-4">模板</h2>
+              <h2 className="text-[var(--helix-transcript-size)] font-semibold text-foreground mb-4">模板</h2>
               <div className="space-y-2">
                 {TEMPLATE_SUGGESTIONS.map((tpl) => (
                   <button
@@ -638,11 +638,11 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
                     className="w-full text-left p-4 rounded-xl border border-border/30 bg-card/40 hover:bg-card/70 transition-colors"
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium text-foreground/90">{tpl.label}</span>
+                      <span className="text-[var(--helix-transcript-size)] font-medium text-foreground/90">{tpl.label}</span>
                       <Plus className="size-3.5 text-muted-foreground" />
                     </div>
-                    <p className="text-xs text-muted-foreground/70 mt-1">{tpl.prompt}</p>
-                    <p className="text-[10px] text-muted-foreground/50 mt-2">{tpl.schedule}</p>
+                    <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-1">{tpl.prompt}</p>
+                    <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50 mt-2">{tpl.schedule}</p>
                   </button>
                 ))}
               </div>

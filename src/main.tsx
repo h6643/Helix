@@ -16,17 +16,15 @@ const HelixLayout = lazy(
 installTauriBridge()
 
 createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <Suspense
-      fallback={
-        <div className="h-screen w-screen flex items-center justify-center bg-background">
-          <div className="text-sm text-muted-foreground">Loading Helix...</div>
-        </div>
-      }
-    >
-      <ErrorBoundary>
-        <HelixLayout />
-      </ErrorBoundary>
-    </Suspense>
-  </React.StrictMode>,
+  <Suspense
+    fallback={
+      <div className="h-screen w-screen flex items-center justify-center bg-background">
+        <div className="text-[var(--helix-transcript-size)] text-muted-foreground">Loading Helix...</div>
+      </div>
+    }
+  >
+    <ErrorBoundary>
+      <HelixLayout />
+    </ErrorBoundary>
+  </Suspense>,
 )

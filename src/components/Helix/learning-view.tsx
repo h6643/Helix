@@ -77,15 +77,15 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
     <div className="max-w-3xl space-y-1">
 
       {loading ? (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground/60 mt-6">
+          <div className="flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-6">
             读取中…
           </div>
         ) : err ? (
-          <p className="text-xs text-red-400 mt-6">{err}</p>
+          <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400 mt-6">{err}</p>
         ) : active ? (
           <div>
             <div className="flex items-center justify-between mb-2">
-              <button onClick={() => setActive(null)} className="text-[11px] text-muted-foreground hover:text-foreground">
+              <button onClick={() => setActive(null)} className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground hover:text-foreground">
                 ← 返回列表
               </button>
                 <button
@@ -100,15 +100,15 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
                       setRevealErr(String(e?.message || e))
                     }
                   }}
-                  className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                  className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground hover:text-foreground"
                   data-tip="在资源管理器中打开文件位置"
                 >
                   打开位置
                 </button>
             </div>
-            {revealErr && <p className="text-[10px] text-red-400 mb-1">{revealErr}</p>}
-            <h3 className="text-sm font-medium mb-1">{active.name}</h3>
-            <pre className="text-sm whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-muted/40 rounded-lg p-2">
+            {revealErr && <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-red-400 mb-1">{revealErr}</p>}
+            <h3 className="text-[var(--helix-transcript-size)] font-medium mb-1">{active.name}</h3>
+            <pre className="text-[var(--helix-transcript-size)] whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-muted/40 rounded-lg p-2">
               {active.text.slice(0, 20000)}
             </pre>
           </div>
@@ -120,7 +120,7 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
                 onClick={() => open(n)}
                 className={`flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-accent/30 ${n.isDir ? 'cursor-default' : 'cursor-pointer'}`}
               >
-                <span className="text-xs truncate">{n.name}</span>
+                <span className="text-[calc(var(--helix-transcript-size)*0.8571)] truncate">{n.name}</span>
               </div>
             ))}
           </div>

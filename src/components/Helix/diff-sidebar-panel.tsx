@@ -39,10 +39,10 @@ export function DiffSidebarPanel() {
       <div className="flex items-center gap-2 px-3 py-2 shrink-0">
         {projectChanges.length > 0 && (
           <>
-            <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full">
+            <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full">
               {projectChanges.length} 个文件
             </span>
-            <span className="ml-auto flex items-center gap-2 text-[10px] tabular-nums">
+            <span className="ml-auto flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)] tabular-nums">
               <span className="text-emerald-500">+{totalStats.added}</span>
               <span className="text-red-500">-{totalStats.removed}</span>
             </span>
@@ -55,8 +55,8 @@ export function DiffSidebarPanel() {
         {projectChanges.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-12 text-muted-foreground/70">
             <FileDiff className="size-9" strokeWidth={1.5} />
-            <span className="text-sm">暂无变更</span>
-            <span className="text-xs text-muted-foreground/60">当前项目对话中的文件修改会自动收集到这里</span>
+            <span className="text-[var(--helix-transcript-size)]">暂无变更</span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">当前项目对话中的文件修改会自动收集到这里</span>
           </div>
         ) : (
           <FileChangeSummary changes={projectChanges} hideHeader />

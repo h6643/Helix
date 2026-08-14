@@ -109,7 +109,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
             {onRename && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onRename() }}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-accent/60"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground hover:bg-accent/60"
               >
                 <Pencil className="size-3.5" />
                 重命名
@@ -118,7 +118,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
             {!isArchived && onArchive && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onArchive() }}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <Archive className="size-3.5" />
                 归档
@@ -127,7 +127,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
             {!isArchived && onPin && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onPin() }}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <Pin className={`size-3.5 ${isPinned ? 'text-primary' : ''}`} />
                 {isPinned ? '取消固定' : '固定'}
@@ -136,7 +136,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
             {isArchived && onRestore && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onRestore() }}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <RotateCcw className="size-3.5" />
                 恢复
@@ -145,7 +145,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
             {onDelete && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onDelete() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-destructive hover:bg-destructive/10"
+                className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-destructive hover:bg-destructive/10"
               >
                 <Trash2 className="size-3.5" />
                 删除
@@ -229,7 +229,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
             {onPin && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onPin() }}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <Pin className={`size-3.5 ${isPinned ? 'text-primary' : ''}`} />
                 {isPinned ? '取消置顶' : '置顶'}
@@ -238,7 +238,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
             {onShowInExplorer && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onShowInExplorer() }}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <FolderOpen className="size-3.5" />
                 <span className="whitespace-nowrap">在资源管理器中显示</span>
@@ -247,7 +247,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
             {onArchive && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onArchive() }}
-                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
               >
                 <Archive className="size-3.5" />
                 归档
@@ -256,7 +256,7 @@ function ProjectActionsMenu({ isPinned, onPin, onArchive, onDelete, onShowInExpl
             {onDelete && (
               <button
                 onClick={(e) => { e.stopPropagation(); setOpen(false); onDelete() }}
-                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-destructive hover:bg-destructive/10"
+                className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-destructive hover:bg-destructive/10"
               >
                 <Trash2 className="size-3.5" />
                 删除
@@ -842,7 +842,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                 }`}
               >
                 <item.icon className="size-[18px]" />
-                <span className="text-[13px]">{item.label}</span>
+                <span className="text-[calc(var(--helix-transcript-size)*0.9286)]">{item.label}</span>
               </button>
             )
           })}
@@ -854,7 +854,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         <div className="flex items-center px-4 pt-2.5 pb-1 group/section">
           <button
             onClick={() => setRecentCollapsed(prev => !prev)}
-            className="flex items-center gap-1 flex-1 text-[13px] font-medium tracking-normal text-sidebar-foreground/50 hover:text-sidebar-foreground/70 transition-colors"
+            className="flex items-center gap-1 flex-1 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium tracking-normal text-sidebar-foreground/50 hover:text-sidebar-foreground/70 transition-colors"
           >
             <svg className={`size-3 transition-transform ${recentCollapsed ? '' : 'rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="m9 18 6-6-6-6"/></svg>
             <span>最近</span>
@@ -895,7 +895,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                       >
                         {isSelectedProject && <div className="w-[3px] h-4 bg-primary rounded-full shrink-0 -ml-1.5 mr-0.5" />}
                         <Folder className={`size-3.5 shrink-0 ${isSelectedProject ? 'text-primary' : 'text-sidebar-foreground/30'}`} />
-                        <span className="text-[12.5px] truncate flex-1" title={project.label}>{project.label.length > 15 ? project.label.slice(0, 15) + '…' : project.label}</span>
+                        <span className="text-[calc(var(--helix-transcript-size)*0.8929)] truncate flex-1" title={project.label}>{project.label.length > 15 ? project.label.slice(0, 15) + '…' : project.label}</span>
                       </div>
                       <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
                         <button
@@ -917,7 +917,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                     {isExpanded && (
                       <div>
                         {project.sessions.length === 0 ? (
-                          <div className="px-4 py-1.5 text-[12px] text-sidebar-foreground/30">
+                          <div className="px-4 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/30">
                             暂无对话
                           </div>
                         ) : (
@@ -973,18 +973,18 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                                     if (e.key === 'Enter') { e.preventDefault(); handleCommitRename(session.id, (e.target as HTMLInputElement).value) }
                                     else if (e.key === 'Escape') { setRenamingId(null) }
                                   }}
-                                  className="text-[12px] w-full bg-background outline-none border border-primary rounded px-1 py-0.5"
+                                  className="text-[calc(var(--helix-transcript-size)*0.8571)] w-full bg-background outline-none border border-primary rounded px-1 py-0.5"
                                 />
                               ) : (
                                 <div className="flex items-center gap-1.5 min-w-0">
                                   {session.branchName && (
-                                    <span className="shrink-0 inline-flex items-center gap-0.5 px-1 py-px rounded text-[9px] font-medium bg-blue-500/10 text-blue-500 dark:text-blue-400">
+                                    <span className="shrink-0 inline-flex items-center gap-0.5 px-1 py-px rounded text-[calc(var(--helix-transcript-size)*0.6429)] font-medium bg-blue-500/10 text-blue-500 dark:text-blue-400">
                                       <GitBranch className="size-2" />
                                       {session.branchName}
                                     </span>
                                   )}
                                   <p
-                                    className="text-[12px] truncate flex-1"
+                                    className="text-[calc(var(--helix-transcript-size)*0.8571)] truncate flex-1"
                                     data-tip="双击重命名"
                                     onDoubleClick={(e) => { e.stopPropagation(); setRenamingId(session.id) }}
                                   >{session.label}</p>
@@ -1011,7 +1011,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
               })}
             </div>
           ) : (
-            <div className="px-3 py-2 text-[13px] text-sidebar-foreground/30">
+            <div className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.9286)] text-sidebar-foreground/30">
               暂无项目
             </div>
           )}
@@ -1021,7 +1021,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         {/* Conversations */}
         {conversations.length > 0 && (
           <>
-            <div className="px-4 pt-2.5 pb-1 text-[11px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
+            <div className="px-4 pt-2.5 pb-1 text-[calc(var(--helix-transcript-size)*0.7857)] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
               对话
             </div>
             <div className="px-3 pb-2">
@@ -1054,11 +1054,11 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                             if (e.key === 'Enter') { e.preventDefault(); handleCommitRename(session.id, (e.target as HTMLInputElement).value) }
                             else if (e.key === 'Escape') { setRenamingId(null) }
                           }}
-                          className="text-[13px] w-full bg-background outline-none border border-primary rounded px-1 py-0.5"
+                          className="text-[calc(var(--helix-transcript-size)*0.9286)] w-full bg-background outline-none border border-primary rounded px-1 py-0.5"
                         />
                       ) : (
                         <p
-                          className="text-[13px] truncate"
+                          className="text-[calc(var(--helix-transcript-size)*0.9286)] truncate"
                           data-tip="双击重命名"
                           onDoubleClick={(e) => { e.stopPropagation(); setRenamingId(session.id) }}
                         >{session.label}</p>
@@ -1085,12 +1085,12 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       <div className="px-2 py-2 shrink-0 space-y-0.5">
         <button
           onClick={() => toggleSettings()}
-          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12.5px] text-sidebar-foreground/60 hover:text-sidebar-foreground/90 hover:bg-sidebar-accent/40 rounded-lg transition-colors"
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8929)] text-sidebar-foreground/60 hover:text-sidebar-foreground/90 hover:bg-sidebar-accent/40 rounded-lg transition-colors"
         >
           <Settings className="size-4 shrink-0" />
           <span>设置</span>
           {isElectron() && (
-            <span className={`ml-auto flex items-center gap-1 text-[10px] ${hermesConnected ? 'text-emerald-500' : 'text-amber-500'}`}>
+            <span className={`ml-auto flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.7143)] ${hermesConnected ? 'text-emerald-500' : 'text-amber-500'}`}>
               <span className={`w-1.5 h-1.5 rounded-full ${hermesConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
               {hermesConnected ? '已连接' : '连接中'}
             </span>
@@ -1108,8 +1108,8 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                 <AlertTriangle className="size-5 text-destructive" />
               </div>
               <div>
-                <h3 className="text-sm font-semibold text-foreground">删除对话</h3>
-                <p className="text-sm text-muted-foreground mt-1">
+                <h3 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">删除对话</h3>
+                <p className="text-[var(--helix-transcript-size)] text-muted-foreground mt-1">
                   确定要删除「{deleteTarget.label}」吗？此操作不可撤销。
                 </p>
               </div>
@@ -1117,13 +1117,13 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             <div className="flex justify-between gap-2">
               <button
                 onClick={handleConfirmDelete}
-                className="px-3 py-1.5 text-[13px] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
+                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
               >
                 删除
               </button>
               <button
                 onClick={() => setDeleteTarget(null)}
-                className="px-3 py-1.5 text-[13px] text-foreground/70 hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/70 hover:text-foreground hover:bg-accent rounded-lg transition-colors"
               >
                 取消
               </button>
@@ -1140,8 +1140,8 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                 <AlertTriangle className="size-5 text-destructive" />
               </div>
               <div>
-                <h3 className="text-sm font-semibold text-foreground">删除项目</h3>
-                <p className="text-sm text-muted-foreground mt-1">
+                <h3 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">删除项目</h3>
+                <p className="text-[var(--helix-transcript-size)] text-muted-foreground mt-1">
                   确定要删除「{deleteProjectDir.split(/[/\\\\]/).pop() || deleteProjectDir}」及该项目下的所有对话吗？此操作不可撤销。
                 </p>
               </div>
@@ -1149,13 +1149,13 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             <div className="flex justify-between gap-2">
               <button
                 onClick={handleConfirmDeleteProject}
-                className="px-3 py-1.5 text-[13px] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
+                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
               >
                 删除
               </button>
               <button
                 onClick={() => setDeleteProjectDir(null)}
-                className="px-3 py-1.5 text-[13px] text-foreground/70 hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/70 hover:text-foreground hover:bg-accent rounded-lg transition-colors"
               >
                 取消
               </button>

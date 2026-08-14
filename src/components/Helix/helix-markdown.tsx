@@ -214,7 +214,7 @@ function CodeCard({ language, code, blockId }: { language: string; code: string;
     <pre>
       <div>
         <div className="flex items-center justify-between mb-1.5">
-        <span className="text-[10px] uppercase tracking-wider text-foreground/40 select-none font-medium">
+        <span className="text-[calc(var(--helix-transcript-size)*0.7143)] uppercase tracking-wider text-foreground/40 select-none font-medium">
           {isDiff ? 'diff' : language || (boxDiagram ? 'text' : 'code')}
         </span>
         <button
@@ -229,7 +229,7 @@ function CodeCard({ language, code, blockId }: { language: string; code: string;
               /* clipboard unavailable */
             }
           }}
-          className="text-[10px] text-foreground/40 hover:text-foreground/70 transition-colors cursor-pointer"
+          className="text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/40 hover:text-foreground/70 transition-colors cursor-pointer"
         >
           {copied ? '已复制' : '复制'}
         </button>

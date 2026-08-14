@@ -88,15 +88,15 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
   return (
     <div className="w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-3">
       <div className="flex items-start justify-between gap-2 mb-2">
-        <h3 className="text-[13px] font-semibold leading-snug">
+        <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
           {getApprovalTitle(request.toolName)}
         </h3>
-        <span className="shrink-0 mt-0.5 text-[10px] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
+        <span className="shrink-0 mt-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
           等待确认
         </span>
       </div>
       {command && (
-        <pre className="bg-muted rounded-xl p-2 text-[12px] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-2 max-h-16 overflow-auto">
+        <pre className="bg-muted rounded-xl p-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-2 max-h-16 overflow-auto">
           {command}
         </pre>
       )}
@@ -119,18 +119,18 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
             >
               <span
                 className={
-                  'w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-semibold shrink-0 ' +
+                  'w-5 h-5 rounded-full flex items-center justify-center text-[calc(var(--helix-transcript-size)*0.7857)] font-semibold shrink-0 ' +
                   (isSel ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')
                 }
               >
                 {o.key}
               </span>
-              <span className="text-[12px]">{o.label}</span>
+              <span className="text-[calc(var(--helix-transcript-size)*0.8571)]">{o.label}</span>
             </button>
           )
         })}
       </div>
-      <div className="text-[10px] text-muted-foreground/60 text-center mt-2">
+      <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-2">
         内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · ⌘/Ctrl+Enter 允许 · Esc 拒绝
       </div>
     </div>
@@ -234,13 +234,13 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
       <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-3">
         <div className="flex items-center justify-between gap-3 mb-1.5">
-          <h3 className="text-[13px] font-semibold leading-snug">需要你的确认</h3>
-          <span className="shrink-0 text-[10px] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
+          <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">需要你的确认</h3>
+          <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
             等待确认
           </span>
         </div>
 
-        <div className="bg-muted rounded-lg px-2.5 py-1.5 text-[12px] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-1.5 max-h-16 overflow-auto">
+        <div className="bg-muted rounded-lg px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-1.5 max-h-16 overflow-auto">
           {request.question || '模型需要你的选择'}
         </div>
 
@@ -266,13 +266,13 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
                 >
                   <span
                     className={
-                      'w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-semibold shrink-0 ' +
+                      'w-5 h-5 rounded-full flex items-center justify-center text-[calc(var(--helix-transcript-size)*0.7857)] font-semibold shrink-0 ' +
                       (isSel ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground')
                     }
                   >
                     {idx + 1}
                   </span>
-                  <span className="text-[13px] truncate">{c}</span>
+                  <span className="text-[calc(var(--helix-transcript-size)*0.9286)] truncate">{c}</span>
                 </button>
               )
             })}
@@ -285,19 +285,19 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
             onChange={(e) => setFreeText(e.target.value)}
             disabled={submitting}
             placeholder={choices.length ? '或输入其他回答…' : '输入回答…'}
-            className="flex-1 h-8 px-3 rounded-lg bg-background/60 border border-border/50 text-[13px] text-foreground outline-none focus:border-ring disabled:opacity-50"
+            className="flex-1 h-8 px-3 rounded-lg bg-background/60 border border-border/50 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground outline-none focus:border-ring disabled:opacity-50"
           />
           <Button
             size="sm"
             disabled={submitting || !freeText.trim()}
             onClick={() => submit(freeText)}
-            className="h-8 px-4 text-[13px]"
+            className="h-8 px-4 text-[calc(var(--helix-transcript-size)*0.9286)]"
           >
             {submitting ? <Loader2 className="size-3.5 animate-spin" /> : '回复'}
           </Button>
         </div>
 
-        <div className="text-[10px] text-muted-foreground/60 text-center mt-1">
+        <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-1">
           内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · Enter 确认 · 也可自由输入
         </div>
       </div>

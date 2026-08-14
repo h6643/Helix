@@ -446,7 +446,7 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
       return (
         <div key={item.path}>
           <div
-            className={`flex items-center gap-1 px-2 py-0.5 cursor-pointer rounded-md group text-[13px] transition-colors ${
+            className={`flex items-center gap-1 px-2 py-0.5 cursor-pointer rounded-md group text-[calc(var(--helix-transcript-size)*0.9286)] transition-colors ${
               item.isDirectory ? 'hover:brightness-95' : 'hover:bg-accent/40'
             }`}
             style={{
@@ -487,14 +487,14 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
                 onBlur={() => setRenaming(null)}
                 onClick={(e) => e.stopPropagation()}
                 spellCheck={false}
-                className="flex-1 min-w-0 bg-accent/40 text-foreground text-[13px] px-1 py-0 rounded outline-none border border-primary/60"
+                className="flex-1 min-w-0 bg-accent/40 text-foreground text-[calc(var(--helix-transcript-size)*0.9286)] px-1 py-0 rounded outline-none border border-primary/60"
               />
             ) : (
               <span className={`truncate flex-1 ${bg ? 'text-white' : 'text-foreground/80'}`}>{item.name}</span>
             )}
             {style && (
               <span
-                className={`shrink-0 text-[10px] font-bold w-4 h-4 flex items-center justify-center rounded ${style.color} ${style.bg}`}
+                className={`shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] font-bold w-4 h-4 flex items-center justify-center rounded ${style.color} ${style.bg}`}
                 data-tip={status || ''}
               >
                 {style.label}
@@ -512,16 +512,16 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
   return (
     <div className="h-full w-full bg-card flex flex-col overflow-hidden">
       {/* Tree */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 text-sm">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 text-[var(--helix-transcript-size)]">
         {loading && items.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground/40">
             <Loader2 className="size-4 animate-spin" />
-            <span className="text-xs">Loading...</span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)]">Loading...</span>
           </div>
         ) : error ? (
-          <div className="px-3 py-4 text-xs text-muted-foreground/50">{error}</div>
+          <div className="px-3 py-4 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50">{error}</div>
         ) : items.length === 0 ? (
-          <div className="px-3 py-4 text-xs text-muted-foreground/30">Empty directory</div>
+          <div className="px-3 py-4 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/30">Empty directory</div>
         ) : (
           renderTree(items)
         )}
@@ -538,14 +538,14 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
         >
           <button
             onClick={() => startRename(menu.item)}
-            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
           >
             <Pencil className="size-3.5" />
             <span className="flex-1 text-left">重命名</span>
           </button>
           <button
             onClick={() => handleDelete(menu.item)}
-            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-accent/60 transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-destructive hover:bg-accent/60 transition-colors"
           >
             <Trash2 className="size-3.5" />
             <span className="flex-1 text-left">删除</span>
@@ -553,7 +553,7 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
           <div className="h-px my-1 bg-border/60" />
           <button
             onClick={() => { handleOpenInFolder(menu.item); setMenu(null) }}
-            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
           >
             <FolderOpen className="size-3.5" />
             <span className="flex-1 text-left">在文件夹中显示</span>

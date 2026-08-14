@@ -144,7 +144,7 @@ export function GlobalTooltip() {
       ref={tipRef}
       role="tooltip"
       style={style}
-      className="pointer-events-none z-[9999] max-w-[280px] whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-xs leading-relaxed text-foreground shadow-md"
+      className="pointer-events-none z-[9999] max-w-[280px] whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] leading-relaxed text-foreground shadow-md"
     >
       {state.text}
     </div>,

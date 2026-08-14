@@ -103,7 +103,7 @@ function ContextMenu({ state, onClose }: ContextMenuProps) {
         return (
           <button
             key={idx}
-            className={`w-full flex items-center gap-2.5 px-3 py-1.5 text-xs transition-colors ${
+            className={`w-full flex items-center gap-2.5 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] transition-colors ${
               item.disabled
                 ? 'text-muted-foreground/40 cursor-not-allowed'
                 : item.danger
@@ -126,7 +126,7 @@ function ContextMenu({ state, onClose }: ContextMenuProps) {
             {!item.icon && <span className="w-4 shrink-0" />}
             <span className="flex-1 text-left">{item.label}</span>
             {item.shortcut && (
-              <span className="text-[10px] text-muted-foreground/60 shrink-0">{item.shortcut}</span>
+              <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 shrink-0">{item.shortcut}</span>
             )}
           </button>
         )

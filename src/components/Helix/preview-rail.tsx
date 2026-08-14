@@ -108,7 +108,7 @@ function BookmarkMenu({ node, onOpen, onDelete, path = [], nested }: {
 
   if (node.type === 'url') {
     return (
-      <div className="group flex items-center gap-0.5 rounded text-[11px] text-foreground/70 hover:bg-accent/60 whitespace-nowrap max-w-[220px]">
+      <div className="group flex items-center gap-0.5 rounded text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 hover:bg-accent/60 whitespace-nowrap max-w-[220px]">
         <button
           onClick={() => node.url && onOpen(node.url)}
           data-tip={node.url}
@@ -141,7 +141,7 @@ function BookmarkMenu({ node, onOpen, onDelete, path = [], nested }: {
       <button
         ref={ref}
         onClick={toggle}
-        className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-foreground/70 hover:bg-accent/60 whitespace-nowrap"
+        className="flex items-center gap-1 px-2 py-1 rounded text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 hover:bg-accent/60 whitespace-nowrap"
       >
         <Folder className="size-3 shrink-0" />
         <span className="truncate max-w-[160px]">{node.name}</span>
@@ -274,12 +274,12 @@ export function BrowserView({
               }}
               onBlur={submitUrlEdit}
               spellCheck={false}
-              className="w-full px-2 py-0.5 text-[11px] bg-muted/30 border border-border/20 rounded text-foreground/70 outline-none focus:border-primary/40 text-center"
+              className="w-full px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.7857)] bg-muted/30 border border-border/20 rounded text-foreground/70 outline-none focus:border-primary/40 text-center"
             />
           ) : (
             <button
               onClick={startUrlEdit}
-              className="text-[11px] text-foreground/70 truncate hover:text-foreground hover:bg-accent/60 rounded px-2 py-0.5 transition-colors"
+              className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 truncate hover:text-foreground hover:bg-accent/60 rounded px-2 py-0.5 transition-colors"
               data-tip={loaded}
             >
               {summarizeUrl(loaded)}
@@ -322,17 +322,17 @@ export function BrowserView({
             onWebviewRef={(el) => { webviewRef.current = el }}
           />
         ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground/40 pointer-events-none">
+          <div className="absolute inset-0 flex items-center justify-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 pointer-events-none">
             点击消息中的链接以预览
           </div>
         )}
         {loading && (
-          <div className="absolute top-2 right-2 z-10 px-2 py-0.5 text-[10px] text-muted-foreground/70 bg-card/80 rounded pointer-events-none">
+          <div className="absolute top-2 right-2 z-10 px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70 bg-card/80 rounded pointer-events-none">
             加载中…
           </div>
         )}
         {error && (
-          <div className="absolute inset-x-0 top-0 z-10 px-3 py-1.5 text-[11px] text-red-500 bg-red-50/90 border-b border-red-100">
+          <div className="absolute inset-x-0 top-0 z-10 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-red-500 bg-red-50/90 border-b border-red-100">
             {error}
           </div>
         )}

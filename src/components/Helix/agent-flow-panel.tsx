@@ -698,7 +698,7 @@ function ReasoningEffortControl({ value, onChange }: { value: ReasoningEffortLev
         ref={triggerRef}
         type="button"
         onClick={toggle}
-        className="text-xs font-medium text-foreground/70 hover:text-foreground px-2 py-1.5 h-7 rounded-lg border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors min-w-11 text-center"
+        className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:text-foreground px-2 py-1.5 h-7 rounded-lg border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors min-w-11 text-center"
       >
         {current.label}
       </button>
@@ -709,10 +709,10 @@ function ReasoningEffortControl({ value, onChange }: { value: ReasoningEffortLev
           className="p-2 bg-popover border border-border/40 rounded-xl shadow-2xl flex flex-col gap-1 w-48 select-none animate-scale-in"
         >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-foreground/60">推理强度</span>
-            <span className="text-xs font-medium text-primary">{current.label}</span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/60">推理强度</span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-primary">{current.label}</span>
           </div>
-          <div className="flex items-center justify-between text-[10px] text-foreground/40 leading-none">
+          <div className="flex items-center justify-between text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/40 leading-none">
             <span>更快</span>
             <span>更聪明</span>
           </div>
@@ -827,11 +827,11 @@ function SummarizedHistoryBlock({ count, preview, startTs, endTs }: { count: num
     : ''
   return (
     <details className="group/details">
-      <summary className="flex items-center gap-1.5 px-1 py-1 text-[11px] text-muted-foreground/40 cursor-pointer hover:text-foreground/60 select-none list-none transition-colors">
+      <summary className="flex items-center gap-1.5 px-1 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/40 cursor-pointer hover:text-foreground/60 select-none list-none transition-colors">
         <ChevronRight className="size-3 transition-transform group-open/details:rotate-90 shrink-0" />
         <span>已压缩 {count} 条较早消息{range}，点击展开预览</span>
       </summary>
-      <div className="pl-4 pr-2 text-xs text-muted-foreground/45  leading-relaxed mb-2">
+      <div className="pl-4 pr-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/45  leading-relaxed mb-2">
         {preview}
       </div>
     </details>
@@ -1054,8 +1054,8 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                       <FileText className="size-4 text-foreground/50 shrink-0" />
                     )}
                     <div className="min-w-0">
-                      <p className="text-xs font-medium text-foreground truncate">{f.name}</p>
-                      <p className="text-[10px] text-muted-foreground/70">{formatBytes(f.size)}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground truncate">{f.name}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70">{formatBytes(f.size)}</p>
                     </div>
                   </div>
                 ))}
@@ -1892,7 +1892,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }
             }
           }}
-          className="flex items-center justify-between gap-2 min-w-[80px] max-w-[140px] px-2.5 py-1.5 h-7 bg-muted/30 border border-border/30 rounded-lg text-[13px] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
+          className="flex items-center justify-between gap-2 min-w-[80px] max-w-[140px] px-2.5 py-1.5 h-7 bg-muted/30 border border-border/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
         >
           <span className="truncate">{displayName}</span>
           <svg className={`size-3.5 text-muted-foreground transition-transform shrink-0 ${showModelDropdown ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -1904,7 +1904,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 key={m}
                 type="button"
                 onClick={() => handleModelSelect(m)}
-                className={`w-full text-left px-3 py-2 rounded-md text-sm font-mono transition-colors ${
+                className={`w-full text-left px-3 py-2 rounded-md text-[var(--helix-transcript-size)] font-mono transition-colors ${
                   m === selectedForHighlight
                     ? 'bg-primary/10 text-primary font-semibold'
                     : 'text-foreground/70 hover:bg-muted'
@@ -1914,7 +1914,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               </button>
             ))}
             {modelList.length === 0 && (
-              <div className="px-3 py-2 text-sm text-foreground/40">
+              <div className="px-3 py-2 text-[var(--helix-transcript-size)] text-foreground/40">
                 暂无可用模型
               </div>
             )}
@@ -2961,6 +2961,71 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         return null
       }
 
+      // ── 子代理实时事件 → store.subAgents ──────────────────────────────
+      // serve 模式下后端把子任务进度以 subagent.* 事件中继到父会话（见
+      // tui_gateway/server.py _on_tool_progress 的 subagent.* 分支）。
+      // 这些事件经 serve-gateway.ts 的 default 分支原样透传，这里消费并写入
+      // store，让 DelegationsPanel 顶部的"实时"区能显示运行中的子任务。
+      // 磁盘 live 日志（delegation_live_log.py）仍由后端独立维护，作为兜底。
+      const handleSubagentEvent = (method: string, params: any): void => {
+        if (typeof params !== 'object' || params === null) return
+        const goal = typeof params.goal === 'string' ? params.goal : ''
+        // 后端 subagent_id；缺失时退回 child_session_id 构造的稳定 id
+        const subagentId =
+          typeof params.subagent_id === 'string' && params.subagent_id
+            ? params.subagent_id
+            : typeof params.child_session_id === 'string' && params.child_session_id
+              ? `sa-${params.child_session_id}`
+              : null
+        if (!subagentId) {
+          debug('[SubAgent] 事件缺少 subagent_id/child_session_id，跳过', method)
+          return
+        }
+        const model = typeof params.model === 'string' ? params.model : ''
+        const text = typeof params.text === 'string' ? params.text : ''
+
+        if (method === 'subagent.start') {
+          const existing = useHelixStore.getState().subAgents.some(a => a.id === subagentId)
+          if (existing) return // 已存在（thinking 提前建过）——只补描述
+          useHelixStore.getState().spawnSubAgent(model || '子代理', goal || text || '执行子任务', undefined, subagentId)
+          return
+        }
+        if (method === 'subagent.thinking') {
+          const existing = useHelixStore.getState().subAgents.some(a => a.id === subagentId)
+          if (!existing) {
+            useHelixStore.getState().spawnSubAgent(model || '子代理', goal || text || '思考中…', undefined, subagentId)
+          }
+          return
+        }
+        if (method === 'subagent.tool') {
+          const toolName = typeof params.tool_name === 'string' && params.tool_name ? params.tool_name : 'tool'
+          // 后端 subagent.tool 只带 tool_preview（args 不进 payload）；优先用它
+          const preview = typeof params.tool_preview === 'string' && params.tool_preview
+            ? params.tool_preview
+            : text
+          useHelixStore.getState().addSubAgentToolCall(subagentId, {
+            toolName,
+            params: preview.slice(0, 500),
+            status: 'running',
+          })
+          return
+        }
+        if (method === 'subagent.complete') {
+          const status = typeof params.status === 'string' ? params.status : ''
+          const summary = typeof params.summary === 'string' && params.summary ? params.summary : text
+          const filesWritten = Array.isArray(params.files_written)
+            ? params.files_written.map((f: unknown) => String(f)).slice(0, 20)
+            : undefined
+          if (status === 'failed' || status === 'error') {
+            useHelixStore.getState().failSubAgent(subagentId, summary || '子代理执行失败')
+          } else {
+            useHelixStore.getState().completeSubAgent(subagentId, summary || undefined, filesWritten)
+          }
+          return
+        }
+        // subagent.progress / subagent.text / 其它 → 忽略
+      }
+
       // ── Hermes todo-list extraction ──────────────────────────────────────
       // Hermes carries an in-session todo list and streams it via session/update
       // events whose sessionUpdate name includes "todo"/"task"/"plan" (per the
@@ -3293,6 +3358,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           const parsed = mapHermesEvent(method, params)
           if (parsed) {
             enqueue('data: ' + JSON.stringify(parsed))
+          }
+          // 子代理（delegate_task）事件：实时写入 store.subAgents，
+          // 供 DelegationsPanel 顶部"实时"区渲染（磁盘 live 日志仍作兜底）。
+          // 这些事件携带父会话 sid，已通过上面的 true-concurrency 过滤。
+          if (method === 'subagent.start' || method === 'subagent.thinking' ||
+              method === 'subagent.tool' || method === 'subagent.complete') {
+            try {
+              handleSubagentEvent(method, params)
+            } catch (e) {
+              console.error('[Helix] subagent event handling error', e)
+            }
           }
           // 自动压缩实时提示：检测到压缩驱动的 session 轮转事件时，在对话流中插入一条居中状态行。
           if (parsed && parsed.type === 'auto_compressed') {
@@ -4539,7 +4615,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         <button
           type="button"
           onClick={() => setShowApprovalModeDropdown(!showApprovalModeDropdown)}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
           data-tip="审批模式"
         >
           {approvalMode === 'default' && <Hand className="size-3.5" />}
@@ -4600,8 +4676,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     <Icon className="size-4 text-foreground/70" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-foreground">{mode.title}</div>
-                    <div className="text-xs text-muted-foreground leading-relaxed">{mode.desc}</div>
+                    <div className="text-[var(--helix-transcript-size)] font-medium text-foreground">{mode.title}</div>
+                    <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground leading-relaxed">{mode.desc}</div>
                   </div>
                   {active && (
                     <div className="mt-1 shrink-0">
@@ -4618,7 +4694,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return (
     <div
       ref={chatInputWrapRef}
-      className={`border transition-all duration-200 relative bg-background/90 backdrop-blur-md border-border/40 rounded-2xl shadow-lg shadow-black/5 ${isDraggingFile ? 'border-primary/40' : 'hover:border-border/60 focus-within:border-primary/30'}`}
+      className={`border transition-all duration-200 relative bg-background/90 backdrop-blur-md border-border/40 rounded-2xl ${isDraggingFile ? 'border-primary/40' : 'hover:border-border/60 focus-within:border-primary/30'}`}
       onDragOver={(e) => {
         e.preventDefault()
         e.stopPropagation()
@@ -4638,7 +4714,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     >
             {/* Drag-over hint */}
             {isDraggingFile && (
-              <div className={`absolute inset-0 z-30 flex items-center justify-center pointer-events-none bg-primary/10 text-sm font-medium text-primary rounded-2xl`}>
+              <div className={`absolute inset-0 z-30 flex items-center justify-center pointer-events-none bg-primary/10 text-[var(--helix-transcript-size)] font-medium text-primary rounded-2xl`}>
                 松开以添加附件
               </div>
             )}
@@ -4655,8 +4731,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       <FileText className="size-4 text-muted-foreground shrink-0" />
                     )}
                     <div className="min-w-0">
-                      <p className="text-xs font-medium text-foreground truncate">{f.name}</p>
-                      <p className="text-[10px] text-muted-foreground/60">{formatBytes(f.size)}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground truncate">{f.name}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60">{formatBytes(f.size)}</p>
                     </div>
                     <button
                       onClick={() => removePendingFile(f.id)}
@@ -4701,7 +4777,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               onPaste={handlePaste}
               placeholder={isEmpty ? "随心输入..." : "要求后续变更..."}
               rows={2}
-              className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-sm min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
+              className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-[var(--helix-transcript-size)] min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
               style={{
                 overflowX: 'hidden',
                 overflowY: 'auto',
@@ -4731,7 +4807,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 {/* Quick commands section */}
                 {matchedQuickCmds.length > 0 && (
                   <>
-                    <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-muted-foreground/30 uppercase tracking-wider">快捷指令</p>
+                    <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">快捷指令</p>
                     {matchedQuickCmds.map((qc) => (
                       <button
                         key={qc.cmd}
@@ -4742,10 +4818,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         }}
                         className="w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 hover:bg-muted/30"
                       >
-                        <code className="text-[12px] font-mono text-primary/70 shrink-0 w-20">{qc.cmd}</code>
+                        <code className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-primary/70 shrink-0 w-20">{qc.cmd}</code>
                         <div className="min-w-0 flex-1">
-                          <span className="text-[13px] text-foreground block">{qc.label}</span>
-                          <span className="text-[11px] text-muted-foreground block truncate">{qc.prompt}</span>
+                          <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block">{qc.label}</span>
+                          <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground block truncate">{qc.prompt}</span>
                         </div>
                       </button>
                     ))}
@@ -4756,7 +4832,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 {filteredSkills.length > 0 && (
                   <>
                     {matchedQuickCmds.length > 0 && <div className="border-t border-border/20 mx-3" />}
-                    <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-muted-foreground/30 uppercase tracking-wider">命令</p>
+                    <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">命令</p>
                     {filteredSkills.map((skill, index) => (
                       <button
                         key={skill.id}
@@ -4785,16 +4861,16 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                           ? <Circle className="size-3.5 text-amber-500/70 shrink-0" fill="currentColor" />
                           : <FileText className="size-4 text-foreground/40 shrink-0" />}
                         <div className="min-w-0 flex-1">
-                          <span className="text-[13px] text-foreground block truncate">{skill.name}</span>
+                          <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block truncate">{skill.name}</span>
                           {skill.description && (
-                            <span className="text-[11px] text-muted-foreground block truncate">{skill.description}</span>
+                            <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground block truncate">{skill.description}</span>
                           )}
                         </div>
                         {(skill as any).isBuiltinCommand && (
-                          <span className="text-[10px] text-amber-500/70 shrink-0">CMD</span>
+                          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-amber-500/70 shrink-0">CMD</span>
                         )}
                         {(skill as any).isHermesCommand && (
-                          <span className="text-[10px] text-muted-foreground/60 shrink-0">Hermes</span>
+                          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 shrink-0">Hermes</span>
                         )}
                       </button>
                     ))}
@@ -4830,8 +4906,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   >
                     <FileText className="size-4 text-foreground/40 shrink-0" />
                     <div className="min-w-0 flex-1">
-                      <span className="text-[13px] text-foreground block truncate">{file.name}</span>
-                      <span className="text-[11px] text-muted-foreground block truncate">{file.path}</span>
+                      <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block truncate">{file.name}</span>
+                      <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground block truncate">{file.path}</span>
                     </div>
                   </button>
                 ))}
@@ -4868,7 +4944,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       <button
                         type="button"
                         onClick={() => storeActions.toggleSettings('api')}
-                        className="text-xs text-foreground/50 hover:text-foreground hover:bg-muted/60 px-2.5 py-1.5 h-9 rounded-lg transition-colors"
+                        className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/50 hover:text-foreground hover:bg-muted/60 px-2.5 py-1.5 h-9 rounded-lg transition-colors"
                       >
                         设置模型
                       </button>
@@ -4954,7 +5030,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               console.error('[selectWorkDir] openDirectory failed:', e)
             }
           }}
-          className="flex items-center gap-1.5 text-[12px] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
+          className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
           data-tip={selectedWorkDir || '选择项目目录'}
         >
           <Folder className="size-3.5 text-amber-500" />
@@ -4993,7 +5069,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   .catch(() => setBranchDirtyCount(0))
               }
             }}
-            className="flex items-center gap-1.5 text-[12px] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
+            className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
             data-tip={`当前分支：${currentBranch}（点击查看全部分支）`}
           >
             <GitBranch className="size-3.5 text-emerald-500" />
@@ -5003,7 +5079,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             <div className="absolute bottom-full left-0 mb-1.5 w-64 bg-background/95 backdrop-blur-sm rounded-xl border border-border/30 shadow-lg shadow-black/8 z-50 flex flex-col max-h-80">
               {/* Search */}
               <div className="px-3 pt-2.5 pb-1.5 border-b border-border/20">
-                <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+                <div className="flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
                   <Search className="size-3.5 shrink-0" />
                   <input
                     value={branchSearch}
@@ -5017,7 +5093,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
               {/* Branch list */}
               <div className="flex-1 overflow-y-auto py-1 min-h-0">
-                <div className="px-3 py-1 text-[11px] font-medium text-muted-foreground">分支</div>
+                <div className="px-3 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] font-medium text-muted-foreground">分支</div>
                 {branchList.filter(b => !branchSearch || b.toLowerCase().includes(branchSearch.toLowerCase())).map((b) => (
                   <button
                     key={b}
@@ -5033,14 +5109,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         storeActions.showToast({ type: 'error', title: '切换分支失败', description: res.error })
                       }
                     }}
-                    className={`w-full flex items-center gap-2 text-[13px] px-3 py-1.5 transition-colors ${b === currentBranch ? 'bg-primary/8 text-primary' : 'text-foreground/80 hover:bg-muted/40'}`}
+                    className={`w-full flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.9286)] px-3 py-1.5 transition-colors ${b === currentBranch ? 'bg-primary/8 text-primary' : 'text-foreground/80 hover:bg-muted/40'}`}
                   >
                     <GitBranch className="size-3.5 shrink-0 text-foreground/40" />
                     <span className="truncate flex-1 text-left">{b}</span>
                     {b === currentBranch && (
                       <div className="flex items-center gap-2 shrink-0">
                         {branchDirtyCount > 0 && (
-                          <span className="text-[11px] text-muted-foreground">未提交：{branchDirtyCount} 个文件</span>
+                          <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground">未提交：{branchDirtyCount} 个文件</span>
                         )}
                         <Check className="size-4 text-primary" strokeWidth={2.5} />
                       </div>
@@ -5055,7 +5131,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   <button
                     type="button"
                     onClick={() => { setBranchCreating(true); setBranchNewName('') }}
-                    className="w-full flex items-center gap-2 text-[12px] px-3 py-2 text-foreground/50 hover:text-foreground hover:bg-muted/30 transition-colors"
+                    className="w-full flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.8571)] px-3 py-2 text-foreground/50 hover:text-foreground hover:bg-muted/30 transition-colors"
                   >
                     <Plus className="size-3" />
                     创建并检出新分支...
@@ -5070,7 +5146,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         if (e.key === 'Escape') setBranchCreating(false)
                       }}
                       placeholder="新分支名称"
-                      className="w-full text-[12px] px-2 py-1 rounded-md bg-muted/40 border border-border/30 outline-none focus:border-primary/50"
+                      className="w-full text-[calc(var(--helix-transcript-size)*0.8571)] px-2 py-1 rounded-md bg-muted/40 border border-border/30 outline-none focus:border-primary/50"
                       autoFocus
                     />
                     <div className="flex gap-1.5">
@@ -5078,12 +5154,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                         type="button"
                         onClick={() => handleCreateBranch(branchNewName.trim())}
                         disabled={!branchNewName.trim()}
-                        className="flex-1 text-[11px] py-1 rounded-md bg-primary/15 text-primary hover:bg-primary/25 transition-colors disabled:opacity-30"
+                        className="flex-1 text-[calc(var(--helix-transcript-size)*0.7857)] py-1 rounded-md bg-primary/15 text-primary hover:bg-primary/25 transition-colors disabled:opacity-30"
                       >创建</button>
                       <button
                         type="button"
                         onClick={() => setBranchCreating(false)}
-                        className="flex-1 text-[11px] py-1 rounded-md bg-muted/40 text-foreground/70 hover:bg-muted/60 transition-colors"
+                        className="flex-1 text-[calc(var(--helix-transcript-size)*0.7857)] py-1 rounded-md bg-muted/40 text-foreground/70 hover:bg-muted/60 transition-colors"
                       >取消</button>
                     </div>
                   </div>
@@ -5112,9 +5188,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             onChange={(e) => { setConversationSearchQuery(e.target.value); setConversationSearchActive(0) }}
             onKeyDown={handleConversationSearchKeyDown}
             placeholder="搜索对话内容..."
-            className="w-44 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            className="w-44 bg-transparent text-[var(--helix-transcript-size)] outline-none placeholder:text-muted-foreground"
           />
-          <span className={`text-[11px] tabular-nums shrink-0 ${searchMatches.length ? 'text-muted-foreground' : 'text-foreground/40'}`}>
+          <span className={`text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums shrink-0 ${searchMatches.length ? 'text-muted-foreground' : 'text-foreground/40'}`}>
             {conversationSearchQuery.trim() ? (searchMatches.length ? `${conversationSearchActive + 1}/${searchMatches.length}` : '无结果') : ''}
           </span>
           <button
@@ -5152,7 +5228,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             <div className="flex flex-col items-center w-full pt-[22vh]">
               <div className="w-full max-w-[700px] mx-auto px-5">
                 <img src="/kirin.png" alt="Helix" className="w-14 h-14 opacity-70 mx-auto mb-4" />
-                <p className="text-[15px] font-normal text-foreground/50 text-center mb-6 tracking-tight">{startupGreeting}</p>
+                <p className="text-[calc(var(--helix-transcript-size)*1.0714)] font-normal text-foreground/50 text-center mb-6 tracking-tight">{startupGreeting}</p>
                 {renderEmptyBreadcrumb()}
                 {renderChatInput({ isEmpty: true })}
               </div>
@@ -5161,7 +5237,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             <div className="space-y-3">
               {/* Branch indicator */}
               {currentBranchInfo && (
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-500/5 border border-blue-500/15 text-[12px]">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-500/5 border border-blue-500/15 text-[calc(var(--helix-transcript-size)*0.8571)]">
                   <GitBranch className="size-3.5 text-blue-500 shrink-0" />
                   <span className="text-blue-600 dark:text-blue-400 font-medium">{currentBranchInfo.branchName}</span>
                   {currentBranchInfo.parentLabel && (
@@ -5184,7 +5260,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 ) : item.kind === 'status' ? (
                   <div
                     key={item.id}
-                    className="flex w-full items-center justify-center gap-1.5 py-2 text-[11px] text-muted-foreground/60"
+                    className="flex w-full items-center justify-center gap-1.5 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60"
                   >
                     <Archive className="size-3 shrink-0" />
                     <span>{item.text}</span>
@@ -5355,7 +5431,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
       {/* Connection notice */}
       {connectionNotice && (
-        <div className="mx-4 mb-2 px-3 py-2.5 rounded-xl text-xs flex items-center gap-2 border cursor-pointer hover:opacity-80 transition-all duration-200 shadow-sm" style={{
+        <div className="mx-4 mb-2 px-3 py-2.5 rounded-xl text-[calc(var(--helix-transcript-size)*0.8571)] flex items-center gap-2 border cursor-pointer hover:opacity-80 transition-all duration-200 shadow-sm" style={{
           backgroundColor: connectionNotice.phase === 'recovered' ? 'oklch(0.65 0.15 145 / 0.1)' : 'oklch(0.70 0.15 65 / 0.1)',
           borderColor: connectionNotice.phase === 'recovered' ? 'oklch(0.65 0.15 145 / 0.25)' : 'oklch(0.70 0.15 65 / 0.25)',
           color: connectionNotice.phase === 'recovered' ? 'oklch(0.65 0.15 145)' : 'oklch(0.70 0.15 65)',
@@ -5364,7 +5440,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             <div className="animate-spin size-3 border-2 border-current border-t-transparent rounded-full shrink-0" />
           )}
           <span className="flex-1">{connectionNotice.message}</span>
-          <span className="text-[10px] opacity-60">点击关闭</span>
+          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] opacity-60">点击关闭</span>
         </div>
       )}
 
@@ -5373,7 +5449,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         <div className="max-w-[700px] mx-auto mb-2 p-3 bg-card/30 rounded-xl border border-border/30 shadow-sm">
           <div className="flex items-center gap-2 mb-2">
             <FolderPlus className="size-4 text-primary" />
-            <span className="text-sm font-medium text-foreground">新建项目</span>
+            <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">新建项目</span>
           </div>
           <div className="flex gap-2">
             <input
@@ -5382,7 +5458,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               onChange={(e) => setNewProjectName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleCreateProject() }}
               placeholder="输入项目名称..."
-              className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40 transition-all duration-200"
+              className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40 transition-all duration-200"
               autoFocus
             />
             <Button size="sm" onClick={handleCreateProject} className="px-3">
@@ -5400,7 +5476,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         <div className="flex justify-center shrink-0 -my-1 relative z-10">
           <button
             onClick={jumpToBottom}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-muted/80 hover:bg-muted border border-border/50 text-xs text-muted-foreground hover:text-foreground transition-all duration-200 shadow-sm backdrop-blur-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-muted/80 hover:bg-muted border border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground transition-all duration-200 shadow-sm backdrop-blur-sm"
           >
             <ArrowDown className="size-3.5" />
           </button>
@@ -5412,7 +5488,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         <div className="bg-transparent shrink-0 mb-2 mt-2 w-full px-5">
           <div className="w-full max-w-[700px] mx-auto">
             {renderChatInput()}
-            <p className="text-xs text-foreground/50 text-center mt-3 mb-1.5 select-none">AI不是万能的，需要有自己的判断</p>
           </div>
         </div>
       )}

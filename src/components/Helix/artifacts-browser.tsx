@@ -69,7 +69,7 @@ export function ArtifactsBrowser({ onClose }: { onClose: () => void }) {
           ) : (
             <FileText className="size-3.5 text-muted-foreground shrink-0" />
           )}
-          <span className="text-xs truncate flex-1">{n.name}</span>
+          <span className="text-[calc(var(--helix-transcript-size)*0.8571)] truncate flex-1">{n.name}</span>
           {n.type !== 'directory' && (
             <button
               className="opacity-0 group-hover:opacity-100"
@@ -93,13 +93,13 @@ export function ArtifactsBrowser({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between px-4 py-3 border-b border-border/60">
           <div className="flex items-center gap-2">
             <FolderOpen className="size-4 text-primary" />
-            <h2 className="text-sm font-semibold">产物浏览器</h2>
+            <h2 className="text-[var(--helix-transcript-size)] font-semibold">产物浏览器</h2>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg text-muted-foreground hover:bg-accent/60">
             <X className="size-4" />
           </button>
         </div>
-        <div className="px-3 py-2 border-b border-border/60 flex items-center gap-2 text-[11px] text-muted-foreground/70">
+        <div className="px-3 py-2 border-b border-border/60 flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70">
           <button onClick={openDir} className="flex items-center gap-1 hover:text-foreground">
             <FolderOpen className="size-3" /> 选择目录
           </button>
@@ -112,25 +112,25 @@ export function ArtifactsBrowser({ onClose }: { onClose: () => void }) {
         </div>
         <div className="flex-1 overflow-y-auto p-2">
           {loading ? (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground/60 mt-6">
+            <div className="flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-6">
               <Loader2 className="size-3.5 animate-spin" /> 加载中…
             </div>
           ) : err ? (
-            <p className="text-xs text-red-400 mt-6">{err}</p>
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400 mt-6">{err}</p>
           ) : content ? (
             <div>
               <div className="flex items-center justify-between px-1 py-1">
-                <span className="text-xs font-medium truncate">{content.name}</span>
-                <button onClick={() => setContent(null)} className="text-[11px] text-muted-foreground hover:text-foreground">
+                <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium truncate">{content.name}</span>
+                <button onClick={() => setContent(null)} className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground hover:text-foreground">
                   返回
                 </button>
               </div>
-              <pre className="text-[11px] whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-muted/40 rounded-lg p-2">
+              <pre className="text-[calc(var(--helix-transcript-size)*0.7857)] whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-muted/40 rounded-lg p-2">
                 {content.text.slice(0, 20000)}
               </pre>
             </div>
           ) : tree.length === 0 ? (
-            <p className="text-xs text-muted-foreground/60 text-center mt-8">空目录</p>
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 text-center mt-8">空目录</p>
           ) : (
             <div className="group">{renderNodes(tree)}</div>
           )}

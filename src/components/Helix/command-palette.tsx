@@ -291,7 +291,7 @@ export function CommandPalette() {
     return (
       <div>
         {title && (
-          <div className="px-4 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 bg-muted/30">
+          <div className="px-4 py-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold uppercase tracking-wider text-muted-foreground/60 bg-muted/30">
             {title}
           </div>
         )}
@@ -311,20 +311,20 @@ export function CommandPalette() {
             >
               {item.icon}
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{item.label}</p>
+                <p className="text-[var(--helix-transcript-size)] font-medium truncate">{item.label}</p>
                 {item.description && (
-                  <p className="text-xs text-muted-foreground truncate">
+                  <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground truncate">
                     {item.description}
                   </p>
                 )}
               </div>
               {item.category === 'file' && (
-                <span className="text-[10px] text-muted-foreground bg-muted/50 px-2 py-0.5 rounded">
+                <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-muted/50 px-2 py-0.5 rounded">
                   文件
                 </span>
               )}
               {item.shortcut && (
-                <span className="text-[10px] text-muted-foreground/60 bg-muted/30 px-1.5 py-0.5 rounded hidden sm:block">
+                <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 bg-muted/30 px-1.5 py-0.5 rounded hidden sm:block">
                   {item.shortcut}
                 </span>
               )}
@@ -353,16 +353,16 @@ export function CommandPalette() {
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="搜索文件或输入命令..."
-            className="flex-1 py-3.5 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            className="flex-1 py-3.5 bg-transparent text-[var(--helix-transcript-size)] outline-none placeholder:text-muted-foreground"
           />
-          <kbd className="hidden sm:flex items-center gap-0.5 text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+          <kbd className="hidden sm:flex items-center gap-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
             ESC
           </kbd>
         </div>
         {/* Results */}
         <div className="max-h-80 overflow-y-auto">
           {filtered.length === 0 && (
-            <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+            <div className="px-4 py-8 text-center text-[var(--helix-transcript-size)] text-muted-foreground">
               没有找到匹配的结果
             </div>
           )}
@@ -373,7 +373,7 @@ export function CommandPalette() {
           {renderSection('操作', actionResults, fileResults.length)}
         </div>
         {/* Footer */}
-        <div className="flex items-center gap-4 px-4 py-2 border-t border-border/60 text-[10px] text-muted-foreground">
+        <div className="flex items-center gap-4 px-4 py-2 border-t border-border/60 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
           <span className="flex items-center gap-1">
             <kbd className="bg-muted px-1 py-0.5 rounded">↑↓</kbd> 导航
           </span>

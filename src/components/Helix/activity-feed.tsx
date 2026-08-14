@@ -97,7 +97,7 @@ export function ActivityFeed({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between px-4 py-3 border-b border-border/60">
           <div className="flex items-center gap-2">
             <Activity className="size-4 text-primary" />
-            <h2 className="text-sm font-semibold">活动流</h2>
+            <h2 className="text-[var(--helix-transcript-size)] font-semibold">活动流</h2>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg text-muted-foreground hover:bg-accent/60">
             <X className="size-4" />
@@ -105,7 +105,7 @@ export function ActivityFeed({ onClose }: { onClose: () => void }) {
         </div>
         <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
           {items.length === 0 ? (
-            <p className="text-xs text-muted-foreground/60 text-center mt-8">暂无活动记录</p>
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 text-center mt-8">暂无活动记录</p>
           ) : (
             items.map((it) => {
               const Icon = ICONS[it.kind]
@@ -113,8 +113,8 @@ export function ActivityFeed({ onClose }: { onClose: () => void }) {
                 <div key={it.id} className="flex items-start gap-2.5 px-2 py-1.5 rounded-lg hover:bg-accent/30">
                   <Icon className={`size-3.5 mt-0.5 shrink-0 ${COLORS[it.kind]}`} />
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs text-foreground/90 truncate">{it.text}</p>
-                    <p className="text-[10px] text-muted-foreground/50">{timeAgo(it.at)}</p>
+                    <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/90 truncate">{it.text}</p>
+                    <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50">{timeAgo(it.at)}</p>
                   </div>
                 </div>
               )

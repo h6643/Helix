@@ -82,7 +82,7 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
         >
           {THEME_SELECT_GROUPS.map((g) => (
             <div key={g.label}>
-              <div className="px-3 pt-2 pb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+              <div className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium uppercase tracking-wider text-muted-foreground/60">
                 {g.label}
               </div>
               {g.options.map((o) => (
@@ -90,7 +90,7 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
                   key={o.value}
                   type="button"
                   onClick={() => { onChange(o.value); setOpen(false) }}
-                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors text-left ${
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] transition-colors text-left ${
                     o.value === value
                       ? 'bg-accent text-accent-foreground'
                       : 'text-foreground hover:bg-accent/50'
@@ -164,23 +164,35 @@ export function AppearanceSettingsPanel({ themeStyle, onSelectThemeStyle }: {
         </SettingRow>
       </SettingGroup>
 
-      <SettingGroup title="编辑器" description="设置代码内容的字体和字号，不受界面字号影响。">
-        <SettingRow label="代码字体" hint="调整代码内容使用的等宽字体。">
-          {fontSelect(fontFamily, setFontFamily, FONT_OPTIONS)}
-        </SettingRow>
-        <SettingRow label="代码字号" hint="调整代码块、文件预览和差异视图的默认字号。">
-          {stepper(fontSize, 10, 32, setFontSize)}
-        </SettingRow>
-      </SettingGroup>
+      {/* 编辑器：标题和描述在卡片上方，卡片内放代码字体/字号 */}
+      <div className="pt-1">
+        <div className="px-4 pt-3 pb-2">
+          <h4 className="ui-title font-semibold text-foreground">编辑器</h4>
+        </div>
+        <SettingGroup>
+          <SettingRow label="代码字体" hint="调整代码内容使用的等宽字体。">
+            {fontSelect(fontFamily, setFontFamily, FONT_OPTIONS)}
+          </SettingRow>
+          <SettingRow label="代码字号" hint="调整代码块、文件预览和差异视图的默认字号。">
+            {stepper(fontSize, 10, 32, setFontSize)}
+          </SettingRow>
+        </SettingGroup>
+      </div>
 
-      <SettingGroup title="界面" description="调整应用界面文字的大小与字体，图标和布局尺寸不受影响。">
-        <SettingRow label="UI 字体" hint="调整界面文字使用的字体。">
-          {fontSelect(interfaceFont, setInterfaceFont, UI_FONT_OPTIONS)}
-        </SettingRow>
-        <SettingRow label="界面字号" hint="调整应用界面的文字大小，图标和布局尺寸不受影响。">
-          {stepper(transcriptFontSize, 10, 28, setTranscriptFontSize)}
-        </SettingRow>
-      </SettingGroup>
+      {/* 界面：标题和描述在卡片上方，卡片内放 UI 字体/字号 */}
+      <div className="pt-1">
+        <div className="px-4 pt-3 pb-2">
+          <h4 className="ui-title font-semibold text-foreground">界面</h4>
+        </div>
+        <SettingGroup>
+          <SettingRow label="UI 字体" hint="调整界面文字使用的字体。">
+            {fontSelect(interfaceFont, setInterfaceFont, UI_FONT_OPTIONS)}
+          </SettingRow>
+          <SettingRow label="界面字号" hint="调整应用界面的文字大小，图标和布局尺寸不受影响。">
+            {stepper(transcriptFontSize, 10, 28, setTranscriptFontSize)}
+          </SettingRow>
+        </SettingGroup>
+      </div>
     </div>
   )
 }

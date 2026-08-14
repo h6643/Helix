@@ -42,10 +42,10 @@ export function McpEditorForm({
       <div className={`p-4 space-y-4 ${fullScreen ? 'flex-1 overflow-y-auto' : ''}`}>
         {/* Name */}
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1.5">名称</label>
+          <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">名称</label>
           <input type="text" value={form.name} onChange={e => onChange({ name: e.target.value })}
             placeholder="MCP server name"
-            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
         </div>
 
         {/* Type */}
@@ -53,7 +53,7 @@ export function McpEditorForm({
           <div className="flex gap-2">
             {([['local', 'STDIO'], ['remote', '流式 HTTP']] as const).map(([t, label]) => (
               <button key={t} onClick={() => onChange({ type: t, command: '', url: '' })}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm transition-colors ${form.type === t ? 'border-primary bg-primary/10 text-primary' : 'border-border/50 text-muted-foreground hover:bg-accent/50'}`}>
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-[var(--helix-transcript-size)] transition-colors ${form.type === t ? 'border-primary bg-primary/10 text-primary' : 'border-border/50 text-muted-foreground hover:bg-accent/50'}`}>
                 {label}
               </button>
             ))}
@@ -63,53 +63,53 @@ export function McpEditorForm({
         {/* Command / URL */}
         {form.type === 'local' ? (
           <div>
-            <label className="block text-sm font-medium text-foreground mb-1.5">启动命令</label>
+            <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">启动命令</label>
             <input type="text" value={form.command} onChange={e => onChange({ command: e.target.value })}
               placeholder="npx -y @modelcontextprotocol/server-filesystem ./data"
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
           </div>
         ) : (
           <div>
-            <label className="block text-sm font-medium text-foreground mb-1.5">URL</label>
+            <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">URL</label>
             <input type="text" value={form.url} onChange={e => onChange({ url: e.target.value })}
               placeholder="http://localhost:3001/sse"
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
           </div>
         )}
 
         {/* Args */}
         {form.type === 'local' && (
           <div>
-            <label className="block text-sm font-medium text-foreground mb-1.5">参数</label>
+            <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">参数</label>
             <input type="text" value={form.args} onChange={e => onChange({ args: e.target.value })}
               placeholder="--port 3000 --verbose"
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
           </div>
         )}
 
         {/* Environment variables */}
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1.5">环境变量</label>
+          <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">环境变量</label>
           {envEntries.length > 0 && (
             <div className="space-y-1 mb-2">
               {envEntries.map(([key, val]) => (
                 <div key={key} className="flex items-center gap-2">
-                  <span className="text-xs font-mono text-foreground/60 bg-muted px-2 py-1 rounded flex-shrink-0">{key}</span>
-                  <span className="text-xs text-foreground/30">=</span>
-                  <span className="text-xs font-mono text-foreground/40 truncate flex-1">{val}</span>
-                  <button onClick={() => removeEnvVar(key)} className="text-xs text-red-500 hover:text-red-600 shrink-0">删除</button>
+                  <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/60 bg-muted px-2 py-1 rounded flex-shrink-0">{key}</span>
+                  <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/30">=</span>
+                  <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/40 truncate flex-1">{val}</span>
+                  <button onClick={() => removeEnvVar(key)} className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-500 hover:text-red-600 shrink-0">删除</button>
                 </div>
               ))}
             </div>
           )}
           <div className="flex gap-2">
             <input type="text" value={newEnvKey} onChange={e => setNewEnvKey(e.target.value)} placeholder="键"
-              className="flex-1 px-2 py-1.5 bg-muted/50 border border-border/50 rounded text-xs font-mono" />
+              className="flex-1 px-2 py-1.5 bg-muted/50 border border-border/50 rounded text-[calc(var(--helix-transcript-size)*0.8571)] font-mono" />
             <input type="text" value={newEnvValue} onChange={e => setNewEnvValue(e.target.value)} placeholder="值"
-              className="flex-1 px-2 py-1.5 bg-muted/50 border border-border/50 rounded text-xs font-mono" />
-            <button onClick={addEnvVar} className="px-2 py-1.5 bg-muted/50 border border-border/50 rounded text-xs hover:bg-accent/50 transition-colors">添加</button>
+              className="flex-1 px-2 py-1.5 bg-muted/50 border border-border/50 rounded text-[calc(var(--helix-transcript-size)*0.8571)] font-mono" />
+            <button onClick={addEnvVar} className="px-2 py-1.5 bg-muted/50 border border-border/50 rounded text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/50 transition-colors">添加</button>
           </div>
-          <label className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
+          <label className="flex items-center gap-2 mt-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
             <input type="checkbox" checked={form.envPassthrough} onChange={e => onChange({ envPassthrough: e.target.checked })}
               className="rounded border-border/50" />
             环境变量传递
@@ -118,10 +118,10 @@ export function McpEditorForm({
 
         {/* Working directory */}
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1.5">工作目录</label>
+          <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">工作目录</label>
           <input type="text" value={form.cwd} onChange={e => onChange({ cwd: e.target.value })}
             placeholder="~/Helix"
-            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
         </div>
       </div>
 

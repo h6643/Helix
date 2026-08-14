@@ -94,7 +94,7 @@ function PanelSuspense({ children }: { children: React.ReactNode }) {
   return (
     <Suspense
       fallback={
-        <div className="h-full w-full flex items-center justify-center text-sm text-muted-foreground">
+        <div className="h-full w-full flex items-center justify-center text-[var(--helix-transcript-size)] text-muted-foreground">
           正在加载…
         </div>
       }
@@ -1095,7 +1095,7 @@ export function HelixLayout() {
           <button
             ref={windowMenuButtonRef}
             onClick={toggleWindowMenu}
-            className="px-2 py-1 text-xs font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+            className="px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
             data-tip="窗口"
           >
             窗口
@@ -1103,7 +1103,7 @@ export function HelixLayout() {
           <button
             ref={helpMenuButtonRef}
             onClick={() => setHelpMenuOpen(v => !v)}
-            className="px-2 py-1 text-xs font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+            className="px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
             data-tip="帮助"
           >
             帮助
@@ -1117,11 +1117,11 @@ export function HelixLayout() {
               }}
             >
               <div ref={helpMenuRef} className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1">
-                <div className="px-3 py-2 text-xs text-muted-foreground/60">
+                <div className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
                     版本 v{appVersion || '0.1.2'}
                   </div>
                   <button
-                    className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
+                    className="w-full px-3 py-2 text-[var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
                     onClick={async () => {
                       setHelpMenuOpen(false)
                       try {
@@ -1159,7 +1159,7 @@ export function HelixLayout() {
                   </button>
                 <div className="h-px bg-border/60 my-1" />
                 <button
-                  className="w-full px-3 py-2 text-sm text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
+                  className="w-full px-3 py-2 text-[var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
                   onClick={() => {
                     setHelpMenuOpen(false)
                     window.open('https://github.com/h6643/Helix', '_blank')
@@ -1188,7 +1188,7 @@ export function HelixLayout() {
                     <button
                       key={i}
                       onClick={item.action}
-                      className="w-full flex items-center justify-between px-3 py-1.5 text-xs text-foreground/80 hover:bg-accent/60 transition-colors"
+                      className="w-full flex items-center justify-between px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
                     >
                       <span>{item.label}</span>
                       {item.shortcut && <span className="text-foreground/40 ml-4">{item.shortcut}</span>}
@@ -1270,7 +1270,7 @@ export function HelixLayout() {
         )}
 
         {/* Floating cards container */}
-        <div className="flex-1 flex flex-row m-3 ml-0 overflow-hidden relative">
+        <div className="flex-1 flex flex-row mt-3 mr-3 mb-1 ml-0 overflow-hidden relative">
         {/* Floating card — main content */}
         <div className="flex-1 flex flex-col rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
           {/* Main area */}
@@ -1285,7 +1285,7 @@ export function HelixLayout() {
                       {activeSessionWorkDir && (
                       <button
                         onClick={handleOpenLocation}
-                        className="flex items-center gap-1.5 text-[12px] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
+                        className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
                         data-tip={selectedWorkDir ? '在资源管理器中打开' : '选择位置'}
                       >
                         <Folder className="size-3.5 text-muted-foreground" />
@@ -1294,7 +1294,7 @@ export function HelixLayout() {
                       )}
                       {activeSessionWorkDir && gitBranch && (
                         <div
-                          className="flex items-center gap-1 text-[12px] text-foreground/60 bg-accent/40 px-2 py-1 rounded-lg shrink-0"
+                          className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/60 bg-accent/40 px-2 py-1 rounded-lg shrink-0"
                           data-tip={`当前分支：${gitBranch}`}
                         >
                           <GitBranch className="size-3.5 text-muted-foreground" />
@@ -1315,7 +1315,7 @@ export function HelixLayout() {
                       >
                         <ListTodo className="size-4" />
                         {hermesTodos.length > 0 && (
-                          <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[9px] font-medium flex items-center justify-center">
+                          <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[calc(var(--helix-transcript-size)*0.6429)] font-medium flex items-center justify-center">
                             {hermesTodos.length}
                           </span>
                         )}
@@ -1323,15 +1323,15 @@ export function HelixLayout() {
                       {todoPopoverOpen && hermesTodos.length > 0 && (
                         <div className="absolute right-0 top-[calc(100%+6px)] z-50 w-72 max-h-[60vh] overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-xl">
                           <div className="sticky top-0 flex items-center justify-between px-3 py-2 border-b border-border bg-popover rounded-t-xl">
-                            <span className="text-[12px] font-semibold">任务清单</span>
+                            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">任务清单</span>
                             <div className="flex items-center gap-2">
-                              <span className="text-[11px] text-foreground/50">
+                              <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
                                 {hermesTodos.filter(t => t.status === 'completed').length}/{hermesTodos.length}
                               </span>
                               {hasTaskList && (
                                 <button
                                   onClick={() => { setTodoPopoverOpen(false); setShowTaskListPanel(true) }}
-                                  className="text-[11px] text-primary hover:underline"
+                                  className="text-[calc(var(--helix-transcript-size)*0.7857)] text-primary hover:underline"
                                   data-tip="编辑任务"
                                 >
                                   编辑
@@ -1341,7 +1341,7 @@ export function HelixLayout() {
                           </div>
                           <ul className="py-1">
                             {hermesTodos.map((todo) => (
-                              <li key={todo.id} className="flex items-start gap-2 px-3 py-1.5 text-[12px]">
+                              <li key={todo.id} className="flex items-start gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)]">
                                 {todo.status === 'completed' ? (
                                   <CheckCircle2 className="size-4 text-green-500 shrink-0 mt-0.5" />
                                 ) : todo.status === 'in_progress' ? (
@@ -1370,23 +1370,23 @@ export function HelixLayout() {
                         data-tip={`${delegations.length} 个子 Agent`}
                       >
                         <Users className="size-4" />
-                        <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-primary text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                        <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-primary text-white text-[calc(var(--helix-transcript-size)*0.6429)] font-bold rounded-full flex items-center justify-center">
                           {delegations.length}
                         </span>
                       </button>
                       {delegationsPopoverOpen && (
                         <div className="absolute right-0 top-full mt-1 w-72 bg-card border border-border/80 rounded-lg shadow-xl z-50">
                           <div className="px-3 py-2 border-b border-border/50">
-                            <h3 className="text-xs font-semibold text-foreground">子 Agent</h3>
+                            <h3 className="text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold text-foreground">子 Agent</h3>
                           </div>
                           <div className="max-h-64 overflow-auto">
                             {delegations.map((del) => (
                               <div key={del.id} className="px-3 py-2 border-b border-border/30 last:border-b-0">
                                 <div className="flex items-center gap-2">
                                   <Terminal className="size-3 text-primary" />
-                                  <span className="text-xs font-mono text-foreground/80 truncate">{del.id}</span>
+                                  <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/80 truncate">{del.id}</span>
                                 </div>
-                                <div className="mt-1 text-[10px] text-muted-foreground">
+                                <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
                                   {del.tasks.length} 个任务
                                 </div>
                               </div>
@@ -1395,7 +1395,7 @@ export function HelixLayout() {
                           <div className="px-3 py-2 border-t border-border/50">
                             <button
                               onClick={() => { storeActions.toggleSubAgentPanel(); setDelegationsPopoverOpen(false) }}
-                              className="w-full text-xs text-primary hover:underline"
+                              className="w-full text-[calc(var(--helix-transcript-size)*0.8571)] text-primary hover:underline"
                             >
                               查看详情
                             </button>
@@ -1433,7 +1433,7 @@ export function HelixLayout() {
                         <button
                           data-tip="浏览器"
                           onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'browser' ? null : 'browser'); setBrowserMenuOpen(false) }}
-                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'browser' ? 'text-primary' : 'text-foreground/80'}`}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/60 transition-colors ${rightSidebarTab === 'browser' ? 'text-primary' : 'text-foreground/80'}`}
                         >
                           <Globe className="size-3.5" />
                           <span className="flex-1 text-left">浏览器</span>
@@ -1442,7 +1442,7 @@ export function HelixLayout() {
                         <button
                           data-tip="目录"
                           onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'files' ? null : 'files'); setBrowserMenuOpen(false) }}
-                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'files' ? 'text-primary' : 'text-foreground/80'}`}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/60 transition-colors ${rightSidebarTab === 'files' ? 'text-primary' : 'text-foreground/80'}`}
                         >
                           <FolderTree className="size-3.5" />
                           <span className="flex-1 text-left">目录</span>
@@ -1451,7 +1451,7 @@ export function HelixLayout() {
                         <button
                           data-tip="变更"
                           onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'diff' ? null : 'diff'); setBrowserMenuOpen(false) }}
-                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent/60 transition-colors ${rightSidebarTab === 'diff' ? 'text-primary' : 'text-foreground/80'}`}
+                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/60 transition-colors ${rightSidebarTab === 'diff' ? 'text-primary' : 'text-foreground/80'}`}
                         >
                           <FileDiff className="size-3.5" />
                           <span className="flex-1 text-left">变更</span>

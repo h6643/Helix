@@ -36,7 +36,7 @@ export function ScheduledTaskConfirm({ tasks, onConfirm, onDismiss }: Props) {
       <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[60vh]">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border/40">
           <Clock className="size-4 text-primary" />
-          <span className="text-sm font-semibold text-foreground">
+          <span className="text-[var(--helix-transcript-size)] font-semibold text-foreground">
             AI 想要创建 {tasks.length} 个定时任务
           </span>
           <button
@@ -67,15 +67,15 @@ export function ScheduledTaskConfirm({ tasks, onConfirm, onDismiss }: Props) {
                 {selected.has(i) && <Check className="size-3" />}
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block text-sm font-medium text-foreground truncate">{t.label}</span>
-                <span className="block text-xs text-muted-foreground truncate">{t.scheduleText}</span>
+                <span className="block text-[var(--helix-transcript-size)] font-medium text-foreground truncate">{t.label}</span>
+                <span className="block text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground truncate">{t.scheduleText}</span>
               </span>
             </button>
           ))}
         </div>
 
         <div className="flex items-center justify-between gap-2 px-4 py-3 border-t border-border/40">
-          <span className="text-xs text-muted-foreground">
+          <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
             已选 {chosen.length} / {tasks.length}
           </span>
           <div className="flex gap-2">

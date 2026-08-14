@@ -93,9 +93,9 @@ export function TaskListPanel({ onClose }: TaskListPanelProps) {
         <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0">
           <div className="flex items-center gap-2">
             <ListTodo className="size-4 text-primary" />
-            <span className="text-base font-semibold text-foreground">任务清单</span>
+            <span className="text-[calc(var(--helix-transcript-size)*1.1429)] font-semibold text-foreground">任务清单</span>
             {tasks.length > 0 && (
-              <span className="text-[13px] text-foreground/40">({tasks.length})</span>
+              <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/40">({tasks.length})</span>
             )}
           </div>
           <button
@@ -111,10 +111,10 @@ export function TaskListPanel({ onClose }: TaskListPanelProps) {
           {loading ? (
             <div className="flex items-center justify-center py-12 text-foreground/50">
               <Loader2 className="size-4 animate-spin mr-2" />
-              <span className="text-base">加载中...</span>
+              <span className="text-[calc(var(--helix-transcript-size)*1.1429)]">加载中...</span>
             </div>
           ) : tasks.length === 0 ? (
-            <div className="text-center py-12 text-base text-foreground/40">
+            <div className="text-center py-12 text-[calc(var(--helix-transcript-size)*1.1429)] text-foreground/40">
               暂无任务
             </div>
           ) : (
@@ -122,9 +122,9 @@ export function TaskListPanel({ onClose }: TaskListPanelProps) {
               <div key={task.id} className="rounded-xl border border-border/60 overflow-hidden">
                 {/* Task name header */}
                 <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/30 border-b border-border/40">
-                  <span className="text-[15px] font-medium text-foreground flex-1 truncate">{task.name}</span>
+                  <span className="text-[calc(var(--helix-transcript-size)*1.0714)] font-medium text-foreground flex-1 truncate">{task.name}</span>
                   {task.status && (
-                    <span className={`text-[12px] px-1.5 py-0.5 rounded-full ${
+                    <span className={`text-[calc(var(--helix-transcript-size)*0.8571)] px-1.5 py-0.5 rounded-full ${
                       task.status === 'completed' ? 'bg-green-500/15 text-green-600' :
                       task.status === 'in_progress' ? 'bg-blue-500/15 text-blue-600' :
                       task.status === 'cancelled' ? 'bg-muted text-foreground/40' :
@@ -141,14 +141,14 @@ export function TaskListPanel({ onClose }: TaskListPanelProps) {
                   <textarea
                     value={editedPrompts[task.id] ?? task.prompt}
                     onChange={e => setEditedPrompts(prev => ({ ...prev, [task.id]: e.target.value }))}
-                    className="w-full min-h-[60px] px-3 py-2 bg-muted/50 border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-y leading-relaxed"
+                    className="w-full min-h-[60px] px-3 py-2 bg-muted/50 border border-border rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-y leading-relaxed"
                     placeholder="输入提示词..."
                   />
                   <div className="flex justify-end mt-1.5">
                     <button
                       onClick={() => handleSave(task.id)}
                       disabled={savingId === task.id || editedPrompts[task.id] === task.prompt}
-                      className="flex items-center gap-1.5 px-3 py-1 text-[13px] font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      className="flex items-center gap-1.5 px-3 py-1 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                     >
                       {savingId === task.id ? (
                         <Loader2 className="size-3 animate-spin" />

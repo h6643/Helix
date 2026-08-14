@@ -79,7 +79,7 @@ export function ShortcutsPage() {
                   <span className="ml-auto ui-text font-mono text-foreground/80 bg-muted px-2.5 py-1 rounded shrink-0">{s.keys.join(' + ')}</span>
                   <button
                     onClick={() => startRecording(id)}
-                    className="ml-3 px-1.5 py-1 rounded text-xs text-muted-foreground/20 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all"
+                    className="ml-3 px-1.5 py-1 rounded text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/20 hover:text-blue-500 opacity-0 group-hover:opacity-100 transition-all"
                     data-tip="编辑快捷键"
                   >
                     编辑
@@ -106,10 +106,10 @@ export function ShortcutsPage() {
                 readOnly
                 value={pendingKeys.length > 0 ? pendingKeys.join(' + ') : ''}
                 placeholder="按快捷键..."
-                className="bg-transparent text-center text-lg font-mono text-foreground/80 outline-none w-full"
+                className="bg-transparent text-center text-[calc(var(--helix-transcript-size)*1.2857)] font-mono text-foreground/80 outline-none w-full"
               />
             </div>
-            <p className="text-xs text-foreground/40 text-center mb-3">按下新的按键组合，然后点击确定保存</p>
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/40 text-center mb-3">按下新的按键组合，然后点击确定保存</p>
             <div className="flex gap-2">
               <button
                 onClick={cancelRecording}

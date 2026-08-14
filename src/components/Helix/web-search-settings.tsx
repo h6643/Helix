@@ -206,7 +206,7 @@ export function WebSearchSettings() {
       <SectionTitle>搜索引擎</SectionTitle>
 
       {availableProviders !== null && displayProviders.length === 0 ? (
-        <p className="text-xs text-muted-foreground/60">
+        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
           暂无后端搜索插件，请在 hermes 中安装 plugins/web/&lt;name&gt; 后再来此处配置。
         </p>
       ) : (
@@ -219,12 +219,12 @@ export function WebSearchSettings() {
                 <div className="flex items-center justify-between p-4 hover:bg-accent/30 transition-colors">
                   <div className="flex-1 min-w-0">
                     <p className="ui-text font-medium text-foreground">{provider.name}</p>
-                    <p className="text-xs text-muted-foreground/60 mt-0.5">{provider.description}</p>
+                    <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-0.5">{provider.description}</p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0 ml-4">
                     <button
                       onClick={() => setExpandedId(expandedId === provider.id ? null : provider.id)}
-                      className="px-3 py-1.5 text-xs font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
+                      className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
                     >
                       {expandedId === provider.id ? '收起' : '配置'}
                     </button>
@@ -243,21 +243,21 @@ export function WebSearchSettings() {
                 {expandedId === provider.id && (
                   <div className="px-4 pb-4 pt-2 bg-muted/20 space-y-3">
                     {provider.freeQuota && (
-                      <p className="text-xs text-muted-foreground">免费额度: {provider.freeQuota}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">免费额度: {provider.freeQuota}</p>
                     )}
                     {provider.signupUrl && (
                       <a
                         href={provider.signupUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-xs text-primary hover:underline block"
+                        className="text-[calc(var(--helix-transcript-size)*0.8571)] text-primary hover:underline block"
                       >
                         获取 API Key →
                       </a>
                     )}
                     {provider.envKey ? (
                       <div>
-                        <label className="block text-xs font-medium text-muted-foreground mb-1">
+                        <label className="block text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-muted-foreground mb-1">
                           API Key ({provider.envKey})
                         </label>
                         <input
@@ -269,7 +269,7 @@ export function WebSearchSettings() {
                         />
                       </div>
                     ) : (
-                      <p className="text-xs text-muted-foreground/60">
+                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
                         {known
                           ? '此引擎无需 API Key，开启开关即可使用。'
                           : '前端暂未配置此引擎的 API Key 字段，请在后端插件中设置。'}

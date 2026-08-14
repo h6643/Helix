@@ -26,14 +26,14 @@ import { MemorySettings } from './memory-settings'
 import { McpEditorForm, type McpFormData } from './mcp-editor-form'
 import { ShortcutsPage } from './shortcuts-page'
 import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './usage-stats'
-import { PopupSelect } from './settings-ui'
+import { PopupSelect, SettingGroup } from './settings-ui'
 import { WebSearchSettings } from './web-search-settings'
 import { VisionModelSettings } from './vision-model-settings'
 
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <div className={`flex items-center gap-2 mb-4 ${className || ''}`}>
-      <h3 className="text-lg font-semibold text-foreground">{children}</h3>
+      <h3 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold text-foreground">{children}</h3>
     </div>
   )
 }
@@ -335,7 +335,7 @@ function ChannelsSettings() {
     <div className="max-w-3xl space-y-4">
       <div className="flex items-center justify-between">
         <SectionTitle>Channels</SectionTitle>
-        <button onClick={addChannel} className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 transition-colors">
+        <button onClick={addChannel} className="flex items-center gap-1.5 text-[var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors">
           + 添加渠道
         </button>
       </div>
@@ -344,20 +344,20 @@ function ChannelsSettings() {
           <div key={channel.id} className="border border-border/50 rounded-xl overflow-hidden">
             <div className="flex items-center justify-between p-4 hover:bg-accent/30 transition-colors">
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-foreground">{channel.name || channel.id}</p>
-                <p className="text-xs text-muted-foreground/60 mt-0.5">{channel.description}</p>
+                <p className="text-[var(--helix-transcript-size)] font-medium text-foreground">{channel.name || channel.id}</p>
+                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-0.5">{channel.description}</p>
               </div>
               <div className="flex items-center gap-2 shrink-0 ml-4">
                 <button
                   onClick={() => setExpandedChannel(expandedChannel === channel.id ? null : channel.id)}
-                  className="px-3 py-1.5 text-xs font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
+                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
                 >
                   Configure
                 </button>
                 <Toggle enabled={channel.enabled} onToggle={() => handleToggle(channel.id)} />
                 <button
                   onClick={() => removeChannel(channel.id)}
-                  className="px-2 py-1.5 text-xs text-red-600/80 border border-border/50 rounded-lg hover:bg-red-500/10 transition-colors"
+                  className="px-2 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-600/80 border border-border/50 rounded-lg hover:bg-red-500/10 transition-colors"
                 >
                   删除
                 </button>
@@ -367,52 +367,52 @@ function ChannelsSettings() {
               <div className="px-4 pb-4 pt-2 border-t border-border/30 bg-muted/20 space-y-3">
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">名称</label>
+                    <label className="block text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-muted-foreground mb-1">名称</label>
                     <input
                       value={channel.name}
                       onChange={e => updateChannelMeta(channel.id, { name: e.target.value })}
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-muted-foreground mb-1">描述</label>
+                    <label className="block text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-muted-foreground mb-1">描述</label>
                     <input
                       value={channel.description}
                       onChange={e => updateChannelMeta(channel.id, { description: e.target.value })}
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <label className="block text-xs font-medium text-muted-foreground">配置字段（环境变量）</label>
+                  <label className="block text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-muted-foreground">配置字段（环境变量）</label>
                   {Object.entries(channel.config).map(([key, value]) => (
                     <div key={key} className="flex items-center gap-2">
                       <input
                         value={key}
                         onChange={e => renameConfigKey(channel.id, key, e.target.value)}
-                        className="w-2/5 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                        className="w-2/5 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground text-center font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                       />
                       <input
                         type={key.toLowerCase().includes('secret') || key.toLowerCase().includes('token') || key.toLowerCase().includes('password') ? 'password' : 'text'}
                         value={value}
                         onChange={e => handleConfigChange(channel.id, key, e.target.value)}
                         placeholder={`Enter ${key.replace(/_/g, ' ')}`}
-                        className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                       />
                       <button
                         onClick={() => removeConfigKey(channel.id, key)}
-                        className="px-2 py-2 text-xs text-red-600/80 border border-border/50 rounded-lg hover:bg-red-500/10"
+                        className="px-2 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-600/80 border border-border/50 rounded-lg hover:bg-red-500/10"
                       >
                         ×
                       </button>
                     </div>
                   ))}
                   {Object.keys(channel.config).length === 0 && (
-                    <p className="text-xs text-muted-foreground/60">暂无配置字段，点击下方添加。</p>
+                    <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">暂无配置字段，点击下方添加。</p>
                   )}
                   <button
                     onClick={() => addConfigKey(channel.id)}
-                    className="px-3 py-1.5 text-xs font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
+                    className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
                   >
                     + 添加字段
                   </button>
@@ -422,7 +422,7 @@ function ChannelsSettings() {
           </div>
         ))}
         {channels.length === 0 && (
-          <p className="text-xs text-muted-foreground/60">尚无渠道，点击右上角「添加渠道」。</p>
+          <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">尚无渠道，点击右上角「添加渠道」。</p>
         )}
       </div>
       <div className="flex justify-end pt-2">
@@ -1113,7 +1113,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       <div className="flex items-center gap-3 flex-1 min-w-0">
         <span className="text-muted-foreground shrink-0">{icon}</span>
         <div className="min-w-0">
-          <p className="text-sm font-medium text-foreground">{label}</p>
+          <p className="text-[var(--helix-transcript-size)] font-medium text-foreground">{label}</p>
         </div>
       </div>
       <div className="shrink-0">{children}</div>
@@ -1133,7 +1133,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className="flex-1 px-3 py-2 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none font-mono"
+        className="flex-1 px-3 py-2 bg-transparent text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none font-mono"
       />
       {suffix && <span className="pr-3">{suffix}</span>}
     </div>
@@ -1269,16 +1269,16 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
-              <p className={`text-sm truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
+              <p className={`text-[var(--helix-transcript-size)] truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
             </div>
           </div>
           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
             <button onClick={(e) => { e.stopPropagation(); setLocalConfig({ ...h }); setShowAddModelModal(true) }}
-              className="ml-2 p-1 rounded text-xs text-muted-foreground/20 hover:text-foreground hover:bg-accent transition-all">
+              className="ml-2 p-1 rounded text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/20 hover:text-foreground hover:bg-accent transition-all">
               编辑
             </button>
             <button onClick={async (e) => { e.stopPropagation(); removeApiHistory(index); await persistToStorage() }}
-              className="ml-1 p-1 rounded text-xs text-muted-foreground/20 hover:text-red-500 transition-all">
+              className="ml-1 p-1 rounded text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/20 hover:text-red-500 transition-all">
               删除
             </button>
           </div>
@@ -1294,11 +1294,11 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             <div key={g.baseUrl} className="space-y-1.5">
               <button
                 onClick={() => toggleGroup(g.baseUrl)}
-                className="flex items-center gap-1.5 w-full px-1 py-1 text-left text-xs hover:bg-accent/40 rounded transition-colors"
+                className="flex items-center gap-1.5 w-full px-1 py-1 text-left text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/40 rounded transition-colors"
                 data-tip={g.baseUrl}
               >
                 <span className="truncate font-mono text-muted-foreground">{g.baseUrl}</span>
-                <span className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground/70">{g.items.length}</span>
+                <span className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70">{g.items.length}</span>
               </button>
               {!isCollapsed && (
                 <div className="space-y-1.5 border-l border-border/40 ml-1.5 pl-2">
@@ -1328,7 +1328,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               <div className="flex items-center gap-1 bg-muted/60 rounded-full p-1">
                 <button
                   onClick={() => setModelTab('main')}
-                  className={`px-3.5 py-1 text-xs font-medium rounded-full transition-colors ${
+                  className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
                     modelTab === 'main'
                       ? 'bg-background text-foreground shadow-sm'
                       : 'text-muted-foreground hover:text-foreground'
@@ -1338,7 +1338,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 </button>
                 <button
                   onClick={() => setModelTab('vision')}
-                  className={`px-3.5 py-1 text-xs font-medium rounded-full transition-colors ${
+                  className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
                     modelTab === 'vision'
                       ? 'bg-background text-foreground shadow-sm'
                       : 'text-muted-foreground hover:text-foreground'
@@ -1356,7 +1356,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                     setShowModelDropdown(false)
                     setShowAddModelModal(true)
                   }}
-                  className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 transition-colors"
+                  className="flex items-center gap-1.5 text-[var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
                 >
                   添加模型
                 </button>
@@ -1364,7 +1364,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               {modelTab === 'main' && showAddModelModal && (
                 <button
                   onClick={() => setShowAddModelModal(false)}
-                  className="text-sm text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
+                  className="text-[var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
                   data-tip="关闭"
                 >
                   关闭
@@ -1380,17 +1380,17 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 </div>
               ) : (
                 /* Add model form */
-              <div className="flex justify-center py-4">
-                <div className="p-6 space-y-5 w-full max-w-2xl">
+              <SettingGroup>
+                <div className="p-4 space-y-3">
                   {/* Provider */}
                   <div>
-                    <label className="block text-sm font-medium text-foreground mb-1.5">Provider</label>
+                    <label className="block ui-text font-medium text-foreground mb-1.5">Provider</label>
                     {!isCustomProvider ? (
                       <PopupSelect
                         value={localConfig.provider}
                         onChange={handleSelectProvider}
                         placeholder="请选择 Provider"
-                        className="w-full ui-text text-foreground"
+                        className="w-full ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2"
                         options={[
                           ...ALL_PROVIDERS.map(p => ({ label: `${p.name} (${p.id})`, value: p.id })),
                           { label: '＋ 自定义', value: CUSTOM_PROVIDER_ID },
@@ -1405,13 +1405,13 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                           onFocus={() => setCustomInputFocused(true)}
                           onBlur={handleBlurCustomInput}
                           placeholder="输入 Provider 名称"
-                          className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                          className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                           autoFocus
                         />
                         <button
                           type="button"
                           onClick={() => { setIsCustomProvider(false); setCustomInputFocused(false) }}
-                          className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground hover:bg-accent/50 transition-colors"
+                          className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground hover:bg-accent/50 transition-colors"
                           data-tip="返回列表"
                         >
                           返回
@@ -1422,31 +1422,31 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
                   {/* Base URL */}
                   <div>
-                    <label className="block text-sm font-medium text-foreground mb-1.5">Base URL</label>
+                    <label className="block ui-text font-medium text-foreground mb-1.5">Base URL</label>
                     <input
                       type="text"
                       value={localConfig.baseUrl}
                       onChange={(e) => setLocalConfig(prev => ({ ...prev, baseUrl: e.target.value }))}
                       placeholder="https://api.openai.com/v1"
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                     />
                   </div>
 
                   {/* API Key */}
                   <div>
-                    <label className="block text-sm font-medium text-foreground mb-1.5">API Key</label>
+                    <label className="block ui-text font-medium text-foreground mb-1.5">API Key</label>
                     <div className="relative">
                       <input
                         type={showApiKey ? 'text' : 'password'}
                         value={localConfig.apiKey}
                         onChange={(e) => setLocalConfig(prev => ({ ...prev, apiKey: e.target.value }))}
                         placeholder="sk-..."
-                        className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                       />
                       <button
                         type="button"
                         onClick={() => setShowApiKey(!showApiKey)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-xs text-muted-foreground/50 hover:text-foreground transition-colors"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 hover:text-foreground transition-colors"
                       >
                         {showApiKey ? '隐藏' : '显示'}
                       </button>
@@ -1456,12 +1456,12 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                   {/* Model */}
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
-                      <label className="text-sm font-medium text-foreground">模型名称</label>
+                      <label className="block ui-text font-medium text-foreground">模型名称</label>
                       <button
                         type="button"
                         onClick={handleFetchModels}
                         disabled={isLoadingModels}
-                        className="flex items-center gap-1 text-xs text-primary hover:text-primary/80 disabled:text-muted-foreground transition-colors"
+                        className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-primary hover:text-primary/80 disabled:text-muted-foreground transition-colors"
                       >
                         {isLoadingModels ? '获取中...' : '获取模型列表'}
                       </button>
@@ -1471,7 +1471,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         <button
                           type="button"
                           onClick={() => setShowModelDropdown(!showModelDropdown)}
-                          className="w-full flex items-center justify-between ui-text text-foreground hover:text-foreground/80 transition-colors"
+                          className="w-full flex items-center justify-between ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2 transition-colors"
                         >
                           <span>{localConfig.model || '选择模型'}</span>
                           <svg className={`size-4 text-muted-foreground transition-transform ${showModelDropdown ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -1483,7 +1483,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                                 key={model}
                                 type="button"
                                 onClick={() => { setLocalConfig(prev => ({ ...prev, model })); setShowModelDropdown(false) }}
-                                className={`w-full text-left px-3 py-2 rounded-md text-sm font-mono transition-colors ${
+                                className={`w-full text-left px-3 py-2 rounded-md text-[var(--helix-transcript-size)] font-mono transition-colors ${
                                   localConfig.model === model
                                     ? 'bg-primary/10 text-primary'
                                     : 'text-foreground/70 hover:bg-muted'
@@ -1501,19 +1501,19 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         value={localConfig.model}
                         onChange={(e) => setLocalConfig(prev => ({ ...prev, model: e.target.value }))}
                         placeholder="gpt-4o-mini"
-                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                       />
                     )}
                   </div>
 
                   {/* Save button — inside card, bottom-right */}
                   <div className="flex justify-end pt-2">
-                    <Button onClick={async () => { await handleSaveApi(); setShowAddModelModal(false) }} size="sm" className="gap-1.5">
+                    <Button onClick={async () => { await handleSaveApi(); setShowAddModelModal(false) }} size="sm" variant="outline">
                       保存
                     </Button>
                   </div>
                 </div>
-              </div>
+              </SettingGroup>
             )
             ) : (
               <VisionModelSettings />
@@ -1532,18 +1532,18 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
         return (
           <div className="space-y-6">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-foreground">MCP</h3>
+              <h3 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold text-foreground">MCP</h3>
               {!isAddingMcp && !editingMcpName ? (
                 <button
                   onClick={() => { setIsAddingMcp(true); resetMcpForm() }}
-                  className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 transition-colors"
+                  className="flex items-center gap-1.5 text-[var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
                 >
                   添加服务器
                 </button>
               ) : (
                 <button
                   onClick={() => { setIsAddingMcp(false); setEditingMcpName(null); resetMcpForm() }}
-                  className="text-sm text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
+                  className="text-[var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
                   data-tip="关闭"
                 >
                   关闭
@@ -1555,7 +1555,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             {gatewayMcpLoaded && !isAddingMcp && !editingMcpName && (
               <section className="space-y-2">
                 {Object.keys(gatewayMcp).length === 0 ? (
-                  <p className="text-xs text-muted-foreground/50 px-4 py-3 border border-dashed border-border/40 rounded-lg">
+                  <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 px-4 py-3 border border-dashed border-border/40 rounded-lg">
                     config.yaml 未配置 mcp_servers —— 在该文件的 mcp_servers 段添加的网关级服务器会显示在这里
                   </p>
                 ) : (
@@ -1570,16 +1570,16 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
-                              <span className="text-sm font-medium text-foreground">{name}</span>
-                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${cfg?.url ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}>
+                              <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">{name}</span>
+                              <span className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full font-medium ${cfg?.url ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}>
                                 {cfg?.url ? '远程' : '本地'}
                               </span>
                             </div>
-                            <p className="text-xs text-muted-foreground/70 font-mono truncate mt-0.5">
+                            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 font-mono truncate mt-0.5">
                               {cfg?.url || cmd || '(环境变量式配置)'}
                             </p>
                           </div>
-                          <span className="text-[10px] text-muted-foreground/50 shrink-0">
+                          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50 shrink-0">
                             {cfg?.enabled === false ? '已停用' : connected ? '已连接' : connected === false ? '未连接' : '检测中'}
                           </span>
                         </div>
@@ -1609,22 +1609,22 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium text-foreground">{name}</span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${config.type === 'local' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'}`}>
+                            <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">{name}</span>
+                            <span className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full font-medium ${config.type === 'local' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'}`}>
                               {config.type === 'local' ? '本地' : '远程'}
                             </span>
                           </div>
-                          <p className="text-xs text-muted-foreground/70 font-mono truncate mt-0.5">
+                          <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 font-mono truncate mt-0.5">
                             {config.type === 'local' ? config.command?.join(' ') : config.url}
                           </p>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0">
                           <Toggle enabled={config.enabled !== false} onToggle={() => handleToggleMcp(name)} />
                           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
-                            <button onClick={() => handleEditMcp(name)} className="px-1 py-1 rounded-md text-xs text-muted-foreground/40 hover:text-foreground hover:bg-accent transition-colors">
+                            <button onClick={() => handleEditMcp(name)} className="px-1 py-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 hover:text-foreground hover:bg-accent transition-colors">
                               编辑
                             </button>
-                            <button onClick={() => handleDeleteMcp(name)} className="px-1 py-1 rounded-md text-xs text-muted-foreground/40 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 transition-colors">
+                            <button onClick={() => handleDeleteMcp(name)} className="px-1 py-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 transition-colors">
                               删除
                             </button>
                           </div>
@@ -1636,7 +1636,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
                 {mcpServerNames.length === 0 && (
                   <div className="max-w-3xl flex flex-col items-center justify-center py-12 text-center">
-                    <p className="text-sm font-medium text-foreground/60">暂无 MCP 服务器</p>
+                    <p className="text-[var(--helix-transcript-size)] font-medium text-foreground/60">暂无 MCP 服务器</p>
                   </div>
                 )}
               </>
@@ -1665,7 +1665,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             <section className="space-y-3">
               {archives.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <p className="text-sm font-medium text-foreground/60">暂无归档记录</p>
+                  <p className="text-[var(--helix-transcript-size)] font-medium text-foreground/60">暂无归档记录</p>
                 </div>
               ) : (
                 <div className="space-y-1.5">
@@ -1674,11 +1674,11 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         onClick={() => handleLoadArchive(a.id)}
                         className="flex items-center justify-between px-4 py-3 border-b border-border/30 last:border-b-0 hover:bg-accent/30 transition-colors group cursor-pointer">
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-foreground truncate">{a.label}</p>
-                          <p className="text-xs text-muted-foreground/70 mt-0.5">{a.messageCount} 条消息</p>
+                          <p className="text-[var(--helix-transcript-size)] font-medium text-foreground truncate">{a.label}</p>
+                          <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-0.5">{a.messageCount} 条消息</p>
                         </div>
                         <button onClick={(e) => { e.stopPropagation(); handleDeleteArchive(a.id) }}
-                          className="p-1 rounded-md text-xs text-muted-foreground/20 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all shrink-0">
+                          className="p-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/20 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all shrink-0">
                           删除
                         </button>
                       </div>
@@ -1696,7 +1696,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             <SettingRow icon={<Globe className="size-4 text-foreground/60" />} label="从 Chrome 导入书签">
               <div className="ml-auto flex items-center">
                 {browserBookmarks.length > 0 && (
-                  <span className="mr-3 text-xs text-muted-foreground/70">已导入 {browserBookmarks.length} 个书签项</span>
+                  <span className="mr-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">已导入 {browserBookmarks.length} 个书签项</span>
                 )}
                 <Button variant="outline" size="sm" onClick={() => importChromeBookmarks()}>
                   选择 Chrome 数据目录
@@ -1739,18 +1739,18 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                   })}
                 >
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-foreground">关于</span>
+                    <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">关于</span>
                   </div>
                 </button>
                 <div className={`p-4 space-y-4 ${collapsedSections.has('about') ? 'hidden' : ''}`}>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="text-sm text-muted-foreground">版本</span>
-                      <span className="text-sm font-mono text-foreground">v{appVersion || '0.1.2'}</span>
+                      <span className="text-[var(--helix-transcript-size)] text-muted-foreground">版本</span>
+                      <span className="text-[var(--helix-transcript-size)] font-mono text-foreground">v{appVersion || '0.1.2'}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-sm text-muted-foreground">许可证</span>
-                      <span className="text-sm text-foreground">MIT License</span>
+                      <span className="text-[var(--helix-transcript-size)] text-muted-foreground">许可证</span>
+                      <span className="text-[var(--helix-transcript-size)] text-foreground">MIT License</span>
                     </div>
                   </div>
                   <div className="pt-2 border-t border-border/50 flex justify-end">
@@ -1824,7 +1824,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               <div className="px-4 pt-2 pb-1 space-y-2">
                 <button
                   onClick={() => useHelixStore.getState().toggleSettings()}
-                  className="flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground/60 hover:text-foreground hover:bg-muted/80 rounded-xl transition-colors"
+                  className="flex items-center gap-2 w-full px-3 py-2 text-[var(--helix-transcript-size)] text-foreground/60 hover:text-foreground hover:bg-muted/80 rounded-xl transition-colors"
                 >
                   <ChevronLeft className="size-4" />
                   返回
@@ -1833,7 +1833,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                   <Search className="size-3.5 text-muted-foreground/25 shrink-0" />
                   <input ref={navSearchRef} value={navSearch} onChange={e => setNavSearch(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Escape') { setNavSearch(''); (e.target as HTMLInputElement).blur() } }}
-                    placeholder="搜索设置..." className="flex-1 bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground/30 focus:outline-none min-w-0" />
+                    placeholder="搜索设置..." className="flex-1 bg-transparent text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground placeholder:text-muted-foreground/30 focus:outline-none min-w-0" />
                   {navSearch && <button onClick={() => setNavSearch('')} className="text-muted-foreground/20 hover:text-foreground/60 shrink-0"><X className="size-3" /></button>}
                 </div>
               </div>
@@ -1842,12 +1842,12 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 const filtered = q
                   ? NAV_GROUPS.map(g => ({ ...g, items: g.items.filter(i => i.label.toLowerCase().includes(q)) })).filter(g => g.items.length)
                   : NAV_GROUPS
-                if (!filtered.length) return <div className="px-5 py-8 text-center text-[13px] text-muted-foreground/40">未找到匹配项</div>
+                if (!filtered.length) return <div className="px-5 py-8 text-center text-[calc(var(--helix-transcript-size)*0.9286)] text-muted-foreground/40">未找到匹配项</div>
                 return (
                   <nav className="flex-1 overflow-y-auto pt-1 pb-2">
                     {filtered.map(group => (
                       <div key={group.title} className="mb-2">
-                        <p className="px-5 py-1.5 text-[13px] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
+                        <p className="px-5 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
                           {group.title}
                         </p>
                         <div className="space-y-0.5 px-2">
@@ -1859,7 +1859,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                               pushNavigation({ type: 'settings', page: item.id })
                               setNavSearch('')
                             }}
-                            className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-sm rounded-md transition-colors duration-100 ${
+                            className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-[var(--helix-transcript-size)] rounded-md transition-colors duration-100 ${
                               page === item.id
                                 ? 'bg-muted text-foreground font-medium'
                                 : 'text-foreground/65 hover:bg-muted/50 hover:text-foreground'

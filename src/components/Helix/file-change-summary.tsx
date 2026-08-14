@@ -12,7 +12,7 @@ function DiffBody({ change }: { change: PendingChange }) {
   )
   if (change.unifiedDiff) {
     return (
-      <div className="font-mono text-[11px] leading-relaxed rounded-md overflow-hidden">
+      <div className="font-mono text-[calc(var(--helix-transcript-size)*0.7857)] leading-relaxed rounded-md overflow-hidden">
         {change.unifiedDiff.split('\n').map((line, i) => {
           if (line.startsWith('+++') || line.startsWith('---')) {
             return (
@@ -42,7 +42,7 @@ function DiffBody({ change }: { change: PendingChange }) {
     )
   }
   return (
-    <div className="font-mono text-[11px] leading-relaxed rounded-md overflow-hidden">
+    <div className="font-mono text-[calc(var(--helix-transcript-size)*0.7857)] leading-relaxed rounded-md overflow-hidden">
       {fallbackDiff.map((line, i) => {
         if (line.type === 'equal') {
           return (
@@ -90,10 +90,10 @@ export function FileChangeSummary({ changes, hideHeader = false }: { changes: Pe
   return (
     <div className="overflow-hidden rounded-lg border border-border/40 bg-card/40">
       {!hideHeader && (
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/30 text-[12px] text-foreground/70">
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/30 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70">
         <span className="font-medium">变更</span>
-        <span className="text-[10px] text-muted-foreground">{changes.length} 个文件</span>
-        <span className="ml-auto flex items-center gap-2 text-[10px] tabular-nums">
+        <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">{changes.length} 个文件</span>
+        <span className="ml-auto flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)] tabular-nums">
           {totalAdded > 0 && <span className="text-emerald-500">+{totalAdded}</span>}
           {totalRemoved > 0 && <span className="text-red-500">-{totalRemoved}</span>}
         </span>
@@ -111,8 +111,8 @@ export function FileChangeSummary({ changes, hideHeader = false }: { changes: Pe
             >
               <ChevronRight className={`size-3 shrink-0 text-foreground/30 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
               <FileCode className="size-3.5 shrink-0 text-sky-500/80" />
-              <span className="flex-1 truncate font-mono text-[11px] text-foreground/70">{change.fileName}</span>
-              <span className="shrink-0 tabular-nums text-[11px]">
+              <span className="flex-1 truncate font-mono text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70">{change.fileName}</span>
+              <span className="shrink-0 tabular-nums text-[calc(var(--helix-transcript-size)*0.7857)]">
                 {s.added > 0 && <span className="text-emerald-500 mr-1.5">+{s.added}</span>}
                 {s.removed > 0 && <span className="text-red-500">-{s.removed}</span>}
               </span>

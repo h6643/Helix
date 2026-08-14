@@ -119,14 +119,14 @@ export function BootOverlay() {
           )}
         </div>
 
-        <h1 className="text-sm font-semibold mb-1">
+        <h1 className="text-[var(--helix-transcript-size)] font-semibold mb-1">
           {isBootstrapping
             ? (STAGE_LABELS[bootstrapStage!] ?? bootstrapMessage)
             : isConnecting
               ? '正在连接 Hermes 网关…'
               : '无法连接到 Hermes 网关'}
         </h1>
-        <p className="text-xs text-muted-foreground leading-relaxed">
+        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground leading-relaxed">
           {isBootstrapping
             ? '首次启动需要安装运行环境，请耐心等待。'
             : isConnecting
@@ -137,7 +137,7 @@ export function BootOverlay() {
         {!isConnecting && (
           <button
             onClick={retry}
-            className="mt-3 mx-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
+            className="mt-3 mx-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-[calc(var(--helix-transcript-size)*0.8571)] font-medium hover:bg-primary/90 transition-colors"
           >
             <RefreshCw className="size-3" />
             重试连接
@@ -158,7 +158,7 @@ export function BootOverlay() {
 
         {/* Success animation */}
         {showSuccess && (
-          <div className="mt-3 flex items-center justify-center gap-1.5 text-xs text-green-500">
+          <div className="mt-3 flex items-center justify-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-green-500">
             <CheckCircle2 className="size-3.5" />
             启动成功
           </div>

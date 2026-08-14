@@ -166,7 +166,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
   if (!isElectron()) {
     return (
       <div className="h-full flex items-center justify-center">
-        <p className="text-sm text-muted-foreground">Worktree 功能仅在桌面版可用</p>
+        <p className="text-[var(--helix-transcript-size)] text-muted-foreground">Worktree 功能仅在桌面版可用</p>
       </div>
     )
   }
@@ -177,7 +177,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
       <div className="shrink-0 px-4 py-3 border-b border-border/40 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <GitBranch className="size-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold text-foreground">Worktree 管理</h2>
+          <h2 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">Worktree 管理</h2>
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -199,7 +199,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
             onClick={onClose}
             className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
           >
-            <span className="text-xs">关闭</span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)]">关闭</span>
           </button>
         </div>
       </div>
@@ -212,7 +212,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
             value={newPath}
             onChange={e => setNewPath(e.target.value)}
             placeholder="路径 (e.g. ../project-feature)"
-            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
           />
           <div className="flex gap-2">
             <input
@@ -220,24 +220,24 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
               value={newBranch}
               onChange={e => setNewBranch(e.target.value)}
               placeholder="已有分支名 (留空=detached)"
-              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
             />
             <input
               type="text"
               value={createFromBranch}
               onChange={e => setCreateFromBranch(e.target.value)}
               placeholder="新建分支 (可选)"
-              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
             />
           </div>
           <div className="flex justify-end gap-2">
-            <button onClick={() => setShowAddForm(false)} className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground rounded-lg hover:bg-accent/60 transition-colors">
+            <button onClick={() => setShowAddForm(false)} className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground rounded-lg hover:bg-accent/60 transition-colors">
               取消
             </button>
             <button
               onClick={handleAdd}
               disabled={!newPath.trim() || actionLoading === 'add'}
-              className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
+              className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
             >
               {actionLoading === 'add' ? <Loader2 className="size-3 animate-spin" /> : '创建'}
             </button>
@@ -254,11 +254,11 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
         ) : error ? (
           <div className="flex flex-col items-center justify-center py-12 gap-2 text-red-500">
             <AlertCircle className="size-5" />
-            <p className="text-sm">{error}</p>
-            <button onClick={loadWorktrees} className="text-xs text-muted-foreground hover:text-foreground">重试</button>
+            <p className="text-[var(--helix-transcript-size)]">{error}</p>
+            <button onClick={loadWorktrees} className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground">重试</button>
           </div>
         ) : worktrees.length === 0 ? (
-          <p className="text-sm text-muted-foreground/60 text-center py-12">暂无 worktree</p>
+          <p className="text-[var(--helix-transcript-size)] text-muted-foreground/60 text-center py-12">暂无 worktree</p>
         ) : (
           <div className="space-y-2">
             {worktrees.map((wt) => (
@@ -270,27 +270,27 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       {wt.isMain && (
-                        <span className="px-1.5 py-0.5 text-[10px] rounded bg-primary/10 text-primary font-medium">主</span>
+                        <span className="px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] rounded bg-primary/10 text-primary font-medium">主</span>
                       )}
                       {wt.locked && (
                         <Lock className="size-3 text-amber-500" />
                       )}
                       {wt.detached && (
-                        <span className="px-1.5 py-0.5 text-[10px] rounded bg-muted text-muted-foreground">detached</span>
+                        <span className="px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] rounded bg-muted text-muted-foreground">detached</span>
                       )}
                       {wt.prunable && (
-                        <span className="px-1.5 py-0.5 text-[10px] rounded bg-red-500/10 text-red-500">可清理</span>
+                        <span className="px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] rounded bg-red-500/10 text-red-500">可清理</span>
                       )}
                       {wt.branch && (
-                        <span className="flex items-center gap-1 text-xs font-mono text-foreground/70">
+                        <span className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70">
                           <GitBranch className="size-3" />
                           {wt.branch}
                         </span>
                       )}
                     </div>
-                    <p className="text-[11px] text-muted-foreground/60 font-mono truncate mt-1">{wt.path}</p>
+                    <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60 font-mono truncate mt-1">{wt.path}</p>
                     {wt.head && (
-                      <p className="text-[10px] text-muted-foreground/40 font-mono mt-0.5">{wt.head.slice(0, 8)}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 font-mono mt-0.5">{wt.head.slice(0, 8)}</p>
                     )}
                   </div>
 
@@ -338,7 +338,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
 
       {/* Footer info */}
       <div className="shrink-0 px-4 py-2 border-t border-border/40">
-        <p className="text-[10px] text-muted-foreground/40">
+        <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40">
           {worktrees.length} 个工作树 · 在不同分支上并行工作
         </p>
       </div>

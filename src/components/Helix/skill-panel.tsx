@@ -152,7 +152,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
         <div className="flex items-center gap-1 bg-muted/60 rounded-full p-1">
           <button
             onClick={() => setActiveTab('plugins')}
-            className={`px-3.5 py-1 text-xs font-medium rounded-full transition-colors ${
+            className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
               activeTab === 'plugins'
                 ? 'bg-background text-foreground shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
@@ -162,7 +162,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
           </button>
           <button
             onClick={() => setActiveTab('skills')}
-            className={`px-3.5 py-1 text-xs font-medium rounded-full transition-colors ${
+            className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
               activeTab === 'skills'
                 ? 'bg-background text-foreground shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
@@ -209,13 +209,13 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={activeTab === 'plugins' ? '搜索插件...' : '搜索技能...'}
-              className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+              className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
             />
           </div>
 
           {/* Section header */}
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-foreground">
+            <h2 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">
               {activeTab === 'plugins' ? `已安装 (${filteredPlugins.length})` : `已安装 (${filteredSkills.length})`}
             </h2>
           </div>
@@ -224,7 +224,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
           {!isEmpty ? (activeTab === 'plugins' ? (
             <div className="space-y-2">
               {pluginsLoading && plugins.length === 0 && (
-                <p className="text-sm text-muted-foreground/60 text-center py-8">加载中...</p>
+                <p className="text-[var(--helix-transcript-size)] text-muted-foreground/60 text-center py-8">加载中...</p>
               )}
               {filteredPlugins.map(plugin => (
                   <div
@@ -233,16 +233,16 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
                   >
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-foreground truncate">{plugin.name}</p>
+                        <p className="text-[var(--helix-transcript-size)] font-medium text-foreground truncate">{plugin.name}</p>
                         {plugin.source === 'bundled' && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">内置</span>
+                          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-primary/10 text-primary">内置</span>
                         )}
                       </div>
                       {plugin.description && (
-                        <p className="text-xs text-muted-foreground/70 truncate mt-0.5">{plugin.description}</p>
+                        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 truncate mt-0.5">{plugin.description}</p>
                       )}
                       {plugin.version && (
-                        <p className="text-[10px] text-muted-foreground/50 mt-0.5">v{plugin.version}</p>
+                        <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50 mt-0.5">v{plugin.version}</p>
                       )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
@@ -277,7 +277,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
           ) : (
             <div className="space-y-2">
               {skillsLoading && skills.length === 0 && (
-                <p className="text-sm text-muted-foreground/60 text-center py-8">加载中...</p>
+                <p className="text-[var(--helix-transcript-size)] text-muted-foreground/60 text-center py-8">加载中...</p>
               )}
               {filteredSkills.map(skill => (
                 <div
@@ -286,8 +286,8 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-foreground">{skill.name}</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                      <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">{skill.name}</span>
+                      <span className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded font-medium ${
                         skill.isBuiltin
                           ? 'bg-primary/10 text-primary'
                           : 'bg-muted text-muted-foreground'
@@ -295,13 +295,13 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
                         {skill.isBuiltin ? '内置' : '自定义'}
                       </span>
                       {skill.callCount > 0 && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/50 text-accent-foreground">
+                        <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-accent/50 text-accent-foreground">
                           {skill.callCount}次
                         </span>
                       )}
                     </div>
                     {skill.description && (
-                      <p className="text-xs text-muted-foreground/70 truncate mt-0.5">{skill.description}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 truncate mt-0.5">{skill.description}</p>
                     )}
                   </div>
                   {!skill.isBuiltin && (
@@ -317,7 +317,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
               ))}
             </div>
           )) : (
-            <div className="text-center py-12 text-sm text-muted-foreground/60">
+            <div className="text-center py-12 text-[var(--helix-transcript-size)] text-muted-foreground/60">
               {activeTab === 'plugins' ? '暂无已安装插件' : '暂无技能'}
             </div>
           )}

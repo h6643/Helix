@@ -73,7 +73,7 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
       <div className="flex items-center justify-between px-6 py-4 border-b border-border/40 shrink-0">
         <div className="flex items-center gap-2">
           <ShieldCheck className="size-5 text-primary" />
-          <h1 className="text-xl font-semibold text-foreground">运行时与安全</h1>
+          <h1 className="text-[calc(var(--helix-transcript-size)*1.4286)] font-semibold text-foreground">运行时与安全</h1>
         </div>
         <button
           onClick={onClose}
@@ -95,7 +95,7 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
               {/* Status cards */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-xl border border-border/50 bg-card/50 p-4">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
+                  <div className="flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">
                     <Server className="size-3.5" /> Gateway 状态
                   </div>
                   <div className="flex items-center gap-2">
@@ -104,15 +104,15 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
                     ) : (
                       <XCircle className="size-4 text-muted-foreground" />
                     )}
-                    <span className="text-sm font-medium text-foreground">
+                    <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">
                       {status?.gatewayRunning ? '运行中' : '未连接'}
                     </span>
                   </div>
-                  <p className="text-[11px] text-muted-foreground/70 mt-1">运行时长 {fmtUptime(status?.uptime || 0)}</p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">运行时长 {fmtUptime(status?.uptime || 0)}</p>
                 </div>
 
                 <div className="rounded-xl border border-border/50 bg-card/50 p-4">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
+                  <div className="flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">
                     <ShieldCheck className="size-3.5" /> 内核签名校验
                   </div>
                   <div className="flex items-center gap-2">
@@ -121,23 +121,23 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
                     ) : (
                       <XCircle className="size-4 text-amber-500" />
                     )}
-                    <span className="text-sm font-medium text-foreground">
+                    <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">
                       {status?.signatureStatus === 'verified' ? '已校验' : '未校验'}
                     </span>
                   </div>
-                  <p className="text-[11px] text-muted-foreground/70 mt-1 truncate">{status?.signatureDetail}</p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1 truncate">{status?.signatureDetail}</p>
                 </div>
 
                 <div className="rounded-xl border border-border/50 bg-card/50 p-4">
-                  <div className="text-xs text-muted-foreground mb-1">运行时版本</div>
-                  <p className="text-sm font-medium text-foreground">{status?.runtimeVersion || '—'}</p>
-                  <p className="text-[11px] text-muted-foreground/70 mt-1">Electron {status?.electronVersion} · Node {status?.nodeVersion}</p>
+                  <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">运行时版本</div>
+                  <p className="text-[var(--helix-transcript-size)] font-medium text-foreground">{status?.runtimeVersion || '—'}</p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">Electron {status?.electronVersion} · Node {status?.nodeVersion}</p>
                 </div>
 
                 <div className="rounded-xl border border-border/50 bg-card/50 p-4">
-                  <div className="text-xs text-muted-foreground mb-1">平台</div>
-                  <p className="text-sm font-medium text-foreground capitalize">{status?.platform || '—'}</p>
-                  <p className="text-[11px] text-muted-foreground/70 mt-1">托管运行时通道</p>
+                  <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">平台</div>
+                  <p className="text-[var(--helix-transcript-size)] font-medium text-foreground capitalize">{status?.platform || '—'}</p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">托管运行时通道</p>
                 </div>
               </div>
 
@@ -145,14 +145,14 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
               <div className="flex items-center gap-2">
                 <button
                   onClick={refresh}
-                  className="px-3 py-1.5 text-xs rounded-lg border border-border/50 hover:bg-muted/50 transition-colors flex items-center gap-1.5"
+                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] rounded-lg border border-border/50 hover:bg-muted/50 transition-colors flex items-center gap-1.5"
                 >
                   <RefreshCw className="size-3.5" /> 刷新状态
                 </button>
                 <button
                   onClick={doUpdate}
                   disabled={updating}
-                  className="px-3 py-1.5 text-xs rounded-lg border border-border/50 hover:bg-muted/50 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] rounded-lg border border-border/50 hover:bg-muted/50 transition-colors flex items-center gap-1.5 disabled:opacity-50"
                 >
                   {updating ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
                   检查并更新

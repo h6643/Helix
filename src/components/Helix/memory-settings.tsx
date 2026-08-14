@@ -344,7 +344,7 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
               type="button"
               onClick={save}
               disabled={saving}
-              className="px-3 py-1 rounded-lg text-xs font-medium bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors"
+              className="px-3 py-1 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-medium bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors"
             >
               保存
             </button>
@@ -364,14 +364,14 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
         <div className="ui-text text-muted-foreground/70 leading-relaxed">
           <span className="text-foreground">{label}</span> 未安装，暂无可配置项。安装后即可配置：
           <div className="mt-2 flex items-center gap-2">
-            <code className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-muted/50 font-mono text-[12px] text-foreground/80 border border-border overflow-x-auto whitespace-nowrap">
+            <code className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-muted/50 font-mono text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 border border-border overflow-x-auto whitespace-nowrap">
               {pluginInstallCommand}
             </code>
             <button
               type="button"
               onClick={runInstall}
               disabled={installing}
-              className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors"
+              className="shrink-0 px-3 py-1.5 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-medium bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors"
             >
               {installing ? '安装中…' : '一键安装'}
             </button>
@@ -382,7 +382,7 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
             </div>
           )}
           {installOutput && (
-            <pre className={`mt-2 max-h-48 overflow-auto px-2.5 py-2 rounded-lg bg-muted/40 font-mono text-[11px] whitespace-pre-wrap break-all ${installOk ? 'text-emerald-500/90' : 'text-red-400'}`}>
+            <pre className={`mt-2 max-h-48 overflow-auto px-2.5 py-2 rounded-lg bg-muted/40 font-mono text-[calc(var(--helix-transcript-size)*0.7857)] whitespace-pre-wrap break-all ${installOk ? 'text-emerald-500/90' : 'text-red-400'}`}>
               {installOutput}
             </pre>
           )}
@@ -469,12 +469,12 @@ export function MemorySettings() {
   }, [cfg])
 
   if (state === 'loading') {
-    return <div className="max-w-3xl text-xs text-muted-foreground/60 py-2">读取 Hermes 配置…</div>
+    return <div className="max-w-3xl text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 py-2">读取 Hermes 配置…</div>
   }
 
   if (state === 'unavailable') {
     return (
-      <div className="max-w-3xl text-xs text-muted-foreground/60 py-2">
+      <div className="max-w-3xl text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 py-2">
         Hermes 网关未就绪，暂时无法读写记忆配置。
       </div>
     )
@@ -483,11 +483,11 @@ export function MemorySettings() {
   const memOff = !cfg.memoryEnabled && !cfg.userProfileEnabled
 
   const status = err
-    ? <span className="text-[11px] text-red-400">{err}</span>
+    ? <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-red-400">{err}</span>
     : saving
-      ? <span className="text-[11px] text-muted-foreground/60">保存中…</span>
+      ? <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">保存中…</span>
       : savedTick > 0
-        ? <span className="text-[11px] text-muted-foreground/60">已保存</span>
+        ? <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">已保存</span>
         : null
 
   return (

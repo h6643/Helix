@@ -75,8 +75,8 @@ export function PluginManager({ onClose }: PluginManagerProps) {
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 shrink-0">
         <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold">插件管理</h2>
-          <span className="text-xs text-muted-foreground/50 font-mono ml-1">
+          <h2 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold">插件管理</h2>
+          <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 font-mono ml-1">
             {backendPlugins.length} 个 Hermes 插件
           </span>
         </div>
@@ -89,7 +89,7 @@ export function PluginManager({ onClose }: PluginManagerProps) {
         <div className="max-w-3xl mx-auto px-6 pb-8 space-y-2">
 
           <div className="flex items-center justify-between">
-            <p className="text-xs text-muted-foreground/50 pb-1">
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 pb-1">
               Hermes 网关托管插件，与 hermes plugins / Plugins Hub 同源
             </p>
             <button
@@ -102,22 +102,22 @@ export function PluginManager({ onClose }: PluginManagerProps) {
           </div>
 
           {backendLoading && backendPlugins.length === 0 ? (
-            <div className="text-center py-12 text-sm text-muted-foreground/60 flex items-center justify-center gap-2">
+            <div className="text-center py-12 text-[var(--helix-transcript-size)] text-muted-foreground/60 flex items-center justify-center gap-2">
               <Loader2 className="size-4 animate-spin" /> 正在加载后端插件...
             </div>
           ) : backendError ? (
-            <div className="text-center py-12 text-sm text-red-500/80">
+            <div className="text-center py-12 text-[var(--helix-transcript-size)] text-red-500/80">
               <p>无法连接 Hermes 网关加载插件</p>
-              <p className="text-muted-foreground/50 mt-1 text-xs">{backendError}</p>
+              <p className="text-muted-foreground/50 mt-1 text-[calc(var(--helix-transcript-size)*0.8571)]">{backendError}</p>
               <button
                 onClick={() => loadBackendPlugins()}
-                className="mt-3 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-xs font-medium hover:bg-primary/20 transition-colors"
+                className="mt-3 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-[calc(var(--helix-transcript-size)*0.8571)] font-medium hover:bg-primary/20 transition-colors"
               >
                 重试
               </button>
             </div>
           ) : backendPlugins.length === 0 ? (
-            <div className="text-center py-12 text-sm text-muted-foreground/60">
+            <div className="text-center py-12 text-[var(--helix-transcript-size)] text-muted-foreground/60">
               暂无后端插件，可在 Hermes 中执行 hermes plugins install owner/repo 安装
             </div>
           ) : (
@@ -127,20 +127,20 @@ export function PluginManager({ onClose }: PluginManagerProps) {
               >
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-foreground">{p.name}</span>
-                    <span className="text-[10px] text-muted-foreground/40 font-mono">v{p.version || '-'}</span>
+                    <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">{p.name}</span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 font-mono">v{p.version || '-'}</span>
                     {p.source === 'bundled' ? (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">内置</span>
+                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">内置</span>
                     ) : (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-500 font-medium">用户</span>
+                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-500 font-medium">用户</span>
                     )}
                     {p.status === 'enabled' ? (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500">已启用</span>
+                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-500">已启用</span>
                     ) : (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">已禁用</span>
+                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">已禁用</span>
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground/70 mt-0.5">{p.description || '（无描述）'}</p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-0.5">{p.description || '（无描述）'}</p>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
                   {backendToggling === p.name ? (

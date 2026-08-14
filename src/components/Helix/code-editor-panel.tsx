@@ -164,10 +164,10 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50 gap-2 bg-card">
         <FileCode2 className="size-10" />
-        <p className="text-sm">从左侧文件树点击文件即可在此编辑</p>
+        <p className="text-[var(--helix-transcript-size)]">从左侧文件树点击文件即可在此编辑</p>
         <button
           onClick={onClose}
-          className="mt-2 px-3 py-1.5 text-xs rounded-lg border border-border/60 hover:bg-accent/50 transition-colors"
+          className="mt-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] rounded-lg border border-border/60 hover:bg-accent/50 transition-colors"
         >
           关闭编辑器
         </button>
@@ -182,7 +182,7 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
         {editorTabs.map((tab) => (
           <div
             key={tab.id}
-            className={`group flex items-center gap-1.5 pl-3 pr-1.5 py-1 rounded-t-md cursor-pointer text-[12px] max-w-[220px] border-b-2 ${
+            className={`group flex items-center gap-1.5 pl-3 pr-1.5 py-1 rounded-t-md cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] max-w-[220px] border-b-2 ${
               tab.id === activeId
                 ? 'bg-card border-primary text-foreground'
                 : 'text-foreground/60 border-transparent hover:bg-accent/40'
@@ -240,8 +240,8 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
             <div className="flex items-start gap-3">
               <AlertTriangle className="size-5 text-amber-400 shrink-0 mt-0.5" />
               <div className="min-w-0">
-                <h3 className="text-sm font-medium text-foreground">未保存的修改</h3>
-                <p className="text-xs text-muted-foreground mt-1 break-words">
+                <h3 className="text-[var(--helix-transcript-size)] font-medium text-foreground">未保存的修改</h3>
+                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mt-1 break-words">
                   <span className="font-mono text-foreground/80">{pendingClose.name}</span> 有未保存的修改，关闭前要保存吗？
                 </p>
               </div>
@@ -249,19 +249,19 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
             <div className="flex items-center justify-end gap-2">
               <button
                 onClick={() => setPendingCloseId(null)}
-                className="px-3 py-1.5 text-xs rounded-md text-muted-foreground/80 hover:bg-accent/60 transition-colors"
+                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] rounded-md text-muted-foreground/80 hover:bg-accent/60 transition-colors"
               >
                 取消
               </button>
               <button
                 onClick={confirmDiscardClose}
-                className="px-3 py-1.5 text-xs rounded-md text-destructive border border-destructive/40 hover:bg-destructive/10 transition-colors"
+                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] rounded-md text-destructive border border-destructive/40 hover:bg-destructive/10 transition-colors"
               >
                 不保存
               </button>
               <button
                 onClick={confirmSaveAndClose}
-                className="px-3 py-1.5 text-xs rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-colors"
+                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-colors"
               >
                 保存并关闭
               </button>

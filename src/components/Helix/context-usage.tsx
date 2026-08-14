@@ -36,8 +36,8 @@ function ContextUsageBar({ used, total, categories }: { used: number; total: num
   return (
     <div className="w-full">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-sm font-semibold text-foreground">~{formatTokens(used)}</span>
-        <span className="text-[10px] text-muted-foreground">
+        <span className="text-[var(--helix-transcript-size)] font-semibold text-foreground">~{formatTokens(used)}</span>
+        <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
           / {formatTokens(total)} &middot; {percentage.toFixed(1)}%
         </span>
       </div>
@@ -69,7 +69,7 @@ function ContextUsagePanel({ used, total, categories, onClose }: { used: number;
       {/* Legend list */}
       <div className="mt-3 space-y-1.5">
         {categories.filter(c => c.tokens > 0).length === 0 ? (
-          <div className="text-xs text-muted-foreground">
+          <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
             暂无上下文分类数据（需要正在运行的 Hermes 会话）
           </div>
         ) : categories.filter(c => c.tokens > 0).map(item => {
@@ -78,9 +78,9 @@ function ContextUsagePanel({ used, total, categories, onClose }: { used: number;
             <div key={item.id} className="flex items-center justify-between">
               <div className="flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: item.color }} />
-                <span className="text-xs text-foreground">{item.label}</span>
+                <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground">{item.label}</span>
               </div>
-              <span className="text-xs text-muted-foreground tabular-nums">
+              <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground tabular-nums">
                 ~{formatTokens(item.tokens)} <span className="text-foreground/60">{pct.toFixed(1)}%</span>
               </span>
             </div>

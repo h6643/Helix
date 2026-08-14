@@ -135,10 +135,10 @@ function SideBySideDiffViewer({ change, onNavigateToLine }: { change: DiffChange
   }
 
   return (
-    <div className="flex font-mono text-xs">
+    <div className="flex font-mono text-[calc(var(--helix-font-size,13px)*0.9231)]">
       {/* Left side (old) */}
       <div className="flex-1 border-r border-border">
-        <div className="px-3 py-1.5 bg-red-500/10 border-b border-border text-red-400 text-[10px] font-medium">
+        <div className="px-3 py-1.5 bg-red-500/10 border-b border-border text-red-400 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium">
           原始版本
         </div>
         <div className="max-h-[500px] overflow-y-auto">
@@ -174,7 +174,7 @@ function SideBySideDiffViewer({ change, onNavigateToLine }: { change: DiffChange
 
       {/* Right side (new) */}
       <div className="flex-1">
-        <div className="px-3 py-1.5 bg-emerald-500/10 border-b border-border text-emerald-400 text-[10px] font-medium">
+        <div className="px-3 py-1.5 bg-emerald-500/10 border-b border-border text-emerald-400 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium">
           新版本
         </div>
         <div className="max-h-[500px] overflow-y-auto">
@@ -215,7 +215,7 @@ function UnifiedDiffViewer({ change, onNavigateToLine }: { change: DiffChange; o
   const diff = useMemo(() => computeDiff(change.oldContent, change.newContent), [change.oldContent, change.newContent])
 
   return (
-    <div className="font-mono text-xs">
+    <div className="font-mono text-[calc(var(--helix-font-size,13px)*0.9231)]">
       <div className="max-h-[500px] overflow-y-auto">
         {diff.map((line, idx) => {
           if (line.type === 'equal') {
@@ -268,7 +268,7 @@ interface DiffPreviewProps {
 function UnifiedDiffTextViewer({ diff }: { diff: string }) {
   const lines = useMemo(() => diff.split('\n'), [diff])
   return (
-    <div className="font-mono text-xs">
+    <div className="font-mono text-[calc(var(--helix-font-size,13px)*0.9231)]">
       <div className="max-h-[500px] overflow-y-auto">
         {lines.map((line, idx) => {
           if (line.startsWith('+++') || line.startsWith('---')) {
@@ -349,11 +349,11 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
         <div className="flex items-center justify-between px-4 py-3 border-b border-border/60 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-            <span className="text-sm font-semibold">代码变更预览</span>
-            <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">
+            <span className="text-[var(--helix-transcript-size)] font-semibold">代码变更预览</span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground bg-muted px-2 py-0.5 rounded-full">
               {changes.length} 个文件
             </span>
-            <div className="flex items-center gap-2 text-[10px]">
+            <div className="flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)]">
               <span className="text-emerald-500">+{stats.added}</span>
               <span className="text-red-500">-{stats.removed}</span>
             </div>
@@ -403,7 +403,7 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
                 <div
                   key={c.fileId}
                   onClick={() => setActiveIndex(idx)}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md transition-colors whitespace-nowrap cursor-pointer select-none ${
+                  className={`flex items-center gap-1.5 px-2.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] rounded-md transition-colors whitespace-nowrap cursor-pointer select-none ${
                     idx === activeIndex
                       ? 'bg-accent text-accent-foreground'
                       : 'text-muted-foreground hover:bg-accent/50'
@@ -446,7 +446,7 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
               variant="ghost"
               size="sm"
               onClick={() => { onReject(activeChange); if (changes.length <= 1) onClose() }}
-              className="text-xs"
+              className="text-[calc(var(--helix-transcript-size)*0.8571)]"
             >
               <X className="size-3.5 mr-1" />
               拒绝
@@ -455,7 +455,7 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
               variant="ghost"
               size="sm"
               onClick={onRejectAll}
-              className="text-xs text-destructive hover:text-destructive"
+              className="text-[calc(var(--helix-transcript-size)*0.8571)] text-destructive hover:text-destructive"
             >
               <RotateCcw className="size-3.5 mr-1" />
               全部拒绝
@@ -465,7 +465,7 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
             <Button
               size="sm"
               onClick={onApplyAll}
-              className="text-xs"
+              className="text-[calc(var(--helix-transcript-size)*0.8571)]"
             >
               <Check className="size-3.5 mr-1" />
               全部应用
@@ -473,7 +473,7 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
             <Button
               size="sm"
               onClick={() => { onApply(activeChange); if (changes.length <= 1) onClose() }}
-              className="text-xs"
+              className="text-[calc(var(--helix-transcript-size)*0.8571)]"
               variant="outline"
             >
               <Check className="size-3.5 mr-1" />
