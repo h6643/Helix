@@ -21,6 +21,7 @@
  */
 
 import { warn, error as logError, debug } from '@/lib/logger'
+import { installTauriBridge } from '@/lib/tauri-bridge'
 
 // ── PROBE v2: WS 接收层原始字节记录（临时调试，验证后删除）──
 // 记录 onmessage 拿到的每个文本事件帧完整字节，用于对比：
@@ -1126,6 +1127,7 @@ export function getGatewayMode(): Promise<'acp' | 'serve'> {
   modePromise = (async () => {
     try {
       if (typeof window === 'undefined') return 'acp'
+      installTauriBridge() // 惰性桥：先装再读，避免误判 acp
       const ipc = (window as any).electron?.hermes
       if (!ipc?.getGatewayInfo) return 'acp'
       const info = await ipc.getGatewayInfo()
@@ -1219,6 +1221,10 @@ function buildRouterFacade(ipc: any): any {
  */
 export function getServeHermesFacade(): any | null {
   if (typeof window === 'undefined') return null
+  // 确保 Tauri invoke 桥已装好（window.electron 是惰性安装的）。若模块加载
+  // 顺序导致本函数先于任何 isElectron()/installTauriBridge() 执行，直接读
+  // window.electron 会拿到 undefined → 错误地走 acp/null 分支。
+  installTauriBridge()
   const ipc = (window as any).electron?.hermes
   if (!ipc?.getGatewayInfo) return null
   if (!routerFacade) routerFacade = buildRouterFacade(ipc)
@@ -1233,6 +1239,12 @@ export function initServeGateway(): Promise<ServeGatewayClient | null> {
   if (initPromise) return initPromise
   initPromise = (async () => {
     if (typeof window === 'undefined') return null
+    // 惰性桥竞态修复：window.electron 由 installTauriBridge() 惰性安装。
+    // 若 use-hermes 的 useEffect 先于任何 isElectron() 触发 initServeGateway，
+    // 直接读 window.electron 会得到 undefined → 提前 return null 且被
+    // initPromise 永久缓存 → 之后桥装好也不重试 → serve 网关永不连接。
+    // 这里先强制装桥（幂等），保证下面能读到 getGatewayInfo。
+    installTauriBridge()
     const ipc = (window as any).electron?.hermes
     if (!ipc?.getGatewayInfo) return null
     try {
