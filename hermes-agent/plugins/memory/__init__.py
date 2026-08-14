@@ -90,30 +90,20 @@ def _is_memory_provider_dir(path: Path) -> bool:
 def _iter_provider_dirs() -> List[Tuple[str, Path]]:
     """Yield ``(name, path)`` for all discovered provider directories.
 
-    Scans bundled first, then user-installed.  Bundled takes precedence
-    on name collisions (first-seen wins via ``seen`` set).
+    Only user-installed providers are discovered (``$HERMES_HOME/plugins/<name>/``).
+    Bundled providers (``plugins/memory/<name>/`` next to this module) are NOT
+    scanned: 外置记忆 Provider 不随应用内置，改为按需安装
+    （``hermes plugins install NousResearch/hermes-agent/plugins/memory/<name>``
+    → ``$HERMES_HOME/plugins/<name>``）。
     """
-    seen: set = set()
     dirs: List[Tuple[str, Path]] = []
 
-    # 1. Bundled providers (plugins/memory/<name>/)
-    if _MEMORY_PLUGINS_DIR.is_dir():
-        for child in sorted(_MEMORY_PLUGINS_DIR.iterdir()):
-            if not child.is_dir() or child.name.startswith(("_", ".")):
-                continue
-            if not (child / "__init__.py").exists():
-                continue
-            seen.add(child.name)
-            dirs.append((child.name, child))
-
-    # 2. User-installed providers ($HERMES_HOME/plugins/<name>/)
+    # User-installed providers ($HERMES_HOME/plugins/<name>/)
     user_dir = _get_user_plugins_dir()
     if user_dir:
         for child in sorted(user_dir.iterdir()):
             if not child.is_dir() or child.name.startswith(("_", ".")):
                 continue
-            if child.name in seen:
-                continue  # bundled takes precedence
             if not _is_memory_provider_dir(child):
                 continue  # skip non-memory plugins
             dirs.append((child.name, child))
@@ -124,13 +114,9 @@ def _iter_provider_dirs() -> List[Tuple[str, Path]]:
 def find_provider_dir(name: str) -> Optional[Path]:
     """Resolve a provider name to its directory.
 
-    Checks bundled first, then user-installed.
+    只查用户安装目录（$HERMES_HOME/plugins/<name>/）——外置记忆 Provider 不内置，
+    按需安装到该目录。bundled（plugins/memory/<name>/）不再参与发现。
     """
-    # Bundled
-    bundled = _MEMORY_PLUGINS_DIR / name
-    if bundled.is_dir() and (bundled / "__init__.py").exists():
-        return bundled
-    # User-installed
     user_dir = _get_user_plugins_dir()
     if user_dir:
         user = user_dir / name

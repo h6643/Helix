@@ -210,16 +210,14 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
   const [saving, setSaving] = useState(false)
   const [savedTick, setSavedTick] = useState(0)
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // 未安装态：显示安装指令（pip 依赖一行，external 命令各自一行）+ 一键安装。
-  const installCommands = useMemo(() => {
-    const cmds: string[] = []
+  // 未安装态：显示一行安装指令（插件安装）+ 可选 pip 依赖提示 + 一键安装。
+  const pluginInstallCommand = useMemo(
+    () => `hermes plugins install NousResearch/hermes-agent/plugins/memory/${provider}`,
+    [provider]
+  )
+  const pipHint = useMemo(() => {
     const pipDeps: string[] = Array.isArray(setup?.pip_dependencies) ? setup.pip_dependencies : []
-    if (pipDeps.length > 0) cmds.push(`pip install ${pipDeps.join(' ')}`)
-    const exts: any[] = Array.isArray(setup?.external_dependencies) ? setup.external_dependencies : []
-    for (const d of exts) {
-      if (d && typeof d.install === 'string' && d.install.trim()) cmds.push(d.install.trim())
-    }
-    return cmds
+    return pipDeps.length > 0 ? `pip install ${pipDeps.join(' ')}` : ''
   }, [setup])
   const [installOutput, setInstallOutput] = useState<string | null>(null)
   const [installOk, setInstallOk] = useState(false)
@@ -266,23 +264,36 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
     return () => { cancelled = true }
   }, [provider, loadTick])
 
-  // 一键安装缺失的运行时依赖（后端 POST /setup → pip install …）。
-  const runSetup = async () => {
+  // 一键安装：1) 插件本体（hermes plugins install → GitHub 下载到
+  // $HERMES_HOME/plugins/<name>） 2) 运行时依赖（POST /setup → pip install）。
+  const runInstall = async () => {
     if (installing) return
     setInstalling(true)
     setInstallOutput(null)
     try {
+      // 1) 插件文件（不内置，必须按需安装）
+      const el = window.electron as any
+      if (typeof el?.hermes?.installPlugin !== 'function') {
+        setInstallOutput('当前运行时未提供自动安装通道，请在终端手动执行：' + pluginInstallCommand)
+        setInstallOk(false)
+        return
+      }
+      const pluginRes = await el.hermes.installPlugin(
+        `NousResearch/hermes-agent/plugins/memory/${provider}`,
+        false
+      )
+      if (!pluginRes?.ok) {
+        setInstallOutput(String(pluginRes?.message || pluginRes?.error || '插件安装失败'))
+        setInstallOk(false)
+        return
+      }
+      // 2) 运行时依赖（pip / external）
       const res = await setupMemoryProvider(provider)
       const results = Array.isArray(res?.results) ? res.results : (res?.results ? [res.results] : [])
       const failed = results.find((r: any) => r?.status === 'failed')
       if (failed) {
-        setInstallOutput(String(failed.error || failed.command || '安装失败'))
+        setInstallOutput(String(failed.error || failed.command || '依赖安装失败'))
         setInstallOk(false)
-        return
-      }
-      if (results.length === 0) {
-        setInstallOutput('没有需要安装的依赖')
-        setInstallOk(true)
         return
       }
       setInstallOutput('安装完成，正在刷新配置…')
@@ -351,21 +362,25 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
 
       {state === 'not-installed' && (
         <div className="ui-text text-muted-foreground/70 leading-relaxed">
-          <span className="text-foreground">{label}</span> 的运行时依赖未安装，暂无可配置项。
-          安装后即可配置：
+          <span className="text-foreground">{label}</span> 未安装，暂无可配置项。安装后即可配置：
           <div className="mt-2 flex items-center gap-2">
             <code className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-muted/50 font-mono text-[12px] text-foreground/80 border border-border overflow-x-auto whitespace-nowrap">
-              {installCommands.join(' && ')}
+              {pluginInstallCommand}
             </code>
             <button
               type="button"
-              onClick={runSetup}
+              onClick={runInstall}
               disabled={installing}
               className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors"
             >
               {installing ? '安装中…' : '一键安装'}
             </button>
           </div>
+          {pipHint && (
+            <div className="mt-1 ui-text text-muted-foreground/50">
+              安装后还需运行依赖：<code className="font-mono">{pipHint}</code>（一键安装会自动执行）
+            </div>
+          )}
           {installOutput && (
             <pre className={`mt-2 max-h-48 overflow-auto px-2.5 py-2 rounded-lg bg-muted/40 font-mono text-[11px] whitespace-pre-wrap break-all ${installOk ? 'text-emerald-500/90' : 'text-red-400'}`}>
               {installOutput}

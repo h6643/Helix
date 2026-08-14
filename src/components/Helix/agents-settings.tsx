@@ -30,46 +30,6 @@ interface SubagentDraft {
   system_prompt: string
 }
 
-const SubagentCard = ({
-  i,
-  update,
-  remove,
-}: {
-  i: SubagentDraft
-  update: (id: string, patch: Partial<SubagentDraft>) => void
-  remove: (id: string) => void
-}) => (
-  <div className="rounded-lg border border-border/30 bg-muted/10 px-3 py-2.5 space-y-2.5">
-    <div className="space-y-1">
-      <label className="block text-[11px] text-muted-foreground/70">名称 Name</label>
-      <div className="flex items-center gap-2">
-        <input
-          value={i.name}
-          onChange={(e) => update(i.id, { name: e.target.value })}
-          placeholder="如 researcher"
-          className="flex-1 min-w-0 px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md ui-text font-semibold text-foreground text-center placeholder:text-muted-foreground/30 placeholder:font-normal focus:outline-none focus:border-primary/40 transition-colors"
-        />
-        <Button
-          size="icon"
-          variant="ghost"
-          className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
-          onClick={() => remove(i.id)}
-          aria-label="删除 Subagent"
-          data-tip="删除"
-        >
-          <Trash2 className="size-4" />
-        </Button>
-      </div>
-    </div>
-    <textarea
-      value={i.system_prompt}
-      onChange={(e) => update(i.id, { system_prompt: e.target.value })}
-      placeholder="系统提示词 / 人格描述…"
-      className="w-full min-h-[80px] px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md ui-text text-foreground text-center placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/40 resize-y transition-colors"
-    />
-  </div>
-)
-
 const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s)
 
 const SubagentItem = ({ i, remove }: { i: SubagentDraft; remove: (id: string) => void }) => (
@@ -179,10 +139,6 @@ export function AgentsSettings() {
     }
   }
 
-  const hostOf = (url: string) => {
-    try { return new URL(url).hostname } catch { return '' }
-  }
-
   const applyHistory = (idx: string) => {
     const h = apiHistory[Number(idx)]
     if (!h) return
@@ -256,8 +212,7 @@ export function AgentsSettings() {
                       className="w-56 ui-text text-foreground"
                       options={apiHistory.map((h, i) => ({
                         value: String(i),
-                        label: `${h.model}${h.baseUrl ? ` · ${hostOf(h.baseUrl)}` : ''}`,
-                        ...(h.baseUrl ? { hint: h.baseUrl } : {}),
+                        label: h.model,
                       }))}
                     />
                   </SettingRow>
@@ -270,6 +225,41 @@ export function AgentsSettings() {
                 )}
                 {field('最大迭代次数', 'max_iterations', '50', 'number', '子智能体单次任务最多执行的步骤数，超过即停止。')}
                 {field('推理强度', 'reasoning_effort', 'ultra / max / high（可选）', 'text', '控制子智能体的思考深度与耗时，留空使用默认。')}
+                {identities.length > 0 && (() => {
+                  const draft = identities[identities.length - 1]
+                  return (
+                    <>
+                      <SettingRow label="名称 Name">
+                        <div className="flex items-center gap-2">
+                          <input
+                            value={draft.name}
+                            onChange={(e) => updateIdentity(draft.id, { name: e.target.value })}
+                            placeholder="如 researcher"
+                            className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text font-semibold text-foreground text-center placeholder:text-muted-foreground/30 placeholder:font-normal focus:outline-none focus:border-primary/30 transition-colors"
+                          />
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
+                            onClick={() => removeIdentity(draft.id)}
+                            aria-label="删除 Subagent"
+                            data-tip="删除"
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        </div>
+                      </SettingRow>
+                      <SettingRow label="系统提示词" hint="子智能体的人格描述 / 角色设定">
+                        <textarea
+                          value={draft.system_prompt}
+                          onChange={(e) => updateIdentity(draft.id, { system_prompt: e.target.value })}
+                          placeholder="系统提示词 / 人格描述…"
+                          className="w-72 min-h-[80px] px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground text-left placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/30 resize-y transition-colors"
+                        />
+                      </SettingRow>
+                    </>
+                  )
+                })()}
                 <SettingRow label="子智能体危险命令自动通过（非交互式）" hint="开启后，子智能体执行危险命令前不再逐条请求确认。">
                   <input
                     type="checkbox"
@@ -280,20 +270,12 @@ export function AgentsSettings() {
                 </SettingRow>
               </SettingGroup>
 
-              {identities.length > 0 && (
-                <SubagentCard
-                  i={identities[identities.length - 1]}
-                  update={updateIdentity}
-                  remove={removeIdentity}
-                />
-              )}
-
               {err && <p className="text-xs text-red-400 pt-2">{err}</p>}
               <div className="flex items-center justify-end gap-3 pt-4">
                 <Button size="sm" variant="ghost" onClick={() => setCfg(DEFAULTS)}>
                   重置
                 </Button>
-                <Button size="sm" variant="default" onClick={save} disabled={loading || saving}>
+                <Button size="sm" variant="outline" onClick={save} disabled={loading || saving}>
                   {saving ? '保存中…' : saved ? '已保存' : '保存'}
                 </Button>
               </div>

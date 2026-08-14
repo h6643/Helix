@@ -174,6 +174,18 @@ find "$RESOURCES_DIR" -name "tests" -type d -not -path "*/site-packages/*" -exec
 rm -rf "$RESOURCES_DIR/python/include" 2>/dev/null || true
 rm -rf "$RESOURCES_DIR/python/share" 2>/dev/null || true
 
+# ── 外置记忆 Provider 不内置 ────────────────────────────────────────────────
+# memory provider 插件（site-packages/plugins/memory/<name>/）改为按需安装：
+# `hermes plugins install NousResearch/hermes-agent/plugins/memory/<name>`
+# 会从 GitHub 下载到 $HERMES_HOME/plugins/<name>，不随应用打包。这里删除
+# 所有 provider 子目录，但保留 plugins/memory/__init__.py（发现逻辑）与
+# config_schema.py（配置 schema 判定）。
+MEMORY_DIR="$SITE_PACKAGES/plugins/memory"
+if [ -d "$MEMORY_DIR" ]; then
+  find "$MEMORY_DIR" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} + 2>/dev/null || true
+  echo "[prepare] memory provider plugins excluded from bundle (install on demand)"
+fi
+
 SIZE=$(du -sh "$RESOURCES_DIR" 2>/dev/null | cut -f1)
 echo "[prepare] done.  Total size: $SIZE"
 echo "[prepare] runtime ready at: $RESOURCES_DIR"
