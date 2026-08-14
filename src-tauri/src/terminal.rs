@@ -571,8 +571,10 @@ pub fn terminal_start(
 
         let stop = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
-        // HANDLE 非 Send，按 usize 传进读线程（read_loop 内还原）。
-        thread::spawn(move || read_loop(h_out_read.0 as usize, reader_stop));
+        // HANDLE 非 Send，先取出底层指针值（usize）再进闭包——否则 move 闭包
+        // 会捕获整个 HANDLE（`*mut c_void`）导致 thread::spawn 报 Send 错误。
+        let out_read_raw = h_out_read.0 as usize;
+        thread::spawn(move || read_loop(out_read_raw, reader_stop));
 
         *windows_terminal_state().lock().unwrap() = Some(WindowsTerminalSession {
             hpc,
