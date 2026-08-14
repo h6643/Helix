@@ -122,3 +122,8 @@ export async function setMemoryProviderConfig(
 ): Promise<any> {
   return (await memoryMain<any>('setMemoryProviderConfig', name, values)).result
 }
+
+/** POST /api/memory/providers/{name}/setup — 安装缺失的运行时依赖（pip install …）。 */
+export async function setupMemoryProvider(name: string): Promise<any> {
+  return (await memoryMain<any>('memoryProviderSetup', name)).result
+}

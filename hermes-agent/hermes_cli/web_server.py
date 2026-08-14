@@ -5281,15 +5281,22 @@ def _public_memory_provider_field(field: Dict[str, Any], data: Dict[str, Any]) -
 
 def _memory_provider_payload(name: str, provider: Any) -> Dict[str, Any]:
     data = _read_memory_provider_existing_values(name)
+    setup = _memory_provider_setup_info(name)
     fields = [
         _public_memory_provider_field(field, data)
         for field in _normalize_memory_provider_schema(name, provider)
     ]
+    # 插件本体内置 ≠ 已安装：运行时依赖（pip_dependencies / external
+    # dependencies）缺失时返回空 fields，前端把它判为「未安装」并显示
+    # 安装指令（pip install …），而不是展示一个看似可配、实际用不了的
+    # 配置面板。
+    if not setup.get("dependencies_installed", True):
+        fields = []
     return {
         "name": name,
         "label": _memory_provider_label(name),
         "fields": fields,
-        "setup": _memory_provider_setup_info(name),
+        "setup": setup,
     }
 
 

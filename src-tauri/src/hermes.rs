@@ -862,6 +862,39 @@ pub async fn hermes_get_memory_provider_config(
 
 #[tauri::command]
 
+pub async fn hermes_memory_provider_setup(
+
+    state: State<'_, Arc<AppState>>,
+
+    name: String,
+
+) -> Result<Value, String> {
+    let path = format!("/api/memory/providers/{name}/setup");
+    let Some((url, token)) = serve_api_url(&state, &path) else {
+        return Ok(json!({ "ok": false, "error": "gateway-not-ready" }));
+    };
+    let client = match reqwest::Client::builder().build() {
+        Ok(c) => c,
+        Err(_) => return Ok(json!({ "ok": false, "error": "client" })),
+    };
+    match client
+        .post(&url)
+        .header("X-Hermes-Session-Token", token)
+        .json(&json!({ "values": {} }))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json::<Value>().await {
+            Ok(v) => Ok(json!({ "ok": true, "result": v })),
+            Err(_) => Ok(json!({ "ok": true })),
+        },
+        Ok(r) => Ok(json!({ "ok": false, "error": format!("HTTP {}", r.status()) })),
+        Err(e) => Ok(json!({ "ok": false, "error": e.to_string() })),
+    }
+}
+
+#[tauri::command]
+
 pub async fn hermes_set_memory_provider_config(
 
     state: State<'_, Arc<AppState>>,

@@ -226,6 +226,7 @@ function buildTauriAPI(): ElectronAPI {
     getMemoryProviderConfig: (name: string) => invoke('hermes_get_memory_provider_config', { name }),
     setMemoryProviderConfig: (name: string, values: Record<string, unknown>) =>
       invoke('hermes_set_memory_provider_config', { name, values }),
+    memoryProviderSetup: (name: string) => invoke('hermes_memory_provider_setup', { name }),
     setYamlKey: (key: string, value: unknown) => invoke('hermes_set_yaml_key', { key, value }),
     setDelegationIdentities: (identities: unknown) => invoke('hermes_set_delegation_identities', { identities }),
     listPersonalities: () => invoke('hermes_list_personalities'),

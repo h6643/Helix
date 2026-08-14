@@ -132,6 +132,11 @@ export interface ElectronAPI {
       result?: any
       error?: string
     }>
+    memoryProviderSetup: (name: string) => Promise<{
+      ok: boolean
+      result?: any
+      error?: string
+    }>
     setYamlKey: (key: string, value: any) => Promise<any>
     setDelegationIdentities: (identities: Array<{ name: string; system_prompt: string }>) => Promise<{ success: boolean; changed?: boolean; error?: string }>
     listPersonalities: () => Promise<any>

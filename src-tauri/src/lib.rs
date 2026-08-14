@@ -178,6 +178,7 @@ pub fn run() {
             hermes::hermes_get_memory_status,
             hermes::hermes_get_memory_provider_config,
             hermes::hermes_set_memory_provider_config,
+            hermes::hermes_memory_provider_setup,
             hermes::hermes_get_config,
             hermes::hermes_set_config,
             hermes::hermes_set_yaml_key,

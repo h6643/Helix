@@ -1,16 +1,16 @@
 'use client'
 
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Toggle, PopupSelect, NumberField } from './settings-ui'
 import {
   getHermesConfig,
   patchHermesConfig,
   getMemoryProviderConfig,
   setMemoryProviderConfig,
+  setupMemoryProvider,
   HermesRestUnavailable,
 } from '@/lib/hermes-rest'
 import type { MemoryProviderField } from '@/types/electron'
-import { isElectron } from '@/lib/electron-bridge'
 import { warn } from '@/lib/logger'
 
 /**
@@ -62,15 +62,6 @@ interface MemoryCfg {
   targetPct: number
   protectLastN: number
 }
-
-/**
- * 未安装 Provider 时安装命令的默认值：从上游 NousResearch/hermes-agent 仓库
- * 取 `plugins/memory/<provider-id>` 子目录安装（该子目录的 plugin.yaml 的
- * name 与 provider id 一致，装到 ~/.local/share/hermes/plugins/ 后网关实时
- * 目录扫描即可发现）。命令仍可编辑，方便换源或指定版本。
- */
-const defaultInstallCmd = (provider: string) =>
-  `hermes plugins install NousResearch/hermes-agent/plugins/memory/${provider}`
 
 const DEFAULTS: MemoryCfg = {
   memoryEnabled: false,
@@ -212,21 +203,31 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
   const [state, setState] = useState<'loading' | 'ready' | 'not-installed' | 'error'>('loading')
   const [fields, setFields] = useState<MemoryProviderField[]>([])
   const [label, setLabel] = useState(provider)
+  const [setup, setSetup] = useState<any>(null)
   const [values, setValues] = useState<Record<string, any>>({})
   const [secretSet, setSecretSet] = useState<Record<string, boolean>>({})
   const [err, setErr] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [savedTick, setSavedTick] = useState(0)
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // 安装状态：可编辑的安装命令 + 运行按钮（未安装态）。装完通过 loadTick 重新拉配置。
-  const [installCmd, setInstallCmd] = useState(() => defaultInstallCmd(provider))
-  const [installing, setInstalling] = useState(false)
+  // 未安装态：显示安装指令（pip 依赖一行，external 命令各自一行）+ 一键安装。
+  const installCommands = useMemo(() => {
+    const cmds: string[] = []
+    const pipDeps: string[] = Array.isArray(setup?.pip_dependencies) ? setup.pip_dependencies : []
+    if (pipDeps.length > 0) cmds.push(`pip install ${pipDeps.join(' ')}`)
+    const exts: any[] = Array.isArray(setup?.external_dependencies) ? setup.external_dependencies : []
+    for (const d of exts) {
+      if (d && typeof d.install === 'string' && d.install.trim()) cmds.push(d.install.trim())
+    }
+    return cmds
+  }, [setup])
   const [installOutput, setInstallOutput] = useState<string | null>(null)
   const [installOk, setInstallOk] = useState(false)
+  const [installing, setInstalling] = useState(false)
   const [loadTick, setLoadTick] = useState(0)
 
-  // 切换 Provider 时重置安装命令为该 Provider 的默认仓库。
-  useEffect(() => { setInstallCmd(defaultInstallCmd(provider)) }, [provider])
+  // 切换 Provider 时清空安装输出。
+  useEffect(() => { setInstallOutput(null); setInstallOk(false) }, [provider])
 
   useEffect(() => {
     let cancelled = false
@@ -237,6 +238,7 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
         const cfg = await getMemoryProviderConfig(provider)
         if (cancelled) return
         setLabel(cfg?.label || provider)
+        setSetup(cfg?.setup)
         const f: MemoryProviderField[] = Array.isArray(cfg?.fields) ? cfg.fields : []
         if (!f.length) {
           setState('not-installed')
@@ -264,37 +266,28 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
     return () => { cancelled = true }
   }, [provider, loadTick])
 
-  // 运行安装命令（内存 Provider 插件，走后端 hermes 可执行文件）。
-  const runInstall = async () => {
-    const cmd = installCmd.trim()
-    if (!cmd || installing) return
+  // 一键安装缺失的运行时依赖（后端 POST /setup → pip install …）。
+  const runSetup = async () => {
+    if (installing) return
     setInstalling(true)
     setInstallOutput(null)
     try {
-      if (!isElectron()) {
-        setInstallOutput('当前环境不支持自动安装，请在终端手动执行该命令')
+      const res = await setupMemoryProvider(provider)
+      const results = Array.isArray(res?.results) ? res.results : (res?.results ? [res.results] : [])
+      const failed = results.find((r: any) => r?.status === 'failed')
+      if (failed) {
+        setInstallOutput(String(failed.error || failed.command || '安装失败'))
         setInstallOk(false)
         return
       }
-      const el = window.electron as any
-      if (typeof el?.hermes?.installPlugin !== 'function') {
-        setInstallOutput('当前运行时未提供自动安装通道，请在终端手动执行该命令')
-        setInstallOk(false)
-        return
-      }
-      // 从可编辑命令里抽出标识符与重装 flag：`hermes plugins install <identifier> [--force]`
-      const m = cmd.match(/^hermes\s+plugins\s+install\s+(\S+)/i)
-      const identifier = m?.[1] ?? cmd
-      const force = /\s--force\b|\s-f\b/i.test(cmd)
-      const res = await el.hermes.installPlugin(identifier, force)
-      if (res?.ok) {
-        setInstallOutput(res.message || '安装成功，正在刷新配置…')
+      if (results.length === 0) {
+        setInstallOutput('没有需要安装的依赖')
         setInstallOk(true)
-        setLoadTick((n) => n + 1)
-      } else {
-        setInstallOutput(res?.error || res?.message || '安装失败')
-        setInstallOk(false)
+        return
       }
+      setInstallOutput('安装完成，正在刷新配置…')
+      setInstallOk(true)
+      setLoadTick((n) => n + 1)
     } catch (e: any) {
       setInstallOutput(String(e?.message || e))
       setInstallOk(false)
@@ -358,29 +351,20 @@ function ProviderConfigPanel({ provider }: { provider: string }) {
 
       {state === 'not-installed' && (
         <div className="ui-text text-muted-foreground/70 leading-relaxed">
-          未检测到 <span className="text-foreground">{label}</span> 的已安装插件，暂无可配置项。
-          点击「运行」自动从官方仓库安装该 Provider 的插件（命令可编辑以换源）：
+          <span className="text-foreground">{label}</span> 的运行时依赖未安装，暂无可配置项。
+          安装后即可配置：
           <div className="mt-2 flex items-center gap-2">
-            <input
-              value={installCmd}
-              onChange={(e) => setInstallCmd(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') runInstall() }}
-              onFocus={(e) => e.target.select()}
-              spellCheck={false}
-              disabled={installing}
-              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-muted/50 font-mono ui-text text-foreground/80 text-center border border-border focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60 transition-colors"
-            />
+            <code className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-muted/50 font-mono text-[12px] text-foreground/80 border border-border overflow-x-auto whitespace-nowrap">
+              {installCommands.join(' && ')}
+            </code>
             <button
               type="button"
-              onClick={runInstall}
-              disabled={installing || !installCmd.trim()}
+              onClick={runSetup}
+              disabled={installing}
               className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors"
             >
-              {installing ? '安装中…' : '运行'}
+              {installing ? '安装中…' : '一键安装'}
             </button>
-          </div>
-          <div className="mt-1 ui-text text-muted-foreground/50">
-            安装到 <code className="font-mono">~/.local/share/hermes/plugins/</code>，完成后本页会自动刷新并显示配置项。
           </div>
           {installOutput && (
             <pre className={`mt-2 max-h-48 overflow-auto px-2.5 py-2 rounded-lg bg-muted/40 font-mono text-[11px] whitespace-pre-wrap break-all ${installOk ? 'text-emerald-500/90' : 'text-red-400'}`}>
