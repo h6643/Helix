@@ -103,7 +103,7 @@ export function VisionModelSettings() {
               value={provider}
               onChange={setProvider}
               placeholder="选择视觉 Provider"
-              className="w-full ui-text text-foreground"
+              className="w-full ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2"
               options={VISION_PROVIDERS.map((p) => ({ label: p.name, value: p.id }))}
             />
           </div>
@@ -116,7 +116,7 @@ export function VisionModelSettings() {
                 value={model}
                 onChange={setModel}
                 placeholder="选择模型"
-                className="w-full ui-text text-foreground"
+                className="w-full ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2"
                 options={VISION_MODELS[provider].map((m) => ({ label: m, value: m }))}
               />
             ) : (
@@ -139,7 +139,7 @@ export function VisionModelSettings() {
                 value={knownBaseUrl}
                 readOnly
                 disabled
-                className="w-full px-3 py-2 bg-muted/30 border border-border/50 rounded-lg ui-text text-foreground/70 text-center font-mono cursor-not-allowed"
+                className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground/70 text-center font-mono cursor-not-allowed"
               />
             </div>
           ) : (
