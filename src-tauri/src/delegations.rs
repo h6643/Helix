@@ -20,6 +20,23 @@ fn delegation_session_id(deleg_dir: &PathBuf) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Read manifest.json `tasks` array for a delegation dir (goal / status per
+/// child task, matched by `task-N` index). Best-effort: empty on any failure.
+fn read_manifest_tasks(deleg_dir: &PathBuf) -> Vec<Value> {
+    let manifest_path = deleg_dir.join("manifest.json");
+    let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<Value>(&content) else {
+        return Vec::new();
+    };
+    manifest
+        .get("tasks")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 pub fn delegations_list(session_id: Option<String>) -> Value {
     let root = delegation_live_root();
@@ -44,6 +61,9 @@ pub fn delegations_list(session_id: Option<String>) -> Value {
 
             let dir_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
+            // Read manifest.json tasks (goal/status per task, by index)
+            let manifest_tasks = read_manifest_tasks(&path);
+
             // Read task logs
             let mut tasks = Vec::new();
             if let Ok(task_entries) = std::fs::read_dir(&path) {
@@ -62,13 +82,36 @@ pub fn delegations_list(session_id: Option<String>) -> Value {
                         // Read last few lines for preview
                         let preview = read_tail(&tp, 5);
 
-                        tasks.push(json!({
+                        // Match manifest goal/status by the `task-N` index in
+                        // the filename stem (task-0, task-1, …).
+                        let idx = task_name
+                            .rsplit('-')
+                            .next()
+                            .and_then(|s| s.parse::<usize>().ok());
+                        let (goal, status) = idx
+                            .and_then(|i| manifest_tasks.get(i))
+                            .map(|t| {
+                                (
+                                    t.get("goal").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    t.get("status").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                )
+                            })
+                            .unwrap_or((None, None));
+
+                        let mut task_json = json!({
                             "name": task_name,
                             "path": tp.to_string_lossy(),
                             "size": size,
                             "modified": modified,
                             "preview": preview,
-                        }));
+                        });
+                        if let Some(g) = goal {
+                            task_json["goal"] = json!(g);
+                        }
+                        if let Some(s) = status {
+                            task_json["status"] = json!(s);
+                        }
+                        tasks.push(task_json);
                     }
                 }
             }
