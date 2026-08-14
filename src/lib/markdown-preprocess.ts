@@ -446,14 +446,30 @@ function neutralizeSetextUnderlines(text: string): string {
 // LLMs often write ATX headings with a full-width space after the marker:
 // `##　标题`. CommonMark only accepts `#` followed by an ASCII space/tab, so
 // those lines would render as literal text. Only a full-width space is
-// repaired — a space-like separator is unambiguous heading intent. Lines
-// where the marker is glued DIRECTLY to the content (`##标题`, `##"引用"`)
-// are deliberately left as literal text: the marker there is usually
-// decoration, and repair would promote plain prose to a heading out of
-// nowhere. A lone `#` is always left alone (ambiguous with hashtags like
-// `#话题`). Fenced code is excluded upstream, so only prose lines are
-// touched.
+// repaired — a space-like separator is unambiguous heading intent. A lone `#`
+// is always left alone (ambiguous with hashtags like `#话题`). Fenced code is
+// excluded upstream, so only prose lines are touched.
 const ATX_HEADING_BROKEN_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^\n]*)$/gm
+
+// LLMs also glue the heading text straight onto the marker with no space at
+// all: `##自包含工具卡`, `##页面结构单页`, `##查询配置（：…）`. CommonMark
+// requires an ASCII space/tab after the `#` run, so these lines render as
+// plain paragraphs instead of headings. A line that starts with `#{2,6}`
+// directly followed by visible content is unambiguous heading intent, so
+// repair it (`##标题` → `## 标题`). Single `#` stays untouched (hashtags),
+// and markers already followed by whitespace are skipped by the `[^\s#]`
+// guard. A `- ##xxx` list item is not matched (leading `- ` breaks the
+// `^ {0,3}` prefix).
+const ATX_HEADING_GLUED_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})([^\s#][^\n]*)$/gm
+
+// LLMs sometimes flatten the whole newline away, leaving the heading glued
+// MID-LINE: `…归因分解##数据智能细节-打开页面自动查询`. ATX markers are only
+// read at line start, so insert a line break before the mid-line `##` and a
+// space after it. Lookbehind = any non-newline/non-space/non-`#` char (CJK
+// text, punctuation, digits); lookahead = a letter (heading text). Mid-line
+// `##` before a letter is essentially never legit prose — `C## ` (C#) has a
+// space/EOL after, and `###` runs fail the `\p{L}` lookahead.
+const ATX_HEADING_MIDLINE_RE = /(?<=[^\n\s#])##(?=\p{L})/gu
 
 // LLMs sometimes glue a table header straight onto an ATX heading with no
 // newline: `##　做了什么|步骤 |结果 |`. The plain broken-heading fix above
@@ -466,14 +482,14 @@ const ATX_HEADING_BROKEN_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^\n]*)$/
 const ATX_HEADING_GLUED_TABLE_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^|\n]*)(\|[^|\n]*\|[^\n]*)$/gm
 
 /**
- * Replace a full-width space after a `##`+ heading marker with an ASCII
- * space, so `##　标题` parses as an `<h2>` instead of showing literal
- * `##　标题` text. Glued markers (`##标题`) are NOT repaired — CommonMark
- * already renders them as literal text, keeping plain prose from spuriously
- * turning into a heading. The line's leading indent is deliberately not
- * re-emitted — the pipeline preserves it separately via the `leading` slice,
- * so keeping it here would double it (2 spaces → 4 spaces = indented code
- * block).
+ * Repair ATX headings: replace a full-width space after a `##`+ marker with
+ * an ASCII space (`##　标题` → `## 标题`), and insert a space where the text
+ * is glued straight onto the marker (`##标题` → `## 标题`) so both parse as
+ * real headings instead of literal text. Glued-table rows (`##　做了什么|步骤|结果`)
+ * are split into heading + table header first. The line's leading indent is
+ * deliberately not re-emitted — the pipeline preserves it separately via the
+ * `leading` slice, so keeping it here would double it (2 spaces → 4 spaces =
+ * indented code block).
  */
 function normalizeAtxHeadings(text: string): string {
   const unglued = text.replace(
@@ -482,11 +498,19 @@ function normalizeAtxHeadings(text: string): string {
       `${prefix}${hashes} ${rest}\n${tablePart}`
   )
 
-  return unglued.replace(
+  const fixedBroken = unglued.replace(
     ATX_HEADING_BROKEN_RE,
     (_match, _indent: string, prefix: string, hashes: string, _fwSpace: string, rest: string) =>
       `${prefix}${hashes} ${rest}`
   )
+
+  return fixedBroken
+    .replace(
+      ATX_HEADING_GLUED_RE,
+      (_match, _indent: string, prefix: string, hashes: string, rest: string) =>
+        `${prefix}${hashes} ${rest}`
+    )
+    .replace(ATX_HEADING_MIDLINE_RE, '\n## ')
 }
 
 // LLMs pad emphasis with spaces/full-width spaces around the `**` markers —
@@ -511,6 +535,126 @@ function normalizeSpacedEmphasis(text: string): string {
   let out = text.replace(STRONG_PADDED_DOUBLE_RE, '**$1**')
   out = out.replace(STRONG_PADDED_OPEN_RE, '**$1**')
   return out.replace(STRONG_PADDED_CLOSE_RE, '**$1**')
+}
+
+// LLMs sometimes drop the closing `**`: `**不能。这台是 VMware NAT模式虚拟机`
+// renders as a literal `**` because the strong pair never closes. A line that
+// STARTS with `**` (≤3 spaces indent) and contains no other `**` on the line
+// is unambiguous dangling-strong intent — close it at the end of the line.
+// `***` (em-strong mix) is excluded via `(?!\*)`, and already-closed pairs
+// (`**a** …`) contain a second `**` so they're untouched.
+const DANGLING_STRONG_RE = /^( {0,3})\*\*(?!\*)([^\n]*)$/gm
+
+function closeDanglingStrongEmphasis(text: string): string {
+  return text.replace(DANGLING_STRONG_RE, (whole, indent: string, rest: string) => {
+    if (!rest.includes('**') && rest.trim()) {
+      return `${indent}**${rest}**`
+    }
+    return whole
+  })
+}
+
+// LLMs emit GFM tables whose header row has MORE columns than the separator
+// row: `证据|检查项 |结果 |含义 |` over `|---|---|---|` renders nothing — GFM
+// needs the separator to have exactly as many cells as the header. When the
+// header has more cells than the dash row, rebuild the dash row with the
+// header's cell count. Cell count = non-empty `|`-delimited segments (so both
+// `| a | b |` and `a|b` count 2).
+//
+// Models also sometimes put a BLANK LINE between the header and the dash row
+// — GFM requires them adjacent, so the blank line is removed too.
+const TABLE_DASH_LINE_RE = /^\s*\|?[\t ]*:?-+:?[\t ]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?\s*$/
+
+function cellCount(line: string): number {
+  return line
+    .trim()
+    .split('|')
+    .filter((segment) => segment.trim().length > 0).length
+}
+
+function padTableDelimiterRows(text: string): string {
+  const lines = text.split('\n')
+
+  for (let index = 0; index + 1 < lines.length; index += 1) {
+    const headerCells = cellCount(lines[index])
+    if (headerCells < 2) continue
+
+    // The dash row may sit 1 line below (normal) or 2 lines below with a blank
+    // line in between — GFM needs the header immediately followed by it.
+    let delimIndex = index + 1
+    if (delimIndex < lines.length && !lines[delimIndex].trim()) {
+      delimIndex += 1
+    }
+    if (delimIndex >= lines.length || !TABLE_DASH_LINE_RE.test(lines[delimIndex])) {
+      continue
+    }
+
+    const dashCells = cellCount(lines[delimIndex])
+    if (dashCells > 0 && dashCells < headerCells) {
+      lines[delimIndex] = `|${'---|'.repeat(headerCells)}`
+    }
+
+    if (delimIndex === index + 2) {
+      // Remove the blank line so the header + dash row form one table block.
+      lines.splice(index + 1, 1)
+      delimIndex -= 1
+    }
+
+    index = delimIndex
+  }
+
+  return lines.join('\n')
+}
+
+// LLMs glue consecutive ordered-list items onto one line — item 4's `4. `
+// runs straight into item 3's text: `…显示返回行数 +耗时4. 时间从产品成立`.
+// CommonMark only treats `4. ` as a list marker at line start, so the glued
+// item renders as part of the paragraph instead of a numbered entry. Insert
+// a line break before an inline `N. `/`N、` marker that sits right after
+// visible text. Guards:
+//   - `(?<=[^\n\s，。、；：！？）】》])` — must follow text (not a line start,
+//     whitespace, or a Chinese sentence terminator that would suggest the
+//     number is plain prose like `用时4. 5秒`)。
+//   - `(?=[ \t\u3000]+\S)` — must be followed by a space + content.
+//   - `(?![ \t\u3000]*\d)` — not a version/decimal like `2. 0` / `3. 5元`.
+//   - `\d{1,2}` — ordered-list numbers are 1–2 digits; 3-digit runs (years,
+//     IDs) are left alone.
+const GLUED_LIST_ITEM_RE = /(?<=[^\n\s，。、；：！？）】》])(\d{1,2}[.、])(?=[ \t\u3000]+\S)(?![ \t\u3000]*\d)/g
+
+// Same gluing bug for bullet lists: `- **月收益率明细表**：- **动态回撤图**`
+// — the second `- ` runs straight into the first item's text after the `：`.
+// Insert a line break before an inline `- ` that follows visible text.
+// Guards:
+//   - `(?<=[^\n\s-])` — must follow text/space-like-terminator, NOT a line
+//     start, whitespace, or another `-` (`- - ` chains are left alone).
+//   - `(?=[^\s-])` — the `- ` must be followed by non-space, non-`-` content.
+//   - `(?<![A-Za-z0-9] - [A-Za-z0-9])` — not an English dash or minus like
+//     `A - B` / `5 - 3` (letter/digit on both sides with surrounding spaces).
+const GLUED_BULLET_ITEM_RE = /(?<=[^\n\s-])(- )(?=[^\s-])(?<![A-Za-z0-9] - [A-Za-z0-9])/g
+
+// `-` glued directly to the item text with NO space: `-打开页面自动查询`,
+// and mid-line `…细节-打开…` after the model flattened the newline.
+// CommonMark needs `- ` (marker + space) at line start, so insert the missing
+// space (line start) or a line break + space (mid-line).
+//
+// Line-start guard: `-` must be followed by a letter / `*` / `_` (a bullet
+// marker, not a negative number like `-1` and not a bare `---` divider —
+// the next char would be `-`). Line-start `-foo` / `-打开` is unambiguous
+// bullet intent; hyphenated words never START with `-`.
+//
+// Mid-line guard: both sides must be Han (`节-打开`), and the following Han
+// run must be ≥4 chars — a full list item (`打开页面自动查询`), NOT a short
+// hyphenated pair like `中-美`, `港-澳`, `人-机交互` (following side is
+// 1–3 chars). English hyphens (`foo-bar`) and `T-恤` are excluded by the Han
+// lookbehind; `5-3` by the letter lookahead.
+const GLUED_BULLET_NOSPACE_LINE_START_RE = /^( {0,3})-(?=[*_\p{L}])/gmu
+const GLUED_BULLET_NOSPACE_MIDLINE_RE = /(?<=\p{Script=Han})-(?=\p{Script=Han}{4})/gu
+
+function normalizeGluedListItems(text: string): string {
+  const numbered = text.replace(GLUED_LIST_ITEM_RE, '\n$1')
+  const withSpacedBullets = numbered.replace(GLUED_BULLET_ITEM_RE, '\n$1')
+  const withNospaceLineStart = withSpacedBullets.replace(GLUED_BULLET_NOSPACE_LINE_START_RE, '$1- ')
+  return withNospaceLineStart.replace(GLUED_BULLET_NOSPACE_MIDLINE_RE, '\n- ')
 }
 
 const processCache = new Map<string, string>()
@@ -548,8 +692,14 @@ export function preprocessMarkdown(text: string): string {
       const leading = part.match(/^\s*/)?.[0] ?? ''
       const trailing = part.match(/\s*$/)?.[0] ?? ''
 
-      const transformed = normalizeSpacedEmphasis(
-        normalizeAtxHeadings(normalizeVisibleProse(normalizeProseMath(neutralizeSetextUnderlines(part))))
+      const transformed = normalizeGluedListItems(
+        normalizeSpacedEmphasis(
+          closeDanglingStrongEmphasis(
+            padTableDelimiterRows(
+              normalizeAtxHeadings(normalizeVisibleProse(normalizeProseMath(neutralizeSetextUnderlines(part))))
+            )
+          )
+        )
       )
 
       return leading + transformed + trailing
