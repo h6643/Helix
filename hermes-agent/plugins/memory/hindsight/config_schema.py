@@ -1,4 +1,4 @@
-"""Hindsight's declared config surface — rendered by the generic desktop panel."""
+"""Hindsight 的声明式配置面板 — 由通用桌面面板渲染。"""
 
 from plugins.memory.config_schema import (
     KIND_SECRET,
@@ -15,36 +15,36 @@ CONFIG_SCHEMA = ProviderConfigSchema(
     fields=(
         ProviderField(
             key="mode",
-            label="Mode",
+            label="连接方式",
             kind=KIND_SELECT,
             default="cloud",
-            description="How Hermes connects to Hindsight.",
+            description="Hermes 如何连接 Hindsight。",
             options=(
                 ProviderFieldOption(
                     "cloud",
-                    "Cloud",
-                    "Hindsight Cloud API (lightweight, just needs an API key)",
+                    "云端",
+                    "Hindsight Cloud API（轻量，只需要一个 API Key）",
                 ),
                 ProviderFieldOption(
                     "local_external",
-                    "Local External",
-                    "Connect to an existing Hindsight instance",
+                    "本地外部",
+                    "连接已有的 Hindsight 实例",
                 ),
             ),
             inline=True,
         ),
         ProviderField(
             key="api_key",
-            label="API key",
+            label="API Key",
             kind=KIND_SECRET,
             env_key="HINDSIGHT_API_KEY",
-            description="Used to authenticate with the Hindsight API.",
-            placeholder="Enter Hindsight API key",
+            description="用于向 Hindsight API 进行身份验证。",
+            placeholder="输入 Hindsight API Key",
             inline=True,
         ),
         ProviderField(
             key="api_url",
-            label="API URL",
+            label="API 地址",
             kind=KIND_TEXT,
             default="https://api.hindsight.vectorize.io",
             aliases=("apiUrl",),
@@ -53,7 +53,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         ),
         ProviderField(
             key="bank_id",
-            label="Bank ID",
+            label="存储库 ID",
             kind=KIND_TEXT,
             default="hermes",
             aliases=("bankId",),
@@ -61,14 +61,14 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         ),
         ProviderField(
             key="recall_budget",
-            label="Recall budget",
+            label="召回预算",
             kind=KIND_SELECT,
             default="mid",
             aliases=("budget",),
             options=(
-                ProviderFieldOption("low", "low"),
-                ProviderFieldOption("mid", "mid"),
-                ProviderFieldOption("high", "high"),
+                ProviderFieldOption("low", "低"),
+                ProviderFieldOption("mid", "中"),
+                ProviderFieldOption("high", "高"),
             ),
             inline=True,
         ),

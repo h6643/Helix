@@ -1,4 +1,4 @@
-"""Honcho's declared config surface — rendered by the generic desktop panel."""
+"""Honcho 的声明式配置面板 — 由通用桌面面板渲染。"""
 
 from plugins.memory.config_schema import (
     KIND_BOOL,
@@ -14,13 +14,13 @@ from plugins.memory.config_schema import (
 )
 
 
-# Reasoning effort levels shared by dialectic-related selects.
+# 辩证（dialectic）相关下拉框共用的推理强度档位。
 _REASONING_LEVELS = (
-    ProviderFieldOption("minimal", "Minimal"),
-    ProviderFieldOption("low", "Low"),
-    ProviderFieldOption("medium", "Medium"),
-    ProviderFieldOption("high", "High"),
-    ProviderFieldOption("max", "Max"),
+    ProviderFieldOption("minimal", "最低"),
+    ProviderFieldOption("low", "低"),
+    ProviderFieldOption("medium", "中"),
+    ProviderFieldOption("high", "高"),
+    ProviderFieldOption("max", "最高"),
 )
 
 
@@ -30,16 +30,16 @@ CONFIG_SCHEMA = ProviderConfigSchema(
     storage=STORAGE_HONCHO_HOST_BLOCK,
     docs_url="https://docs.honcho.dev/v3/guides/integrations/hermes",
     fields=(
-        # — Connection —
+        # — 连接 —
         ProviderField(
             key="apiKey",
-            label="API key",
+            label="API Key",
             kind=KIND_SECRET,
             env_key="HONCHO_API_KEY",
-            description="Authenticate with Honcho Cloud. Not needed for a self-hosted base URL.",
-            placeholder="Enter Honcho API key",
+            description="用于向 Honcho Cloud 进行身份验证。自建 base URL 时无需填写。",
+            placeholder="输入 Honcho API Key",
             inline=True,
-            group="Connection",
+            group="连接",
         ),
         ProviderField(
             key="baseUrl",
@@ -47,278 +47,278 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             kind=KIND_TEXT,
             aliases=("base_url",),
             env_fallbacks=("HONCHO_BASE_URL",),
-            description="Self-hosted Honcho URL. Overrides the environment when set.",
-            placeholder="https://… (self-hosted)",
+            description="自建 Honcho 服务的地址。设置后覆盖环境变量。",
+            placeholder="https://…（自建地址）",
             inline=True,
-            group="Connection",
+            group="连接",
             scope="root",
         ),
         ProviderField(
             key="environment",
-            label="Environment",
+            label="环境",
             kind=KIND_SELECT,
             default="production",
             env_fallbacks=("HONCHO_ENVIRONMENT",),
-            description="Honcho environment. Ignored when a base URL is set.",
+            description="Honcho 环境。设置了 base URL 时忽略此项。",
             options=(
-                ProviderFieldOption("production", "Cloud"),
-                ProviderFieldOption("local", "Local"),
+                ProviderFieldOption("production", "云端"),
+                ProviderFieldOption("local", "本地"),
             ),
             inline=True,
-            group="Connection",
+            group="连接",
         ),
         ProviderField(
             key="workspace",
-            label="Workspace",
+            label="工作区",
             kind=KIND_TEXT,
-            description="Honcho workspace ID. Defaults to the profile host.",
+            description="Honcho 工作区 ID。默认使用当前配置的主机名。",
             inline=True,
-            group="Connection",
+            group="连接",
         ),
-        # — Identity —
+        # — 身份 —
         ProviderField(
             key="peerName",
-            label="Peer name",
+            label="用户 Peer 名",
             kind=KIND_TEXT,
-            description="Your stable user peer. Unifies memory across platforms for single-user setups.",
-            placeholder="e.g. eri",
+            description="你的稳定用户 Peer。单用户场景下跨平台统一记忆。",
+            placeholder="例如 eri",
             inline=True,
-            group="Identity",
+            group="身份",
         ),
         ProviderField(
             key="aiPeer",
-            label="AI peer",
+            label="AI Peer 名",
             kind=KIND_TEXT,
-            description="The AI-side peer name. Defaults to the profile host.",
+            description="AI 侧的 Peer 名。默认使用当前配置的主机名。",
             inline=True,
-            group="Identity",
+            group="身份",
         ),
-        # — Session —
+        # — 会话 —
         ProviderField(
             key="sessionStrategy",
-            label="Session strategy",
+            label="会话策略",
             kind=KIND_SELECT,
             default="per-directory",
-            description="How conversations map to Honcho sessions.",
+            description="对话如何映射到 Honcho 会话。",
             info=(
-                "Per session: every conversation gets its own Honcho session. "
-                "Per directory: conversations from the same working directory share one. "
-                "Per repo: conversations from the same git repo share one. "
-                "Global: everything shares a single session."
+                "按会话：每个对话使用独立的 Honcho 会话。"
+                "按目录：同一工作目录的对话共享一个会话。"
+                "按仓库：同一 git 仓库的对话共享一个会话。"
+                "全局：所有对话共享一个会话。"
             ),
             options=(
-                ProviderFieldOption("per-session", "Per session"),
-                ProviderFieldOption("per-directory", "Per directory"),
-                ProviderFieldOption("per-repo", "Per repo"),
-                ProviderFieldOption("global", "Global"),
+                ProviderFieldOption("per-session", "按会话"),
+                ProviderFieldOption("per-directory", "按目录"),
+                ProviderFieldOption("per-repo", "按仓库"),
+                ProviderFieldOption("global", "全局"),
             ),
             inline=True,
-            group="Session",
+            group="会话",
         ),
-        # —————— Full-config-only fields below (inline=False) ——————
-        # — Connection —
+        # —————— 以下为完整配置弹窗中的字段（inline=False） ——————
+        # — 连接 —
         ProviderField(
             key="timeout",
-            label="Request timeout",
+            label="请求超时",
             kind=KIND_NUMBER,
             aliases=("requestTimeout",),
             env_fallbacks=("HONCHO_TIMEOUT",),
-            description="Request timeout in seconds for Honcho HTTP calls. Blank uses the default.",
+            description="Honcho HTTP 请求的超时秒数。留空使用默认值。",
             placeholder="30",
-            group="Connection",
+            group="连接",
             scope="root",
         ),
-        # — Identity —
+        # — 身份 —
         ProviderField(
             key="pinUserPeer",
-            label="Pin user peer",
+            label="固定用户 Peer",
             kind=KIND_BOOL,
             default="false",
             aliases=("pinPeerName",),
-            description="Pin the user peer to the peer name, ignoring gateway runtime identity. Unifies memory for single-user setups.",
-            group="Identity",
+            description="把用户 Peer 固定为 peer 名，忽略网关运行时的身份。单用户场景下统一记忆。",
+            group="身份",
         ),
         ProviderField(
             key="runtimePeerPrefix",
-            label="Runtime peer prefix",
+            label="运行时 Peer 前缀",
             kind=KIND_TEXT,
-            description="Prefix applied to unknown gateway runtime user IDs.",
-            placeholder="e.g. telegram_",
-            group="Identity",
+            description="应用到未知网关运行时用户 ID 上的前缀。",
+            placeholder="例如 telegram_",
+            group="身份",
         ),
         ProviderField(
             key="userPeerAliases",
-            label="User peer aliases",
+            label="用户 Peer 别名",
             kind=KIND_JSON,
-            description="Map gateway runtime user IDs to stable Honcho peers.",
+            description="把网关运行时用户 ID 映射到稳定的 Honcho Peer。",
             placeholder='{"telegram_123": "eri"}',
-            group="Identity",
+            group="身份",
         ),
-        # — Session —
+        # — 会话 —
         ProviderField(
             key="sessionPeerPrefix",
-            label="Session peer prefix",
+            label="会话 Peer 前缀",
             kind=KIND_BOOL,
             default="false",
-            description="Prefix session peer names with the host.",
-            group="Session",
+            description="为会话 Peer 名加上主机名前缀。",
+            group="会话",
         ),
         ProviderField(
             key="sessions",
-            label="Session overrides",
+            label="会话覆盖",
             kind=KIND_JSON,
-            description="Explicit session ID overrides keyed by resolver.",
+            description="按解析器显式覆盖会话 ID。",
             placeholder='{"key": "session-id"}',
-            group="Session",
+            group="会话",
             scope="root",
         ),
-        # — Message writing —
+        # — 消息写入 —
         ProviderField(
             key="saveMessages",
-            label="Save messages",
+            label="保存消息",
             kind=KIND_BOOL,
             default="true",
-            description="Persist conversation messages to Honcho.",
-            group="Message writing",
+            description="把对话消息持久化到 Honcho。",
+            group="消息写入",
         ),
         ProviderField(
             key="writeFrequency",
-            label="Write frequency",
+            label="写入频率",
             kind=KIND_TEXT,
             default="async",
-            description="When to flush messages: async, turn, session, or every N turns.",
+            description="消息刷写时机：async、turn、session，或每 N 轮。",
             info=(
-                "async: write in the background as messages arrive. "
-                "turn: flush after each turn. session: flush when the session ends. "
-                "A number N flushes every N turns."
+                "async：消息到达后在后台写入。"
+                "turn：每轮结束后刷写。session：会话结束时刷写。"
+                "数字 N：每 N 轮刷写一次。"
             ),
             placeholder="async | turn | session | N",
-            group="Message writing",
+            group="消息写入",
         ),
-        # — Dialectic —
+        # — 辩证（Dialectic） —
         ProviderField(
             key="dialecticReasoningLevel",
-            label="Reasoning level",
+            label="推理强度",
             kind=KIND_SELECT,
             default="low",
-            description="Reasoning effort for dialectic (peer.chat) calls.",
+            description="辩证（peer.chat）调用的推理强度。",
             options=_REASONING_LEVELS,
-            group="Dialectic",
+            group="辩证",
         ),
         ProviderField(
             key="dialecticDynamic",
-            label="Dynamic reasoning",
+            label="动态推理",
             kind=KIND_BOOL,
             default="true",
-            description="Let the model override the reasoning level per call.",
-            group="Dialectic",
+            description="允许模型在每次调用时自行调整推理强度。",
+            group="辩证",
         ),
         ProviderField(
             key="dialecticMaxChars",
-            label="Max result chars",
+            label="结果最大字符数",
             kind=KIND_NUMBER,
-            description="Max chars of dialectic result injected into the system prompt.",
+            description="辩证结果注入系统提示词的最大字符数。",
             placeholder="1200",
-            group="Dialectic",
+            group="辩证",
         ),
         ProviderField(
             key="dialecticDepth",
-            label="Depth",
+            label="轮次深度",
             kind=KIND_NUMBER,
-            description="Dialectic passes per cycle (1–3).",
+            description="每轮辩证循环的轮数（1–3）。",
             placeholder="1",
-            group="Dialectic",
+            group="辩证",
         ),
         ProviderField(
             key="dialecticDepthLevels",
-            label="Per-pass levels",
+            label="每轮强度",
             kind=KIND_JSON,
-            description="Reasoning level per pass; array length matches depth.",
+            description="每一轮的推理强度；数组长度需与深度一致。",
             placeholder='["low", "medium"]',
-            group="Dialectic",
+            group="辩证",
         ),
         ProviderField(
             key="dialecticMaxInputChars",
-            label="Max input chars",
+            label="输入最大字符数",
             kind=KIND_NUMBER,
-            description="Max chars of query input sent to peer.chat().",
+            description="发送给 peer.chat() 的查询输入的最大字符数。",
             placeholder="10000",
-            group="Dialectic",
+            group="辩证",
         ),
-        # — Reasoning —
+        # — 推理 —
         ProviderField(
             key="reasoningHeuristic",
-            label="Reasoning heuristic",
+            label="推理启发式",
             kind=KIND_BOOL,
             default="true",
-            description="Scale the reasoning level up on longer queries.",
-            group="Reasoning",
+            description="查询较长时自动上调推理强度。",
+            group="推理",
         ),
         ProviderField(
             key="reasoningLevelCap",
-            label="Reasoning level cap",
+            label="推理强度上限",
             kind=KIND_SELECT,
             default="high",
-            description="Ceiling for the heuristic-selected reasoning level.",
+            description="启发式选择推理强度的上限。",
             options=_REASONING_LEVELS,
-            group="Reasoning",
+            group="推理",
         ),
-        # — Recall —
+        # — 召回 —
         ProviderField(
             key="recallMode",
-            label="Recall mode",
+            label="召回模式",
             kind=KIND_SELECT,
             default="hybrid",
-            description="How memory retrieval works: hybrid, context-only, or tools-only.",
+            description="记忆检索方式：混合、仅上下文、或仅工具。",
             info=(
-                "Hybrid: auto-injected context plus on-demand memory tools. "
-                "Context only: injection without tools. "
-                "Tools only: the model queries memory explicitly, nothing is injected."
+                "混合：自动注入上下文，外加按需的记忆工具。"
+                "仅上下文：只注入，不提供工具。"
+                "仅工具：模型显式查询记忆，不自动注入。"
             ),
             options=(
-                ProviderFieldOption("hybrid", "Hybrid"),
-                ProviderFieldOption("context", "Context only"),
-                ProviderFieldOption("tools", "Tools only"),
+                ProviderFieldOption("hybrid", "混合"),
+                ProviderFieldOption("context", "仅上下文"),
+                ProviderFieldOption("tools", "仅工具"),
             ),
-            group="Recall",
+            group="召回",
         ),
         ProviderField(
             key="contextTokens",
-            label="Context token cap",
+            label="上下文 Token 上限",
             kind=KIND_NUMBER,
-            description="Cap on auto-injected context tokens. Blank leaves it uncapped.",
-            placeholder="(uncapped)",
-            group="Recall",
+            description="自动注入的上下文 Token 上限。留空不设上限。",
+            placeholder="（不设上限）",
+            group="召回",
         ),
         ProviderField(
             key="initOnSessionStart",
-            label="Eager init",
+            label="会话启动即初始化",
             kind=KIND_BOOL,
             default="false",
-            description="Initialize the session eagerly in tools mode instead of on first tool call.",
-            group="Recall",
+            description="在工具模式下会话开始时就初始化，而不是等第一次工具调用。",
+            group="召回",
         ),
-        # — Limits —
+        # — 限制 —
         ProviderField(
             key="messageMaxChars",
-            label="Message max chars",
+            label="消息最大字符数",
             kind=KIND_NUMBER,
-            description="Max chars per message sent to Honcho.",
+            description="发送给 Honcho 的每条消息的最大字符数。",
             placeholder="25000",
-            group="Limits",
+            group="限制",
         ),
-        # — Observation —
+        # — 观测 —
         ProviderField(
             key="observationMode",
-            label="Observation mode",
+            label="观测模式",
             kind=KIND_SELECT,
             default="directional",
-            description="Per-peer observation preset. Directional observes all directions; unified shares one view.",
+            description="按 Peer 的观测预设。Directional 分别观测各方向；unified 共享同一视图。",
             options=(
-                ProviderFieldOption("directional", "Directional"),
-                ProviderFieldOption("unified", "Unified"),
+                ProviderFieldOption("directional", "定向观测"),
+                ProviderFieldOption("unified", "统一视图"),
             ),
-            group="Observation",
+            group="观测",
         ),
     ),
 )
