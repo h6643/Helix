@@ -73,7 +73,7 @@ fn configure_slave(slave: std::os::unix::io::RawFd) -> Result<(), String> {
     termios.c_iflag |= libc::ICRNL | libc::IXON;
     termios.c_oflag |= libc::OPOST | libc::ONLCR;
     termios.c_lflag |= libc::ISIG;
-    if unsafe { libc::tcsetattr(slave, libc::TCSANOW, &termios) } != 0 {
+    if unsafe { libc::tcsetattr(slave, libc::TCSANOW, &mut termios) } != 0 {
         return Err(last_os_error("tcsetattr"));
     }
     Ok(())
@@ -338,11 +338,18 @@ pub fn terminal_kill() -> Result<Value, String> {
 // On Windows there is no POSIX PTY, so the interactive terminal is powered by
 // the Windows Pseudo Console (ConPTY) API. The flow:
 //   1. create two anon pipes (in/out) shared with the pseudo console,
-//   2. CreatePseudoConsole(COORD, inRead, outWrite) -> HPCON,
-//   3. spawn cmd.exe attached to the pseudo console,
+//   2. CreatePseudoConsole(COORD, inRead, outWrite, 0) -> HPCON,
+//   3. attach the HPCON to a proc-thread attribute list and spawn cmd.exe,
 //   4. read the out-pipe in a thread and push bytes as `terminal:data`.
 // Handles are stored directly; the session struct is Send+Sync so it can live
 // in a global Mutex.
+//
+// Written against `windows` 0.61 (the same major version Tauri 2 pulls in),
+// so there is exactly one `windows_core` in the graph and no `PCWSTR` version
+// clash. `HANDLE`/`HPCON` are pointer-backed (not `Send`/`Sync` in 0.51+), so
+// `WindowsTerminalSession` is explicitly marked `Send`/`Sync` — the values are
+// plain OS handles safe to move between threads and all access is serialized
+// by the Mutex.
 // ===========================================================================
 
 #[cfg(windows)]
@@ -356,7 +363,7 @@ use tauri::Emitter;
 #[cfg(windows)]
 use windows::core::{PCWSTR, PWSTR};
 #[cfg(windows)]
-use windows::Win32::Foundation::{CloseHandle, FALSE, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 #[cfg(windows)]
@@ -364,14 +371,15 @@ use windows::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole, COORD,
 };
 #[cfg(windows)]
-use windows::Win32::System::IO::{ReadFile, WriteFile};
+use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 #[cfg(windows)]
 use windows::Win32::System::Pipes::CreatePipe;
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
-    CreateProcessW, InitializeStartupInfoAttachedToPseudoConsole, PROCESS_INFORMATION,
-    STARTUPINFO, STARTUPINFOEXW, TerminateProcess, CREATE_NO_WINDOW,
-    EXTENDED_STARTUPINFO_PRESENT,
+    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+    STARTUPINFOEXW, STARTUPINFOW, TerminateProcess, CREATE_NO_WINDOW,
+    EXTENDED_STARTUPINFO_PRESENT, UpdateProcThreadAttribute,
 };
 
 #[cfg(windows)]
@@ -387,11 +395,15 @@ struct WindowsTerminalSession {
     h_out_read: HANDLE,
     process: PROCESS_INFORMATION,
     stop: Arc<AtomicBool>,
-    // NB: the proc-thread attribute list allocated by
-    // InitializeStartupInfoAttachedToPseudoConsole is intentionally leaked (not
-    // freed) so this struct stays Send+Sync. It is a tiny one-time allocation
-    // per terminal session.
 }
+
+// `HANDLE`/`HPCON` are pointer-backed and not `Send`/`Sync` in windows 0.51+,
+// but the values are just OS handles that are safe to move between threads;
+// all access is serialized by the `Mutex` below.
+#[cfg(windows)]
+unsafe impl Send for WindowsTerminalSession {}
+#[cfg(windows)]
+unsafe impl Sync for WindowsTerminalSession {}
 
 #[cfg(windows)]
 static WINDOWS_TERMINAL: OnceLock<Mutex<Option<WindowsTerminalSession>>> = OnceLock::new();
@@ -418,7 +430,10 @@ fn kill_current() {
 }
 
 #[cfg(windows)]
-fn read_loop(h_out_read: HANDLE, stop: Arc<AtomicBool>) {
+fn read_loop(h_out_read: usize, stop: Arc<AtomicBool>) {
+    // windows 0.61 的 `HANDLE` 是 `*mut c_void`（非 Send），不能直接 move 进
+    // `thread::spawn` 的闭包；这里以 `usize` 传句柄，进函数再还原。
+    let h_out_read = HANDLE(h_out_read as *mut std::ffi::c_void);
     let mut buf = [0u8; 8192];
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -428,13 +443,12 @@ fn read_loop(h_out_read: HANDLE, stop: Arc<AtomicBool>) {
         let ok = unsafe {
             ReadFile(
                 h_out_read,
-                buf.as_mut_ptr() as *mut std::ffi::c_void,
-                buf.len() as u32,
-                &mut bytes_read,
+                Some(&mut buf),
+                Some(&mut bytes_read),
                 None,
             )
         };
-        if !ok.is_ok() || bytes_read == 0 {
+        if ok.is_err() || bytes_read == 0 {
             break;
         }
         emit_terminal_data(&buf[..bytes_read as usize]);
@@ -458,43 +472,71 @@ pub fn terminal_start(
         // error which we safely ignore — ConPTY still functions.
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-        let mut h_in_read: HANDLE = HANDLE::NULL;
-        let mut h_in_write: HANDLE = HANDLE::NULL;
-        let mut h_out_read: HANDLE = HANDLE::NULL;
-        let mut h_out_write: HANDLE = HANDLE::NULL;
+        let mut h_in_read: HANDLE = HANDLE::default();
+        let mut h_in_write: HANDLE = HANDLE::default();
+        let mut h_out_read: HANDLE = HANDLE::default();
+        let mut h_out_write: HANDLE = HANDLE::default();
 
-        if !CreatePipe(&mut h_in_read, &mut h_in_write, None, 0).is_ok() {
+        if CreatePipe(&mut h_in_read, &mut h_in_write, None, 0).is_err() {
             return Err("failed to create conpty input pipe".to_string());
         }
-        if !CreatePipe(&mut h_out_read, &mut h_out_write, None, 0).is_ok() {
+        if CreatePipe(&mut h_out_read, &mut h_out_write, None, 0).is_err() {
             let _ = CloseHandle(h_in_read);
             let _ = CloseHandle(h_in_write);
             return Err("failed to create conpty output pipe".to_string());
         }
 
         let size = COORD { X: cols, Y: rows };
-        let mut hpc: HPCON = std::mem::zeroed();
-        if CreatePseudoConsole(size, h_in_read, h_out_write, 0, &mut hpc).is_err() {
-            let _ = CloseHandle(h_in_read);
-            let _ = CloseHandle(h_in_write);
-            let _ = CloseHandle(h_out_read);
-            let _ = CloseHandle(h_out_write);
-            return Err("CreatePseudoConsole failed".to_string());
-        }
+        let hpc = match CreatePseudoConsole(size, h_in_read, h_out_write, 0) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = CloseHandle(h_in_read);
+                let _ = CloseHandle(h_in_write);
+                let _ = CloseHandle(h_out_read);
+                let _ = CloseHandle(h_out_write);
+                return Err(format!("CreatePseudoConsole failed: {e}"));
+            }
+        };
 
         // ConPTY duplicates the endpoints it needs; close our local copies so
         // EOF is delivered when the shell exits.
         let _ = CloseHandle(h_in_read);
         let _ = CloseHandle(h_out_write);
 
+        // Attach the pseudo console to the new process via a proc-thread
+        // attribute list (InitializeStartupInfoAttachedToPseudoConsole was
+        // removed in windows 0.58+).
         let mut si_ex = STARTUPINFOEXW::default();
         si_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-        if InitializeStartupInfoAttachedToPseudoConsole(&mut si_ex, hpc).is_err() {
+
+        let mut attr_size: usize = 0;
+        let _ = InitializeProcThreadAttributeList(None, 1, None, &mut attr_size);
+        let mut attr_buf: Vec<usize> = vec![0usize; (attr_size + 7) / 8];
+        let attr_list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut std::ffi::c_void);
+        if InitializeProcThreadAttributeList(Some(attr_list), 1, None, &mut attr_size).is_err() {
             let _ = CloseHandle(h_in_write);
             let _ = CloseHandle(h_out_read);
             ClosePseudoConsole(hpc);
-            return Err("InitializeStartupInfoAttachedToPseudoConsole failed".to_string());
+            return Err("InitializeProcThreadAttributeList failed".to_string());
         }
+        if UpdateProcThreadAttribute(
+            attr_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+            Some(&hpc as *const HPCON as *const std::ffi::c_void),
+            std::mem::size_of::<HPCON>(),
+            None,
+            None,
+        )
+        .is_err()
+        {
+            DeleteProcThreadAttributeList(attr_list);
+            let _ = CloseHandle(h_in_write);
+            let _ = CloseHandle(h_out_read);
+            ClosePseudoConsole(hpc);
+            return Err("UpdateProcThreadAttribute failed".to_string());
+        }
+        si_ex.lpAttributeList = attr_list;
 
         let mut cmd_line: Vec<u16> = "cmd.exe\0".encode_utf16().collect();
         let cwd_wide: Option<Vec<u16>> = cwd
@@ -506,17 +548,21 @@ pub fn terminal_start(
         let creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
         let ok = CreateProcessW(
             None,
-            PWSTR(cmd_line.as_mut_ptr()),
+            Some(PWSTR(cmd_line.as_mut_ptr())),
             None,
             None,
-            FALSE,
+            false,
             creation_flags,
             None,
-            cwd_pcwstr,
-            &si_ex as *const STARTUPINFOEXW as *const STARTUPINFO,
+            // windows-core 0.61 的 `Param<PCWSTR>` 只实现于 `Option<&T>`
+            //（值类型 `Option<PCWSTR>` 没有 Param 实现），传引用。
+            cwd_pcwstr.as_ref(),
+            &si_ex as *const STARTUPINFOEXW as *const STARTUPINFOW,
             &mut pi,
         );
-        if !ok.is_ok() {
+        // The attribute list is only needed to spawn the process.
+        DeleteProcThreadAttributeList(attr_list);
+        if ok.is_err() {
             let _ = CloseHandle(h_in_write);
             let _ = CloseHandle(h_out_read);
             ClosePseudoConsole(hpc);
@@ -525,7 +571,8 @@ pub fn terminal_start(
 
         let stop = Arc::new(AtomicBool::new(false));
         let reader_stop = Arc::clone(&stop);
-        thread::spawn(move || read_loop(h_out_read, reader_stop));
+        // HANDLE 非 Send，按 usize 传进读线程（read_loop 内还原）。
+        thread::spawn(move || read_loop(h_out_read.0 as usize, reader_stop));
 
         *windows_terminal_state().lock().unwrap() = Some(WindowsTerminalSession {
             hpc,
@@ -552,13 +599,12 @@ pub fn terminal_write(data: String) -> Result<(), String> {
                 let ok = unsafe {
                     WriteFile(
                         session.h_in_write,
-                        bytes[offset..].as_ptr() as *const std::ffi::c_void,
-                        (bytes.len() - offset) as u32,
-                        &mut written,
+                        Some(&bytes[offset..]),
+                        Some(&mut written),
                         None,
                     )
                 };
-                if !ok.is_ok() {
+                if ok.is_err() {
                     return Err("failed to write to terminal".to_string());
                 }
                 offset += written as usize;

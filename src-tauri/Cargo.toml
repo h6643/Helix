@@ -1,6 +1,6 @@
 [package]
 name = "helix"
-version = "0.1.14"
+version = "0.1.17"
 description = "Helix — AI coding assistant (Tauri rewrite of the Electron shell)"
 authors = ["hyt"]
 edition = "2021"
@@ -44,24 +44,30 @@ strip = true
 # Windows-only: powers the interactive terminal via the ConPTY API.
 # Gated to cfg(windows) so the crate is never compiled on the Linux target.
 #
-# Pinned to 0.51 on purpose. terminal.rs (the ConPTY backend) was written
-# against the <=0.51 Win32 API:
-#   - CreatePseudoConsole(size, hIn, hOut, 0, &mut hpc)  -> ()  (5-arg; 0.52+
-#     changed it to return HPCON, i.e. 4-arg)
-#   - HANDLE::NULL exists, and HANDLE is isize-based so it is Send+Sync
-#     (0.52+ made HANDLE = *mut c_void, which is NOT Send -> the global
-#     WINDOWS_TERMINAL static stops compiling)
-#   - CreatePipe / CreateProcessW are gated behind `Win32_Security`, which must
-#     be enabled here or they fail to resolve.
-# DO NOT bump this version without also rewriting terminal.rs for the new API.
+# Pinned to 0.61 to match the version Tauri 2 pulls in. Using the SAME major
+# version as Tauri means there is exactly ONE `windows_core` in the dependency
+# graph, which avoids the `Option<PCWSTR>: Param<...>` / `Send` clashes that
+# arose when terminal.rs was built against a different `windows` major than
+# Tauri's. terminal.rs was fully rewritten for the 0.61 Win32 API:
+#   - CreatePseudoConsole(size, hIn, hOut, 0) -> Result<HPCON>  (4-arg)
+#   - HANDLE / HPCON are *mut c_void -> not Send/Sync, so
+#     WindowsTerminalSession is explicitly `unsafe impl Send/Sync`
+#   - InitializeStartupInfoAttachedToPseudoConsole was removed in 0.58+; the
+#     pseudo console is now attached via a proc-thread attribute list
+#     (InitializeProcThreadAttributeList + UpdateProcThreadAttribute with
+#     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE)
+#   - ReadFile/WriteFile moved to Win32::Storage::FileSystem (Win32_Storage_FileSystem)
+#   - CreateProcessW: lpCommandLine: Option<PWSTR>, bInheritHandles: bool,
+#     lpStartupInfo: *const STARTUPINFOW
+# DO NOT bump this version without also adjusting terminal.rs for the new API.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.51", features = [
+windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_System_Com",
-    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
     "Win32_Security",
 ] }
 
