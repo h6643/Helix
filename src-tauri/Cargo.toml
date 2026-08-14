@@ -43,14 +43,26 @@ strip = true
 
 # Windows-only: powers the interactive terminal via the ConPTY API.
 # Gated to cfg(windows) so the crate is never compiled on the Linux target.
+#
+# Pinned to 0.51 on purpose. terminal.rs (the ConPTY backend) was written
+# against the <=0.51 Win32 API:
+#   - CreatePseudoConsole(size, hIn, hOut, 0, &mut hpc)  -> ()  (5-arg; 0.52+
+#     changed it to return HPCON, i.e. 4-arg)
+#   - HANDLE::NULL exists, and HANDLE is isize-based so it is Send+Sync
+#     (0.52+ made HANDLE = *mut c_void, which is NOT Send -> the global
+#     WINDOWS_TERMINAL static stops compiling)
+#   - CreatePipe / CreateProcessW are gated behind `Win32_Security`, which must
+#     be enabled here or they fail to resolve.
+# DO NOT bump this version without also rewriting terminal.rs for the new API.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.51", features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_System_Com",
     "Win32_System_IO",
+    "Win32_Security",
 ] }
 
 # Linux-only: renderer HTTP proxy via the WebKitGTK default WebContext
