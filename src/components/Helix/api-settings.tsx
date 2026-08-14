@@ -1405,7 +1405,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                           onFocus={() => setCustomInputFocused(true)}
                           onBlur={handleBlurCustomInput}
                           placeholder="输入 Provider 名称"
-                          className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                          className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                           autoFocus
                         />
                         <button
@@ -1428,7 +1428,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                       value={localConfig.baseUrl}
                       onChange={(e) => setLocalConfig(prev => ({ ...prev, baseUrl: e.target.value }))}
                       placeholder="https://api.openai.com/v1"
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                     />
                   </div>
 
@@ -1441,7 +1441,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         value={localConfig.apiKey}
                         onChange={(e) => setLocalConfig(prev => ({ ...prev, apiKey: e.target.value }))}
                         placeholder="sk-..."
-                        className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                       />
                       <button
                         type="button"
