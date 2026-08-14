@@ -300,11 +300,11 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="size-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="size-6 text-muted-foreground/70 hover:text-foreground transition-colors"
                     onClick={(e) => { e.stopPropagation(); setExportMenuSession(exportMenuSession?.id === session.id ? null : session) }}
                     data-tip="导出"
                   >
-                    <Download className="size-3 text-muted-foreground" />
+                    <Download className="size-3" />
                   </Button>
                   <Button
                     variant="ghost"
