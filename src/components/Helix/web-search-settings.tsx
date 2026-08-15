@@ -155,23 +155,28 @@ export function WebSearchSettings() {
     loadConfig()
   }, [])
 
-  const save = async () => {
-    setSaving(true)
+  // 核心持久化：把当前激活 providers / apiKeys 写回后端 config.yaml（Tauri）
+  // 或 localStorage（Web 环境）。silent=true 时不弹 toast（用于开关即时保存）。
+  const persist = async (
+    providers: string[],
+    keys: Record<string, string>,
+    silent = false,
+  ): Promise<boolean> => {
+    // Determine search_backend from active providers
+    let searchBackend = ''
+    if (providers.includes('tavily')) searchBackend = 'tavily'
+    else if (providers.includes('brave-free')) searchBackend = 'brave'
+    else if (providers.includes('exa')) searchBackend = 'exa'
+    else if (providers.includes('ddgs')) searchBackend = 'ddgs'
+    else if (providers.includes('searxng')) searchBackend = 'searxng'
+
+    const config = {
+      backend: searchBackend,
+      search_backend: searchBackend,
+      apiKeys: keys,
+    }
+
     try {
-      // Determine search_backend from active providers
-      let searchBackend = ''
-      if (activeProviders.includes('tavily')) searchBackend = 'tavily'
-      else if (activeProviders.includes('brave-free')) searchBackend = 'brave'
-      else if (activeProviders.includes('exa')) searchBackend = 'exa'
-      else if (activeProviders.includes('ddgs')) searchBackend = 'ddgs'
-      else if (activeProviders.includes('searxng')) searchBackend = 'searxng'
-
-      const config = {
-        backend: searchBackend,
-        search_backend: searchBackend,
-        apiKeys: apiKeys,
-      }
-
       if (isElectron()) {
         const api = (window as any).electron?.webSearch
         if (api?.setConfig) {
@@ -180,23 +185,31 @@ export function WebSearchSettings() {
       } else {
         // Fallback to localStorage
         localStorage.setItem('helix-web-search', JSON.stringify({
-          activeProviders,
-          apiKeys,
+          activeProviders: providers,
+          apiKeys: keys,
         }))
         // Also set environment variables for the current session
-        for (const [key, value] of Object.entries(apiKeys)) {
+        for (const [key, value] of Object.entries(keys)) {
           if (value) {
             process.env[key] = value
           }
         }
       }
 
-      showToast({ type: 'success', title: '搜索配置已保存' })
+      if (!silent) showToast({ type: 'success', title: '搜索配置已保存' })
+      return true
     } catch (e) {
-      showToast({ type: 'error', title: '保存失败' })
-    } finally {
-      setSaving(false)
+      console.error('[WebSearchSettings] save failed:', e)
+      if (!silent) showToast({ type: 'error', title: '保存失败' })
+      return false
     }
+  }
+
+  // 显式「保存」按钮（仍保留，作为整体确认入口）
+  const save = async () => {
+    setSaving(true)
+    await persist(activeProviders, apiKeys, false)
+    setSaving(false)
   }
 
   const displayProviders = buildDisplayProviders(availableProviders)
@@ -231,11 +244,12 @@ export function WebSearchSettings() {
                     <Toggle
                       enabled={isSelected}
                       onToggle={() => {
-                        if (isSelected) {
-                          setActiveProviders(activeProviders.filter(id => id !== provider.id))
-                        } else {
-                          setActiveProviders([...activeProviders, provider.id])
-                        }
+                        const next = isSelected
+                          ? activeProviders.filter(id => id !== provider.id)
+                          : [...activeProviders, provider.id]
+                        setActiveProviders(next)
+                        // 开关切换即时落盘：避免离开设置页后组件重挂载读回旧值导致开关复位
+                        void persist(next, apiKeys, true)
                       }}
                     />
                   </div>
