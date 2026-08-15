@@ -16,7 +16,6 @@ export default defineConfig([
     'out/**',
     'build/**',
     'release/**',
-    'electron/**',
     'src-tauri/**',
     'hermes-agent/**',
     '*.config.js',
