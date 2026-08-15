@@ -60,6 +60,27 @@ function loadShiki(): Promise<ShikiModule> {
   return shikiPromise
 }
 
+// ── Highlight cache ─────────────────────────────────────────────────────────
+// Switching conversations remounts every message (new chatMessages objects
+// defeat React.memo), which used to re-run shiki's codeToHtml for EVERY code
+// block in the target conversation — the "切换对话卡顿" bottleneck. Cache the
+// highlight result per (language, code) so a re-mount just reads the finished
+// promise instead of re-highlighting. Values are promises so concurrent mounts
+// of the same block share one highlight; bounded LRU-style so long sessions
+// can't grow it without limit.
+const HIGHLIGHT_CACHE_MAX = 200
+const highlightCache = new Map<string, Promise<string>>()
+
+function cacheHighlight(key: string, p: Promise<string>): Promise<string> {
+  highlightCache.delete(key) // refresh insertion order (LRU)
+  highlightCache.set(key, p)
+  if (highlightCache.size > HIGHLIGHT_CACHE_MAX) {
+    const oldest = highlightCache.keys().next().value
+    if (oldest !== undefined && oldest !== key) highlightCache.delete(oldest)
+  }
+  return p
+}
+
 /** Pull just the `<code>…</code>` token markup out of shiki's full `<pre>` output. */
 function codeInnerHtml(html: string): string {
   const codeOpen = html.indexOf('<code')
@@ -91,24 +112,32 @@ export const HighlightedCode = memo(function HighlightedCode({ code, language }:
     }
 
     let cancelled = false
+    const key = `${language}\u0000${trimmed}`
+    const apply = (rendered: string) => {
+      if (!cancelled) setHtml(codeInnerHtml(rendered))
+    }
+    const fail = () => {
+      if (!cancelled) setHtml(null)
+    }
 
-    void loadShiki()
-      .then(shiki => shiki.codeToHtml(trimmed, {
-        lang: language,
-        themes: SHIKI_THEMES,
-        defaultColor: 'light-dark()',
-        colorReplacements: SHIKI_COLOR_REPLACEMENTS
-      }))
-      .then(rendered => {
-        if (!cancelled) {
-          setHtml(codeInnerHtml(rendered))
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setHtml(null)
-        }
-      })
+    let highlight: Promise<string> | undefined = highlightCache.get(key)
+    if (!highlight) {
+      // Miss → run codeToHtml once, share the promise with any concurrent
+      // mount of the same block, and drop the entry on failure so a later
+      // mount can retry instead of pinning a dead promise.
+      highlight = cacheHighlight(
+        key,
+        loadShiki()
+          .then(shiki => shiki.codeToHtml(trimmed, {
+            lang: language,
+            themes: SHIKI_THEMES,
+            defaultColor: 'light-dark()',
+            colorReplacements: SHIKI_COLOR_REPLACEMENTS,
+          })),
+      )
+      highlight.catch(() => { highlightCache.delete(key) })
+    }
+    highlight.then(apply).catch(fail)
 
     return () => {
       cancelled = true

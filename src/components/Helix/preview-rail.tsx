@@ -2,7 +2,7 @@
 
 import { X, Folder, ChevronLeft, ChevronRight, RotateCw, ExternalLink } from 'lucide-react'
 import React, { useEffect, useRef, useState } from 'react'
-import { isElectron } from '@/lib/electron-bridge'
+import { isRealElectron } from '@/lib/electron-bridge'
 import { useHelixStore, type BrowserBookmark } from '@/stores/helix-store'
 import { createPortal } from 'react-dom'
 import { cleanUrl } from '@/lib/url-utils'
@@ -71,7 +71,7 @@ function normalizeUrl(raw: string): string {
 }
 
 export function summarizeUrl(url: string): string {
-  if (!url) return 'url'
+  if (!url) return ''
   try {
     const u = new URL(url)
     if (u.protocol === 'file:') {
@@ -188,10 +188,12 @@ export function BrowserView({
   url,
   onUrlChange,
   browserBookmarks,
+  onPageTitle,
 }: {
   url: string
   onUrlChange: (url: string) => void
   browserBookmarks: BrowserBookmark[]
+  onPageTitle?: (title: string) => void
 }) {
   const [loaded, setLoaded] = useState(cleanUrl(url))
   const loadedRef = useRef(loaded)
@@ -199,7 +201,7 @@ export function BrowserView({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const webviewRef = useRef<any>(null)
-  const inElectron = isElectron()
+  const inElectron = isRealElectron()
 
   // Sync when the controlled `url` prop changes (external link / page switch).
   useEffect(() => {
@@ -235,7 +237,7 @@ export function BrowserView({
   const cancelUrlEdit = () => setEditingUrl(false)
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col bg-white">
+    <div className="flex-1 min-h-0 flex flex-col bg-card">
       {/* Navigation toolbar */}
       <div className="flex items-center gap-1 px-2.5 py-1.5 border-b border-border/20 shrink-0 bg-card">
         <button
@@ -311,7 +313,7 @@ export function BrowserView({
       )}
 
       {/* Content */}
-      <div className="flex-1 min-h-0 bg-white relative">
+      <div className="flex-1 min-h-0 bg-card relative">
         {url ? (
           <WebviewFrame
             url={url}
@@ -320,6 +322,7 @@ export function BrowserView({
             onError={(e) => { setError(e); setLoading(false) }}
             onNavigate={(u) => { setLoaded(u) }}
             onWebviewRef={(el) => { webviewRef.current = el }}
+            onPageTitle={onPageTitle}
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 pointer-events-none">
@@ -349,6 +352,7 @@ function WebviewFrame({
   onError,
   onNavigate,
   onWebviewRef,
+  onPageTitle,
 }: {
   url: string
   active: boolean
@@ -356,10 +360,11 @@ function WebviewFrame({
   onError: (error: string) => void
   onNavigate: (url: string) => void
   onWebviewRef?: (el: any) => void
+  onPageTitle?: (title: string) => void
 }) {
   const webviewRef = useRef<any>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
-  const inElectron = isElectron()
+  const inElectron = isRealElectron()
   // Freeze the INITIAL src to `about:blank` so the <webview> guest process is
   // created exactly once. We must NOT bind `src` to the live `url` — every
   // `src` change makes Electron call loadURL internally, whose ERR_ABORTED
@@ -377,9 +382,11 @@ function WebviewFrame({
   const onLoadingRef = useRef(onLoading)
   const onErrorRef = useRef(onError)
   const onNavigateRef = useRef(onNavigate)
+  const onPageTitleRef = useRef(onPageTitle)
   onLoadingRef.current = onLoading
   onErrorRef.current = onError
   onNavigateRef.current = onNavigate
+  onPageTitleRef.current = onPageTitle
   const setWebviewRef = (el: any) => { webviewRef.current = el; onWebviewRef?.(el) }
 
   // Electron's <webview> doesn't reflow on container resize (known flex-parent
@@ -442,6 +449,7 @@ function WebviewFrame({
       doLoad(urlRef.current)
     }
     const onNav = (e: any) => { if (e?.url) onNavigateRef.current(e.url) }
+    const onTitle = (e: any) => { if (e?.title) onPageTitleRef.current?.(e.title) }
     const onFail = (e: any) => {
       // ERR_ABORTED (-3) is a benign navigation supersede — never surface it.
       if (e?.errorCode && e.errorCode !== -3) {
@@ -453,6 +461,7 @@ function WebviewFrame({
     el.addEventListener('did-stop-loading', onStop)
     el.addEventListener('dom-ready', onDomReady)
     el.addEventListener('did-navigate', onNav)
+    el.addEventListener('page-title-updated', onTitle)
     el.addEventListener('did-fail-load', onFail)
     // If the guest is already live (dom-ready fired before React attached the
     // listener, e.g. after an HMR remount), load now — otherwise dom-ready will.
@@ -464,6 +473,7 @@ function WebviewFrame({
       el.removeEventListener('did-stop-loading', onStop)
       el.removeEventListener('dom-ready', onDomReady)
       el.removeEventListener('did-navigate', onNav)
+      el.removeEventListener('page-title-updated', onTitle)
       el.removeEventListener('did-fail-load', onFail)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

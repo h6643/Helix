@@ -33,7 +33,7 @@ import { VisionModelSettings } from './vision-model-settings'
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <div className={`flex items-center gap-2 mb-4 ${className || ''}`}>
-      <h3 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold text-foreground">{children}</h3>
+      <h3 className="ui-title font-semibold text-foreground">{children}</h3>
     </div>
   )
 }
@@ -1693,16 +1693,18 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
         return (
           <div className="space-y-4">
             <SectionTitle>浏览器</SectionTitle>
-            <SettingRow icon={<Globe className="size-4 text-foreground/60" />} label="从 Chrome 导入书签">
-              <div className="ml-auto flex items-center">
-                {browserBookmarks.length > 0 && (
-                  <span className="mr-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">已导入 {browserBookmarks.length} 个书签项</span>
-                )}
-                <Button variant="outline" size="sm" onClick={() => importChromeBookmarks()}>
-                  选择 Chrome 数据目录
-                </Button>
-              </div>
-            </SettingRow>
+            <div className="border border-border/50 rounded-xl overflow-hidden">
+              <SettingRow icon={<Globe className="size-4 text-foreground/60" />} label="从 Chrome 导入书签">
+                <div className="ml-auto flex items-center">
+                  {browserBookmarks.length > 0 && (
+                    <span className="mr-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">已导入 {browserBookmarks.length} 个书签项</span>
+                  )}
+                  <Button variant="outline" size="sm" onClick={() => importChromeBookmarks()}>
+                    选择 Chrome 数据目录
+                  </Button>
+                </div>
+              </SettingRow>
+            </div>
 
             <WebSearchSettings />
           </div>
@@ -1824,7 +1826,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               <div className="px-4 pt-2 pb-1 space-y-2">
                 <button
                   onClick={() => useHelixStore.getState().toggleSettings()}
-                  className="flex items-center gap-2 w-full px-3 py-2 text-[var(--helix-transcript-size)] text-foreground/60 hover:text-foreground hover:bg-muted/80 rounded-xl transition-colors"
+                  className="flex items-center gap-2 w-full px-3 py-2 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/60 hover:text-foreground hover:bg-muted/80 rounded-xl transition-colors"
                 >
                   <ChevronLeft className="size-4" />
                   返回
@@ -1859,7 +1861,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                               pushNavigation({ type: 'settings', page: item.id })
                               setNavSearch('')
                             }}
-                            className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-[var(--helix-transcript-size)] rounded-md transition-colors duration-100 ${
+                            className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] rounded-md transition-colors duration-100 ${
                               page === item.id
                                 ? 'bg-muted text-foreground font-medium'
                                 : 'text-foreground/65 hover:bg-muted/50 hover:text-foreground'
@@ -1896,7 +1898,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       )}
 
       {/* Right content — floating card */}
-      <div className="flex-1 m-3 ml-0 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-y-auto relative">
+      <div className="flex-1 mt-3 mb-px ml-0 mr-px rounded-2xl border-0 bg-card shadow-2xl shadow-primary/5 overflow-y-auto relative">
         <div className="flex justify-center">
           <div className="px-8 pt-5 pb-10 w-full max-w-3xl">
             {renderContent()}

@@ -247,6 +247,7 @@ pub fn run() {
             git::status,
             git::diff,
             git::diff_head,
+            git::diff_numstat,
             git::revert,
             git::stage,
             git::unstage,
@@ -309,6 +310,7 @@ pub fn run() {
             delegations::delegations_read_log,
             // diagnostics
             diagnostics::get_status,
+            diagnostics::dbg_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

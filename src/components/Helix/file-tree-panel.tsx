@@ -1,16 +1,18 @@
 'use client'
 
 import {
-  File,
-  FileText,
-  Folder,
   FolderOpen,
   ChevronRight,
   Loader2,
   Pencil,
   Trash2,
+  Search,
+  X,
+  ArrowLeft,
+  RefreshCw,
+  Terminal,
 } from 'lucide-react'
-import React, { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { isElectron, electronGit, electronFS, electronShell } from '@/lib/electron-bridge'
 import { useHelixStore } from '@/stores/helix-store'
@@ -30,26 +32,14 @@ interface FileTreePanelProps {
   onOpenFile?: () => void
   /** Bump this key (e.g. from the parent's refresh button) to reload the tree. */
   reloadKey?: number
-}
-
-// Pastel folder tints for the warm cream workspace, matching the
-// colorful sidebar in the reference screenshot.
-const FOLDER_COLORS = [
-  'oklch(0.72 0.14 25)',
-  'oklch(0.74 0.16 55)',
-  'oklch(0.80 0.14 95)',
-  'oklch(0.76 0.13 125)',
-  'oklch(0.74 0.13 155)',
-  'oklch(0.74 0.12 185)',
-  'oklch(0.74 0.13 245)',
-  'oklch(0.74 0.14 300)',
-  'oklch(0.76 0.14 340)',
-]
-
-function folderColor(name: string): string {
-  let hash = 0
-  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0
-  return FOLDER_COLORS[hash % FOLDER_COLORS.length]
+  /** Explicit root directory to display. When omitted, falls back to the store's
+   *  `selectedWorkDir` (so the panel can be reused in the left sidebar to show an
+   *  arbitrary project's tree, not just the currently-selected one). */
+  rootDir?: string
+  /** Directory-view header: close the explorer and return to the sidebar list. */
+  onBack?: () => void
+  /** Directory-view header: manual refresh of the tree. */
+  onRefresh?: () => void
 }
 
 function parsePorcelainV2(output: string): Map<string, string> {
@@ -128,32 +118,28 @@ function getStatusStyle(code: string) {
   return null
 }
 
-function ExtensionIcon({ name, className }: { name: string; className?: string }) {
-  const ext = name.includes('.') ? name.split('.').pop()?.toLowerCase() : ''
-  const colorMap: Record<string, string> = {
-    ts: 'text-blue-400',
-    tsx: 'text-blue-400',
-    js: 'text-yellow-400',
-    jsx: 'text-yellow-400',
-    json: 'text-orange-400',
-    md: 'text-sky-400',
-    css: 'text-pink-400',
-    scss: 'text-pink-400',
-    html: 'text-orange-400',
-    py: 'text-blue-300',
-    go: 'text-cyan-400',
-    rs: 'text-orange-500',
-    yaml: 'text-cyan-400',
-    yml: 'text-cyan-400',
-    toml: 'text-green-400',
-    vue: 'text-emerald-400',
-    svelte: 'text-orange-400',
-    java: 'text-red-400',
-    cpp: 'text-pink-300',
-    c: 'text-blue-400',
-    h: 'text-purple-400',
+// Filter the (already fully-loaded) tree by a case-insensitive substring match
+// on node names. A folder is kept if its own name matches OR any descendant
+// matches; matched folders are force-expanded so the hits are visible.
+function filterTree(nodes: FileTreeItem[], rawQuery: string): FileTreeItem[] {
+  const q = rawQuery.toLowerCase()
+  const out: FileTreeItem[] = []
+  for (const n of nodes) {
+    if (n.isDirectory) {
+      const kids = n.children ? filterTree(n.children, rawQuery) : []
+      const selfMatch = n.name.toLowerCase().includes(q)
+      if (selfMatch || kids.length > 0) {
+        out.push({
+          ...n,
+          children: kids.length > 0 ? kids : n.children,
+          expanded: kids.length > 0 ? true : n.expanded,
+        })
+      }
+    } else if (n.name.toLowerCase().includes(q)) {
+      out.push(n)
+    }
   }
-  return <FileText className={`size-4 shrink-0 ${ext && colorMap[ext] ? colorMap[ext] : 'text-muted-foreground/60'} ${className || ''}`} />
+  return out
 }
 
 // In-place helpers for rename / delete without collapsing the whole tree.
@@ -196,15 +182,22 @@ function removeFromTree(nodes: FileTreeItem[], path: string): FileTreeItem[] {
   return result
 }
 
-export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
+export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefresh }: FileTreePanelProps) {
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
   const showToast = useHelixStore(s => s.showToast)
   const openFileInEditor = useHelixStore(s => s.openFileInEditor)
+  const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
+  const toggleTerminal = useHelixStore(s => s.toggleTerminal)
   const [items, setItems] = useState<FileTreeItem[]>([])
   const [gitStatus, setGitStatus] = useState<Map<string, string>>(new Map())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
   const showHidden = false
+  // The directory this panel scans. A passed `rootDir` wins (used when the panel
+  // lives in the left sidebar to show a specific project); otherwise it follows
+  // the globally-selected working directory.
+  const root = rootDir ?? selectedWorkDir
 
   // VS Code-style right-click context menu.
   const [menu, setMenu] = useState<{ x: number; y: number; item: FileTreeItem } | null>(null)
@@ -215,16 +208,16 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
   const renameInputRef = useRef<HTMLInputElement>(null)
 
   const loadTree = useCallback(async () => {
-    if (!isElectron() || !selectedWorkDir) {
+    if (!isElectron() || !root) {
       setLoading(false)
-      setError(!selectedWorkDir ? 'No directory selected' : 'File tree is only available in desktop mode')
+      setError(!root ? 'No directory selected' : 'File tree is only available in desktop mode')
       return
     }
     setLoading(true)
     setError(null)
     // Load git status
     try {
-      const gitResult = await electronGit.status()
+      const gitResult = await electronGit.status(root)
       if (gitResult.ok && gitResult.output) {
         setGitStatus(parsePorcelainV2(gitResult.output))
       }
@@ -233,21 +226,28 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
     try {
       const api = (window as any).electron
       let tree: FileTreeItem[] = []
-      // 登记当前选中项目为合法根：点历史对话等路径会直接改 selectedWorkDir 而不走
+      // 登记当前根目录为合法根：点历史对话等路径会直接改 selectedWorkDir 而不走
       // app:setWorkDir，主进程不知道这个根 → 单根校验判越界。扫描前 ensure 一次最稳。
-      try { await api?.fs?.allowRoot?.(selectedWorkDir) } catch { /* best-effort */ }
+      try { await api?.fs?.allowRoot?.(root) } catch { /* best-effort */ }
       if (api?.fs?.scanTree) {
         // 显式传当前选中的绝对路径扫描。无参 scanTree() 扫的是主进程模块级 workDir，
         // 切项目时若它还没更新（或主进程未重启），safePath 的 startsWith(workDir) 会
         // 判越界 → 扫描被静默吞 → 目录面板“固定”在旧项目。传绝对路径则 safePath 放行。
-        const raw = (await api.fs.scanTree(selectedWorkDir)) as Array<{ id: string; name: string; type: 'file' | 'folder'; children?: any[] }>
+        const raw = (await api.fs.scanTree(root)) as Array<{ id: string; name: string; type: 'file' | 'folder'; children?: any[] }>
+        // scanTree returns paths RELATIVE to the scanned root (e.g.
+        // "src/components/Helix/x.tsx"); readFile/rename/delete/showInFolder all
+        // require an ABSOLUTE path (Rust `safe_path` only admits absolute paths).
+        // So join the relative segment onto root here so every node carries a
+        // real filesystem path.
+        const baseDir = root.replace(/[/\\]+$/, '')
         function convert(rawList: Array<{ name: string; type: string; children?: any[] }>, prefix: string): FileTreeItem[] {
           const result: FileTreeItem[] = []
           for (const item of rawList) {
             if (item.name.startsWith('.') && !showHidden) continue
-            const path = prefix ? `${prefix}/${item.name}` : item.name
+            const rel = prefix ? `${prefix}/${item.name}` : item.name
+            const path = `${baseDir}/${rel}`
             if (item.type === 'folder' && item.children) {
-              const children = convert(item.children, path)
+              const children = convert(item.children, rel)
               result.push({ name: item.name, path, isDirectory: true, children, expanded: false })
             } else {
               result.push({ name: item.name, path, isDirectory: false })
@@ -263,9 +263,10 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
       } else {
         // Fallback: load only root
         const entries = await api.fs.readdir(selectedWorkDir) as Array<{ name: string; isDirectory: boolean }>
+        const baseDir = (selectedWorkDir || root || '').replace(/[/\\]+$/, '')
         for (const e of entries) {
           if (e.name.startsWith('.') && !showHidden) continue
-          tree.push({ name: e.name, path: e.name, isDirectory: e.isDirectory })
+          tree.push({ name: e.name, path: `${baseDir}/${e.name}`, isDirectory: e.isDirectory })
         }
         tree.sort((a, b) => {
           if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
@@ -277,7 +278,7 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
       setError(e.message || 'Failed to load file tree')
     }
     setLoading(false)
-  }, [selectedWorkDir, showHidden])
+  }, [root, showHidden])
 
   useEffect(() => { loadTree() }, [loadTree])
 
@@ -389,6 +390,11 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
     if (item.isDirectory) {
       toggleExpand(item)
     } else {
+      // Open the editor panel synchronously on click so the user ALWAYS gets a
+      // visible response — the read/checks below run async and may fail, but the
+      // panel must not stay hidden (previously onOpenFile ran only after a
+      // successful read, so any read error left the sidebar closed = "no response").
+      onOpenFile?.()
       openFileInEditorAction(item)
     }
   }
@@ -407,22 +413,31 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
       showToast({ type: 'error', title: '无法编辑', description: `${item.name} 是二进制文件` })
       return
     }
+    // Open / activate the editor tab synchronously (carrying only the file NAME)
+    // BEFORE the async disk read, so the right-sidebar page strip shows the file
+    // name immediately — instead of flashing the generic "代码" placeholder and
+    // only revealing the name (inside the editor's own file tab) after loading.
+    const createdEmpty = useHelixStore.getState().ensureEditorTab(item.path, item.name)
     try {
       const content = await electronFS.readFile(item.path)
       if (content == null) throw new Error('读取为空')
       if (content.length > 1_000_000) {
         showToast({ type: 'error', title: '文件过大', description: `${item.name} 超过 1MB，暂不支持在编辑器打开` })
+        if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path)
         return
       }
       // Reject files that look binary (null bytes in the first 4KB).
       if (/[\u0000-\u0008]/.test(content.slice(0, 4096))) {
         showToast({ type: 'error', title: '无法编辑', description: `${item.name} 不是文本文件` })
+        if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path)
         return
       }
-      openFileInEditor(item.path, item.name, content)
-      onOpenFile?.()
+      // Only fill the empty optimistic tab we just created. An already-open tab
+      // is left untouched (re-click just activates it, preserving any edits).
+      if (createdEmpty) useHelixStore.getState().fillEditorTabContent(item.path, content)
     } catch (e: any) {
       showToast({ type: 'error', title: '打开失败', description: e?.message || '读取文件出错' })
+      if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path)
     }
   }
 
@@ -441,8 +456,6 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
     return items.map((item) => {
       const status = gitStatus.get(item.path)
       const style = status ? getStatusStyle(status) : null
-      const isTopFolder = item.isDirectory && depth === 0
-      const bg = isTopFolder ? folderColor(item.name) : undefined
       return (
         <div key={item.path}>
           <div
@@ -451,28 +464,18 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
             }`}
             style={{
               paddingLeft: `${depth * 16 + 8}px`,
-              ...(bg ? { backgroundColor: bg } : {}),
             }}
             onClick={() => handleFileClick(item)}
             onContextMenu={(e) => openMenu(e, item)}
           >
             {item.isDirectory ? (
               <ChevronRight
-                className={`size-3.5 shrink-0 transition-transform duration-150 ${
-                  bg ? 'text-white/80' : 'text-muted-foreground/40'
-                } ${item.expanded ? 'rotate-90' : ''}`}
+                className={`size-3.5 shrink-0 transition-transform duration-150 text-muted-foreground/40 ${
+                  item.expanded ? 'rotate-90' : ''
+                }`}
               />
             ) : (
               <span className="w-3.5 shrink-0" />
-            )}
-            {item.isDirectory ? (
-              item.expanded ? (
-                <FolderOpen className={`size-4 shrink-0 ${bg ? 'text-white/90' : 'text-amber-400/70'}`} />
-              ) : (
-                <Folder className={`size-4 shrink-0 ${bg ? 'text-white/80' : 'text-amber-400/60'}`} />
-              )
-            ) : (
-              <ExtensionIcon name={item.name} />
             )}
             {renaming && renaming.path === item.path ? (
               <input
@@ -487,10 +490,10 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
                 onBlur={() => setRenaming(null)}
                 onClick={(e) => e.stopPropagation()}
                 spellCheck={false}
-                className="flex-1 min-w-0 bg-accent/40 text-foreground text-[calc(var(--helix-transcript-size)*0.9286)] px-1 py-0 rounded outline-none border border-primary/60"
+                className="flex-1 min-w-0 bg-accent/40 text-sidebar-foreground text-[calc(var(--helix-transcript-size)*0.9286)] px-1 py-0 rounded outline-none border border-primary/60"
               />
             ) : (
-              <span className={`truncate flex-1 ${bg ? 'text-white' : 'text-foreground/80'}`}>{item.name}</span>
+              <span className="truncate flex-1 text-sidebar-foreground/80">{item.name}</span>
             )}
             {style && (
               <span
@@ -509,8 +512,75 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
     })
   }
 
+  // Filtered view: when a search query is active, derive a name-matched tree
+  // (matched folders auto-expanded). Otherwise show the raw loaded tree.
+  const displayItems = useMemo(
+    () => (query.trim() ? filterTree(items, query.trim()) : items),
+    [items, query],
+  )
+
   return (
-    <div className="h-full w-full bg-card flex flex-col overflow-hidden">
+    <div className="h-full w-full flex flex-col overflow-hidden">
+      {/* Return to the conversation list — top-most row, above the search box */}
+      {onBack && (
+        <div className="shrink-0 px-2 py-1.5">
+          <button
+            onClick={onBack}
+            className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/40 transition-colors"
+          >
+            <ArrowLeft className="size-4 shrink-0" />
+            <span className="text-[calc(var(--helix-transcript-size)*0.9286)]">返回对话</span>
+          </button>
+        </div>
+      )}
+      {/* Search box — sits above the tree in the full-area directory view */}
+      <div className="shrink-0 px-2 py-1.5">
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-sidebar-accent/30">
+          <Search className="size-3.5 text-sidebar-foreground/40 shrink-0" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索文件…"
+            spellCheck={false}
+            className="flex-1 min-w-0 bg-transparent outline-none text-sidebar-foreground text-[calc(var(--helix-transcript-size)*0.9286)] placeholder:text-sidebar-foreground/30"
+          />
+          {query && (
+            <button
+              onClick={() => setQuery('')}
+              className="text-sidebar-foreground/40 hover:text-sidebar-foreground shrink-0 transition-colors"
+              data-tip="清除"
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+      {/* Directory header (name / refresh) — sits below the search box; the
+          return-to-conversation action now lives in the top "返回对话" row. */}
+      {root && (
+        <div className="shrink-0 flex items-center gap-1 px-2 py-1.5">
+          <span
+            className="pl-2 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium truncate flex-1"
+            title={root}
+          >
+            {(() => { const n = root.split(/[/\\]/).pop() || root; return n.length > 12 ? n.slice(0, 12) + '…' : n })()}
+          </span>
+          <button
+            onClick={toggleTerminal}
+            className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? 'text-primary bg-sidebar-accent/50' : 'text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40'}`}
+            data-tip={isTerminalOpen ? '关闭终端' : '终端'}
+          >
+            <Terminal className="size-4" />
+          </button>
+          <button
+            onClick={onRefresh}
+            className="p-1.5 rounded-lg text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40 transition-colors"
+            data-tip="刷新"
+          >
+            <RefreshCw className="size-4" />
+          </button>
+        </div>
+      )}
       {/* Tree */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 text-[var(--helix-transcript-size)]">
         {loading && items.length === 0 ? (
@@ -520,10 +590,12 @@ export function FileTreePanel({ onOpenFile, reloadKey }: FileTreePanelProps) {
           </div>
         ) : error ? (
           <div className="px-3 py-4 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50">{error}</div>
-        ) : items.length === 0 ? (
-          <div className="px-3 py-4 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/30">Empty directory</div>
+        ) : displayItems.length === 0 ? (
+          <div className="px-3 py-4 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/30">
+            {query.trim() ? '无匹配文件' : 'Empty directory'}
+          </div>
         ) : (
-          renderTree(items)
+          renderTree(displayItems)
         )}
       </div>
 

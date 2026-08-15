@@ -66,7 +66,7 @@ const SEARCH_PROVIDERS: SearchProvider[] = [
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <div className={`flex items-center gap-2 mb-4 ${className || ''}`}>
-      <h3 className="ui-text text-foreground">{children}</h3>
+      <h3 className="ui-title font-semibold text-foreground">{children}</h3>
     </div>
   )
 }

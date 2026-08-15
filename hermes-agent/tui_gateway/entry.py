@@ -430,6 +430,12 @@ def ensure_mcp_discovery_started() -> None:
 def main():
     _install_sidecar_publisher()
 
+    # 后台进程实时输出 → tool.progress（桌面端工具卡片实时显示长任务进度）
+    try:
+        server._ensure_process_output_sink()
+    except Exception:
+        pass
+
     # MCP tool discovery — backgrounded so a slow or unreachable MCP server
     # can't freeze TUI startup (a dead stdio/http server burns 1+2+4s of
     # connect retries → ~7s of dead air before the composer appears).  The

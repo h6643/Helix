@@ -827,6 +827,7 @@ pre code.hljs {
   padding: 0;
   border-radius: 0;
   border: none;
+  box-shadow: none;
   /* 重置 .helix-md code 的行内规则泄漏：line-height:1 会让代码块行距=字号（行行贴死），
      font-size:0.8em 会与 pre>div 的 0.85em 叠乘成 0.68em 小字。inherit 让代码块
      跟随卡片自己的 0.85em 字号与 1.8 行高。 */
@@ -1421,15 +1422,41 @@ nav::-webkit-scrollbar-thumb:hover {
 @keyframes voiceCaret { 0%,100% { opacity: 0.4; } 50% { opacity: 0.05; } }
 
 /* 界面字号跟随「界面字号」设置（--helix-transcript-size，默认 14px，与 :root 定义一致）。
-   .ui-text  = 界面默认字号（正文 / 卡片标题 / 说明共用，不再写死 text-sm）；
-   .ui-title = 界面字号 + 4px（各页主标题）；
-   .ui-text-sm2 = 界面字号 − 4px（比界面字号小两个字号，用于设置项右侧的值/输入）。 */
+   .ui-text     = 界面默认字号（正文 / 卡片标题 / 说明共用，不再写死 text-sm）；
+   .ui-title    = 界面字号 + 6px（各页主标题，如「外观」「浏览器」等 section 大标题）；
+   .ui-subtitle = 界面字号 + 4px（面板内子标题，如「编辑器」「界面」等次级标题）；
+   .ui-text-sm2 = 界面字号 − 2px（比界面字号小一号，用于设置项右侧的值/输入）。 */
 .ui-text {
   font-size: var(--helix-transcript-size, 14px);
 }
 .ui-title {
+  font-size: calc(var(--helix-transcript-size, 14px) + 6px);
+}
+.ui-subtitle {
   font-size: calc(var(--helix-transcript-size, 14px) + 4px);
 }
 .ui-text-sm2 {
-  font-size: calc(var(--helix-transcript-size, 14px) - 4px);
+  font-size: calc(var(--helix-transcript-size, 14px) - 2px);
+}
+
+/* ── Chat input toolbar collapse ───────────────────────────────────────────
+   拖拽右侧边栏把对话区压窄时，工具栏先截断文字、空间再不足就隐藏
+   非关键文字（模型名 / 审批模式 / 推理强度），发送按钮始终留在框内。 */
+.helix-chat-input-card {
+  container-type: inline-size;
+}
+@container (max-width: 620px) {
+  .chat-toolbar-label {
+    max-width: 96px;
+  }
+}
+@container (max-width: 520px) {
+  .chat-toolbar-label {
+    max-width: 56px;
+  }
+}
+@container (max-width: 440px) {
+  .chat-toolbar-label {
+    display: none;
+  }
 }

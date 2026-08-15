@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
 import { SettingRow, SettingGroup, SectionHeading, Toggle, PopupSelect } from './settings-ui'
@@ -47,6 +47,19 @@ export function GeneralSettingsPanel() {
   // HTTP 代理（配置持久化在 Rust 侧 proxy.json，重启应用后生效）。
   const [proxyUrl, setProxyUrl] = useState('')
   const [proxyBusy, setProxyBusy] = useState(false)
+
+  // 常规面板的开关/选项改动即生效（无保存按钮），防抖写入 IndexedDB，
+  // 避免「增强 Find 和 Grep」「自动归档」「终端 Shell」等重启后丢失。
+  const settingsPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (settingsPersistTimer.current) clearTimeout(settingsPersistTimer.current)
+    settingsPersistTimer.current = setTimeout(() => {
+      void persistToStorage().catch(() => {})
+    }, 300)
+    return () => {
+      if (settingsPersistTimer.current) clearTimeout(settingsPersistTimer.current)
+    }
+  }, [autoArchiveOldTasks, archiveRetentionHours, enhancedFindGrep, terminalShell, persistToStorage])
 
   // 拉取当前生效的数据根目录（后端是权威来源）。
   useEffect(() => {
@@ -156,13 +169,12 @@ export function GeneralSettingsPanel() {
         {autoArchiveOldTasks && (
           <SettingRow
             label="归档保留时长"
-            hint="任务最后更新时间早于该时长后，才会进入自动归档候选。"
           >
             <PopupSelect
               value={String(archiveRetentionHours)}
               onChange={(v) => setArchiveRetentionHours(Number(v))}
               options={RETENTION_OPTIONS}
-              className="w-36 rounded-md border border-border bg-background px-2 py-1"
+              className="w-36 rounded-md border border-border bg-background px-2 py-1 ui-text-sm2"
             />
           </SettingRow>
         )}

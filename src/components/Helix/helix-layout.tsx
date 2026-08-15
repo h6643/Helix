@@ -7,14 +7,12 @@ import {
   X,
   Folder,
   Terminal,
-  FileDiff,
   PanelLeft,
   ArrowLeft,
   ArrowRight,
   GripVertical,
   ChevronDown,
   FileText,
-  GitBranch,
   Keyboard,
   Globe,
   ListTodo,
@@ -23,7 +21,6 @@ import {
   Loader2,
   XCircle,
   MoreHorizontal,
-  FolderTree,
     Users,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
@@ -39,13 +36,16 @@ import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
 import { isServeActive, getServeClient } from '@/lib/serve-gateway'
 import { markScanDone, runAutoArchiveScan, shouldScanNow } from '@/lib/auto-archive'
 import { useHelixStore } from '@/stores/helix-store'
+import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
 import { applyHelixPalette } from '@/lib/themes'
 import { AgentFlowPanel } from './agent-flow-panel'
 import { GlobalTooltip } from './global-tooltip'
 import { CommandPalette } from './command-palette'
 import { Sidebar } from './sidebar'
+import { BranchPicker } from './branch-picker'
 import { KeyboardShortcuts } from './keyboard-shortcuts'
 import { ContextMenuProvider } from './context-menu'
+import { BackgroundTasksPanel } from './background-tasks-panel'
 
 
 import { ToastContainer } from './toast-container'
@@ -85,6 +85,7 @@ const PluginManagerPanel = lazy(() => import('./plugin-manager').then(m => ({ de
 const KanbanPanel = lazy(() => import('./kanban-panel').then(m => ({ default: m.KanbanPanel })))
 const DelegationsPanel = lazy(() => import('./delegations-panel').then(m => ({ default: m.DelegationsPanel })))
 const RightSidebar = lazy(() => import('./right-sidebar').then(m => ({ default: m.RightSidebar })))
+import { MoreActionsMenu } from './more-actions-menu'
 
 // Local Suspense for the always-visible panel areas. Without a boundary the
 // lazy panels' chunk load bubbles up to the root Suspense in main.tsx, which
@@ -108,7 +109,7 @@ function PanelSuspense({ children }: { children: React.ReactNode }) {
 const SIDEBAR_MIN = 200
 const SIDEBAR_MAX = 500
 const SIDEBAR_COLLAPSED = 48
-const SIDEBAR_DEFAULT = 240
+const SIDEBAR_DEFAULT = 280
 const STORAGE_KEY = 'helix-sidebar-width'
 
 // Right sidebar (code editor / browser)
@@ -329,6 +330,7 @@ export function HelixLayout() {
   // Kanban/Plan/Skill panels render as floating cards inside the main area — chat stays visible behind them.
   const sidePanelOpen = showPluginManager || showRuntimePanel || showWorktreePanel || showSubAgentPanel
   const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
+  const codeFullscreen = useHelixStore(s => s.codeFullscreen)
   const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
   const [gitBranch, setGitBranch] = useState<string | null>(null)
@@ -359,6 +361,19 @@ export function HelixLayout() {
   const [delegations, setDelegations] = useState<Array<{id: string; tasks: Array<{name: string; modified: number}>}>>([])
   const [delegationsPopoverOpen, setDelegationsPopoverOpen] = useState(false)
   const delegationsPopoverRef = useRef<HTMLDivElement>(null)
+  const [bgTasksOpen, setBgTasksOpen] = useState(false)
+  const bgTasksRef = useRef<HTMLDivElement>(null)
+  // 只选稳定引用（s.tasks 数组只在 store set 时换引用）；过滤在组件内做，
+  // 不能写成 s.tasks.filter(...) —— selector 每次返回新数组会让
+  // useSyncExternalStore 认为快照永远在变 → "Maximum update depth exceeded"。
+  const bgTasks = useBackgroundTasksStore(s => s.tasks)
+  const activeSessionId = useHelixStore(s => s.currentSessionId)
+  // 后台任务绑定当前会话：只显示本对话的任务
+  const myBgTasks = useMemo(
+    () => bgTasks.filter(t => t.sessionId === activeSessionId),
+    [bgTasks, activeSessionId],
+  )
+  const runningBgTasks = useMemo(() => myBgTasks.filter(t => t.status === 'running'), [myBgTasks])
   // Close the todo popover when clicking outside of it
   const todoPopoverRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -383,6 +398,18 @@ export function HelixLayout() {
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [delegationsPopoverOpen])
+
+  // Close background-tasks popover when clicking outside
+  useEffect(() => {
+    if (!bgTasksOpen) return
+    const onDocClick = (e: MouseEvent) => {
+      if (bgTasksRef.current && !bgTasksRef.current.contains(e.target as Node)) {
+        setBgTasksOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [bgTasksOpen])
 
   // Load delegations data — scoped to the current session.
   useEffect(() => {
@@ -992,7 +1019,7 @@ export function HelixLayout() {
     }},
     { label: '切换侧边栏', shortcut: 'Ctrl+L', action: () => { setShowSidebar(v => !v); closeWindowMenu() } },
     { label: '打开终端', shortcut: shortcutLabel('toggle-terminal', customShortcuts), action: () => { useHelixStore.setState({ isTerminalOpen: true }); closeWindowMenu() } },
-    { label: '切换文件树', shortcut: shortcutLabel('toggle-file-tree', customShortcuts), action: () => { storeActions.setRightSidebarTab(storeActions.rightSidebarTab === 'files' ? null : 'files'); closeWindowMenu() } },
+    { label: '切换文件树', shortcut: shortcutLabel('toggle-file-tree', customShortcuts), action: () => { if (storeActions.selectedWorkDir) storeActions.toggleDirectoryProject(storeActions.selectedWorkDir); closeWindowMenu() } },
     { label: '打开代码编辑器', action: () => { storeActions.setRightSidebarTab('code'); closeWindowMenu() } },
     { divider: true },
     { label: '设置', shortcut: 'Ctrl+,', action: () => { storeActions.toggleSettings('api'); closeWindowMenu() } },
@@ -1270,9 +1297,11 @@ export function HelixLayout() {
         )}
 
         {/* Floating cards container */}
-        <div className="flex-1 flex flex-row mt-3 mr-3 mb-1 ml-0 overflow-hidden relative">
-        {/* Floating card — main content */}
-        <div className="flex-1 flex flex-col rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
+        <div className="flex-1 flex flex-col mt-3 mr-px mb-1 ml-0 overflow-hidden">
+        <div className="flex-1 min-h-0 flex flex-row relative">
+        {/* Floating card — main content. Hidden when the code panel is in
+            fullscreen (the right sidebar takes over the main area). */}
+        <div className={`flex-1 flex flex-col rounded-2xl border-0 bg-card shadow-2xl shadow-primary/5 overflow-hidden ${codeFullscreen ? 'hidden' : ''}`}>
           {/* Main area */}
           <div className="relative flex-1 h-full flex flex-col overflow-hidden">
           <div className={`flex-1 flex flex-row overflow-hidden ${sidePanelOpen ? 'hidden' : ''}`}>
@@ -1289,17 +1318,16 @@ export function HelixLayout() {
                         data-tip={selectedWorkDir ? '在资源管理器中打开' : '选择位置'}
                       >
                         <Folder className="size-3.5 text-muted-foreground" />
-                        <span className="max-w-[200px] truncate">{selectedWorkDir ? (selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir) : '未选择位置'}</span>
+                        <span className="max-w-[200px] truncate">{selectedWorkDir ? (() => { const n = selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir; return n.length > 8 ? n.slice(0, 8) + '…' : n })() : '未选择位置'}</span>
                       </button>
                       )}
                       {activeSessionWorkDir && gitBranch && (
-                        <div
-                          className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/60 bg-accent/40 px-2 py-1 rounded-lg shrink-0"
-                          data-tip={`当前分支：${gitBranch}`}
-                        >
-                          <GitBranch className="size-3.5 text-muted-foreground" />
-                          <span className="max-w-[160px] truncate">{gitBranch}</span>
-                        </div>
+                        <BranchPicker
+                          workDir={activeSessionWorkDir}
+                          currentBranch={gitBranch}
+                          onBranchChange={(b) => setGitBranch(b)}
+                          drop="down"
+                        />
                       )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
@@ -1404,6 +1432,24 @@ export function HelixLayout() {
                       )}
                     </div>
                   )}
+                  {/* 后台任务按钮（终端按钮左侧）：仅当前会话有任务时才显示 */}
+                  {myBgTasks.length > 0 && (
+                  <div className="relative" ref={bgTasksRef}>
+                    <button
+                      onClick={() => setBgTasksOpen(v => !v)}
+                      className={`relative p-1.5 rounded-lg transition-colors ${bgTasksOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
+                      data-tip="后台任务"
+                    >
+                      <Loader2 className="size-4" />
+                      {runningBgTasks.length > 0 && (
+                        <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[calc(var(--helix-transcript-size)*0.6429)] font-medium flex items-center justify-center">
+                          {runningBgTasks.length}
+                        </span>
+                      )}
+                    </button>
+                    {bgTasksOpen && <BackgroundTasksPanel sessionId={activeSessionId ?? ''} onClose={() => setBgTasksOpen(false)} />}
+                  </div>
+                  )}
                   <button
                     onClick={() => storeActions.toggleTerminal()}
                     className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
@@ -1411,7 +1457,7 @@ export function HelixLayout() {
                   >
                     <Terminal className="size-4" />
                   </button>
-                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'files' && rightSidebarTab !== 'diff') && (
+                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'diff') && (
                   <button
                     ref={browserMenuButtonRef}
                     onClick={() => setBrowserMenuOpen(v => !v)}
@@ -1429,34 +1475,12 @@ export function HelixLayout() {
                         left: browserMenuButtonRef.current?.getBoundingClientRect().right ? browserMenuButtonRef.current!.getBoundingClientRect().right - 208 : 0,
                       }}
                     >
-                      <div ref={browserMenuRef} className="w-52 bg-card border border-border/80 rounded-lg shadow-xl py-1">
-                        <button
-                          data-tip="浏览器"
-                          onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'browser' ? null : 'browser'); setBrowserMenuOpen(false) }}
-                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/60 transition-colors ${rightSidebarTab === 'browser' ? 'text-primary' : 'text-foreground/80'}`}
-                        >
-                          <Globe className="size-3.5" />
-                          <span className="flex-1 text-left">浏览器</span>
-                          {rightSidebarTab === 'browser' && <CheckCircle2 className="size-3.5" />}
-                        </button>
-                        <button
-                          data-tip="目录"
-                          onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'files' ? null : 'files'); setBrowserMenuOpen(false) }}
-                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/60 transition-colors ${rightSidebarTab === 'files' ? 'text-primary' : 'text-foreground/80'}`}
-                        >
-                          <FolderTree className="size-3.5" />
-                          <span className="flex-1 text-left">目录</span>
-                          {rightSidebarTab === 'files' && <CheckCircle2 className="size-3.5" />}
-                        </button>
-                        <button
-                          data-tip="变更"
-                          onClick={() => { storeActions.setRightSidebarTab(rightSidebarTab === 'diff' ? null : 'diff'); setBrowserMenuOpen(false) }}
-                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/60 transition-colors ${rightSidebarTab === 'diff' ? 'text-primary' : 'text-foreground/80'}`}
-                        >
-                          <FileDiff className="size-3.5" />
-                          <span className="flex-1 text-left">变更</span>
-                          {rightSidebarTab === 'diff' && <CheckCircle2 className="size-3.5" />}
-                        </button>
+                      <div ref={browserMenuRef}>
+                        <MoreActionsMenu
+                          rightSidebarTab={rightSidebarTab}
+                          onToggleTab={(kind) => { storeActions.setRightSidebarTab(rightSidebarTab === kind ? null : kind); setBrowserMenuOpen(false) }}
+                          onAddBrowser={() => { storeActions.requestAddBrowserPage(); setBrowserMenuOpen(false) }}
+                        />
                       </div>
                     </div>,
                     document.body
@@ -1467,7 +1491,6 @@ export function HelixLayout() {
               <div className="flex-1 min-h-0 min-w-0 flex flex-col">
                 <AgentFlowPanel />
               </div>
-              <TerminalPanel onClose={storeActions.toggleTerminal} />
 
               </div>
             </div>
@@ -1498,15 +1521,17 @@ export function HelixLayout() {
             removes the "flash / white-screen on first open and on every tab
             switch". */}
         <div
-          className={`relative shrink-0 ${rightSidebarTab ? '' : 'hidden'}`}
-          style={{ width: rightSidebarTab ? rightSidebarWidth : 0 }}
+          className={`relative ${codeFullscreen ? 'flex-1 min-w-0' : 'shrink-0'} ${rightSidebarTab ? '' : 'hidden'}`}
+          style={codeFullscreen ? undefined : { width: rightSidebarTab ? rightSidebarWidth : 0 }}
         >
+          {!codeFullscreen && (
           <div
             className={`absolute top-0 -left-1 w-2 h-full cursor-col-resize z-30 group ${isRightDragging ? 'bg-primary/20' : ''}`}
             onMouseDown={handleRightDragStart}
           >
             <div className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${isRightDragging ? 'bg-primary/40' : 'bg-transparent group-hover:bg-border/40'}`} />
           </div>
+          )}
           <div className="h-full rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
             <RightSidebar />
           </div>
@@ -1538,6 +1563,11 @@ export function HelixLayout() {
             </PanelSuspense>
           </div>
 
+        </div>
+        {/* Terminal: a bottom panel of the whole main area (NOT inside the main
+            conversation card), so it stays visible when the code editor is in
+            fullscreen — which hides the conversation card. */}
+        <TerminalPanel onClose={storeActions.toggleTerminal} />
         </div>
       </div>
       {/* Overlay panels */}

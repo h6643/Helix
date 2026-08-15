@@ -18,6 +18,22 @@ export function isElectron(): boolean {
   return false
 }
 
+/**
+ * True ONLY in a real Electron runtime (where the contextBridge exposed
+ * `window.electron.isElectron === true`). Distinct from `isElectron()`:
+ * in the Tauri build `isElectron()` is forced true (shim) but Tauri's WebView2
+ * engine does NOT support the Electron `<webview>` *guest* tag, so any code that
+ * needs a real Electron webview (the embedded browser in preview-rail) must use
+ * this guard and fall back to `<iframe>` in Tauri.
+ */
+export function isRealElectron(): boolean {
+  if (typeof window === 'undefined') return false
+  // The Tauri bridge also sets window.electron.isElectron = true (shim), so the
+  // flag alone can't distinguish runtimes — must exclude Tauri explicitly.
+  if (isTauri()) return false
+  return !!window.electron?.isElectron
+}
+
 // serve 模式下包裹 window.electron 的 Proxy 缓存：
 // 拦截 `.hermes` 返回网关门面，其余属性透传原 contextBridge 对象。
 // （contextBridge 暴露的 window.electron 不可重赋值，只能在读取层分流。）
@@ -190,38 +206,40 @@ export const electronShell = {
 
 /**
  * Interactive terminal (Electron only) — persistent PowerShell session.
+ * Each call is scoped to a renderer-assigned tab id so multiple terminals can
+ * run side-by-side (VS Code style).
  */
 export const electronTerminal = {
-  async start(cols?: number, rows?: number, cwd?: string): Promise<{ ok: boolean; error?: string }> {
+  async start(id: number, cols?: number, rows?: number, cwd?: string): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI()
     if (api?.terminal) {
-      return api.terminal.start(cols, rows, cwd)
+      return api.terminal.start(id, cols, rows, cwd)
     }
     return { ok: false, error: 'Terminal not available in browser mode' }
   },
 
-  write(command: string): void {
+  write(id: number, command: string): void {
     const api = getElectronAPI()
     if (api?.terminal) {
-      api.terminal.write(command)
+      api.terminal.write(id, command)
     }
   },
 
-  resize(cols: number, rows: number): void {
+  resize(id: number, cols: number, rows: number): void {
     const api = getElectronAPI()
     if (api?.terminal) {
-      api.terminal.resize(cols, rows)
+      api.terminal.resize(id, cols, rows)
     }
   },
 
-  async kill(): Promise<void> {
+  async kill(id: number): Promise<void> {
     const api = getElectronAPI()
     if (api?.terminal) {
-      await api.terminal.kill()
+      await api.terminal.kill(id)
     }
   },
 
-  onData(callback: (data: string) => void): () => void {
+  onData(callback: (payload: { id: number; data: string }) => void): () => void {
     const api = getElectronAPI()
     if (api?.terminal) {
       return api.terminal.onData(callback)
@@ -401,6 +419,12 @@ export const electronGit = {
   async diffHead(filePath?: string): Promise<{ ok: boolean; diff?: string; error?: string }> {
     const api = getElectronAPI()
     if (api?.git) return api.git.diffHead(filePath)
+    return { ok: false, error: 'Git not available in browser mode' }
+  },
+
+  async diffNumstat(cwd?: string | null): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const api = getElectronAPI()
+    if (api?.git) return api.git.diffNumstat(cwd)
     return { ok: false, error: 'Git not available in browser mode' }
   },
 

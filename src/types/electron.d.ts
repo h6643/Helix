@@ -67,11 +67,11 @@ export interface ElectronAPI {
   }
 
   terminal: {
-    start: (cols?: number, rows?: number, cwd?: string) => Promise<{ ok: boolean; error?: string }>
-    write: (command: string) => void
-    resize: (cols: number, rows: number) => void
-    kill: () => Promise<{ ok: boolean }>
-    onData: (callback: (data: string) => void) => () => void
+    start: (id: number, cols?: number, rows?: number, cwd?: string) => Promise<{ ok: boolean; error?: string }>
+    write: (id: number, command: string) => void
+    resize: (id: number, cols: number, rows: number) => void
+    kill: (id: number) => Promise<{ ok: boolean }>
+    onData: (callback: (payload: { id: number; data: string }) => void) => () => void
   }
 
   scheduledTasks: {
@@ -172,6 +172,7 @@ export interface ElectronAPI {
     status: (cwd?: string | null) => Promise<{ ok: boolean; output?: string; error?: string }>
     diff: (filePath?: string, staged?: boolean) => Promise<{ ok: boolean; diff?: string; error?: string }>
     diffHead: (filePath?: string) => Promise<{ ok: boolean; diff?: string; error?: string }>
+    diffNumstat: (cwd?: string | null) => Promise<{ ok: boolean; output?: string; error?: string }>
     revert: (filePath?: string) => Promise<{ ok: boolean; error?: string }>
     stage: (filePath?: string) => Promise<{ ok: boolean; error?: string }>
     unstage: (filePath?: string) => Promise<{ ok: boolean; error?: string }>

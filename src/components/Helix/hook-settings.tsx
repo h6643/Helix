@@ -146,7 +146,7 @@ export function HookSettings() {
       <SectionHeading>Hooks</SectionHeading>
 
       <div className="flex items-center justify-between gap-3 px-1">
-        <span className="ui-text font-medium text-foreground">启用 Hooks</span>
+        <span className="ui-subtitle font-semibold text-foreground">启用 Hooks</span>
         <Toggle enabled={settings.enabled} onToggle={() => setMasterEnabled(!settings.enabled)} />
       </div>
 

@@ -143,7 +143,15 @@ export function ContextMenuProvider() {
 
   useEffect(() => {
     _setState = setState
-    return () => { _setState = null }
+
+    // Block the native browser / webview context menu globally
+    const handleNativeMenu = (e: Event) => e.preventDefault()
+    document.addEventListener('contextmenu', handleNativeMenu)
+
+    return () => {
+      _setState = null
+      document.removeEventListener('contextmenu', handleNativeMenu)
+    }
   }, [])
 
   return <ContextMenu state={state} onClose={() => setState(null)} />

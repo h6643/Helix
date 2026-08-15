@@ -74,6 +74,30 @@ const DEFAULTS: MemoryCfg = {
   protectLastN: 20,
 }
 
+// ── 本地缓存 ───────────────────────────────────────────────────────────────
+// 配置权威源在 serve 网关的 config.yaml，但应用重启后网关握手需要几秒，
+// 此面板挂载时可能还没 ready（报 gateway-not-ready → "不可用"），用户被迫
+// 先发一条消息等网关起来再开面板。这里在每次保存时把设置快照到 localStorage：
+// 重启后打开面板先渲染缓存（上次保存的数字），同时后台拉权威配置校正——
+// 网关就绪前不会出现空白/不可用。
+const CACHE_KEY = 'helix-memory-settings'
+
+function loadCachedCfg(): MemoryCfg | null {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    return { ...DEFAULTS, ...parsed }
+  } catch {
+    return null
+  }
+}
+
+function saveCachedCfg(c: MemoryCfg): void {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(c)) } catch { /* ignore */ }
+}
+
 function toBool(v: any, fallback: boolean): boolean {
   if (typeof v === 'boolean') return v
   if (typeof v === 'string') return ['true', '1', 'yes'].includes(v.toLowerCase())
@@ -428,16 +452,27 @@ export function MemorySettings() {
 
   useEffect(() => {
     let cancelled = false
+    // 先渲染本地缓存（上次保存的数字），网关未就绪时也能立即显示；
+    // 权威值随后在后台拉取校正。
+    const cached = loadCachedCfg()
+    if (cached) {
+      setCfg(cached)
+      setState('ready')
+    }
     ;(async () => {
       try {
         const raw = await getHermesConfig()
         if (cancelled) return
-        setCfg(fromConfig(raw))
+        const fresh = fromConfig(raw)
+        setCfg(fresh)
+        saveCachedCfg(fresh)
         setState('ready')
       } catch (e: any) {
         if (cancelled) return
         if (e instanceof HermesRestUnavailable) {
-          setState('unavailable')
+          // 网关未就绪：有缓存就继续显示缓存值（保持 ready，不打扰用户）；
+          // 无缓存（从未保存过）才提示未就绪。
+          if (!cached) setState('unavailable')
         } else {
           warn('[MemorySettings] 读取配置失败:', e)
           setErr(String(e?.message || e))
@@ -457,6 +492,7 @@ export function MemorySettings() {
     setErr(null)
     try {
       await patchHermesConfig(toConfigPatch(next))
+      saveCachedCfg(next) // 保存成功即写本地缓存，重启后可直接显示
       setSavedTick((n) => n + 1)
       if (savedTimer.current) clearTimeout(savedTimer.current)
       savedTimer.current = setTimeout(() => setSavedTick(0), 2200)
@@ -538,7 +574,7 @@ export function MemorySettings() {
         {cfg.provider && <ProviderConfigPanel provider={cfg.provider} />}
       </div>
 
-      <h3 className="ui-title font-semibold text-foreground mb-4">上下文管理</h3>
+      <h3 className="ui-subtitle font-semibold text-foreground mb-4">上下文管理</h3>
       <div className="rounded-xl border border-border bg-card shadow-sm overflow-hidden divide-y divide-border/30">
         <Row label="压缩阈值" hint="上下文占用达到该比例时自动压缩">
           <NumberField value={cfg.thresholdPct} min={10} max={95} suffix="%" onCommit={(v) => update({ thresholdPct: v })} />

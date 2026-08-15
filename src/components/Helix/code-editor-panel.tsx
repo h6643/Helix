@@ -3,8 +3,8 @@
 import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { loadLanguage } from '@uiw/codemirror-extensions-langs'
 import CodeMirror from '@uiw/react-codemirror'
-import { FileCode2, X, AlertTriangle } from 'lucide-react'
-import React, { useEffect, useMemo, useState } from 'react'
+import { FileCode2, AlertTriangle } from 'lucide-react'
+import React, { useEffect, useMemo } from 'react'
 import { electronFS } from '@/lib/electron-bridge'
 import { useHelixStore } from '@/stores/helix-store'
 
@@ -88,14 +88,25 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
   const editorTheme = useHelixStore((s) => s.editorTheme)
   const setActiveEditorTab = useHelixStore((s) => s.setActiveEditorTab)
   const closeEditorTab = useHelixStore((s) => s.closeEditorTab)
+  const setPendingCloseId = useHelixStore((s) => s.setPendingCloseId)
+  const pendingCloseId = useHelixStore((s) => s.pendingCloseId)
   const updateEditorTabContent = useHelixStore((s) => s.updateEditorTabContent)
   const markEditorTabSaved = useHelixStore((s) => s.markEditorTabSaved)
   const showToast = useHelixStore((s) => s.showToast)
 
   const active = editorTabs.find((t) => t.id === activeId) || null
 
+  // Self-heal a stale `activeEditorTabId`: the parent only renders this panel
+  // when there is at least one open tab, so `active` being null here is always a
+  // desync (e.g. the id pointing at a tab that was closed). Fall back to the
+  // most recent tab instead of showing the "click a file to edit" placeholder.
+  useEffect(() => {
+    if (editorTabs.length > 0 && !editorTabs.some((t) => t.id === activeId)) {
+      setActiveEditorTab(editorTabs[editorTabs.length - 1].id)
+    }
+  }, [editorTabs, activeId, setActiveEditorTab])
+
   // Editor tab waiting for an unsaved-changes confirmation before it closes.
-  const [pendingCloseId, setPendingCloseId] = useState<string | null>(null)
   const pendingClose = editorTabs.find((t) => t.id === pendingCloseId) || null
 
   const handleSave = async (id: string): Promise<boolean> => {
@@ -110,16 +121,6 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
       showToast({ type: 'error', title: '保存失败', description: e?.message || '写入文件出错' })
       return false
     }
-  }
-
-  // Closing a tab: clean tabs close immediately; dirty tabs prompt first.
-  const requestCloseTab = (id: string) => {
-    const tab = useHelixStore.getState().editorTabs.find((t) => t.id === id)
-    if (!tab || !tab.dirty) {
-      closeEditorTab(id)
-      return
-    }
-    setPendingCloseId(id)
   }
 
   const confirmSaveAndClose = async () => {
@@ -177,39 +178,8 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-card">
-      {/* Tab bar */}
-      <div className="flex items-center gap-0.5 px-1.5 h-9 shrink-0 border-b border-border/40 bg-card overflow-x-auto">
-        {editorTabs.map((tab) => (
-          <div
-            key={tab.id}
-            className={`group flex items-center gap-1.5 pl-3 pr-1.5 py-1 rounded-t-md cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] max-w-[220px] border-b-2 ${
-              tab.id === activeId
-                ? 'bg-card border-primary text-foreground'
-                : 'text-foreground/60 border-transparent hover:bg-accent/40'
-            }`}
-            onClick={() => setActiveEditorTab(tab.id)}
-            data-tip={tab.path}
-          >
-            <span className="truncate">{tab.name}</span>
-            {tab.dirty && (
-              <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0" data-tip="未保存" />
-            )}
-            <button
-              className="opacity-40 hover:opacity-100 hover:text-destructive transition-opacity ml-0.5"
-              onClick={(e) => {
-                e.stopPropagation()
-                requestCloseTab(tab.id)
-              }}
-              data-tip={tab.dirty ? '关闭（未保存）' : '关闭'}
-            >
-              <X className="size-3" />
-            </button>
-          </div>
-        ))}
-        <div className="flex-1" />
-      </div>
-
-      {/* Editor */}
+      {/* Editor — the file name / close live in the unified right-sidebar tab
+          strip (one row), so there is no duplicate per-file tab bar here. */}
       <div className="flex-1 min-h-0 overflow-hidden">
         <CodeMirror
           value={active.content}

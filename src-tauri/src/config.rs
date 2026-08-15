@@ -121,7 +121,19 @@ pub fn set_yaml_key_deep(yaml: &str, dotted: &str, value: &serde_json::Value) ->
     }
     let value_str = yaml_scalar_string(value);
     let mut lines: Vec<String> = norm_lines(yaml);
-    set_deep(&mut lines, &parts, &value_str, 0);
+    set_deep(&mut lines, &parts, &value_str, 0, 0);
+    lines.join("\n")
+}
+
+/// Remove a `key:` line at a dotted path (used to strip legacy inline secrets
+/// that are now stored in `.env`, e.g. `auxiliary.vision.api_key`).
+pub fn remove_yaml_key_deep(yaml: &str, dotted: &str) -> String {
+    let parts: Vec<&str> = dotted.split('.').collect();
+    if parts.is_empty() {
+        return yaml.to_string();
+    }
+    let mut lines: Vec<String> = norm_lines(yaml);
+    remove_deep(&mut lines, &parts, 0, 0);
     lines.join("\n")
 }
 
@@ -145,12 +157,25 @@ fn yaml_scalar_string(value: &serde_json::Value) -> String {
     }
 }
 
-/// Find the index of a `key:` header at exactly `indent` spaces. Returns None
-/// if absent. A deeper-indented line (more spaces) is intentionally not matched
-/// so we don't confuse a child block with a sibling.
-fn find_at_indent(lines: &[String], key: &str, indent: usize) -> Option<usize> {
+/// Find the index of a `key:` header at exactly `indent` spaces, scoped to the
+/// block that starts at `start`. A deeper-indented line (more spaces) is
+/// intentionally not matched so we don't confuse a child block with a sibling.
+/// The search stops at the first non-blank, non-comment line shallower than
+/// `indent`, so a same-indent key in an unrelated section (e.g. a
+/// `custom_providers` field) can never shadow a nested key like
+/// `auxiliary.vision.base_url`.
+fn find_at_indent(lines: &[String], key: &str, indent: usize, start: usize) -> Option<usize> {
     let prefix = " ".repeat(indent);
-    for (i, l) in lines.iter().enumerate() {
+    for (i, l) in lines.iter().enumerate().skip(start) {
+        if indent > 0 {
+            let trimmed = l.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if leading_spaces(l) < indent {
+                break;
+            }
+        }
         if l.len() >= indent && l.starts_with(&prefix) {
             let rest = &l[indent..];
             if !rest.starts_with(' ') {
@@ -167,14 +192,15 @@ fn find_at_indent(lines: &[String], key: &str, indent: usize) -> Option<usize> {
 /// leaf to `value_str`. When a parent header exists but the child is missing,
 /// the child header is inserted right after the parent header (keeps the block
 /// cohesive). When the top-level key is absent it is appended at EOF (the only
-/// caller writes `auxiliary.*`, so this stays correct).
-fn set_deep(lines: &mut Vec<String>, parts: &[&str], value_str: &str, indent: usize) {
+/// caller writes `auxiliary.*`, so this stays correct). `start` anchors every
+/// lookup to the parent block so nested keys can't leak into sibling sections.
+fn set_deep(lines: &mut Vec<String>, parts: &[&str], value_str: &str, indent: usize, start: usize) {
     let key = parts[0];
-    let idx = find_at_indent(lines, key, indent);
+    let idx = find_at_indent(lines, key, indent, start);
     match idx {
         None => {
             lines.push(format!("{}{}:", " ".repeat(indent), key));
-            set_deep(lines, &parts[1..], value_str, indent + 2);
+            set_deep(lines, &parts[1..], value_str, indent + 2, lines.len() - 1);
         }
         Some(i) => {
             if parts.len() == 1 {
@@ -182,11 +208,24 @@ fn set_deep(lines: &mut Vec<String>, parts: &[&str], value_str: &str, indent: us
                 return;
             }
             let child = parts[1];
-            if find_at_indent(lines, child, indent + 2).is_none() {
+            if find_at_indent(lines, child, indent + 2, i + 1).is_none() {
                 lines.insert(i + 1, format!("{}{}:", " ".repeat(indent + 2), child));
             }
-            set_deep(lines, &parts[1..], value_str, indent + 2);
+            set_deep(lines, &parts[1..], value_str, indent + 2, i + 1);
         }
+    }
+}
+
+/// Recursively remove the leaf `key` line at `parts[0]..`, scoped like
+/// `set_deep`. Leaves parent headers (and sibling keys) intact.
+fn remove_deep(lines: &mut Vec<String>, parts: &[&str], indent: usize, start: usize) {
+    let Some(i) = find_at_indent(lines, parts[0], indent, start) else {
+        return;
+    };
+    if parts.len() == 1 {
+        lines.remove(i);
+    } else {
+        remove_deep(lines, &parts[1..], indent + 2, i + 1);
     }
 }
 

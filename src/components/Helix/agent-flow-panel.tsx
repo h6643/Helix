@@ -170,6 +170,43 @@ function isNearDuplicate(aN: string, bN: string): boolean {
     aN.includes(bN) || bN.includes(aN) || textSimilarityRatio(aN, bN) >= 0.6
 }
 
+// reconcileBlocksWithContent repairs streaming-accumulated text blocks using
+// the authoritative msg.content. The forwarding chain intermittently drops
+// whitespace/newlines inside streamed chunks (e.g. "**加粗** 后" glued into
+// "**加粗**后"), which breaks CommonMark strong rendering (a `**` closer must
+// be followed by whitespace/punctuation). The done handler already repairs
+// msg.content from the backend's final text; here we apply the same fix to the
+// blocks path so rendering matches. Only fires when the joined text blocks are
+// normalized-equivalent to msg.content AND content is not shorter (i.e. it is
+// the same or a fuller version) — never guesses, never corrupts normal text.
+function reconcileBlocksWithContent(
+  blocks: NonNullable<ChatMessage['blocks']>,
+  content?: string | null,
+): NonNullable<ChatMessage['blocks']> {
+  if (!content || blocks.length === 0) return blocks
+  const textBlocks = blocks.filter((b) => b.type === 'text')
+  if (textBlocks.length === 0) return blocks
+  const joined = textBlocks.map((b) => String(b.content || '')).join('')
+  if (!joined) return blocks
+  const normJoined = normalizeForCompare(joined)
+  const normContent = normalizeForCompare(content)
+  if (!normJoined || !normContent) return blocks
+  if (normJoined !== normContent && !normJoined.includes(normContent) && !normContent.includes(normJoined)) return blocks
+  if (content.length < joined.length) return blocks
+  // Same-or-fuller authoritative text: last text block carries the full
+  // content, earlier text blocks are blanked (normalizeTextBlocks filters
+  // empty ones). Non-text blocks (thinking/tool_group) keep their order.
+  let textSeen = false
+  return blocks.map((b) => {
+    if (b.type !== 'text') return b
+    if (!textSeen) {
+      textSeen = true
+      return { ...b, content }
+    }
+    return { ...b, content: '' }
+  })
+}
+
 function normalizeTextBlocks(blocks: NonNullable<ChatMessage['blocks']>): NonNullable<ChatMessage['blocks']> {
   // Hermes frequently RE-SENDS the full accumulated text as another
   // agent_message_chunk (update_agent_message_text). When such a resend lands
@@ -698,7 +735,7 @@ function ReasoningEffortControl({ value, onChange }: { value: ReasoningEffortLev
         ref={triggerRef}
         type="button"
         onClick={toggle}
-        className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:text-foreground px-2 py-1.5 h-7 rounded-lg border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors min-w-11 text-center"
+        className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:text-foreground px-2 py-1.5 h-7 rounded-lg border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors min-w-11 text-center chat-toolbar-label"
       >
         {current.label}
       </button>
@@ -922,7 +959,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               // 按时间序交替渲染 thinking / tool_group / text（不置顶工具、不合并
               // 所有思考）：被工具隔开的思考段各自独立折叠，工具卡按事件顺序出现，
               // 模型"思考→执行→再思考→再执行"的节奏原样呈现。仅合并相邻思考块。
-              const normalizedBlocks = mergeAdjacentThinking(normalizeTextBlocks(msg.blocks))
+              const normalizedBlocks = mergeAdjacentThinking(normalizeTextBlocks(reconcileBlocksWithContent(msg.blocks, msg.content)))
               const lastTextIndex = normalizedBlocks.reduce((acc, b, i) => b.type === 'text' ? i : acc, -1)
               const processBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(0, lastTextIndex) : normalizedBlocks
               const answerBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(lastTextIndex) : []
@@ -1054,7 +1091,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                       <FileText className="size-4 text-foreground/50 shrink-0" />
                     )}
                     <div className="min-w-0">
-                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground truncate">{f.name}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground max-w-[8ch] truncate">{f.name.length > 8 ? f.name.slice(0, 8) + '…' : f.name}</p>
                       <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70">{formatBytes(f.size)}</p>
                     </div>
                   </div>
@@ -1865,7 +1902,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return (
     <>
       {/* Model selector — wide button matching settings page style */}
-      <div className="relative" ref={modelDropdownRef}>
+      <div className="relative min-w-0" ref={modelDropdownRef}>
         <button
           type="button"
           onClick={() => {
@@ -1892,9 +1929,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }
             }
           }}
-          className="flex items-center justify-between gap-2 min-w-[80px] max-w-[140px] px-2.5 py-1.5 h-7 bg-muted/30 border border-border/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
+          className="flex items-center justify-between gap-2 min-w-0 max-w-[140px] px-2.5 py-1.5 h-7 bg-muted/30 border border-border/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
         >
-          <span className="truncate">{displayName}</span>
+          <span className="truncate min-w-0 flex-1 text-left chat-toolbar-label">{displayName}</span>
           <svg className={`size-3.5 text-muted-foreground transition-transform shrink-0 ${showModelDropdown ? 'rotate-180' : ''}`} xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
         </button>
         {showModelDropdown && (
@@ -2517,6 +2554,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     let wasFront = isFrontRun()
     const uiRB = (u: any) => {
       responseBlocksRef.current = typeof u === 'function' ? u(responseBlocksRef.current) : u
+      // TEMP DIAG
+      try {
+        ;(window as any).__TAURI_INTERNALS__?.invoke?.('dbg_log', { msg: `[ui-dbg] uiRB called front=${isFrontRun()} blocks=${responseBlocksRef.current.length} owner=${liveStateOwnerRef.current} cur=${useHelixStore.getState().currentSessionId}` }).catch(()=>{})
+      } catch { /* noop */ }
       if (!isFrontRun()) { wasFront = false; return }
       if (!wasFront) { wasFront = true; setResponseBlocks(responseBlocksRef.current) }
       setResponseBlocks(u)
@@ -3211,6 +3252,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // run with "正在思考" forever (no tool cards, no text).
       unsubscribe = hermesApi()!.onEvent(async (method: string, params: any) => {
         const mySid = sessionId
+        // TEMP DIAG: 记录收到的 tool 相关事件
+        if (method.includes('tool') || method.includes('session/update')) {
+          try {
+            ;(window as any).__TAURI_INTERNALS__?.invoke?.('dbg_log', { msg: `[tool-dbg] method=${method} sid=${mySid} evtSid=${params?.session_id} su=${params?.update?.sessionUpdate} tc=${params?.update?.toolCallId}` }).catch(()=>{})
+          } catch { /* noop */ }
+        }
         // True-concurrency guard: this onEvent instance belongs to the run for
         // `mySid`. Ignore events from any OTHER session so parallel runs don't
         // cross-contaminate each other's queues. Global gateway-level events
@@ -3816,11 +3863,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               if (!curTrim) {
                 newText = incRaw
               } else if (incTrim.startsWith(curTrim)) {
-                // New text is a superset of accumulated text (Hermes full resend)
-                newText = incRaw
-              } else if (curTrim.startsWith(incTrim)) {
+                // New text is a superset of accumulated text (Hermes full resend).
+                // Guard: a resend that LOST whitespace (fewer bytes, same normalized
+                // content) must not clobber the accumulated copy — whitespace loss is
+                // what breaks markdown tables/strong ("**加粗** 后" → "**加粗**后").
+                newText = incRaw.length >= cur.length ? incRaw : cur
+              } else if (incTrim && curTrim.startsWith(incTrim)) {
                 // Incoming is a subset of accumulated (retry sent shorter text) — keep the
                 // more complete accumulated buffer to avoid truncation.
+                // `incTrim &&` guard: a whitespace-only chunk trims to "" and
+                // curTrim.startsWith("") is ALWAYS true — that branch would silently
+                // DROP the whitespace (the root cause of glued words / broken tables
+                // in streamed markdown). Whitespace-only chunks must be appended.
                 newText = cur
               } else if (textSimilarityRatio(curTrim, incTrim) >= 0.6) {
                 // 归一化后高度相似：Hermes 全文重发微差版 / 模型重试改写。
@@ -3986,6 +4040,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 const discardBlocks = !!(finalBlocks && content && !finalBlocks.some(b => b.type === 'text'))
                 if (discardBlocks) {
                   finalBlocks = undefined
+                }
+                // 权威全文自愈（见 reconcileBlocksWithContent）：流式转发链会间歇丢
+                // 空白/换行，done 时 content 已被 finalText 修复；把同样的权威文本写回
+                // blocks 的 text 块，让 blocks 渲染路径与 msg.content 一致——否则
+                // "**加粗** 后"黏成 "**加粗**后" 时 strong 闭合符后紧跟非空白字符，
+                // CommonMark 不渲染加粗（用户可见症状：** 原样显示）。
+                if (finalBlocks && content) {
+                  finalBlocks = reconcileBlocksWithContent(finalBlocks, content)
                 }
                 // CRITICAL: clear streaming blocks BEFORE adding the completed
                 // message to chatMessages.  Zustand store writes can trigger a
@@ -4611,7 +4673,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   const renderChatInput = ({ isEmpty }: { isEmpty?: boolean } = {}) => {
     const projectName = selectedWorkDir ? (selectedWorkDir.split(/[/\\]/).pop() || selectedWorkDir) : '选择项目'
     const approvalModeButton = (
-      <div className="relative" ref={approvalModeDropdownRef}>
+      <div className="relative min-w-0" ref={approvalModeDropdownRef}>
         <button
           type="button"
           onClick={() => setShowApprovalModeDropdown(!showApprovalModeDropdown)}
@@ -4621,7 +4683,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           {approvalMode === 'default' && <Hand className="size-3.5" />}
           {approvalMode === 'accept_edits' && <Clock className="size-3.5" />}
           {approvalMode === 'dont_ask' && <AlertTriangle className="size-3.5" />}
-          <span>
+          <span className="truncate min-w-0 chat-toolbar-label">
             {approvalMode === 'default' && '请求批准'}
             {approvalMode === 'accept_edits' && '替我审批'}
             {approvalMode === 'dont_ask' && '完全访问权限'}
@@ -4694,7 +4756,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return (
     <div
       ref={chatInputWrapRef}
-      className={`border transition-all duration-200 relative bg-background/90 backdrop-blur-md border-border/40 rounded-2xl ${isDraggingFile ? 'border-primary/40' : 'hover:border-border/60 focus-within:border-primary/30'}`}
+      className={`helix-chat-input-card border transition-all duration-200 relative bg-card backdrop-blur-md border-border/40 rounded-2xl ${isDraggingFile ? 'border-primary/40' : 'hover:border-border/60 focus-within:border-primary/30'}`}
       onDragOver={(e) => {
         e.preventDefault()
         e.stopPropagation()
@@ -4731,7 +4793,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       <FileText className="size-4 text-muted-foreground shrink-0" />
                     )}
                     <div className="min-w-0">
-                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground truncate">{f.name}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground max-w-[8ch] truncate">{f.name.length > 8 ? f.name.slice(0, 8) + '…' : f.name}</p>
                       <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60">{formatBytes(f.size)}</p>
                     </div>
                     <button
@@ -4775,7 +4837,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={isEmpty ? "随心输入..." : "要求后续变更..."}
+              placeholder={ "随心输入..."}
               rows={2}
               className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-[var(--helix-transcript-size)] min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
               style={{
@@ -4936,7 +4998,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       onChange={handleFileSelect}
                     />
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 min-w-0 shrink">
                     <ContextUsageIndicator />
                     {hasApiKey || isServeActive() ? (
                       renderModelSelector()
@@ -4985,7 +5047,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       onChange={handleFileSelect}
                     />
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 min-w-0 shrink">
                     <ContextUsageIndicator />
                     {(hasApiKey || isServeActive()) && renderModelSelector()}
                     <ReasoningEffortControl value={reasoningEffort} onChange={(v) => storeActions.setReasoningEffort(v)} />
@@ -5034,7 +5096,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           data-tip={selectedWorkDir || '选择项目目录'}
         >
           <Folder className="size-3.5 text-amber-500" />
-          <span className="max-w-[160px] truncate">{projectName}</span>
+          <span className="max-w-[160px] truncate">{projectName.length > 12 ? projectName.slice(0, 12) + '…' : projectName}</span>
         </button>
 
         {/* External services (server / VM) — breadcrumb entry, placed right of project name */}
@@ -5070,7 +5132,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }
             }}
             className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/60 hover:text-foreground hover:bg-accent/50 px-2 py-1 rounded-lg transition-colors"
-            data-tip={`当前分支：${currentBranch}（点击查看全部分支）`}
+            data-tip={`当前分支：${currentBranch}`}
           >
             <GitBranch className="size-3.5 text-emerald-500" />
             <span>{currentBranch}</span>
@@ -5222,7 +5284,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       {/* Flow area */}
       {/* 模型在执行危险操作、弹出确认弹窗时，不显示聊天对话框（对话区+输入框）。
           只保留确认弹窗，让用户专注审批；审批结束后聊天恢复显示。 */}
-      <div ref={scrollRef} className={`flex-1 min-h-0 overflow-y-auto msg-scroll-viewport ${approvalRequest ? 'hidden' : ''} ${sessionMessages.length === 0 && !hasSteps ? 'hide-scrollbar' : ''}`}>
+      <div ref={scrollRef} className={`flex-1 min-h-0 overflow-y-auto msg-scroll-viewport ${sessionMessages.length === 0 && !hasSteps ? 'hide-scrollbar' : ''}`}>
         <div className="max-w-[700px] mx-auto px-5 py-4 pb-12 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (
             <div className="flex flex-col items-center w-full pt-[22vh]">
@@ -5340,7 +5402,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                                     <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
                                     <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                                   </summary>
-                                  <div className="mt-1 pl-3 text-foreground/50  break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                                  <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
                                     {conversationSearchOpen && conversationSearchQuery.trim() ? (
                                       <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
                                     ) : (
@@ -5384,7 +5446,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                                 <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
                                 <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                               </summary>
-                              <div className="mt-1 pl-3 text-foreground/50  break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                              <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
                                 {conversationSearchOpen && conversationSearchQuery.trim() ? (
                                   <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
                                 ) : (

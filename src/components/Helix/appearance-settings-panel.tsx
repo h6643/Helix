@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import { useHelixStore } from '@/stores/helix-store'
-import { SettingRow, SettingGroup, SectionHeading, PopupSelect, NumberField } from './settings-ui'
+import { SettingRow, SettingGroup, SectionHeading, PopupSelect, NumberField, useLockScrollOnOpen } from './settings-ui'
 import { THEME_SELECT_GROUPS } from '@/lib/themes'
 
 /**
@@ -16,6 +16,10 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
+  const selectedRef = useRef<HTMLButtonElement | null>(null)
+
+  // 展开期间锁定背景滚动容器，避免 fixed 弹层与触发器错位。
+  useLockScrollOnOpen(open, btnRef)
 
   const currentLabel =
     THEME_SELECT_GROUPS.flatMap((g) => g.options).find((o) => o.value === value)?.label ?? '默认'
@@ -29,7 +33,7 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
       setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); setOpen(false) }
+      if (e.key === 'Escape') { e.preventDefault(); setOpen(false); (document.activeElement as HTMLElement)?.blur?.() }
     }
     const t = setTimeout(() => {
       document.addEventListener('mousedown', onDown)
@@ -48,8 +52,8 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
     const btn = btnRef.current
     if (!btn) return
     const r = btn.getBoundingClientRect()
-    // popup 与触发器同宽（w-56 = 224px），右对齐后两者左缘也对齐。
-    const left = Math.max(8, r.right - 224)
+    // popup 与触发器同宽（w-40 = 160px），右对齐后两者左缘也对齐。
+    const left = Math.max(8, r.right - 160)
     setPos({ left, top: r.bottom + 4 })
   }, [open])
 
@@ -60,6 +64,36 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
       const br = btnRef.current.getBoundingClientRect()
       popRef.current.style.top = `${Math.max(8, br.top - pr.height - 4)}px`
     }
+  }, [open, pos])
+
+  // 打开时自动滚动到当前选中的主题，而不是每次都从列表顶部开始。
+  useEffect(() => {
+    if (!open || !pos || !popRef.current || !selectedRef.current) return
+    const container = popRef.current
+    const el = selectedRef.current
+    const cTop = container.scrollTop
+    const elTop = el.offsetTop
+    const cH = container.clientHeight
+    const elH = el.offsetHeight
+    if (elTop < cTop || elTop + elH > cTop + cH) {
+      container.scrollTop = Math.max(0, elTop - (cH - elH) / 2)
+    }
+  }, [open, pos])
+
+  // 列表展开期间滚轮只滚动列表本身，绝不滚动背后的设置页：列表可滚动时在
+  // 列表内滚动，滚到边界或列表本身不可滚动（内容没超出 max-h）时 preventDefault
+  // 阻止滚动链冒泡到页面（passive:false 才能 preventDefault）。
+  useEffect(() => {
+    if (!open || !popRef.current) return
+    const el = popRef.current
+    const onWheel = (e: WheelEvent) => {
+      const canDown = el.scrollHeight > el.clientHeight && el.scrollTop + el.clientHeight < el.scrollHeight - 1
+      const canUp = el.scrollTop > 0
+      const down = e.deltaY > 0
+      if ((down && !canDown) || (!down && !canUp)) e.preventDefault()
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
   }, [open, pos])
 
   return (
@@ -77,7 +111,7 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed z-50 w-56 bg-popover border border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto backdrop-blur-sm"
+          className="fixed z-50 w-40 bg-popover border-0 rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto overscroll-contain backdrop-blur-sm"
           style={{ left: pos.left, top: pos.top }}
         >
           {THEME_SELECT_GROUPS.map((g) => (
@@ -88,8 +122,9 @@ function ThemeStylePicker({ value, onChange }: { value: string; onChange: (id: s
               {g.options.map((o) => (
                 <button
                   key={o.value}
+                  ref={o.value === value ? selectedRef : undefined}
                   type="button"
-                  onClick={() => { onChange(o.value); setOpen(false) }}
+                  onClick={() => { onChange(o.value); setOpen(false); btnRef.current?.focus({ preventScroll: true }) }}
                   className={`w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] transition-colors text-left ${
                     o.value === value
                       ? 'bg-accent text-accent-foreground'
@@ -167,7 +202,7 @@ export function AppearanceSettingsPanel({ themeStyle, onSelectThemeStyle }: {
       {/* 编辑器：标题和描述在卡片上方，卡片内放代码字体/字号 */}
       <div className="pt-1">
         <div className="px-4 pt-3 pb-2">
-          <h4 className="ui-title font-semibold text-foreground">编辑器</h4>
+          <h4 className="ui-subtitle font-semibold text-foreground">编辑器</h4>
         </div>
         <SettingGroup>
           <SettingRow label="代码字体" hint="调整代码内容使用的等宽字体。">
@@ -182,7 +217,7 @@ export function AppearanceSettingsPanel({ themeStyle, onSelectThemeStyle }: {
       {/* 界面：标题和描述在卡片上方，卡片内放 UI 字体/字号 */}
       <div className="pt-1">
         <div className="px-4 pt-3 pb-2">
-          <h4 className="ui-title font-semibold text-foreground">界面</h4>
+          <h4 className="ui-subtitle font-semibold text-foreground">界面</h4>
         </div>
         <SettingGroup>
           <SettingRow label="UI 字体" hint="调整界面文字使用的字体。">

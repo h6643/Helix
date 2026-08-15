@@ -3,7 +3,7 @@
 //! and referenced from YAML via `key_env`, mirroring how web_search handles
 //! search keys (keeps secrets out of the committed yaml).
 
-use crate::config::{config_yaml_path, env_path, set_yaml_key_deep};
+use crate::config::{config_yaml_path, env_path, remove_yaml_key_deep, set_yaml_key_deep};
 use crate::gateway::{env_gateway_mode, kill_current, spawn_gateway};
 use crate::state::AppState;
 use serde_json::{json, Value};
@@ -23,6 +23,7 @@ pub fn vision_config_list(_state: State<'_, Arc<AppState>>) -> Value {
     let mut provider = String::new();
     let mut model = String::new();
     let mut base_url = String::new();
+    let mut inline_api_key = String::new();
     let mut in_aux = false;
     let mut in_vision = false;
 
@@ -54,20 +55,30 @@ pub fn vision_config_list(_state: State<'_, Arc<AppState>>) -> Value {
                     model = rest.trim().trim_matches('"').trim_matches('\'').to_string();
                 } else if let Some(rest) = trimmed.strip_prefix("base_url:") {
                     base_url = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                } else if let Some(rest) = trimmed.strip_prefix("api_key:") {
+                    // Legacy configs stored the key inline. Keep it as a fallback
+                    // so the UI isn't wiped on restart; saves migrate it to .env.
+                    inline_api_key = rest.trim().trim_matches('"').trim_matches('\'').to_string();
                 }
             }
         }
     }
 
-    // Read the vision API key from .env (written under HELIX_VISION_API_KEY).
-    let mut api_key = String::new();
+    // Read the vision API key from .env (written under HELIX_VISION_API_KEY),
+    // falling back to a legacy inline api_key in config.yaml.
+    let mut env_api_key = String::new();
     if let Ok(env) = std::fs::read_to_string(env_path()) {
         for line in env.lines() {
             if let Some(rest) = line.strip_prefix("HELIX_VISION_API_KEY=") {
-                api_key = rest.trim().to_string();
+                env_api_key = rest.trim().to_string();
             }
         }
     }
+    let api_key = if !env_api_key.is_empty() {
+        env_api_key
+    } else {
+        inline_api_key
+    };
 
     json!({
         "ok": true,
@@ -104,6 +115,9 @@ pub fn vision_config_save(state: State<'_, Arc<AppState>>, config: Value) -> Val
         "auxiliary.vision.key_env",
         &json!(if api_key.is_empty() { "" } else { "HELIX_VISION_API_KEY" }),
     );
+    // Move the secret out of config.yaml: drop any legacy inline api_key now
+    // that it lives in .env under HELIX_VISION_API_KEY (referenced via key_env).
+    yaml = remove_yaml_key_deep(&yaml, "auxiliary.vision.api_key");
 
     if let Some(dir) = yaml_path.parent() {
         let _ = std::fs::create_dir_all(dir);

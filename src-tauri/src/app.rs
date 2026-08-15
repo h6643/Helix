@@ -41,6 +41,26 @@ pub fn persist_work_dir(dir: &str) {
     }
 }
 
+/// Render a path for the renderer. `std::fs::canonicalize` returns verbatim
+/// `\\?\`-prefixed paths on Windows (correct for internal comparison, but ugly
+/// in the UI — e.g. the terminal prompt becomes `\\?\D:\桌面\...`). Strip the
+/// namespace prefix for display only; internal storage (state.work_dir /
+/// allowed_roots) keeps the canonical form so path checks stay consistent.
+fn display_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    match s.strip_prefix("\\\\?\\") {
+        // `rest[..4]` would PANIC when byte 4 lands inside a multi-byte UTF-8
+        // char (e.g. `\\?\D:\桌面\...` → `D:\桌...`); `get(..4)` returns None
+        // there and falls through to the plain strip. `rest[4..]` below is safe
+        // because the `UNC\` prefix is 4 ASCII bytes.
+        Some(rest) if rest.get(..4).is_some_and(|r| r.eq_ignore_ascii_case("UNC\\")) => {
+            format!("\\\\{}", &rest[4..])
+        }
+        Some(rest) => rest.to_string(),
+        None => s,
+    }
+}
+
 fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
@@ -63,7 +83,7 @@ pub fn get_info(state: State<'_, Arc<AppState>>) -> Value {
     json!({
         "version": app_version(),
         "platform": platform(),
-        "workDir": work_dir.display().to_string(),
+        "workDir": display_path(&work_dir),
     })
 }
 
@@ -74,7 +94,7 @@ pub fn sync_work_dir(state: State<'_, Arc<AppState>>, dir: String) -> Value {
     let d = dir.trim().to_string();
     if d.is_empty() {
         let w = state.work_dir.read().unwrap().clone();
-        return json!({ "success": false, "workDir": w.display().to_string() });
+        return json!({ "success": false, "workDir": display_path(&w) });
     }
     let resolved = if std::path::Path::new(&d).is_absolute() {
         PathBuf::from(&d)
@@ -90,7 +110,7 @@ pub fn sync_work_dir(state: State<'_, Arc<AppState>>, dir: String) -> Value {
         .unwrap_or(resolved);
     *state.work_dir.write().unwrap() = resolved.clone();
     state.add_allowed_root(resolved.to_str().unwrap_or(""));
-    json!({ "success": true, "workDir": resolved.display().to_string() })
+    json!({ "success": true, "workDir": display_path(&resolved) })
 }
 
 /// Get installed Hermes backend version via `hermes --version`.
@@ -183,7 +203,7 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
         std::thread::sleep(std::time::Duration::from_millis(300));
         let _ = spawn_gateway(&state);
     }
-    json!({ "success": true, "workDir": canonical.display().to_string() })
+    json!({ "success": true, "workDir": display_path(&canonical) })
 }
 
 /// Kill + respawn the gateway. serve mode: no-op (config re-read per session).
@@ -336,4 +356,22 @@ fn remove_pointer() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_path_strips_verbatim_prefix() {
+        // Plain drive path with no prefix → unchanged.
+        assert_eq!(display_path(Path::new("D:\\foo")), "D:\\foo");
+        // ASCII drive path.
+        assert_eq!(display_path(Path::new("\\\\?\\C:\\Windows")), "C:\\Windows");
+        // CJK immediately after the drive root: byte 4 falls inside a multi-byte
+        // char — must strip without panicking on the byte-index slice.
+        assert_eq!(display_path(Path::new("\\\\?\\D:\\桌面\\客户知识库\\wiki")), "D:\\桌面\\客户知识库\\wiki");
+        // UNC share.
+        assert_eq!(display_path(Path::new("\\\\?\\UNC\\server\\share")), "\\\\server\\share");
+    }
 }

@@ -185,6 +185,35 @@ export function ContextUsageIndicator() {
     if (open) fetchContextData()
   }, [open, fetchContextData])
 
+  // Quietly capture the category breakdown once per new live Hermes session and
+  // persist it into the local snapshot — WITHOUT overriding the displayed ring
+  // data (which reflects THIS conversation's persisted usage). Previously the
+  // breakdown was only saved when the popover was opened mid-session, so a cold
+  // restart always fell back to the "需要正在运行的 Hermes 会话" empty state
+  // even though the total percentage had been persisted.
+  const hermesSessionId = useHermesStore((s) => s.hermesSessionId)
+  const quietFetchedSidRef = useRef<string | null>(null)
+  useEffect(() => {
+    const sid = hermesSessionId
+    if (!sid || quietFetchedSidRef.current === sid) return
+    quietFetchedSidRef.current = sid
+    const currentSessionId = useHelixStore.getState().currentSessionId
+    hermesApi()?.send('session.context_breakdown', { session_id: sid })
+      .then((result) => {
+        if (!result || typeof result !== 'object') return
+        const data = result as ContextUsageData
+        if (data.categories?.length) {
+          useHelixStore.getState().setContextUsage(
+            currentSessionId ?? sid,
+            data.context_max,
+            data.context_used,
+            data.categories.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
+          )
+        }
+      })
+      .catch(() => { /* backend may not support this yet */ })
+  }, [hermesSessionId])
+
   // Prefer live backend RPC data. When there is no live Hermes session
   // (app/gateway restarted, or the conversation was never run this session) fall
   // back to the locally persisted per-conversation store

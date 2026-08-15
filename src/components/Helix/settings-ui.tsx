@@ -38,7 +38,7 @@ export const SettingRow = ({ label, hint, labelClassName = '', children }: { lab
 )
 
 export const SettingGroup = ({ title, action, description, children, className = '' }: { title?: string; action?: React.ReactNode; description?: React.ReactNode; children?: React.ReactNode; className?: string }) => (
-  <div className={`rounded-xl border border-border bg-card shadow-sm overflow-hidden ${className}`}>
+  <div className={`rounded-xl border-0 bg-card shadow-sm overflow-hidden ${className}`}>
     {(title || action || description) && (
       <div className={`px-4 py-3 ${children ? 'border-b border-border/30' : ''}`}>
         {(title || action) && (
@@ -124,6 +124,38 @@ interface PopupSelectProps {
 }
 
 /**
+ * 下拉/弹层打开时锁定最近的背景滚动容器。弹层多为 position:fixed，背景滚动容器
+ * （如设置内容卡片）滚动时触发器会移动而弹层留在视口原位，导致两者错位；锁住背景
+ * 滚动并补偿滚动条宽度（隐藏滚动条后避免布局横向跳动），关闭时还原。
+ */
+export function useLockScrollOnOpen(open: boolean, btnRef: React.RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    if (!open) return
+    let el: HTMLElement | null = btnRef.current
+    let scroller: HTMLElement | null = null
+    while (el && el !== document.body && el !== document.documentElement) {
+      const s = getComputedStyle(el)
+      if (s.overflowY === 'auto' || s.overflowY === 'scroll' || s.overflowY === 'overlay') {
+        scroller = el
+        break
+      }
+      el = el.parentElement
+    }
+    if (!scroller) return
+    const prevOverflow = scroller.style.overflowY
+    const prevPadR = scroller.style.paddingRight
+    const sbw = scroller.offsetWidth - scroller.clientWidth
+    if (sbw > 0) scroller.style.paddingRight = `${sbw}px`
+    scroller.style.overflowY = 'hidden'
+    return () => {
+      if (!scroller) return
+      scroller.style.overflowY = prevOverflow
+      scroller.style.paddingRight = prevPadR
+    }
+  }, [open, btnRef])
+}
+
+/**
  * 自定义下拉选择。原生 `<select>` 的弹出列表在 WebKitGTK 下不可靠
  * （配色风格选择器因此改用 HTML 列表），这里做成通用组件：触发器 +
  * 固定定位的 HTML 弹出列表，点击外部 / Escape 关闭，选中项高亮打勾，
@@ -155,7 +187,7 @@ export function PopupSelect({
       setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); setOpen(false) }
+      if (e.key === 'Escape') { e.preventDefault(); setOpen(false); (document.activeElement as HTMLElement)?.blur?.() }
     }
     const t = setTimeout(() => {
       document.addEventListener('mousedown', onDown)
@@ -191,6 +223,9 @@ export function PopupSelect({
     popRef.current.style.left = `${left}px`
   }, [open, pos])
 
+  // 展开期间锁定背景滚动容器，避免 fixed 弹窗与触发器错位（见 useLockScrollOnOpen）。
+  useLockScrollOnOpen(open, btnRef)
+
   return (
     <div className="relative">
       <button
@@ -207,7 +242,7 @@ export function PopupSelect({
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed z-50 bg-popover border-2 border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto backdrop-blur-sm"
+          className="fixed z-50 bg-popover border-0 rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto overscroll-contain backdrop-blur-sm"
           style={{ left: pos.left, top: pos.top, width: pos.width }}
         >
           {options.map((o) => {
@@ -216,7 +251,7 @@ export function PopupSelect({
               <button
                 key={String(o.value)}
                 type="button"
-                onClick={() => { onChange(String(o.value)); setOpen(false) }}
+                onClick={() => { onChange(String(o.value)); setOpen(false); btnRef.current?.focus({ preventScroll: true }) }}
                 className={`w-full flex items-center gap-2 px-3 py-1.5 ui-text-sm2 transition-colors text-left ${
                   selected
                     ? 'bg-accent text-accent-foreground'

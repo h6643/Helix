@@ -11,6 +11,7 @@ import {
   Trash2,
   Folder,
   FolderOpen,
+  FolderTree,
   Archive,
   Pin,
   Sparkles,
@@ -30,6 +31,7 @@ import { isElectron, electronDialog, electronShell } from '@/lib/electron-bridge
 import { persistence, type PersistedSession } from '@/lib/persist'
 import { useHelixStore } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
+import { FileTreePanel } from './file-tree-panel'
 
 interface SidebarProps {
   onNewTask?: () => void
@@ -306,6 +308,9 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
           const showSkillPanel = useHelixStore((s) => s.showSkillPanel)
   const showKanbanPanel = useHelixStore((s) => s.showKanbanPanel)
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir)
+  const directoryProjectDir = useHelixStore((s) => s.directoryProjectDir)
+  const toggleDirectoryProject = useHelixStore((s) => s.toggleDirectoryProject)
+  const setRightSidebarTab = useHelixStore((s) => s.setRightSidebarTab)
 
   const currentSessionId = useHelixStore(s => s.currentSessionId)
   const sessionPendingApproval = useHelixStore(s => s.sessionPendingApproval)
@@ -323,6 +328,8 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   const [recentCollapsed, setRecentCollapsed] = useState(false)
   const [recentHovered, setRecentHovered] = useState(false)
+  // Bumped to force the full-area directory view's FileTreePanel to reload.
+  const [dirReloadKey, setDirReloadKey] = useState(0)
 
   const sortSessions = useCallback(
     (list: PersistedSession[]) =>
@@ -821,10 +828,22 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             )}
           </button>
         </div>
+      ) : directoryProjectDir ? (
+        /* Full-area directory explorer: takes over the ENTIRE left sidebar
+           (not a small inset panel) while active. The header (back / name /
+           refresh) and the search box both live inside FileTreePanel, with the
+           search box rendered above the header. */
+        <FileTreePanel
+          rootDir={directoryProjectDir}
+          reloadKey={dirReloadKey}
+          onOpenFile={() => setRightSidebarTab('code')}
+          onBack={() => toggleDirectoryProject(directoryProjectDir)}
+          onRefresh={() => setDirReloadKey(k => k + 1)}
+        />
       ) : (
       <>
       {/* Top actions */}
-      <div className="shrink-0 px-3 pt-3 pb-2">
+      <div className="shrink-0 px-3 pt-2 pb-1.5">
         <div className="flex flex-col gap-0.5">
           {topActions.map(item => {
             const isActive =
@@ -835,7 +854,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
               <button
                 key={item.id}
                 onClick={() => item.action()}
-                className={`flex items-center gap-2.5 px-3 py-2 rounded-lg transition-colors outline-none ${
+                className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg transition-colors outline-none ${
                   isActive
                     ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                     : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'
@@ -851,7 +870,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
 
       {/* Unified scroll: single scrollbar covers projects + standalone conversations */}
       <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
-        <div className="flex items-center px-4 pt-2.5 pb-1 group/section">
+        <div className="flex items-center px-4 pt-1.5 pb-0.5 group/section">
           <button
             onClick={() => setRecentCollapsed(prev => !prev)}
             className="flex items-center gap-1 flex-1 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium tracking-normal text-sidebar-foreground/50 hover:text-sidebar-foreground/70 transition-colors"
@@ -864,7 +883,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
 {!recentCollapsed && (
         <div className="px-2">
           {loading ? (
-            <div className="flex items-center justify-center py-6">
+            <div className="flex items-center justify-center py-4">
               <Loader2 className="size-4 animate-spin text-sidebar-foreground/30" />
             </div>
           ) : projects.length > 0 ? (
@@ -883,7 +902,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                 return (
                   <div key={project.dir} className="group rounded-lg overflow-hidden">
                     <div
-                      className={`w-full flex items-center rounded-lg px-3 py-2 transition-colors ${
+                      className={`w-full flex items-center rounded-lg px-3 py-1.5 transition-colors ${
                         isSelectedProject
                           ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                           : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground/90'
@@ -895,15 +914,22 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                       >
                         {isSelectedProject && <div className="w-[3px] h-4 bg-primary rounded-full shrink-0 -ml-1.5 mr-0.5" />}
                         <Folder className={`size-3.5 shrink-0 ${isSelectedProject ? 'text-primary' : 'text-sidebar-foreground/30'}`} />
-                        <span className="text-[calc(var(--helix-transcript-size)*0.8929)] truncate flex-1" title={project.label}>{project.label.length > 15 ? project.label.slice(0, 15) + '…' : project.label}</span>
+                        <span className="text-[calc(var(--helix-transcript-size)*0.8929)] truncate flex-1" title={project.label}>{project.label.length > 12 ? project.label.slice(0, 12) + '…' : project.label}</span>
                       </div>
                       <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
                         <button
                           onClick={(e) => { e.stopPropagation(); handleNewProjectChat(project.dir) }}
                           className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
-                          data-tip="在该项目下新建对话"
+                          data-tip="新建对话"
                         >
                           <Plus className="size-3.5" />
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleDirectoryProject(project.dir) }}
+                          className={`shrink-0 p-1 rounded-lg transition-colors ${directoryProjectDir === project.dir ? 'text-primary bg-primary/10' : 'text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
+                          data-tip="打开目录"
+                        >
+                          <FolderTree className="size-3.5" />
                         </button>
                         <ProjectActionsMenu
                           isPinned={project.isPinned}
@@ -987,7 +1013,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                                     className="text-[calc(var(--helix-transcript-size)*0.8571)] truncate flex-1"
                                     data-tip="双击重命名"
                                     onDoubleClick={(e) => { e.stopPropagation(); setRenamingId(session.id) }}
-                                  >{session.label}</p>
+                                  >{session.label.length > 14 ? session.label.slice(0, 14) + '…' : session.label}</p>
                                 </div>
                               )}
                             </div>
@@ -1021,10 +1047,10 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         {/* Conversations */}
         {conversations.length > 0 && (
           <>
-            <div className="px-4 pt-2.5 pb-1 text-[calc(var(--helix-transcript-size)*0.7857)] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
+            <div className="px-4 pt-1.5 pb-0.5 text-[calc(var(--helix-transcript-size)*0.7857)] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
               对话
             </div>
-            <div className="px-3 pb-2">
+            <div className="px-3 pb-1.5">
               <div className="space-y-0.5">
                 {conversations.map(session => (
                   <div
@@ -1061,7 +1087,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                           className="text-[calc(var(--helix-transcript-size)*0.9286)] truncate"
                           data-tip="双击重命名"
                           onDoubleClick={(e) => { e.stopPropagation(); setRenamingId(session.id) }}
-                        >{session.label}</p>
+                        >{session.label.length > 14 ? session.label.slice(0, 14) + '…' : session.label}</p>
                       )}
                     </div>
                     {sessionPendingApproval[session.id] && (
@@ -1082,7 +1108,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         )}
 
       </div>
-      <div className="px-2 py-2 shrink-0 space-y-0.5">
+      <div className="px-2 py-1.5 shrink-0 space-y-0.5">
         <button
           onClick={() => toggleSettings()}
           className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8929)] text-sidebar-foreground/60 hover:text-sidebar-foreground/90 hover:bg-sidebar-accent/40 rounded-lg transition-colors"

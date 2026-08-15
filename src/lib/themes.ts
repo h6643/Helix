@@ -93,16 +93,6 @@ const luminescenceLight: CtpPalette = P({
   mantle: '236, 231, 223', crust: '236, 231, 223',
 })
 
-const materialMintLight: CtpPalette = P({
-  rosewater: '195, 126, 112', flamingo: '180, 78, 78', pink: '144, 61, 122', mauve: '98, 61, 143',
-  red: '146, 62, 86', maroon: '145, 62, 76', peach: '195, 145, 114', yellow: '184, 164, 123',
-  green: '51, 107, 46', teal: '71, 123, 133', sky: '47, 101, 110', sapphire: '45, 88, 108',
-  blue: '46, 69, 109', lavender: '53, 60, 100', text: '5, 9, 10', subtext1: '11, 18, 20',
-  subtext0: '18, 31, 33', overlay2: '29, 49, 53', overlay1: '43, 73, 80', overlay0: '57, 98, 106',
-  surface2: '71, 122, 133', surface1: '86, 147, 159', surface0: '109, 165, 176', base: '189, 214, 219',
-  mantle: '162, 198, 205', crust: '136, 182, 191',
-})
-
 const nordLight: CtpPalette = P({
   rosewater: '209, 135, 112', flamingo: '180, 142, 173', pink: '180, 142, 173', mauve: '180, 142, 173',
   red: '191, 97, 106', maroon: '191, 97, 106', peach: '208, 135, 112', yellow: '216, 172, 84',
@@ -144,16 +134,6 @@ const solarizedLight: CtpPalette = P({
 })
 
 // ── Dark flavors ──────────────────────────────────────────────────────────────
-const amoledDark: CtpPalette = P({
-  rosewater: '245, 224, 220', flamingo: '242, 205, 205', pink: '245, 194, 231', mauve: '203, 166, 247',
-  red: '243, 139, 168', maroon: '235, 160, 172', peach: '250, 179, 135', yellow: '249, 226, 175',
-  green: '166, 227, 161', teal: '148, 226, 213', sky: '137, 220, 235', sapphire: '116, 199, 236',
-  blue: '135, 176, 249', lavender: '180, 190, 254', text: '255, 255, 255', subtext1: '210, 210, 210',
-  subtext0: '189, 189, 189', overlay2: '168, 168, 168', overlay1: '147, 147, 147', overlay0: '126, 126, 126',
-  surface2: '80, 80, 80', surface1: '50, 50, 50', surface0: '30, 30, 30', base: '10, 10, 10',
-  mantle: '5, 5, 5', crust: '0, 0, 0',
-})
-
 const atomDark: CtpPalette = P({
   rosewater: '226, 196, 168', flamingo: '238, 187, 216', pink: '221, 120, 211', mauve: '198, 120, 221',
   red: '224, 108, 117', maroon: '224, 121, 108', peach: '209, 154, 102', yellow: '229, 192, 123',
@@ -184,16 +164,6 @@ const draculaDark: CtpPalette = P({
   mantle: '33, 34, 44', crust: '26, 27, 35',
 })
 
-const everforestDark: CtpPalette = P({
-  rosewater: '231, 198, 155', flamingo: '224, 186, 207', pink: '227, 150, 174', mauve: '184, 123, 157',
-  red: '218, 99, 98', maroon: '218, 116, 98', peach: '215, 127, 72', yellow: '191, 152, 61',
-  green: '137, 156, 64', teal: '86, 157, 121', sky: '86, 157, 144', sapphire: '86, 156, 157',
-  blue: '90, 147, 162', lavender: '180, 144, 202', text: '211, 198, 170', subtext1: '182, 192, 180',
-  subtext0: '154, 167, 157', overlay2: '133, 146, 137', overlay1: '127, 137, 125', overlay0: '81, 91, 97',
-  surface2: '74, 85, 91', surface1: '64, 76, 81', surface0: '55, 66, 71', base: '47, 56, 62',
-  mantle: '39, 47, 52', crust: '34, 40, 44',
-})
-
 const genericDark: CtpPalette = P({
   rosewater: '245, 224, 220', flamingo: '242, 205, 205', pink: '245, 194, 231', mauve: '203, 166, 247',
   red: '243, 139, 168', maroon: '235, 160, 172', peach: '250, 179, 135', yellow: '249, 226, 175',
@@ -204,16 +174,6 @@ const genericDark: CtpPalette = P({
   mantle: '21, 21, 21', crust: '0, 0, 0',
 })
 
-const gruvboxDark: CtpPalette = P({
-  rosewater: '243, 128, 25', flamingo: '207, 162, 174', pink: '177, 98, 118', mauve: '177, 98, 134',
-  red: '204, 36, 29', maroon: '204, 49, 29', peach: '214, 93, 14', yellow: '215, 153, 33',
-  green: '152, 151, 26', teal: '102, 152, 26', sky: '26, 152, 76', sapphire: '26, 133, 152',
-  blue: '69, 133, 136', lavender: '146, 111, 175', text: '251, 241, 199', subtext1: '213, 196, 161',
-  subtext0: '189, 174, 147', overlay2: '151, 137, 125', overlay1: '124, 111, 100', overlay0: '102, 92, 84',
-  surface2: '80, 73, 69', surface1: '60, 56, 54', surface0: '50, 48, 47', base: '40, 40, 40',
-  mantle: '29, 32, 33', crust: '19, 21, 22',
-})
-
 const kanagawaDark: CtpPalette = P({
   rosewater: '255, 200, 148', flamingo: '210, 126, 129', pink: '210, 126, 153', mauve: '149, 127, 184',
   red: '255, 93, 98', maroon: '228, 104, 118', peach: '255, 160, 102', yellow: '230, 195, 132',
@@ -222,16 +182,6 @@ const kanagawaDark: CtpPalette = P({
   subtext0: '200, 192, 147', overlay2: '95, 95, 124', overlay1: '84, 84, 109', overlay0: '73, 73, 95',
   surface2: '62, 62, 81', surface1: '54, 54, 69', surface0: '42, 42, 55', base: '31, 31, 40',
   mantle: '22, 22, 29', crust: '11, 11, 15',
-})
-
-const materialMintDark: CtpPalette = P({
-  rosewater: '245, 224, 220', flamingo: '242, 205, 205', pink: '245, 194, 231', mauve: '203, 166, 247',
-  red: '243, 139, 168', maroon: '235, 160, 172', peach: '250, 179, 135', yellow: '249, 226, 175',
-  green: '166, 227, 161', teal: '189, 214, 219', sky: '137, 220, 235', sapphire: '116, 199, 236',
-  blue: '135, 176, 249', lavender: '180, 190, 254', text: '189, 214, 219', subtext1: '162, 198, 205',
-  subtext0: '136, 182, 191', overlay2: '109, 165, 176', overlay1: '86, 147, 159', overlay0: '71, 122, 133',
-  surface2: '57, 98, 106', surface1: '43, 73, 80', surface0: '29, 49, 53', base: '18, 31, 33',
-  mantle: '11, 18, 20', crust: '5, 9, 10',
 })
 
 const nordDark: CtpPalette = P({
@@ -264,26 +214,6 @@ const notionDark: CtpPalette = P({
   mantle: '54, 60, 63', crust: '47, 52, 55',
 })
 
-const roseboxDark: CtpPalette = P({
-  rosewater: '165, 117, 98', flamingo: '165, 117, 98', pink: '180, 142, 173', mauve: '180, 142, 173',
-  red: '191, 97, 106', maroon: '191, 97, 106', peach: '208, 135, 112', yellow: '235, 203, 139',
-  green: '163, 190, 140', teal: '143, 188, 187', sky: '136, 192, 208', sapphire: '136, 192, 208',
-  blue: '94, 129, 172', lavender: '129, 161, 193', text: '163, 165, 170', subtext1: '135, 137, 145',
-  subtext0: '110, 113, 119', overlay2: '92, 92, 92', overlay1: '82, 82, 82', overlay0: '71, 71, 71',
-  surface2: '61, 61, 61', surface1: '51, 51, 51', surface0: '40, 40, 40', base: '35, 35, 35',
-  mantle: '30, 30, 30', crust: '25, 25, 25',
-})
-
-const rosepineDark: CtpPalette = P({
-  rosewater: '243, 215, 204', flamingo: '235, 188, 186', pink: '223, 167, 231', mauve: '196, 167, 231',
-  red: '235, 111, 146', maroon: '235, 122, 111', peach: '235, 159, 111', yellow: '246, 193, 119',
-  green: '114, 182, 156', teal: '156, 207, 216', sky: '49, 116, 143', sapphire: '68, 132, 171',
-  blue: '76, 127, 169', lavender: '210, 193, 231', text: '224, 222, 244', subtext1: '144, 140, 170',
-  subtext0: '110, 106, 134', overlay2: '82, 79, 103', overlay1: '64, 61, 82', overlay0: '54, 50, 83',
-  surface2: '46, 42, 70', surface1: '33, 32, 46', surface0: '31, 29, 46', base: '25, 23, 36',
-  mantle: '17, 16, 25', crust: '11, 10, 16',
-})
-
 const royalVelvetDark: CtpPalette = P({
   rosewater: '246, 201, 153', flamingo: '245, 189, 166', pink: '228, 157, 248', mauve: '197, 146, 222',
   red: '240, 120, 160', maroon: '230, 102, 102', peach: '230, 195, 125', yellow: '241, 250, 140',
@@ -294,43 +224,25 @@ const royalVelvetDark: CtpPalette = P({
   mantle: '25, 25, 30', crust: '20, 20, 25',
 })
 
-const solarizedDark: CtpPalette = P({
-  rosewater: '227, 131, 89', flamingo: '241, 142, 168', pink: '211, 54, 130', mauve: '108, 113, 196',
-  red: '220, 50, 47', maroon: '220, 60, 46', peach: '203, 75, 22', yellow: '181, 137, 0',
-  green: '133, 153, 0', teal: '42, 161, 152', sky: '42, 145, 161', sapphire: '39, 168, 211',
-  blue: '38, 139, 210', lavender: '139, 143, 222', text: '253, 246, 227', subtext1: '237, 232, 214',
-  subtext0: '225, 215, 183', overlay2: '147, 161, 161', overlay1: '117, 159, 163', overlay0: '106, 168, 175',
-  surface2: '51, 129, 153', surface1: '38, 97, 115', surface0: '10, 76, 92', base: '7, 54, 66',
-  mantle: '0, 43, 54', crust: '0, 33, 41',
-})
-
 const THEMES: Record<string, HelixThemeDef> = {
   'ctp-atom-light': { id: 'ctp-atom-light', label: 'Atom 蓝白', mode: 'light', ctp: atomLight, pair: 'ctp-atom-dark' },
-  'ctp-everforest-light': { id: 'ctp-everforest-light', label: 'Everforest 淡绿', mode: 'light', ctp: everforestLight, pair: 'ctp-everforest-dark' },
-  'ctp-gruvbox-light': { id: 'ctp-gruvbox-light', label: 'Gruvbox 棕橙', mode: 'light', ctp: gruvboxLight, pair: 'ctp-gruvbox-dark' },
+  'ctp-everforest-light': { id: 'ctp-everforest-light', label: 'Everforest 淡绿', mode: 'light', ctp: everforestLight },
+  'ctp-gruvbox-light': { id: 'ctp-gruvbox-light', label: 'Gruvbox 棕橙', mode: 'light', ctp: gruvboxLight },
   'ctp-luminescence-light': { id: 'ctp-luminescence-light', label: 'Luminescence 桃花', mode: 'light', ctp: luminescenceLight },
-  'ctp-material-mint-light': { id: 'ctp-material-mint-light', label: 'Material Mint 薄荷', mode: 'light', ctp: materialMintLight, pair: 'ctp-material-mint-dark' },
   'ctp-nord-light': { id: 'ctp-nord-light', label: 'Nord 蓝雪', mode: 'light', ctp: nordLight, pair: 'ctp-nord-dark' },
   'ctp-notion-light': { id: 'ctp-notion-light', label: 'Notion 红白', mode: 'light', ctp: notionLight, pair: 'ctp-notion-dark' },
   'ctp-sandy-beaches-light': { id: 'ctp-sandy-beaches-light', label: 'Sandy Beaches 沙滩', mode: 'light', ctp: sandyBeachesLight },
-  'ctp-solarized-light': { id: 'ctp-solarized-light', label: 'Solarized 橙红', mode: 'light', ctp: solarizedLight, pair: 'ctp-solarized-dark' },
+  'ctp-solarized-light': { id: 'ctp-solarized-light', label: 'Solarized 橙红', mode: 'light', ctp: solarizedLight },
 
-  'ctp-amoled-dark': { id: 'ctp-amoled-dark', label: 'AMOLED 纯黑', mode: 'dark', ctp: amoledDark },
   'ctp-atom-dark': { id: 'ctp-atom-dark', label: 'Atom 暗蓝', mode: 'dark', ctp: atomDark, pair: 'ctp-atom-light' },
   'ctp-coffee-dark': { id: 'ctp-coffee-dark', label: 'Coffee 咖啡', mode: 'dark', ctp: coffeeDark },
   'ctp-dracula': { id: 'ctp-dracula', label: 'Dracula 暗紫', mode: 'dark', ctp: draculaDark },
-  'ctp-everforest-dark': { id: 'ctp-everforest-dark', label: 'Everforest 墨绿', mode: 'dark', ctp: everforestDark, pair: 'ctp-everforest-light' },
   'ctp-generic-dark': { id: 'ctp-generic-dark', label: 'Grayscale 灰黑', mode: 'dark', ctp: genericDark },
-  'ctp-gruvbox-dark': { id: 'ctp-gruvbox-dark', label: 'Gruvbox 活力橙', mode: 'dark', ctp: gruvboxDark, pair: 'ctp-gruvbox-light' },
   'ctp-kanagawa-dark': { id: 'ctp-kanagawa-dark', label: 'Kanagawa 暗橙', mode: 'dark', ctp: kanagawaDark },
-  'ctp-material-mint-dark': { id: 'ctp-material-mint-dark', label: 'Material Mint 暗薄荷', mode: 'dark', ctp: materialMintDark, pair: 'ctp-material-mint-light' },
   'ctp-nord-dark': { id: 'ctp-nord-dark', label: 'Nord 雪蓝', mode: 'dark', ctp: nordDark, pair: 'ctp-nord-light' },
   'ctp-nord-darker': { id: 'ctp-nord-darker', label: 'Nord 极夜', mode: 'dark', ctp: nordDarker, pair: 'ctp-nord-light' },
   'ctp-notion-dark': { id: 'ctp-notion-dark', label: 'Notion 暗橙', mode: 'dark', ctp: notionDark, pair: 'ctp-notion-light' },
-  'ctp-rosebox': { id: 'ctp-rosebox', label: 'Rosebox 暖棕', mode: 'dark', ctp: roseboxDark },
-  'ctp-rosepine-dark': { id: 'ctp-rosepine-dark', label: 'Rosé Pine 玫瑰', mode: 'dark', ctp: rosepineDark },
   'ctp-royal-velvet': { id: 'ctp-royal-velvet', label: 'Royal Velvet 紫绒', mode: 'dark', ctp: royalVelvetDark },
-  'ctp-solarized-dark': { id: 'ctp-solarized-dark', label: 'Solarized 护眼蓝', mode: 'dark', ctp: solarizedDark, pair: 'ctp-solarized-light' },
 }
 
 const DEFAULT_THEME_STYLE = 'default'
@@ -429,17 +341,13 @@ export function applyHelixPalette(styleId: string | null | undefined): void {
 /** Dropdown option groups for the appearance panel. */
 export const THEME_SELECT_GROUPS: { label: string; options: { value: string; label: string }[] }[] = [
   {
-    label: '内置',
-    options: [{ value: DEFAULT_THEME_STYLE, label: '默认（奶油）' }],
-  },
-  {
     label: '浅色',
     options: [
+      { value: DEFAULT_THEME_STYLE, label: '默认（奶油）' },
       { value: 'ctp-atom-light', label: 'Atom 蓝白' },
       { value: 'ctp-everforest-light', label: 'Everforest 淡绿' },
       { value: 'ctp-gruvbox-light', label: 'Gruvbox 棕橙' },
       { value: 'ctp-luminescence-light', label: 'Luminescence 桃花' },
-      { value: 'ctp-material-mint-light', label: 'Material Mint 薄荷' },
       { value: 'ctp-nord-light', label: 'Nord 蓝雪' },
       { value: 'ctp-notion-light', label: 'Notion 红白' },
       { value: 'ctp-sandy-beaches-light', label: 'Sandy Beaches 沙滩' },
@@ -449,22 +357,15 @@ export const THEME_SELECT_GROUPS: { label: string; options: { value: string; lab
   {
     label: '深色',
     options: [
-      { value: 'ctp-amoled-dark', label: 'AMOLED 纯黑' },
       { value: 'ctp-atom-dark', label: 'Atom 暗蓝' },
       { value: 'ctp-coffee-dark', label: 'Coffee 咖啡' },
       { value: 'ctp-dracula', label: 'Dracula 暗紫' },
-      { value: 'ctp-everforest-dark', label: 'Everforest 墨绿' },
       { value: 'ctp-generic-dark', label: 'Grayscale 灰黑' },
-      { value: 'ctp-gruvbox-dark', label: 'Gruvbox 活力橙' },
       { value: 'ctp-kanagawa-dark', label: 'Kanagawa 暗橙' },
-      { value: 'ctp-material-mint-dark', label: 'Material Mint 暗薄荷' },
       { value: 'ctp-nord-dark', label: 'Nord 雪蓝' },
       { value: 'ctp-nord-darker', label: 'Nord 极夜' },
       { value: 'ctp-notion-dark', label: 'Notion 暗橙' },
-      { value: 'ctp-rosebox', label: 'Rosebox 暖棕' },
-      { value: 'ctp-rosepine-dark', label: 'Rosé Pine 玫瑰' },
       { value: 'ctp-royal-velvet', label: 'Royal Velvet 紫绒' },
-      { value: 'ctp-solarized-dark', label: 'Solarized 护眼蓝' },
     ],
   },
 ]

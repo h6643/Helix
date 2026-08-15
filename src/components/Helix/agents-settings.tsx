@@ -186,7 +186,7 @@ export function AgentsSettings() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h3 className="ui-title font-semibold text-foreground">Subagent</h3>
+        <h3 className="ui-subtitle font-semibold text-foreground">Subagent</h3>
         <button
           onClick={startAdd}
           className="flex items-center gap-1.5 ui-text font-medium text-primary hover:text-primary/80 transition-colors"

@@ -22,6 +22,7 @@
 
 import { warn, error as logError, debug } from '@/lib/logger'
 import { installTauriBridge } from '@/lib/tauri-bridge'
+import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
 
 // ── PROBE v2: WS 接收层原始字节记录（临时调试，验证后删除）──
 // 记录 onmessage 拿到的每个文本事件帧完整字节，用于对比：
@@ -650,6 +651,19 @@ export class ServeGatewayClient {
         const name = payload?.name ?? ''
         this.emit(type, { ...base, tool_call_id: toolId, tool_name: name })
         if (type === 'tool.start') {
+          // terminal/process 等命令工具 → 「后台任务」面板登记（运行中）。
+          // 前台命令也会出现在面板：执行中显示"运行中"，tool.complete 时填输出
+          // 并标完成；background=true 的进程由 tool.progress 流式追加 + process.exit
+          // 定终态。这样面板永远反映终端任务活动，不依赖模型是否用 background=true。
+          if (name === 'terminal' || name === 'process' || name === 'bash' || name === 'docker') {
+            const rawInput = payload?.args ?? payload?.args_text ?? (payload?.context ? { context: payload.context } : {})
+            let cmdStr = ''
+            if (typeof rawInput === 'string') cmdStr = rawInput
+            else if (rawInput && typeof rawInput === 'object') {
+              cmdStr = (rawInput as any).command ?? (rawInput as any).context ?? ''
+            }
+            useBackgroundTasksStore.getState().startTask(toolId, cmdStr || name, sessionId ?? '')
+          }
           this.emit('session/update', {
             session_id: sessionId,
             update: {
@@ -670,17 +684,66 @@ export class ServeGatewayClient {
 
       case 'tool.progress': {
         const toolId = payload?.tool_id ?? ''
-        this.emit('tool.progress', { ...base, tool_call_id: toolId, tool_name: payload?.name ?? '' })
+        const name = payload?.name ?? ''
+        this.emit('tool.progress', { ...base, tool_call_id: toolId, tool_name: name })
+        // 后台终端/进程任务的实时输出块 → 复用 tool_output_delta 流式追加，
+        // 让工具卡片在运行中就能看到 docker pull / npm install 等输出。
+        const text = payload?.text ?? ''
+        if (text) {
+          this.emit('session/update', {
+            session_id: sessionId,
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: toolId,
+              status: 'in_progress',
+              content: text,
+            },
+          })
+        }
+        return
+      }
+
+      case 'process.exit': {
+        // 后台进程真正退出（process_registry on_exit）→ 任务终态。
+        // 与 tool.complete 不同：background=true 的工具 spawn 即 complete，
+        // 进程可能还在跑；只有这里才是真实生命周期终点。
+        const toolId = payload?.tool_id ?? ''
+        const exitCode = payload?.exit_code
+        const status = typeof exitCode === 'number' && exitCode === 0 ? ('completed' as const) : ('failed' as const)
+        useBackgroundTasksStore.getState().finishTask(toolId, status)
+        this.emit('process.exit', { ...base, tool_call_id: toolId, exit_code: exitCode })
         return
       }
 
       case 'tool.complete': {
         const toolId = payload?.tool_id ?? ''
         const name = payload?.name ?? ''
-        const resultText = typeof payload?.result_text === 'string' ? payload.result_text
+        let resultText = typeof payload?.result_text === 'string' ? payload.result_text
           : typeof payload?.result === 'string' ? payload.result
           : payload?.summary ?? ''
+        // terminal 等工具的 result 是 JSON 对象（{output, exit_code, error}），
+        // 默认非 verbose 模式下后端不附 result_text 且 terminal 无 summary →
+        // 前端工具卡片完成后 content 恒为空（表现：状态条「工作中」→「已执行」，
+        // 卡片里什么输出都没有）。这里从 result 对象提取 output/error，让卡片
+        // 完成态能看到真实输出（后端 bounded_capture 已对输出做 head/tail 截断）。
+        if (!resultText && payload?.result && typeof payload.result === 'object') {
+          const r = payload.result as Record<string, unknown>
+          const out = typeof r.output === 'string' ? r.output : ''
+          const err = typeof r.error === 'string' ? r.error : ''
+          resultText = err ? (out ? `${out}\n⚠️ ${err}` : `⚠️ ${err}`) : out
+        }
         const inlineDiff = stripAnsi(payload?.inline_diff)
+        // background=true 工具 spawn 即返回 "Background process started"——
+        // 这不是进程结束，任务终态由后续 process.exit 决定，这里不标完成。
+        const isBackgroundSpawn = resultText.includes('Background process started')
+        if (!isBackgroundSpawn) {
+          // 仅当任务已存在（tool.start 登记过）才标完成：前台命令/后台 spawn
+          // 都在这里收尾（后台进程的终态另有 process.exit，但 spawn 那次
+          // tool.complete 已被 isBackgroundSpawn 跳过）。
+          const taskStatus = payload?.is_error ? ('failed' as const) : ('completed' as const)
+          const bgSt = useBackgroundTasksStore.getState()
+          if (bgSt.tasks.some(t => t.id === toolId)) bgSt.finishTask(toolId, taskStatus)
+        }
         this.emit('tool.complete', { ...base, tool_call_id: toolId, tool_name: name, inline_diff: inlineDiff })
         this.emit('session/update', {
           session_id: sessionId,

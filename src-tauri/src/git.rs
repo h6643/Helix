@@ -156,6 +156,14 @@ pub fn commit(state: State<'_, Arc<AppState>>, message: Option<String>) -> Value
 }
 
 #[tauri::command]
+pub fn diff_numstat(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
+    match git_exec(&state, &["diff", "--numstat"], target_cwd.as_deref()) {
+        Ok((stdout, _)) => json!({ "ok": true, "output": stdout.trim() }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+#[tauri::command]
 pub fn branch_list(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
     match git_exec(&state, &["for-each-ref", "--format=%(refname:short)", "refs/heads"], target_cwd.as_deref()) {
         Ok((stdout, _)) => {

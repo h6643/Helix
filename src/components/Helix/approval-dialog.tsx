@@ -86,7 +86,7 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
   ]
 
   return (
-    <div className="w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-3">
+    <div className="w-full max-w-[520px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-2.5">
       <div className="flex items-start justify-between gap-2 mb-2">
         <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
           {getApprovalTitle(request.toolName)}
@@ -96,11 +96,11 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
         </span>
       </div>
       {command && (
-        <pre className="bg-muted rounded-xl p-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-2 max-h-16 overflow-auto">
+        <pre className="bg-muted rounded-xl p-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-1.5 max-h-10 overflow-auto">
           {command}
         </pre>
       )}
-      <div className="flex flex-col gap-1.5">
+      <div className="flex flex-col gap-1">
         {options.map((o) => {
           const isSel = selected === o.level
           return (
@@ -130,7 +130,7 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
           )
         })}
       </div>
-      <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-2">
+      <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-1.5">
         内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · ⌘/Ctrl+Enter 允许 · Esc 拒绝
       </div>
     </div>
@@ -162,7 +162,7 @@ export function ApprovalDialog(props: LegacyProps) {
   if (!request) return null
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
-      <div className="pointer-events-auto mx-auto max-w-[700px]">
+      <div className="pointer-events-auto mx-auto max-w-[520px]">
         <ApprovalBar request={request} onApprove={handleApprove} />
       </div>
     </div>

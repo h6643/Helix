@@ -5282,6 +5282,13 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
         except Exception:
             pass
         session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
+        # 后台进程实时输出路由：terminal/process 等工具启动时，把 command →
+        # tool_call_id 记到会话上。on_output sink（见 _ensure_process_output_sink）
+        # 收到进程输出块后据此把 tool.progress 事件路由到正确的工具卡片。
+        if name in ("terminal", "process", "bash", "docker") and isinstance(args, dict):
+            cmd = str(args.get("command") or "").strip()
+            if cmd:
+                session.setdefault("tool_commands", {})[cmd] = tool_call_id
     if _tool_progress_enabled(sid) or _tool_lifecycle_required_for_ui(name):
         payload = {
             "tool_id": tool_call_id,
@@ -5305,6 +5312,12 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     if session is not None:
         snapshot = session.setdefault("edit_snapshots", {}).pop(tool_call_id, None)
         started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None)
+        # 后台进程实时输出路由：工具完成即移除 command → tool_call_id 映射，
+        # 防止同命令二次调用时输出路由到旧卡片（映射被覆盖）。
+        if name in ("terminal", "process", "bash", "docker") and isinstance(args, dict):
+            cmd = str(args.get("command") or "").strip()
+            if cmd:
+                (session.get("tool_commands") or {}).pop(cmd, None)
     duration_s = time.time() - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s
@@ -5342,6 +5355,55 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         pass
     if _tool_progress_enabled(sid) or payload.get("inline_diff") or _tool_lifecycle_required_for_ui(name):
         _emit("tool.complete", sid, payload)
+
+
+# ── 后台进程实时输出 → tool.progress ────────────────────────────────────
+# terminal_tool(background=True) 等后台任务由 tools.process_registry 跟踪，
+# 其 reader 线程把新输出块喂给 on_output sink（见 process_registry._emit_output）。
+# 这里把 sink 接到 serve 网关：按会话的 command→tool_call_id 映射（在
+# _on_tool_start 登记），把输出块作为 tool.progress 事件推给前端，让工具卡片
+# 实时显示「docker pull / npm install」等长任务的进度（类似官方桌面端）。
+_process_output_sink_installed = False
+
+
+def _ensure_process_output_sink() -> None:
+    global _process_output_sink_installed
+    if _process_output_sink_installed:
+        return
+    try:
+        from tools.process_registry import process_registry
+
+        def _on_process_output(session, chunk: str) -> None:
+            try:
+                if not chunk:
+                    return
+                # 找到会话对应的 live sid
+                key = str(getattr(session, "session_key", "") or "")
+                if not key:
+                    return
+                live = _find_live_session_by_key(key)
+                if live is None:
+                    return
+                sid, sess = live
+                # command → tool_call_id
+                cmd = str(getattr(session, "command", "") or "").strip()
+                if not cmd:
+                    return
+                tool_call_id = (sess.get("tool_commands") or {}).get(cmd, "")
+                if not tool_call_id:
+                    return
+                _emit("tool.progress", sid, {
+                    "tool_id": tool_call_id,
+                    "name": "terminal",
+                    "text": chunk,
+                })
+            except Exception:
+                pass
+
+        process_registry.on_output = _on_process_output
+        _process_output_sink_installed = True
+    except Exception:
+        pass
 
 
 def _on_tool_progress(

@@ -290,6 +290,7 @@ const HelixMarkdown = memo(function HelixMarkdown({ text, className }: HelixMark
             // 修饰键 / 中键 → 放行系统默认（在外部浏览器打开）
             if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return
             e.preventDefault()
+            // 统一在侧边栏内嵌浏览器打开（Tauri 走 iframe，Electron 走 webview）。
             setPreviewRailUrl(href!)
             setRightSidebarTab('browser')
           }

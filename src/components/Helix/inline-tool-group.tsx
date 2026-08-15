@@ -257,6 +257,7 @@ function ToolCard({
   const [expandedResults, setExpandedResults] = useState<Set<string>>(new Set())
   const path = extractToolPath(step)
   const hasSubSteps = step.subSteps && step.subSteps.length > 0
+  const hasParams = !hasSubSteps && !!step.toolParams && Object.keys(step.toolParams).length > 0
   const stepStatus = step.status || (step.finishedAt ? 'completed' : step.startedAt ? 'running' : undefined)
   const running = stepStatus === 'running' && isRunning
   const failed = stepStatus === 'failed'
@@ -295,11 +296,11 @@ function ToolCard({
           <span className="text-[0.72em] text-muted-foreground shrink-0">{formatDurationSeconds(step.duration_s)}</span>
         )}
         {(() => {
-          const count = step.output ? extractResultCount(step.output, step.toolName || '', step.toolParams) : ''
+          const count = step.content ? extractResultCount(step.content, step.toolName || '', step.toolParams) : ''
           return count ? <span className="text-[0.72em] text-muted-foreground/50 shrink-0">{count}</span> : null
         })()}
         {(() => {
-          const diff = step.output ? extractDiffStats(step.output) : ''
+          const diff = step.content ? extractDiffStats(step.content) : ''
           return diff ? <span className="text-[0.72em] text-emerald-500/60 shrink-0">{diff}</span> : null
         })()}
         <ChevronRight className={`size-3.5 shrink-0 text-foreground/30 transition-all ${open ? 'rotate-90' : ''}`} />
@@ -307,10 +308,12 @@ function ToolCard({
 
       {open && (
         <div className="pb-1 pt-1 pl-3 border-l-2 border-border/60 space-y-1.5">
-          {/* Streaming output preview — shown while tool is running */}
-          {running && step.output && (
+          {/* Streaming output preview — shown while tool is running.
+              tool.progress → tool_call_update(in_progress) → tool_output_delta 把
+              实时输出追加到 step.content（agent-flow-panel），这里显示它的末尾。 */}
+          {running && step.content && (
             <div className="text-[0.85em] text-foreground/40 font-mono max-h-16 overflow-hidden leading-relaxed whitespace-pre-wrap break-all">
-              {stripAnsi(step.output.slice(-200))}
+              {stripAnsi(step.content.slice(-200))}
             </div>
           )}
           {/* Sub-agent sub-steps */}
@@ -339,75 +342,77 @@ function ToolCard({
               })}
             </div>
           )}
-          {/* Parameters — hidden by default */}
-          {!hasSubSteps && step.toolParams && Object.keys(step.toolParams).length > 0 && (
-            <details className="pl-1 group/params">
-              <summary className="text-[0.72em] text-foreground/40 cursor-pointer hover:text-foreground/60 transition-colors">
-                参数 ({Object.keys(step.toolParams).length})
-              </summary>
-              <div className="mt-1.5 space-y-1.5">
-                {Object.entries(step.toolParams).map(([k, v]) => (
-                  <div key={k} className="flex flex-col">
-                    <span className="text-[0.72em] text-foreground/40 font-medium uppercase tracking-wide">{k}</span>
-                    <pre className="text-[0.85em] text-foreground/70 bg-muted/20 rounded px-2 py-1.5 overflow-x-auto font-mono whitespace-pre-wrap break-all">{typeof v === 'string' ? v : JSON.stringify(v, null, 2)}</pre>
-                  </div>
-                ))}
-              </div>
-            </details>
-          )}
-          {/* Result(s) — multi-typed render inside this tool's card */}
-          {results.map((r) => {
-            if (r.type === 'error') {
-              return (
-                <div key={r.id} className="pl-1 text-[0.85em] text-red-500/80 font-mono whitespace-pre-wrap break-all leading-relaxed">
-                  {stripEmoji(normalizeAcpContent(r.content || ''))}
+          {/* 内容单块 — 参数与结果合并展示，无单独标签分隔 */}
+          {(hasParams || results.length > 0) && (
+            <div className="rounded border border-border/20 divide-y divide-border/20">
+              {hasParams && (
+                <div className="p-1.5 space-y-1.5">
+                  {Object.entries(step.toolParams!).map(([k, v]) => (
+                    <div key={k} className="flex flex-col">
+                      <span className="text-[0.72em] text-foreground/40 font-medium uppercase tracking-wide">{k}</span>
+                      <pre className="text-[0.85em] text-foreground/70 bg-muted/20 rounded px-2 py-1.5 overflow-x-auto font-mono whitespace-pre-wrap break-all">{typeof v === 'string' ? v : JSON.stringify(v, null, 2)}</pre>
+                    </div>
+                  ))}
                 </div>
-              )
-            }
-            const isExpanded = expandedResults.has(r.id)
-            const raw = stripEmoji(normalizeAcpContent(r.content || ''))
-            const clamped = raw.length > TOOL_RESULT_CLAMP ? raw.slice(0, TOOL_RESULT_CLAMP) + `\n\n… (${raw.length - TOOL_RESULT_CLAMP} 字符已截断)` : raw
-            const isLong = clamped.length > 500 || clamped.split('\n').length > 10
-            const fullText = r.content || ''
-            const isImage = detectResultKind(r.toolName || '', raw) === 'image'
+              )}
+              {results.map((r) => {
+                if (r.type === 'error') {
+                  return (
+                    <div key={r.id} className="flex items-start gap-1 p-1.5">
+                      <div className="flex-1 min-w-0 text-[0.85em] text-red-500/80 font-mono whitespace-pre-wrap break-all leading-relaxed">
+                        {stripEmoji(normalizeAcpContent(r.content || ''))}
+                      </div>
+                      <CopyButton text={r.content || ''} />
+                    </div>
+                  )
+                }
+                const isExpanded = expandedResults.has(r.id)
+                const raw = stripEmoji(normalizeAcpContent(r.content || ''))
+                const clamped = raw.length > TOOL_RESULT_CLAMP ? raw.slice(0, TOOL_RESULT_CLAMP) + `\n\n… (${raw.length - TOOL_RESULT_CLAMP} 字符已截断)` : raw
+                const isLong = clamped.length > 500 || clamped.split('\n').length > 10
+                const fullText = r.content || ''
+                const isImage = detectResultKind(r.toolName || '', raw) === 'image'
 
-            return (
-              <div key={r.id} className="pl-1">
-                <div className="flex items-center gap-1.5 mb-0.5">
-                  <span className="text-[0.72em] text-foreground/40">结果</span>
-                  <CopyButton text={fullText} />
-                </div>
-                {isLong && !isExpanded && !isImage ? (
-                  <div>
-                    <div className="relative overflow-hidden max-h-20 rounded border border-border/20">
-                      <ResultRenderer content={clamped} toolName={r.toolName || ''} />
-                      <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-card to-transparent" />
+                return (
+                  <div key={r.id} className="relative p-1.5">
+                    <div className="absolute top-2 right-2 z-10">
+                      <CopyButton text={fullText} />
                     </div>
-                    <button
-                      onClick={() => toggleResult(r.id)}
-                      className="mt-1 text-foreground/40 hover:text-foreground/70 transition-colors text-[0.85em]"
-                    >
-                      展开 ▼
-                    </button>
-                  </div>
-                ) : (
-                  <div className={`rounded border border-border/20 ${isLong ? 'max-h-40 overflow-y-auto' : ''}`}>
-                    <div className="p-1.5">
-                      <ResultRenderer content={isExpanded ? raw : clamped} toolName={r.toolName || ''} />
-                    </div>
-                    {isLong && (
-                      <button
-                        onClick={() => toggleResult(r.id)}
-                        className="block w-full text-center py-0.5 text-foreground/40 hover:text-foreground/70 hover:bg-muted/30 transition-colors border-t border-border/20 text-[0.85em]"
-                      >
-                        折叠 ▲
-                      </button>
+                    {isLong && !isExpanded && !isImage ? (
+                      <div>
+                        <div className="relative overflow-hidden max-h-20 rounded border border-border/20">
+                          <ResultRenderer content={clamped} toolName={r.toolName || ''} />
+                          <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-card to-transparent" />
+                        </div>
+                        <button
+                          onClick={() => toggleResult(r.id)}
+                          className="mt-1 text-foreground/40 hover:text-foreground/70 transition-colors text-[0.85em]"
+                        >
+                          展开 ▼
+                        </button>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className={`rounded border border-border/20 ${isLong ? 'max-h-40 overflow-y-auto' : ''}`}>
+                          <div className="p-1.5">
+                            <ResultRenderer content={isExpanded ? raw : clamped} toolName={r.toolName || ''} />
+                          </div>
+                        </div>
+                        {isLong && (
+                          <button
+                            onClick={() => toggleResult(r.id)}
+                            className="block w-full text-center py-0.5 text-foreground/40 hover:text-foreground/70 hover:bg-muted/30 transition-colors border-t border-border/20 text-[0.85em]"
+                          >
+                            折叠 ▲
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
-              </div>
-            )
-          })}
+                )
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

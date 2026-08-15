@@ -135,8 +135,19 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   // Preview Rail
   showPreviewRail: boolean
   previewRailUrl: string | null
+  // Monotonic counter bumped on every setPreviewRailUrl call. The right sidebar
+  // keys its link-navigation effect off this, so RE-clicking the same link (whose
+  // `previewRailUrl` value is unchanged) still navigates instead of leaving a
+  // freshly-created blank browser page.
+  previewRailNavSeq: number
   setPreviewRailUrl: (url: string | null) => void
   togglePreviewRail: () => void
+
+  // Monotonic counter bumped on every "新建浏览器页" request (the "更多操作 /
+  // ＋ → 浏览器" menu). The right sidebar keys its add-page effect off this so
+  // every click opens a NEW browser tab instead of reusing the existing one.
+  browserAddSeq: number
+  requestAddBrowserPage: () => void
 
   // Browser bookmarks (imported from Chrome etc.)
   browserBookmarks: BrowserBookmark[]
@@ -147,8 +158,18 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setBrowserHomeUrl: (url: string) => void
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: 'browser' | 'code' | 'files' | 'email' | 'diff' | null
-  setRightSidebarTab: (tab: 'browser' | 'code' | 'files' | 'email' | 'diff' | null) => void
+  rightSidebarTab: 'browser' | 'code' | 'email' | 'diff' | null
+  setRightSidebarTab: (tab: 'browser' | 'code' | 'email' | 'diff' | null) => void
+  // Left sidebar: which project's file tree is expanded (null = none). Triggered
+  // by the per-project "目录" button; opening a file from it opens the right
+  // sidebar code editor.
+  directoryProjectDir: string | null
+  toggleDirectoryProject: (dir: string) => void
+  // Code "fullscreen": the right sidebar expands to fill the MAIN area (the
+  // conversation card is hidden) while the LEFT sidebar (projects / directory
+  // tree) stays visible. Driven by the maximize button in the right sidebar.
+  codeFullscreen: boolean
+  toggleCodeFullscreen: () => void
   showLearningView: boolean
   toggleLearningView: () => void
   approvalMode: 'default' | 'accept_edits' | 'dont_ask'
@@ -880,9 +901,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   showArtifactsBrowser: false,
   showPreviewRail: false,
   previewRailUrl: null as string | null,
+  previewRailNavSeq: 0,
+  browserAddSeq: 0,
   browserHomeUrl: '',
   browserBookmarks: [],
   rightSidebarTab: null,
+  directoryProjectDir: null,
+  codeFullscreen: false,
   showLearningView: false,
   approvalMode: 'accept_edits' as const,
   startupGreeting: '有什么可以帮你的？',
@@ -1107,7 +1132,15 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   }),
   setPreviewRailUrl: (url: string | null) => set((s) => ({
     previewRailUrl: url === null ? null : cleanUrl(url),
+    previewRailNavSeq: s.previewRailNavSeq + 1,
     ...(url !== null ? { showPreviewRail: true, rightSidebarTab: 'browser', editorOpen: false } : {}),
+  })),
+  requestAddBrowserPage: () => set((s) => ({
+    // 打开侧边栏 + 递增信号；right-sidebar 监听 browserAddSeq 新建页面。
+    rightSidebarTab: 'browser',
+    showPreviewRail: true,
+    editorOpen: false,
+    browserAddSeq: s.browserAddSeq + 1,
   })),
   setBrowserHomeUrl: (url: string) => {
     const trimmed = url.trim()
@@ -1121,11 +1154,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   setRightSidebarTab: (tab) => set(() => {
     if (tab === 'browser') return { rightSidebarTab: 'browser', showPreviewRail: true, editorOpen: false }
     if (tab === 'code') return { rightSidebarTab: 'code', showPreviewRail: false, editorOpen: true }
-    if (tab === 'files') return { rightSidebarTab: 'files', showPreviewRail: false, editorOpen: false }
     if (tab === 'email') return { rightSidebarTab: 'email', showPreviewRail: false, editorOpen: false }
     if (tab === 'diff') return { rightSidebarTab: 'diff', showPreviewRail: false, editorOpen: false }
     return { rightSidebarTab: null, showPreviewRail: false, editorOpen: false }
   }),
+  toggleDirectoryProject: (dir) => set((s) => ({
+    directoryProjectDir: s.directoryProjectDir === dir ? null : dir,
+  })),
+  toggleCodeFullscreen: () => set((s) => ({ codeFullscreen: !s.codeFullscreen })),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
   setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask') => set({ approvalMode: v }),
   sessionPendingApproval: {},
@@ -2478,7 +2514,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // stale/failed messages (e.g. 401 errors) from a previous run.
       // Historical sessions remain available in the sidebar and can be
       // opened manually.
-      const defaults = { provider: 'custom' as const, apiKey: '', baseUrl: 'https://api.ant-ling.com/v1', model: 'Ling-2.6-1T' }
+      const defaults = { provider: 'custom' as const, apiKey: '', baseUrl: '', model: '' }
       // Restore which named profile was active before the restart, so the selection
       // survives a cold start (the profile list itself is persisted to IndexedDB).
       const loadedActiveProfileId = (await safeLoad(persistence.loadSetting<string | null>('activeProfileId'), 'activeProfileId')) ?? null
@@ -2763,13 +2799,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             const merged = { ...defaults, ...cfg }
             // Heal model/baseUrl mismatch: a persisted entry can pair a Ling
             // model with a deepseek baseUrl (old pollution / provider-switch
-            // fallout). The gateway would then 400 "model not supported" and
-            // output nothing. Keep the user's model name but force the
-            // known-good ant-ling endpoint + key — same policy as
-            // main.js hermes:setModel (isBadConfig fallback).
+            // fallout). Drop the poisoned endpoint so it never surfaces in the
+            // model selector (defaults are now empty — no Ling default).
             if (isModelEndpointMismatch(merged.model, merged.baseUrl)) {
-              warn('[restoreFromStorage] apiConfig model/baseUrl mismatch → snap to ant-ling:', merged.model, merged.baseUrl)
-              return { ...merged, provider: 'ant-ling', baseUrl: defaults.baseUrl, apiKey: defaults.apiKey }
+              warn('[restoreFromStorage] apiConfig model/baseUrl mismatch → drop endpoint:', merged.model, merged.baseUrl)
+              return { ...merged, provider: 'custom', baseUrl: defaults.baseUrl, apiKey: defaults.apiKey }
             }
             return merged
           }

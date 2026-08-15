@@ -80,8 +80,8 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
   apiConfig: {
     provider: 'custom',
     apiKey: '',
-    baseUrl: 'https://api.ant-ling.com/v1',
-    model: 'Ling-2.6-1T',
+    baseUrl: '',
+    model: '',
   },
   apiHistory: [],
   apiProfiles: [],

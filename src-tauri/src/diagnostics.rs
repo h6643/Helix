@@ -32,3 +32,9 @@ pub fn get_status(state: State<'_, Arc<AppState>>) -> Value {
         "uptime": 0,
     })
 }
+
+/// 临时诊断：前端断点回传日志（定位 tool 事件链路，验证后删除）。
+#[tauri::command]
+pub fn dbg_log(msg: String) {
+    eprintln!("[dbg-fe] {msg}");
+}

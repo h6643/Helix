@@ -14,13 +14,78 @@ import type { ElectronAPI } from '@/types/electron'
 
 let installed = false
 const eventListeners = new Set<(method: string, params?: unknown) => void>()
-const terminalListeners = new Set<(data: string) => void>()
+const terminalListeners = new Set<(payload: { id: number; data: string }) => void>()
 let unlistenPromise: Promise<UnlistenFn> | null = null
 let terminalUnlistenPromise: Promise<UnlistenFn> | null = null
 
 /** 检测是否运行在 Tauri 环境。 */
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
+/**
+ * Open a URL in a real in-app browser window (Tauri `WebviewWindow`).
+ *
+ * WHY this is needed: Tauri's main webview cannot embed external sites via
+ * `<iframe>` (the OS webview engine blocks cross-origin framing / navigation the
+ * way Electron's `<webview>` guest tag does). So the embedded sidebar browser is
+ * dead for external links in Tauri. A `WebviewWindow` is a SEPARATE, fully
+ * functional browser instance that loads any URL — this is the Tauri-native
+ * equivalent of "open the link in the in-app browser".
+ *
+ * One reusable window is kept: re-clicking a link navigates the existing window
+ * instead of spawning a new one each time.
+ */
+let tauriBrowserLabel = 'helix-browser'
+export async function openTauriBrowser(url: string): Promise<void> {
+  if (!isTauri()) return
+  const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+  // Tauri's JS API has no runtime "navigate to URL" method on an existing
+  // webview, so to reuse one browser window we close any existing one first and
+  // open a fresh window at the target URL (keyed by a stable label).
+  try {
+    const existing = await WebviewWindow.getByLabel(tauriBrowserLabel)
+    if (existing) await existing.close().catch(() => {})
+  } catch {
+    /* fall through to create */
+  }
+
+  // Position the new window to the right of the main window, sized to ~60% width.
+  let x = 140
+  let y = 80
+  let w = 1000
+  let h = 760
+  try {
+    const win = getCurrentWindow()
+    const outer = await win.outerPosition() // PhysicalPosition (device px)
+    const sf = await win.scaleFactor()
+    const size = await win.innerSize() // PhysicalSize (device px)
+    const lx = outer.x / sf
+    const ly = outer.y / sf
+    const lw = size.width / sf
+    const lh = size.height / sf
+    w = Math.max(640, Math.min(1280, Math.round(lw * 0.62)))
+    h = Math.max(480, Math.round(lh * 0.9))
+    x = Math.round(lx + lw - w - 24)
+    y = Math.round(ly + 36)
+  } catch {
+    /* use defaults */
+  }
+
+  const win = new WebviewWindow(tauriBrowserLabel, {
+    url,
+    title: 'Helix 浏览器',
+    width: w,
+    height: h,
+    x,
+    y,
+    resizable: true,
+    decorations: true,
+    focus: true,
+  })
+  win.once('tauri://error', (e: unknown) => {
+    console.error('[helix] browser window failed to open:', e)
+  })
 }
 
 async function subscribeHermesEvents(): Promise<void> {
@@ -51,10 +116,21 @@ async function subscribeTerminalEvents(): Promise<void> {
   terminalUnlistenPromise = (async () => {
     try {
       return await listen('terminal:data', (event) => {
-        const data = typeof event.payload === 'string' ? event.payload : String(event.payload ?? '')
+        // Backend emits `{ id, data }` so each multi-tab terminal only receives
+        // its own output; tolerate a plain string payload (legacy) as id 0.
+        const raw = event.payload as unknown
+        let id = 0
+        let data = ''
+        if (typeof raw === 'string') {
+          data = raw
+        } else if (raw && typeof raw === 'object') {
+          const obj = raw as Record<string, unknown>
+          id = Number(obj.id) || 0
+          data = String(obj.data ?? '')
+        }
         for (const cb of terminalListeners) {
           try {
-            cb(data)
+            cb({ id, data })
           } catch {
             /* listener threw — keep dispatching to the rest */
           }
@@ -67,7 +143,7 @@ async function subscribeTerminalEvents(): Promise<void> {
   })()
 }
 
-function onTerminalData(callback: (data: string) => void): () => void {
+function onTerminalData(callback: (payload: { id: number; data: string }) => void): () => void {
   terminalListeners.add(callback)
   void subscribeTerminalEvents()
   return () => {
@@ -151,26 +227,31 @@ function buildTauriAPI(): ElectronAPI {
 
   // ── shell ───────────────────────────────────────────────────────────────
   api.shell = {
-    open: (target: string) => invoke('open', { target }),
+    // Route URL opening through the opener plugin (tauri_plugin_opener registers
+    // the `plugin:opener|open_url` command). The previous `invoke('open', ...)`
+    // had no matching Rust command in this project, so it silently failed in
+    // Tauri — that's why the "open in external browser" button did nothing.
+    open: (target: string) => invoke('plugin:opener|open_url', { url: target, with: null }),
     showItemInFolder: (relativePath: string) => invoke('show_item_in_folder', { relativePath }),
     openPath: (dir: string) => invoke('open_path', { dir }),
   }
 
   // ── terminal ───────────────────────────────────────────────────────────
   api.terminal = {
-    start: (cols?: number, rows?: number, cwd?: string) =>
+    start: (id: number, cols?: number, rows?: number, cwd?: string) =>
       invoke('terminal_start', {
+        id,
         cols: cols ?? null,
         rows: rows ?? null,
         cwd: cwd ?? null,
       }),
-    write: (command: string) => {
-      void invoke('terminal_write', { data: command }).catch(() => {})
+    write: (id: number, command: string) => {
+      void invoke('terminal_write', { id, data: command }).catch(() => {})
     },
-    resize: (cols: number, rows: number) => {
-      void invoke('terminal_resize', { cols, rows }).catch(() => {})
+    resize: (id: number, cols: number, rows: number) => {
+      void invoke('terminal_resize', { id, cols, rows }).catch(() => {})
     },
-    kill: () => invoke('terminal_kill'),
+    kill: (id: number) => invoke('terminal_kill', { id }),
     onData: onTerminalData,
   }
 
@@ -263,6 +344,7 @@ function buildTauriAPI(): ElectronAPI {
     status: (cwd?: string | null) => invoke('status', { targetCwd: cwd ?? null }),
     diff: (filePath?: string, staged?: boolean) => invoke('diff', { filePath: filePath ?? null, staged: staged ?? null }),
     diffHead: (filePath?: string) => invoke('diff_head', { filePath: filePath ?? null }),
+    diffNumstat: (cwd?: string | null) => invoke('diff_numstat', { targetCwd: cwd ?? null }),
     revert: (filePath?: string) => invoke('revert', { filePath: filePath ?? null }),
     stage: (filePath?: string) => invoke('stage', { filePath: filePath ?? null }),
     unstage: (filePath?: string) => invoke('unstage', { filePath: filePath ?? null }),
