@@ -85,24 +85,9 @@ src-tauri/target/
 
 # Skills (user-specific, not shared)
 skills/
-# Exception: the vendored hermes-agent keeps its own skills/ (override the rule above)
-!hermes-agent/skills/
-!hermes-agent/skills/**
 
-# Vendored hermes-agent: drop non-runtime source to slim the repo / GitHub push.
-# These are hermes's own docs site, test suite, and desktop-client source —
-# NOT needed by Helix's gateway at runtime or build. The backend core
-# (agent/, hermes_cli/, skills/, tools/, providers/, gateway/, acp_adapter/)
-# stays tracked.
-hermes-agent/website/
-hermes-agent/tests/
-hermes-agent/apps/
-# hermes-agent runtime artifacts — never tracked (rebuilt via `uv sync`)
-hermes-agent/venv/
-hermes-agent/.venv/
-hermes-agent/.hermes-runtime/
-hermes-agent/**/__pycache__/
-hermes-agent/**/*.egg-info/
+# hermes-agent is now a git submodule (see .gitmodules). Its internal paths are
+# no longer tracked by this repo — only the nested .git must stay untracked.
 
 AGENTS.md
 
