@@ -23,6 +23,23 @@ if [ ! -f "$RESOURCES_DIR/.gitignore" ]; then
   printf '# CI-generated runtime directory — contents are built by scripts/prepare-runtime.sh\n*\n!.gitignore\n!RUNTIME_VERSION\n' > "$RESOURCES_DIR/.gitignore"
 fi
 
+# ── Ensure the hermes-agent submodule is checked out ───────────────────────
+# hermes-agent is now a git submodule (see .gitmodules). The build reads
+# $REPO_ROOT/hermes-agent/ directly, so the submodule must be present on disk.
+# On a fresh clone it isn't checked out automatically — fetch it here. If the
+# source dir already exists (local dev / already-initialized submodule) we skip
+# the network fetch entirely. Release tarballs (no .git) must ship the runtime
+# via CI; this guard only kicks in for real git checkouts.
+if [ ! -f "$REPO_ROOT/hermes-agent/pyproject.toml" ]; then
+  if [ -f "$REPO_ROOT/.gitmodules" ]; then
+    echo "[prepare] hermes-agent source not present — initializing submodule..."
+    git -C "$REPO_ROOT" submodule update --init hermes-agent
+  else
+    echo "ERROR: hermes-agent source not found at $REPO_ROOT/hermes-agent and no .gitmodules to fetch it" >&2
+    exit 1
+  fi
+fi
+
 # ── Configuration ──────────────────────────────────────────────────────────
 PYTHON_VERSION="3.12.10"
 PBS_RELEASE="20250409"
