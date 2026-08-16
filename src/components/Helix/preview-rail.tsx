@@ -1,6 +1,6 @@
 'use client'
 
-import { X, Folder, ChevronLeft, ChevronRight, RotateCw, ExternalLink } from 'lucide-react'
+import { X, Folder, ChevronLeft, ChevronRight, RotateCw, ExternalLink, MousePointer2, Globe } from 'lucide-react'
 import React, { useEffect, useRef, useState } from 'react'
 import { isRealElectron } from '@/lib/electron-bridge'
 import { useHelixStore, type BrowserBookmark } from '@/stores/helix-store'
@@ -217,6 +217,9 @@ export function BrowserView({
     const input = (raw ?? '').trim()
     const u = cleanUrl(normalizeUrl(input))
     if (!u) return
+    // 地址栏导航 → 必须退出选取模式（否则 iframe 仍停留在 srcdoc 渲染的
+    // 选取页面，新链接不会加载，表现为"地址栏输入链接没反应"）
+    exitPick()
     setLoaded(u)
     setError('')
     onUrlChange(u)
@@ -225,6 +228,7 @@ export function BrowserView({
   const openBookmark = (u: string) => {
     const target = cleanUrl(normalizeUrl(u))
     if (!target) return
+    exitPick()
     setLoaded(target)
     setError('')
     onUrlChange(target)
@@ -232,9 +236,76 @@ export function BrowserView({
 
   const [editingUrl, setEditingUrl] = useState(false)
   const [urlDraft, setUrlDraft] = useState('')
-  const startUrlEdit = () => { setUrlDraft(loaded); setEditingUrl(true) }
+  const startUrlEdit = () => { exitPick(); setUrlDraft(loaded); setEditingUrl(true) }
   const submitUrlEdit = () => { commitUrl(urlDraft); setEditingUrl(false) }
   const cancelUrlEdit = () => setEditingUrl(false)
+
+  // ── "选取元素加入聊天" ─────────────────────────────────────────────────
+  // 跨域 iframe 无法从父页面访问 DOM，所以进入选择模式时先用 Rust
+  // page_fetch 拉取页面 HTML，用 <iframe srcdoc> 渲染（继承父 origin），
+  // 注入选择脚本：hover 高亮、点击选取、parent.postMessage 回传元素信息。
+  const [pickMode, setPickMode] = useState(false)
+  const [pickSrcDoc, setPickSrcDoc] = useState<string | null>(null)
+  const [pickError, setPickError] = useState('')
+  const pickErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const exitPick = () => {
+    setPickMode(false)
+    setPickSrcDoc(null)
+  }
+
+  const enterPick = async () => {
+    if (!loaded) return
+    setPickError('')
+    setPickMode(true)
+    try {
+      const res = await (window as any).__TAURI_INTERNALS__?.invoke?.('page_fetch', { url: loaded })
+      if (!res || typeof res.html !== 'string') throw new Error('fetch failed')
+      setPickSrcDoc(res.html)
+    } catch (e: any) {
+      exitPick()
+      setPickError(`无法载入页面进行选取：${e?.message || e || '未知错误'}`)
+      if (pickErrorTimer.current) clearTimeout(pickErrorTimer.current)
+      pickErrorTimer.current = setTimeout(() => setPickError(''), 5000)
+    }
+  }
+
+  // 接收选取结果 → 注入聊天输入框 → 退出选择模式
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      const data = e?.data
+      if (!data || typeof data !== 'object') return
+      if (data.type === 'HELIX_PICKED') {
+        const info = data.info || {}
+        const text = String(info.text || '').trim()
+        const link = String(info.href || info.src || '').trim()
+        if (link) {
+          // 链接不再以纯文本塞进输入框（多个会拥挤），改为底部"网页链接"卡片
+          useHelixStore.getState().addLinkAttachment({
+            id: `link-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            url: link,
+            title: text.slice(0, 80) || '',
+          })
+        } else {
+          // 纯文本元素（无链接）：不往输入框塞文字，但给出选取反馈，避免"点了没反应"
+          useHelixStore.getState().showToast({ type: 'info', title: `已选取元素（无链接）`, duration: 1200 })
+        }
+      } else if (data.type === 'HELIX_PICKED_CANCEL') {
+        exitPick()
+      }
+    }
+    window.addEventListener('message', onMsg)
+    return () => window.removeEventListener('message', onMsg)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded])
+
+  // Esc 退出选择模式
+  useEffect(() => {
+    if (!pickMode) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') exitPick() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [pickMode])
 
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-card">
@@ -264,7 +335,7 @@ export function BrowserView({
         >
           <RotateCw className="size-3.5" />
         </button>
-        <div className="flex-1 min-w-0 text-center px-2">
+        <div className="flex-1 min-w-0 px-2">
           {editingUrl ? (
             <input
               autoFocus
@@ -276,18 +347,33 @@ export function BrowserView({
               }}
               onBlur={submitUrlEdit}
               spellCheck={false}
-              className="w-full px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.7857)] bg-muted/30 border border-border/20 rounded text-foreground/70 outline-none focus:border-primary/40 text-center"
+              className="w-full px-2 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] bg-muted/40 border border-border/50 rounded-md text-foreground outline-none focus:border-primary/60 text-center"
             />
           ) : (
             <button
               onClick={startUrlEdit}
-              className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 truncate hover:text-foreground hover:bg-accent/60 rounded px-2 py-0.5 transition-colors"
+              className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/80 bg-muted/30 border border-border/40 rounded-md hover:bg-muted/50 hover:border-border/60 hover:text-foreground transition-colors"
               data-tip={loaded}
             >
-              {summarizeUrl(loaded)}
+              <Globe className="size-3 text-muted-foreground/70 shrink-0" />
+              <span className="truncate">{summarizeUrl(loaded)}</span>
             </button>
           )}
         </div>
+        {/* 选取元素加入聊天（放在地址栏右侧，远离刷新/后退，避免误触） */}
+        <button
+          onClick={() => {
+            if (!loaded) {
+              useHelixStore.getState().showToast({ type: 'info', title: '没有可选取的页面', description: '请先在地址栏输入网址，加载后再选取元素' })
+              return
+            }
+            pickMode ? exitPick() : enterPick()
+          }}
+          className={`p-1 rounded transition-colors ${pickMode ? 'text-primary bg-primary/10' : 'text-foreground/60 hover:text-foreground hover:bg-accent/60'}`}
+          data-tip={loaded ? '选取网页元素加入聊天' : '请先打开网页再选取元素'}
+        >
+          <MousePointer2 className="size-3.5" />
+        </button>
         <button
           onClick={() => {
             if (loaded) {
@@ -314,7 +400,19 @@ export function BrowserView({
 
       {/* Content */}
       <div className="flex-1 min-h-0 bg-card relative">
-        {url ? (
+        {pickMode ? (
+          <WebviewFrame
+            url={url}
+            active
+            srcdoc={pickSrcDoc ?? undefined}
+            pickMode
+            onLoading={setLoading}
+            onError={(e) => { setError(e); setLoading(false) }}
+            onNavigate={(u) => { setLoaded(u) }}
+            onWebviewRef={(el) => { webviewRef.current = el }}
+            onPageTitle={onPageTitle}
+          />
+        ) : url ? (
           <WebviewFrame
             url={url}
             active
@@ -327,6 +425,16 @@ export function BrowserView({
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 pointer-events-none">
             点击消息中的链接以预览
+          </div>
+        )}
+        {pickMode && (
+          <div className="absolute top-2 left-2 z-10 px-2.5 py-1 rounded text-[calc(var(--helix-transcript-size)*0.7857)] text-primary bg-primary/10 border border-primary/20 pointer-events-none">
+            点击页面元素（Esc 取消）
+          </div>
+        )}
+        {pickError && (
+          <div className="absolute inset-x-0 top-0 z-10 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-red-500 bg-red-50/90 border-b border-red-100">
+            {pickError}
           </div>
         )}
         {loading && (
@@ -348,6 +456,8 @@ export function BrowserView({
 function WebviewFrame({
   url,
   active,
+  srcdoc,
+  pickMode,
   onLoading,
   onError,
   onNavigate,
@@ -356,6 +466,8 @@ function WebviewFrame({
 }: {
   url: string
   active: boolean
+  srcdoc?: string
+  pickMode?: boolean
   onLoading: (loading: boolean) => void
   onError: (error: string) => void
   onNavigate: (url: string) => void
@@ -488,7 +600,7 @@ function WebviewFrame({
     doLoad(url)
   }, [url, guestReady, inElectron])
 
-  if (!url) return null
+  if (!url && !srcdoc) return null
 
   return (
     <div ref={wrapRef} className={`absolute inset-0 ${active ? '' : 'hidden'}`}>
@@ -506,7 +618,15 @@ function WebviewFrame({
       ) : (
         <iframe
           ref={setWebviewRef as any}
-          src={url}
+          src={srcdoc ? undefined : url}
+          srcDoc={srcdoc || undefined}
+          onLoad={() => {
+            // 选择模式：srcdoc iframe 继承父 origin，加载后注入选择脚本
+            if (pickMode && srcdoc) {
+              const doc = (webviewRef.current as any)?.contentDocument
+              if (doc) injectPickScript(doc)
+            }
+          }}
           className="w-full h-full border-0"
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
           data-tip="Preview"
@@ -514,4 +634,64 @@ function WebviewFrame({
       )}
     </div>
   )
+}
+
+/** 在 srcdoc iframe 的 document 里注入元素选择脚本：hover 高亮、点击选取、
+ *  结果通过 parent.postMessage 回传给宿主页面。 */
+function injectPickScript(doc: Document) {
+  try {
+    // 防重复 append（父页面视角）。脚本内部的防重入用 __helixPickerListening。
+    if ((doc.defaultView as any)?.__helixPickerInstalled) return
+    ;(doc.defaultView as any).__helixPickerInstalled = true
+    const script = doc.createElement('script')
+    script.textContent = `
+      (function() {
+        // 注意：用独立的标志名 —— 父页面 injectPickScript 已设
+        // __helixPickerInstalled（防重复 append），脚本内部若检查同一个标志
+        // 会因已 true 而直接 return，事件监听器一个都不注册（hover 无高亮、
+        // 点击无响应）。这里用 __helixPickerListening 区分。
+        if (window.__helixPickerListening) return;
+        window.__helixPickerListening = true;
+        try { parent.postMessage({ type: 'HELIX_PICKER_READY' }, '*'); } catch (e) {}
+        var current = null;
+        document.addEventListener('mouseover', function(e) {
+          var el = e.target;
+          if (!el || el === current) return;
+          if (current && current.style) current.style.outline = '';
+          current = el;
+          if (el.style) { el.style.outline = '2px solid #f59e0b'; el.style.outlineOffset = '-2px'; }
+        }, true);
+        document.addEventListener('click', function(e) {
+          e.preventDefault(); e.stopPropagation();
+          var el = e.target;
+          if (!el) return;
+          if (current && current.style) current.style.outline = '';
+          var text = (el.innerText || el.textContent || '').trim().slice(0, 8000);
+          var html = (el.outerHTML || '').slice(0, 20000);
+          var href = '';
+          var src = '';
+          try {
+            href = el.href || el.getAttribute('href') || '';
+            src = el.src || el.getAttribute('src') || '';
+          } catch (err) {}
+          parent.postMessage({ type: 'HELIX_PICKED', info: {
+            tag: (el.tagName || '').toLowerCase(),
+            text: text,
+            html: html,
+            href: href,
+            src: src,
+            title: document.title || ''
+          } }, '*');
+        }, true);
+        document.addEventListener('keydown', function(e) {
+          if (e.key === 'Escape') {
+            if (current && current.style) current.style.outline = '';
+            parent.postMessage({ type: 'HELIX_PICKED_CANCEL' }, '*');
+          }
+        }, true);
+        document.body.style.cursor = 'crosshair';
+      })();
+    `
+    ;(doc.head || doc.documentElement).appendChild(script)
+  } catch { /* cross-origin guard — picker just won't attach */ }
 }

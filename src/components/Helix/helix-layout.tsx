@@ -1432,9 +1432,13 @@ export function HelixLayout() {
                       )}
                     </div>
                   )}
-                  {/* 后台任务按钮（终端按钮左侧）：仅当前会话有任务时才显示 */}
-                  {myBgTasks.length > 0 && (
-                  <div className="relative" ref={bgTasksRef}>
+                  {/* 后台任务按钮（终端按钮左侧）：常驻占位，当前会话无任务时透明不可点。
+                      不能条件挂载——任务启动的瞬间按钮闪入/闪出会把右侧的终端、更多操作
+                      顶来顶去（表现为"按钮一闪"）。用透明度淡入淡出替代。 */}
+                  <div
+                    className={`relative transition-opacity duration-200 ${myBgTasks.length === 0 ? 'opacity-0 pointer-events-none' : ''}`}
+                    ref={bgTasksRef}
+                  >
                     <button
                       onClick={() => setBgTasksOpen(v => !v)}
                       className={`relative p-1.5 rounded-lg transition-colors ${bgTasksOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
@@ -1449,7 +1453,6 @@ export function HelixLayout() {
                     </button>
                     {bgTasksOpen && <BackgroundTasksPanel sessionId={activeSessionId ?? ''} onClose={() => setBgTasksOpen(false)} />}
                   </div>
-                  )}
                   <button
                     onClick={() => storeActions.toggleTerminal()}
                     className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
@@ -1457,7 +1460,6 @@ export function HelixLayout() {
                   >
                     <Terminal className="size-4" />
                   </button>
-                  {(rightSidebarTab !== 'browser' && rightSidebarTab !== 'diff') && (
                   <button
                     ref={browserMenuButtonRef}
                     onClick={() => setBrowserMenuOpen(v => !v)}
@@ -1466,7 +1468,6 @@ export function HelixLayout() {
                   >
                     <MoreHorizontal className="size-4" />
                   </button>
-                  )}
                   {browserMenuOpen && typeof window !== 'undefined' && createPortal(
                     <div
                       className="fixed z-[100]"
@@ -1477,8 +1478,7 @@ export function HelixLayout() {
                     >
                       <div ref={browserMenuRef}>
                         <MoreActionsMenu
-                          rightSidebarTab={rightSidebarTab}
-                          onToggleTab={(kind) => { storeActions.setRightSidebarTab(rightSidebarTab === kind ? null : kind); setBrowserMenuOpen(false) }}
+                          onToggleTab={(kind) => { if (rightSidebarTab !== kind) storeActions.setRightSidebarTab(kind); setBrowserMenuOpen(false) }}
                           onAddBrowser={() => { storeActions.requestAddBrowserPage(); setBrowserMenuOpen(false) }}
                         />
                       </div>

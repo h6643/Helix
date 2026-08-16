@@ -12,7 +12,7 @@
  */
 
 import { cloneElement, isValidElement, memo, useMemo, useState, type MouseEvent, type ReactNode } from 'react'
-import { AlertCircle, AlertTriangle, Info, type LucideIcon, Zap } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Check, Copy, Info, Play, type LucideIcon, Zap } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
@@ -188,9 +188,80 @@ function DiffView({ code }: { code: string }) {
 // would otherwise reset a per-component useState back to collapsed).
 const expandedCodeBlocks = new Set<string>()
 
+// 只有真正可执行的命令/脚本语言才显示「执行」按钮（白名单）。
+const RUNNABLE_LANGS = new Set([
+  'bash', 'sh', 'zsh', 'fish', 'powershell', 'pwsh', 'cmd', 'batch',
+  'python', 'py', 'javascript', 'js', 'typescript', 'ts', 'node',
+  'go', 'ruby', 'php', 'perl', 'java', 'c', 'cpp', 'csharp', 'rust',
+  'swift', 'kotlin', 'lua', 'r',
+])
+
+/** Walk the table's React children into a row-major matrix of cell text. */
+function tableRows(children: ReactNode): string[][] {
+  const rows: string[][] = []
+  const collect = (nodes: ReactNode): void => {
+    const arr = Array.isArray(nodes) ? nodes : nodes == null ? [] : [nodes]
+    for (const n of arr) {
+      if (!isValidElement(n)) continue
+      const tag = typeof n.type === 'string' ? n.type : ''
+      if (tag === 'tr') {
+        const cellChildren: unknown = (n.props as { children?: ReactNode })?.children
+        const cellArr: unknown[] = Array.isArray(cellChildren) ? cellChildren : cellChildren == null ? [] : [cellChildren]
+        rows.push(cellArr.map(c => codeText(c)))
+      } else {
+        collect((n.props as { children?: ReactNode })?.children)
+      }
+    }
+  }
+  collect(children)
+  return rows
+}
+
+/** Serialize a markdown table back to a copyable Markdown table. */
+function tableToMarkdown(children: ReactNode): string {
+  const rows = tableRows(children)
+  if (rows.length === 0) return ''
+  const cols = Math.max(...rows.map(r => r.length))
+  const line = (cells: string[]) =>
+    '| ' + Array.from({ length: cols }, (_, i) => (cells[i] ?? '').replace(/\|/g, '\\|')).join(' | ') + ' |'
+  const sep = '| ' + Array.from({ length: cols }, () => '---').join(' | ') + ' |'
+  return rows.flatMap((r, i) => (i === 0 ? [line(r), sep] : [line(r)])).join('\n')
+}
+
+function MarkdownTable({ children }: { children: ReactNode }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div className="my-2 max-w-full rounded-[0.375rem] border border-border/50">
+      <div className="flex items-center justify-end px-1 pt-0.5">
+        <button
+          type="button"
+          aria-label="复制表格"
+          title="复制表格"
+          onClick={() => {
+            const text = tableToMarkdown(children)
+            if (!text) return
+            void navigator.clipboard?.writeText(text).then(() => {
+              setCopied(true)
+              setTimeout(() => setCopied(false), 2000)
+            })
+          }}
+          className="p-1 rounded text-foreground/40 hover:text-foreground/70 hover:bg-foreground/5 transition-colors cursor-pointer"
+        >
+          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="m-0 w-full min-w-[18rem] border-collapse text-[0.8125rem] [&_tr]:border-b [&_tr]:border-border/50 last:[&_tr]:border-0">{children}</table>
+      </div>
+    </div>
+  )
+}
+
 function CodeCard({ language, code, blockId }: { language: string; code: string; blockId?: string }) {
   const trimmed = code.replace(/^\n+/, '').trimEnd()
   const [copied, setCopied] = useState(false)
+  const [sent, setSent] = useState(false)
+  const canRun = RUNNABLE_LANGS.has(language)
   const [collapsed, setCollapsed] = useState(() => (blockId ? !expandedCodeBlocks.has(blockId) : true))
   const isDiff = language === 'diff'
   // Diffs win over the box-diagram check: DiffView is already a plain
@@ -210,6 +281,15 @@ function CodeCard({ language, code, blockId }: { language: string; code: string;
     <HighlightedCode code={trimmed} language={language} />
   )
 
+  const runCode = () => {
+    const isShell = ['bash', 'sh', 'zsh', 'fish', 'powershell', 'pwsh', 'cmd', 'batch'].includes(language)
+    const fenceLang = language ? `${language}\n` : ''
+    const prompt = `${isShell ? '请执行以下命令' : '请执行以下代码'}并输出执行结果：\n\n\`\`\`${fenceLang}${trimmed}\n\`\`\``
+    useHelixStore.getState().injectAndSend(prompt)
+    setSent(true)
+    setTimeout(() => setSent(false), 2000)
+  }
+
   return (
     <pre>
       <div>
@@ -217,22 +297,36 @@ function CodeCard({ language, code, blockId }: { language: string; code: string;
         <span className="text-[calc(var(--helix-transcript-size)*0.7143)] uppercase tracking-wider text-foreground/40 select-none font-medium">
           {isDiff ? 'diff' : language || (boxDiagram ? 'text' : 'code')}
         </span>
-        <button
-          type="button"
-          aria-label="复制代码"
-          onClick={() => {
-            try {
-              void navigator.clipboard?.writeText(trimmed)
-              setCopied(true)
-              setTimeout(() => setCopied(false), 2000)
-            } catch {
-              /* clipboard unavailable */
-            }
-          }}
-          className="text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/40 hover:text-foreground/70 transition-colors cursor-pointer"
-        >
-          {copied ? '已复制' : '复制'}
-        </button>
+        <span className="flex items-center gap-1">
+          {canRun && (
+            <button
+              type="button"
+              aria-label="执行代码"
+              title="执行代码"
+              onClick={runCode}
+              className="p-1 rounded text-foreground/40 hover:text-foreground/70 hover:bg-foreground/5 transition-colors cursor-pointer"
+            >
+              {sent ? <Check className="size-3.5" /> : <Play className="size-3.5" />}
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label="复制代码"
+            title="复制代码"
+            onClick={() => {
+              try {
+                void navigator.clipboard?.writeText(trimmed)
+                setCopied(true)
+                setTimeout(() => setCopied(false), 2000)
+              } catch {
+                /* clipboard unavailable */
+              }
+            }}
+            className="p-1 rounded text-foreground/40 hover:text-foreground/70 hover:bg-foreground/5 transition-colors cursor-pointer"
+          >
+            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+          </button>
+        </span>
       </div>
       <div className={isLong && collapsed ? 'helix-code-collapsed' : ''}>{body}</div>
       {isLong && (
@@ -335,15 +429,8 @@ const HelixMarkdown = memo(function HelixMarkdown({ text, className }: HelixMark
         ol: ({ className, ...props }) => <ol className={`my-1 gap-0 ${className || ''}`} dir="auto" {...props} />,
         li: ({ className, ...props }) => <li className={className} {...props} />,
         // Tables — official: rounded card wrapper + header bg + nowrap th +
-        // row separators (last row un-bordered).
-        table: ({ className, ...props }) => (
-          <div className="aui-md-table my-2 max-w-full overflow-x-auto rounded-[0.375rem] border border-border/50">
-            <table
-              className={`m-0 w-full min-w-[18rem] border-collapse text-[0.8125rem] [&_tr]:border-b [&_tr]:border-border/50 last:[&_tr]:border-0 ${className || ''}`}
-              {...props}
-            />
-          </div>
-        ),
+        // row separators (last row un-bordered) + a copy button in the corner.
+        table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
         thead: ({ className, ...props }) => (
           <thead className={`m-0 bg-muted/35 text-muted-foreground ${className || ''}`} {...props} />
         ),

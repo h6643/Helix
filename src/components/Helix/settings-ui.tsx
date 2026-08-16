@@ -171,7 +171,7 @@ export function PopupSelect({
   disabled = false,
 }: PopupSelectProps) {
   const [open, setOpen] = useState(false)
-  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null)
+  const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
 
@@ -207,20 +207,31 @@ export function PopupSelect({
     if (!btn) return
     const r = btn.getBoundingClientRect()
     const w = r.width || popupWidth
-    setPos({ left: r.right - w, top: r.bottom + 4, width: w })
+    // 向下展开时的可用空间（留 8px 底部边距）
+    const downMaxH = Math.max(120, window.innerHeight - r.bottom - 8)
+    setPos({ left: r.right - w, top: r.bottom + 4, width: w, maxHeight: downMaxH })
   }, [open, popupWidth])
 
   useEffect(() => {
     if (!open || !pos || !popRef.current) return
     const pr = popRef.current.getBoundingClientRect()
     let top = pos.top
-    if (pr.bottom > window.innerHeight - 8 && btnRef.current) {
+    let maxHeight = pos.maxHeight
+    // 弹窗底部超出视口 且 向下空间确实不够（<200px）→ 翻到触发器上方。
+    // 动态 maxHeight 已限制弹窗高度，轻微超出（几像素舍入）不应触发翻转。
+    const downSpaceTooSmall = pos.maxHeight < 200
+    if (pr.bottom > window.innerHeight - 8 && downSpaceTooSmall && btnRef.current) {
       const br = btnRef.current.getBoundingClientRect()
       top = Math.max(8, br.top - pr.height - 4)
+      // 向上展开时的可用空间（留 8px 顶部边距）
+      maxHeight = Math.max(120, br.top - 8)
     }
     const left = Math.max(8, Math.min(pos.left, window.innerWidth - pr.width - 8))
     popRef.current.style.top = `${top}px`
     popRef.current.style.left = `${left}px`
+    popRef.current.style.maxHeight = `${maxHeight}px`
+    // 同步回 state 以防后续重渲染覆盖 inline style
+    setPos(prev => prev ? { ...prev, top, maxHeight } : prev)
   }, [open, pos])
 
   // 展开期间锁定背景滚动容器，避免 fixed 弹窗与触发器错位（见 useLockScrollOnOpen）。
@@ -242,8 +253,8 @@ export function PopupSelect({
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed z-50 bg-popover border-0 rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto overscroll-contain backdrop-blur-sm"
-          style={{ left: pos.left, top: pos.top, width: pos.width }}
+          className="fixed z-50 bg-popover border-0 rounded-xl shadow-xl py-1 overflow-y-auto overscroll-contain backdrop-blur-sm"
+          style={{ left: pos.left, top: pos.top, width: pos.width, maxHeight: pos.maxHeight }}
         >
           {options.map((o) => {
             const selected = String(o.value) === value

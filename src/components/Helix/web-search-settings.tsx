@@ -11,9 +11,9 @@ type SearchProvider = {
   pluginName: string
   name: string
   envKey: string
-  description: string
   signupUrl: string
   freeQuota?: string
+  description?: string
 }
 
 const SEARCH_PROVIDERS: SearchProvider[] = [
@@ -22,25 +22,14 @@ const SEARCH_PROVIDERS: SearchProvider[] = [
     pluginName: 'tavily',
     name: 'Tavily',
     envKey: 'TAVILY_API_KEY',
-    description: '搜索 + 内容提取 + 爬虫',
     signupUrl: 'https://app.tavily.com/home',
     freeQuota: '1000 次/月',
-  },
-  {
-    id: 'brave-free',
-    pluginName: 'brave_free',
-    name: 'Brave Search (免费)',
-    envKey: 'BRAVE_SEARCH_API_KEY',
-    description: 'Brave 搜索 API 免费版',
-    signupUrl: 'https://brave.com/search/api/',
-    freeQuota: '2000 次/月',
   },
   {
     id: 'exa',
     pluginName: 'exa',
     name: 'Exa',
     envKey: 'EXA_API_KEY',
-    description: '语义搜索',
     signupUrl: 'https://exa.ai',
     freeQuota: '1000 次/月',
   },
@@ -49,17 +38,8 @@ const SEARCH_PROVIDERS: SearchProvider[] = [
     pluginName: 'ddgs',
     name: 'DuckDuckGo',
     envKey: '',
-    description: '免费，无需 API Key',
     signupUrl: '',
     freeQuota: '无限制',
-  },
-  {
-    id: 'searxng',
-    pluginName: 'searxng',
-    name: 'SearXNG',
-    envKey: '',
-    description: '自托管搜索引擎',
-    signupUrl: 'https://docs.searxng.org',
   },
 ]
 
@@ -138,10 +118,8 @@ export function WebSearchSettings() {
           // Map search_backend to active providers
           const providers: string[] = []
           if (search_backend === 'tavily' || keys?.tavily) providers.push('tavily')
-          if (search_backend === 'brave' || keys?.brave) providers.push('brave-free')
           if (search_backend === 'exa' || keys?.exa) providers.push('exa')
           if (search_backend === 'ddgs') providers.push('ddgs')
-          if (search_backend === 'searxng') providers.push('searxng')
           setActiveProviders(providers)
           setApiKeys(keys || {})
           if (Array.isArray((result as any).availableProviders)) {
@@ -165,10 +143,8 @@ export function WebSearchSettings() {
     // Determine search_backend from active providers
     let searchBackend = ''
     if (providers.includes('tavily')) searchBackend = 'tavily'
-    else if (providers.includes('brave-free')) searchBackend = 'brave'
     else if (providers.includes('exa')) searchBackend = 'exa'
     else if (providers.includes('ddgs')) searchBackend = 'ddgs'
-    else if (providers.includes('searxng')) searchBackend = 'searxng'
 
     const config = {
       backend: searchBackend,

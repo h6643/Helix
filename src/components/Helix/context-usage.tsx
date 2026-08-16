@@ -134,12 +134,20 @@ export function ContextUsageIndicator() {
         // it survives a cold restart. Categories only live on the live backend,
         // so without this they vanish the moment the Hermes session ends (and
         // the panel would fall back to the "需要正在运行的 Hermes 会话" empty state).
-        useHelixStore.getState().setContextUsage(
-          currentSessionId ?? sessionId,
-          data.context_max,
-          data.context_used,
-          data.categories?.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
-        )
+        //
+        // 关键：只有当后端回报**非零**用量时才写回本地快照。重启后 Hermes 会话
+        // 可能尚未把对话重新载入上下文，此时后端会回报 0；若直接写回会把本地
+        // 持久化的真实用量覆盖成 0，导致环「重启后显示 0」。后端为 0（未就绪/
+        // 空会话）时保留本地快照——圆环会回退到本地持久值，不会无故归零。
+        const hasRealUsage = (data.context_used || 0) > 0 && (data.context_max || 0) > 0
+        if (hasRealUsage) {
+          useHelixStore.getState().setContextUsage(
+            currentSessionId ?? sessionId,
+            data.context_max,
+            data.context_used,
+            data.categories?.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
+          )
+        }
 
         // Auto-compaction check (Hermes Desktop style)
         if (data.context_percent >= 80 && !autoCompactCooldownRef.current) {
@@ -202,7 +210,10 @@ export function ContextUsageIndicator() {
       .then((result) => {
         if (!result || typeof result !== 'object') return
         const data = result as ContextUsageData
-        if (data.categories?.length) {
+        // 同 fetchContextData：仅当后端回报非零用量才写回，避免重启后空会话把
+        // 本地持久化的真实用量覆盖成 0（categories 非空但 token 为 0 的情况也要拦）。
+        const hasRealUsage = (data.context_used || 0) > 0 && (data.context_max || 0) > 0
+        if (hasRealUsage) {
           useHelixStore.getState().setContextUsage(
             currentSessionId ?? sid,
             data.context_max,

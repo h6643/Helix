@@ -1142,8 +1142,6 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
   // ── Render content ────────────────────────────────────────────────────────
   const ModelHistoryList = () => {
-    const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set())
-
     if (apiHistory.length === 0) {
       return null
     }
@@ -1166,14 +1164,6 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       }
       groups[pos].items.push({ h, index })
     })
-
-    const toggleGroup = (url: string) =>
-      setCollapsed((prev) => {
-        const next = new Set(prev)
-        if (next.has(url)) next.delete(url)
-        else next.add(url)
-        return next
-      })
 
     // Whether the CURRENT connection (baseUrl + apiKey) exists in history at
     // all. Computed ONCE per render, not per entry (renderItem). The list
@@ -1264,13 +1254,14 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             }
             showToast({ type: 'success', title: `已切换到 ${final.model}` })
           }}
-          className={`flex items-center justify-between px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors group border-b border-border/30 last:border-b-0 ${isActive ? 'bg-primary/5' : 'hover:bg-muted/40'}`}
+          className={`flex items-center justify-between px-3 py-1.5 rounded-xl bg-card shadow-sm cursor-pointer transition-colors group ${isActive ? 'ring-1 ring-primary/30 bg-primary/5' : 'hover:bg-muted/40'}`}
         >
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
               <p className={`text-[var(--helix-transcript-size)] truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
             </div>
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 truncate mt-0.5 font-mono">{h.baseUrl}</p>
           </div>
           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
             <button onClick={(e) => { e.stopPropagation(); setLocalConfig({ ...h }); setShowAddModelModal(true) }}
@@ -1287,27 +1278,8 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     }
 
     return (
-      <div className="space-y-3">
-        {groups.map((g) => {
-          const isCollapsed = collapsed.has(g.baseUrl)
-          return (
-            <div key={g.baseUrl} className="space-y-1.5">
-              <button
-                onClick={() => toggleGroup(g.baseUrl)}
-                className="flex items-center gap-1.5 w-full px-1 py-1 text-left text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/40 rounded transition-colors"
-                data-tip={g.baseUrl}
-              >
-                <span className="truncate font-mono text-muted-foreground">{g.baseUrl}</span>
-                <span className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70">{g.items.length}</span>
-              </button>
-              {!isCollapsed && (
-                <div className="space-y-1.5 border-l border-border/40 ml-1.5 pl-2">
-                  {g.items.map(renderItem)}
-                </div>
-              )}
-            </div>
-          )
-        })}
+      <div className="space-y-1.5">
+        {groups.flatMap((g) => g.items).map(renderItem)}
       </div>
     )
   }
@@ -1672,7 +1644,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                     {archives.map(a => (
                       <div key={a.id}
                         onClick={() => handleLoadArchive(a.id)}
-                        className="flex items-center justify-between px-4 py-3 border-b border-border/30 last:border-b-0 hover:bg-accent/30 transition-colors group cursor-pointer">
+                        className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-card shadow-sm cursor-pointer transition-colors group hover:bg-muted/40">
                         <div className="flex-1 min-w-0">
                           <p className="text-[var(--helix-transcript-size)] font-medium text-foreground truncate">{a.label}</p>
                           <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-0.5">{a.messageCount} 条消息</p>

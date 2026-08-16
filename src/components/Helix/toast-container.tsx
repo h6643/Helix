@@ -31,66 +31,34 @@ export function ToastContainer() {
 
   if (toasts.length === 0) return null
 
-  const bottomToasts = toasts.filter(t => t.position === 'bottom-right')
-  const topToasts = toasts.filter(t => !t.position || t.position === 'top-right')
-
   return (
-    <>
-      {/* Top-right toasts */}
-      {topToasts.length > 0 && (
-        <div className="fixed top-14 right-4 z-[60] flex flex-col gap-1.5 max-w-xs">
-          {topToasts.map((toast) => (
-            <div
-              key={toast.id}
-              className={`flex items-center gap-2 bg-card/95 border border-border/60 rounded-xl shadow-lg shadow-black/10 px-3 py-2 backdrop-blur-md transition-all duration-300 ${
-                exiting.has(toast.id) ? 'opacity-0 -translate-y-2 scale-95' : 'opacity-100 translate-y-0 scale-100'
-              }`}
-            >
-              <ToastIcon type={toast.type} />
-              <div className="flex-1 min-w-0">
-                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">{toast.title}</p>
-                {toast.description && (
-                  <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground mt-0.5 leading-relaxed">{toast.description}</p>
-                )}
-              </div>
-              <button
-                onClick={() => handleClose(toast.id)}
-                className="p-0.5 hover:bg-accent rounded shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-              >
-                <X className="size-3" />
-              </button>
-            </div>
-          ))}
+    <div className="fixed top-14 right-4 z-[60] flex flex-col gap-1.5 max-w-xs">
+      {toasts.map((toast) => (
+        <div
+          key={toast.id}
+          role={toast.onClick ? 'button' : undefined}
+          onClick={() => toast.onClick?.()}
+          className={`flex items-center gap-2 bg-card/95 border border-border/60 rounded-xl shadow-lg shadow-black/10 px-3 py-2 backdrop-blur-md transition-all duration-300 ${
+            toast.onClick ? 'cursor-pointer hover:bg-accent/50' : ''
+          } ${
+            exiting.has(toast.id) ? 'opacity-0 -translate-y-2 scale-95' : 'opacity-100 translate-y-0 scale-100'
+          }`}
+        >
+          <ToastIcon type={toast.type} />
+          <div className="flex-1 min-w-0">
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">{toast.title}</p>
+            {toast.description && (
+              <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground mt-0.5 leading-relaxed">{toast.description}</p>
+            )}
+          </div>
+          <button
+            onClick={(e) => { e.stopPropagation(); handleClose(toast.id) }}
+            className="p-0.5 hover:bg-accent rounded shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <X className="size-3" />
+          </button>
         </div>
-      )}
-
-      {/* Bottom-right toasts */}
-      {bottomToasts.length > 0 && (
-        <div className="fixed bottom-10 right-4 z-[60] flex flex-col gap-1.5 max-w-xs">
-          {bottomToasts.map((toast) => (
-            <div
-              key={toast.id}
-              className={`flex items-center gap-2 bg-card border border-border rounded-xl shadow-lg px-3 py-2 backdrop-blur-sm transition-all duration-200 ${
-                exiting.has(toast.id) ? 'opacity-0 translate-x-2 scale-95' : 'opacity-100 translate-x-0 scale-100'
-              }`}
-            >
-              <ToastIcon type={toast.type} />
-              <div className="flex-1 min-w-0">
-                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">{toast.title}</p>
-                {toast.description && (
-                  <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground mt-0.5">{toast.description}</p>
-                )}
-              </div>
-              <button
-                onClick={() => handleClose(toast.id)}
-                className="p-0.5 hover:bg-accent rounded shrink-0 text-muted-foreground hover:text-foreground"
-              >
-                <X className="size-3" />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </>
+      ))}
+    </div>
   )
 }

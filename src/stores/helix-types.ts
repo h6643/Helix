@@ -37,6 +37,14 @@ export interface FileAttachment {
   path?: string        // Electron: absolute file path for binary files
 }
 
+// A web link picked from the in-app browser ("选取网页元素加入聊天") and shown
+// as a compact card in the composer instead of a long raw URL in the input.
+export interface LinkAttachment {
+  id: string
+  url: string
+  title?: string       // optional display label (e.g. the picked element's text)
+}
+
 export interface ExecutionStep {
   id: string
   type: 'task' | 'thinking' | 'reasoning' | 'tool_call' | 'tool_result' | 'text' | 'error' | 'done' | 'plan' | 'usage' | 'compact' | 'file_change'
@@ -136,7 +144,6 @@ export interface ToastMessage {
   title: string
   description?: string
   duration?: number
-  position?: 'bottom-right' | 'top-right'
   onClick?: () => void
 }
 

@@ -34,6 +34,7 @@ import {
   Trash,
   BookOpen,
   Archive,
+  Link,
 } from 'lucide-react'
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
@@ -54,10 +55,11 @@ import { ContextUsageIndicator } from './context-usage'
 
 import { getToolLabel, getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
 import { InlineToolGroup } from './inline-tool-group'
+import { HistoryStrip } from './history-strip'
 import { FileChangeSummary } from './file-change-summary'
 import { ApprovalDialog, ClarifyBar, type ApprovalRequest } from './approval-dialog'
 import { ScheduledTaskConfirm } from './scheduled-task-confirm'
-import { useHelixStore, type ImageAttachment, type FileAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
+import { useHelixStore, type ImageAttachment, type FileAttachment, type LinkAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
 import type { ChatMessage, HermesTodo } from '@/stores/helix-types'
 import { HelixMarkdown } from './helix-markdown'
@@ -1123,6 +1125,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
 // typed text must still be preserved per-tab; using a fixed key lets the
 // per-session persist/restore effects work for unsent drafts too.
 const DRAFT_SESSION_KEY = '__draft__'
+const EMPTY_LINKS: LinkAttachment[] = []
 
 export function AgentFlowPanel() {
   const [steps, setSteps] = useState<ExecutionStep[]>([])
@@ -1249,7 +1252,13 @@ export function AgentFlowPanel() {
   const injectSignal = useHelixStore((s) => s.injectInputSignal)
   useEffect(() => {
     if (injectSignal) {
-      setInputSynced(injectSignal.text)
+      if (injectSignal.append) {
+        // 追加模式（连续选取网页元素累积）：保留现有输入，换行拼接新内容
+        const prev = inputValueRef.current
+        setInputSynced(prev ? `${prev}\n${injectSignal.text}` : injectSignal.text)
+      } else {
+        setInputSynced(injectSignal.text)
+      }
       inputRef.current?.focus()
     }
   }, [injectSignal, setInputSynced])
@@ -1274,6 +1283,12 @@ const setTabInput = useHelixStore(s => s.setTabInput)
 const clearTabInput = useHelixStore(s => s.clearTabInput)
   const chatMessages = useHelixStore(s => s.chatMessages)
   const currentSessionId = useHelixStore(s => s.currentSessionId)
+  // Link cards picked from the in-app browser ("选取网页元素加入聊天") live in the
+  // store (not local state) so preview-rail can append them from another surface.
+  const pendingLinks = useHelixStore((s) => {
+    const key = currentSessionId ?? DRAFT_SESSION_KEY
+    return s.tabAttachments[key]?.links ?? EMPTY_LINKS
+  })
   const setSessionPendingApproval = useHelixStore(s => s.setSessionPendingApproval)
   // 仅显示/统计当前会话的待确认（审批/反问/定时任务），避免切会话时串台
   const approvalRequest = approvalQueue.find(r => r.sessionId === currentSessionId) || null
@@ -2389,8 +2404,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const outerTextBufferRef = sharedTextBufferRef
     const currentInput = inputValueRef.current
     const cmd = resolveCommand(currentInput.trim())
-    const trimmed = currentInput.trim()
-    if (!trimmed && pendingImages.length === 0 && pendingFiles.length === 0) return
+    const baseTrimmed = currentInput.trim()
+    // Fold any web-link cards (picked from the in-app browser) into the text the
+    // agent receives, so they ride along without cluttering the input as raw URLs.
+    const linkCards = useHelixStore.getState().tabAttachments[currentSessionId ?? DRAFT_SESSION_KEY]?.links ?? []
+    const linkSuffix = linkCards.length ? '\n' + linkCards.map((l) => `链接: ${l.title ? `${l.title} (${l.url})` : l.url}`).join('\n') : ''
+    const trimmed = baseTrimmed + linkSuffix
+    if (!baseTrimmed && pendingImages.length === 0 && pendingFiles.length === 0 && linkCards.length === 0) return
 
     // Lock isBusy to true BEFORE any async gap so the button NEVER flips
     // back to "send" while the agent is in-flight (even if streamingDrafts
@@ -2401,7 +2421,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     useHelixStore.setState({ isChatLoading: true })
 
     // --- Built-in slash commands (handled client-side, never sent to Hermes) ---
-    const builtinMatch = trimmed.match(/^\/(\S+)/)
+    const builtinMatch = baseTrimmed.match(/^\/(\S+)/)
     if (builtinMatch) {
       const builtin = BUILTIN_COMMANDS.find(c => c.name === builtinMatch[1].toLowerCase())
       if (builtin) {
@@ -2554,10 +2574,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     let wasFront = isFrontRun()
     const uiRB = (u: any) => {
       responseBlocksRef.current = typeof u === 'function' ? u(responseBlocksRef.current) : u
-      // TEMP DIAG
-      try {
-        ;(window as any).__TAURI_INTERNALS__?.invoke?.('dbg_log', { msg: `[ui-dbg] uiRB called front=${isFrontRun()} blocks=${responseBlocksRef.current.length} owner=${liveStateOwnerRef.current} cur=${useHelixStore.getState().currentSessionId}` }).catch(()=>{})
-      } catch { /* noop */ }
       if (!isFrontRun()) { wasFront = false; return }
       if (!wasFront) { wasFront = true; setResponseBlocks(responseBlocksRef.current) }
       setResponseBlocks(u)
@@ -2700,6 +2716,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     })
     setPendingImages([])
     setPendingFiles([])
+    // Clear the web-link cards that rode along on this send.
+    if (linkCards.length > 0) {
+      for (const l of linkCards) useHelixStore.getState().removeLinkAttachment(l.id)
+    }
 
     const controller = new AbortController()
     abortRef.current = controller
@@ -3252,12 +3272,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // run with "正在思考" forever (no tool cards, no text).
       unsubscribe = hermesApi()!.onEvent(async (method: string, params: any) => {
         const mySid = sessionId
-        // TEMP DIAG: 记录收到的 tool 相关事件
-        if (method.includes('tool') || method.includes('session/update')) {
-          try {
-            ;(window as any).__TAURI_INTERNALS__?.invoke?.('dbg_log', { msg: `[tool-dbg] method=${method} sid=${mySid} evtSid=${params?.session_id} su=${params?.update?.sessionUpdate} tc=${params?.update?.toolCallId}` }).catch(()=>{})
-          } catch { /* noop */ }
-        }
         // True-concurrency guard: this onEvent instance belongs to the run for
         // `mySid`. Ignore events from any OTHER session so parallel runs don't
         // cross-contaminate each other's queues. Global gateway-level events
@@ -4652,7 +4666,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const effectiveKey = currentSessionId ?? DRAFT_SESSION_KEY
     const prev = lastSessionForAttachmentsRef.current
     if (prev && prev !== effectiveKey) {
-      store.setTabAttachments(prev, pendingImages, pendingFiles)
+      // Preserve the previous session's link cards too (they live in the store,
+      // not in local state) so switching away doesn't drop them.
+      const prevLinks = store.tabAttachments[prev]?.links ?? []
+      store.setTabAttachments(prev, pendingImages, pendingFiles, prevLinks)
     }
     lastSessionForAttachmentsRef.current = effectiveKey
     const saved = useHelixStore.getState().tabAttachments[effectiveKey]
@@ -4804,6 +4821,45 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     </button>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Web link cards picked from the in-app browser (compact替代长 URL 纯文本) */}
+            {pendingLinks.length > 0 && (
+              <div className="border-t border-border/20 px-4 py-2">
+                <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 mb-1.5">
+                  {pendingLinks.length} 个网页链接
+                </p>
+                <div className="flex flex-wrap gap-2">
+                {pendingLinks.map(l => {
+                  const linkTitle = l.title || (() => { try { return new URL(l.url).hostname } catch { return '网页链接' } })()
+                  return (
+                  <div
+                    key={l.id}
+                    className="relative flex items-center gap-2 max-w-[280px] px-2.5 py-1.5 rounded-xl border border-border/30 bg-muted/20 hover:bg-muted/40 hover:border-border/30 transition-all duration-200 group cursor-pointer"
+                    onClick={() => {
+                      import('@/lib/electron-bridge').then(({ electronShell }) => electronShell.open(l.url))
+                    }}
+                    data-tip={linkTitle}
+                  >
+                    <Link className="size-4 text-primary shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground truncate">{linkTitle}</p>
+                      <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 truncate">{l.url}</p>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        useHelixStore.getState().removeLinkAttachment(l.id)
+                      }}
+                      className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                  )
+                })}
+                </div>
               </div>
             )}
 
@@ -5015,7 +5071,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     <button
                       type="button"
                       onClick={isBusy ? () => handleStop() : handleRun}
-                      disabled={!isBusy && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
+                      disabled={!isBusy && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0 && pendingLinks.length === 0}
                       className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center ${
                         isBusy
                           ? 'text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40'
@@ -5054,7 +5110,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     <button
                       type="button"
                       onClick={isBusy ? () => handleStop() : handleRun}
-                      disabled={!isBusy && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0}
+                      disabled={!isBusy && !input.trim() && pendingImages.length === 0 && pendingFiles.length === 0 && pendingLinks.length === 0}
                       className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center ${
                         isBusy
                           ? 'text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40'
@@ -5238,6 +5294,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
   return (
     <div className="h-full flex flex-col bg-transparent text-foreground relative">
+      {/* 历史对话竖条：消息区左侧边缘，点击弹出最近对话列表并跳转 */}
+      <HistoryStrip />
       {/* Header bar - removed */}
 
       {/* Conversation search bar (Ctrl+F) */}

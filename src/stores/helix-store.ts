@@ -11,7 +11,7 @@ import type { McpServerConfig } from '@/stores/hermes-store'
 import { useHermesStore } from '@/stores/hermes-store'
 export type { McpServerConfig } from '@/stores/hermes-store'
 import type {
-  FileNode, ImageAttachment, FileAttachment, ExecutionStep,
+  FileNode, ImageAttachment, FileAttachment, LinkAttachment, ExecutionStep,
   StreamingResponseBlock, StreamingDraft, ConnectionNotice,
   ChatMessage, EditorTab, CursorPosition, ToastMessage, PendingChange,
   ApiProvider, AgentEngine, ApiConfig, ApiProfile, Skill,
@@ -76,7 +76,7 @@ import { createTerminalSlice, type TerminalSlice } from './slices/terminal-slice
 import { createToastSlice, type ToastSlice } from './slices/toast-slice'
 
 export type {
-  FileNode, ImageAttachment, FileAttachment, ExecutionStep, ChatMessage,
+  FileNode, ImageAttachment, FileAttachment, LinkAttachment, ExecutionStep, ChatMessage,
   StreamingResponseBlock, PendingChange,
   ApiConfig, ApiProfile,
   TaskNode,
@@ -215,18 +215,22 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   setGatewayStatus: (v: 'connecting' | 'ready' | 'disconnected') => void
   setIsAgentRunning: (v: boolean) => void
   streamingDrafts: Record<string, StreamingDraft>
-  injectInputSignal: { text: string; nonce: number } | null
+  injectInputSignal: { text: string; nonce: number; append?: boolean } | null
   injectInput: (text: string) => void
+  /** 追加注入：把 text 追加到当前输入框内容之后（用于连续选取网页元素累积） */
+  injectInputAppend: (text: string) => void
   requestSendSignal: number
   requestSend: () => void
   injectAndSend: (text: string) => void
   tabInputs: Record<string, string>
-  tabAttachments: Record<string, { images: ImageAttachment[]; files: FileAttachment[] }>
+  tabAttachments: Record<string, { images: ImageAttachment[]; files: FileAttachment[]; links: LinkAttachment[] }>
   pendingUpdate: string | null
   setPendingUpdate: (version: string | null) => void
   setTabInput: (sessionId: string, text: string) => void
   clearTabInput: (sessionId: string) => void
-  setTabAttachments: (sessionId: string, images: ImageAttachment[], files: FileAttachment[]) => void
+  setTabAttachments: (sessionId: string, images: ImageAttachment[], files: FileAttachment[], links?: LinkAttachment[]) => void
+  addLinkAttachment: (link: LinkAttachment) => void
+  removeLinkAttachment: (id: string) => void
   clearTabAttachments: (sessionId: string) => void
   setStreamingDraft: (sessionId: string, draft: Partial<StreamingDraft>) => void
   clearStreamingDraft: (sessionId: string) => void
@@ -790,6 +794,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   injectInputSignal: null,
   requestSendSignal: 0,
   injectInput: (text) => set({ injectInputSignal: { text, nonce: Date.now() } }),
+  injectInputAppend: (text) => set({ injectInputSignal: { text, nonce: Date.now(), append: true } }),
   requestSend: () => set((s) => ({ requestSendSignal: s.requestSendSignal + 1 })),
   injectAndSend: (text: string) => set((s) => ({ injectInputSignal: { text, nonce: Date.now() }, requestSendSignal: s.requestSendSignal + 1 })),
   hasOnboarded: false,
@@ -814,10 +819,32 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     const { [sessionId]: _, ...rest } = state.tabInputs
     return { tabInputs: rest }
   }),
-  tabAttachments: {} as Record<string, { images: ImageAttachment[]; files: FileAttachment[] }>,
-  setTabAttachments: (sessionId, images, files) => set((state) => ({
-    tabAttachments: { ...state.tabAttachments, [sessionId]: { images, files } },
+  tabAttachments: {} as Record<string, { images: ImageAttachment[]; files: FileAttachment[]; links: LinkAttachment[] }>,
+  setTabAttachments: (sessionId, images, files, links) => set((state) => ({
+    tabAttachments: { ...state.tabAttachments, [sessionId]: { images, files, links: links ?? [] } },
   })),
+  addLinkAttachment: (link) => set((state) => {
+    const key = state.currentSessionId ?? '__draft__'
+    const cur = state.tabAttachments[key]?.links ?? []
+    // De-dupe by url so re-picking the same link doesn't pile up cards.
+    if (cur.some((l) => l.url === link.url)) return {}
+    return {
+      tabAttachments: {
+        ...state.tabAttachments,
+        [key]: { images: state.tabAttachments[key]?.images ?? [], files: state.tabAttachments[key]?.files ?? [], links: [...cur, link] },
+      },
+    }
+  }),
+  removeLinkAttachment: (id) => set((state) => {
+    const key = state.currentSessionId ?? '__draft__'
+    const cur = state.tabAttachments[key]?.links ?? []
+    return {
+      tabAttachments: {
+        ...state.tabAttachments,
+        [key]: { images: state.tabAttachments[key]?.images ?? [], files: state.tabAttachments[key]?.files ?? [], links: cur.filter((l) => l.id !== id) },
+      },
+    }
+  }),
   clearTabAttachments: (sessionId) => set((state) => {
     const { [sessionId]: _, ...rest } = state.tabAttachments
     return { tabAttachments: rest }

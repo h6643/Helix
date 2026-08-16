@@ -8,16 +8,16 @@ import { electronApp, electronDialog } from '@/lib/electron-bridge'
 
 /** 归档保留时长选项（小时）— 任务最后更新时间早于该时长才进入自动归档候选。 */
 const RETENTION_OPTIONS = [
-  { label: '3 天', value: '72', hint: '最后更新早于 3 天' },
-  { label: '7 天', value: '168', hint: '最后更新早于 7 天' },
-  { label: '14 天', value: '336', hint: '最后更新早于 14 天' },
-  { label: '30 天', value: '720', hint: '最后更新早于 30 天' },
+  { label: '3 天', value: '72', },
+  { label: '7 天', value: '168', },
+  { label: '14 天', value: '336',},
+  { label: '30 天', value: '720',},
 ]
 
 /** 集成终端 Shell 选项 — 仅新会话生效。 */
 const TERMINAL_SHELL_OPTIONS = [
-  { label: '自动（Git Bash）', value: 'auto', hint: '优先 Git Bash，找不到回退 cmd.exe' },
-  { label: 'cmd.exe', value: 'cmd', hint: '始终使用 Windows 命令提示符' },
+  { label: '自动（Git Bash）', value: 'auto'},
+  { label: 'cmd.exe', value: 'cmd'},
 ]
 
 export function GeneralSettingsPanel() {

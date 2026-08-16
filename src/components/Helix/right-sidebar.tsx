@@ -311,14 +311,14 @@ export function RightSidebar() {
                 key={p.id}
                 onClick={() => setActivePageId(p.id)}
                 data-tip={label}
-                className={`group flex items-center gap-1.5 pl-3 pr-1 py-1.5 flex-1 min-w-0 max-w-[200px] rounded-t-md cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] border-b-2 transition-colors ${active ? 'bg-primary/10 border-primary text-foreground' : 'bg-muted/40 border-transparent text-foreground/60 hover:bg-accent/50'}`}
+                className={`group relative flex items-center gap-1.5 pl-3 pr-4 py-1.5 flex-1 min-w-0 max-w-[200px] rounded-t-md overflow-hidden cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] border-b-2 transition-colors ${active ? 'bg-primary/10 border-primary text-foreground' : 'bg-muted/40 border-transparent text-foreground/60 hover:bg-accent/50'}`}
               >
                 {p.kind === 'browser' && <Globe className="size-3.5 shrink-0 opacity-60" />}
                 <span className="flex-1 min-w-0 truncate">{label}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); closePage(p.id) }}
                   data-tip="关闭"
-                  className={`shrink-0 rounded p-0.5 transition-opacity ${active ? 'opacity-60 hover:opacity-100 hover:text-destructive hover:bg-destructive/10' : 'opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10'}`}
+                  className={`absolute right-0.5 top-1/2 -translate-y-1/2 rounded p-0.5 transition-opacity ${active ? 'opacity-60 hover:opacity-100 hover:text-destructive hover:bg-destructive/10' : 'opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10'}`}
                 >
                   <X className="size-3" />
                 </button>
@@ -332,13 +332,13 @@ export function RightSidebar() {
                 key={t.id}
                 onClick={() => { useHelixStore.getState().setActiveEditorTab(t.id); setActivePageId('') }}
                 data-tip={t.path}
-                className={`group flex items-center gap-1.5 pl-3 pr-1 py-1.5 flex-1 min-w-0 max-w-[200px] rounded-t-md cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] border-b-2 transition-colors ${active ? 'bg-primary/10 border-primary text-foreground' : 'bg-muted/40 border-transparent text-foreground/60 hover:bg-accent/50'}`}
+                className={`group relative flex items-center gap-1.5 pl-3 pr-4 py-1.5 flex-1 min-w-0 max-w-[200px] rounded-t-md overflow-hidden cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] border-b-2 transition-colors ${active ? 'bg-primary/10 border-primary text-foreground' : 'bg-muted/40 border-transparent text-foreground/60 hover:bg-accent/50'}`}
               >
                 <span className="flex-1 min-w-0 truncate">{t.name}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); closeCodeTab(t.id) }}
                   data-tip="关闭"
-                  className={`shrink-0 rounded p-0.5 transition-opacity ${active ? 'opacity-60 hover:opacity-100 hover:text-destructive hover:bg-destructive/10' : 'opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10'}`}
+                  className={`absolute right-0.5 top-1/2 -translate-y-1/2 rounded p-0.5 transition-opacity ${active ? 'opacity-60 hover:opacity-100 hover:text-destructive hover:bg-destructive/10' : 'opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10'}`}
                 >
                   <X className="size-3" />
                 </button>
@@ -367,24 +367,35 @@ export function RightSidebar() {
           preserves each page's state — same as the old multi-tab browser. The
           file tree lives in the LEFT sidebar (full-area directory view); this
           panel shows the active browser/diff page, or the code editor when no
-          browser/diff page is active. */}
+          browser/diff page is active.
+          NOTE: inactive pages rely on `display:none`. We ALSO set it inline so a
+          non-active page can never show even if the Tailwind `hidden` utility is
+          missing/overridden in a given build — otherwise two stacked browser
+          panels (the active one + a leftover blank one) can appear. */}
       <div className="flex-1 min-h-0 flex">
         <div className="flex-1 min-h-0 flex flex-col">
-          {pages.map(p => (
-            <div key={p.id} className={p.id === activePageId ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}>
-              {p.kind === 'browser' && (
-                <BrowserView
-                  url={p.url}
-                  onUrlChange={(u) => updatePageUrl(p.id, u)}
-                  browserBookmarks={browserBookmarks}
-                  onPageTitle={(t) => updatePageTitle(p.id, t)}
-                />
-              )}
-              {p.kind === 'diff' && (
-                <DiffSidebarPanel />
-              )}
-            </div>
-          ))}
+          {pages.map(p => {
+            const isActive = p.id === activePageId
+            return (
+              <div
+                key={p.id}
+                className={isActive ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}
+                style={isActive ? undefined : { display: 'none' }}
+              >
+                {p.kind === 'browser' && (
+                  <BrowserView
+                    url={p.url}
+                    onUrlChange={(u) => updatePageUrl(p.id, u)}
+                    browserBookmarks={browserBookmarks}
+                    onPageTitle={(t) => updatePageTitle(p.id, t)}
+                  />
+                )}
+                {p.kind === 'diff' && (
+                  <DiffSidebarPanel />
+                )}
+              </div>
+            )
+          })}
           {editorTabs.length > 0 && codeViewActive && (
             <div className="flex-1 min-h-0 flex flex-col">
               <CodeEditorPanel onClose={closeCodeView} />
@@ -403,8 +414,17 @@ export function RightSidebar() {
         >
           <div ref={plusMenuRef}>
             <MoreActionsMenu
-              rightSidebarTab={tab}
-              onToggleTab={(kind) => { setTab(tab === kind ? null : kind); setPlusMenuOpen(false) }}
+              onToggleTab={(kind) => {
+                // 已打开的页签再次点击 → 只聚焦对应页，不关闭、不收起侧边栏
+                // （关闭走页签的 ✕）。尚未打开 → 打开。
+                if (tab === kind) {
+                  const target = pagesRef.current.find(p => p.kind === kind)
+                  if (target) setActivePageId(target.id)
+                } else {
+                  setTab(kind)
+                }
+                setPlusMenuOpen(false)
+              }}
               onAddBrowser={() => { useHelixStore.getState().requestAddBrowserPage(); setPlusMenuOpen(false) }}
             />
           </div>

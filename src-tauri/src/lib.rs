@@ -25,6 +25,7 @@ mod terminal;
 mod web_search;
 mod vision;
 mod mcp;
+mod page_fetch;
 mod window;
 
 use crate::state::{AppState, APP_HANDLE};
@@ -243,6 +244,10 @@ pub fn run() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_kill,
+            // page fetch (browser pick-element)
+            page_fetch::page_fetch,
+            // TEMP DIAG: 前端诊断日志通道
+            diagnostics::dbg_log,
             // git
             git::status,
             git::diff,
@@ -310,7 +315,6 @@ pub fn run() {
             delegations::delegations_read_log,
             // diagnostics
             diagnostics::get_status,
-            diagnostics::dbg_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
