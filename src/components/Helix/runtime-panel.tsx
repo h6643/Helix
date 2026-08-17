@@ -104,7 +104,7 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
                     ) : (
                       <XCircle className="size-4 text-muted-foreground" />
                     )}
-                    <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">
+                    <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
                       {status?.gatewayRunning ? '运行中' : '未连接'}
                     </span>
                   </div>
@@ -121,7 +121,7 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
                     ) : (
                       <XCircle className="size-4 text-amber-500" />
                     )}
-                    <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">
+                    <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
                       {status?.signatureStatus === 'verified' ? '已校验' : '未校验'}
                     </span>
                   </div>
@@ -130,13 +130,13 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
 
                 <div className="rounded-xl border border-border/50 bg-card/50 p-4">
                   <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">运行时版本</div>
-                  <p className="text-[var(--helix-transcript-size)] font-medium text-foreground">{status?.runtimeVersion || '—'}</p>
+                  <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">{status?.runtimeVersion || '—'}</p>
                   <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">Electron {status?.electronVersion} · Node {status?.nodeVersion}</p>
                 </div>
 
                 <div className="rounded-xl border border-border/50 bg-card/50 p-4">
                   <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">平台</div>
-                  <p className="text-[var(--helix-transcript-size)] font-medium text-foreground capitalize">{status?.platform || '—'}</p>
+                  <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground capitalize">{status?.platform || '—'}</p>
                   <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">托管运行时通道</p>
                 </div>
               </div>

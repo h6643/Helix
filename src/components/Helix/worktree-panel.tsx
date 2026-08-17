@@ -166,7 +166,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
   if (!isElectron()) {
     return (
       <div className="h-full flex items-center justify-center">
-        <p className="text-[var(--helix-transcript-size)] text-muted-foreground">Worktree 功能仅在桌面版可用</p>
+        <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground">Worktree 功能仅在桌面版可用</p>
       </div>
     )
   }
@@ -177,7 +177,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
       <div className="shrink-0 px-4 py-3 border-b border-border/40 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <GitBranch className="size-4 text-muted-foreground" />
-          <h2 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">Worktree 管理</h2>
+          <h2 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">Worktree 管理</h2>
         </div>
         <div className="flex items-center gap-1">
           <button
@@ -212,7 +212,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
             value={newPath}
             onChange={e => setNewPath(e.target.value)}
             placeholder="路径 (e.g. ../project-feature)"
-            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
           />
           <div className="flex gap-2">
             <input
@@ -220,14 +220,14 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
               value={newBranch}
               onChange={e => setNewBranch(e.target.value)}
               placeholder="已有分支名 (留空=detached)"
-              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
             />
             <input
               type="text"
               value={createFromBranch}
               onChange={e => setCreateFromBranch(e.target.value)}
               placeholder="新建分支 (可选)"
-              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
             />
           </div>
           <div className="flex justify-end gap-2">
@@ -254,11 +254,11 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
         ) : error ? (
           <div className="flex flex-col items-center justify-center py-12 gap-2 text-red-500">
             <AlertCircle className="size-5" />
-            <p className="text-[var(--helix-transcript-size)]">{error}</p>
+            <p className="text-[length:var(--helix-transcript-size)]">{error}</p>
             <button onClick={loadWorktrees} className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground">重试</button>
           </div>
         ) : worktrees.length === 0 ? (
-          <p className="text-[var(--helix-transcript-size)] text-muted-foreground/60 text-center py-12">暂无 worktree</p>
+          <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground/60 text-center py-12">暂无 worktree</p>
         ) : (
           <div className="space-y-2">
             {worktrees.map((wt) => (

@@ -29,6 +29,7 @@ import { createPortal } from 'react-dom'
 import { useShallow } from 'zustand/react/shallow'
 import { isElectron, electronDialog, electronShell } from '@/lib/electron-bridge'
 import { persistence, type PersistedSession } from '@/lib/persist'
+import { timeAgo } from '@/lib/format'
 import { useHelixStore } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
 import { FileTreePanel } from './file-tree-panel'
@@ -96,7 +97,7 @@ function SessionActionsMenu({ isPinned, isArchived, onArchive, onPin, onDelete, 
   }, [open, updatePosition])
 
   return (
-    <div className="relative shrink-0">
+    <div className="absolute right-1 top-1/2 -translate-y-1/2">
       <button
         ref={buttonRef}
         onClick={(e) => { e.stopPropagation(); setOpen(v => !v) }}
@@ -312,6 +313,13 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   const toggleDirectoryProject = useHelixStore((s) => s.toggleDirectoryProject)
   const setRightSidebarTab = useHelixStore((s) => s.setRightSidebarTab)
 
+  // Re-render every minute so the relative '上次使用' timestamps stay fresh
+  const [, setNowTick] = useState(0)
+  useEffect(() => {
+    const timer = setInterval(() => setNowTick((n) => n + 1), 60_000)
+    return () => clearInterval(timer)
+  }, [])
+
   const currentSessionId = useHelixStore(s => s.currentSessionId)
   const sessionPendingApproval = useHelixStore(s => s.sessionPendingApproval)
   const streamingDrafts = useHelixStore(s => s.streamingDrafts)
@@ -323,6 +331,13 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   const [deleteTarget, setDeleteTarget] = useState<PersistedSession | null>(null)
   const [deleteProjectDir, setDeleteProjectDir] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
+
+  // 历史对话条分页：每页最多显示 20 条（项目内会话与独立对话各自分页）。
+  const PAGE_SIZE = 20
+  const [projectPages, setProjectPages] = useState<Record<string, number>>({})
+  const [conversationPage, setConversationPage] = useState(1)
+  // 取某列表的有效页码（增删会话后页码可能越界，clamp 到 [1, totalPages]）。
+  const clampPage = (page: number, total: number) => Math.min(Math.max(1, page), Math.max(1, total))
 
   const [, setFavRefresh] = useState(0)
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
@@ -495,9 +510,9 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       // (hermesSessionMapRef in agent-flow-panel); resetting the legacy global
       // id would be meaningless at best and confusing at worst.
       // Same as above: navigating to a session must close the panels.
-      if (state.showScheduledTasksPanel || state.showSkillPanel || state.showKanbanPanel) {
-        useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false, showKanbanPanel: false })
-      }
+    if (state.showScheduledTasksPanel || state.showSkillPanel || state.showKanbanPanel) {
+      useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false, showKanbanPanel: false })
+    }
       // Load just the target session (single IndexedDB read) instead of
       // fetching every session from disk just to pick one. Fall back to the
       // in-memory snapshot if the record is missing (e.g. just-deleted).
@@ -947,12 +962,19 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                             暂无对话
                           </div>
                         ) : (
-                        project.sessions.map((session, sessionIdx) => (
+                        (() => {
+                          const totalPages = Math.max(1, Math.ceil(project.sessions.length / PAGE_SIZE))
+                          const page = clampPage(projectPages[project.dir] ?? 1, totalPages)
+                          const pageStart = (page - 1) * PAGE_SIZE
+                          const pageSessions = project.sessions.slice(pageStart, pageStart + PAGE_SIZE)
+                          return (
+                            <>
+                        {pageSessions.map((session, sessionIdx) => (
                           <div
                             key={session.id}
                             draggable
                             onDragStart={(e) => {
-                              e.dataTransfer.setData('text/session-reorder', JSON.stringify({ sessionId: session.id, fromDir: project.dir, fromIdx: sessionIdx }))
+                              e.dataTransfer.setData('text/session-reorder', JSON.stringify({ sessionId: session.id, fromDir: project.dir, fromIdx: pageStart + sessionIdx }))
                             }}
                             onDragOver={(e) => {
                               const data = e.dataTransfer.types.includes('text/session-reorder')
@@ -975,7 +997,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                               }
                             }}
                             onClick={() => handleLoadSession(session)}
-                            className={`w-full group flex items-center gap-2 px-4 py-1 cursor-pointer transition-colors ${
+                            className={`relative w-full group flex items-center gap-2 px-4 py-1 cursor-pointer transition-colors ${
                               currentSessionId === session.id
                                 ? 'bg-primary/10 text-primary'
                                 : 'text-sidebar-foreground/50 hover:bg-sidebar-accent/30 hover:text-sidebar-foreground/80'
@@ -1017,10 +1039,13 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                                 </div>
                               )}
                             </div>
-                            
                             {sessionPendingApproval[session.id] && (
                               <span className="shrink-0 size-2 rounded-full bg-amber-500" data-tip="需要确认" />
                             )}
+                            <span
+                              className="ml-auto shrink-0 text-right text-[calc(var(--helix-transcript-size)*0.7143)] text-sidebar-foreground/40 transition-opacity group-hover:opacity-0"
+                              data-tip={`上次使用：${new Date(session.savedAt).toLocaleString('zh-CN')}`}
+                            >{timeAgo(session.savedAt)}</span>
                             <SessionActionsMenu
                               isPinned={session.isPinned}
                               onArchive={() => handleToggleArchive(session.id)}
@@ -1029,7 +1054,34 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                               onRename={() => setRenamingId(session.id)}
                             />
                           </div>
-                        )))}
+                        ))}
+                            {/* 项目内会话分页控件 */}
+                            {project.sessions.length > PAGE_SIZE && (
+                              <div className="flex items-center justify-center gap-1 pt-1">
+                                <button
+                                  type="button"
+                                  disabled={page <= 1}
+                                  onClick={() => setProjectPages(prev => ({ ...prev, [project.dir]: page - 1 }))}
+                                  className="px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/50 hover:text-sidebar-foreground disabled:opacity-30 disabled:hover:text-sidebar-foreground/50 rounded transition-colors"
+                                >
+                                  上一页
+                                </button>
+                                <span className="px-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/40">
+                                  {page} / {totalPages}
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={page >= totalPages}
+                                  onClick={() => setProjectPages(prev => ({ ...prev, [project.dir]: page + 1 }))}
+                                  className="px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/50 hover:text-sidebar-foreground disabled:opacity-30 disabled:hover:text-sidebar-foreground/50 rounded transition-colors"
+                                >
+                                  下一页
+                                </button>
+                              </div>
+                            )}
+                            </>
+                          )
+                        })())}
                       </div>
                     )}
                   </div>
@@ -1052,11 +1104,13 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
             </div>
             <div className="px-3 pb-1.5">
               <div className="space-y-0.5">
-                {conversations.map(session => (
+                {conversations
+                  .slice((conversationPage - 1) * PAGE_SIZE, conversationPage * PAGE_SIZE)
+                  .map(session => (
                   <div
                     key={session.id}
                     onClick={() => handleLoadSession(session)}
-                    className={`w-full group flex items-center gap-2 px-3 py-1 rounded-lg transition-colors cursor-pointer ${
+                    className={`relative w-full group flex items-center gap-2 px-3 py-1 rounded-lg transition-colors cursor-pointer ${
                       currentSessionId === session.id
                         ? 'bg-primary/10 text-primary'
                         : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/40'
@@ -1093,6 +1147,10 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                     {sessionPendingApproval[session.id] && (
                       <span className="shrink-0 size-2 rounded-full bg-amber-500" data-tip="需要确认" />
                     )}
+                    <span
+                      className="ml-auto shrink-0 text-right text-[calc(var(--helix-transcript-size)*0.7143)] text-sidebar-foreground/40 transition-opacity group-hover:opacity-0"
+                      data-tip={`上次使用：${new Date(session.savedAt).toLocaleString('zh-CN')}`}
+                    >{timeAgo(session.savedAt)}</span>
                     <SessionActionsMenu
                       isPinned={session.isPinned}
                       onArchive={() => handleToggleArchive(session.id)}
@@ -1103,6 +1161,30 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                   </div>
                 ))}
               </div>
+              {/* 独立对话分页控件 */}
+              {conversations.length > PAGE_SIZE && (
+                <div className="flex items-center justify-center gap-1 pt-1.5">
+                  <button
+                    type="button"
+                    disabled={conversationPage <= 1}
+                    onClick={() => setConversationPage(p => p - 1)}
+                    className="px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/50 hover:text-sidebar-foreground disabled:opacity-30 disabled:hover:text-sidebar-foreground/50 rounded transition-colors"
+                  >
+                    上一页
+                  </button>
+                  <span className="px-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/40">
+                    {conversationPage} / {Math.ceil(conversations.length / PAGE_SIZE)}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={conversationPage >= Math.ceil(conversations.length / PAGE_SIZE)}
+                    onClick={() => setConversationPage(p => p + 1)}
+                    className="px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/50 hover:text-sidebar-foreground disabled:opacity-30 disabled:hover:text-sidebar-foreground/50 rounded transition-colors"
+                  >
+                    下一页
+                  </button>
+                </div>
+              )}
             </div>
           </>
         )}
@@ -1134,8 +1216,8 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                 <AlertTriangle className="size-5 text-destructive" />
               </div>
               <div>
-                <h3 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">删除对话</h3>
-                <p className="text-[var(--helix-transcript-size)] text-muted-foreground mt-1">
+                <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">删除对话</h3>
+                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground mt-1">
                   确定要删除「{deleteTarget.label}」吗？此操作不可撤销。
                 </p>
               </div>
@@ -1166,8 +1248,8 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                 <AlertTriangle className="size-5 text-destructive" />
               </div>
               <div>
-                <h3 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">删除项目</h3>
-                <p className="text-[var(--helix-transcript-size)] text-muted-foreground mt-1">
+                <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">删除项目</h3>
+                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground mt-1">
                   确定要删除「{deleteProjectDir.split(/[/\\\\]/).pop() || deleteProjectDir}」及该项目下的所有对话吗？此操作不可撤销。
                 </p>
               </div>

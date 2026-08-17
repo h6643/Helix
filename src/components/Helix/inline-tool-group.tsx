@@ -1,7 +1,7 @@
 'use client'
 
 import { ChevronRight, X, Copy, CheckCheck, Image as ImageIcon } from 'lucide-react'
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import { formatDurationSeconds } from '@/lib/format'
 import { normalizeAcpContent, stripEmoji } from '@/lib/text-utils'
 import { getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
@@ -205,11 +205,106 @@ function toolActionText(step: ExecutionStep): string {
   if (path) return path
   const cmd = extractCommandSnippet(step.toolParams)
   if (cmd) {
+    // execute_code：不裸显示代码第一行（如 "const id = …"），优先提取
+    // 有意义的标识（函数/类定义、行注释），提取不到就显示稳定的「执行代码」。
+    if (step.toolName === 'execute_code') {
+      const fn = cmd.match(/^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/m)
+        || cmd.match(/^\s*(?:export\s+)?(?:async\s+)?class\s+([A-Za-z_$][\w$]*)/m)
+        || cmd.match(/^\s*def\s+([A-Za-z_][\w]*)/m)
+        || cmd.match(/^\s*#\s*(.+)$/m)
+        || cmd.match(/^\s*\/\/\s*(.+)$/m)
+      if (fn) return fn[1].slice(0, 50)
+      return '执行代码'
+    }
     // For bash commands, show only the first line.
     const firstLine = cmd.split('\n')[0]
     return firstLine.length > 50 ? firstLine.slice(0, 50) + '…' : firstLine
   }
   return ''
+}
+
+// 把 shell 复合命令拆成逐条命令（按换行 / && / ; 拆分，字符串内不拆）。
+// 用于展开区的"命令"滚动列表 —— 多命令不再只显示 "第一条 + N commands" 摘要。
+function splitCommands(command: string): string[] {
+  if (!command) return []
+  const out: string[] = []
+  let cur = ''
+  let inSingle = false
+  let inDouble = false
+  let escaped = false
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (escaped) { cur += ch; escaped = false; continue }
+    if (ch === '\\' && !inSingle) { cur += ch; escaped = true; continue }
+    if (ch === "'" && !inDouble) { inSingle = !inSingle; cur += ch; continue }
+    if (ch === '"' && !inSingle) { inDouble = !inDouble; cur += ch; continue }
+    if (!inSingle && !inDouble && (ch === '\n' || ch === ';')) {
+      const t = cur.trim()
+      if (t) out.push(t)
+      cur = ''
+      continue
+    }
+    if (!inSingle && !inDouble && ch === '&' && command[i + 1] === '&') {
+      const t = cur.trim()
+      if (t) out.push(t)
+      cur = ''
+      i++
+      continue
+    }
+    cur += ch
+  }
+  const tail = cur.trim()
+  if (tail) out.push(tail)
+  return out
+}
+
+/** 多命令流水展示：
+ *  - 运行中：逐条滚动 —— 当前命令高亮"执行中 XXX"，每条停留约 2 秒后切
+ *    下一条，最后一条停留到完成。后端把复合命令当一个进程执行，无法逐条
+ *    报真实进度，这里用时间轮播呈现"一条接一条"的视觉流水。
+ *  - 完成态：展开全部命令（紧凑列表，限高滚动）。
+ */
+function CommandScroller({ cmds, running }: { cmds: string[]; running: boolean }) {
+  const [idx, setIdx] = useState(0)
+  useEffect(() => {
+    if (!running || cmds.length <= 1) return
+    setIdx(0)
+    const t = setInterval(() => {
+      setIdx(i => (i < cmds.length - 1 ? i + 1 : i))
+    }, 2000)
+    return () => clearInterval(t)
+  }, [running, cmds.length])
+
+  if (running) {
+    const cur = cmds[Math.min(idx, cmds.length - 1)]
+    return (
+      <div className="rounded border border-border/20 overflow-hidden">
+        <div className="px-2 py-0.5 text-[0.72em] text-foreground/40 border-b border-border/20 flex items-center justify-between">
+          <span>命令流水</span>
+          <span className="text-primary/60">{idx + 1}/{cmds.length}</span>
+        </div>
+        <div className="px-2 py-1 text-[0.8em] font-mono text-foreground/70 whitespace-pre-wrap break-all leading-relaxed">
+          <span className="text-primary/80 flowing-text">执行中</span>{' '}
+          {cur}
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="rounded border border-border/20 overflow-hidden">
+      <div className="px-2 py-0.5 text-[0.72em] text-foreground/40 border-b border-border/20">
+        已执行 {cmds.length} 条命令
+      </div>
+      <div className="max-h-24 overflow-y-auto">
+        {cmds.map((c, i) => (
+          <div key={i} className="px-2 py-0.5 text-[0.8em] font-mono text-foreground/60 border-b border-border/10 last:border-b-0 whitespace-pre-wrap break-all">
+            <span className="text-emerald-500/60 mr-1.5">✓</span>
+            {c}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 // Action verb shown before the concrete action, derived from the tool type:
@@ -308,6 +403,17 @@ function ToolCard({
 
       {open && (
         <div className="pb-1 pt-1 pl-3 border-l-2 border-border/60 space-y-1.5">
+          {/* 命令流水 — 多命令（&& / ; / 换行连接）执行中逐条滚动：
+              当前命令高亮"执行中"，每条停留约 2 秒后切下一条（最后一条停留到
+              完成）；完成态展开全部（紧凑限高滚动）。不再一次列一大张卡片。 */}
+          {(() => {
+            const raw = extractCommandSnippet(step.toolParams)
+            const cmds = raw ? splitCommands(raw) : []
+            if (cmds.length > 1) {
+              return <CommandScroller cmds={cmds} running={running} />
+            }
+            return null
+          })()}
           {/* Streaming output preview — shown while tool is running.
               tool.progress → tool_call_update(in_progress) → tool_output_delta 把
               实时输出追加到 step.content（agent-flow-panel），这里显示它的末尾。 */}

@@ -109,6 +109,11 @@ export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
+  /** Durable backend message row id (state.db messages.id), surfaced by the
+   *  gateway's message.complete frame. Used to sync local withdraw/delete with
+   *  the backend session history via the message.delete RPC. Absent on messages
+   *  produced before this field existed or for local-only messages. */
+  rowId?: number
   sessionId?: string
   images?: ImageAttachment[]
   files?: FileAttachment[]
@@ -234,6 +239,7 @@ export interface AvailableCommand {
 // `hermes plugins` / Plugins Hub). Mirrors the backend row shape.
 export interface BackendPlugin {
   name: string
+  key?: string
   version: string
   description: string
   source: 'bundled' | 'user'

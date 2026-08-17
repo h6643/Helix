@@ -1,26 +1,16 @@
 'use client'
 
 import {
-  Send,
-  Brain,
-  Wrench,
   Circle,
-  AlertCircle,
-  Code2,
-  FileCode,
   FileText,
-  BarChart3,
   Copy,
   Check,
   ChevronRight,
   ChevronDown,
   Search,
   Folder,
-  FolderOpen,
-  Eye,
   ArrowDown,
   ArrowUp,
-  RotateCcw,
   X,
   Square,
   Plus,
@@ -29,35 +19,32 @@ import {
   Hand,
   AlertTriangle,
   GitBranch,
-  Pause,
-  Download,
-  Trash,
-  BookOpen,
+  Undo2,
   Archive,
   Link,
 } from 'lucide-react'
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion'
 import { Button } from '@/components/ui/button'
 import type { ReasoningEffortLevel } from '@/hermes-ui/types'
 import { useProviderStore } from '@/hermes-ui/provider-store'
 import { pushModelConfig } from '@/lib/config-sync'
 import { isElectron, electronDialog, electronHermes, electronGit, hermesApi } from '@/lib/electron-bridge'
-import { generateId, timeAgo } from '@/lib/format'
+import { generateId } from '@/lib/format'
 import { processClipboardImage, canAddMoreImages, blobToDataUrl, compressImage } from '@/lib/image-utils'
 import { buildAcpMcpServers } from '@/lib/mcp'
 import { detectScheduledTasks, syncTaskToBackend, type DetectedTask } from '@/lib/schedule-utils'
 import { isServeActive } from '@/lib/serve-gateway'
 import { debug } from '@/lib/logger'
-import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, normalizeAcpContentRaw, stripEmoji, stripSystemReminders, extractKaomojiStatus } from '@/lib/text-utils'
+import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, normalizeAcpContentRaw, stripEmoji, extractKaomojiStatus } from '@/lib/text-utils'
 import { ContextUsageIndicator } from './context-usage'
 
-import { getToolLabel, getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
+import { getToolDisplayLabel } from '@/lib/tool-display-utils'
 import { InlineToolGroup } from './inline-tool-group'
 import { HistoryStrip } from './history-strip'
 import { FileChangeSummary } from './file-change-summary'
-import { ApprovalDialog, ClarifyBar, type ApprovalRequest } from './approval-dialog'
+import { ApprovalDialog, ClarifyBar, PlanReviewBar, type ApprovalRequest, type PlanReviewRequest } from './approval-dialog'
+import type { ApprovalLevel } from '@/hermes-ui/api-client'
 import { ScheduledTaskConfirm } from './scheduled-task-confirm'
 import { useHelixStore, type ImageAttachment, type FileAttachment, type LinkAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
@@ -72,8 +59,9 @@ import { HelixMarkdown } from './helix-markdown'
 // its recorded gateway `epoch` still matches the live epoch — otherwise it's a
 // dead id and must be treated as missing (the run path recreates it on demand,
 // and the context-usage indicator falls back to the per-conversation store).
-type SessionMapEntry = { sid: string; epoch: number }
-const SESSION_MAP_KEY = 'conversationSessions'
+// SessionMapEntry / SESSION_MAP_KEY / loadSessionMap / resolveBackendSid 已迁移到
+// @/lib/session-map 模块，供多个组件复用；这里仅导入所需引用。
+import { SESSION_MAP_KEY, loadSessionMap, type SessionMapEntry } from '@/lib/session-map'
 
 async function persistSessionMap(map: Map<string, SessionMapEntry>) {
   try {
@@ -82,22 +70,6 @@ async function persistSessionMap(map: Map<string, SessionMapEntry>) {
     map.forEach((v, k) => { obj[k] = v })
     await persistence.saveSetting(SESSION_MAP_KEY, obj)
   } catch { /* best-effort persistence — never block the UI on it */ }
-}
-
-async function loadSessionMap(): Promise<Map<string, SessionMapEntry>> {
-  try {
-    const { persistence } = await import('@/lib/persist')
-    const raw = await persistence.loadSetting<Record<string, SessionMapEntry>>(SESSION_MAP_KEY)
-    const map = new Map<string, SessionMapEntry>()
-    if (raw && typeof raw === 'object') {
-      for (const [k, v] of Object.entries(raw)) {
-        if (v && typeof v.sid === 'string' && typeof v.epoch === 'number') map.set(k, v)
-      }
-    }
-    return map
-  } catch {
-    return new Map()
-  }
 }
 
 
@@ -392,12 +364,29 @@ function classifyApproval(
   toolName: string,
   params: Record<string, any>,
   workDir: string | null,
-  mode: 'default' | 'accept_edits' | 'dont_ask',
+  mode: 'default' | 'accept_edits' | 'dont_ask' | 'plan',
 ): 'auto' | 'ask' {
   const patternKey = String(params?.pattern_key || '')
   const command = String(params?.command || '')
   const blob = `${toolName} ${patternKey} ${command} ${params?.description || ''} ${params?.reason || ''}`
   const workNorm = workDir ? normPathForCompare(workDir) : ''
+
+  // 0) 计划模式：只读查询放行，其余全部弹。计划审批的意义就是让用户先看方案，
+  //    因此文件写入/命令执行/外部访问（甚至项目内读写）都要求确认。
+  if (mode === 'plan') {
+    if (DANGEROUS_CMD_RE.test(command)) return 'ask'
+    if (EXFIL_CMD_RE.test(command)) return 'ask'
+    if (SENSITIVE_PATH_RE.test(blob)) return 'ask'
+    if (FILE_WRITE_TOOL_RE.test(blob)) return 'ask'
+    for (const p of extractAbsPaths(blob)) {
+      if (/^~\//.test(p)) return 'ask'
+      if (!workNorm) return 'ask'
+      const pn = normPathForCompare(p)
+      if (pn !== workNorm && !pn.startsWith(workNorm + '/')) return 'ask'
+    }
+    if (patternKey.includes('read_file:outside_project:')) return 'ask'
+    return 'ask' // 计划模式下非只读查询一律弹，让用户批准后才真正执行
+  }
 
   // 1) 危险命令（删除/格式化）→ 弹
   if (DANGEROUS_CMD_RE.test(command)) return 'ask'
@@ -417,8 +406,12 @@ function classifyApproval(
   // 5) 项目外文件读取（后端检测到的）→ 弹
   if (patternKey.includes('read_file:outside_project:')) return 'ask'
 
-  // 6) 项目内文件修改 → 自动批准（diff 记录走 tool.complete inline_diff，不受影响）
-  if (FILE_WRITE_TOOL_RE.test(blob)) return 'auto'
+  // 6) 项目内文件修改 → 视模式：accept_edits/dont_ask 自动批准（diff 记录走 tool.complete
+  //    inline_diff，不受影响）；default 模式一律弹，让用户确认
+  if (FILE_WRITE_TOOL_RE.test(blob)) {
+    if (mode === 'accept_edits' || mode === 'dont_ask') return 'auto'
+    return 'ask'
+  }
 
   // 模式相关分流
   if (mode === 'dont_ask') return 'auto'        // 后端一般不发请求，前端兜底放行
@@ -439,20 +432,6 @@ type ResponseBlock = StreamingResponseBlock
 // InlineToolGroup — extracted to ./inline-tool-group.tsx
 
 // ==== Helpers ========================================================================================
-
-function WaveLoader({ className = '' }: { className?: string }) {
-  return (
-    <span className={`inline-flex items-center gap-[3px] ${className}`}>
-      {[0, 1, 2, 3].map(i => (
-        <span
-          key={i}
-          className="size-[4px] rounded-full bg-current"
-          style={{ animation: `waveDot 0.9s ease-in-out ${i * 0.16}s infinite` }}
-        />
-      ))}
-    </span>
-  )
-}
 
 const TEXTUAL_MIME_RE = /^(text\/|application\/(json|xml|javascript|typescript|x-sh|csv|yaml|toml|x-www-form-urlencoded)|image\/(svg\+xml))/
 const TEXTUAL_EXT = /\.(txt|md|markdown|mdx|json|yml|yaml|toml|csv|ts|tsx|js|jsx|py|java|c|cpp|h|hpp|go|rs|rb|php|sh|bash|zsh|sql|html|htm|css|scss|less|xml|log|env|gitignore|dockerfile|makefile|rst|tex)$/i
@@ -529,65 +508,6 @@ function ThinkingTimer({ questionStartTs, isRunning }: { questionStartTs: number
   return <>{formatDuration(duration)}</>
 }
 
-// Export conversation as Markdown
-function exportConversation(messages: any[], sessionLabel: string): void {
-  const lines: string[] = []
-  lines.push('# ' + (sessionLabel || 'Helix 对话'))
-  lines.push('')
-  lines.push('> 导出时间: ' + new Date().toLocaleString('zh-CN'))
-  lines.push('')
-  lines.push('---')
-  lines.push('')
-  for (const msg of messages) {
-    if (msg.role === 'system') continue
-    lines.push('## ' + (msg.role === 'user' ? '🧑 用户' : '🤖 助手'))
-    lines.push('')
-    if (msg.blocks && msg.blocks.length > 0) {
-      for (const block of msg.blocks) {
-        if (block.type === 'thinking') {
-          lines.push('<details><summary>💭 思考</summary>')
-          lines.push('')
-          lines.push(block.content)
-          lines.push('')
-          lines.push('</details>')
-          lines.push('')
-        } else if (block.type === 'text') {
-          lines.push(block.content)
-          lines.push('')
-        }
-      }
-    } else {
-      lines.push(msg.content || '')
-      lines.push('')
-    }
-    lines.push('---')
-    lines.push('')
-  }
-  const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = (sessionLabel || 'helix-conversation') + '-' + Date.now() + '.md'
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
-// Export conversation as JSON
-function exportConversationJSON(messages: any[], sessionLabel: string): void {
-  const data = {
-    label: sessionLabel || 'Helix 对话',
-    exportedAt: new Date().toISOString(),
-    messages: messages.filter(m => m.role !== 'system'),
-  }
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = (sessionLabel || 'helix-conversation') + '-' + Date.now() + '.json'
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
 // Quick command templates
 const QUICK_COMMANDS: { cmd: string; label: string; prompt: string }[] = [
   { cmd: '/review', label: '代码审查', prompt: '请审查当前代码变更，检查安全漏洞、性能问题、代码风格，并给出改进建议。' },
@@ -601,11 +521,6 @@ const QUICK_COMMANDS: { cmd: string; label: string; prompt: string }[] = [
   { cmd: '/summary', label: '代码总结', prompt: '请总结当前代码的功能、架构和主要模块，给出一份简洁的概述。' },
 ]
 
-
-
-
-
-const SYSTEM_REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/gi
 
 // Schedule parsing — extracted to lib/schedule-utils.ts
 
@@ -928,6 +843,8 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   isSearchMatch,
   isSearchActive,
   onFork,
+  onWithdraw,
+  onUndo,
 }: {
   msg: ChatMessage
   fontSize: number
@@ -936,6 +853,8 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   isSearchMatch: boolean
   isSearchActive: boolean
   onFork: (id: string) => void
+  onWithdraw: (id: string) => void
+  onUndo?: () => void
 }) {
   const content = useMemo(() => normalizeAcpContent(msg.content), [msg.content])
   const mdContent = useMemo(() => normalizeAcpContentRaw(msg.content), [msg.content])
@@ -1112,6 +1031,13 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
           </div>
           {/* Action buttons below user message */}
           <div className="flex justify-end items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
+            <button
+              onClick={() => onUndo?.()}
+              className="p-1 rounded-lg text-muted-foreground/40 hover:text-amber-500 hover:bg-amber-500/10 transition-colors"
+              data-tip="撤回本轮对话"
+            >
+              <Undo2 className="size-3" />
+            </button>
             <CopyButton text={content} />
           </div>
         </div>
@@ -1140,6 +1066,10 @@ export function AgentFlowPanel() {
   // 模型反问多选（clarify）：一次只显示最旧一条，回应后出队
   const [clarifyQueue, setClarifyQueue] = useState<Array<{ id: string; question: string; choices: string[] | null; sessionId?: string }>>([])
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null)
+
+  // 计划审批（plan 模式）：模型产出方案后先弹浮条让用户决定“批准执行”或“继续调整”，
+  // 用户批准后才以 accept_edits 模式真正跑 handleRun（done 时由它触发 + handleApprovePlan）。
+  const [pendingPlanReview, setPendingPlanReview] = useState<PlanReviewRequest | null>(null)
 
   const [showModelDropdown, setShowModelDropdown] = useState(false)
   const [showFolderDropdown, setShowFolderDropdown] = useState(false)
@@ -1290,10 +1220,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return s.tabAttachments[key]?.links ?? EMPTY_LINKS
   })
   const setSessionPendingApproval = useHelixStore(s => s.setSessionPendingApproval)
-  // 仅显示/统计当前会话的待确认（审批/反问/定时任务），避免切会话时串台
-  const approvalRequest = approvalQueue.find(r => r.sessionId === currentSessionId) || null
-  const pendingApprovalCount = approvalQueue.filter(r => r.sessionId === currentSessionId).length
-  const clarifyRequest = clarifyQueue.find(c => c.sessionId === currentSessionId) || null
+  // 仅显示/统计当前会话的待确认（审批/反问/定时任务），避免切会话时串台。
+  // 统一用 currentSessionId ?? DRAFT_SESSION_KEY 作为查找键：新建对话（id 未分配）
+  // 时 handleRun 的自动批准/审批回调拿到的也是这个 fallback 键，双方对齐才能命中。
+  const approvalKey = currentSessionId ?? DRAFT_SESSION_KEY
+  const approvalRequest = approvalQueue.find(r => r.sessionId === approvalKey) || null
+  const pendingApprovalCount = approvalQueue.filter(r => r.sessionId === approvalKey).length
+  const clarifyRequest = clarifyQueue.find(c => c.sessionId === approvalKey) || null
   // 把每个会话的待确认状态同步到全局 store，供侧边栏标记
   useEffect(() => {
     const map: Record<string, boolean> = {}
@@ -1306,9 +1239,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     for (const k of Object.keys(map)) next[k] = true
     setSessionPendingApproval(next)
   }, [approvalQueue, clarifyQueue, pendingTaskCreations, currentSessionId, setSessionPendingApproval])
-  // 切换会话时清空上一次的自动压缩内联提示，避免把旧提示带进新对话。
+  // 切换会话时清空上一次的自动压缩内联提示，避免把旧提示带进新对话；
+  // 同时清掉不属于当前会话的待审批计划（切走即作废，防止串到别的会话）。
   useEffect(() => {
     setAutoCompressNotices([])
+    setPendingPlanReview(prev => (prev && prev.sessionId === (currentSessionId ?? DRAFT_SESSION_KEY) ? prev : null))
   }, [currentSessionId])
   const sessionMessages = useMemo(() => {
     // 永远按会话过滤：currentSessionId 为 null（新对话）时只显示无 sessionId
@@ -1461,6 +1396,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return !!streamingDrafts[currentSessionId || '']?.isAgentRunning
   }, [streamingDrafts, currentSessionId])
   const isChatLoading = useHelixStore(s => s.isChatLoading)
+  // 覆盖面板（看板/定时任务/技能）打开时，把聊天输入区降一级（z-20），避免
+  // 和面板（z-30）争焦点；历史条/上下文指示器也在面板打开时隐藏（遮挡感）。
+  const showKanbanPanel = useHelixStore(s => s.showKanbanPanel)
+  const showScheduledTasksPanel = useHelixStore(s => s.showScheduledTasksPanel)
+  const showSkillPanel = useHelixStore(s => s.showSkillPanel)
+  const overlayPanelOpen = showKanbanPanel || showScheduledTasksPanel || showSkillPanel
   // Per-session busy: only the conversation that is itself running shows a
   // stop button. A global isChatLoading (even if set by a future caller) must
   // never lock the input of a different/new conversation.
@@ -1543,6 +1484,29 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // Stable action references — these never change so getState() is safe
   const connectionNotice = useHelixStore(s => s.connectionNotice)
   const storeActions = useMemo(() => useHelixStore.getState(), [])
+
+  // 撤回：移除该助手消息，并同时移除紧邻的上一条用户提问（这一轮对话），保持整洁；
+  // 同时同步后端 message.delete，删除 state.db 里的历史，避免下次 prompt 复活。
+  const handleWithdraw = useCallback((id: string) => {
+    const state = useHelixStore.getState()
+    const msgs = state.chatMessages
+    const idx = msgs.findIndex((m) => m.id === id)
+    if (idx === -1) return
+    const assistantMsg = msgs[idx]
+    state.deleteMessage(id)
+    for (let i = idx - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') {
+        useHelixStore.getState().deleteMessage(msgs[i].id)
+        break
+      }
+    }
+    state.showToast({ type: 'success', title: '已撤回', description: '已移除该回复及其提问' })
+    const sessionId = useHermesStore.getState().hermesSessionId
+    const rowId = assistantMsg?.rowId
+    if (sessionId && rowId != null) {
+      hermesApi()?.send('message.delete', { session_id: sessionId, row_id: rowId }).catch(() => {})
+    }
+  }, [])
 
   const handleCreateBranch = async (name: string) => {
     if (!name || !isElectron()) return
@@ -1670,6 +1634,40 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       }
     })
     return () => { try { unsub?.() } catch {} }
+  }, [])
+  // /btw 后台任务的完成通知需要一个 persistent listener（handleRun 里的 per-run
+  // onEvent 在 finally 里退订，后台 run 与当前 run 生命周期不同步，事件会漏掉）。
+  // background.complete 参数 = { session_id: 后台任务的 sid, task_id, text }。
+  useEffect(() => {
+    let unsubFn: (() => void) | undefined
+    try {
+      unsubFn = hermesApi()!.onEvent((method: string, params: any) => {
+        if (method !== 'background.complete') return
+        const parentSid = params?.session_id
+        const text = typeof params?.text === 'string' ? params.text : ''
+        const taskId = params?.task_id
+        // 通过 session 映射反查它属于哪个对话（后台会话未注册时落到当前对话）。
+        let bgCid: string | null = null
+        if (parentSid) {
+          for (const [c, entry] of sessionMapRef.current.entries()) {
+            if (entry.sid === parentSid) { bgCid = c; break }
+          }
+        }
+        const target = bgCid || useHelixStore.getState().currentSessionId || undefined
+        if (text) {
+          useHelixStore.getState().addChatMessage({ role: 'assistant', content: text, sessionId: target })
+        }
+        storeActions.showToast({
+          type: 'success',
+          title: '后台任务已完成',
+          description: text.slice(0, 80) || (taskId ? `任务 ${taskId} 已完成` : undefined),
+          duration: 8000,
+        })
+      })
+    } catch (e) {
+      console.warn('[Helix] background.complete listener setup failed:', e)
+    }
+    return () => { try { unsubFn?.() } catch {} }
   }, [])
   // When an SSH connection is established, reload MCP tools for the active
   // session so `remote_exec` becomes available immediately (the bridge server
@@ -1876,6 +1874,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // re-read the stale value (e.g. the previously-selected pro) and the bridge
     // would overwrite the Helix store back to it.
     useProviderStore.getState().setActiveModel(model)
+    // Sync the ACTIVE profile's model too. restoreFromStorage prefers the
+    // activeProfileId's config.model over the persisted activeModel — if we
+    // only updated activeModel here, the profile keeps its old model and a
+    // restart reverts the input-bar choice to whatever the profile pinned.
+    const pst = useHelixStore.getState()
+    if (pst.activeProfileId) {
+      const prof = pst.apiProfiles.find((p) => p.id === pst.activeProfileId)
+      if (prof) {
+        useHelixStore.getState().updateApiProfileConfig(pst.activeProfileId, { ...prof.config, model })
+      }
+    }
     // setActiveModel already records the activation into apiHistory (settings
     // model list highlight) — no separate addApiHistory needed here.
     // Persist the API-related state only. The full persistToStorage() is too
@@ -1890,6 +1899,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       persistence.saveSetting('apiConfig', st.apiConfig)
       persistence.saveSetting('activeModel', st.activeModel)
       persistence.saveSetting('activeProviderId', st.activeProviderId)
+      // Persist the synced profile model so a cold restart restores the same
+      // model (restoreFromStorage reads activeProfileId's config first).
+      persistence.saveSetting('apiProfiles', st.apiProfiles)
     })
     setShowModelDropdown(false)
     await syncConfigToBackend()
@@ -1956,7 +1968,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 key={m}
                 type="button"
                 onClick={() => handleModelSelect(m)}
-                className={`w-full text-left px-3 py-2 rounded-md text-[var(--helix-transcript-size)] font-mono transition-colors ${
+                className={`w-full text-left px-3 py-2 rounded-md text-[length:var(--helix-transcript-size)] font-mono transition-colors ${
                   m === selectedForHighlight
                     ? 'bg-primary/10 text-primary font-semibold'
                     : 'text-foreground/70 hover:bg-muted'
@@ -1966,7 +1978,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               </button>
             ))}
             {modelList.length === 0 && (
-              <div className="px-3 py-2 text-[var(--helix-transcript-size)] text-foreground/40">
+              <div className="px-3 py-2 text-[length:var(--helix-transcript-size)] text-foreground/40">
                 暂无可用模型
               </div>
             )}
@@ -2020,6 +2032,16 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     { name: 'compact', description: '压缩上下文', action: 'compact' as const },
     { name: 'clear', description: '清空当前对话', action: 'clear' as const },
     { name: 'reset', description: '重置会话（清空对话+上下文）', action: 'reset' as const },
+    { name: 'background', description: '后台运行一个任务，不打断当前对话', action: 'background' as const, aliases: ['bg', 'btw'] },
+    { name: 'undo', description: '撤销上一条消息并同步截断后端历史', action: 'undo' as const },
+    { name: 'save', description: '保存当前会话到磁盘（~/hermes/sessions/saved/*.json）', action: 'save' as const },
+    { name: 'branch', description: '从当前对话分叉出一个新分支会话', action: 'branch' as const },
+    { name: 'steer', description: '偏离当前思路，告诉模型换方向：/steer <text>', action: 'steer' as const },
+    { name: 'redirect', description: '重定向话题到新方向：/redirect <text>', action: 'redirect' as const },
+    { name: 'image', description: '生成一张图片：/image <prompt>', action: 'image' as const },
+    { name: 'rollback', description: '打开回滚面板（文件版本回滚）', action: 'rollback' as const },
+    { name: 'sessions', description: '打开后端会话管理面板', action: 'sessions' as const },
+    { name: 'projects', description: '打开项目管理面板', action: 'projects' as const },
     { name: 'mcp', description: '管理 MCP 服务器', action: 'mcp' as const },
     { name: 'model', description: '切换到模型选择设置', action: 'model' as const },
     { name: 'skill', description: '打开技能管理面板', action: 'skill' as const },
@@ -2027,14 +2049,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
   // Merge local skills with Hermes slash commands
   const allSlashItems = useMemo(() => {
-    const builtinCmds = BUILTIN_COMMANDS.map(c => ({
-      name: c.name,
-      description: c.description,
-      id: 'builtin:' + c.name,
-      icon: undefined as string | undefined,
-      isBuiltinCommand: true,
-      action: c.action,
-    }))
+    const builtinCmds = BUILTIN_COMMANDS.flatMap(c => {
+      const names = [c.name, ...(c.aliases ?? [])]
+      return names.map(name => ({
+        name,
+        description: c.description,
+        id: 'builtin:' + c.name + ':' + name,
+        icon: undefined as string | undefined,
+        isBuiltinCommand: true,
+        action: c.action,
+      }))
+    })
     const hermesCmds = (availableCommands || []).map(cmd => ({
       name: cmd.name,
       description: cmd.description || '',
@@ -2321,6 +2346,32 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     }
   }, [setStreamingDraft, currentSessionId, isBusy, isRunning])
 
+  // Undo last round (same semantics as the /undo builtin command, exposed as a
+  // toolbar button): truncate backend history back to the last user prompt and
+  // drop all local messages after it.
+  const handleUndoChat = useCallback(async () => {
+    try {
+      const cid = currentSessionId
+      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+      if (!sid) {
+        storeActions.showToast({ type: 'warning', title: '无法撤回', description: '当前对话还没有后端会话，无法截断历史' })
+        return
+      }
+      const r = await hermesApi()!.send('session.undo', { session_id: sid })
+      const removed = (r as any)?.removed ?? 0
+      const all = useHelixStore.getState().chatMessages
+      const local = all.filter(m => !m.sessionId || m.sessionId === cid)
+      const lastUserIdx = [...local].reverse().findIndex(m => m.role === 'user')
+      const kept = lastUserIdx >= 0
+        ? all.filter(m => !local.includes(m) || local.indexOf(m) < local.length - 1 - lastUserIdx)
+        : all
+      useHelixStore.setState({ chatMessages: kept })
+      storeActions.showToast({ type: 'success', title: '已撤回', description: `已截断后端历史（移除 ${removed} 条记录）` })
+    } catch (e) {
+      storeActions.showToast({ type: 'error', title: '撤回失败', description: String(e) })
+    }
+  }, [currentSessionId, storeActions.showToast])
+
   // File picker handler
   const addSelectedFile = useHelixStore(s => s.addSelectedFile)
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2420,10 +2471,42 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // the model gets interrupted mid-thought.
     useHelixStore.setState({ isChatLoading: true })
 
+    // Builtin-command helper: resolve (or create) the backend session for the
+    // current conversation. Reuses the same params/epoch logic as the main flow.
+    // Returns the backend sid, or null when no conversation / creation failed.
+    const ensureBuiltinSid = async (): Promise<string | null> => {
+      const cid = currentSessionId
+      if (!cid) return null
+      const liveEpoch = useHermesStore.getState().gatewayEpoch
+      const cached = sessionMapRef.current.get(cid)
+      if (cached && cached.epoch === liveEpoch && cached.sid) return cached.sid
+      try {
+        const st = useHelixStore.getState()
+        const res = await hermesApi()!.send('session/new', {
+          mcpServers: buildAcpMcpServers(st.mcpServers),
+          cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? undefined,
+          search_engine: st.enhancedFindGrep ? 'rg' : '',
+          terminal_shell: st.terminalShell,
+        }) as any
+        const sid = res?._meta?.hermes?.sessionProvenance?.acpSessionId
+          || res?.session_id
+          || res?.sessionID
+          || (typeof res === 'string' ? res : null)
+        if (!sid) return null
+        sessionMapRef.current.set(cid, { sid, epoch: liveEpoch })
+        persistSessionMap(sessionMapRef.current)
+        return sid
+      } catch (e) {
+        console.warn('[Helix] ensureBuiltinSid failed:', e)
+        return null
+      }
+    }
+
     // --- Built-in slash commands (handled client-side, never sent to Hermes) ---
     const builtinMatch = baseTrimmed.match(/^\/(\S+)/)
     if (builtinMatch) {
-      const builtin = BUILTIN_COMMANDS.find(c => c.name === builtinMatch[1].toLowerCase())
+      const builtin = BUILTIN_COMMANDS.find(c =>
+        c.name === builtinMatch[1].toLowerCase() || c.aliases?.includes(builtinMatch[1].toLowerCase()))
       if (builtin) {
         setInputSynced('')
         resetInputHeight()
@@ -2474,6 +2557,192 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             await storeActions.clearChatInPlace()
             break
           }
+          case 'background': {
+            // /background|/bg|/btw <prompt> — 启动一个后台任务，不打断当前对话：
+            // 为它新建（或复用）一个独立会话，prompt.background 派发（ack-only，
+            // 只回 { task_id }），完成后走 background.complete 事件通知前端渲染。
+            const bgMatch = baseTrimmed.match(/^\/(?:background|bg|btw)\s+([\s\S]+)$/i)
+            const bgText = bgMatch ? bgMatch[1].trim() : ''
+            if (!bgText) {
+              storeActions.showToast({ type: 'warning', title: '缺少参数', description: '/btw <你的提示> — 把任务放到后台运行，不打断当前对话' })
+              break
+            }
+            try {
+              // 当前对话没有 id（新建未进入 store）时，为后台任务临时分配一个，
+              // 并同步 activeSessionWorkDir 到所选项目，避免 session/new 拿错 cwd。
+              let bgCid = currentSessionId
+              if (!bgCid) {
+                bgCid = 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
+                const stNew = useHelixStore.getState()
+                stNew.setCurrentSessionId(bgCid)
+                useHelixStore.setState({ activeSessionWorkDir: stNew.selectedWorkDir })
+                stNew.pushNavigation({ type: 'chat', sessionId: bgCid })
+                stNew.persistToStorage()
+              }
+              const st0 = useHelixStore.getState()
+              const bgLiveEpoch = useHermesStore.getState().gatewayEpoch
+              let bgSid: string | null = sessionMapRef.current.get(bgCid)?.sid ?? null
+              if (bgSid && sessionMapRef.current.get(bgCid)?.epoch !== bgLiveEpoch) bgSid = null
+              if (!bgSid) {
+                const res = await hermesApi()!.send('session/new', {
+                  mcpServers: buildAcpMcpServers(st0.mcpServers),
+                  cwd: st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined,
+                  search_engine: st0.enhancedFindGrep ? 'rg' : '',
+                  terminal_shell: st0.terminalShell,
+                }) as any
+                bgSid = res?._meta?.hermes?.sessionProvenance?.acpSessionId
+                  || res?.session_id
+                  || res?.sessionID
+                  || (typeof res === 'string' ? res : null)
+                if (!bgSid) throw new Error('后端未能创建会话')
+                sessionMapRef.current.set(bgCid, { sid: bgSid, epoch: bgLiveEpoch })
+                persistSessionMap(sessionMapRef.current)
+              }
+              // 后台任务的消息挂在 bgCid 下，切过去能看到（async 上下文里用 ref 兜底）。
+              useHelixStore.getState().addChatMessage({ role: 'user', content: baseTrimmed, sessionId: bgCid })
+              // 后台派发是 ack-only 的：只返回 { task_id }，没有流式事件。
+              const r = await hermesApi()!.send('prompt.background', { session_id: bgSid, text: bgText })
+              storeActions.showToast({ type: 'success', title: '已转后台执行', description: bgText.slice(0, 40), duration: 4000 })
+              debug('[HelixTrace] /btw dispatched', { bgCid, bgSid, taskId: (r as any)?.task_id })
+            } catch (e) {
+              storeActions.showToast({ type: 'error', title: '后台任务启动失败', description: String(e) })
+            }
+            break
+          }
+          case 'undo': {
+            // /undo — 撤销上一轮对话：后端 session.undo 截断历史 + 前端同步删除本地消息。
+            try {
+              const sid = await ensureBuiltinSid()
+              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法撤销', description: '当前对话还没有后端会话，无法截断历史' }); break }
+              const r = await hermesApi()!.send('session.undo', { session_id: sid })
+              const removed = (r as any)?.removed ?? 0
+              const all = useHelixStore.getState().chatMessages
+              const local = all.filter(m => !m.sessionId || m.sessionId === currentSessionId)
+              // 后端 del history[last_user_idx:] — 前端删到上一条用户消息为止。
+              const lastUserIdx = [...local].reverse().findIndex(m => m.role === 'user')
+              const kept = lastUserIdx >= 0
+                ? all.filter(m => !local.includes(m) || local.indexOf(m) < local.length - 1 - lastUserIdx)
+                : all
+              useHelixStore.setState({ chatMessages: kept })
+              storeActions.showToast({ type: 'success', title: '已撤销', description: `已截断后端历史（移除 ${removed} 条记录）` })
+            } catch (e) {
+              storeActions.showToast({ type: 'error', title: '撤销失败', description: String(e) })
+            }
+            break
+          }
+          case 'save': {
+            // /save — 把当前会话存档为 JSON（~/.hermes/sessions/saved/）。
+            try {
+              const sid = await ensureBuiltinSid()
+              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法保存', description: '当前对话还没有后端会话' }); break }
+              const r = await hermesApi()!.send('session.save', { session_id: sid })
+              const file = (r as any)?.file
+              storeActions.showToast({ type: 'success', title: '会话已保存', description: file || undefined, duration: 6000 })
+            } catch (e) {
+              storeActions.showToast({ type: 'error', title: '保存失败', description: String(e) })
+            }
+            break
+          }
+          case 'branch': {
+            // /branch — 从当前会话分叉出一个新分支（后端 session.branch 返回新 sid +
+            // 完整消息列表），前端切到新会话并沿用同一个项目目录。
+            try {
+              const sid = await ensureBuiltinSid()
+              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法分叉', description: '当前对话还没有后端会话' }); break }
+              const r = await hermesApi()!.send('session.branch', { session_id: sid }) as any
+              const newSid = r?.session_id
+              if (!newSid) throw new Error('branch 未返回 session_id')
+              const title = r?.title || '分支会话'
+              const newCid = 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
+              const msgs = (Array.isArray(r.messages) ? r.messages : []).map((m: any) => ({
+                id: m.id || generateId(),
+                role: (m.role === 'assistant' || m.role === 'user' ? m.role : m.role === 'tool' ? 'assistant' : 'user') as 'user' | 'assistant' | 'system',
+                content: (typeof m.content === 'string' ? m.content : '') || '',
+                timestamp: m.timestamp || Date.now(),
+                reasoning: m.reasoning,
+                sessionId: newCid,
+              }))
+              const stB = useHelixStore.getState()
+              stB.setCurrentSessionId(newCid)
+              useHelixStore.setState({ chatMessages: msgs })
+              useHelixStore.setState({ activeSessionWorkDir: stB.activeSessionWorkDir ?? stB.selectedWorkDir })
+              stB.pushNavigation({ type: 'chat', sessionId: newCid })
+              await stB.persistToStorage()
+              // 新分支的会话映射立即注册，防止后续 prompt 再用旧 sid 起新会话。
+              sessionMapRef.current.set(newCid, { sid: newSid, epoch: useHermesStore.getState().gatewayEpoch })
+              persistSessionMap(sessionMapRef.current)
+              useHelixStore.getState().showToast({ type: 'success', title: `已创建分支「${title}」`, description: `${msgs.length} 条消息` })
+            } catch (e) {
+              storeActions.showToast({ type: 'error', title: '分叉失败', description: String(e) })
+            }
+            break
+          }
+          case 'steer': {
+            // /steer <text> — 偏离当前思路：告诉模型换方向，agent 采纳后调整后续行为。
+            const steerText = baseTrimmed.replace(/^\/(?:steer)\s+/i, '').trim()
+            if (!steerText) { storeActions.showToast({ type: 'warning', title: '缺少参数', description: '/steer <你的新方向>' }); break }
+            try {
+              const sid = await ensureBuiltinSid()
+              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法转向', description: '当前对话还没有后端会话' }); break }
+              const r = await hermesApi()!.send('session.steer', { session_id: sid, text: steerText }) as any
+              storeActions.showToast({ type: r?.status === 'rejected' ? 'warning' : 'success', title: r?.status === 'rejected' ? '方向被拒绝' : '已转向', description: steerText.slice(0, 60) })
+            } catch (e) {
+              storeActions.showToast({ type: 'error', title: '转向失败', description: String(e) })
+            }
+            break
+          }
+          case 'redirect': {
+            // /redirect <text> — 重定向话题到新方向（与 steer 类似但用于扭转整个对话走向）。
+            const redirectText = baseTrimmed.replace(/^\/(?:redirect)\s+/i, '').trim()
+            if (!redirectText) { storeActions.showToast({ type: 'warning', title: '缺少参数', description: '/redirect <新方向>' }); break }
+            try {
+              const sid = await ensureBuiltinSid()
+              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法重定向', description: '当前对话还没有后端会话' }); break }
+              const r = await hermesApi()!.send('session.redirect', { session_id: sid, text: redirectText }) as any
+              storeActions.showToast({ type: r?.status === 'rejected' ? 'warning' : 'success', title: r?.status === 'rejected' ? '重定向被拒绝' : '已重定向', description: redirectText.slice(0, 60) })
+            } catch (e) {
+              storeActions.showToast({ type: 'error', title: '重定向失败', description: String(e) })
+            }
+            break
+          }
+          case 'image': {
+            // /image <prompt> — 调用 image.generate 生成一张图片，作为 assistant 消息
+            // 带 images 挂到当前对话。
+            const imagePrompt = baseTrimmed.replace(/^\/(?:image)\s+/i, '').trim()
+            if (!imagePrompt) { storeActions.showToast({ type: 'warning', title: '缺少参数', description: '/image <你的提示>' }); break }
+            try {
+              const r = await hermesApi()!.send('image.generate', { prompt: imagePrompt, aspect_ratio: 'square' }) as any
+              if (r?.available === false) {
+                storeActions.showToast({ type: 'warning', title: '图片生成不可用', description: r?.error || '后端没有可用的图片生成能力' })
+                break
+              }
+              if (r?.success !== true || !r?.image_data) {
+                storeActions.showToast({ type: 'error', title: '图片生成失败', description: r?.error || '未返回图片数据' })
+                break
+              }
+              const dataUrl: string = r.image_data
+              const mediaType = (dataUrl.match(/^data:([^;]+)/) || [])[1] || 'image/png'
+              useHelixStore.getState().addChatMessage({
+                role: 'assistant',
+                content: `已生成 ${imagePrompt}`,
+                sessionId: currentSessionId || undefined,
+                images: [{ id: generateId(), dataUrl, mediaType, name: imagePrompt.slice(0, 40) }],
+              })
+              storeActions.showToast({ type: 'success', title: '图片已生成', description: imagePrompt.slice(0, 40) })
+            } catch (e) {
+              storeActions.showToast({ type: 'error', title: '图片生成失败', description: String(e) })
+            }
+            break
+          }
+          case 'rollback':
+            storeActions.toggleRollbackPanel()
+            break
+          case 'sessions':
+            storeActions.toggleBackendSessionsPanel()
+            break
+          case 'projects':
+            storeActions.toggleProjectsPanel()
+            break
           case 'mcp':
             storeActions.toggleSettings('mcp')
             break
@@ -2552,6 +2821,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const streamThinkingRef = { current: '' }
     const doneProcessedRef = { current: false }
     const usageReceivedRef = { current: false }
+    const doneMsgIdRef = { current: null as string | null }
+    const pendingAssistantRowIdRef = { current: null as number | null }
     const streamCappedRef = { current: false }
     const thinkingCappedRef = { current: false }
     const pendingTextRef = { current: null as string | null }
@@ -2568,6 +2839,27 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const synthDoneTimerRef = { current: null as ReturnType<typeof setTimeout> | null }
     const forceDoneTimerRef = { current: null as ReturnType<typeof setTimeout> | null }
     const startedAtRef = { current: 0 }
+    // 语义化的 done 正文自愈：部分场景后端连发多条 done，前面已触发的 done 已把消息提交到
+    // chatMessages，此时用本次 done 自带正文（message.complete / run.completed 的 text，与
+    // state.db 持久化同源，字节完好）原地修正已提交消息，覆盖流式累积可能丢空白/换行的损坏。
+    // 只替换为原文，不猜补空格；归一化比较下 complete 更短（截断/中断）时则保留流式累积。
+    const patchDoneMessage = (finalText: string) => {
+      const mid = doneMsgIdRef.current
+      if (!mid || !finalText || !finalText.trim()) return
+      const st = useHelixStore.getState()
+      const existing = st.chatMessages.find((m: { id: string }) => m.id === mid)
+      if (!existing) return
+      const cur = existing.content || ''
+      if (cur === finalText) return
+      const normCur = normalizeForCompare(cur)
+      const normFinal = normalizeForCompare(finalText)
+      if (!cur.trim() ||
+          (normFinal.length >= normCur.length &&
+           (normFinal.includes(normCur) || normCur.includes(normFinal)))) {
+        st.updateChatMessage(mid, finalText)
+        debug('[HelixTrace] 权威全文自愈，已原地修正消息正文', { len: cur.length, to: finalText.length })
+      }
+    }
     // Tracks whether THIS run is the one currently driving the shared UI state.
     // On a background→front transition the accumulated snapshot is pushed first
     // so the live state never mixes two runs' data.
@@ -3161,7 +3453,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       }
       const pushTodos = (list: HermesTodo[] | null) => {
         if (list && list.length) {
-          useHelixStore.getState().setHermesTodos(list)
+          // 带上会话级 sessionId：todo 面板按会话聚合，只显示当前 run 所属
+          // 会话的 UI 更新，避免切会话/并发 run 时串台。
+          useHelixStore.getState().setHermesTodos(list, sessionId ?? undefined)
         }
       }
 
@@ -3244,7 +3538,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // ── 空闲检测定时器（idle detector）────────────────────────────────
       // 当已收到内容但事件流静默超过 15 秒时，合成 done 让循环退出。
       // 仅在 streamedContent=true 后激活；有运行中工具时不触发。
-      const IDLE_TIMEOUT_MS = 15_000
+      const IDLE_TIMEOUT_MS = 90_000
       const resetIdleTimer = () => {
         if (idleTimerRef) { clearTimeout(idleTimerRef); idleTimerRef = null }
         if (!streamedContent || queueDone) return
@@ -3417,6 +3711,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             }
           }
           const parsed = mapHermesEvent(method, params)
+          // 抓取后端 message.complete 透传的 row_id，落库时盖到 ChatMessage 上，供撤回同步后端用。
+          if (method === 'message.complete') {
+            const rid = params?.row_id ?? params?.payload?.row_id
+            if (rid != null) {
+              const n = typeof rid === 'string' ? parseInt(rid, 10) : Number(rid)
+              if (!Number.isNaN(n)) pendingAssistantRowIdRef.current = n
+            }
+          }
           if (parsed) {
             enqueue('data: ' + JSON.stringify(parsed))
           }
@@ -3484,6 +3786,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }
             }
           }
+          if (parsed && parsed.type === 'done' && doneProcessedRef.current) {
+            // 后续重复的 done 事件带权威正文时，就地修正已提交消息，避免最终文本缺字。
+            patchDoneMessage(typeof parsed.content === 'string' ? parsed.content : '')
+          }
           if (parsed && (parsed.type === 'done' || parsed.type === 'error')) {
             queueDone = true
             if (idleTimerRef) { clearTimeout(idleTimerRef); idleTimerRef = null }
@@ -3546,25 +3852,24 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           }
         }
       }
-      const promptText = (trimmed + fileContext).trim() || trimmed
-      promptItems.push({ type: 'text', text: promptText })
+const promptText = (trimmed + fileContext).trim() || trimmed
+      // 计划模式（plan）：handleRun 被批准流程重新触发时（approvalMode 已是
+      // accept_edits），这里取 live getState() 而非闭包——避免闭包里还是旧的
+      // plan 模式，导致批准后仍带上只读前缀，模型继续只读规划不执行。
+      // plan 模式前缀明确告诉模型：只做只读分析、给出方案，不要改文件/跑命令；
+      // 用户批准后（accept_edits）前缀消失，模型才真正动手。
+      const liveMode = useHelixStore.getState().approvalMode
+      const finalPromptText = liveMode === 'plan'
+        ? `[计划模式] 请只做只读分析并给出可执行的实施计划，不要修改任何文件、不要执行任何命令，也不要在没有明确请求时下载或访问外部资源。请以清晰的步骤列出你的方案，供用户审阅批准后再执行。\n\n${promptText}`
+        : promptText
+      promptItems.push({ type: 'text', text: finalPromptText })
 
       // Fire the prompt — events stream back via onEvent (don't await the promise itself).
       // ACP expects prompt as a list of content blocks, not a plain string
-      promptSentAtRef.current = Date.now()
-      // ── 并发串台诊断日志（临时）：记录本 run 的对话 id → 后端 sid 映射 ──
-      console.log('[HelixSend]', JSON.stringify({
-        conversation: activeSessionId,
-        sid: sessionId,
-        sidSource: wasCreated ? 'new' : 'map',
-        frontRun: isFrontRun(),
-        globalSid: useHermesStore.getState().hermesSessionId,
-        map: Object.fromEntries(sessionMapRef.current),
-        text: promptText.slice(0, 50),
-      }))
+promptSentAtRef.current = Date.now()
       hermesApi()!.send('session/prompt', {
         session_id: sessionId,
-        prompt: [{ type: 'text', text: promptText }],
+        prompt: [{ type: 'text', text: finalPromptText }],
       }).then((result: any) => {
         // session/prompt is now ack-only (official model): result == {status:'streaming'}.
         // Completion + usage are driven by events — run_complete → done (mapHermesEvent
@@ -3964,6 +4269,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               scheduleStreamRender()
             } else if (parsed.type === 'done') {
               if (doneProcessedRef.current) {
+                // 重复的 done 事件带权威正文时，就地修正已提交消息，避免最终文本缺字。
+                patchDoneMessage(typeof parsed.content === 'string' ? parsed.content : '')
                 queueDone = true
                 return
               }
@@ -4031,7 +4338,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 const detected = detectScheduledTasks(content)
                 content = detected.cleaned
                 if (detected.tasks.length > 0) {
-                  setPendingTaskCreations(prev => [...prev, ...detected.tasks.map(t => ({ ...t, sessionId: currentSessionId ?? undefined }))])
+                  setPendingTaskCreations(prev => [...prev, ...detected.tasks.map(t => ({ ...t, sessionId: useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY }))])
                 }
                 const curState = useHelixStore.getState()
                 const endTs = Date.now()
@@ -4073,15 +4380,35 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 // duplicates of every tool_group block.
                 uiRB([])
                 const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: discardBlocks ? undefined : (reasoning || undefined), steps: completedSteps.length ? completedSteps : undefined, blocks: finalBlocks, sessionId: activeSessionId, duration: totalSecs > 0 ? totalSecs : undefined, thoughtTokens: thoughtTokensRef.current || undefined, outputTokens: outputTokensRef.current || undefined, totalTokens: totalTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
+                if (pendingAssistantRowIdRef.current != null) {
+                  curState.setChatMessageRowId(msgId, pendingAssistantRowIdRef.current)
+                  pendingAssistantRowIdRef.current = null
+                }
+                doneMsgIdRef.current = msgId
                 thoughtTokensRef.current = 0
                 outputTokensRef.current = 0
                 thinkingStartTimeRef.current = 0
                 thinkingDurationRef.current = 0
                 curState.setChatMessageStreaming(msgId, false)
+                // 两阶段计划模式：plan 模式下模型产出方案后不直接执行，而是先弹
+                // 审批浮条让用户“批准执行”或“继续调整”。批准时才把模式切到
+                // accept_edits 并重新跑 handleRun（此时 getState() 已是批准后的
+                // 模式，handleRun 的只读前缀判定自然放行）。
+                if (content && useHelixStore.getState().approvalMode === 'plan') {
+                  setPendingPlanReview({
+                    sessionId: useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY,
+                    content,
+                  })
+                }
               } else {
                 // 防御性兜底：run 结束但无任何可见内容（根因已修复，极少触发）。
                 const st = useHelixStore.getState()
                 const mid = st.addChatMessage({ role: 'assistant', content: '⚠️ 本轮运行已结束，但模型未返回任何可见内容。', sessionId: activeSessionId })
+                doneMsgIdRef.current = mid
+                if (pendingAssistantRowIdRef.current != null) {
+                  st.setChatMessageRowId(mid, pendingAssistantRowIdRef.current)
+                  pendingAssistantRowIdRef.current = null
+                }
                 st.setChatMessageStreaming(mid, false)
               }
               // Hermes' ACP adapter only emits a `tool_call` (tool.started) event
@@ -4194,10 +4521,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   || (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid)
                   || hermesSessionIdRef.current
                 if (sid) {
-                  hermesApi()!.send('session/approve', {
+                  // 自动批准也走新 RPC（2026-08-17 起后端弃用 session/approve）：
+                  // approval.respond + choice，无需再配对 toolCallId。
+                  hermesApi()!.send('approval.respond', {
                     session_id: sid,
-                    toolCallId: parsed.approvalId,
-                    approve: true,
+                    choice: 'once',
                   }).catch((e: any) => console.warn('[Helix] auto-approve failed:', e))
                 }
               } else {
@@ -4569,19 +4897,29 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     setPendingFiles(prev => prev.filter(f => f.id !== id))
   }, [])
 
-  const handleApproval = useCallback(async (approvalId: string, approved: boolean, cacheDecision?: boolean) => {
+  const handleApproval = useCallback(async (approvalId: string, choice: ApprovalLevel) => {
+    // 先出队（fail-closed）：无论 RPC 是否成功，approval 弹条立即从 UI 移除，
+    // 避免后端已 resolve 但响应延迟/超时时，用户看到一条永远转圈"提交中"的弹条
+    //（RPC_TIMEOUT_MS=60s，agent 已继续但审批仍在占屏）。未送达时 agent 会再发
+    // 新 approval.request 重新入队，UI 与后端状态自然对齐。
+    setApprovalQueue(prev => prev.filter(r => r.id !== approvalId))
     try {
-      const sid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || hermesSessionIdRef.current
+      // 用 getState() 拿当前会话，避免 useCallback([]) 闭包里的 currentSessionId
+      // 因依赖变化而读到旧值（弹条常跨会话存活，出队必须删对的会话）。
+      const cid = useHelixStore.getState().currentSessionId
+      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
       if (sid) {
-        await hermesApi()!.send('session/approve', {
+        // 旧 RPC 是 WS 里非对称的一对一 approve/deny（session/approve 需要 toolCallId）。
+        // 新 RPC 用 approval.respond + choice: once/session/always/deny，把决定写回
+        // 后端状态机后由 agent 侧 resolve，无需前端再配对 request_id（2026-08-17 验证）。
+        await hermesApi()!.send('approval.respond', {
           session_id: sid,
-          toolCallId: approvalId,
-          approve: approved,
+          choice,
         })
       }
-      setApprovalQueue(prev => prev.filter(r => r.id !== approvalId))
     } catch (err) {
       console.error('Approval error:', err)
+      storeActions.showToast({ type: 'error', title: '审批提交失败', description: String(err) })
     }
   }, [])
 
@@ -4603,22 +4941,79 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     }
   }, [currentSessionId])
 
+  // 批准计划：关掉审批浮条，把 approvalMode 切到 accept_edits（用 live store + 后端
+  // set_mode 双保险，让后端/前端都进入"替我审批"模式），然后重跑 handleRun 让 agent
+  // 真正动手执行刚才的方案。注意 handleRun 是幂等的：它按当前输入重新发 prompt，模型
+  // 在 accept_edits 模式下会继续执行（而非再次只读规划）。
+  const handleApprovePlan = useCallback(async () => {
+    setPendingPlanReview(null)
+    const cid = useHelixStore.getState().currentSessionId
+    setApprovalMode('accept_edits')
+    // 后端模式同步：让 yolo/只读模式下的 session 真正解锁到可写状态。
+    const hermesSid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+    if (hermesSid) {
+      hermesApi()!.send('session/set_mode', {
+        session_id: hermesSid,
+        mode_id: 'accept_edits',
+      }).catch((e: any) => {
+        console.warn('[Helix] set_mode(accept_edits) failed:', e)
+      })
+    }
+    // 把"批准"注入输入框再跑，模型以此确认用户已同意并开始动手；setInputSynced
+    // 只写 ref（不触发 store 写入），setTimeout 确保新输入在 handleRun 读到的是
+    // 批准后的状态。
+    setInputSynced('[计划已获批准] 请按你刚才给出的计划开始执行。')
+    setTimeout(() => handleRun(), 0)
+  }, [setApprovalMode, setInputSynced, handleRun])
+
+  // 调整计划：只关闭审批浮条（保持 plan 模式），用户自己修改输入后重新触发即可；
+  // 后端 session 模式不变，仍是只读规划模式。
+  const handleAdjustPlan = useCallback(() => {
+    setPendingPlanReview(null)
+  }, [])
+
   const handleApproveAll = useCallback(async () => {
     if (approvalQueue.length === 0) return
+    // 先把队列清空（fail-closed），让弹条立即消失；RPC 逐个发，任一个失败不阻塞整体。
+    setApprovalQueue([])
     try {
-      const sid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || hermesSessionIdRef.current
+      const cid = useHelixStore.getState().currentSessionId
+      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
       if (sid) {
         for (const req of approvalQueue) {
-          await hermesApi()!.send('session/approve', {
+          // 新 RPC（2026-08-17 起后端弃用 session/approve）：approval.respond +
+          // choice: once/session/always/deny，由 agent 侧状态机 resolve，不再配对
+          // toolCallId。once = 仅放行当前这步。
+          await hermesApi()!.send('approval.respond', {
             session_id: sid,
-            toolCallId: req.id,
-            approve: true,
+            choice: 'once',
           })
         }
       }
-      setApprovalQueue([])
     } catch (err) {
       console.error('Approve all error:', err)
+      storeActions.showToast({ type: 'error', title: '全部批准失败', description: String(err) })
+    }
+  }, [approvalQueue])
+
+  const handleRejectAll = useCallback(async () => {
+    if (approvalQueue.length === 0) return
+    // 先清空队列（fail-closed），弹条立即消失；逐个发 deny 让 agent 侧拒绝。
+    setApprovalQueue([])
+    try {
+      const cid = useHelixStore.getState().currentSessionId
+      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+      if (sid) {
+        for (const req of approvalQueue) {
+          await hermesApi()!.send('approval.respond', {
+            session_id: sid,
+            choice: 'deny',
+          })
+        }
+      }
+    } catch (err) {
+      console.error('Reject all error:', err)
+      storeActions.showToast({ type: 'error', title: '全部拒绝失败', description: String(err) })
     }
   }, [approvalQueue])
 
@@ -4628,7 +5023,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       const detail = (e as CustomEvent).detail
       if (approvalQueue.length === 0) return
       const first = approvalQueue[0]
-      handleApproval(first.id, detail.approved)
+      handleApproval(first.id, detail.approved ? 'once' : 'deny')
     }
     window.addEventListener('helix:approve-request', handler)
     return () => window.removeEventListener('helix:approve-request', handler)
@@ -4700,33 +5095,41 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           {approvalMode === 'default' && <Hand className="size-3.5" />}
           {approvalMode === 'accept_edits' && <Clock className="size-3.5" />}
           {approvalMode === 'dont_ask' && <AlertTriangle className="size-3.5" />}
+          {approvalMode === 'plan' && <FileText className="size-3.5" />}
           <span className="truncate min-w-0 chat-toolbar-label">
             {approvalMode === 'default' && '请求批准'}
             {approvalMode === 'accept_edits' && '替我审批'}
             {approvalMode === 'dont_ask' && '完全访问权限'}
+            {approvalMode === 'plan' && '制定计划'}
           </span>
           <ChevronDown className="size-3" />
         </button>
         {showApprovalModeDropdown && (
-          <div className="absolute bottom-full left-0 mb-2 w-72 bg-popover rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
+          <div className="absolute bottom-full left-0 mb-2 w-56 bg-popover rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
             {[
               {
                 id: 'default' as const,
                 icon: Hand,
                 title: '请求批准',
-                desc: '所有操作均请求批准（含文件写入与命令执行）',
+                desc: '全部需批准',
               },
               {
                 id: 'accept_edits' as const,
                 icon: Clock,
                 title: '替我审批',
-                desc: '仅对检测到的风险操作请求批准',
+                desc: '风险才批准',
               },
               {
                 id: 'dont_ask' as const,
                 icon: AlertTriangle,
                 title: '完全访问权限',
-                desc: '可不受限制地访问互联网和您电脑上的任何文件',
+                desc: '完全放开',
+              },
+              {
+                id: 'plan' as const,
+                icon: FileText,
+                title: '制定计划',
+                desc: '先规划后做',
               },
             ].map((mode) => {
               const Icon = mode.icon
@@ -4749,14 +5152,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                       })
                     }
                   }}
-                  className={`w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-muted transition-colors ${active ? 'bg-primary/5' : ''}`}
+                  className={`w-full flex items-start gap-2.5 px-3 py-2 text-left hover:bg-muted transition-colors ${active ? 'bg-primary/5' : ''}`}
                 >
-                  <div className="mt-0.5 shrink-0 w-7 h-7 rounded-full bg-muted flex items-center justify-center">
-                    <Icon className="size-4 text-foreground/70" />
+                  <div className="mt-0.5 shrink-0 w-6 h-6 rounded-full bg-muted flex items-center justify-center">
+                    <Icon className="size-3.5 text-foreground/70" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-[var(--helix-transcript-size)] font-medium text-foreground">{mode.title}</div>
-                    <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground leading-relaxed">{mode.desc}</div>
+                    <div className="text-sm font-medium text-foreground">{mode.title}</div>
+                    <div className="text-xs text-muted-foreground leading-relaxed">{mode.desc}</div>
                   </div>
                   {active && (
                     <div className="mt-1 shrink-0">
@@ -4793,7 +5196,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     >
             {/* Drag-over hint */}
             {isDraggingFile && (
-              <div className={`absolute inset-0 z-30 flex items-center justify-center pointer-events-none bg-primary/10 text-[var(--helix-transcript-size)] font-medium text-primary rounded-2xl`}>
+              <div className={`absolute inset-0 z-30 flex items-center justify-center pointer-events-none bg-primary/10 text-[length:var(--helix-transcript-size)] font-medium text-primary rounded-2xl`}>
                 松开以添加附件
               </div>
             )}
@@ -4895,7 +5298,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               onPaste={handlePaste}
               placeholder={ "随心输入..."}
               rows={2}
-              className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-[var(--helix-transcript-size)] min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
+              className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-[length:var(--helix-transcript-size)] min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
               style={{
                 overflowX: 'hidden',
                 overflowY: 'auto',
@@ -5294,8 +5697,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
   return (
     <div className="h-full flex flex-col bg-transparent text-foreground relative">
-      {/* 历史对话竖条：消息区左侧边缘，点击弹出最近对话列表并跳转 */}
-      <HistoryStrip />
+      {/* 历史对话竖条：消息区左侧边缘，点击弹出最近对话列表并跳转。
+          覆盖面板（看板/定时任务/技能）打开时隐藏，避免竖条与面板抢焦点。 */}
+      {!overlayPanelOpen && <HistoryStrip />}
       {/* Header bar - removed */}
 
       {/* Conversation search bar (Ctrl+F) */}
@@ -5308,7 +5712,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             onChange={(e) => { setConversationSearchQuery(e.target.value); setConversationSearchActive(0) }}
             onKeyDown={handleConversationSearchKeyDown}
             placeholder="搜索对话内容..."
-            className="w-44 bg-transparent text-[var(--helix-transcript-size)] outline-none placeholder:text-muted-foreground"
+            className="w-44 bg-transparent text-[length:var(--helix-transcript-size)] outline-none placeholder:text-muted-foreground"
           />
           <span className={`text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums shrink-0 ${searchMatches.length ? 'text-muted-foreground' : 'text-foreground/40'}`}>
             {conversationSearchQuery.trim() ? (searchMatches.length ? `${conversationSearchActive + 1}/${searchMatches.length}` : '无结果') : ''}
@@ -5395,6 +5799,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     isSearchMatch={searchMatchIds.has(item.msg.id)}
                     isSearchActive={item.msg.id === conversationSearchActiveId}
                     onFork={storeActions.forkConversation}
+                    onWithdraw={handleWithdraw}
+                    onUndo={handleUndoChat}
                   />
                 )
               )}
@@ -5569,7 +5975,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         <div className="max-w-[700px] mx-auto mb-2 p-3 bg-card/30 rounded-xl border border-border/30 shadow-sm">
           <div className="flex items-center gap-2 mb-2">
             <FolderPlus className="size-4 text-primary" />
-            <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">新建项目</span>
+            <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">新建项目</span>
           </div>
           <div className="flex gap-2">
             <input
@@ -5578,7 +5984,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               onChange={(e) => setNewProjectName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleCreateProject() }}
               placeholder="输入项目名称..."
-              className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40 transition-all duration-200"
+              className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40 transition-all duration-200"
               autoFocus
             />
             <Button size="sm" onClick={handleCreateProject} className="px-3">
@@ -5617,16 +6023,16 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         <ApprovalDialog
           request={approvalRequest}
           pendingCount={pendingApprovalCount}
-          onApprove={(id, cache) => handleApproval(id, true, cache)}
-          onReject={(id, cache) => handleApproval(id, false, cache)}
+          onApprove={(id, level) => handleApproval(id, level)}
+          onReject={(id) => handleApproval(id, 'deny')}
           onApproveAll={handleApproveAll}
         />
       )}
 
       {/* Scheduled task creation confirmation */}
-      {pendingTaskCreations.some(t => t.sessionId === currentSessionId) && (
+      {pendingTaskCreations.some(t => t.sessionId === approvalKey) && (
         <ScheduledTaskConfirm
-          tasks={pendingTaskCreations.filter(t => t.sessionId === currentSessionId)}
+          tasks={pendingTaskCreations.filter(t => t.sessionId === approvalKey)}
           onConfirm={handleConfirmTasks}
           onDismiss={handleDismissTasks}
         />
@@ -5635,8 +6041,22 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       {/* Clarify 反问浮条（模型多选反问） */}
       {clarifyRequest && (
         <ClarifyBar
+          // key 绑定到请求 id：同一会话连发多条 clarify 时，第二条进来会强制重建
+          // 组件，清掉上一条的 submitting/freeText/selectedIdx 等内部状态，避免
+          // 残留 UI 挡在第二条上面（ApprovalBar 的 pendingCount 同样依赖重建）。
+          key={clarifyRequest.id}
           request={clarifyRequest}
           onRespond={handleClarifyRespond}
+        />
+      )}
+
+      {/* 计划审批浮条（plan 模式）：模型产出方案（Claude 只读规划返回）后先弹给
+          用户审阅，批准才切换 accept_edits 重新执行，调整则关闭浮条让用户改输入。 */}
+      {pendingPlanReview && pendingPlanReview.sessionId === approvalKey && (
+        <PlanReviewBar
+          content={pendingPlanReview.content}
+          onApprove={handleApprovePlan}
+          onAdjust={handleAdjustPlan}
         />
       )}
 
@@ -5644,17 +6064,3 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   )
 }
 
-// ── 诊断期：Ctrl+Shift+D 导出 HelixTrace 日志（诊断完可删） ──
-;(function () {
-  if (typeof window === 'undefined') return
-  try {
-    ;(window as any).__helixExportTrace = () => (localStorage.getItem('helix_trace') || '')
-    window.addEventListener('keydown', function (e) {
-      if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
-        e.preventDefault()
-        var t = localStorage.getItem('helix_trace') || '(无日志)'
-        window.prompt('Helix 诊断日志（Ctrl+C 复制后发给我）', t.slice(-20000))
-      }
-    })
-  } catch (err) {}
-})()

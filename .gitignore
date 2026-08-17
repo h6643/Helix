@@ -97,6 +97,40 @@ AGENTS.md
 src/hermes.rs:*
 ~hermes/
 
+# Hermes data dir mistakenly created at repo root (HERMES_HOME once pointed here).
+# These are NOT Helix source — never commit them. NOTE: scripts/ is Helix's own dir (prepare-runtime.sh), do NOT ignore it.
+config.yaml
+auth.json
+auth.json.bak
+auth.lock
+agent-extra/
+audio_cache/
+cron/
+desktop/
+hooks/
+image_cache/
+kanban/
+kanban.db
+kanban.db.init.lock
+lsp/
+git/
+bin/
+logs/
+cache/
+channel_directory.json
+channels.json
+gateway_state.json
+gateway-starts.log
+.hermes_history
+
+# Hermes runtime dotfiles left at repo root (HERMES_HOME once pointed here).
+.mcp-discovery.lock
+.no-bundled-skills
+.npm_lock_hash_*
+.processes_*.tmp
+.skills_prompt_snapshot.json
+.update_check
+
 # nested hermes-agent .git must not be tracked (vendored dir keeps its own git)
 hermes-agent/.git/
 

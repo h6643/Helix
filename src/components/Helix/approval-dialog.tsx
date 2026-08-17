@@ -1,6 +1,6 @@
 'use client'
 
-import { AlertTriangle, Loader2 } from 'lucide-react'
+import { AlertTriangle, Check, Loader2, Pencil } from 'lucide-react'
 import React, { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import type { ApprovalLevel } from '@/hermes-ui/api-client'
@@ -16,6 +16,10 @@ export interface ApprovalRequest {
 }
 
 function getApprovalTitle(toolName: string): string {
+  // 后端项目外读取审批的 pattern_key 前缀（file_tools._check_approval_required_read）
+  if (toolName.includes('read_file:outside_project')) {
+    return '检测到工作空间外部文件读取'
+  }
   switch (toolName) {
     case 'terminal':
     case 'run_bash':
@@ -29,6 +33,9 @@ function getApprovalTitle(toolName: string): string {
 interface ApprovalBarProps {
   request: ApprovalRequest
   onApprove: (level: ApprovalLevel) => void
+  pendingCount?: number
+  onApproveAll?: () => void
+  onRejectAll?: () => void
 }
 
 /**
@@ -38,7 +45,7 @@ interface ApprovalBarProps {
  * user can still switch conversations while it is open.
  * Keyboard: ⌘/Ctrl+Enter = allow · Esc = deny · ↑/↓ = move selection · Enter = confirm.
  */
-function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
+function ApprovalBar({ request, onApprove, pendingCount, onApproveAll, onRejectAll }: ApprovalBarProps) {
   const [submitting, setSubmitting] = useState<ApprovalLevel | null>(null)
   const [selected, setSelected] = useState<ApprovalLevel>('once')
   const command =
@@ -86,10 +93,15 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
   ]
 
   return (
-    <div className="w-full max-w-[520px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-2.5">
+    <div className="w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-2.5">
       <div className="flex items-start justify-between gap-2 mb-2">
         <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
           {getApprovalTitle(request.toolName)}
+          {typeof pendingCount === 'number' && pendingCount > 1 && (
+            <span className="ml-2 text-[calc(var(--helix-transcript-size)*0.7857)] font-normal text-foreground/50">
+              还有 {pendingCount - 1} 个待确认
+            </span>
+          )}
         </h3>
         <span className="shrink-0 mt-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
           等待确认
@@ -100,6 +112,7 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
           {command}
         </pre>
       )}
+      {/* onApproveAll / onRejectAll removed per user request */}
       <div className="flex flex-col gap-1">
         {options.map((o) => {
           const isSel = selected === o.level
@@ -142,28 +155,37 @@ function ApprovalBar({ request, onApprove }: ApprovalBarProps) {
 interface LegacyProps {
   request: ApprovalRequest
   pendingCount?: number
-  onApprove: (id: string, cache?: boolean) => void
-  onReject: (id: string, cache?: boolean) => void
+  // level 直接透传（once/session/always/deny），由父组件映射为 approval.respond 的
+  // choice；不再折成 cache?: boolean（那会丢失 session/deny 语义，2026-08-17）。
+  onApprove: (id: string, level: ApprovalLevel) => void
+  onReject: (id: string) => void
   onApproveAll?: () => void
+  onRejectAll?: () => void
 }
 export function ApprovalDialog(props: LegacyProps) {
   const { request, onApprove, onReject } = props
   const handleApprove = useCallback(
     (level: ApprovalLevel) => {
       if (!request) return
-      if (level === 'deny') {
-        onReject(request.id, false)
-      } else {
-        onApprove(request.id, level === 'always')
-      }
+      onApprove(request.id, level)
     },
-    [request, onApprove, onReject],
+    [request, onApprove],
   )
   if (!request) return null
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
-      <div className="pointer-events-auto mx-auto max-w-[520px]">
-        <ApprovalBar request={request} onApprove={handleApprove} />
+      <div className="pointer-events-auto mx-auto max-w-[700px]">
+        <ApprovalBar
+          // key=request.id：连续多个审批时强制重挂载，重置 submitting/selected。
+          // 否则第一个审批点击后 submitting 卡在非 null，第二个弹窗按钮全禁用、
+          // 看起来"点了不消失也不切下一个"（2026-08-17 实录）。
+          key={request.id}
+          request={request}
+          onApprove={handleApprove}
+          pendingCount={props.pendingCount}
+          onApproveAll={props.onApproveAll}
+          onRejectAll={props.onRejectAll}
+        />
       </div>
     </div>
   )
@@ -299,6 +321,98 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
 
         <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-1">
           内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · Enter 确认 · 也可自由输入
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── 计划审查浮条（Claude 式两阶段）─────────────────────────────────────
+// 计划模式下模型产完计划（本轮 run 结束）后弹出：用户批准后才开始真正执行。
+// 批准 → 前端切到 accept_edits 并续发一条"请执行"指令触发新一轮 run；
+// 继续调整 → 关闭浮条，保持计划模式，用户可继续对话修改方案。
+
+export interface PlanReviewRequest {
+  sessionId?: string
+  // 本轮模型产出的计划全文（用于预览）
+  content: string
+}
+
+interface PlanReviewBarProps {
+  content: string
+  onApprove: () => void
+  onAdjust: () => void
+}
+
+export function PlanReviewBar({ content, onApprove, onAdjust }: PlanReviewBarProps) {
+  const [submitting, setSubmitting] = useState<'approve' | 'adjust' | null>(null)
+
+  const approve = useCallback(() => {
+    if (submitting) return
+    setSubmitting('approve')
+    onApprove()
+  }, [submitting, onApprove])
+
+  const adjust = useCallback(() => {
+    if (submitting) return
+    setSubmitting('adjust')
+    onAdjust()
+  }, [submitting, onAdjust])
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault()
+        e.stopPropagation()
+        approve()
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        adjust()
+      }
+    }
+    window.addEventListener('keydown', handler, true)
+    return () => window.removeEventListener('keydown', handler, true)
+  }, [approve, adjust])
+
+  return (
+    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-3">
+        <div className="flex items-center justify-between gap-3 mb-1.5">
+          <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">计划已生成</h3>
+          <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-600 dark:text-sky-400 border border-sky-500/25">
+            待批准执行
+          </span>
+        </div>
+
+        <div className="bg-muted rounded-lg px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-1.5 max-h-32 overflow-auto">
+          {content || '（模型未输出可见计划文本）'}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            disabled={submitting !== null}
+            onClick={approve}
+            className="flex-1 h-8 text-[calc(var(--helix-transcript-size)*0.9286)]"
+          >
+            {submitting === 'approve' ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+            批准并执行
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={submitting !== null}
+            onClick={adjust}
+            className="flex-1 h-8 text-[calc(var(--helix-transcript-size)*0.9286)]"
+          >
+            {submitting === 'adjust' ? <Loader2 className="size-3.5 animate-spin" /> : <Pencil className="size-3.5" />}
+            继续调整
+          </Button>
+        </div>
+
+        <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-1">
+          批准后开始执行，危险操作仍需确认 · ⌘/Ctrl+Enter 批准 · Esc 继续调整
         </div>
       </div>
     </div>

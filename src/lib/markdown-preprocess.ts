@@ -650,11 +650,24 @@ const GLUED_BULLET_ITEM_RE = /(?<=[^\n\s-])(- )(?=[^\s-])(?<![A-Za-z0-9] - [A-Za
 const GLUED_BULLET_NOSPACE_LINE_START_RE = /^( {0,3})-(?=[*_\p{L}])/gmu
 const GLUED_BULLET_NOSPACE_MIDLINE_RE = /(?<=\p{Script=Han})-(?=\p{Script=Han}{4})/gu
 
+// Glued-list repair must NOT touch inline code spans: `` `- hermes-cli` `` —
+// `- ` inside backticks is a literal dash, not a bullet. Without the
+// INLINE_CODE_SPLIT_RE guard, GLUED_BULLET_ITEM_RE inserts a `\n` into the
+// code span, splitting the backtick pair so CommonMark renders the backticks
+// literally and the code text as a list item (user-visible: `` ` `` 换行
+// `` hermes-cli` `` 而非行内代码)。Same protection pattern as
+// normalizeVisibleProse — only prose segments get the list repair.
 function normalizeGluedListItems(text: string): string {
-  const numbered = text.replace(GLUED_LIST_ITEM_RE, '\n$1')
-  const withSpacedBullets = numbered.replace(GLUED_BULLET_ITEM_RE, '\n$1')
-  const withNospaceLineStart = withSpacedBullets.replace(GLUED_BULLET_NOSPACE_LINE_START_RE, '$1- ')
-  return withNospaceLineStart.replace(GLUED_BULLET_NOSPACE_MIDLINE_RE, '\n- ')
+  return text
+    .split(INLINE_CODE_SPLIT_RE)
+    .map(part => {
+      if (part.startsWith('`')) return part
+      const numbered = part.replace(GLUED_LIST_ITEM_RE, '\n$1')
+      const withSpacedBullets = numbered.replace(GLUED_BULLET_ITEM_RE, '\n$1')
+      const withNospaceLineStart = withSpacedBullets.replace(GLUED_BULLET_NOSPACE_LINE_START_RE, '$1- ')
+      return withNospaceLineStart.replace(GLUED_BULLET_NOSPACE_MIDLINE_RE, '\n- ')
+    })
+    .join('')
 }
 
 const processCache = new Map<string, string>()

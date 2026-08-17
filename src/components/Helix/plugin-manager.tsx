@@ -102,11 +102,11 @@ export function PluginManager({ onClose }: PluginManagerProps) {
           </div>
 
           {backendLoading && backendPlugins.length === 0 ? (
-            <div className="text-center py-12 text-[var(--helix-transcript-size)] text-muted-foreground/60 flex items-center justify-center gap-2">
+            <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-muted-foreground/60 flex items-center justify-center gap-2">
               <Loader2 className="size-4 animate-spin" /> 正在加载后端插件...
             </div>
           ) : backendError ? (
-            <div className="text-center py-12 text-[var(--helix-transcript-size)] text-red-500/80">
+            <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-red-500/80">
               <p>无法连接 Hermes 网关加载插件</p>
               <p className="text-muted-foreground/50 mt-1 text-[calc(var(--helix-transcript-size)*0.8571)]">{backendError}</p>
               <button
@@ -117,7 +117,7 @@ export function PluginManager({ onClose }: PluginManagerProps) {
               </button>
             </div>
           ) : backendPlugins.length === 0 ? (
-            <div className="text-center py-12 text-[var(--helix-transcript-size)] text-muted-foreground/60">
+            <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-muted-foreground/60">
               暂无后端插件，可在 Hermes 中执行 hermes plugins install owner/repo 安装
             </div>
           ) : (
@@ -127,7 +127,7 @@ export function PluginManager({ onClose }: PluginManagerProps) {
               >
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">{p.name}</span>
+                    <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">{p.name}</span>
                     <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 font-mono">v{p.version || '-'}</span>
                     {p.source === 'bundled' ? (
                       <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">内置</span>

@@ -221,7 +221,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between px-5 py-4 border-b border-border/60">
           <div className="flex items-center gap-2">
             <FolderOpen className="size-4 text-amber-400" />
-            <h2 className="text-[var(--helix-transcript-size)] font-semibold">会话管理</h2>
+            <h2 className="text-[length:var(--helix-transcript-size)] font-semibold">会话管理</h2>
             <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded-full">
               {sessions.length} 个会话
             </span>
@@ -273,7 +273,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
           ) : filteredSessions.length === 0 ? (
             <div className="px-5 py-12 text-center">
               <FolderOpen className="size-8 text-muted-foreground/20 mx-auto mb-3" />
-              <p className="text-[var(--helix-transcript-size)] text-muted-foreground">
+              <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground">
                 {searchQuery ? '没有匹配的会话' : '暂无保存的会话'}
               </p>
             </div>
@@ -361,7 +361,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                 <AlertTriangle className="size-5 text-red-500" />
               </div>
               <div>
-                <h3 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">删除会话</h3>
+                <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">删除会话</h3>
                 <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mt-0.5">
                   确定要删除「{deleteTarget.label}」吗？此操作不可撤销。
                 </p>

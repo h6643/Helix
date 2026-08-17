@@ -42,6 +42,20 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
   const [skills, setSkills] = useState<HelixSkill[]>([])
   const [skillsLoading, setSkillsLoading] = useState(false)
 
+  // 模型供应商由独立的 provider UI 管理，不应作为通用插件出现在插件页。
+  // 两类都要拦：
+  //   1) 命名空间式：`model-providers/openai`、`provider/xxx`（bundled 目录，key 带斜杠）
+  //   2) entry-point 式：`anthropic-provider`、`openai-provider`…（pip 安装的独立包，
+  //      key = ep.name，直接以 `-provider` 结尾，不在 model-providers/ 命名空间下）
+  const isProviderPlugin = (p: BackendPlugin): boolean => {
+    const k = (p.key || p.name || '').toLowerCase()
+    return (
+      k === 'model-providers' || k.startsWith('model-providers/') ||
+      k === 'provider' || k.startsWith('provider/') ||
+      k.endsWith('-provider')
+    )
+  }
+
   const loadPlugins = async () => {
     setPluginsLoading(true)
     try {
@@ -51,6 +65,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
       if (Array.isArray(res?.plugins)) {
         const seen = new Set<string>()
         setPlugins(res.plugins.filter((p: BackendPlugin) => {
+          if (isProviderPlugin(p)) return false
           if (seen.has(p.name)) return false
           seen.add(p.name)
           return true
@@ -135,6 +150,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
     if (activeTab !== 'plugins') return []
     const q = searchQuery.trim().toLowerCase()
     return plugins.filter(p => {
+      if (isProviderPlugin(p)) return false
       if (!q) return true
       return (
         p.name.toLowerCase().includes(q) ||
@@ -209,13 +225,13 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={activeTab === 'plugins' ? '搜索插件...' : '搜索技能...'}
-              className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+              className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
             />
           </div>
 
           {/* Section header */}
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">
+            <h2 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
               {activeTab === 'plugins' ? `已安装 (${filteredPlugins.length})` : `已安装 (${filteredSkills.length})`}
             </h2>
           </div>
@@ -224,7 +240,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
           {!isEmpty ? (activeTab === 'plugins' ? (
             <div className="space-y-2">
               {pluginsLoading && plugins.length === 0 && (
-                <p className="text-[var(--helix-transcript-size)] text-muted-foreground/60 text-center py-8">加载中...</p>
+                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground/60 text-center py-8">加载中...</p>
               )}
               {filteredPlugins.map(plugin => (
                   <div
@@ -233,7 +249,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
                   >
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <p className="text-[var(--helix-transcript-size)] font-medium text-foreground truncate">{plugin.name}</p>
+                        <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground truncate">{plugin.name}</p>
                         {plugin.source === 'bundled' && (
                           <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-primary/10 text-primary">内置</span>
                         )}
@@ -277,7 +293,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
           ) : (
             <div className="space-y-2">
               {skillsLoading && skills.length === 0 && (
-                <p className="text-[var(--helix-transcript-size)] text-muted-foreground/60 text-center py-8">加载中...</p>
+                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground/60 text-center py-8">加载中...</p>
               )}
               {filteredSkills.map(skill => (
                 <div
@@ -286,7 +302,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">{skill.name}</span>
+                      <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">{skill.name}</span>
                       <span className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded font-medium ${
                         skill.isBuiltin
                           ? 'bg-primary/10 text-primary'
@@ -317,7 +333,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
               ))}
             </div>
           )) : (
-            <div className="text-center py-12 text-[var(--helix-transcript-size)] text-muted-foreground/60">
+            <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-muted-foreground/60">
               {activeTab === 'plugins' ? '暂无已安装插件' : '暂无技能'}
             </div>
           )}

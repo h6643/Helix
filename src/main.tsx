@@ -19,7 +19,7 @@ createRoot(document.getElementById('root')!).render(
   <Suspense
     fallback={
       <div className="h-screen w-screen flex items-center justify-center bg-background">
-        <div className="text-[var(--helix-transcript-size)] text-muted-foreground">Loading Helix...</div>
+        <div className="text-[length:var(--helix-transcript-size)] text-muted-foreground">Loading Helix...</div>
       </div>
     }
   >

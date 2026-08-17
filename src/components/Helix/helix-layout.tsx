@@ -72,7 +72,6 @@ const SessionManager = lazy(() => import('./session-manager').then(m => ({ defau
 const ApiSettings = lazy(() => import('./api-settings').then(m => ({ default: m.ApiSettings })))
 const SkillPanel = lazy(() => import('./skill-panel').then(m => ({ default: m.SkillPanel })))
 const ScheduledTasksPanel = lazy(() => import('./scheduled-tasks-panel').then(m => ({ default: m.ScheduledTasksPanel })))
-const TaskListPanel = lazy(() => import('./task-list-panel').then(m => ({ default: m.TaskListPanel })))
 const CustomizePanel = lazy(() => import('./customize-panel').then(m => ({ default: m.CustomizePanel })))
 const RuntimePanel = lazy(() => import('./runtime-panel').then(m => ({ default: m.RuntimePanel })))
 const ActivityFeed = lazy(() => import('./activity-feed').then(m => ({ default: m.ActivityFeed })))
@@ -84,6 +83,9 @@ const WorktreePanel = lazy(() => import('./worktree-panel').then(m => ({ default
 const PluginManagerPanel = lazy(() => import('./plugin-manager').then(m => ({ default: m.PluginManager })))
 const KanbanPanel = lazy(() => import('./kanban-panel').then(m => ({ default: m.KanbanPanel })))
 const DelegationsPanel = lazy(() => import('./delegations-panel').then(m => ({ default: m.DelegationsPanel })))
+const RollbackPanel = lazy(() => import('./rollback-panel').then(m => ({ default: m.RollbackPanel })))
+const BackendSessionsPanel = lazy(() => import('./backend-sessions-panel').then(m => ({ default: m.BackendSessionsPanel })))
+const ProjectsPanel = lazy(() => import('./projects-panel').then(m => ({ default: m.ProjectsPanel })))
 const RightSidebar = lazy(() => import('./right-sidebar').then(m => ({ default: m.RightSidebar })))
 import { MoreActionsMenu } from './more-actions-menu'
 
@@ -95,7 +97,7 @@ function PanelSuspense({ children }: { children: React.ReactNode }) {
   return (
     <Suspense
       fallback={
-        <div className="h-full w-full flex items-center justify-center text-[var(--helix-transcript-size)] text-muted-foreground">
+        <div className="h-full w-full flex items-center justify-center text-[length:var(--helix-transcript-size)] text-muted-foreground">
           正在加载…
         </div>
       }
@@ -203,8 +205,6 @@ export function HelixLayout() {
   const rightSidebarWidthRef = useRef(rightSidebarWidth)
   rightSidebarWidthRef.current = rightSidebarWidth
   const [isMaximized, setIsMaximized] = useState(false)
-  const [hasTaskList, setHasTaskList] = useState(false)
-  const [showTaskListPanel, setShowTaskListPanel] = useState(false)
   const dragStartX = useRef(0)
   const dragStartW = useRef(0)
   const rightDragStartX = useRef(0)
@@ -322,6 +322,9 @@ export function HelixLayout() {
   const showActivityFeed = useHelixStore(s => s.showActivityFeed)
   const showArtifactsBrowser = useHelixStore(s => s.showArtifactsBrowser)
   const showPluginManager = useHelixStore(s => s.showPluginManager)
+  const showRollbackPanel = useHelixStore(s => s.showRollbackPanel)
+  const showBackendSessionsPanel = useHelixStore(s => s.showBackendSessionsPanel)
+  const showProjectsPanel = useHelixStore(s => s.showProjectsPanel)
   // 打开任一主区覆盖页（计划/插件管理/技能/运行时/工作树）时，聊天区用
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
   // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
@@ -988,21 +991,11 @@ export function HelixLayout() {
     return () => { cancelled = true; if (timer) clearInterval(timer) }
   }, [])
 
-  // Check if Hermes backend has a task list
-  useEffect(() => {
-    if (!isElectron()) return
-    let cancelled = false
-    electronHermes.send('hermes:getTasks').then((result: any) => {
-      if (cancelled) return
-      const list = Array.isArray(result) ? result : result?.tasks ?? result?.items ?? []
-      setHasTaskList(Array.isArray(list) && list.length > 0)
-    }).catch(() => {
-      // Backend may not support this method — silently hide the button
-    })
-    return () => { cancelled = true }
-  }, [])
+  // ── Task list ───────────────────────────────────────────────────────────
+  // 后端没有任务清单 RPC（hermes:getTasks 是空桩），任务清单 = 前端已接收的
+  // live todos（来自 session/update 的 todo/plan 负载）。
 
-    const windowMenuItems: (WindowMenuItem | { divider: true })[] = useMemo(() => [
+  const windowMenuItems: (WindowMenuItem | { divider: true })[] = useMemo(() => [
     { label: '新建窗口', shortcut: 'Ctrl+Shift+N', action: () => { window.open(window.location.href, '_blank'); closeWindowMenu() } },
     { label: '关闭窗口', shortcut: 'Ctrl+Shift+W', action: () => { window.close(); closeWindowMenu() } },
     { divider: true },
@@ -1148,7 +1141,7 @@ export function HelixLayout() {
                     版本 v{appVersion || '0.1.2'}
                   </div>
                   <button
-                    className="w-full px-3 py-2 text-[var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
+                    className="w-full px-3 py-2 text-[length:var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
                     onClick={async () => {
                       setHelpMenuOpen(false)
                       try {
@@ -1186,7 +1179,7 @@ export function HelixLayout() {
                   </button>
                 <div className="h-px bg-border/60 my-1" />
                 <button
-                  className="w-full px-3 py-2 text-[var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
+                  className="w-full px-3 py-2 text-[length:var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
                   onClick={() => {
                     setHelpMenuOpen(false)
                     window.open('https://github.com/h6643/Helix', '_blank')
@@ -1331,13 +1324,10 @@ export function HelixLayout() {
                       )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
-                  {(hermesTodos.length > 0 || hasTaskList) && (
+                  {(hermesTodos.length > 0) && (
                     <div className="relative" ref={todoPopoverRef}>
                       <button
-                        onClick={() => {
-                          if (hermesTodos.length > 0) setTodoPopoverOpen(o => !o)
-                          else if (hasTaskList) setShowTaskListPanel(true)
-                        }}
+                        onClick={() => setTodoPopoverOpen(o => !o)}
                         className={`relative p-1.5 rounded-lg transition-colors ${todoPopoverOpen ? 'text-primary bg-primary/10' : 'text-foreground/50 hover:text-foreground hover:bg-accent/60'}`}
                         data-tip="任务清单"
                       >
@@ -1356,15 +1346,6 @@ export function HelixLayout() {
                               <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
                                 {hermesTodos.filter(t => t.status === 'completed').length}/{hermesTodos.length}
                               </span>
-                              {hasTaskList && (
-                                <button
-                                  onClick={() => { setTodoPopoverOpen(false); setShowTaskListPanel(true) }}
-                                  className="text-[calc(var(--helix-transcript-size)*0.7857)] text-primary hover:underline"
-                                  data-tip="编辑任务"
-                                >
-                                  编辑
-                                </button>
-                              )}
                             </div>
                           </div>
                           <ul className="py-1">
@@ -1415,7 +1396,7 @@ export function HelixLayout() {
                                   <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/80 truncate">{del.id}</span>
                                 </div>
                                 <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
-                                  {del.tasks.length} 个任务
+                                  {(del.tasks || []).length} 个任务
                                 </div>
                               </div>
                             ))}
@@ -1432,11 +1413,11 @@ export function HelixLayout() {
                       )}
                     </div>
                   )}
-                  {/* 后台任务按钮（终端按钮左侧）：常驻占位，当前会话无任务时透明不可点。
-                      不能条件挂载——任务启动的瞬间按钮闪入/闪出会把右侧的终端、更多操作
-                      顶来顶去（表现为"按钮一闪"）。用透明度淡入淡出替代。 */}
+                  {/* 后台任务按钮（终端按钮左侧）：无任务时收起为 0 宽（不再留
+                       phantom 间距）；用 width+opacity 平滑过渡替代条件挂载，
+                      避免任务启动瞬间按钮闪入/闪出把右侧终端、更多操作顶来顶去。 */}
                   <div
-                    className={`relative transition-opacity duration-200 ${myBgTasks.length === 0 ? 'opacity-0 pointer-events-none' : ''}`}
+                    className={`relative overflow-hidden transition-all duration-200 ${myBgTasks.length === 0 ? 'opacity-0 pointer-events-none w-0' : 'w-8'}`}
                     ref={bgTasksRef}
                   >
                     <button
@@ -1572,9 +1553,10 @@ export function HelixLayout() {
       </div>
       {/* Overlay panels */}
       <Suspense fallback={null}>
-        {showTaskListPanel && <TaskListPanel onClose={() => setShowTaskListPanel(false)} />}
-
         {showSessionManager && <SessionManager onClose={() => storeActions.toggleSessionManager()} />}
+        {showRollbackPanel && <RollbackPanel sessionId={activeSessionId ?? ''} onClose={() => storeActions.toggleRollbackPanel()} />}
+        {showBackendSessionsPanel && <BackendSessionsPanel sessionId={activeSessionId ?? ''} onClose={() => storeActions.toggleBackendSessionsPanel()} />}
+        {showProjectsPanel && <ProjectsPanel onClose={() => storeActions.toggleProjectsPanel()} />}
         {showCustomizePanel && <CustomizePanel onClose={() => storeActions.toggleCustomizePanel()} />}
         {showSettings && (
           <ApiSettings

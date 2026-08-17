@@ -172,8 +172,8 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   toggleCodeFullscreen: () => void
   showLearningView: boolean
   toggleLearningView: () => void
-  approvalMode: 'default' | 'accept_edits' | 'dont_ask'
-  setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask') => void
+  approvalMode: 'default' | 'accept_edits' | 'dont_ask' | 'plan'
+  setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask' | 'plan') => void
   // 每个会话是否有待用户确认（审批/反问/定时任务），侧边栏据此显示标记
   sessionPendingApproval: Record<string, boolean>
   setSessionPendingApproval: (patch: Record<string, boolean>) => void
@@ -326,6 +326,7 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   addChatMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => string
   updateChatMessage: (messageId: string, content: string) => void
   setChatMessageStreaming: (messageId: string, isStreaming: boolean) => void
+  setChatMessageRowId: (messageId: string, rowId: number) => void
   deleteMessage: (messageId: string) => void
   clearChat: () => void
   clearChatInPlace: () => Promise<void>
@@ -1190,7 +1191,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   })),
   toggleCodeFullscreen: () => set((s) => ({ codeFullscreen: !s.codeFullscreen })),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
-  setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask') => set({ approvalMode: v }),
+  setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask' | 'plan') => set({ approvalMode: v }),
   sessionPendingApproval: {},
   setSessionPendingApproval: (patch: Record<string, boolean>) => set((s) => ({ sessionPendingApproval: { ...s.sessionPendingApproval, ...patch } })),
   setStartupGreeting: (v: string) => set((s) => ({ startupGreeting: v })),
@@ -1241,6 +1242,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set((state) => ({
       chatMessages: state.chatMessages.map((m) =>
         m.id === messageId ? { ...m, isStreaming } : m
+      ),
+    })),
+
+  setChatMessageRowId: (messageId, rowId) =>
+    set((state) => ({
+      chatMessages: state.chatMessages.map((m) =>
+        m.id === messageId ? { ...m, rowId } : m
       ),
     })),
 
@@ -1668,14 +1676,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
     }),
   setCurrentSessionId: (id) => set((state) => {
-    if (!id) return { currentSessionId: id, activeSessionWorkDir: null }
+    if (!id) return { currentSessionId: id, activeSessionWorkDir: null, hermesTodos: [] }
     // Skip if clicking the same session that's already loaded
     if (id === state.currentSessionId) return {}
+    // 任务清单跟随会话：恢复目标会话缓存的 todo 列表（无则清空）
+    const hermesTodos = state.hermesTodosBySession?.[id] ?? []
     const history = [...state.sessionHistory]
     const idx = state.sessionHistoryIndex
     // Check if the target ID already exists at the current position (deduplicate)
     if (history[idx] === id) {
-      return { currentSessionId: id }
+      return { currentSessionId: id, hermesTodos }
     }
     // Remove any forward history when navigating to a new session
     const newHistory = [...history.slice(0, idx + 1), id]
@@ -1683,6 +1693,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       currentSessionId: id,
       sessionHistory: newHistory,
       sessionHistoryIndex: newHistory.length - 1,
+      hermesTodos,
     }
   }),
   navigateSession: async (direction) => {
@@ -2751,11 +2762,21 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // catches genuinely bad model/endpoint pairings, so keeping the user's
       // explicit choice here is safe.
       const builtActiveModel: string | null =
-        activeModel || (mergedProviders.length > 0
-          ? (mergedProviders.find((p) => p.isDefault && (p.models?.length || 0) > 0)?.models[0] ||
-             mergedProviders.find((p) => (p.models?.length || 0) > 0)?.models[0] ||
-             null)
-          : null)
+        // 优先 activeProfileId 指向的 profile 的模型：activeModel 与
+        // activeProfileId 可能不一致（旧版 applyProfile 漏更新 activeModel，
+        // 残留 deepseek-v4-flash 而 profile 指向 Ling）—— profile 是用户最近
+        // 的显式选择，应以其模型为准；profile 无模型时才回退 activeModel。
+        (() => {
+          if (loadedActiveProfileId) {
+            const prof = (apiProfiles || []).find((p) => p.id === loadedActiveProfileId)
+            if (prof?.config?.model) return prof.config.model
+          }
+          return activeModel || (mergedProviders.length > 0
+            ? (mergedProviders.find((p) => p.isDefault && (p.models?.length || 0) > 0)?.models[0] ||
+               mergedProviders.find((p) => (p.models?.length || 0) > 0)?.models[0] ||
+               null)
+            : null)
+        })()
       // Resolve the active provider: prefer the owner of the active model, then
       // a saved id that still exists (only when it agrees with that owner or the
       // model has no clear owner), then the default/first provider.

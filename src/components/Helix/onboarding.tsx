@@ -58,7 +58,7 @@ export function Onboarding() {
                   <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
                     <Icon className="size-5 text-primary" />
                   </div>
-                  <h2 className="text-[var(--helix-transcript-size)] font-semibold">{s.title}</h2>
+                  <h2 className="text-[length:var(--helix-transcript-size)] font-semibold">{s.title}</h2>
                 </div>
                 <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground leading-relaxed">{s.desc}</p>
               </div>

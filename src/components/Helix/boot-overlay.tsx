@@ -119,7 +119,7 @@ export function BootOverlay() {
           )}
         </div>
 
-        <h1 className="text-[var(--helix-transcript-size)] font-semibold mb-1">
+        <h1 className="text-[length:var(--helix-transcript-size)] font-semibold mb-1">
           {isBootstrapping
             ? (STAGE_LABELS[bootstrapStage!] ?? bootstrapMessage)
             : isConnecting

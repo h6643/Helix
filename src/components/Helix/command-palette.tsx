@@ -311,7 +311,7 @@ export function CommandPalette() {
             >
               {item.icon}
               <div className="flex-1 min-w-0">
-                <p className="text-[var(--helix-transcript-size)] font-medium truncate">{item.label}</p>
+                <p className="text-[length:var(--helix-transcript-size)] font-medium truncate">{item.label}</p>
                 {item.description && (
                   <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground truncate">
                     {item.description}
@@ -353,7 +353,7 @@ export function CommandPalette() {
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="搜索文件或输入命令..."
-            className="flex-1 py-3.5 bg-transparent text-[var(--helix-transcript-size)] outline-none placeholder:text-muted-foreground"
+            className="flex-1 py-3.5 bg-transparent text-[length:var(--helix-transcript-size)] outline-none placeholder:text-muted-foreground"
           />
           <kbd className="hidden sm:flex items-center gap-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
             ESC
@@ -362,7 +362,7 @@ export function CommandPalette() {
         {/* Results */}
         <div className="max-h-80 overflow-y-auto">
           {filtered.length === 0 && (
-            <div className="px-4 py-8 text-center text-[var(--helix-transcript-size)] text-muted-foreground">
+            <div className="px-4 py-8 text-center text-[length:var(--helix-transcript-size)] text-muted-foreground">
               没有找到匹配的结果
             </div>
           )}

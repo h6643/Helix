@@ -582,7 +582,7 @@ export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefres
         </div>
       )}
       {/* Tree */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 text-[var(--helix-transcript-size)]">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 text-[length:var(--helix-transcript-size)]">
         {loading && items.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground/40">
             <Loader2 className="size-4 animate-spin" />

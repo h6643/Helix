@@ -335,7 +335,7 @@ function ChannelsSettings() {
     <div className="max-w-3xl space-y-4">
       <div className="flex items-center justify-between">
         <SectionTitle>Channels</SectionTitle>
-        <button onClick={addChannel} className="flex items-center gap-1.5 text-[var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors">
+        <button onClick={addChannel} className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors">
           + 添加渠道
         </button>
       </div>
@@ -344,7 +344,7 @@ function ChannelsSettings() {
           <div key={channel.id} className="border border-border/50 rounded-xl overflow-hidden">
             <div className="flex items-center justify-between p-4 hover:bg-accent/30 transition-colors">
               <div className="flex-1 min-w-0">
-                <p className="text-[var(--helix-transcript-size)] font-medium text-foreground">{channel.name || channel.id}</p>
+                <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">{channel.name || channel.id}</p>
                 <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-0.5">{channel.description}</p>
               </div>
               <div className="flex items-center gap-2 shrink-0 ml-4">
@@ -371,7 +371,7 @@ function ChannelsSettings() {
                     <input
                       value={channel.name}
                       onChange={e => updateChannelMeta(channel.id, { name: e.target.value })}
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                   </div>
                   <div>
@@ -379,7 +379,7 @@ function ChannelsSettings() {
                     <input
                       value={channel.description}
                       onChange={e => updateChannelMeta(channel.id, { description: e.target.value })}
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
+                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                   </div>
                 </div>
@@ -390,14 +390,14 @@ function ChannelsSettings() {
                       <input
                         value={key}
                         onChange={e => renameConfigKey(channel.id, key, e.target.value)}
-                        className="w-2/5 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground text-center font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                        className="w-2/5 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground text-center font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                       />
                       <input
                         type={key.toLowerCase().includes('secret') || key.toLowerCase().includes('token') || key.toLowerCase().includes('password') ? 'password' : 'text'}
                         value={value}
                         onChange={e => handleConfigChange(channel.id, key, e.target.value)}
                         placeholder={`Enter ${key.replace(/_/g, ' ')}`}
-                        className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                       />
                       <button
                         onClick={() => removeConfigKey(channel.id, key)}
@@ -864,6 +864,13 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     if (!p) return
     setLocalConfig({ ...p.config })
     setApiConfig({ ...p.config })
+    // 同步 activeModel 到该 profile 的模型：applyProfile 之前只更新 apiConfig /
+    // activeProviderId / activeProfileId，漏了 activeModel —— 重启时
+    // restoreFromStorage 以 activeModel 为准（builtActiveModel），残留的旧模型
+    // （如 deepseek-v4-flash）会把一切拉回旧端点（"每次重启都是 deepseek"）。
+    if (p.config.model) {
+      useHelixStore.setState({ activeModel: p.config.model })
+    }
     // Re-anchor activeProviderId to the profile's endpoint. applyProfile used to
     // leave it at the previously-active provider, so the chat dropdown's open
     // refetch hit the wrong endpoint and the selector dropped to 1 model.
@@ -1103,9 +1110,20 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     }
     useHelixStore.getState().setCurrentSessionId(session.id)
     pushNavigation({ type: 'chat', sessionId: session.id })
+    // 恢复 = 取消归档：把 isArchived 置回 false，让会话回到侧边栏主列表。
+    // 之前只加载内容不改归档标记 → toast 显示"已恢复"但会话仍留在归档里，
+    // 主列表看不到 → "实际没效果"。
+    if (session.isArchived) {
+      await persistence.saveSession({
+        ...session,
+        isArchived: false,
+        savedAt: Date.now(),
+      })
+    }
     await persistToStorage()
+    await loadArchives()
     showToast({ type: 'success', title: '已恢复', description: session.label })
-  }, [showToast, persistToStorage])
+  }, [showToast, persistToStorage, loadArchives])
 
   // ── Shared components ─────────────────────────────────────────────────────
   const SettingRow = ({ icon, label, children }: { icon: React.ReactNode; label: string; children: React.ReactNode }) => (
@@ -1113,7 +1131,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       <div className="flex items-center gap-3 flex-1 min-w-0">
         <span className="text-muted-foreground shrink-0">{icon}</span>
         <div className="min-w-0">
-          <p className="text-[var(--helix-transcript-size)] font-medium text-foreground">{label}</p>
+          <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">{label}</p>
         </div>
       </div>
       <div className="shrink-0">{children}</div>
@@ -1133,7 +1151,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className="flex-1 px-3 py-2 bg-transparent text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none font-mono"
+        className="flex-1 px-3 py-2 bg-transparent text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none font-mono"
       />
       {suffix && <span className="pr-3">{suffix}</span>}
     </div>
@@ -1259,7 +1277,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               {isActive && <span className="size-1.5 rounded-full bg-primary shrink-0" />}
-              <p className={`text-[var(--helix-transcript-size)] truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
+              <p className={`text-[length:var(--helix-transcript-size)] truncate ${isActive ? 'font-semibold text-primary' : 'font-medium text-foreground'}`}>{h.model}</p>
             </div>
             <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 truncate mt-0.5 font-mono">{h.baseUrl}</p>
           </div>
@@ -1328,7 +1346,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                     setShowModelDropdown(false)
                     setShowAddModelModal(true)
                   }}
-                  className="flex items-center gap-1.5 text-[var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
+                  className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
                 >
                   添加模型
                 </button>
@@ -1336,7 +1354,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               {modelTab === 'main' && showAddModelModal && (
                 <button
                   onClick={() => setShowAddModelModal(false)}
-                  className="text-[var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
+                  className="text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
                   data-tip="关闭"
                 >
                   关闭
@@ -1383,7 +1401,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         <button
                           type="button"
                           onClick={() => { setIsCustomProvider(false); setCustomInputFocused(false) }}
-                          className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground hover:bg-accent/50 transition-colors"
+                          className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground hover:bg-accent/50 transition-colors"
                           data-tip="返回列表"
                         >
                           返回
@@ -1455,7 +1473,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                                 key={model}
                                 type="button"
                                 onClick={() => { setLocalConfig(prev => ({ ...prev, model })); setShowModelDropdown(false) }}
-                                className={`w-full text-left px-3 py-2 rounded-md text-[var(--helix-transcript-size)] font-mono transition-colors ${
+                                className={`w-full text-left px-3 py-2 rounded-md text-[length:var(--helix-transcript-size)] font-mono transition-colors ${
                                   localConfig.model === model
                                     ? 'bg-primary/10 text-primary'
                                     : 'text-foreground/70 hover:bg-muted'
@@ -1508,14 +1526,14 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               {!isAddingMcp && !editingMcpName ? (
                 <button
                   onClick={() => { setIsAddingMcp(true); resetMcpForm() }}
-                  className="flex items-center gap-1.5 text-[var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
+                  className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
                 >
                   添加服务器
                 </button>
               ) : (
                 <button
                   onClick={() => { setIsAddingMcp(false); setEditingMcpName(null); resetMcpForm() }}
-                  className="text-[var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
+                  className="text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
                   data-tip="关闭"
                 >
                   关闭
@@ -1542,7 +1560,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
-                              <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">{name}</span>
+                              <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">{name}</span>
                               <span className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full font-medium ${cfg?.url ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}>
                                 {cfg?.url ? '远程' : '本地'}
                               </span>
@@ -1581,7 +1599,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
-                            <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">{name}</span>
+                            <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">{name}</span>
                             <span className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full font-medium ${config.type === 'local' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'}`}>
                               {config.type === 'local' ? '本地' : '远程'}
                             </span>
@@ -1608,7 +1626,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
                 {mcpServerNames.length === 0 && (
                   <div className="max-w-3xl flex flex-col items-center justify-center py-12 text-center">
-                    <p className="text-[var(--helix-transcript-size)] font-medium text-foreground/60">暂无 MCP 服务器</p>
+                    <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground/60">暂无 MCP 服务器</p>
                   </div>
                 )}
               </>
@@ -1637,7 +1655,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             <section className="space-y-3">
               {archives.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <p className="text-[var(--helix-transcript-size)] font-medium text-foreground/60">暂无归档记录</p>
+                  <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground/60">暂无归档记录</p>
                 </div>
               ) : (
                 <div className="space-y-1.5">
@@ -1646,7 +1664,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                         onClick={() => handleLoadArchive(a.id)}
                         className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-card shadow-sm cursor-pointer transition-colors group hover:bg-muted/40">
                         <div className="flex-1 min-w-0">
-                          <p className="text-[var(--helix-transcript-size)] font-medium text-foreground truncate">{a.label}</p>
+                          <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground truncate">{a.label}</p>
                           <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-0.5">{a.messageCount} 条消息</p>
                         </div>
                         <button onClick={(e) => { e.stopPropagation(); handleDeleteArchive(a.id) }}
@@ -1713,18 +1731,18 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                   })}
                 >
                   <div className="flex items-center gap-2">
-                    <span className="text-[var(--helix-transcript-size)] font-medium text-foreground">关于</span>
+                    <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">关于</span>
                   </div>
                 </button>
                 <div className={`p-4 space-y-4 ${collapsedSections.has('about') ? 'hidden' : ''}`}>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="text-[var(--helix-transcript-size)] text-muted-foreground">版本</span>
-                      <span className="text-[var(--helix-transcript-size)] font-mono text-foreground">v{appVersion || '0.1.2'}</span>
+                      <span className="text-[length:var(--helix-transcript-size)] text-muted-foreground">版本</span>
+                      <span className="text-[length:var(--helix-transcript-size)] font-mono text-foreground">v{appVersion || '0.1.2'}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-[var(--helix-transcript-size)] text-muted-foreground">许可证</span>
-                      <span className="text-[var(--helix-transcript-size)] text-foreground">MIT License</span>
+                      <span className="text-[length:var(--helix-transcript-size)] text-muted-foreground">许可证</span>
+                      <span className="text-[length:var(--helix-transcript-size)] text-foreground">MIT License</span>
                     </div>
                   </div>
                   <div className="pt-2 border-t border-border/50 flex justify-end">

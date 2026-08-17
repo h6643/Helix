@@ -173,7 +173,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
   if (!isElectron()) {
     return (
       <div className="h-full flex items-center justify-center">
-        <p className="text-[var(--helix-transcript-size)] text-muted-foreground">看板功能仅在桌面版可用</p>
+        <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground">看板功能仅在桌面版可用</p>
       </div>
     )
   }
@@ -594,7 +594,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
         {error ? (
           <div className="flex flex-col items-center justify-center gap-2 py-16 text-red-500 mx-auto">
             <AlertCircle className="size-5" />
-            <p className="text-[var(--helix-transcript-size)]">{error}</p>
+            <p className="text-[length:var(--helix-transcript-size)]">{error}</p>
             <button onClick={refresh} className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground">重试</button>
           </div>
         ) : loading ? (
@@ -624,7 +624,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/40">
           <div className="w-[460px] max-h-[80vh] overflow-y-auto rounded-xl border border-border/50 bg-card shadow-2xl p-5">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">新建任务</h3>
+              <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">新建任务</h3>
               <button onClick={() => setShowCreate(false)} className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/60">
                 <X className="size-4" />
               </button>
@@ -636,14 +636,14 @@ export function KanbanPanel(_props: KanbanPanelProps) {
                 onChange={e => setCreateForm(f => ({ ...f, title: e.target.value }))}
                 placeholder="任务标题 *"
                 autoFocus
-                className="w-full px-3 py-2 rounded-lg border border-border/60 bg-muted/30 text-[var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
+                className="w-full px-3 py-2 rounded-lg border border-border/60 bg-muted/30 text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
               />
               <textarea
                 value={createForm.body}
                 onChange={e => setCreateForm(f => ({ ...f, body: e.target.value }))}
                 placeholder="任务描述（可选）"
                 rows={4}
-                className="w-full px-3 py-2 rounded-lg border border-border/60 bg-muted/30 text-[var(--helix-transcript-size)] resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+                className="w-full px-3 py-2 rounded-lg border border-border/60 bg-muted/30 text-[length:var(--helix-transcript-size)] resize-none focus:outline-none focus:ring-2 focus:ring-ring"
               />
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -651,7 +651,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
                   <select
                     value={createForm.assignee}
                     onChange={e => setCreateForm(f => ({ ...f, assignee: e.target.value }))}
-                    className="w-full h-9 px-3 rounded-lg border border-border/60 bg-muted/30 text-[var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
+                    className="w-full h-9 px-3 rounded-lg border border-border/60 bg-muted/30 text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
                   >
                     <option value="">未指派</option>
                     {assignees.map(a => (
@@ -664,7 +664,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
                   <select
                     value={createForm.initialStatus}
                     onChange={e => setCreateForm(f => ({ ...f, initialStatus: e.target.value as '' | 'blocked' | 'running' }))}
-                    className="w-full h-9 px-3 rounded-lg border border-border/60 bg-muted/30 text-[var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
+                    className="w-full h-9 px-3 rounded-lg border border-border/60 bg-muted/30 text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
                   >
                     <option value="">就绪 (ready)</option>
                     <option value="blocked">受阻 (blocked)</option>
@@ -698,7 +698,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/40">
           <div className="w-[380px] rounded-xl border border-border/50 bg-card shadow-2xl p-5">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">新建看板</h3>
+              <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">新建看板</h3>
               <button onClick={() => setShowNewBoard(false)} className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/60">
                 <X className="size-4" />
               </button>
@@ -710,14 +710,14 @@ export function KanbanPanel(_props: KanbanPanelProps) {
                 onChange={e => setBoardForm(f => ({ ...f, slug: e.target.value }))}
                 placeholder="slug (kebab-case，如 my-project) *"
                 autoFocus
-                className="w-full px-3 py-2 rounded-lg border border-border/60 bg-muted/30 text-[var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
+                className="w-full px-3 py-2 rounded-lg border border-border/60 bg-muted/30 text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
               />
               <input
                 type="text"
                 value={boardForm.name}
                 onChange={e => setBoardForm(f => ({ ...f, name: e.target.value }))}
                 placeholder="显示名称（可选）"
-                className="w-full px-3 py-2 rounded-lg border border-border/60 bg-muted/30 text-[var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
+                className="w-full px-3 py-2 rounded-lg border border-border/60 bg-muted/30 text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-ring"
               />
               <div className="flex justify-end gap-2 pt-1">
                 <button
@@ -756,7 +756,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
                   )}
                   <span className="text-[calc(var(--helix-transcript-size)*0.7143)] font-mono text-muted-foreground/50">{detailId}</span>
                 </div>
-                <h3 className="text-[var(--helix-transcript-size)] font-semibold text-foreground mt-1.5 break-words">
+                <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground mt-1.5 break-words">
                   {activeTask ? activeTask.title : (detailLoading ? '加载中…' : '—')}
                 </h3>
               </div>
@@ -890,7 +890,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
                       <MessageSquare className="size-3" />
                       评论（{(detail?.comments || []).length}）
                     </div>
-                    {detail && detail.comments.length > 0 ? (
+                    {detail && (detail.comments || []).length > 0 ? (
                       <div className="space-y-2">
                         {detail.comments.map((c, i) => (
                           <div key={c.id ?? i} className="rounded-lg border border-border/50 bg-muted/20 px-3 py-2">
@@ -926,14 +926,14 @@ export function KanbanPanel(_props: KanbanPanelProps) {
                     </div>
                   </div>
 
-                  {detail && detail.events.length > 0 && (
+                  {detail && (detail.events || []).length > 0 && (
                     <div>
                       <button
                         onClick={() => setShowEvents(v => !v)}
                         className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground hover:text-foreground transition-colors"
                       >
                         <Clock className="size-3" />
-                        事件记录（{detail.events.length}）
+                        事件记录（{(detail.events || []).length}）
                         <ChevronDown className={cn('size-3 transition-transform', showEvents && 'rotate-180')} />
                       </button>
                       {showEvents && (
@@ -958,7 +958,7 @@ export function KanbanPanel(_props: KanbanPanelProps) {
               </>
             ) : (
               <div className="flex-1 flex items-center justify-center">
-                <p className="text-[var(--helix-transcript-size)] text-muted-foreground/60">任务不存在或已删除</p>
+                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground/60">任务不存在或已删除</p>
               </div>
             )}
           </div>

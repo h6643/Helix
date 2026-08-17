@@ -198,7 +198,7 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
 
   if (!isElectron()) {
     return (
-      <div className="flex items-center justify-center h-64 text-muted-foreground text-[var(--helix-transcript-size)]">
+      <div className="flex items-center justify-center h-64 text-muted-foreground text-[length:var(--helix-transcript-size)]">
         子 agent 面板仅在桌面版可用
       </div>
     )
@@ -212,7 +212,7 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
       <div className="flex items-center justify-between px-4 py-3 border-b border-border/50">
         <div className="flex items-center gap-2">
           <Users className="size-4 text-primary" />
-          <h2 className="text-[var(--helix-transcript-size)] font-semibold text-foreground">子 Agent</h2>
+          <h2 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">子 Agent</h2>
           {runningCount > 0 && (
             <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-primary/10 text-primary">
               {runningCount} 运行中
@@ -266,9 +266,9 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
               <Loader2 className="size-5 animate-spin text-primary" />
             </div>
           ) : error ? (
-            <div className="flex items-center justify-center h-24 text-destructive text-[var(--helix-transcript-size)]">{error}</div>
+            <div className="flex items-center justify-center h-24 text-destructive text-[length:var(--helix-transcript-size)]">{error}</div>
           ) : delegations.length === 0 && !showLive ? (
-            <div className="flex flex-col items-center justify-center h-32 text-muted-foreground text-[var(--helix-transcript-size)]">
+            <div className="flex flex-col items-center justify-center h-32 text-muted-foreground text-[length:var(--helix-transcript-size)]">
               <Users className="size-8 mb-2 opacity-30" />
               <p>暂无子 agent 记录</p>
               <p className="text-[calc(var(--helix-transcript-size)*0.8571)] mt-1">使用 delegate_task 时会在这里显示</p>
@@ -297,13 +297,13 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
                         {del.id}
                       </span>
                       <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground ml-auto">
-                        {del.tasks.length} 个任务
+                        {(del.tasks || []).length} 个任务
                       </span>
                     </button>
 
                     {isExpanded && (
                       <div className="border-t border-border/30 bg-muted/20">
-                        {del.tasks.map((task) => (
+                        {(del.tasks || []).map((task) => (
                           <button
                             key={task.name}
                             onClick={() => loadLog(task.path, task.name)}

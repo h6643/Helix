@@ -295,7 +295,7 @@ function CodeCard({ language, code, blockId }: { language: string; code: string;
       <div>
         <div className="flex items-center justify-between mb-1.5">
         <span className="text-[calc(var(--helix-transcript-size)*0.7143)] uppercase tracking-wider text-foreground/40 select-none font-medium">
-          {isDiff ? 'diff' : language || (boxDiagram ? 'text' : 'code')}
+          {isDiff ? 'diff' : `${language || (boxDiagram ? 'text' : 'code')} · ${lineCount} 行`}
         </span>
         <span className="flex items-center gap-1">
           {canRun && (

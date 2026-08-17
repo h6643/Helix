@@ -252,8 +252,8 @@ export function WebSearchSettings() {
                         </label>
                         <input
                           type="password"
-                          value={apiKeys[provider.envKey] || ''}
-                          onChange={(e) => setApiKeys({ ...apiKeys, [provider.envKey]: e.target.value })}
+                          value={apiKeys[provider.id] || ''}
+                          onChange={(e) => setApiKeys({ ...apiKeys, [provider.id]: e.target.value })}
                           placeholder={`输入 ${provider.envKey}`}
                           className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground text-center placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring"
                         />

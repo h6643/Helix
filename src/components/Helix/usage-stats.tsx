@@ -25,14 +25,14 @@ export function ModelUsageStats() {
           <span className="text-right">成本</span>
         </div>
         {entries.sort((a, b) => b[1].total - a[1].total).map(([model, usage]) => (
-          <div key={model} className="grid grid-cols-4 gap-2 px-4 py-2.5 border-b border-border/50 last:border-0 text-[var(--helix-transcript-size)]">
+          <div key={model} className="grid grid-cols-4 gap-2 px-4 py-2.5 border-b border-border/50 last:border-0 text-[length:var(--helix-transcript-size)]">
             <span className="font-mono text-foreground truncate">{model}</span>
             <span className="text-right text-foreground/70 font-mono">{formatTokens(usage.prompt)}</span>
             <span className="text-right text-foreground/70 font-mono">{formatTokens(usage.completion)}</span>
             <span className="text-right text-foreground/70 font-mono">${usage.cost.toFixed(4)}</span>
           </div>
         ))}
-        <div className="grid grid-cols-4 gap-2 px-4 py-2.5 bg-muted/30 text-[var(--helix-transcript-size)] font-medium">
+        <div className="grid grid-cols-4 gap-2 px-4 py-2.5 bg-muted/30 text-[length:var(--helix-transcript-size)] font-medium">
           <span>总计</span>
           <span className="text-right font-mono">{formatTokens(entries.reduce((s, [, u]) => s + u.prompt, 0))}</span>
           <span className="text-right font-mono">{formatTokens(entries.reduce((s, [, u]) => s + u.completion, 0))}</span>
@@ -125,7 +125,7 @@ export function UsageDetail() {
           <span className="text-right">成本</span>
         </div>
         {rows.map((r, i) => (
-          <div key={i} className="grid grid-cols-4 gap-2 px-4 py-2 border-b border-border/50 last:border-0 text-[var(--helix-transcript-size)]">
+          <div key={i} className="grid grid-cols-4 gap-2 px-4 py-2 border-b border-border/50 last:border-0 text-[length:var(--helix-transcript-size)]">
             <span className="text-foreground/60">{new Date(r.timestamp).toLocaleTimeString()}</span>
             <span className="font-mono text-foreground truncate">{r.model}</span>
             <span className="text-right font-mono text-foreground/70">{formatTokens(r.tokens)}</span>
@@ -146,7 +146,7 @@ export function TokenUsagePanel() {
   if (stats.requestCount === 0) {
     return (
       <section className="rounded-xl border border-border/40 bg-muted/20 px-5 py-12 text-center">
-        <p className="text-[var(--helix-transcript-size)] text-muted-foreground/70">尚未获取到用量数据</p>
+        <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground/70">尚未获取到用量数据</p>
         <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 mt-1.5">运行一次对话后，这里会自动显示 Token 消耗情况</p>
       </section>
     )
@@ -201,7 +201,7 @@ export function TokenUsagePanel() {
       <div className="rounded-xl border border-border/40 bg-card p-4">
         <div className="flex items-center justify-between px-0.5">
           <div className="flex items-center gap-3">
-            <h3 className="text-[var(--helix-transcript-size)] font-medium text-foreground">每日用量</h3>
+            <h3 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">每日用量</h3>
             <div className="flex items-center rounded-lg border border-border/40 p-0.5">
               {([7, 30] as const).map(n => (
                 <button
@@ -232,7 +232,7 @@ export function TokenUsagePanel() {
       {/* Activity heatmap — real dailyUsage data (GitHub-style grid), replaces the old static placeholder PNG */}
       <div className="rounded-xl border border-border/40 bg-card p-4">
         <div className="flex items-center justify-between px-0.5">
-          <h3 className="text-[var(--helix-transcript-size)] font-medium text-foreground">活跃热力图</h3>
+          <h3 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">活跃热力图</h3>
           <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">最近 90 天</span>
         </div>
         <UsageHeatmap dailyUsage={dailyUsage} days={90} selectedDay={activeDay} onDaySelect={setSelectedDay} />
@@ -241,12 +241,12 @@ export function TokenUsagePanel() {
       {/* Per-model breakdown for the selected day */}
       <div className="rounded-xl border border-border/40 bg-card">
         <div className="flex items-center justify-between px-4 pt-3 pb-2">
-          <h3 className="text-[var(--helix-transcript-size)] font-medium text-foreground">模型用量明细</h3>
+          <h3 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">模型用量明细</h3>
           <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">{activeDay}</span>
         </div>
         {modelRows.length > 0 ? (
           <div className="overflow-x-auto">
-            <table className="w-full text-[var(--helix-transcript-size)]">
+            <table className="w-full text-[length:var(--helix-transcript-size)]">
               <thead>
                 <tr className="border-b border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
                   <th className="text-left font-medium px-4 py-2">模型</th>
@@ -268,7 +268,7 @@ export function TokenUsagePanel() {
             </table>
           </div>
         ) : (
-          <p className="px-4 pb-4 text-[var(--helix-transcript-size)] text-muted-foreground/50">该日无用量数据</p>
+          <p className="px-4 pb-4 text-[length:var(--helix-transcript-size)] text-muted-foreground/50">该日无用量数据</p>
         )}
       </div>
 

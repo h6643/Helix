@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
 import { SettingRow, SettingGroup, SectionHeading, Toggle, PopupSelect } from './settings-ui'
 import { electronApp, electronDialog } from '@/lib/electron-bridge'
+import { CodingContextSetting } from './agents-settings'
 
 /** 归档保留时长选项（小时）— 任务最后更新时间早于该时长才进入自动归档候选。 */
 const RETENTION_OPTIONS = [
@@ -155,6 +156,8 @@ export function GeneralSettingsPanel() {
   return (
     <div className="space-y-4">
       <SectionHeading>常规</SectionHeading>
+
+      <CodingContextSetting />
 
       <SettingGroup>
         <SettingRow

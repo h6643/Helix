@@ -36,7 +36,7 @@ function ContextUsageBar({ used, total, categories }: { used: number; total: num
   return (
     <div className="w-full">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-[var(--helix-transcript-size)] font-semibold text-foreground">~{formatTokens(used)}</span>
+        <span className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">~{formatTokens(used)}</span>
         <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
           / {formatTokens(total)} &middot; {percentage.toFixed(1)}%
         </span>
@@ -140,11 +140,15 @@ export function ContextUsageIndicator() {
         // 持久化的真实用量覆盖成 0，导致环「重启后显示 0」。后端为 0（未就绪/
         // 空会话）时保留本地快照——圆环会回退到本地持久值，不会无故归零。
         const hasRealUsage = (data.context_used || 0) > 0 && (data.context_max || 0) > 0
-        if (hasRealUsage) {
+        // 分类数据只要有就持久化（即使 breakdown 的用量估算为 0）：分类是
+        // 唯一来源，不写就永远丢，重启后必显示"暂无上下文分类数据"。
+        // size/used 用本地已有值兜底，避免被估算 0 覆盖。
+        if (hasRealUsage || (data.categories?.length ?? 0) > 0) {
+          const localPrev = useHelixStore.getState().contextUsage[currentSessionId ?? '']
           useHelixStore.getState().setContextUsage(
             currentSessionId ?? sessionId,
-            data.context_max,
-            data.context_used,
+            data.context_max || localPrev?.size || 0,
+            data.context_used || localPrev?.used || 0,
             data.categories?.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
           )
         }

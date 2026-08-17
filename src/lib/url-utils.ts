@@ -24,3 +24,16 @@ export function cleanUrl(raw: string): string {
   } while (url !== prev && url)
   return url
 }
+
+/** 网页标题/标签页展示用摘要：file 协议取文件名，其余取 hostname。 */
+export function summarizeUrl(url: string): string {
+  if (!url) return ''
+  try {
+    const u = new URL(url)
+    if (u.protocol === 'file:') {
+      const name = decodeURIComponent(u.pathname).split('/').pop()
+      return name || url
+    }
+    return u.hostname || url
+  } catch { return url }
+}

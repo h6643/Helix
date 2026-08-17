@@ -248,10 +248,14 @@ export function BrowserView({
   const [pickSrcDoc, setPickSrcDoc] = useState<string | null>(null)
   const [pickError, setPickError] = useState('')
   const pickErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [pickedCount, setPickedCount] = useState(0)
+  const pickedCountRef = useRef(0)
 
   const exitPick = () => {
     setPickMode(false)
     setPickSrcDoc(null)
+    setPickedCount(0)
+    pickedCountRef.current = 0
   }
 
   const enterPick = async () => {
@@ -286,9 +290,10 @@ export function BrowserView({
             url: link,
             title: text.slice(0, 80) || '',
           })
-        } else {
-          // 纯文本元素（无链接）：不往输入框塞文字，但给出选取反馈，避免"点了没反应"
-          useHelixStore.getState().showToast({ type: 'info', title: `已选取元素（无链接）`, duration: 1200 })
+          pickedCountRef.current += 1
+          const n = pickedCountRef.current
+          setPickedCount(n)
+          useHelixStore.getState().showToast({ type: 'info', title: `已添加 ${n} 个网页链接`, duration: 1200 })
         }
       } else if (data.type === 'HELIX_PICKED_CANCEL') {
         exitPick()

@@ -349,7 +349,7 @@ export function DiffPreview({ changes, onApply, onApplyAll, onReject, onRejectAl
         <div className="flex items-center justify-between px-4 py-3 border-b border-border/60 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-            <span className="text-[var(--helix-transcript-size)] font-semibold">代码变更预览</span>
+            <span className="text-[length:var(--helix-transcript-size)] font-semibold">代码变更预览</span>
             <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground bg-muted px-2 py-0.5 rounded-full">
               {changes.length} 个文件
             </span>

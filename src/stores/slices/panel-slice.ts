@@ -23,6 +23,9 @@ export interface PanelSlice {
   showWorktreePanel: boolean
   showPluginManager: boolean
   showKanbanPanel: boolean
+  showRollbackPanel: boolean
+  showBackendSessionsPanel: boolean
+  showProjectsPanel: boolean
   availableCommands: AvailableCommand[]
   /**
    * Hermes's in-session todo list, captured from `session/update` events that
@@ -30,6 +33,9 @@ export interface PanelSlice {
    * hidden until the backend actually streams a list.
    */
   hermesTodos: HermesTodo[]
+  /** 按会话缓存的 todo 列表（仅内存，不持久化）：切会话时按 currentSessionId
+   *  恢复对应清单，避免 A 会话的任务清单串到 B 会话。 */
+  hermesTodosBySession: Record<string, HermesTodo[]>
   toggleCommandPalette: () => void
   setCommandPaletteOpen: (open: boolean) => void
   toggleTaskPanel: () => void
@@ -46,9 +52,14 @@ export interface PanelSlice {
   toggleWorktreePanel: () => void
   togglePluginManager: () => void
   toggleKanbanPanel: () => void
+  toggleRollbackPanel: () => void
+  toggleBackendSessionsPanel: () => void
+  toggleProjectsPanel: () => void
   setAvailableCommands: (cmds: AvailableCommand[]) => void
-  /** Replace the Hermes todo list (called whenever a fresh todo payload arrives). */
-  setHermesTodos: (todos: HermesTodo[]) => void
+  /** Replace the Hermes todo list (called whenever a fresh todo payload arrives).
+   *  sessionId 标识该清单归属的 UI 会话：写入按会话缓存，且仅当它就是当前
+   *  查看的会话时才更新展示列表（并行 run 不互相覆盖）。 */
+  setHermesTodos: (todos: HermesTodo[], sessionId?: string) => void
   /** Clear the todo list (e.g. when a run completes or the session is reset). */
   clearHermesTodos: () => void
 }
@@ -66,8 +77,12 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   showWorktreePanel: false,
   showPluginManager: false,
   showKanbanPanel: false,
+  showRollbackPanel: false,
+  showBackendSessionsPanel: false,
+  showProjectsPanel: false,
   availableCommands: [],
   hermesTodos: [],
+  hermesTodosBySession: {},
 
   toggleCommandPalette: () =>
     set((state) => ({ showCommandPalette: !state.showCommandPalette })),
@@ -120,7 +135,20 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   toggleWorktreePanel: () => set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
   togglePluginManager: () => set((s) => ({ showPluginManager: !s.showPluginManager })),
   toggleKanbanPanel: () => set((s) => ({ showKanbanPanel: !s.showKanbanPanel })),
+  toggleRollbackPanel: () => set((s) => ({ showRollbackPanel: !s.showRollbackPanel })),
+  toggleBackendSessionsPanel: () => set((s) => ({ showBackendSessionsPanel: !s.showBackendSessionsPanel })),
+  toggleProjectsPanel: () => set((s) => ({ showProjectsPanel: !s.showProjectsPanel })),
   setAvailableCommands: (cmds) => set({ availableCommands: cmds }),
-  setHermesTodos: (todos) => set({ hermesTodos: todos }),
+  setHermesTodos: (todos, sessionId) => set((s) => {
+    const bySession = sessionId
+      ? { ...s.hermesTodosBySession, [sessionId]: todos }
+      : s.hermesTodosBySession
+    const cur = (s as unknown as { currentSessionId: string | null }).currentSessionId
+    const isVisible = sessionId === undefined || sessionId === cur
+    return {
+      hermesTodosBySession: bySession,
+      ...(isVisible ? { hermesTodos: todos } : {}),
+    }
+  }),
   clearHermesTodos: () => set({ hermesTodos: [] }),
 })

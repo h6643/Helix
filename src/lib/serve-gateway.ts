@@ -24,32 +24,6 @@ import { warn, error as logError, debug } from '@/lib/logger'
 import { installTauriBridge } from '@/lib/tauri-bridge'
 import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
 
-// ── PROBE v2: WS 接收层原始字节记录（临时调试，验证后删除）──
-// 记录 onmessage 拿到的每个文本事件帧完整字节，用于对比：
-//   客户端 onmessage 原始字节 vs state.db 真源 vs IndexedDB 快照
-// 判定「serve 写出坏 / 传输层丢 / 客户端内部处理坏」三层归属。
-const PROBE_KEY = 'helix-ws-bytes-v2'
-function probeWsBytes(data: string): void {
-  try {
-    for (const line of data.split('\n')) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      let obj: any
-      try { obj = JSON.parse(trimmed) } catch { continue }
-      const t = obj?.params?.type
-      if (t !== 'message.delta' && t !== 'message.complete' && t !== 'run.completed' && t !== 'message.start' && t !== 'run.cancelled') continue
-      const text = obj?.params?.payload?.text ?? obj?.params?.payload?.output ?? ''
-      const sid = obj?.params?.session_id ?? ''
-      const rec = { at: Date.now(), kind: t, sid: String(sid).slice(-6), len: typeof text === 'string' ? text.length : -1, body: typeof text === 'string' ? text : null }
-      let buf: any[] = []
-      try { const b = JSON.parse(localStorage.getItem(PROBE_KEY) || '[]'); if (Array.isArray(b)) buf = b } catch { buf = [] }
-      buf.push(rec)
-      if (buf.length > 400) buf.splice(0, buf.length - 400)
-      try { localStorage.setItem(PROBE_KEY, JSON.stringify(buf)) } catch { buf.splice(0, Math.floor(buf.length / 2)); try { localStorage.setItem(PROBE_KEY, JSON.stringify(buf)) } catch { /* noop */ } }
-    }
-  } catch { /* noop */ }
-}
-
 // ── 类型 ────────────────────────────────────────────────────────────────
 
 export interface ServeGatewayInfo {
@@ -252,7 +226,6 @@ export class ServeGatewayClient {
 
       ws.onmessage = (ev) => {
         const data = typeof ev.data === 'string' ? ev.data : ''
-        probeWsBytes(data) // PROBE: 接收层原始字节
         // 换行分隔：一帧可能含多行 JSON
         for (const line of data.split('\n')) {
           const trimmed = line.trim()
@@ -463,11 +436,6 @@ export class ServeGatewayClient {
 
   private translateEvent(type: string, sessionId: string | undefined, payload: any): void {
     const base = { session_id: sessionId, ...payload }
-    // ── 并发串台诊断日志（临时）：记录事件帧所属 sid ──
-    if (type === 'message.start' || type === 'message.delta' || type === 'message.complete'
-        || type === 'run.completed' || type === 'run.cancelled' || type === 'run.failed') {
-      console.log('[ServeEvent]', JSON.stringify({ type, sid: sessionId }))
-    }
 
     switch (type) {
       case 'gateway.ready':
@@ -745,6 +713,15 @@ export class ServeGatewayClient {
           if (bgSt.tasks.some(t => t.id === toolId)) bgSt.finishTask(toolId, taskStatus)
         }
         this.emit('tool.complete', { ...base, tool_call_id: toolId, tool_name: name, inline_diff: inlineDiff })
+        // Hermes `todo` 工具：后端 tool.complete 在 payload.todos 附带全量列表，
+        // 转成专门的 todo_update 事件喂给 extractTodoList，驱动右上角任务面板
+        // （否则 todo 只作为工具卡片出现在对话流里，面板永远为空）。
+        if (Array.isArray(payload?.todos) && payload.todos.length) {
+          this.emit('session/update', {
+            session_id: sessionId,
+            update: { sessionUpdate: 'todo_update', todos: payload.todos },
+          })
+        }
         this.emit('session/update', {
           session_id: sessionId,
           update: {
@@ -937,8 +914,6 @@ export class ServeGatewayClient {
         // agent-flow-panel 据此收尾）。只把 session 记为 in-flight，供 WS 断连重连后
         // session.resume 恢复事件流（见 resumeInflightSessions）。
         try {
-          // ── 并发串台诊断日志（临时） ──
-          console.log('[ServePrompt]', JSON.stringify({ sid: sessionId, text: text.slice(0, 50) }))
           await this.rpc('prompt.submit', { session_id: sessionId, text })
         } catch (err) {
           // "session not found" 的自动恢复兜底（对齐主进程 ACP 路径）。正常
@@ -980,12 +955,21 @@ export class ServeGatewayClient {
         // - default / accept_edits（请求批准 / 替我审批）→ yolo off：后端发 approval.request，
         //   前端 classifyApproval 分流——项目内文件修改自动批，危险命令/项目外文件/敏感文件/
         //   上传外发弹窗。分流只在 yolo off 时才有物可分。
+        // - plan（计划/只读）→ yolo off：后端照常发审批，前端 classifyApproval 对
+        //   所有操作（含项目内文件修改）一律弹窗，用户不批 = 只读探索。
         const mode = params?.mode_id ?? params?.mode
+        // 把 UI 审批模式同步到后端（config.set ui_approval_mode）：后端据此决定
+        // 项目内写文件是否也要发审批（default/plan 全拦，accept_edits/dont_ask
+        // 只拦敏感路径），使前后端审批行为对齐。
+        if (mode === 'default' || mode === 'accept_edits' || mode === 'plan' || mode === 'dont_ask') {
+          this.rpc('config.set', { key: 'ui_approval_mode', value: mode, scope: 'session', session_id: params?.session_id })
+            .catch((e) => { warn('[ServeGateway] config.set ui_approval_mode 失败:', e) })
+        }
         if (mode === 'dont_ask') {
           return this.rpc('config.set', { key: 'yolo', value: 'on', scope: 'session', session_id: params?.session_id })
             .catch((e) => { warn('[ServeGateway] config.set yolo 失败:', e); return {} })
         }
-        // yolo off：确保默认/替我审批模式下后端会发审批请求。
+        // yolo off：确保默认/替我审批/计划模式下后端会发审批请求。
         return this.rpc('config.set', { key: 'yolo', value: 'off', scope: 'session', session_id: params?.session_id })
           .catch((e) => { warn('[ServeGateway] config.set yolo(off) 失败:', e); return {} })
       }

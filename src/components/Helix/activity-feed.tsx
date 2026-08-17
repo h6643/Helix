@@ -97,7 +97,7 @@ export function ActivityFeed({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between px-4 py-3 border-b border-border/60">
           <div className="flex items-center gap-2">
             <Activity className="size-4 text-primary" />
-            <h2 className="text-[var(--helix-transcript-size)] font-semibold">活动流</h2>
+            <h2 className="text-[length:var(--helix-transcript-size)] font-semibold">活动流</h2>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg text-muted-foreground hover:bg-accent/60">
             <X className="size-4" />

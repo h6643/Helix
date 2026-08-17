@@ -465,24 +465,26 @@ export const persistence = {
     const now = Date.now()
     const id = data.id || 'session-' + now
     const { label: dataLabel, ...rest } = data
-    // Preserve createdAt for existing sessions (so switching/loading/re-saving
-    // never reshuffles the sidebar); assign it only when first created.
-    let createdAt = data.createdAt
-    if (createdAt == null) {
-      const existing = await tx<PersistedSession | undefined>(
-        db,
-        'sessions',
-        'readonly',
-        (store) => store.get(id)
-      )
-      createdAt = existing?.createdAt ?? existing?.savedAt ?? now
-    }
+    // Preserve createdAt / isArchived for existing sessions (so switching/
+    // loading/re-saving never reshuffles the sidebar nor resurrects an
+    // archived conversation); assign them only when first created.
+    const existing = await tx<PersistedSession | undefined>(
+      db,
+      'sessions',
+      'readonly',
+      (store) => store.get(id)
+    )
+    const createdAt = data.createdAt ?? existing?.createdAt ?? existing?.savedAt ?? now
     const session: PersistedSession = {
       id,
       label: dataLabel || new Date().toLocaleString('zh-CN'),
       savedAt: data.savedAt || now,
       createdAt,
       workDir: data.workDir ?? null,
+      // 归档标记兜底：调用方没传 isArchived 时保留现有值——否则任何自动保存
+      // （切换会话/发消息/flushSessionPersist 的 put 整体替换）都会把用户
+      // 归档的会话覆盖回未归档，导致归档对话「过后又自动恢复」。
+      isArchived: data.isArchived ?? existing?.isArchived ?? false,
       ...rest,
       chatMessages: rest.chatMessages.map(m => ({ ...m, sessionId: m.sessionId || 'session-default' })),
     }

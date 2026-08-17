@@ -42,10 +42,10 @@ export function McpEditorForm({
       <div className={`p-4 space-y-4 ${fullScreen ? 'flex-1 overflow-y-auto' : ''}`}>
         {/* Name */}
         <div>
-          <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">名称</label>
+          <label className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground mb-1.5">名称</label>
           <input type="text" value={form.name} onChange={e => onChange({ name: e.target.value })}
             placeholder="MCP server name"
-            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
         </div>
 
         {/* Type */}
@@ -53,7 +53,7 @@ export function McpEditorForm({
           <div className="flex gap-2">
             {([['local', 'STDIO'], ['remote', '流式 HTTP']] as const).map(([t, label]) => (
               <button key={t} onClick={() => onChange({ type: t, command: '', url: '' })}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-[var(--helix-transcript-size)] transition-colors ${form.type === t ? 'border-primary bg-primary/10 text-primary' : 'border-border/50 text-muted-foreground hover:bg-accent/50'}`}>
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-[length:var(--helix-transcript-size)] transition-colors ${form.type === t ? 'border-primary bg-primary/10 text-primary' : 'border-border/50 text-muted-foreground hover:bg-accent/50'}`}>
                 {label}
               </button>
             ))}
@@ -63,33 +63,33 @@ export function McpEditorForm({
         {/* Command / URL */}
         {form.type === 'local' ? (
           <div>
-            <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">启动命令</label>
+            <label className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground mb-1.5">启动命令</label>
             <input type="text" value={form.command} onChange={e => onChange({ command: e.target.value })}
               placeholder="npx -y @modelcontextprotocol/server-filesystem ./data"
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
           </div>
         ) : (
           <div>
-            <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">URL</label>
+            <label className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground mb-1.5">URL</label>
             <input type="text" value={form.url} onChange={e => onChange({ url: e.target.value })}
               placeholder="http://localhost:3001/sse"
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
           </div>
         )}
 
         {/* Args */}
         {form.type === 'local' && (
           <div>
-            <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">参数</label>
+            <label className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground mb-1.5">参数</label>
             <input type="text" value={form.args} onChange={e => onChange({ args: e.target.value })}
               placeholder="--port 3000 --verbose"
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
           </div>
         )}
 
         {/* Environment variables */}
         <div>
-          <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">环境变量</label>
+          <label className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground mb-1.5">环境变量</label>
           {envEntries.length > 0 && (
             <div className="space-y-1 mb-2">
               {envEntries.map(([key, val]) => (
@@ -118,10 +118,10 @@ export function McpEditorForm({
 
         {/* Working directory */}
         <div>
-          <label className="block text-[var(--helix-transcript-size)] font-medium text-foreground mb-1.5">工作目录</label>
+          <label className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground mb-1.5">工作目录</label>
           <input type="text" value={form.cwd} onChange={e => onChange({ cwd: e.target.value })}
             placeholder="~/Helix"
-            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
+            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
         </div>
       </div>
 

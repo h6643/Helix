@@ -55,7 +55,7 @@ export function DiffSidebarPanel() {
         {projectChanges.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-12 text-muted-foreground/70">
             <FileDiff className="size-9" strokeWidth={1.5} />
-            <span className="text-[var(--helix-transcript-size)]">暂无变更</span>
+            <span className="text-[length:var(--helix-transcript-size)]">暂无变更</span>
             <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">当前项目对话中的文件修改会自动收集到这里</span>
           </div>
         ) : (
