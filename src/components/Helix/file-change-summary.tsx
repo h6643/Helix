@@ -1,6 +1,6 @@
 'use client'
 
-import { FileCode, ChevronRight } from 'lucide-react'
+import { ChevronRight } from 'lucide-react'
 import React, { useMemo, useState } from 'react'
 import type { PendingChange } from '@/stores/helix-types'
 import { computeDiff, countDiffLines } from './diff-preview'
@@ -63,68 +63,42 @@ function DiffBody({ change }: { change: PendingChange }) {
 }
 
 /**
- * Inline per-file change stats shown directly in the conversation transcript.
- * Each file gets a green `+N` (additions) and red `-N` (deletions/modifications)
- * count; clicking a row expands the full unified diff. Replaces the auto-popping
- * DiffPreview confirmation modal for in-conversation review.
+ * Inline one-line change summary shown in the conversation transcript:
+ * `已编辑 a.py、b.ts +N -N`. Plain text line — no card wrapper. Clicking the
+ * line expands the per-file colored diffs below it.
  */
-export function FileChangeSummary({ changes, hideHeader = false }: { changes: PendingChange[]; hideHeader?: boolean }) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+export function FileChangeSummary({ changes }: { changes: PendingChange[]; hideHeader?: boolean }) {
+  const [expanded, setExpanded] = useState(false)
 
   const stats = useMemo(() => changes.map(countDiffLines), [changes])
 
   if (changes.length === 0) return null
 
-  const toggle = (fileId: string) => {
-    setExpanded(prev => {
-      const next = new Set(prev)
-      if (next.has(fileId)) next.delete(fileId)
-      else next.add(fileId)
-      return next
-    })
-  }
-
   const totalAdded = stats.reduce((sum, s) => sum + s.added, 0)
   const totalRemoved = stats.reduce((sum, s) => sum + s.removed, 0)
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border/40 bg-card/40">
-      {!hideHeader && (
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/30 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70">
-        <span className="font-medium">变更</span>
-        <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">{changes.length} 个文件</span>
-        <span className="ml-auto flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)] tabular-nums">
-          {totalAdded > 0 && <span className="text-emerald-500">+{totalAdded}</span>}
-          {totalRemoved > 0 && <span className="text-red-500">-{totalRemoved}</span>}
+    <div>
+      <button
+        type="button"
+        onClick={() => setExpanded(v => !v)}
+        className="w-full flex items-center gap-1.5 px-1 py-1 text-left text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:bg-muted/30 rounded transition-colors"
+      >
+        <ChevronRight className={`size-3 shrink-0 text-foreground/30 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+        <span className="font-medium">已编辑</span>
+        <span className="flex-1 truncate font-mono text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">{changes.map(c => c.fileName).join('、')}</span>
+        <span className="shrink-0 flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)] tabular-nums">
+          <span className="text-emerald-500">+{totalAdded}</span>
+          <span className="text-red-500">-{totalRemoved}</span>
         </span>
-      </div>
+      </button>
+      {expanded && (
+        <div className="pl-5 pr-1 pb-1 flex flex-col gap-2">
+          {changes.map(change => (
+            <DiffBody key={change.fileId} change={change} />
+          ))}
+        </div>
       )}
-      {changes.map((change, idx) => {
-        const s = stats[idx]
-        const isExpanded = expanded.has(change.fileId)
-        return (
-          <div key={change.fileId} className="border-b border-border/20 last:border-b-0">
-            <button
-              type="button"
-              onClick={() => toggle(change.fileId)}
-              className="w-full flex items-center gap-1.5 px-3 py-1.5 text-left hover:bg-muted/40 transition-colors"
-            >
-              <ChevronRight className={`size-3 shrink-0 text-foreground/30 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
-              <FileCode className="size-3.5 shrink-0 text-sky-500/80" />
-              <span className="flex-1 truncate font-mono text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70">{change.fileName}</span>
-              <span className="shrink-0 tabular-nums text-[calc(var(--helix-transcript-size)*0.7857)]">
-                {s.added > 0 && <span className="text-emerald-500 mr-1.5">+{s.added}</span>}
-                {s.removed > 0 && <span className="text-red-500">-{s.removed}</span>}
-              </span>
-            </button>
-            {isExpanded && (
-              <div className="px-3 pb-2">
-                <DiffBody change={change} />
-              </div>
-            )}
-          </div>
-        )
-      })}
     </div>
   )
 }

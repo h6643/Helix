@@ -42,13 +42,15 @@ import { ContextUsageIndicator } from './context-usage'
 import { getToolDisplayLabel } from '@/lib/tool-display-utils'
 import { InlineToolGroup } from './inline-tool-group'
 import { HistoryStrip } from './history-strip'
+import { FileChangeSummaryCard } from './file-change-summary-card'
 import { FileChangeSummary } from './file-change-summary'
 import { ApprovalDialog, ClarifyBar, PlanReviewBar, type ApprovalRequest, type PlanReviewRequest } from './approval-dialog'
 import type { ApprovalLevel } from '@/hermes-ui/api-client'
 import { ScheduledTaskConfirm } from './scheduled-task-confirm'
 import { useHelixStore, type ImageAttachment, type FileAttachment, type LinkAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
-import type { ChatMessage, HermesTodo } from '@/stores/helix-types'
+import type { ChatMessage, HermesTodo, PendingChange } from '@/stores/helix-types'
+import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
 import { HelixMarkdown } from './helix-markdown'
 
 // ── Persisted per-conversation Hermes session map ──────────────────────────
@@ -754,6 +756,18 @@ function truncateBlocks(blocks: ChatMessage['blocks']): ChatMessage['blocks'] {
   return changed ? next : blocks
 }
 
+function collectFileChanges(blocks: readonly { type: string; changes?: PendingChange[] }[]): PendingChange[] {
+  const byFile = new Map<string, PendingChange>()
+  for (const block of blocks) {
+    if (block.type === 'file_change' && block.changes) {
+      for (const change of block.changes) {
+        if (change.fileId) byFile.set(change.fileId, change)
+      }
+    }
+  }
+  return [...byFile.values()]
+}
+
 function truncateMessage(m: ChatMessage): ChatMessage {
   const content = truncateStr(m.content, MAX_MESSAGE_CHARS)
   const reasoning = truncateStr(m.reasoning, MAX_REASONING_CHARS)
@@ -861,6 +875,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   const reasoning = useMemo(() => normalizeAcpContentRaw(msg.reasoning || ''), [msg.reasoning])
   const messageDuration = msg.duration ?? msg.thinkingTime
   const isStreaming = msg.isStreaming === true
+  const msgFileChanges = useMemo(() => collectFileChanges(msg.blocks ?? []), [msg.blocks])
 
   return (
     <div
@@ -901,7 +916,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                             <span>{extractKaomojiStatus(reasoning).status || '思考'}</span>
                             <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                           </summary>
-                          <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
+                          <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
                             {searchOpen && searchQuery.trim() ? <HighlightText text={reasoning} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={reasoning} />}
                           </div>
                         </details>
@@ -913,7 +928,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                               <span>{extractKaomojiStatus(block.content).status || '思考'}</span>
                               <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                             </summary>
-                            <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
+                            <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
                               {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />}
                             </div>
                           </details>
@@ -964,6 +979,11 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 ) : (
                   <HelixMarkdown text={mdContent} />
                 )}
+              </div>
+            )}
+            {msgFileChanges.length > 0 && (
+              <div className="mt-2">
+                <FileChangeSummaryCard changes={msgFileChanges} />
               </div>
             )}
             {(messageDuration ?? 0) > 0 && (
@@ -1646,6 +1666,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         const parentSid = params?.session_id
         const text = typeof params?.text === 'string' ? params.text : ''
         const taskId = params?.task_id
+        const failed = text.startsWith('error:')
+        if (typeof taskId === 'string' && taskId) {
+          useBackgroundTasksStore.getState().finishTask(taskId, failed ? 'failed' : 'completed')
+        }
         // 通过 session 映射反查它属于哪个对话（后台会话未注册时落到当前对话）。
         let bgCid: string | null = null
         if (parentSid) {
@@ -1658,8 +1682,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           useHelixStore.getState().addChatMessage({ role: 'assistant', content: text, sessionId: target })
         }
         storeActions.showToast({
-          type: 'success',
-          title: '后台任务已完成',
+          type: failed ? 'error' : 'success',
+          title: failed ? '后台任务失败' : '后台任务已完成',
           description: text.slice(0, 80) || (taskId ? `任务 ${taskId} 已完成` : undefined),
           duration: 8000,
         })
@@ -2362,15 +2386,23 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       const all = useHelixStore.getState().chatMessages
       const local = all.filter(m => !m.sessionId || m.sessionId === cid)
       const lastUserIdx = [...local].reverse().findIndex(m => m.role === 'user')
+      const withdrawnText = lastUserIdx >= 0
+        ? normalizeAcpContent(local[local.length - 1 - lastUserIdx].content)
+        : ''
       const kept = lastUserIdx >= 0
         ? all.filter(m => !local.includes(m) || local.indexOf(m) < local.length - 1 - lastUserIdx)
         : all
       useHelixStore.setState({ chatMessages: kept })
-      storeActions.showToast({ type: 'success', title: '已撤回', description: `已截断后端历史（移除 ${removed} 条记录）` })
+      // 撤回后把被撤回的用户消息放回输入框，方便修改后重发
+      if (withdrawnText) {
+        setInputSynced(withdrawnText)
+        requestAnimationFrame(() => inputRef.current?.focus())
+      }
+      storeActions.showToast({ type: 'success', title: '已撤回', description: `已截断后端历史（移除 ${removed} 条记录），原消息已放回输入框` })
     } catch (e) {
       storeActions.showToast({ type: 'error', title: '撤回失败', description: String(e) })
     }
-  }, [currentSessionId, storeActions.showToast])
+  }, [currentSessionId, storeActions.showToast, setInputSynced])
 
   // File picker handler
   const addSelectedFile = useHelixStore(s => s.addSelectedFile)
@@ -2602,8 +2634,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               useHelixStore.getState().addChatMessage({ role: 'user', content: baseTrimmed, sessionId: bgCid })
               // 后台派发是 ack-only 的：只返回 { task_id }，没有流式事件。
               const r = await hermesApi()!.send('prompt.background', { session_id: bgSid, text: bgText })
+              const bgTaskId = (r as any)?.task_id
+              if (typeof bgTaskId === 'string' && bgTaskId) {
+                useBackgroundTasksStore.getState().startTask(bgTaskId, bgText, bgCid)
+              }
               storeActions.showToast({ type: 'success', title: '已转后台执行', description: bgText.slice(0, 40), duration: 4000 })
-              debug('[HelixTrace] /btw dispatched', { bgCid, bgSid, taskId: (r as any)?.task_id })
+              debug('[HelixTrace] /btw dispatched', { bgCid, bgSid, taskId: bgTaskId })
             } catch (e) {
               storeActions.showToast({ type: 'error', title: '后台任务启动失败', description: String(e) })
             }
@@ -3453,9 +3489,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       }
       const pushTodos = (list: HermesTodo[] | null) => {
         if (list && list.length) {
-          // 带上会话级 sessionId：todo 面板按会话聚合，只显示当前 run 所属
-          // 会话的 UI 更新，避免切会话/并发 run 时串台。
-          useHelixStore.getState().setHermesTodos(list, sessionId ?? undefined)
+          // 带上前端对话 id（myCid）：右上角按 currentSessionId 过滤，之前误用
+          // 后端 sid 导致 todo 永远写不进当前会话的缓存（2026-08-18 修复）。
+          useHelixStore.getState().setHermesTodos(list, myCid ?? undefined)
         }
       }
 
@@ -3943,6 +3979,22 @@ promptSentAtRef.current = Date.now()
 
               // Extract file paths from tool params to track directories
               const params = parsed.toolParams || {}
+              // 「后台任务」面板登记（运行中）：只登记显式 background=true 的
+              // terminal/process/bash/docker 进程，跟 Codex 一样——前台命令无论
+              // 跑多久都只是当前对话里的普通执行步骤，不进后台任务面板。
+              // 必须在这里登记而不是 serve-gateway——那里只有后端会话 id，而顶栏按
+              // 前端对话 id（myCid）过滤，口径不一致会导致任务恒被过滤（2026-08-18 修复）。
+              // 终态由 serve-gateway 的 tool.complete / process.exit 按 toolId 标完成。
+              const isBackgroundTool = params.background === true
+                || params.background === 'true'
+                || params.background === 1
+              if (toolCallId && isBackgroundTool && (parsed.toolName === 'terminal' || parsed.toolName === 'process' || parsed.toolName === 'bash' || parsed.toolName === 'docker')) {
+                const cmdStr = (typeof params.command === 'string' && params.command)
+                  || (typeof params.context === 'string' && params.context)
+                  || (typeof params.raw === 'string' && params.raw)
+                  || parsed.toolName
+                useBackgroundTasksStore.getState().startTask(toolCallId, cmdStr, myCid)
+              }
               const pathKeys = ['path', 'file_path', 'filepath', 'filePath', 'file', 'filename']
               let filePath = ''
               for (const k of pathKeys) {
@@ -5099,7 +5151,7 @@ promptSentAtRef.current = Date.now()
           <span className="truncate min-w-0 chat-toolbar-label">
             {approvalMode === 'default' && '请求批准'}
             {approvalMode === 'accept_edits' && '替我审批'}
-            {approvalMode === 'dont_ask' && '完全访问权限'}
+            {approvalMode === 'dont_ask' && '完全访问'}
             {approvalMode === 'plan' && '制定计划'}
           </span>
           <ChevronDown className="size-3" />
@@ -5122,7 +5174,7 @@ promptSentAtRef.current = Date.now()
               {
                 id: 'dont_ask' as const,
                 icon: AlertTriangle,
-                title: '完全访问权限',
+                title: '完全访问',
                 desc: '完全放开',
               },
               {
@@ -5831,8 +5883,12 @@ promptSentAtRef.current = Date.now()
                             <span>{thinkingStatus || '思考中...'}</span>
                             <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                           </summary>
-                          <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/60 break-all leading-relaxed thinking-cap-tall thinking-scroll" style={{ fontSize: transcriptFontSize }}>
-                            {thinkingBody}
+                          <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/60 break-all leading-relaxed thinking-cap-tall thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                            {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                              <HighlightText text={thinkingBody} query={conversationSearchQuery} active={false} />
+                            ) : (
+                              <HelixMarkdown text={thinkingBody} />
+                            )}
                           </div>
                         </details>
                       </div>
@@ -5850,6 +5906,7 @@ promptSentAtRef.current = Date.now()
                       const lastTextIndex = normalizedBlocks.reduce((acc, b, i) => b.type === 'text' ? i : acc, -1)
                       const processBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(0, lastTextIndex) : normalizedBlocks
                       const answerBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(lastTextIndex) : []
+                      const liveFileChanges = collectFileChanges(normalizedBlocks)
                       return (
                       <>
                         {processBlocks.length > 0 && (
@@ -5866,7 +5923,7 @@ promptSentAtRef.current = Date.now()
                                     <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
                                     <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                                   </summary>
-                                  <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                                  <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
                                     {conversationSearchOpen && conversationSearchQuery.trim() ? (
                                       <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
                                     ) : (
@@ -5910,7 +5967,7 @@ promptSentAtRef.current = Date.now()
                                 <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
                                 <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                               </summary>
-                              <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                              <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
                                 {conversationSearchOpen && conversationSearchQuery.trim() ? (
                                   <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
                                 ) : (
@@ -5923,6 +5980,11 @@ promptSentAtRef.current = Date.now()
                           ) : (
                             <InlineToolGroup key={idx} steps={block.steps} isRunning={isRunning} fontSize={transcriptFontSize} />
                           )
+                        )}
+                        {liveFileChanges.length > 0 && (
+                          <div className="mt-2">
+                            <FileChangeSummaryCard changes={liveFileChanges} />
+                          </div>
                         )}
                       </>
                       )
@@ -5942,12 +6004,6 @@ promptSentAtRef.current = Date.now()
                 </div>
               )}
 
-
-
-
-              {/* End of flow area — no summary */}
-
-              {/* End of flow area — no summary */}
             </div>
           )}
         </div>
@@ -6063,4 +6119,3 @@ promptSentAtRef.current = Date.now()
     </div>
   )
 }
-

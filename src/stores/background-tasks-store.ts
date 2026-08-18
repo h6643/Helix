@@ -1,12 +1,13 @@
 import { create } from 'zustand'
 
 /**
- * background-tasks-store.ts — 后台任务状态（serve 网关的 terminal/process 工具）。
+ * background-tasks-store.ts — 后台任务状态（真实后台任务，不做普通命令面板）。
  *
  * 按会话隔离：每个任务记录所属 sessionId，前端（顶栏按钮/面板）只显示当前
  * 会话的任务。数据来源：
- *  - tool.start → startTask（任务登记为 running）
- *  - tool.complete（前台命令）/ process.exit（后台进程真正退出）→ finishTask
+ *  - 显式 background=true 的 terminal/process/bash/docker → startTask
+ *  - /btw prompt.background 派发的后台任务 → startTask
+ *  - tool.complete / process.exit / background.complete → finishTask
  *
  * 不做流式输出累积——面板只需任务名 + 执行时间 + 状态。
  */

@@ -385,7 +385,7 @@ export function PlanReviewBar({ content, onApprove, onAdjust }: PlanReviewBarPro
           </span>
         </div>
 
-        <div className="bg-muted rounded-lg px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-1.5 max-h-32 overflow-auto">
+        <div className="bg-muted rounded-lg px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-1.5 max-h-64 overflow-auto">
           {content || '（模型未输出可见计划文本）'}
         </div>
 

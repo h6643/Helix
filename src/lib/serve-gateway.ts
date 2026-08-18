@@ -619,19 +619,10 @@ export class ServeGatewayClient {
         const name = payload?.name ?? ''
         this.emit(type, { ...base, tool_call_id: toolId, tool_name: name })
         if (type === 'tool.start') {
-          // terminal/process 等命令工具 → 「后台任务」面板登记（运行中）。
-          // 前台命令也会出现在面板：执行中显示"运行中"，tool.complete 时填输出
-          // 并标完成；background=true 的进程由 tool.progress 流式追加 + process.exit
-          // 定终态。这样面板永远反映终端任务活动，不依赖模型是否用 background=true。
-          if (name === 'terminal' || name === 'process' || name === 'bash' || name === 'docker') {
-            const rawInput = payload?.args ?? payload?.args_text ?? (payload?.context ? { context: payload.context } : {})
-            let cmdStr = ''
-            if (typeof rawInput === 'string') cmdStr = rawInput
-            else if (rawInput && typeof rawInput === 'object') {
-              cmdStr = (rawInput as any).command ?? (rawInput as any).context ?? ''
-            }
-            useBackgroundTasksStore.getState().startTask(toolId, cmdStr || name, sessionId ?? '')
-          }
+          // 后台任务登记已移至 agent-flow-panel 的 tool_call 处理处——那里拿得到
+          // 前端对话 id（myCid）；此处只有后端会话 id，与顶栏过滤口径不一致
+          // （2026-08-18 bug：任务恒被过滤，右上角按钮从不显示）。终态 finishTask
+          // 仍在本文件按 toolId 匹配（process.exit / tool.complete），与 id 口径无关。
           this.emit('session/update', {
             session_id: sessionId,
             update: {
@@ -705,12 +696,11 @@ export class ServeGatewayClient {
         // 这不是进程结束，任务终态由后续 process.exit 决定，这里不标完成。
         const isBackgroundSpawn = resultText.includes('Background process started')
         if (!isBackgroundSpawn) {
-          // 仅当任务已存在（tool.start 登记过）才标完成：前台命令/后台 spawn
-          // 都在这里收尾（后台进程的终态另有 process.exit，但 spawn 那次
-          // tool.complete 已被 isBackgroundSpawn 跳过）。
+          // 前台命令在这里收尾（后台进程的终态另有 process.exit，但 spawn 那次
+          // tool.complete 已被 isBackgroundSpawn 跳过）。无条件调用 finishTask，
+          // 未登记的任务只是 no-op。
           const taskStatus = payload?.is_error ? ('failed' as const) : ('completed' as const)
-          const bgSt = useBackgroundTasksStore.getState()
-          if (bgSt.tasks.some(t => t.id === toolId)) bgSt.finishTask(toolId, taskStatus)
+          useBackgroundTasksStore.getState().finishTask(toolId, taskStatus)
         }
         this.emit('tool.complete', { ...base, tool_call_id: toolId, tool_name: name, inline_diff: inlineDiff })
         // Hermes `todo` 工具：后端 tool.complete 在 payload.todos 附带全量列表，

@@ -1290,7 +1290,7 @@ export function HelixLayout() {
         )}
 
         {/* Floating cards container */}
-        <div className="flex-1 flex flex-col mt-3 mr-px mb-1 ml-0 overflow-hidden">
+        <div className="flex-1 flex flex-col mt-1 mr-px mb-1 ml-0 overflow-hidden">
         <div className="flex-1 min-h-0 flex flex-row relative">
         {/* Floating card — main content. Hidden when the code panel is in
             fullscreen (the right sidebar takes over the main area). */}
@@ -1415,9 +1415,11 @@ export function HelixLayout() {
                   )}
                   {/* 后台任务按钮（终端按钮左侧）：无任务时收起为 0 宽（不再留
                        phantom 间距）；用 width+opacity 平滑过渡替代条件挂载，
-                      避免任务启动瞬间按钮闪入/闪出把右侧终端、更多操作顶来顶去。 */}
+                       避免任务启动瞬间按钮闪入/闪出把右侧终端、更多操作顶来顶去。
+                       overflow-hidden 只在收起态加——展开态若保留会把绝对定位的
+                       面板裁剪到 32px 宽盒子里（2026-08-18 bug：点按钮面板不显示）。 */}
                   <div
-                    className={`relative overflow-hidden transition-all duration-200 ${myBgTasks.length === 0 ? 'opacity-0 pointer-events-none w-0' : 'w-8'}`}
+                    className={`relative transition-all duration-200 ${myBgTasks.length === 0 ? 'opacity-0 pointer-events-none w-0 overflow-hidden' : 'w-8'}`}
                     ref={bgTasksRef}
                   >
                     <button

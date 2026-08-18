@@ -115,11 +115,12 @@ export function WebSearchSettings() {
         const result = await api.getConfig()
         if (result?.ok && result.config) {
           const { search_backend, apiKeys: keys } = result.config
-          // Map search_backend to active providers
+          // 激活项仅以 search_backend 为准（后端只支持单引擎）；
+          // .env 里的 API key 只用于预填输入框，不代表该引擎已启用
           const providers: string[] = []
-          if (search_backend === 'tavily' || keys?.tavily) providers.push('tavily')
-          if (search_backend === 'exa' || keys?.exa) providers.push('exa')
-          if (search_backend === 'ddgs') providers.push('ddgs')
+          if (search_backend === 'tavily') providers.push('tavily')
+          else if (search_backend === 'exa') providers.push('exa')
+          else if (search_backend === 'ddgs') providers.push('ddgs')
           setActiveProviders(providers)
           setApiKeys(keys || {})
           if (Array.isArray((result as any).availableProviders)) {
@@ -156,7 +157,11 @@ export function WebSearchSettings() {
       if (isElectron()) {
         const api = (window as any).electron?.webSearch
         if (api?.setConfig) {
-          await api.setConfig(config)
+          const res = await api.setConfig(config)
+          // 后端写盘错误会被吞掉但仍返回 { ok: false }，必须显式检查
+          if (res && res.ok === false) {
+            throw new Error(res.error || 'web_search_save failed')
+          }
         }
       } else {
         // Fallback to localStorage
@@ -193,6 +198,9 @@ export function WebSearchSettings() {
   return (
     <div className="max-w-3xl space-y-4">
       <SectionTitle>搜索引擎</SectionTitle>
+      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 -mt-2">
+        同时只能启用一个搜索引擎，开启新的会自动关闭当前的。
+      </p>
 
       {availableProviders !== null && displayProviders.length === 0 ? (
         <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
@@ -220,9 +228,9 @@ export function WebSearchSettings() {
                     <Toggle
                       enabled={isSelected}
                       onToggle={() => {
-                        const next = isSelected
-                          ? activeProviders.filter(id => id !== provider.id)
-                          : [...activeProviders, provider.id]
+                        // 单选语义：后端 web.search_backend 只支持一个值，
+                        // 开启一个引擎即关闭其余，避免多选状态被优先级塌缩吞掉
+                        const next = isSelected ? [] : [provider.id]
                         setActiveProviders(next)
                         // 开关切换即时落盘：避免离开设置页后组件重挂载读回旧值导致开关复位
                         void persist(next, apiKeys, true)
