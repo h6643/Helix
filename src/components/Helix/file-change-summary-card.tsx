@@ -17,7 +17,7 @@ function DiffBody({ change }: { change: PendingChange }) {
     : fallbackDiff
 
   return (
-    <div className="font-mono text-[calc(var(--helix-transcript-size)*0.7857)] leading-relaxed rounded-md overflow-hidden">
+    <div className="font-mono text-[length:var(--helix-transcript-size)] leading-relaxed rounded-md overflow-hidden">
       {diffLines.map((entry, i) => {
         const line = 'line' in entry ? entry.line : ('content' in entry ? entry.content : '')
         const isHeader = line.startsWith('+++') || line.startsWith('---')
@@ -174,10 +174,10 @@ export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] })
 
   return (
     <div className="overflow-hidden rounded-lg border border-border/40 bg-card/40">
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/30 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70">
-        <span className="font-medium">修改汇总</span>
-        <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">{visibleChanges.length} 个文件</span>
-        <span className="ml-auto flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)] tabular-nums">
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/30 text-[length:var(--helix-transcript-size)] text-foreground/70">
+        <span className="font-medium">已修改</span>
+        <span className="text-[length:var(--helix-transcript-size)] text-muted-foreground">{visibleChanges.length} 个文件</span>
+        <span className="ml-auto flex items-center gap-2 text-[length:var(--helix-transcript-size)] tabular-nums">
           {totalAdded > 0 && <span className="text-emerald-500">+{totalAdded}</span>}
           {totalRemoved > 0 && <span className="text-red-500">-{totalRemoved}</span>}
         </span>
@@ -185,7 +185,7 @@ export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] })
           type="button"
           onClick={handleUndoAll}
           disabled={undoing}
-          className="ml-1.5 flex items-center gap-1 px-1.5 py-0.5 rounded text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/50 hover:text-foreground hover:bg-red-500/10 disabled:opacity-50 transition-colors"
+          className="ml-1.5 flex items-center gap-1 px-1.5 py-0.5 rounded text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-red-500/10 disabled:opacity-50 transition-colors"
           data-tip={undoing ? '撤销中' : '撤销本次回复的全部修改'}
         >
           <Undo2 className={`size-3.5 ${undoing ? 'animate-pulse' : ''}`} />
@@ -203,13 +203,13 @@ export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] })
                 onClick={() => toggle(change.fileId)}
                 className="flex flex-1 min-w-0 items-center gap-1.5 px-3 py-1.5 text-left"
               >
-                <ChevronRight className={`size-3 shrink-0 text-foreground/30 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
                 <FileCode className="size-3.5 shrink-0 text-sky-500/80" />
-                <span className="flex-1 truncate font-mono text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70">{change.fileName}</span>
-                <span className="shrink-0 tabular-nums text-[calc(var(--helix-transcript-size)*0.7857)]">
+                <span className="truncate font-mono text-[length:var(--helix-transcript-size)] text-foreground/70">{change.fileName}</span>
+                <span className="shrink-0 tabular-nums text-[length:var(--helix-transcript-size)]">
                   {s.added > 0 && <span className="text-emerald-500 mr-1.5">+{s.added}</span>}
                   {s.removed > 0 && <span className="text-red-500">-{s.removed}</span>}
                 </span>
+                <ChevronRight className={`size-3 shrink-0 text-foreground/30 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
               </button>
             </div>
             {isExpanded && (

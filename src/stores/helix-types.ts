@@ -127,6 +127,7 @@ export interface ChatMessage {
   totalTokens?: number
   reasoning?: string
   steps?: ExecutionStep[]
+  fileChanges?: PendingChange[]
   blocks?: Array<{ type: 'text'; content: string } | { type: 'thinking'; content: string } | { type: 'tool_group'; steps: ExecutionStep[] } | { type: 'file_change'; changes: PendingChange[] }>
 }
 

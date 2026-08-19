@@ -18,6 +18,11 @@ export interface BackgroundTask {
   /** 命令原文（tool.start 的 context/command） */
   command: string
   status: 'running' | 'completed' | 'failed'
+  /** 用户暂停标记：进程树已被后端挂起（process.pause） */
+  paused?: boolean
+  /** process_registry 会话 id（proc_xxx），tool.complete 结果里带回，
+   *  pause/resume RPC 的直查凭据 */
+  procSessionId?: string
   startedAt: number
   finishedAt?: number
   /** 所属会话 id —— 顶栏/面板按它过滤，各对话只见自己的任务 */
@@ -30,6 +35,10 @@ interface BackgroundTasksState {
   startTask: (id: string, command: string, sessionId: string) => void
   /** 标记任务完成/失败（仅 running → 终态，避免重复标记） */
   finishTask: (id: string, status: 'completed' | 'failed') => void
+  /** 记录暂停/恢复状态（本地乐观更新，由面板 RPC 成功后调用） */
+  setTaskPaused: (id: string, paused: boolean) => void
+  /** 记录 process_registry 会话 id（tool.complete 结果带回） */
+  setTaskProcId: (id: string, procSessionId: string) => void
   /** 清空已完成/失败的任务（保留运行中的） */
   clearFinished: () => void
   /** 移除单个任务 */
@@ -59,8 +68,26 @@ export const useBackgroundTasksStore = create<BackgroundTasksState>((set) => ({
     set((s) => ({
       tasks: s.tasks.map((t) =>
         t.id === id && t.status === 'running'
-          ? { ...t, status, finishedAt: Date.now() }
+          ? { ...t, status, finishedAt: Date.now(), paused: false }
           : t
+      ),
+    }))
+  },
+
+  setTaskPaused: (id, paused) => {
+    if (!id) return
+    set((s) => ({
+      tasks: s.tasks.map((t) =>
+        t.id === id && t.status === 'running' ? { ...t, paused } : t
+      ),
+    }))
+  },
+
+  setTaskProcId: (id, procSessionId) => {
+    if (!id || !procSessionId) return
+    set((s) => ({
+      tasks: s.tasks.map((t) =>
+        t.id === id ? { ...t, procSessionId } : t
       ),
     }))
   },

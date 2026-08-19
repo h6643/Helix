@@ -203,8 +203,18 @@ function ResultRenderer({ content, toolName }: { content: string; toolName: stri
 function toolActionText(step: ExecutionStep): string {
   const path = extractToolPath(step)
   if (path) return path
+  // 非命令工具（GUI/浏览器/MCP 等）的参数经常把正文/代码/错误说明塞在 text/input
+  // 里，直接拿它当标题会显示 "Clear the draft's responseBlocks" 这类内容。非命令
+  // 工具只显示工具名，不拿参数当标题。
+  const isCommandTool = /bash|terminal|shell|run|execute|command/i.test(step.toolName || '')
+  if (!isCommandTool) return ''
   const cmd = extractCommandSnippet(step.toolParams)
   if (cmd) {
+    // 非命令工具（GUI/浏览器/MCP 等）的参数可能把错误文案放在 text/input 里，
+    // 直接拿它当标题会变成 "指令完成 (gui.lock) prevented..."。明显是错误/拦截
+    // 说明时不当作命令标题，回退到工具名。
+    const looksLikeError = /^\(|prevented|failed|error|cannot|unable|permission|denied|timeout/i.test(cmd)
+    if (looksLikeError) return ''
     // execute_code：不裸显示代码第一行（如 "const id = …"），优先提取
     // 有意义的标识（函数/类定义、行注释），提取不到就显示稳定的「执行代码」。
     if (step.toolName === 'execute_code') {
@@ -353,7 +363,9 @@ function ToolCard({
   const path = extractToolPath(step)
   const hasSubSteps = step.subSteps && step.subSteps.length > 0
   const hasParams = !hasSubSteps && !!step.toolParams && Object.keys(step.toolParams).length > 0
-  const stepStatus = step.status || (step.finishedAt ? 'completed' : step.startedAt ? 'running' : undefined)
+  const stepStatus = results.length > 0
+    ? (step.status === 'failed' ? 'failed' : 'completed')
+    : (step.status || (step.finishedAt ? 'completed' : step.startedAt ? 'running' : undefined))
   const running = stepStatus === 'running' && isRunning
   const failed = stepStatus === 'failed'
   const action = toolActionText(step)

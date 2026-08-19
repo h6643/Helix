@@ -2,8 +2,10 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { hermesApi } from '@/lib/electron-bridge'
+import { captureContextBreakdown } from '@/lib/context-capture'
 import { formatTokens } from '@/lib/format'
 import { debug } from '@/lib/logger'
+import { resolveBackendSid } from '@/lib/session-map'
 import { useHelixStore } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
 
@@ -20,6 +22,7 @@ interface ContextUsageData {
   context_max: number
   context_used: number
   context_percent: number
+  estimated_total?: number
   categories: ContextBreakdown[]
 }
 
@@ -70,7 +73,7 @@ function ContextUsagePanel({ used, total, categories, onClose }: { used: number;
       <div className="mt-3 space-y-1.5">
         {categories.filter(c => c.tokens > 0).length === 0 ? (
           <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
-            暂无上下文分类数据（需要正在运行的 Hermes 会话）
+            暂无上下文分类数据
           </div>
         ) : categories.filter(c => c.tokens > 0).map(item => {
           const pct = total > 0 ? (item.tokens / total) * 100 : 0
@@ -114,8 +117,8 @@ export function ContextUsageIndicator() {
   // Fetch context breakdown from backend via RPC
   const fetchContextData = useCallback(async () => {
     try {
-      const sessionId = useHermesStore.getState().hermesSessionId
       const currentSessionId = useHelixStore.getState().currentSessionId
+      const sessionId = (await resolveBackendSid(currentSessionId)) || useHermesStore.getState().hermesSessionId
       // No live Hermes session for THIS conversation (e.g. it was never run this
       // session, or the gateway restarted and invalidated it). Don't query with an
       // empty id — the backend would return the GLOBAL session's breakdown and the
@@ -130,28 +133,11 @@ export function ContextUsageIndicator() {
       if (result && typeof result === 'object') {
         const data = result as ContextUsageData
         setBackendData(data)
-        // Persist the category breakdown into the local per-session snapshot so
-        // it survives a cold restart. Categories only live on the live backend,
-        // so without this they vanish the moment the Hermes session ends (and
-        // the panel would fall back to the "需要正在运行的 Hermes 会话" empty state).
-        //
-        // 关键：只有当后端回报**非零**用量时才写回本地快照。重启后 Hermes 会话
-        // 可能尚未把对话重新载入上下文，此时后端会回报 0；若直接写回会把本地
-        // 持久化的真实用量覆盖成 0，导致环「重启后显示 0」。后端为 0（未就绪/
-        // 空会话）时保留本地快照——圆环会回退到本地持久值，不会无故归零。
-        const hasRealUsage = (data.context_used || 0) > 0 && (data.context_max || 0) > 0
-        // 分类数据只要有就持久化（即使 breakdown 的用量估算为 0）：分类是
-        // 唯一来源，不写就永远丢，重启后必显示"暂无上下文分类数据"。
-        // size/used 用本地已有值兜底，避免被估算 0 覆盖。
-        if (hasRealUsage || (data.categories?.length ?? 0) > 0) {
-          const localPrev = useHelixStore.getState().contextUsage[currentSessionId ?? '']
-          useHelixStore.getState().setContextUsage(
-            currentSessionId ?? sessionId,
-            data.context_max || localPrev?.size || 0,
-            data.context_used || localPrev?.used || 0,
-            data.categories?.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
-          )
-        }
+        // 本地快照写回统一收敛到 captureContextBreakdown（context-capture.ts）：
+        // - 仅当后端回报非零用量或分类非空才写，避免空会话把本地真实值覆盖成 0；
+        // - size/used 用本地已有值兜底（used 取 max），避免估算偏低时把环缩水；
+        // - 分类数据只要有就持久化（唯一来源，不写重启后必显示"暂无上下文分类数据"）。
+        await captureContextBreakdown(currentSessionId, sessionId)
 
         // Auto-compaction check (Hermes Desktop style)
         if (data.context_percent >= 80 && !autoCompactCooldownRef.current) {
@@ -167,7 +153,7 @@ export function ContextUsageIndicator() {
                 if (r.status === 'compressed' && Array.isArray(r.messages)) {
                   // Update frontend messages with compressed messages
                   const currentSessionId = useHelixStore.getState().currentSessionId
-                  if (currentSessionId === sessionId) {
+                  if (currentSessionId) {
                     const msgs = r.messages.map((m: any) => ({
                       id: m.id || `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`,
                       role: m.role as 'user' | 'assistant' | 'system',
@@ -192,9 +178,13 @@ export function ContextUsageIndicator() {
     }
   }, [])
 
-  // 不轮询：只在用户点击打开弹层时查询一次，避免每 10s 空跑 RPC。
+  // 打开弹层时查询，并在打开期间每 5s 刷新一次：后端 agent 可能刚构建完成，
+  // 分类数据不会在会话创建瞬间就绪，只查一次容易永久停留在"暂无上下文分类数据"。
   useEffect(() => {
-    if (open) fetchContextData()
+    if (!open) return
+    fetchContextData()
+    const timer = setInterval(fetchContextData, 5000)
+    return () => clearInterval(timer)
   }, [open, fetchContextData])
 
   // Quietly capture the category breakdown once per new live Hermes session and
@@ -204,30 +194,24 @@ export function ContextUsageIndicator() {
   // restart always fell back to the "需要正在运行的 Hermes 会话" empty state
   // even though the total percentage had been persisted.
   const hermesSessionId = useHermesStore((s) => s.hermesSessionId)
+  const currentSessionId = useHelixStore((s) => s.currentSessionId)
+  // 防重位只在成功写入后才置：会话创建瞬间 agent 尚未构建，后端返回空分类，
+  // 若此时标记"已捕获"，该 sid 永不重试——run 结束后的权威分类就丢了
+  // （"重启后有的会话分类消失"根因之一）。留空可在下次 dep 变化（新 run 换
+  // sid / 切换会话）时重试；run 结束的兜底捕获在 agent-flow-panel finally 里。
   const quietFetchedSidRef = useRef<string | null>(null)
   useEffect(() => {
-    const sid = hermesSessionId
-    if (!sid || quietFetchedSidRef.current === sid) return
-    quietFetchedSidRef.current = sid
-    const currentSessionId = useHelixStore.getState().currentSessionId
-    hermesApi()?.send('session.context_breakdown', { session_id: sid })
-      .then((result) => {
-        if (!result || typeof result !== 'object') return
-        const data = result as ContextUsageData
-        // 同 fetchContextData：仅当后端回报非零用量才写回，避免重启后空会话把
-        // 本地持久化的真实用量覆盖成 0（categories 非空但 token 为 0 的情况也要拦）。
-        const hasRealUsage = (data.context_used || 0) > 0 && (data.context_max || 0) > 0
-        if (hasRealUsage) {
-          useHelixStore.getState().setContextUsage(
-            currentSessionId ?? sid,
-            data.context_max,
-            data.context_used,
-            data.categories.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
-          )
-        }
-      })
-      .catch(() => { /* backend may not support this yet */ })
-  }, [hermesSessionId])
+    let cancelled = false
+    const capture = async () => {
+      const sid = (await resolveBackendSid(currentSessionId)) || hermesSessionId
+      const key = `${currentSessionId ?? ''}:${sid ?? ''}`
+      if (!sid || quietFetchedSidRef.current === key || cancelled) return
+      const written = await captureContextBreakdown(currentSessionId, sid)
+      if (written) quietFetchedSidRef.current = key
+    }
+    capture()
+    return () => { cancelled = true }
+  }, [hermesSessionId, currentSessionId])
 
   // Prefer live backend RPC data. When there is no live Hermes session
   // (app/gateway restarted, or the conversation was never run this session) fall
@@ -238,8 +222,17 @@ export function ContextUsageIndicator() {
   const localCtx = useHelixStore(s =>
     s.currentSessionId ? s.contextUsage[s.currentSessionId] : undefined,
   )
-  const total = backendData?.context_max || localCtx?.size || 0
-  const used = backendData?.context_used || localCtx?.used || 0
+  // Only let the live RPC payload drive the ring when it carries a real
+  // current-window reading. `session.context_breakdown` returns 0/0 while the
+  // backend agent is not built yet; preferring that transient payload over the
+  // persisted snapshot made the ring visibly shrink after opening/refreshing
+  // the popover even though no compression had run.
+  const backendHasRealUsage =
+    (backendData?.context_used || 0) > 0 &&
+    (backendData?.context_max || 0) > 0 &&
+    (backendData!.context_used || 0) !== Number(backendData!.estimated_total || 0)
+  const total = backendHasRealUsage ? backendData!.context_max : (localCtx?.size || 0)
+  const used = backendHasRealUsage ? backendData!.context_used : (localCtx?.used || 0)
 
   const categories: ContextBreakdown[] = backendData?.categories?.length
     ? backendData.categories.map(c => ({ ...c }))

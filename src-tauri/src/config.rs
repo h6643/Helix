@@ -711,6 +711,13 @@ fn sync_env(base_url: Option<&str>, api_key: Option<&str>, provider: &str) {
     let mut lines: Vec<String> = content
         .split('\n')
         .filter(|l| {
+            // Preserve web-search provider keys — they are written by
+            // web_search_save and would otherwise be wiped on every model-config
+            // write (incl. the startup profile re-assert), making the search
+            // engine config disappear after a restart.
+            if is_search_env_key(l) {
+                return true;
+            }
             !l.starts_with("OPENAI_BASE_URL=")
                 && !starts_provider_key(l)
                 && !(strip_key && l.starts_with("OPENAI_API_KEY="))
@@ -746,6 +753,15 @@ fn starts_provider_key(l: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Web-search provider API keys written by `web_search_save`. `sync_env` must
+/// never strip these (they are not model-provider keys), or the search engine
+/// config vanishes after a restart.
+fn is_search_env_key(l: &str) -> bool {
+    l.starts_with("TAVILY_API_KEY=")
+        || l.starts_with("EXA_API_KEY=")
+        || l.starts_with("BRAVE_SEARCH_API_KEY=")
 }
 
 /// Write model/provider/baseUrl/apiKey into config.yaml + .env.

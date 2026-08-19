@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React from 'react'
 import { Button } from '@/components/ui/button'
 
 export interface McpFormData {
@@ -9,9 +9,6 @@ export interface McpFormData {
   command: string
   url: string
   args: string
-  env: Record<string, string>
-  envPassthrough: boolean
-  cwd: string
 }
 
 export function McpEditorForm({
@@ -23,20 +20,6 @@ export function McpEditorForm({
   onCancel: () => void
   fullScreen?: boolean
 }) {
-  const envEntries = Object.entries(form.env)
-  const [newEnvKey, setNewEnvKey] = useState('')
-  const [newEnvValue, setNewEnvValue] = useState('')
-
-  const addEnvVar = () => {
-    if (!newEnvKey.trim()) return
-    onChange({ env: { ...form.env, [newEnvKey.trim()]: newEnvValue } })
-    setNewEnvKey(''); setNewEnvValue('')
-  }
-  const removeEnvVar = (key: string) => {
-    const { [key]: _, ...rest } = form.env
-    onChange({ env: rest })
-  }
-
   return (
     <div className={`rounded-2xl border border-border/60 bg-card overflow-hidden flex flex-col ${fullScreen ? 'flex-1' : ''}`}>
       <div className={`p-4 space-y-4 ${fullScreen ? 'flex-1 overflow-y-auto' : ''}`}>
@@ -87,45 +70,10 @@ export function McpEditorForm({
           </div>
         )}
 
-        {/* Environment variables */}
-        <div>
-          <label className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground mb-1.5">环境变量</label>
-          {envEntries.length > 0 && (
-            <div className="space-y-1 mb-2">
-              {envEntries.map(([key, val]) => (
-                <div key={key} className="flex items-center gap-2">
-                  <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/60 bg-muted px-2 py-1 rounded flex-shrink-0">{key}</span>
-                  <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/30">=</span>
-                  <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/40 truncate flex-1">{val}</span>
-                  <button onClick={() => removeEnvVar(key)} className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-500 hover:text-red-600 shrink-0">删除</button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="flex gap-2">
-            <input type="text" value={newEnvKey} onChange={e => setNewEnvKey(e.target.value)} placeholder="键"
-              className="flex-1 px-2 py-1.5 bg-muted/50 border border-border/50 rounded text-[calc(var(--helix-transcript-size)*0.8571)] font-mono" />
-            <input type="text" value={newEnvValue} onChange={e => setNewEnvValue(e.target.value)} placeholder="值"
-              className="flex-1 px-2 py-1.5 bg-muted/50 border border-border/50 rounded text-[calc(var(--helix-transcript-size)*0.8571)] font-mono" />
-            <button onClick={addEnvVar} className="px-2 py-1.5 bg-muted/50 border border-border/50 rounded text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/50 transition-colors">添加</button>
-          </div>
-          <label className="flex items-center gap-2 mt-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
-            <input type="checkbox" checked={form.envPassthrough} onChange={e => onChange({ envPassthrough: e.target.checked })}
-              className="rounded border-border/50" />
-            环境变量传递
-          </label>
-        </div>
-
-        {/* Working directory */}
-        <div>
-          <label className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground mb-1.5">工作目录</label>
-          <input type="text" value={form.cwd} onChange={e => onChange({ cwd: e.target.value })}
-            placeholder="~/Helix"
-            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono" />
-        </div>
       </div>
 
       <div className="px-4 py-3 border-t border-border/50 bg-muted/10 flex justify-end gap-2 shrink-0">
+        <Button onClick={onCancel} size="sm" variant="ghost">取消</Button>
         <Button onClick={onSave} size="sm" className="gap-1.5">保存</Button>
       </div>
     </div>

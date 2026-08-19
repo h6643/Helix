@@ -36,6 +36,7 @@ import { buildAcpMcpServers } from '@/lib/mcp'
 import { detectScheduledTasks, syncTaskToBackend, type DetectedTask } from '@/lib/schedule-utils'
 import { isServeActive } from '@/lib/serve-gateway'
 import { debug } from '@/lib/logger'
+import { syncContextUsageToBackend } from '@/lib/context-capture'
 import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, normalizeAcpContentRaw, stripEmoji, extractKaomojiStatus } from '@/lib/text-utils'
 import { ContextUsageIndicator } from './context-usage'
 
@@ -64,6 +65,7 @@ import { HelixMarkdown } from './helix-markdown'
 // SessionMapEntry / SESSION_MAP_KEY / loadSessionMap / resolveBackendSid 已迁移到
 // @/lib/session-map 模块，供多个组件复用；这里仅导入所需引用。
 import { SESSION_MAP_KEY, loadSessionMap, type SessionMapEntry } from '@/lib/session-map'
+import { captureContextBreakdown } from '@/lib/context-capture'
 
 async function persistSessionMap(map: Map<string, SessionMapEntry>) {
   try {
@@ -92,6 +94,25 @@ function mergeAdjacentThinking(blocks: StreamingResponseBlock[]): StreamingRespo
     } else {
       out.push(block)
     }
+  }
+  return out
+}
+
+type ProcessSegment<T extends { type: string }> = { kind: 'text' | 'thinking' | 'tasks'; blocks: T[] }
+
+// 按「正文 / 思考 / 任务」分段：连续的 tool_group + file_change 归为一组任务，
+// 中间出现 thinking 或 text 就断开，保证任务折叠卡只包连续任务。
+function buildProcessSegments<T extends { type: string }>(blocks: T[]): ProcessSegment<T>[] {
+  const out: ProcessSegment<T>[] = []
+  for (const block of blocks) {
+    const kind: ProcessSegment<T>['kind'] = block.type === 'text'
+      ? 'text'
+      : block.type === 'thinking'
+        ? 'thinking'
+        : 'tasks'
+    const last = out[out.length - 1]
+    if (last && last.kind === kind) last.blocks.push(block)
+    else out.push({ kind, blocks: [block] })
   }
   return out
 }
@@ -169,18 +190,23 @@ function reconcileBlocksWithContent(
   if (!normJoined || !normContent) return blocks
   if (normJoined !== normContent && !normJoined.includes(normContent) && !normContent.includes(normJoined)) return blocks
   if (content.length < joined.length) return blocks
-  // Same-or-fuller authoritative text: last text block carries the full
-  // content, earlier text blocks are blanked (normalizeTextBlocks filters
-  // empty ones). Non-text blocks (thinking/tool_group) keep their order.
-  let textSeen = false
-  return blocks.map((b) => {
-    if (b.type !== 'text') return b
-    if (!textSeen) {
-      textSeen = true
-      return { ...b, content }
-    }
-    return { ...b, content: '' }
-  })
+  // Same-or-fuller authoritative text: consolidate ALL text into a single
+  // block pinned to the END of the block list, after every thinking /
+  // tool_group / file_change block. Earlier text blocks are blanked
+  // (normalizeTextBlocks filters empty ones).
+  //
+  // Why pin to the end instead of keeping the first/last text block's
+  // original position: this model (and several reasoning providers) emits
+  // thinking chunks AFTER the final answer text, so the block list can be
+  // [text, thinking] or [thinking, text, thinking]. If the consolidated
+  // answer stays at an early position, the renderer's lastTextIndex split
+  // puts the trailing thinking cards into the "answer" zone — the user sees
+  // the conclusion first and a collapsed 思考 card dangling BELOW it
+  // (2026-08-18 bug). The answer text is semantically the final word of the
+  // run, so pinning it last is always correct.
+  const lastTextBlock = textBlocks[textBlocks.length - 1]
+  const rest = blocks.map((b) => (b.type === 'text' ? { ...b, content: '' } : b))
+  return [...rest, { ...lastTextBlock, content }]
 }
 
 function normalizeTextBlocks(blocks: NonNullable<ChatMessage['blocks']>): NonNullable<ChatMessage['blocks']> {
@@ -875,7 +901,10 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   const reasoning = useMemo(() => normalizeAcpContentRaw(msg.reasoning || ''), [msg.reasoning])
   const messageDuration = msg.duration ?? msg.thinkingTime
   const isStreaming = msg.isStreaming === true
-  const msgFileChanges = useMemo(() => collectFileChanges(msg.blocks ?? []), [msg.blocks])
+  const msgFileChanges = useMemo(
+    () => (msg.fileChanges && msg.fileChanges.length > 0 ? msg.fileChanges : collectFileChanges(msg.blocks ?? [])),
+    [msg.blocks, msg.fileChanges],
+  )
 
   return (
     <div
@@ -900,72 +929,161 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               const processBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(0, lastTextIndex) : normalizedBlocks
               const answerBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(lastTextIndex) : []
               const showInlineReasoning = !!(msg.reasoning && msg.reasoning.trim().length > 0 && !(msg.blocks && msg.blocks.some(b => b.type === 'thinking')))
-              const hasProcess = processBlocks.length > 0 || showInlineReasoning
+              const processSegments = buildProcessSegments(processBlocks)
+              const hasProcess = processSegments.length > 0 || showInlineReasoning
               return (
               <>
                 {hasProcess && (
-                  <details className="mb-2 mt-3 group/process">
-                    <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
-                      <span>已结束</span>
-                      <svg className="size-3.5 transition-transform group-open/process:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
-                    </summary>
-                    <div className="mt-1 pl-3 space-y-1">
-                      {showInlineReasoning && (
-                        <details className="mb-2 mt-3 group/details">
-                          <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
-                            <span>{extractKaomojiStatus(reasoning).status || '思考'}</span>
-                            <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
-                          </summary>
-                          <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
-                            {searchOpen && searchQuery.trim() ? <HighlightText text={reasoning} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={reasoning} />}
+                  <>
+                    {showInlineReasoning && (
+                      <details className="mb-2 mt-3 group/details">
+                        <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
+                          <span>{isStreaming ? (extractKaomojiStatus(reasoning).status || '思考') : '思考完成'}</span>
+                          <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                        </summary>
+                        <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
+                          {searchOpen && searchQuery.trim() ? <HighlightText text={reasoning} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={reasoning} />}
+                        </div>
+                      </details>
+                    )}
+                     <details className="my-2 group/details">
+                       <summary className="flex items-center gap-1.5 px-1 py-1 text-foreground/70 cursor-pointer hover:text-foreground/90 select-none list-none transition-colors" style={{ fontSize }}>
+                        <span className="font-medium">执行过程</span>
+                        <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                      </summary>
+                      <div className="p-2 space-y-1">
+                      {processSegments.map((seg, si) => {
+                      if (seg.kind === 'text') {
+                        return (
+                          <div key={si} className="space-y-1">
+                            {seg.blocks.map((b, i) => {
+                              if (b.type !== 'text') return null
+                              return (
+                                <div key={i} style={{ fontSize }}>
+                                  {searchOpen && searchQuery.trim() ? (
+                                    <div className="whitespace-pre-wrap break-words" style={{ fontSize }}>
+                                      <HighlightText text={normalizeAcpContentRaw(b.content)} query={searchQuery} active={isSearchActive} />
+                                    </div>
+                                  ) : (
+                                    <HelixMarkdown text={normalizeAcpContentRaw(b.content)} />
+                                  )}
+                                </div>
+                              )
+                            })}
                           </div>
-                        </details>
-                      )}
-                      {processBlocks.map((block, idx) =>
-                        block.type === 'thinking' ? (
-                          <details key={idx} className="mb-2 mt-3 group/details">
+                        )
+                      }
+                      if (seg.kind === 'thinking') {
+                        const firstBlock = seg.blocks[0]
+                        const firstContent = firstBlock && 'content' in firstBlock ? String(firstBlock.content) : ''
+                        return isStreaming ? (
+                          <details key={si} className="mb-2 mt-3 group/details">
                             <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
-                              <span>{extractKaomojiStatus(block.content).status || '思考'}</span>
+                              <span>{isStreaming ? (extractKaomojiStatus(firstContent).status || '思考') : '思考完成'}</span>
                               <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                             </summary>
-                            <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
-                              {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />}
+                            <div className="mt-1 pl-3 border-l-2 border-border/60 space-y-1">
+                              {seg.blocks.map((b, i) => {
+                                const content = 'content' in b ? String(b.content) : ''
+                                return (
+                                  <div key={i} className="text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
+                                    {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(content)} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={normalizeAcpContentRaw(content)} />}
+                                  </div>
+                                )
+                              })}
                             </div>
                           </details>
-                        ) : block.type === 'text' ? (
-                          <div key={idx} style={{ fontSize }}>
-                            {searchOpen && searchQuery.trim() ? (
-                              <div className="whitespace-pre-wrap break-words" style={{ fontSize }}>
-                                <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} />
-                              </div>
-                            ) : (
-                              <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
+                        ) : (
+                          null
+                        )
+                      }
+                      return (
+                        <details key={si} className="mb-2 mt-3 group/details">
+                          <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
+                            <span>任务执行</span>
+                            <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                          </summary>
+                          <div className="mt-1 pl-3 space-y-1">
+                            {seg.blocks.map((b, i) =>
+                              b.type === 'tool_group'
+                                ? <InlineToolGroup key={i} steps={b.steps} isRunning={false} fontSize={fontSize} />
+                                : b.type === 'file_change'
+                                  ? <FileChangeSummary key={i} changes={b.changes} />
+                                  : null
                             )}
                           </div>
-                        ) : block.type === 'file_change' ? (
-                          <FileChangeSummary key={idx} changes={block.changes} />
-                        ) : (
-                          <InlineToolGroup key={idx} steps={block.steps} isRunning={false} fontSize={fontSize} />
-                        )
-                      )}
-                    </div>
-                  </details>
+                        </details>
+                      )
+                      })}
+                      </div>
+                    </details>
+                  </>
                 )}
                 {answerBlocks.length > 0 && (
-                  <div className="helix-md" style={{ fontSize }}>
-                    {answerBlocks.map((block, idx) =>
-                      block.type === 'text' ? (
-                        <div key={idx} style={{ fontSize }}>
-                          {searchOpen && searchQuery.trim() ? (
-                            <div className="whitespace-pre-wrap break-words" style={{ fontSize }}>
-                              <HighlightText text={normalizeAcpContentRaw(block.content)} query={searchQuery} active={isSearchActive} />
+                  <div className="helix-md mt-2 pt-2 border-t border-border/20" style={{ fontSize }}>
+                    {buildProcessSegments(answerBlocks).map((seg, si) => {
+                      if (seg.kind === 'text') {
+                        return (
+                          <div key={si} style={{ fontSize }}>
+                            {seg.blocks.map((b, i) => {
+                              if (b.type !== 'text') return null
+                              return (
+                                <div key={i} style={{ fontSize }}>
+                                  {searchOpen && searchQuery.trim() ? (
+                                    <div className="whitespace-pre-wrap break-words" style={{ fontSize }}>
+                                      <HighlightText text={normalizeAcpContentRaw(b.content)} query={searchQuery} active={isSearchActive} />
+                                    </div>
+                                  ) : (
+                                    <HelixMarkdown text={normalizeAcpContentRaw(b.content)} />
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )
+                      }
+                      if (seg.kind === 'thinking') {
+                        const firstBlock = seg.blocks[0]
+                        const firstContent = firstBlock && 'content' in firstBlock ? String(firstBlock.content) : ''
+                        return isStreaming ? (
+                          <details key={si} className="mb-2 mt-3 group/details">
+                            <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
+                              <span>{isStreaming ? (extractKaomojiStatus(firstContent).status || '思考') : '思考完成'}</span>
+                              <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                            </summary>
+                            <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize }}>
+                              {seg.blocks.map((b, i) => {
+                                const content = 'content' in b ? String(b.content) : ''
+                                return (
+                                  <div key={i}>
+                                    {searchOpen && searchQuery.trim() ? <HighlightText text={normalizeAcpContentRaw(content)} query={searchQuery} active={isSearchActive} /> : <HelixMarkdown text={normalizeAcpContentRaw(content)} />}
+                                  </div>
+                                )
+                              })}
                             </div>
-                          ) : (
-                            <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
-                          )}
-                        </div>
-                      ) : null
-                    )}
+                          </details>
+                        ) : (
+                          null
+                        )
+                      }
+                      return (
+                        <details key={si} className="mb-2 mt-3 group/details">
+                          <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
+                            <span>任务执行</span>
+                            <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                          </summary>
+                          <div className="mt-1 pl-3 space-y-1">
+                            {seg.blocks.map((b, i) =>
+                              b.type === 'tool_group'
+                                ? <InlineToolGroup key={i} steps={b.steps} isRunning={false} fontSize={fontSize} />
+                                : b.type === 'file_change'
+                                  ? <FileChangeSummary key={i} changes={b.changes} />
+                                  : null
+                            )}
+                          </div>
+                        </details>
+                      )
+                    })}
                   </div>
                 )}
               </>
@@ -2875,6 +2993,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const synthDoneTimerRef = { current: null as ReturnType<typeof setTimeout> | null }
     const forceDoneTimerRef = { current: null as ReturnType<typeof setTimeout> | null }
     const startedAtRef = { current: 0 }
+    // 本次运行期间收集的文件改动，只在 done 时随最终消息一起提交，避免执行
+    // 过程中“改一个就冒一个”。
+    const runFileChangesRef = { current: [] as PendingChange[] }
     // 语义化的 done 正文自愈：部分场景后端连发多条 done，前面已触发的 done 已把消息提交到
     // chatMessages，此时用本次 done 自带正文（message.complete / run.completed 的 text，与
     // state.db 持久化同源，字节完好）原地修正已提交消息，覆盖流式累积可能丢空白/换行的损坏。
@@ -3035,7 +3156,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const filesSnapshot = pendingFiles.length > 0 ? [...pendingFiles] : undefined
 
     const storeState = useHelixStore.getState()
-    storeState.addChatMessage({
+    const newUserMsgId = storeState.addChatMessage({
       role: 'user',
       content: trimmed,
       images: imagesSnapshot,
@@ -3130,8 +3251,14 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       if (!sessionId) {
         wasCreated = true
         const st0 = useHelixStore.getState()
+        // 重启/刷新后后端会话已失效，重建 session 时把当前对话历史带回去，
+        // 否则模型不知道之前的对话内容，等于每次都是新对话。
+        const seedHistory = useHelixStore.getState().chatMessages
+          .filter(m => m.sessionId === activeSessionId && m.id !== newUserMsgId)
+          .map(m => ({ role: m.role, content: m.content }))
         const res = await hermesApi()!.send('session/new', {
           mcpServers: buildAcpMcpServers(st0.mcpServers),
+          messages: seedHistory,
           // 会话必须绑定当前对话所属项目，否则 serve 后端用配置/TERMINAL_CWD/
           // 启动目录，模型读到的目录和界面显示的项目脱节（"在 agentchat 对话，
           // 但模型读到之前选过的目录"）。
@@ -3787,8 +3914,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             }
             // Diff capture: Hermes tool.complete carries a rendered unified diff
             // (inline_diff) for write_file/patch. Turn it into a pending change
-            // so the diff button lights up, AND surface it inline in the
-            // conversation as a file_change block (per-file +green / -red stats).
+            // so the diff button lights up. The per-reply summary card is only
+            // attached to the final message when the run finishes.
             if (su === 'tool_call_update') {
               const raw = params?.update?.inlineDiff
               if (typeof raw === 'string' && raw.trim()) {
@@ -3796,7 +3923,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 const filePath = inferDiffPath(diff)
                 if (filePath) {
                   const fileName = filePath.split(/[/\\]/).pop() || filePath
-                  storeActions.addPendingChange({
+                  const changeId = storeActions.addPendingChange({
                     fileId: filePath,
                     fileName,
                     filePath,
@@ -3805,18 +3932,16 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                     language: diffLanguageForPath(filePath),
                     unifiedDiff: diff,
                   })
-                  uiRB(prev => [...prev, {
-                    type: 'file_change',
-                    changes: [{
-                      fileId: filePath,
-                      fileName,
-                      filePath,
-                      oldContent: '',
-                      newContent: '',
-                      language: diffLanguageForPath(filePath),
-                      unifiedDiff: diff,
-                    }],
-                  }])
+                  runFileChangesRef.current.push({
+                    id: changeId,
+                    fileId: filePath,
+                    fileName,
+                    filePath,
+                    oldContent: '',
+                    newContent: '',
+                    language: diffLanguageForPath(filePath),
+                    unifiedDiff: diff,
+                  })
                   syncDraft()
                 }
               }
@@ -4069,7 +4194,7 @@ promptSentAtRef.current = Date.now()
                 }
                 if (oldContent || newContent) {
                   const fileName = filePath.split(/[/\\]/).pop() || filePath
-                  storeActions.addPendingChange({
+                  const changeId = storeActions.addPendingChange({
                     fileId: filePath,
                     fileName,
                     filePath,
@@ -4077,17 +4202,15 @@ promptSentAtRef.current = Date.now()
                     newContent,
                     language: diffLanguageForPath(filePath),
                   })
-                  uiRB(prev => [...prev, {
-                    type: 'file_change',
-                    changes: [{
-                      fileId: filePath,
-                      fileName,
-                      filePath,
-                      oldContent,
-                      newContent,
-                      language: diffLanguageForPath(filePath),
-                    }],
-                  }])
+                  runFileChangesRef.current.push({
+                    id: changeId,
+                    fileId: filePath,
+                    fileName,
+                    filePath,
+                    oldContent,
+                    newContent,
+                    language: diffLanguageForPath(filePath),
+                  })
                 }
               }
 
@@ -4380,7 +4503,7 @@ promptSentAtRef.current = Date.now()
                 // something useful instead of a blank reply. 例外：暂停/停止时
                 //（无正文 + responseBlocks 里已有 thinking/tool 块）不把思考塞进
                 // 正文——保留 blocks 让已完成消息按折叠的「思考过程」渲染，而不是
-                // 所有思考过程平铺冒出来（且 discardBlocks 会把 thinking 块丢掉）。
+                // 所有思考过程平铺冒出来。
                 if (!content && reasoning && responseBlocksRef.current.length === 0) {
                   content = reasoning
                   reasoning = ''
@@ -4403,16 +4526,9 @@ promptSentAtRef.current = Date.now()
                 // 极短思考（<0.5s 取整为 0）但有思考迹象时，至少记为 1s，避免"有思考却不显示"
                 if (thinkingSecs === 0 && (thinkingStartTimeRef.current || firstContentAtRef.current)) thinkingSecs = 1
                 thinkingDurationRef.current = thinkingSecs
-                // If responseBlocks has no text block but content is non-empty,
-                // discard blocks so the renderer falls back to rendering msg.content
-                // — prevents "only tool_groups/thinking, no readable result".
-                // Also discard reasoning in this case: the thinking was intermediate
-                // context that produced the final answer; showing it as a separate
-                // collapsible below the completed text is redundant and confusing.
                 let finalBlocks = responseBlocksRef.current.length ? responseBlocksRef.current : undefined
-                const discardBlocks = !!(finalBlocks && content && !finalBlocks.some(b => b.type === 'text'))
-                if (discardBlocks) {
-                  finalBlocks = undefined
+                if (finalBlocks && content && !finalBlocks.some(b => b.type === 'text')) {
+                  finalBlocks = [...finalBlocks, { type: 'text', content }]
                 }
                 // 权威全文自愈（见 reconcileBlocksWithContent）：流式转发链会间歇丢
                 // 空白/换行，done 时 content 已被 finalText 修复；把同样的权威文本写回
@@ -4422,6 +4538,12 @@ promptSentAtRef.current = Date.now()
                 if (finalBlocks && content) {
                   finalBlocks = reconcileBlocksWithContent(finalBlocks, content)
                 }
+                // 本次运行的文件改动统一挂在最终消息的 fileChanges 上，只由
+                // 回复末尾的“已修改”汇总卡片渲染，不混进流式过程块。
+                const runFileChanges = runFileChangesRef.current
+                const byFile = new Map<string, PendingChange>()
+                for (const c of runFileChanges) byFile.set(c.fileId, c)
+                const fileChanges = [...byFile.values()]
                 // CRITICAL: clear streaming blocks BEFORE adding the completed
                 // message to chatMessages.  Zustand store writes can trigger a
                 // synchronous (or microtask) React re-render *before* our subsequent
@@ -4431,12 +4553,22 @@ promptSentAtRef.current = Date.now()
                 // the streaming area (via displayResponseBlocks) — producing exact
                 // duplicates of every tool_group block.
                 uiRB([])
-                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: discardBlocks ? undefined : (reasoning || undefined), steps: completedSteps.length ? completedSteps : undefined, blocks: finalBlocks, sessionId: activeSessionId, duration: totalSecs > 0 ? totalSecs : undefined, thoughtTokens: thoughtTokensRef.current || undefined, outputTokens: outputTokensRef.current || undefined, totalTokens: totalTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
+                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: reasoning || undefined, steps: completedSteps.length ? completedSteps : undefined, fileChanges: fileChanges.length ? fileChanges : undefined, blocks: finalBlocks, sessionId: activeSessionId, duration: totalSecs > 0 ? totalSecs : undefined, thoughtTokens: thoughtTokensRef.current || undefined, outputTokens: outputTokensRef.current || undefined, totalTokens: totalTokensRef.current || undefined, thinkingTime: thinkingDurationRef.current || undefined })
                 if (pendingAssistantRowIdRef.current != null) {
                   curState.setChatMessageRowId(msgId, pendingAssistantRowIdRef.current)
                   pendingAssistantRowIdRef.current = null
                 }
                 doneMsgIdRef.current = msgId
+                // 后台 run（非当前前台会话）完成后立即把回复持久化到自己的
+                // session 记录：persistCurrentSessionNow 只保存前台会话，
+                // 若等 scheduleSessionPersist 的 200ms 节流或切会话时的
+                // flushSessionPersist，磁盘快照里不会有这条回复 ——
+                // navigateSession 用磁盘快照整体覆盖 chatMessages 时它就丢了
+                // （"切到后台对话看不到输出"根因，2026-08-19 修复）。
+                // persistSessionNow 按消息 id merge，幂等，fire-and-forget 即可。
+                if (activeSessionId) {
+                  useHelixStore.getState().persistSessionNow(activeSessionId)
+                }
                 thoughtTokensRef.current = 0
                 outputTokensRef.current = 0
                 thinkingStartTimeRef.current = 0
@@ -4497,13 +4629,23 @@ promptSentAtRef.current = Date.now()
               uiRB([])
               if (content || reasoning || errorSteps.length > 0 || responseBlocks.length > 0) {
                 const curState = useHelixStore.getState()
-                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: reasoning || undefined, steps: errorSteps.length ? errorSteps : undefined, blocks: responseBlocksRef.current.length ? responseBlocksRef.current : undefined, sessionId: activeSessionId })
+                const runFileChanges = runFileChangesRef.current
+                const byFile = new Map<string, PendingChange>()
+                for (const c of runFileChanges) byFile.set(c.fileId, c)
+                const fileChanges = [...byFile.values()]
+                const msgId = curState.addChatMessage({ role: 'assistant', content, reasoning: reasoning || undefined, steps: errorSteps.length ? errorSteps : undefined, fileChanges: fileChanges.length ? fileChanges : undefined, blocks: responseBlocksRef.current.length ? responseBlocksRef.current : undefined, sessionId: activeSessionId })
                 curState.setChatMessageStreaming(msgId, false)
+                if (activeSessionId) {
+                  useHelixStore.getState().persistSessionNow(activeSessionId)
+                }
               } else if (parsed.content) {
                 // Pure error with no streamed content — surface it as an assistant message
                 const curState = useHelixStore.getState()
                 const msgId = curState.addChatMessage({ role: 'assistant', content: '⚠️ ' + parsed.content, sessionId: activeSessionId })
                 curState.setChatMessageStreaming(msgId, false)
+                if (activeSessionId) {
+                  useHelixStore.getState().persistSessionNow(activeSessionId)
+                }
               }
               // Mark all running tool_calls as failed so they disappear from the
               // "正在执行工具" status bar.
@@ -4528,8 +4670,6 @@ promptSentAtRef.current = Date.now()
             } else if (parsed.type === 'compact') {
               const id = generateId()
               uiSteps(prev => [...prev, { id, type: 'compact', content: parsed.content, timestamp: Date.now() }])
-            } else if (parsed.type === 'usage_update') {
-              if (activeSessionId) useHelixStore.getState().setContextUsage(activeSessionId, parsed.size, parsed.used)
             } else if (parsed.type === 'usage_prompt_complete') {
               const u = parsed.usage
               if (u && typeof u === 'object' && !usageReceivedRef.current) {
@@ -4553,6 +4693,7 @@ promptSentAtRef.current = Date.now()
                 const ctxUsed = Number(u.context_used) || 0
                 if (ctxMax && ctxUsed && activeSessionId) {
                   useHelixStore.getState().setContextUsage(activeSessionId, ctxMax, ctxUsed)
+                  void syncContextUsageToBackend(activeSessionId, ctxMax, ctxUsed, sessionId)
                 }
               }
             } else if (parsed.type === 'available_commands') {
@@ -4560,7 +4701,7 @@ promptSentAtRef.current = Date.now()
             } else if (parsed.type === 'approval_request') {
               // 审批分流：项目内文件修改 → 直接回 approve（不弹窗，diff 记录走
               // tool.complete inline_diff 独立路径不受影响）；危险命令/项目外文件/
-              // 敏感文件/上传外发 → 入队弹审批条。完全访问权限档（yolo 开）时后端
+              // 敏感文件/上传外发 → 入队弹审批条。完全访问档（yolo 开）时后端
               // 不发本事件，前端无物可分。
               const verdict = classifyApproval(
                 String(parsed.toolName || ''),
@@ -4696,6 +4837,16 @@ promptSentAtRef.current = Date.now()
         // render the same blocks.
         setStreamingDraft(sid, { isAgentRunning: false, responseBlocks: [] })
         debug('[HelixTrace] handleRun finally setStreamingDraft false', { sid })
+        // 兜底落盘：正常完成路径 done/error 分支已 persistSessionNow，
+        // 这里覆盖 abort/异常退出等所有路径（幂等 merge，重复调用无害）。
+        // 后台 run 的用户消息与已提交回复只有这一条路径能进自己的 session 记录。
+        useHelixStore.getState().persistSessionNow(sid)
+        // 兜底捕获上下文分类：run 结束时 agent 已构建、分类数据权威。会话创建
+        // 瞬间的安静捕获（context-usage.tsx）必然拿到空分类（agent 未构建），
+        // 若只靠弹窗打开时捕获，没开过弹窗的会话重启后分类必丢
+        // （"重启后有的会消失"根因）。用 sessionMap 里最新的 sid
+        // （压缩轮换后仍指向当前后端会话），fire-and-forget 幂等。
+        captureContextBreakdown(sid, sessionMapRef.current.get(sid)?.sid)
         // Once the reply is persisted, the draft is no longer needed; clear it
         // on the next tick so any render this cycle still sees the final steps.
         setTimeout(() => {
@@ -5094,10 +5245,8 @@ promptSentAtRef.current = Date.now()
   // Restore per-tab input when switching sessions
   useEffect(() => {
     const sid = useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY
-    const saved = useHelixStore.getState().tabInputs[sid]
-    if (saved !== undefined && saved !== inputValueRef.current) {
-      setInputSynced(saved)
-    }
+    const saved = useHelixStore.getState().tabInputs[sid] ?? ''
+    if (saved !== inputValueRef.current) setInputSynced(saved)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionId])
 
@@ -5883,7 +6032,7 @@ promptSentAtRef.current = Date.now()
                             <span>{thinkingStatus || '思考中...'}</span>
                             <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                           </summary>
-                          <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/60 break-all leading-relaxed thinking-cap-tall thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                          <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/60 break-all leading-relaxed thinking-cap-tall thinking-scroll" style={{ fontSize: transcriptFontSize }}>
                             {conversationSearchOpen && conversationSearchQuery.trim() ? (
                               <HighlightText text={thinkingBody} query={conversationSearchQuery} active={false} />
                             ) : (
@@ -5898,89 +6047,166 @@ promptSentAtRef.current = Date.now()
 
                     {/* Interleaved response blocks: thinking, text, and tool groups in chronological order */}
                     {displayResponseBlocks.length > 0 && (() => {
-                      // 按时间序交替渲染思考/工具/正文，但把最终 text 之前的中间过程
-                      // （thinking + tool_group + 中间文本）整体包进一个折叠块，减少
-                      // 空间占用。流式中展开（实时可见过程），完成后自动收起——与
-                      // 已完成消息的 group/process 折叠一致。
+                      // 把中间过程按「文本 / 非文本」分段：文本段→「总结」扁平块，
+                      // 思考+工具+文件变更段→独立的「思考过程」折叠卡片，得到
+                      // 「思考过程 → 总结 → 思考过程 → 总结」节奏，每段都和第一个一致。
                       const normalizedBlocks = mergeAdjacentThinking(normalizeTextBlocks(displayResponseBlocks))
                       const lastTextIndex = normalizedBlocks.reduce((acc, b, i) => b.type === 'text' ? i : acc, -1)
                       const processBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(0, lastTextIndex) : normalizedBlocks
                       const answerBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(lastTextIndex) : []
+                      const processSegments = buildProcessSegments(processBlocks)
+                      const answerSegments = buildProcessSegments(answerBlocks)
                       const liveFileChanges = collectFileChanges(normalizedBlocks)
                       return (
                       <>
-                        {processBlocks.length > 0 && (
-                          <details className="mb-2 mt-3 group/process" open={streamingActive}>
-                            <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
-                              <span>{streamingActive ? '思考过程' : '已结束'}</span>
-                              <svg className="size-3.5 transition-transform group-open/process:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
-                            </summary>
-                            <div className="mt-1 pl-3 space-y-1">
-                              {processBlocks.map((block, idx) =>
-                                block.type === 'thinking' ? (
-                                <details key={idx} className="mb-2 mt-3 group/details">
-                                  <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
-                                    <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
-                                    <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
-                                  </summary>
-                                  <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
-                                    {conversationSearchOpen && conversationSearchQuery.trim() ? (
-                                      <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
-                                    ) : (
-                                      <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
-                                    )}
-                                  </div>
-                                </details>
-                              ) : block.type === 'text' ? (
-                                <div key={idx} style={{ fontSize: transcriptFontSize }}>
-                                  {conversationSearchOpen && conversationSearchQuery.trim() ? (
-                                    <div className="whitespace-pre-wrap break-words">
-                                      <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
+                         <details className="my-2 group/details">
+                           <summary className="flex items-center gap-1.5 px-1 py-1 text-foreground/70 cursor-pointer hover:text-foreground/90 select-none list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
+                            <span className="font-medium">执行过程</span>
+                            <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                          </summary>
+                          <div className="p-2 space-y-1">
+                        {processSegments.map((seg, si) => {
+                          if (seg.kind === 'text') {
+                            return (
+                            <div key={si} className="space-y-1">
+                              {seg.blocks.map((b, i) => {
+                                  if (b.type !== 'text') return null
+                                  return (
+                                    <div key={i} style={{ fontSize: transcriptFontSize }}>
+                                      {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                                        <div className="whitespace-pre-wrap break-words">
+                                          <HighlightText text={normalizeAcpContentRaw(b.content)} query={conversationSearchQuery} active={false} />
+                                        </div>
+                                      ) : (
+                                        <HelixMarkdown text={normalizeAcpContentRaw(b.content)} />
+                                      )}
                                     </div>
-                                  ) : (
-                                    <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
-                                  )}
+                                  )
+                                })}
+                              </div>
+                            )
+                          }
+                          if (seg.kind === 'thinking') {
+                            const firstBlock = seg.blocks[0]
+                            const firstContent = firstBlock && 'content' in firstBlock ? String(firstBlock.content) : ''
+                            const thinkingDone = !streamingActive || si < processSegments.length - 1 || answerBlocks.length > 0
+                            if (thinkingDone) {
+                              return null
+                            }
+                            return (
+                              <details key={si} className="mb-2 mt-3 group/details">
+                                <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
+                                  <span>{thinkingDone ? '思考完成' : (extractKaomojiStatus(firstContent).status || '思考中')}</span>
+                                  <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                                </summary>
+                                <div className="mt-1 pl-3 border-l-2 border-border/60 space-y-1">
+                                  {seg.blocks.map((b, i) => {
+                                    const content = 'content' in b ? String(b.content) : ''
+                                    return (
+                                      <div key={i} className="text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                                        {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                                          <HighlightText text={normalizeAcpContentRaw(content)} query={conversationSearchQuery} active={false} />
+                                        ) : (
+                                          <HelixMarkdown text={normalizeAcpContentRaw(content)} />
+                                        )}
+                                      </div>
+                                    )
+                                  })}
                                 </div>
-                              ) : block.type === 'file_change' ? (
-                                <FileChangeSummary key={idx} changes={block.changes} />
-                              ) : (
-                                <InlineToolGroup key={idx} steps={block.steps} isRunning={isRunning} fontSize={transcriptFontSize} />
-                              )
-                              )}
-                            </div>
-                          </details>
-                        )}
-                        {answerBlocks.map((block, idx) =>
-                          block.type === 'text' ? (
-                            <div key={idx} style={{ fontSize: transcriptFontSize }}>
-                              {conversationSearchOpen && conversationSearchQuery.trim() ? (
-                                <div className="whitespace-pre-wrap break-words">
-                                  <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
-                                </div>
-                              ) : (
-                                <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
-                              )}
-                            </div>
-                          ) : block.type === 'thinking' ? (
-                            <details key={idx} className="mb-2 mt-3 group/details">
+                              </details>
+                            )
+                          }
+                          return (
+                            <details key={si} className="mb-2 mt-3 group/details">
                               <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
-                                <span>{extractKaomojiStatus(block.content).status || '思考中'}</span>
+                                <span>任务执行</span>
                                 <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                               </summary>
-                              <div className="helix-md mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
-                                {conversationSearchOpen && conversationSearchQuery.trim() ? (
-                                  <HighlightText text={normalizeAcpContentRaw(block.content)} query={conversationSearchQuery} active={false} />
-                                ) : (
-                                  <HelixMarkdown text={normalizeAcpContentRaw(block.content)} />
+                              <div className="mt-1 pl-3 space-y-1">
+                                {seg.blocks.map((b, i) =>
+                                  b.type === 'tool_group'
+                                    ? <InlineToolGroup key={i} steps={b.steps} isRunning={isRunning} fontSize={transcriptFontSize} />
+                                    : b.type === 'file_change'
+                                      ? <FileChangeSummary key={i} changes={b.changes} />
+                                      : null
                                 )}
                               </div>
                             </details>
-                          ) : block.type === 'file_change' ? (
-                            <FileChangeSummary key={idx} changes={block.changes} />
-                          ) : (
-                            <InlineToolGroup key={idx} steps={block.steps} isRunning={isRunning} fontSize={transcriptFontSize} />
                           )
-                        )}
+                        })}
+                          </div>
+                        </details>
+                         <div className="mt-2 pt-2 border-t border-border/20">
+                         {answerSegments.map((seg, si) => {
+                          if (seg.kind === 'text') {
+                            return (
+                              <div key={si} style={{ fontSize: transcriptFontSize }}>
+                                {seg.blocks.map((b, i) => {
+                                  if (b.type !== 'text') return null
+                                  return (
+                                    <div key={i} style={{ fontSize: transcriptFontSize }}>
+                                      {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                                        <div className="whitespace-pre-wrap break-words">
+                                          <HighlightText text={normalizeAcpContentRaw(b.content)} query={conversationSearchQuery} active={false} />
+                                        </div>
+                                      ) : (
+                                        <HelixMarkdown text={normalizeAcpContentRaw(b.content)} />
+                                      )}
+                                    </div>
+                                  )
+                         })}
+                              </div>
+                            )
+                          }
+                          if (seg.kind === 'thinking') {
+                            const firstBlock = seg.blocks[0]
+                            const firstContent = firstBlock && 'content' in firstBlock ? String(firstBlock.content) : ''
+                            const thinkingDone = !streamingActive || si < answerSegments.length - 1
+                            if (thinkingDone) {
+                              return null
+                            }
+                            return (
+                              <details key={si} className="mb-2 mt-3 group/details">
+                                <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
+                                  <span>{thinkingDone ? '思考完成' : (extractKaomojiStatus(firstContent).status || '思考中')}</span>
+                                  <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                                </summary>
+                                <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>
+                                  {seg.blocks.map((b, i) => {
+                                    const content = 'content' in b ? String(b.content) : ''
+                                    return (
+                                      <div key={i}>
+                                        {conversationSearchOpen && conversationSearchQuery.trim() ? (
+                                          <HighlightText text={normalizeAcpContentRaw(content)} query={conversationSearchQuery} active={false} />
+                                        ) : (
+                                          <HelixMarkdown text={normalizeAcpContentRaw(content)} />
+                                        )}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              </details>
+                            )
+                          }
+                          return (
+                            <details key={si} className="mb-2 mt-3 group/details">
+                              <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
+                                <span>任务执行</span>
+                                <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
+                              </summary>
+                              <div className="mt-1 pl-3 space-y-1">
+                                {seg.blocks.map((b, i) =>
+                                  b.type === 'tool_group'
+                                    ? <InlineToolGroup key={i} steps={b.steps} isRunning={isRunning} fontSize={transcriptFontSize} />
+                                    : b.type === 'file_change'
+                                      ? <FileChangeSummary key={i} changes={b.changes} />
+                                      : null
+                                )}
+                              </div>
+                            </details>
+                          )
+                        })}
+                         </div>
                         {liveFileChanges.length > 0 && (
                           <div className="mt-2">
                             <FileChangeSummaryCard changes={liveFileChanges} />

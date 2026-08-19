@@ -413,9 +413,10 @@ function buildTauriAPI(): ElectronAPI {
     setConfig: (config: unknown) => invoke('vision_config_save', { config }),
   }
 
-  // ── gateway MCP servers (config.yaml mcp_servers, read-only) ─────────
+  // ── gateway MCP servers (config.yaml mcp_servers, read/write) ────────
   api.mcpConfig = {
     list: () => invoke('mcp_config_list'),
+    save: (servers: unknown) => invoke('mcp_config_save', { servers }),
   }
 
   // ── channels ───────────────────────────────────────────────────────────

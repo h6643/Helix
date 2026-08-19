@@ -10,9 +10,15 @@ interface AcpHttpHeader {
   value: string
 }
 
+interface AcpMeta {
+  cwd?: string
+  timeout?: number
+  envPassthrough?: boolean
+}
+
 export type AcpMcpServer =
-  | { name: string; command: string; args: string[]; env: AcpEnvVar[] }
-  | { name: string; url: string; headers: AcpHttpHeader[] }
+  | { name: string; command: string; args: string[]; env: AcpEnvVar[]; _meta?: AcpMeta }
+  | { name: string; url: string; headers: AcpHttpHeader[]; _meta?: AcpMeta }
 
 /**
  * Convert the store's MCP server map into the ACP `session/new` mcpServers
@@ -26,11 +32,17 @@ export function buildAcpMcpServers(
   const out: AcpMcpServer[] = []
   for (const [name, cfg] of Object.entries(servers || {})) {
     if (!cfg || cfg.enabled === false) continue
+    const meta: AcpMeta = {
+      ...(cfg.cwd ? { cwd: cfg.cwd } : {}),
+      ...(typeof cfg.timeout === 'number' ? { timeout: cfg.timeout } : {}),
+      ...(cfg.envPassthrough ? { envPassthrough: true } : {}),
+    }
     if (cfg.type === 'remote' && cfg.url) {
       out.push({
         name,
         url: cfg.url,
         headers: Object.entries(cfg.headers || {}).map(([n, v]) => ({ name: n, value: String(v) })),
+        ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
       })
     } else if (cfg.type === 'local' && cfg.command?.length) {
       const cmd = Array.isArray(cfg.command) ? cfg.command : [String(cfg.command)]
@@ -39,6 +51,7 @@ export function buildAcpMcpServers(
         command: cmd[0],
         args: cmd.slice(1),
         env: Object.entries(cfg.environment || {}).map(([n, v]) => ({ name: n, value: String(v) })),
+        ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
       })
     }
   }

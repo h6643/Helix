@@ -63,6 +63,15 @@ export function getToolIcon(toolName: string) {
   return <Wrench className="size-3.5" />
 }
 
+function argToText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value) } catch { return String(value) }
+  }
+  return String(value)
+}
+
 export function extractCommandSnippet(params?: Record<string, unknown>): string | undefined {
   if (!params) return undefined
   const keys = ['command', 'script', 'cmd', 'args', 'code', 'input', 'query', 'text', 'tool_input', 'pattern', 'file_glob', 'path', 'file_path', 'context']
@@ -73,7 +82,7 @@ export function extractCommandSnippet(params?: Record<string, unknown>): string 
   for (const k of keys) {
     const v = params[k]
     if (Array.isArray(v) && v.length > 0) {
-      const s = v.map(x => String(x)).filter(Boolean).join(' ')
+      const s = v.map(argToText).filter(Boolean).join(' ')
       if (s) return s
     }
   }
@@ -87,7 +96,7 @@ export function extractCommandSnippet(params?: Record<string, unknown>): string 
           for (const k of keys) {
             if (typeof parsed[k] === 'string' && parsed[k].trim()) return parsed[k].trim()
             if (Array.isArray(parsed[k])) {
-              const s = parsed[k].map((x: any) => String(x)).filter(Boolean).join(' ')
+              const s = parsed[k].map(argToText).filter(Boolean).join(' ')
               if (s) return s
             }
           }
@@ -145,7 +154,10 @@ export function getToolDisplayLabel(toolName: string, toolKind?: string, path?: 
       const baseLabel = kindLabels[action] || getToolLabel(action) || '执行工具'
       // Truncate the long description part
       const shortDesc = desc.length > 50 ? desc.slice(0, 50) + '…' : desc
-      return `${baseLabel}  ${shortDesc}`
+      // 有些工具名里塞的是 patch/代码正文/内部字段名，不是可读动作描述；
+      // 这些情况下只显示工具名，避免卡片标题变成 "Clear the draft's responseBlocks"。
+      const looksLikePatch = /^(?:---|\+\+\+|@@|diff )|[\r\n]|\/\/|#\s|responseBlocks/i.test(shortDesc)
+      return looksLikePatch ? baseLabel : `${baseLabel}  ${shortDesc}`
     }
 
     // Fallback: unknown short name — truncate to prevent overflow

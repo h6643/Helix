@@ -10,11 +10,11 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { useHermes } from '@/hooks/use-hermes'
 import { pushModelConfig } from '@/lib/config-sync'
-import { isElectron, hermesApi, electronFS, electronDialog } from '@/lib/electron-bridge'
+import { isElectron, hermesApi, electronFS, electronDialog, electronApp } from '@/lib/electron-bridge'
 import { getCurrentVersion } from '@/hooks/use-check-update'
 import { persistence } from '@/lib/persist'
 import { getAllProviders, getBaseUrl } from '@/lib/providers'
-import { useHelixStore, type ApiConfig, type McpServerConfig, type BrowserBookmark } from '@/stores/helix-store'
+import { useHelixStore, type ApiConfig, type BrowserBookmark } from '@/stores/helix-store'
 import { useHermesStore } from '@/stores/hermes-store'
 import { AgentsSettings } from './agents-settings'
 import { AppearanceSettingsPanel } from './appearance-settings-panel'
@@ -446,7 +446,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     fontFamily, setFontFamily, fontSize, setFontSize,
     interfaceFont, setInterfaceFont,
     transcriptFontSize, setTranscriptFontSize,
-    mcpServers, addMcpServer, removeMcpServer, toggleMcpServer,
+    mcpServers, removeMcpServer, toggleMcpServer,
     // Git
     gitAutoCommit, setGitAutoCommit,
     gitAutoPush, setGitAutoPush,
@@ -671,8 +671,25 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   // MCP state
   const [editingMcpName, setEditingMcpName] = useState<string | null>(null)
   const [isAddingMcp, setIsAddingMcp] = useState(false)
+  const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
+  const [defaultMcpCwd, setDefaultMcpCwd] = useState('')
+  useEffect(() => {
+    let alive = true
+    electronApp.getDataRoot()
+      .then((info) => {
+        if (alive && info?.dataRoot) {
+          setDefaultMcpCwd(`${info.dataRoot.replace(/[\\/]+$/, '')}/sessions`)
+        }
+      })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [])
+  const resolveDefaultMcpCwd = useCallback(
+    () => selectedWorkDir || defaultMcpCwd || '',
+    [selectedWorkDir, defaultMcpCwd],
+  )
   const [mcpForm, setMcpForm] = useState<McpFormData>({
-    name: '', type: 'local', command: '', url: '', args: '', env: {}, envPassthrough: false, cwd: '~/Helix',
+    name: '', type: 'local', command: '', url: '', args: '',
   })
   const mcpServerNames = Object.keys(mcpServers)
   const [mcpStatus, setMcpStatus] = useState<Record<string, boolean>>({})
@@ -681,6 +698,9 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   // is persisted locally and sent per-session via session/new).
   const [gatewayMcp, setGatewayMcp] = useState<Record<string, any>>({})
   const [gatewayMcpLoaded, setGatewayMcpLoaded] = useState(false)
+  // Name of a gateway (config.yaml mcp_servers) server being edited — opens
+  // the shared McpEditorForm with its config; null = not editing.
+  const [gatewayEditing, setGatewayEditing] = useState<string | null>(null)
 
   // MCP status - query tools/list to detect which MCP servers are connected
   // Reactive: subscribes to hermesSessionId so the check re-runs once a session
@@ -744,21 +764,21 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   }, [hermesSessionId, fetchMcpStatus])
 
   // Load gateway MCP servers from config.yaml (Tauri IPC)
-  useEffect(() => {
+  const reloadGatewayMcp = useCallback(async () => {
     if (!isElectron()) { setGatewayMcpLoaded(true); return }
-    ;(async () => {
-      try {
-        const api = (window as any).electron?.mcpConfig
-        if (!api?.list) { setGatewayMcpLoaded(true); return }
-        const r = await api.list()
-        if (r?.ok && r.servers) setGatewayMcp(r.servers || {})
-      } catch {
-        // settings page must not break on IPC failure
-      } finally {
-        setGatewayMcpLoaded(true)
-      }
-    })()
+    try {
+      const api = (window as any).electron?.mcpConfig
+      if (!api?.list) { setGatewayMcpLoaded(true); return }
+      const r = await api.list()
+      if (r?.ok && r.servers) setGatewayMcp(r.servers || {})
+    } catch {
+      // settings page must not break on IPC failure
+    } finally {
+      setGatewayMcpLoaded(true)
+    }
   }, [])
+
+  useEffect(() => { reloadGatewayMcp() }, [reloadGatewayMcp])
 
   // Archive state
   const [archives, setArchives] = useState<Array<{ id: string; label: string; savedAt: number; messageCount: number }>>([])
@@ -1031,8 +1051,14 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   const hasApiConfig = !!apiConfig.apiKey
 
   // ── MCP handlers ─────────────────────────────────────────────────────────
+  const mcpArgText = useCallback((v: unknown) => {
+    if (typeof v === 'string') return v
+    if (v === null || v === undefined) return ''
+    try { return JSON.stringify(v) } catch { return String(v) }
+  }, [])
+
   const resetMcpForm = useCallback(() => {
-    setMcpForm({ name: '', type: 'local', command: '', url: '', args: '', env: {}, envPassthrough: false, cwd: '~/Helix' })
+    setMcpForm({ name: '', type: 'local', command: '', url: '', args: '' })
   }, [])
 
   const handleSaveMcp = useCallback(async () => {
@@ -1040,20 +1066,40 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     if (!name) { showToast({ type: 'error', title: '请填写服务器名称' }); return }
     if (mcpForm.type === 'local' && !mcpForm.command.trim()) { showToast({ type: 'error', title: '请填写启动命令' }); return }
     if (mcpForm.type === 'remote' && !mcpForm.url.trim()) { showToast({ type: 'error', title: '请填写 URL' }); return }
-    if (editingMcpName && editingMcpName !== name) removeMcpServer(editingMcpName)
+    const api = (window as any).electron?.mcpConfig
+    if (!api?.save) { showToast({ type: 'error', title: '当前环境不支持写入 config.yaml' }); return }
     const cmdParts = [mcpForm.command.trim(), ...mcpForm.args.trim().split(/\s+/)].filter(Boolean)
-    const config: McpServerConfig = {
-      type: mcpForm.type, enabled: mcpServers[editingMcpName || name]?.enabled ?? true,
-      ...(mcpForm.type === 'local' ? { command: cmdParts } : { url: mcpForm.url }),
-      ...(Object.keys(mcpForm.env).length > 0 ? { environment: mcpForm.env } : {}),
-      ...(mcpForm.cwd ? { cwd: mcpForm.cwd } : {}),
+    const nextCwd = mcpServers[editingMcpName || name]?.cwd || resolveDefaultMcpCwd()
+    const old = mcpServers[editingMcpName || name] || {}
+    const gatewayEntry: Record<string, any> = {
+      enabled: old.enabled ?? true,
+      ...(mcpForm.type === 'remote' ? { url: mcpForm.url.trim() } : { command: cmdParts[0] || '' }),
+      ...(mcpForm.type === 'local' && cmdParts.length > 1 ? { args: cmdParts.slice(1) } : {}),
+      ...(Object.keys(old.environment || {}).length > 0 ? { env: old.environment } : {}),
+      ...(old.envPassthrough ? { env_passthrough: true } : {}),
+      ...(mcpForm.type === 'local' && nextCwd ? { cwd: nextCwd } : {}),
+      ...(Object.keys(old.headers || {}).length > 0 ? { headers: old.headers } : {}),
+      ...(typeof old.timeout === 'number' ? { timeout: old.timeout } : {}),
     }
-    addMcpServer(name, config); await persistToStorage()
-    showToast({ type: 'success', title: `服务器 "${name}" 已保存` })
-    setEditingMcpName(null); setIsAddingMcp(false); resetMcpForm()
-    // Refresh MCP status after save
-    setTimeout(fetchMcpStatus, 1000)
-  }, [mcpForm, editingMcpName, mcpServers, addMcpServer, removeMcpServer, persistToStorage, showToast, resetMcpForm, fetchMcpStatus])
+    const servers: Record<string, any> = { ...gatewayMcp }
+    if (editingMcpName && editingMcpName !== name) delete servers[editingMcpName]
+    servers[name] = gatewayEntry
+
+    try {
+      const r = await api.save(servers)
+      if (!r?.ok) { showToast({ type: 'error', title: `保存失败：${r?.error || '未知错误'}` }); return }
+      // 新加的服务器只留在 config.yaml（网关级），不重复放进应用列表。
+      if (editingMcpName && editingMcpName !== name) removeMcpServer(editingMcpName)
+      else if (mcpServers[name]) removeMcpServer(name)
+      await persistToStorage()
+      await reloadGatewayMcp()
+      showToast({ type: 'success', title: `服务器 "${name}" 已保存到 config.yaml` })
+      setEditingMcpName(null); setIsAddingMcp(false); resetMcpForm()
+      setTimeout(fetchMcpStatus, 1000)
+    } catch (e) {
+      showToast({ type: 'error', title: `保存失败：${(e as Error)?.message || e}` })
+    }
+  }, [mcpForm, editingMcpName, mcpServers, gatewayMcp, removeMcpServer, persistToStorage, reloadGatewayMcp, showToast, resetMcpForm, fetchMcpStatus, resolveDefaultMcpCwd])
 
   const handleEditMcp = useCallback((name: string) => {
     const config = mcpServers[name]; if (!config) return
@@ -1063,12 +1109,9 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       name, type: config.type,
       command: cmdParts[0] || '',
       url: config.url || '',
-      args: cmdParts.slice(1).join(' '),
-      env: config.environment || {},
-      envPassthrough: (config as any).envPassthrough ?? false,
-      cwd: config.cwd || '',
+      args: cmdParts.slice(1).map(mcpArgText).filter(Boolean).join(' '),
     })
-  }, [mcpServers, setEditingMcpName])
+  }, [mcpServers, setEditingMcpName, mcpArgText])
 
   const handleDeleteMcp = useCallback(async (name: string) => {
     removeMcpServer(name); await persistToStorage(); showToast({ type: 'info', title: `服务器 "${name}" 已删除` })
@@ -1077,6 +1120,83 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   const handleToggleMcp = useCallback(async (name: string) => {
     toggleMcpServer(name); await persistToStorage()
   }, [toggleMcpServer, persistToStorage])
+
+  // ── Gateway MCP (config.yaml mcp_servers) edit handlers ────────────────
+  const handleEditGatewayMcp = useCallback((name: string) => {
+    const cfg = gatewayMcp[name]; if (!cfg) return
+    setGatewayEditing(name)
+    const cmdParts = Array.isArray(cfg.command) ? cfg.command : (cfg.command ? [cfg.command] : [])
+    const argsArr = Array.isArray(cfg.args) ? cfg.args : []
+    setMcpForm({
+      name,
+      type: cfg.url ? 'remote' : 'local',
+      command: cmdParts[0] || '',
+      url: cfg.url || '',
+      args: [...cmdParts.slice(1), ...argsArr].map(mcpArgText).filter(Boolean).join(' '),
+    })
+  }, [gatewayMcp, mcpArgText])
+
+  const handleSaveGatewayMcp = useCallback(async () => {
+    const name = mcpForm.name.trim()
+    if (!name) { showToast({ type: 'error', title: '请填写服务器名称' }); return }
+    if (mcpForm.type === 'local' && !mcpForm.command.trim()) { showToast({ type: 'error', title: '请填写启动命令' }); return }
+    if (mcpForm.type === 'remote' && !mcpForm.url.trim()) { showToast({ type: 'error', title: '请填写 URL' }); return }
+    const api = (window as any).electron?.mcpConfig
+    if (!api?.save) { showToast({ type: 'error', title: '当前环境不支持保存' }); return }
+
+    const cmdParts = [mcpForm.command.trim(), ...mcpForm.args.trim().split(/\s+/)].filter(Boolean)
+    const oldName = gatewayEditing
+    const oldCfg = (oldName && gatewayMcp[oldName]) || {}
+
+    // Full-block write: carry over the original cfg so scalar overrides
+    // (enabled/timeout/auth/headers) survive an edit; delete keys the form
+    // cleared. env is NOT sent when untouched — the Rust side then carries
+    // the old env block over, so secrets never get clobbered by a display
+    // round trip (config.yaml env values are hidden from the renderer).
+    const merged: Record<string, any> = { ...oldCfg }
+    if (mcpForm.type === 'remote') {
+      merged.url = mcpForm.url.trim()
+      delete merged.command; delete merged.args
+    } else {
+      merged.command = cmdParts[0] || ''
+      if (cmdParts.length > 1) merged.args = cmdParts.slice(1)
+      else delete merged.args
+    }
+    const nextCwd = oldCfg.cwd || resolveDefaultMcpCwd()
+    if (nextCwd) merged.cwd = nextCwd
+    else delete merged.cwd
+
+    const servers: Record<string, any> = { ...gatewayMcp }
+    if (oldName && oldName !== name) delete servers[oldName]
+    servers[name] = merged
+
+    try {
+      const r = await api.save(servers)
+      if (!r?.ok) { showToast({ type: 'error', title: `保存失败：${r?.error || '未知错误'}` }); return }
+      showToast({ type: 'success', title: `服务器 "${name}" 已保存` })
+      setGatewayEditing(null); setIsAddingMcp(false); resetMcpForm()
+      await reloadGatewayMcp()
+      setTimeout(fetchMcpStatus, 1000)
+    } catch (e) {
+      showToast({ type: 'error', title: `保存失败：${(e as Error)?.message || e}` })
+    }
+  }, [mcpForm, gatewayEditing, gatewayMcp, showToast, resetMcpForm, reloadGatewayMcp, fetchMcpStatus, resolveDefaultMcpCwd])
+
+  const handleDeleteGatewayMcp = useCallback(async (name: string) => {
+    const api = (window as any).electron?.mcpConfig
+    if (!api?.save) { showToast({ type: 'error', title: '当前环境不支持保存' }); return }
+    const servers: Record<string, any> = { ...gatewayMcp }
+    delete servers[name]
+    try {
+      const r = await api.save(servers)
+      if (!r?.ok) { showToast({ type: 'error', title: `删除失败：${r?.error || '未知错误'}` }); return }
+      await reloadGatewayMcp()
+      setTimeout(fetchMcpStatus, 1000)
+      showToast({ type: 'info', title: `服务器 "${name}" 已删除` })
+    } catch (e) {
+      showToast({ type: 'error', title: `删除失败：${(e as Error)?.message || e}` })
+    }
+  }, [gatewayMcp, reloadGatewayMcp, fetchMcpStatus, showToast])
 
   const handleMcpFormChange = useCallback((patch: Partial<McpFormData>) => {
     setMcpForm(prev => ({ ...prev, ...patch }))
@@ -1523,7 +1643,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
           <div className="space-y-6">
             <div className="flex items-center justify-between">
               <h3 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold text-foreground">MCP</h3>
-              {!isAddingMcp && !editingMcpName ? (
+              {!isAddingMcp && !editingMcpName && !gatewayEditing ? (
                 <button
                   onClick={() => { setIsAddingMcp(true); resetMcpForm() }}
                   className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
@@ -1532,7 +1652,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 </button>
               ) : (
                 <button
-                  onClick={() => { setIsAddingMcp(false); setEditingMcpName(null); resetMcpForm() }}
+                  onClick={() => { setIsAddingMcp(false); setEditingMcpName(null); setGatewayEditing(null); resetMcpForm() }}
                   className="text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
                   data-tip="关闭"
                 >
@@ -1541,8 +1661,8 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               )}
             </div>
 
-            {/* Gateway-loaded MCP servers (config.yaml mcp_servers) — read-only */}
-            {gatewayMcpLoaded && !isAddingMcp && !editingMcpName && (
+            {/* Gateway-loaded MCP servers (config.yaml mcp_servers) — editable */}
+            {gatewayMcpLoaded && !isAddingMcp && !editingMcpName && !gatewayEditing && (
               <section className="space-y-2">
                 {Object.keys(gatewayMcp).length === 0 ? (
                   <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 px-4 py-3 border border-dashed border-border/40 rounded-lg">
@@ -1554,7 +1674,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                       const connected = mcpStatus[name]
                       const cmd = [cfg?.command, ...(cfg?.args || [])].filter(Boolean).join(' ')
                       return (
-                        <div key={name} className="flex items-center gap-3 px-4 py-3 border border-border/20 bg-muted/20 rounded-lg">
+                        <div key={name} className="flex items-center gap-3 px-4 py-3 border border-border/20 bg-muted/20 rounded-lg group">
                           <div className="relative shrink-0">
                             <div className={`w-2.5 h-2.5 rounded-full ${cfg?.enabled === false ? 'bg-gray-300' : connected ? 'bg-green-500' : connected === false ? 'bg-red-400' : 'bg-amber-400'}`} />
                           </div>
@@ -1569,9 +1689,14 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                               {cfg?.url || cmd || '(环境变量式配置)'}
                             </p>
                           </div>
-                          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50 shrink-0">
-                            {cfg?.enabled === false ? '已停用' : connected ? '已连接' : connected === false ? '未连接' : '检测中'}
-                          </span>
+                          <button onClick={() => handleEditGatewayMcp(name)}
+                            className="px-1.5 py-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 hover:text-foreground hover:bg-accent opacity-0 group-hover:opacity-100 transition-all shrink-0">
+                            编辑
+                          </button>
+                          <button onClick={() => handleDeleteGatewayMcp(name)}
+                            className="px-1.5 py-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 opacity-0 group-hover:opacity-100 transition-all shrink-0">
+                            删除
+                          </button>
                         </div>
                       )
                     })}
@@ -1580,7 +1705,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
               </section>
             )}
 
-            {!isAddingMcp && !editingMcpName ? (
+            {!isAddingMcp && !editingMcpName && !gatewayEditing ? (
               <>
                 {/* Server list */}
                 <div className="max-w-3xl space-y-2">
@@ -1637,8 +1762,8 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                   <McpEditorForm
                     form={mcpForm}
                     onChange={handleMcpFormChange}
-                    onSave={handleSaveMcp}
-                    onCancel={() => { setIsAddingMcp(false); setEditingMcpName(null); resetMcpForm() }}
+                    onSave={gatewayEditing ? handleSaveGatewayMcp : handleSaveMcp}
+                    onCancel={() => { setIsAddingMcp(false); setEditingMcpName(null); setGatewayEditing(null); resetMcpForm() }}
                   />
                 </div>
               </div>

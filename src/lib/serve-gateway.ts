@@ -21,6 +21,7 @@
  */
 
 import { warn, error as logError, debug } from '@/lib/logger'
+import { buildAcpMcpServers } from '@/lib/mcp'
 import { installTauriBridge } from '@/lib/tauri-bridge'
 import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
 
@@ -695,6 +696,16 @@ export class ServeGatewayClient {
         // background=true 工具 spawn 即返回 "Background process started"——
         // 这不是进程结束，任务终态由后续 process.exit 决定，这里不标完成。
         const isBackgroundSpawn = resultText.includes('Background process started')
+        // 后台任务暂停/恢复：把 process_registry 会话 id（proc_xxx）从工具结果
+        // 带回任务记录，作为 process.pause / process.resume RPC 的直查凭据。
+        // （后端 tool_commands 的 command→tool_call_id 映射在 tool.complete
+        // 时即被删除，靠它反查不可靠——proc id 是唯一稳定句柄。）
+        if (isBackgroundSpawn && payload?.result && typeof payload.result === 'object') {
+          const procSid = (payload.result as Record<string, unknown>).session_id
+          if (typeof procSid === 'string' && procSid) {
+            useBackgroundTasksStore.getState().setTaskProcId(toolId, procSid)
+          }
+        }
         if (!isBackgroundSpawn) {
           // 前台命令在这里收尾（后台进程的终态另有 process.exit，但 spawn 那次
           // tool.complete 已被 isBackgroundSpawn 跳过）。无条件调用 finishTask，
@@ -847,6 +858,13 @@ export class ServeGatewayClient {
    */
   private async createSession(params?: any): Promise<any> {
     await this.ensureModelSynced()
+    // 会话自动重建（session not found）等路径可能没带 mcpServers，此时回退到
+    // 应用当前保存的 MCP 列表，避免重建后的会话丢失工具。
+    let mcpServers = params?.mcpServers
+    if (!Array.isArray(mcpServers)) {
+      const { useHelixStore } = await import('@/stores/helix-store')
+      mcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers)
+    }
     // 常规「增强 Find 和 Grep」：显式传入的 search_engine 优先（'' = 用默认
     // 引擎），未传时（如「session not found」自动重建路径）回退到当前设置值。
     let searchEngine = params?.search_engine
@@ -862,6 +880,9 @@ export class ServeGatewayClient {
     }
     const res = await this.rpc('session.create', {
       source: 'helix',
+      // 应用内维护的 MCP 服务器列表随会话一起注册；serve 模式下后端不会
+      // 像 ACP 模式那样自动收到 session/new 的 mcpServers，必须在这里带上。
+      ...(Array.isArray(mcpServers) ? { mcpServers } : {}),
       // serve 模式的工作目录是 per-session 的（见 main.rs setWorkDir 注释：
       // "serve mode: cwd applied per-session via explicit_cwd"）。前端选中的项目
       // 必须随 session.create 传给后端，否则会话 cwd 落到配置/TERMINAL_CWD/

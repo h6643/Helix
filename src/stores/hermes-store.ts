@@ -19,6 +19,7 @@ export interface McpServerConfig {
   cwd?: string
   timeout?: number
   headers?: Record<string, string>
+  envPassthrough?: boolean
 }
 
 export type GatewayState = 'idle' | 'connecting' | 'open' | 'closed' | 'error'

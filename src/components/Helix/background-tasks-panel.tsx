@@ -1,8 +1,11 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2, X, XCircle, CheckCircle2, Trash2, Terminal } from 'lucide-react'
-import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
+import { Loader2, X, XCircle, CheckCircle2, Trash2, Terminal, Pause, Play } from 'lucide-react'
+import { useBackgroundTasksStore, type BackgroundTask } from '@/stores/background-tasks-store'
+import { getServeClient } from '@/lib/serve-gateway'
+import { useHermesStore } from '@/stores/hermes-store'
+import { useHelixStore } from '@/stores/helix-store'
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000)
@@ -10,6 +13,30 @@ function formatDuration(ms: number): string {
   const m = Math.floor(s / 60)
   const r = s % 60
   return r > 0 ? `${m} 分 ${r} 秒` : `${m} 分`
+}
+
+/** 暂停/恢复一个后台任务（RPC 到 process.pause / process.resume）。 */
+async function toggleTaskPaused(task: BackgroundTask): Promise<void> {
+  const client = getServeClient()
+  if (!client) return
+  const target = !task.paused
+  // 乐观更新；失败回滚并提示
+  useBackgroundTasksStore.getState().setTaskPaused(task.id, target)
+  try {
+    await client.rpc(target ? 'process.pause' : 'process.resume', {
+      session_id: useHermesStore.getState().hermesSessionId ?? undefined,
+      task_id: task.id,
+      proc_id: task.procSessionId ?? undefined,
+      command: task.command,
+    })
+  } catch (e) {
+    useBackgroundTasksStore.getState().setTaskPaused(task.id, !target)
+    useHelixStore.getState().showToast({
+      type: 'error',
+      title: target ? '暂停失败' : '恢复失败',
+      description: String((e as Error)?.message ?? e).slice(0, 120),
+    })
+  }
 }
 
 /** 后台任务面板：顶栏「后台任务」按钮的弹出卡片。只显示当前会话的任务，
@@ -58,10 +85,11 @@ export function BackgroundTasksPanel({ sessionId, onClose }: { sessionId: string
           {done.length > 0 && (
             <button
               onClick={clearFinished}
-              className="px-1.5 py-0.5 rounded text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/50 hover:text-foreground hover:bg-muted/40 transition-colors"
-              data-tip="清除已完成"
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/50 hover:text-foreground hover:bg-muted/40 transition-colors"
+              data-tip="清理已完成/失败任务"
             >
-              清除完成
+              <Trash2 className="size-3" />
+              清理
             </button>
           )}
           <button
@@ -89,7 +117,11 @@ export function BackgroundTasksPanel({ sessionId, onClose }: { sessionId: string
               className="flex items-center gap-2 px-3 py-2 border-b border-border/30 last:border-b-0"
             >
               {runningTask ? (
-                <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
+                task.paused ? (
+                  <Pause className="size-3.5 text-amber-500 shrink-0" />
+                ) : (
+                  <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
+                )
               ) : task.status === 'failed' ? (
                 <XCircle className="size-3.5 text-red-500 shrink-0" />
               ) : (
@@ -100,8 +132,23 @@ export function BackgroundTasksPanel({ sessionId, onClose }: { sessionId: string
                 {task.command}
               </span>
               <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground shrink-0">
-                {runningTask ? `运行中 ${formatDuration(durationMs)}` : `耗时 ${formatDuration(durationMs)}`}
+                {runningTask
+                  ? `${task.paused ? '已暂停' : '运行中'} ${formatDuration(durationMs)}`
+                  : `耗时 ${formatDuration(durationMs)}`}
               </span>
+              {runningTask && (
+                <button
+                  onClick={() => toggleTaskPaused(task)}
+                  className={`p-0.5 rounded transition-colors shrink-0 ${
+                    task.paused
+                      ? 'text-primary hover:text-primary/80 hover:bg-primary/10'
+                      : 'text-foreground/30 hover:text-foreground hover:bg-muted/40'
+                  }`}
+                  data-tip={task.paused ? '恢复' : '暂停'}
+                >
+                  {task.paused ? <Play className="size-3" /> : <Pause className="size-3" />}
+                </button>
+              )}
               {!runningTask && (
                 <button
                   onClick={() => removeTask(task.id)}

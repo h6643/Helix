@@ -3,6 +3,7 @@
  * Stores: memories, tasks, notes, checkpoints, chat history, file snapshots
  */
 import { encryptApiKey, decryptApiKey } from './crypto'
+import type { PendingChange } from '@/stores/helix-types'
 
 const DB_NAME = 'helix-db'
 const DB_VERSION = 5
@@ -42,6 +43,7 @@ export interface PersistedChatMessage {
   thinkingTime?: number
   totalTokens?: number
   steps?: import('@/stores/helix-store').ExecutionStep[]
+  fileChanges?: PendingChange[]
   /** Interleaved thinking/text/tool_group/file_change blocks. Was dropped from
    *  persistence for a long time, so reloaded messages lost their thinking
    *  cards and tool cards ("重启后思考卡片不能展开"). */

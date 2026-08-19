@@ -173,6 +173,7 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   showLearningView: boolean
   toggleLearningView: () => void
   approvalMode: 'default' | 'accept_edits' | 'dont_ask' | 'plan'
+  approvalModeBySession: Record<string, 'default' | 'accept_edits' | 'dont_ask' | 'plan'>
   setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask' | 'plan') => void
   // 每个会话是否有待用户确认（审批/反问/定时任务），侧边栏据此显示标记
   sessionPendingApproval: Record<string, boolean>
@@ -612,6 +613,7 @@ async function persistCurrentSessionNow(): Promise<void> {
         thoughtTokens: m.thoughtTokens,
         outputTokens: m.outputTokens,
         steps: m.steps,
+        fileChanges: m.fileChanges,
         blocks: m.blocks,
       }))
     const draft = snapshot.streamingDrafts[sessionId]
@@ -640,6 +642,7 @@ async function persistCurrentSessionNow(): Promise<void> {
         timestamp: Date.now(),
         isStreaming: false,
         steps: undefined,
+        fileChanges: undefined,
         blocks: undefined,
       })
     }
@@ -938,6 +941,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   codeFullscreen: false,
   showLearningView: false,
   approvalMode: 'accept_edits' as const,
+  approvalModeBySession: {},
   startupGreeting: '有什么可以帮你的？',
 
   emailConfigured: false,
@@ -1191,7 +1195,19 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   })),
   toggleCodeFullscreen: () => set((s) => ({ codeFullscreen: !s.codeFullscreen })),
   toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
-  setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask' | 'plan') => set({ approvalMode: v }),
+  setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask' | 'plan') => {
+    set((s) => {
+      // 新对话尚未分配 id 时先存到草稿键，避免选择后重启丢失。
+      const sid = s.currentSessionId || '__draft__'
+      const bySession = { ...s.approvalModeBySession, [sid]: v }
+      return { approvalMode: v, approvalModeBySession: bySession }
+    })
+    import('@/lib/persist').then(({ persistence }) => {
+      const st = get()
+      persistence.saveSetting('approvalMode', st.approvalMode).catch(() => {})
+      persistence.saveSetting('approvalModeBySession', st.approvalModeBySession).catch(() => {})
+    })
+  },
   sessionPendingApproval: {},
   setSessionPendingApproval: (patch: Record<string, boolean>) => set((s) => ({ sessionPendingApproval: { ...s.sessionPendingApproval, ...patch } })),
   setStartupGreeting: (v: string) => set((s) => ({ startupGreeting: v })),
@@ -1681,11 +1697,17 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     if (id === state.currentSessionId) return {}
     // 任务清单跟随会话：恢复目标会话缓存的 todo 列表（无则清空）
     const hermesTodos = state.hermesTodosBySession?.[id] ?? []
+    // 访问权限跟随会话：每个对话记住自己的审批模式。
+    const draftMode = state.approvalModeBySession?.['__draft__']
+    const approvalMode = state.approvalModeBySession?.[id] ?? draftMode ?? state.approvalMode
+    const approvalModeBySession = { ...state.approvalModeBySession }
+    if (draftMode && !approvalModeBySession[id]) approvalModeBySession[id] = draftMode
+    delete approvalModeBySession['__draft__']
     const history = [...state.sessionHistory]
     const idx = state.sessionHistoryIndex
     // Check if the target ID already exists at the current position (deduplicate)
     if (history[idx] === id) {
-      return { currentSessionId: id, hermesTodos }
+      return { currentSessionId: id, hermesTodos, approvalMode, approvalModeBySession }
     }
     // Remove any forward history when navigating to a new session
     const newHistory = [...history.slice(0, idx + 1), id]
@@ -1694,6 +1716,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       sessionHistory: newHistory,
       sessionHistoryIndex: newHistory.length - 1,
       hermesTodos,
+      approvalMode,
+      approvalModeBySession,
     }
   }),
   navigateSession: async (direction) => {
@@ -2443,6 +2467,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('enhancedFindGrep', state.enhancedFindGrep),
         persistence.saveSetting('terminalShell', state.terminalShell),
         persistence.saveSetting('approvalMode', state.approvalMode),
+        persistence.saveSetting('approvalModeBySession', state.approvalModeBySession),
         persistence.saveSetting('startupGreeting', state.startupGreeting),
         persistence.saveSetting('editorTheme', state.editorTheme),
         persistence.saveSetting('gitAutoCommit', state.gitAutoCommit),
@@ -2484,7 +2509,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, autoArchiveOldTasks, archiveRetentionHours, enhancedFindGrep, terminalShell, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, approvalMode, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, autoArchiveOldTasks, archiveRetentionHours, enhancedFindGrep, terminalShell, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, approvalMode, approvalModeBySession, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
         safeLoad(persistence.loadMemories(), 'memories'),
         safeLoad(persistence.loadTasks(), 'tasks'),
         safeLoad(persistence.loadCheckpoints(), 'checkpoints'),
@@ -2535,6 +2560,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(persistence.loadSetting<string>('gitCommitTemplate'), 'gitCommitTemplate'),
         safeLoad(persistence.loadSetting<string>('gitBranchPrefix'), 'gitBranchPrefix'),
         safeLoad(persistence.loadSetting<string>('approvalMode'), 'approvalMode'),
+        safeLoad(persistence.loadSetting<Record<string, 'default' | 'accept_edits' | 'dont_ask' | 'plan'>>('approvalModeBySession'), 'approvalModeBySession'),
         safeLoad(persistence.loadSetting<string>('startupGreeting'), 'startupGreeting'),
         safeLoad(persistence.loadSetting<ProviderConfig[]>('providers'), 'providers'),
         safeLoad(persistence.loadSetting<string | null>('activeModel'), 'activeModel'),
@@ -2547,12 +2573,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(persistence.loadSetting<ExternalService[]>('externalServices'), 'externalServices'),
       ])
 
-      // Do NOT restore the latest session's chatMessages on startup.
-      // Always start with an empty welcome screen so the user doesn't see
-      // stale/failed messages (e.g. 401 errors) from a previous run.
-      // Historical sessions remain available in the sidebar and can be
-      // opened manually.
+      // 启动时恢复上次打开的会话及其历史，模型重新建会话时会用这些消息
+      // 作为 seed history，避免每次重启都像新对话一样丢失上下文。
       const defaults = { provider: 'custom' as const, apiKey: '', baseUrl: '', model: '' }
+      let defaultSessionsDir: string | null = null
+      try {
+        const info = await electronApp.getDataRoot()
+        if (info?.dataRoot) defaultSessionsDir = `${info.dataRoot.replace(/[\\/]+$/, '')}/sessions`
+      } catch {
+        // Electron bridge unavailable — leave default empty
+      }
       // Restore which named profile was active before the restart, so the selection
       // survives a cold start (the profile list itself is persisted to IndexedDB).
       const loadedActiveProfileId = (await safeLoad(persistence.loadSetting<string | null>('activeProfileId'), 'activeProfileId')) ?? null
@@ -2762,20 +2792,19 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // catches genuinely bad model/endpoint pairings, so keeping the user's
       // explicit choice here is safe.
       const builtActiveModel: string | null =
-        // 优先 activeProfileId 指向的 profile 的模型：activeModel 与
-        // activeProfileId 可能不一致（旧版 applyProfile 漏更新 activeModel，
-        // 残留 deepseek-v4-flash 而 profile 指向 Ling）—— profile 是用户最近
-        // 的显式选择，应以其模型为准；profile 无模型时才回退 activeModel。
+        // 以用户最后选择的 activeModel 为准；profile 只在没有 activeModel 时兜底，
+        // 避免“手动选了新模型，重启后又被 profile 里的旧模型覆盖”。
         (() => {
+          if (activeModel) return activeModel
           if (loadedActiveProfileId) {
             const prof = (apiProfiles || []).find((p) => p.id === loadedActiveProfileId)
             if (prof?.config?.model) return prof.config.model
           }
-          return activeModel || (mergedProviders.length > 0
+          return mergedProviders.length > 0
             ? (mergedProviders.find((p) => p.isDefault && (p.models?.length || 0) > 0)?.models[0] ||
                mergedProviders.find((p) => (p.models?.length || 0) > 0)?.models[0] ||
                null)
-            : null)
+            : null
         })()
       // Resolve the active provider: prefer the owner of the active model, then
       // a saved id that still exists (only when it agrees with that owner or the
@@ -2820,6 +2849,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const prunedIndex = savedSessionHistoryIndex != null && savedSessionHistoryIndex < prunedHistory.length
         ? savedSessionHistoryIndex
         : prunedHistory.length - 1
+      const restoredSessionId = latestSession?.id ?? null
+      const restoredHistory = latestSession && !prunedHistory.includes(latestSession.id)
+        ? [latestSession.id, ...prunedHistory]
+        : prunedHistory
+      const restoredIndex = latestSession
+        ? (prunedHistory.includes(latestSession.id) ? prunedIndex : 0)
+        : prunedIndex
 
       set({
         // memories are global and owned by the Hermes backend (memories/MEMORY.md);
@@ -2828,10 +2864,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         checkpoints: checkpoints as SessionCheckpoint[],
         notes: notes || '',
         goal: goal,
-        currentSessionId: null,
-        sessionHistory: prunedHistory,
-        sessionHistoryIndex: prunedIndex,
-        selectedWorkDir: savedSelectedWorkDir || latestSession?.workDir || get().selectedWorkDir,
+        // 恢复上次打开的会话和它的历史，避免重启后模型/界面都变成新对话。
+        currentSessionId: restoredSessionId,
+        activeSessionWorkDir: latestSession?.workDir ?? null,
+        sessionHistory: restoredHistory,
+        sessionHistoryIndex: restoredIndex,
+        // 没选项目时默认使用 Hermes sessions 目录；恢复会话时跟随会话自己的目录。
+        selectedWorkDir: latestSession?.workDir ?? defaultSessionsDir,
         // Never downgrade a fresh true set while restore was still loading.
         // Startup renders from the default false before IndexedDB finishes;
         // clicking "skip/start" in that window must not be overwritten by the
@@ -2964,7 +3003,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           if (!prof) return null
           return id
         })(),
-        chatMessages: [],
+        chatMessages: (latestSession?.chatMessages ?? []).map(m => ({
+          ...m,
+          role: m.role as 'user' | 'assistant' | 'system',
+          isStreaming: !!m.isStreaming,
+        })),
         files: get().files,
         openTabs: get().openTabs,
         fontFamily: fontFamily || (typeof localStorage !== 'undefined' ? localStorage.getItem('helix-font-family') : null) || get().fontFamily,
@@ -3040,6 +3083,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
         approvalMode: (approvalMode as any) || get().approvalMode,
+        approvalModeBySession: approvalModeBySession ?? get().approvalModeBySession,
         startupGreeting: startupGreeting || get().startupGreeting,
         browserHomeUrl: '',
         browserBookmarks: savedBookmarks ?? get().browserBookmarks,

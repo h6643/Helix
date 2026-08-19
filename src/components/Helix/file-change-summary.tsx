@@ -1,6 +1,6 @@
 'use client'
 
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, FilePen } from 'lucide-react'
 import React, { useMemo, useState } from 'react'
 import type { PendingChange } from '@/stores/helix-types'
 import { computeDiff, countDiffLines } from './diff-preview'
@@ -82,15 +82,16 @@ export function FileChangeSummary({ changes }: { changes: PendingChange[]; hideH
       <button
         type="button"
         onClick={() => setExpanded(v => !v)}
-        className="w-full flex items-center gap-1.5 px-1 py-1 text-left text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:bg-muted/30 rounded transition-colors"
+        className="w-full flex items-center gap-1.5 px-1 py-1 text-left text-[length:var(--helix-transcript-size)] text-foreground/70 hover:bg-muted/30 rounded transition-colors"
       >
-        <ChevronRight className={`size-3 shrink-0 text-foreground/30 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-        <span className="font-medium">已编辑</span>
-        <span className="flex-1 truncate font-mono text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">{changes.map(c => c.fileName).join('、')}</span>
+        <FilePen className="size-3.5 shrink-0 text-foreground/40" />
+        <span className="font-medium shrink-0">已编辑</span>
+        <span className="flex-1 truncate font-mono text-[length:var(--helix-transcript-size)] text-muted-foreground">{changes.map(c => c.fileName).join('、')}</span>
         <span className="shrink-0 flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)] tabular-nums">
           <span className="text-emerald-500">+{totalAdded}</span>
           <span className="text-red-500">-{totalRemoved}</span>
         </span>
+        <ChevronRight className={`size-3 shrink-0 text-foreground/30 transition-transform ${expanded ? 'rotate-90' : ''}`} />
       </button>
       {expanded && (
         <div className="pl-5 pr-1 pb-1 flex flex-col gap-2">

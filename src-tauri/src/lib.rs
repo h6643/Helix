@@ -303,8 +303,9 @@ pub fn run() {
             // vision model
             vision::vision_config_list,
             vision::vision_config_save,
-            // gateway MCP servers (config.yaml mcp_servers, read-only)
+            // gateway MCP servers (config.yaml mcp_servers, read/write)
             mcp::mcp_config_list,
+            mcp::mcp_config_save,
             // channels
             channels::channels_list,
             channels::channels_save,
