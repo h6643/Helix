@@ -1,51 +1,11 @@
 'use client'
 
-import { ChevronRight, FileCode, Undo2 } from 'lucide-react'
+import { FileCode, Undo2 } from 'lucide-react'
 import React, { useMemo, useState } from 'react'
 import { electronFS } from '@/lib/electron-bridge'
 import { useHelixStore } from '@/stores/helix-store'
 import type { PendingChange } from '@/stores/helix-types'
-import { computeDiff, countDiffLines } from './diff-preview'
-
-function DiffBody({ change }: { change: PendingChange }) {
-  const fallbackDiff = useMemo(
-    () => computeDiff(change.oldContent || '', change.newContent || ''),
-    [change.oldContent, change.newContent],
-  )
-  const diffLines = change.unifiedDiff
-    ? change.unifiedDiff.split('\n').map(line => ({ line }))
-    : fallbackDiff
-
-  return (
-    <div className="font-mono text-[length:var(--helix-transcript-size)] leading-relaxed rounded-md overflow-hidden">
-      {diffLines.map((entry, i) => {
-        const line = 'line' in entry ? entry.line : ('content' in entry ? entry.content : '')
-        const isHeader = line.startsWith('+++') || line.startsWith('---')
-        const isHunk = line.startsWith('@@')
-        const isAdd = !isHeader && !isHunk && line.startsWith('+')
-        const isRemove = !isHeader && !isHunk && line.startsWith('-')
-        return (
-          <div
-            key={i}
-            className={`px-2 py-px whitespace-pre-wrap border-l-2 ${
-              isHeader
-                ? 'bg-purple-500/10 border-transparent text-purple-300/80'
-                : isHunk
-                  ? 'bg-sky-500/10 border-transparent text-sky-300/80'
-                  : isAdd
-                    ? 'bg-emerald-500/10 border-emerald-500 text-emerald-300/90'
-                    : isRemove
-                      ? 'bg-red-500/10 border-red-500 text-red-300/90'
-                      : 'border-transparent text-muted-foreground/70'
-            }`}
-          >
-            {line}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
+import { countDiffLines } from './diff-preview'
 
 function reverseUnifiedDiff(diff: string, currentContent: string): string | null {
   const hunks: Array<{ newStart: number; newCount: number; body: string[] }> = []
@@ -83,7 +43,6 @@ function reverseUnifiedDiff(diff: string, currentContent: string): string | null
  * 单条回复末尾的修改汇总卡片：外层卡片 + 每个文件一行，点击行展开该文件的 diff。
  */
 export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] }) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [undone, setUndone] = useState<Set<string>>(new Set())
   const [undoing, setUndoing] = useState(false)
   const visibleChanges = useMemo(() => changes.filter(c => !undone.has(c.fileId)), [changes, undone])
@@ -93,15 +52,6 @@ export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] })
 
   const totalAdded = stats.reduce((sum, s) => sum + s.added, 0)
   const totalRemoved = stats.reduce((sum, s) => sum + s.removed, 0)
-
-  const toggle = (fileId: string) => {
-    setExpanded(prev => {
-      const next = new Set(prev)
-      if (next.has(fileId)) next.delete(fileId)
-      else next.add(fileId)
-      return next
-    })
-  }
 
   const undoChange = async (change: PendingChange) => {
     if (!change.filePath) throw new Error('缺少文件路径')
@@ -137,6 +87,38 @@ export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] })
     if (existing) {
       if (restored != null) useHelixStore.getState().applyFileChange(existing.id, restored)
       else useHelixStore.getState().deleteFile(existing.id)
+    }
+  }
+
+  const openChange = async (change: PendingChange) => {
+    const st = useHelixStore.getState()
+    const workDir = st.selectedWorkDir ?? st.activeSessionWorkDir ?? ''
+    const absolutePath = /^[A-Za-z]:[\\/]/.test(change.filePath) || change.filePath.startsWith('/')
+      ? change.filePath
+      : workDir
+        ? `${workDir.replace(/[\\/]+$/, '')}/${change.filePath}`
+        : change.filePath
+
+    // 右侧栏由 rightSidebarTab 控制显隐，先切到 code 视图再建编辑器 tab。
+    st.setRightSidebarTab('code')
+    const createdEmpty = st.ensureEditorTab(absolutePath, change.fileName)
+    try {
+      const content = await electronFS.readFile(absolutePath)
+      if (content == null) throw new Error('读取为空')
+      if (content.length > 1_000_000) {
+        st.showToast({ type: 'error', title: '文件过大', description: `${change.fileName} 超过 1MB，暂不支持在编辑器打开` })
+        if (createdEmpty) st.closeEditorTab(absolutePath)
+        return
+      }
+      if (/[\u0000-\u0008]/.test(content.slice(0, 4096))) {
+        st.showToast({ type: 'error', title: '无法编辑', description: `${change.fileName} 不是文本文件` })
+        if (createdEmpty) st.closeEditorTab(absolutePath)
+        return
+      }
+      if (createdEmpty) st.fillEditorTabContent(absolutePath, content)
+    } catch (e: any) {
+      st.showToast({ type: 'error', title: '打开失败', description: e?.message || '读取文件出错' })
+      if (createdEmpty) st.closeEditorTab(absolutePath)
     }
   }
 
@@ -194,14 +176,14 @@ export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] })
       </div>
       {visibleChanges.map((change, idx) => {
         const s = stats[idx]
-        const isExpanded = expanded.has(change.fileId)
         return (
           <div key={change.fileId} className="border-b border-border/20 last:border-b-0">
             <div className="flex items-center hover:bg-muted/40 transition-colors">
               <button
                 type="button"
-                onClick={() => toggle(change.fileId)}
+                onClick={() => openChange(change)}
                 className="flex flex-1 min-w-0 items-center gap-1.5 px-3 py-1.5 text-left"
+                data-tip="在侧边栏打开"
               >
                 <FileCode className="size-3.5 shrink-0 text-sky-500/80" />
                 <span className="truncate font-mono text-[length:var(--helix-transcript-size)] text-foreground/70">{change.fileName}</span>
@@ -209,14 +191,8 @@ export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] })
                   {s.added > 0 && <span className="text-emerald-500 mr-1.5">+{s.added}</span>}
                   {s.removed > 0 && <span className="text-red-500">-{s.removed}</span>}
                 </span>
-                <ChevronRight className={`size-3 shrink-0 text-foreground/30 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
               </button>
             </div>
-            {isExpanded && (
-              <div className="px-3 pb-2">
-                <DiffBody change={change} />
-              </div>
-            )}
           </div>
         )
       })}

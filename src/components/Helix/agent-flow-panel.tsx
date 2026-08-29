@@ -883,7 +883,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   isSearchMatch,
   isSearchActive,
   onFork,
-  onWithdraw,
   onUndo,
 }: {
   msg: ChatMessage
@@ -893,7 +892,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   isSearchMatch: boolean
   isSearchActive: boolean
   onFork: (id: string) => void
-  onWithdraw: (id: string) => void
   onUndo?: () => void
 }) {
   const content = useMemo(() => normalizeAcpContent(msg.content), [msg.content])
@@ -1623,28 +1621,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   const connectionNotice = useHelixStore(s => s.connectionNotice)
   const storeActions = useMemo(() => useHelixStore.getState(), [])
 
-  // 撤回：移除该助手消息，并同时移除紧邻的上一条用户提问（这一轮对话），保持整洁；
-  // 同时同步后端 message.delete，删除 state.db 里的历史，避免下次 prompt 复活。
-  const handleWithdraw = useCallback((id: string) => {
-    const state = useHelixStore.getState()
-    const msgs = state.chatMessages
-    const idx = msgs.findIndex((m) => m.id === id)
-    if (idx === -1) return
-    const assistantMsg = msgs[idx]
-    state.deleteMessage(id)
-    for (let i = idx - 1; i >= 0; i--) {
-      if (msgs[i].role === 'user') {
-        useHelixStore.getState().deleteMessage(msgs[i].id)
-        break
-      }
-    }
-    state.showToast({ type: 'success', title: '已撤回', description: '已移除该回复及其提问' })
-    const sessionId = useHermesStore.getState().hermesSessionId
-    const rowId = assistantMsg?.rowId
-    if (sessionId && rowId != null) {
-      hermesApi()?.send('message.delete', { session_id: sessionId, row_id: rowId }).catch(() => {})
-    }
-  }, [])
+  // （撤回统一走 handleUndoChat / /undo：后端 session.undo 截断 + 前端本地删除，
+  //  不再保留按 row_id 的 message.delete 消息级撤回路径。）
 
   const handleCreateBranch = async (name: string) => {
     if (!name || !isElectron()) return
@@ -1771,6 +1749,41 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         sessionEpochRef.current = -1
       }
     })
+    return () => { try { unsub?.() } catch {} }
+  }, [])
+
+  // 网关重连（同一进程，如 WebView2 崩溃自动恢复/整页重载）后，自动把当前
+  // 对话的后端会话 resume 回来：① 后端断连时会把会话 detach 到 drop
+  // sentinel 继续执行，重连后必须 session.resume 重绑 transport 事件流；
+  // ② 崩溃恢复后 hermesSessionId/全局绑定可能已丢，resume 能把它找回来，
+  // 避免用户下一条消息被当成新会话（历史会话分裂 bug 的另一半）。
+  useEffect(() => {
+    let unsub: (() => void) | undefined
+    try {
+      unsub = hermesApi()!.onEvent((method: string, params: any) => {
+        if (method !== 'gateway.ready') return
+        if (params?.sameGateway !== true) return // 真重启：后端会话已死，交给 handleRun 重建
+        const cid = useHelixStore.getState().currentSessionId
+        if (!cid) return
+        const entry = sessionMapRef.current.get(cid)
+        if (!entry?.sid) return
+        if (useHermesStore.getState().hermesSessionId === entry.sid) return
+        debug('[HelixTrace] 网关重连（同一进程），自动 resume 当前会话 →', entry.sid)
+        hermesApi()!.send('session.resume', { session_id: entry.sid })
+          .then((res: any) => {
+            if (!res) return
+            // 重绑成功：刷新映射 epoch 并恢复全局绑定
+            sessionMapRef.current.set(cid, { sid: entry.sid, epoch: useHermesStore.getState().gatewayEpoch })
+            persistSessionMap(sessionMapRef.current)
+            useHermesStore.getState().setHermesSessionId(entry.sid)
+          })
+          .catch(() => {
+            // 会话确实已死（如后端回收/真重启误判）：静默，handleRun 的
+            // session/new 重建兜底（带 seedHistory，不丢上下文）
+            debug('[HelixTrace] resume 失败，会话可能已回收 →', entry.sid)
+          })
+      })
+    } catch { /* noop */ }
     return () => { try { unsub?.() } catch {} }
   }, [])
   // /btw 后台任务的完成通知需要一个 persistent listener（handleRun 里的 per-run
@@ -2488,19 +2501,63 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     }
   }, [setStreamingDraft, currentSessionId, isBusy, isRunning])
 
+  // Builtin-command helper: resolve (or create) the backend session for the
+  // current conversation. Reuses the same params/epoch logic as the main flow.
+  // Returns the backend sid, or null when no conversation / creation failed.
+  const ensureBuiltinSid = async (): Promise<string | null> => {
+    const cid = currentSessionId
+    if (!cid) return null
+    const liveEpoch = useHermesStore.getState().gatewayEpoch
+    const cached = sessionMapRef.current.get(cid)
+    if (cached && cached.epoch === liveEpoch && cached.sid) return cached.sid
+    try {
+      const st = useHelixStore.getState()
+      const res = await hermesApi()!.send('session/new', {
+        mcpServers: buildAcpMcpServers(st.mcpServers),
+        messages: st.chatMessages
+          .filter(m => m.sessionId === cid)
+          .map(m => ({ role: m.role, content: m.content })),
+        cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? undefined,
+        search_engine: st.enhancedFindGrep ? 'rg' : '',
+        terminal_shell: st.terminalShell,
+      }) as any
+      const sid = res?._meta?.hermes?.sessionProvenance?.acpSessionId
+        || res?.session_id
+        || res?.sessionID
+        || (typeof res === 'string' ? res : null)
+      if (!sid) return null
+      sessionMapRef.current.set(cid, { sid, epoch: liveEpoch })
+      persistSessionMap(sessionMapRef.current)
+      return sid
+    } catch (e) {
+      console.warn('[Helix] ensureBuiltinSid failed:', e)
+      return null
+    }
+  }
+
   // Undo last round (same semantics as the /undo builtin command, exposed as a
   // toolbar button): truncate backend history back to the last user prompt and
   // drop all local messages after it.
   const handleUndoChat = useCallback(async () => {
     try {
       const cid = currentSessionId
-      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+      // 尽量拿到后端 sid：缓存没有就惰性重建（重启后/首次都会走到这里）。
+      // 重建走 session/new 会带本地历史作为 seedHistory，即使重启后后端
+      // session 已销毁，也能恢复出可截断的历史。
+      let sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
       if (!sid) {
-        storeActions.showToast({ type: 'warning', title: '无法撤回', description: '当前对话还没有后端会话，无法截断历史' })
-        return
+        try { sid = await ensureBuiltinSid() } catch { sid = null }
       }
-      const r = await hermesApi()!.send('session.undo', { session_id: sid })
-      const removed = (r as any)?.removed ?? 0
+      // 后端截断为 best-effort：后端未就绪或历史为空时仅前端删除即可。
+      let removed = 0
+      if (sid) {
+        try {
+          const r = await hermesApi()!.send('session.undo', { session_id: sid })
+          removed = (r as any)?.removed ?? 0
+        } catch (e) {
+          console.warn('[Helix] session.undo failed (continuing with local purge):', e)
+        }
+      }
       const all = useHelixStore.getState().chatMessages
       const local = all.filter(m => !m.sessionId || m.sessionId === cid)
       const lastUserIdx = [...local].reverse().findIndex(m => m.role === 'user')
@@ -2516,7 +2573,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         setInputSynced(withdrawnText)
         requestAnimationFrame(() => inputRef.current?.focus())
       }
-      storeActions.showToast({ type: 'success', title: '已撤回', description: `已截断后端历史（移除 ${removed} 条记录），原消息已放回输入框` })
+      storeActions.showToast({
+        type: 'success',
+        title: '已撤回',
+        description: sid
+          ? `已截断后端历史（移除 ${removed} 条记录），原消息已放回输入框`
+          : '已移除本地最后一轮对话（后端未连接，未同步后端）'
+      })
     } catch (e) {
       storeActions.showToast({ type: 'error', title: '撤回失败', description: String(e) })
     }
@@ -2621,36 +2684,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // the model gets interrupted mid-thought.
     useHelixStore.setState({ isChatLoading: true })
 
-    // Builtin-command helper: resolve (or create) the backend session for the
-    // current conversation. Reuses the same params/epoch logic as the main flow.
-    // Returns the backend sid, or null when no conversation / creation failed.
-    const ensureBuiltinSid = async (): Promise<string | null> => {
-      const cid = currentSessionId
-      if (!cid) return null
-      const liveEpoch = useHermesStore.getState().gatewayEpoch
-      const cached = sessionMapRef.current.get(cid)
-      if (cached && cached.epoch === liveEpoch && cached.sid) return cached.sid
-      try {
-        const st = useHelixStore.getState()
-        const res = await hermesApi()!.send('session/new', {
-          mcpServers: buildAcpMcpServers(st.mcpServers),
-          cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? undefined,
-          search_engine: st.enhancedFindGrep ? 'rg' : '',
-          terminal_shell: st.terminalShell,
-        }) as any
-        const sid = res?._meta?.hermes?.sessionProvenance?.acpSessionId
-          || res?.session_id
-          || res?.sessionID
-          || (typeof res === 'string' ? res : null)
-        if (!sid) return null
-        sessionMapRef.current.set(cid, { sid, epoch: liveEpoch })
-        persistSessionMap(sessionMapRef.current)
-        return sid
-      } catch (e) {
-        console.warn('[Helix] ensureBuiltinSid failed:', e)
-        return null
-      }
-    }
 
     // --- Built-in slash commands (handled client-side, never sent to Hermes) ---
     const builtinMatch = baseTrimmed.match(/^\/(\S+)/)
@@ -2765,11 +2798,19 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           }
           case 'undo': {
             // /undo — 撤销上一轮对话：后端 session.undo 截断历史 + 前端同步删除本地消息。
+            // 前端本地删除始终执行（不依赖后端 removed）；后端截断为 best-effort，
+            // 后端未就绪或历史为空时仅前端删除，避免重启后硬报错。
             try {
-              const sid = await ensureBuiltinSid()
-              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法撤销', description: '当前对话还没有后端会话，无法截断历史' }); break }
-              const r = await hermesApi()!.send('session.undo', { session_id: sid })
-              const removed = (r as any)?.removed ?? 0
+              let sid = await ensureBuiltinSid()
+              let removed = 0
+              if (sid) {
+                try {
+                  const r = await hermesApi()!.send('session.undo', { session_id: sid })
+                  removed = (r as any)?.removed ?? 0
+                } catch (e) {
+                  console.warn('[Helix] /undo session.undo failed (continuing with local purge):', e)
+                }
+              }
               const all = useHelixStore.getState().chatMessages
               const local = all.filter(m => !m.sessionId || m.sessionId === currentSessionId)
               // 后端 del history[last_user_idx:] — 前端删到上一条用户消息为止。
@@ -2778,7 +2819,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                 ? all.filter(m => !local.includes(m) || local.indexOf(m) < local.length - 1 - lastUserIdx)
                 : all
               useHelixStore.setState({ chatMessages: kept })
-              storeActions.showToast({ type: 'success', title: '已撤销', description: `已截断后端历史（移除 ${removed} 条记录）` })
+              storeActions.showToast({
+                type: 'success',
+                title: '已撤销',
+                description: sid
+                  ? `已截断后端历史（移除 ${removed} 条记录）`
+                  : '已移除本地最后一轮对话（后端未连接，未同步后端）'
+              })
             } catch (e) {
               storeActions.showToast({ type: 'error', title: '撤销失败', description: String(e) })
             }
@@ -6000,7 +6047,6 @@ promptSentAtRef.current = Date.now()
                     isSearchMatch={searchMatchIds.has(item.msg.id)}
                     isSearchActive={item.msg.id === conversationSearchActiveId}
                     onFork={storeActions.forkConversation}
-                    onWithdraw={handleWithdraw}
                     onUndo={handleUndoChat}
                   />
                 )

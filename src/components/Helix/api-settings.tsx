@@ -5,6 +5,7 @@ import {
   X,
   Globe, Keyboard, GitBranch, Zap, Brain, Bot, Activity, Workflow,
   MessageSquare,
+  RefreshCw,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
@@ -669,6 +670,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   }, [showModelDropdown])
 
   // MCP state
+  const [reloadingMcp, setReloadingMcp] = useState(false)
   const [editingMcpName, setEditingMcpName] = useState<string | null>(null)
   const [isAddingMcp, setIsAddingMcp] = useState(false)
   const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
@@ -692,7 +694,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     name: '', type: 'local', command: '', url: '', args: '',
   })
   const mcpServerNames = Object.keys(mcpServers)
-  const [mcpStatus, setMcpStatus] = useState<Record<string, boolean>>({})
+  const [mcpStatus, setMcpStatus] = useState<Record<string, string>>({})
   // Gateway MCP servers — read-only view of config.yaml `mcp_servers` (loaded
   // by the gateway at startup; separate from the app-managed list above, which
   // is persisted locally and sent per-session via session/new).
@@ -702,35 +704,18 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   // the shared McpEditorForm with its config; null = not editing.
   const [gatewayEditing, setGatewayEditing] = useState<string | null>(null)
 
-  // MCP status - query tools/list to detect which MCP servers are connected
-  // Reactive: subscribes to hermesSessionId so the check re-runs once a session
-  // exists (previously it only ran on mount, leaving every server stuck on
-  // "检测中" when the settings page opened with no active session).
+  // MCP status - read the REAL runtime connection state from the backend via
+  // `mcp.servers.status` (session-independent; covers both config.yaml servers
+  // and session-injected servers). Replaces the old tools/list tool-name probe.
   const hermesSessionId = useHermesStore(s => s.hermesSessionId)
   const [mcpStatusAttempt, setMcpStatusAttempt] = useState(0)
   const fetchMcpStatus = useCallback(async () => {
     try {
-      if (!hermesSessionId) {
-        // No active session yet — keep previous status (don't wipe to {} which
-        // would render every server as "检测中" forever). The effect below
-        // re-runs automatically once a session id appears.
-        return
-      }
-      const result = await hermesApi()!.send('tools/list', { session_id: hermesSessionId }) as any
-      const tools: string[] = result?.tools?.map((t: any) => t.name) || result?.map((t: any) => t.name) || []
-      // Match tool names to MCP server names (e.g. "tavily_search" -> "tavily").
-      // Hermes exposes gateway MCP tools as `mcp__<server>__<tool>` with
-      // hyphens→underscores, so a bare prefix match misses e.g. "ssh-bridge"
-      // → "mcp__ssh_bridge__remote_exec".
-      const norm = (s: string) => s.toLowerCase().replace(/-/g, '_')
-      const status: Record<string, boolean> = {}
-      const allNames = [...new Set([...Object.keys(mcpServers), ...Object.keys(gatewayMcp)])]
-      for (const name of allNames) {
-        const n = norm(name)
-        status[name] = tools.some(t => {
-          const tl = t.toLowerCase()
-          return tl.startsWith(n) || tl.startsWith('mcp__' + n + '__')
-        })
+      const result = await hermesApi()!.send('mcp.servers.status', {}) as any
+      const servers: any[] = result?.servers || []
+      const status: Record<string, string> = {}
+      for (const s of servers) {
+        if (s?.name) status[s.name] = s.status || (s.connected ? 'connected' : 'configured')
       }
       setMcpStatus(status)
       setMcpStatusAttempt(0)  // success resets the retry counter
@@ -755,13 +740,13 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     return () => clearTimeout(t)
   }, [mcpStatusAttempt, fetchMcpStatus])
 
-  // Gentle polling while a session is live so status reflects late MCP
-  // discovery / reconnects without needing to reopen the settings page.
+  // Gentle polling so status reflects late MCP discovery / reconnects without
+  // needing to reopen the settings page. Session-independent: runs whenever the
+  // gateway is reachable.
   useEffect(() => {
-    if (!hermesSessionId) return
     const t = setInterval(() => { fetchMcpStatus() }, 15000)
     return () => clearInterval(t)
-  }, [hermesSessionId, fetchMcpStatus])
+  }, [fetchMcpStatus])
 
   // Load gateway MCP servers from config.yaml (Tauri IPC)
   const reloadGatewayMcp = useCallback(async () => {
@@ -1056,6 +1041,20 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     if (v === null || v === undefined) return ''
     try { return JSON.stringify(v) } catch { return String(v) }
   }, [])
+
+  const handleReloadMcp = useCallback(async () => {
+    if (reloadingMcp) return
+    setReloadingMcp(true)
+    try {
+      await hermesApi()!.send('reload.mcp', { session_id: hermesSessionId, confirm: true })
+      showToast({ type: 'success', title: 'MCP 工具已重新加载', description: '新的工具 schema 将应用到当前会话' })
+      setTimeout(fetchMcpStatus, 1000)
+    } catch (e: any) {
+      showToast({ type: 'error', title: 'MCP 重新加载失败', description: String(e?.message || e) })
+    } finally {
+      setReloadingMcp(false)
+    }
+  }, [reloadingMcp, hermesSessionId, showToast, fetchMcpStatus])
 
   const resetMcpForm = useCallback(() => {
     setMcpForm({ name: '', type: 'local', command: '', url: '', args: '' })
@@ -1643,22 +1642,33 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
           <div className="space-y-6">
             <div className="flex items-center justify-between">
               <h3 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold text-foreground">MCP</h3>
-              {!isAddingMcp && !editingMcpName && !gatewayEditing ? (
+              <div className="flex items-center gap-3">
                 <button
-                  onClick={() => { setIsAddingMcp(true); resetMcpForm() }}
-                  className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
+                  onClick={() => void handleReloadMcp()}
+                  className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-foreground/50 hover:text-foreground transition-colors"
+                  data-tip="重新加载 MCP（应用到当前会话）"
+                  disabled={reloadingMcp}
                 >
-                  添加服务器
+                  <RefreshCw size={13} className={reloadingMcp ? 'animate-spin' : ''} />
+                  {reloadingMcp ? '刷新中…' : '刷新'}
                 </button>
-              ) : (
-                <button
-                  onClick={() => { setIsAddingMcp(false); setEditingMcpName(null); setGatewayEditing(null); resetMcpForm() }}
-                  className="text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
-                  data-tip="关闭"
-                >
-                  关闭
-                </button>
-              )}
+                {!isAddingMcp && !editingMcpName && !gatewayEditing ? (
+                  <button
+                    onClick={() => { setIsAddingMcp(true); resetMcpForm() }}
+                    className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
+                  >
+                    添加服务器
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => { setIsAddingMcp(false); setEditingMcpName(null); setGatewayEditing(null); resetMcpForm() }}
+                    className="text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
+                    data-tip="关闭"
+                  >
+                    关闭
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Gateway-loaded MCP servers (config.yaml mcp_servers) — editable */}
@@ -1671,12 +1681,12 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 ) : (
                   <div className="max-w-3xl space-y-2">
                     {Object.entries(gatewayMcp).map(([name, cfg]) => {
-                      const connected = mcpStatus[name]
+                      const st = mcpStatus[name]
                       const cmd = [cfg?.command, ...(cfg?.args || [])].filter(Boolean).join(' ')
                       return (
                         <div key={name} className="flex items-center gap-3 px-4 py-3 border border-border/20 bg-muted/20 rounded-lg group">
                           <div className="relative shrink-0">
-                            <div className={`w-2.5 h-2.5 rounded-full ${cfg?.enabled === false ? 'bg-gray-300' : connected ? 'bg-green-500' : connected === false ? 'bg-red-400' : 'bg-amber-400'}`} />
+                            <div className={`w-2.5 h-2.5 rounded-full ${cfg?.enabled === false ? 'bg-gray-300' : st === 'connected' ? 'bg-green-500' : st === 'failed' ? 'bg-red-400' : 'bg-amber-400'}`} />
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
@@ -1711,14 +1721,14 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
                 <div className="max-w-3xl space-y-2">
                   {mcpServerNames.map(name => {
                     const config = mcpServers[name]
-                    const connected = mcpStatus[name]
+                    const st = mcpStatus[name]
                     return (
                       <div
                         key={name}
                         className="flex items-center gap-3 px-4 py-3 border-b border-border/30 last:border-b-0 hover:bg-muted/40 transition-colors group">
                         <div className="relative shrink-0">
-                          <div className={`w-2.5 h-2.5 rounded-full ${config.enabled === false ? 'bg-gray-300' : connected ? 'bg-green-500' : connected === false ? 'bg-red-400' : 'bg-amber-400'}`} />
-                          {config.enabled !== false && connected && (
+                          <div className={`w-2.5 h-2.5 rounded-full ${config.enabled === false ? 'bg-gray-300' : st === 'connected' ? 'bg-green-500' : st === 'failed' ? 'bg-red-400' : 'bg-amber-400'}`} />
+                          {config.enabled !== false && st === 'connected' && (
                             <span className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-green-500 animate-ping opacity-30" />
                           )}
                         </div>

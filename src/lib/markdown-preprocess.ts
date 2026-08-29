@@ -615,11 +615,12 @@ function padTableDelimiterRows(text: string): string {
 //   - `(?<=[^\n\s，。、；：！？）】》])` — must follow text (not a line start,
 //     whitespace, or a Chinese sentence terminator that would suggest the
 //     number is plain prose like `用时4. 5秒`)。
+//   - `*` excluded too — `**1. 标题**` is a bold numbered heading, NOT a glued list.
 //   - `(?=[ \t\u3000]+\S)` — must be followed by a space + content.
 //   - `(?![ \t\u3000]*\d)` — not a version/decimal like `2. 0` / `3. 5元`.
 //   - `\d{1,2}` — ordered-list numbers are 1–2 digits; 3-digit runs (years,
 //     IDs) are left alone.
-const GLUED_LIST_ITEM_RE = /(?<=[^\n\s，。、；：！？）】》])(\d{1,2}[.、])(?=[ \t\u3000]+\S)(?![ \t\u3000]*\d)/g
+const GLUED_LIST_ITEM_RE = /(?<=[^\n\s*，。、；：！？）】》])(\d{1,2}[.、])(?=[ \t\u3000]+\S)(?![ \t\u3000]*\d)/g
 
 // Same gluing bug for bullet lists: `- **月收益率明细表**：- **动态回撤图**`
 // — the second `- ` runs straight into the first item's text after the `：`.
@@ -630,7 +631,7 @@ const GLUED_LIST_ITEM_RE = /(?<=[^\n\s，。、；：！？）】》])(\d{1,2}[.
 //   - `(?=[^\s-])` — the `- ` must be followed by non-space, non-`-` content.
 //   - `(?<![A-Za-z0-9] - [A-Za-z0-9])` — not an English dash or minus like
 //     `A - B` / `5 - 3` (letter/digit on both sides with surrounding spaces).
-const GLUED_BULLET_ITEM_RE = /(?<=[^\n\s-])(- )(?=[^\s-])(?<![A-Za-z0-9] - [A-Za-z0-9])/g
+const GLUED_BULLET_ITEM_RE = /(?<=[^\n\s*-])(- )(?=[^\s-])(?<![A-Za-z0-9] - [A-Za-z0-9])/g
 
 // `-` glued directly to the item text with NO space: `-打开页面自动查询`,
 // and mid-line `…细节-打开…` after the model flattened the newline.

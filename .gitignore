@@ -108,6 +108,8 @@ audio_cache/
 cron/
 desktop/
 hooks/
+# 上条规则会误伤前端源码目录 src/hooks（前端 React hooks），这里显式放行。
+!src/hooks/
 image_cache/
 kanban/
 kanban.db

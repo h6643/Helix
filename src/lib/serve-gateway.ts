@@ -38,6 +38,22 @@ export interface ServeGatewayInfo {
 
 type EventCallback = (event: string, params?: any) => void
 
+// ── gateway 身份记忆 ────────────────────────────────────────────────────
+// 前端 WebView2 崩溃/整页重载后 React 重挂载，会新建 ServeGatewayClient，
+// 实例字段全部归零——但 gateway 进程本身没死、后端会话还活着。为了区分
+// 「前端重连（同一 gateway）」与「gateway 真重启（换端口）」，用
+// localStorage 记住上次成功连接的 wsUrl：serve 网关 `--port 0` 下重启必
+// 换端口+token，地址不同即新进程。sameGateway=true 时前端不得 bump
+// epoch，否则缓存的会话绑定全部作废 → 用户下一条消息被当成新会话
+// （2026-08-19 历史对话分裂 bug 的根因）。
+const GATEWAY_IDENTITY_KEY = 'helix.lastGatewayWsUrl'
+function rememberGatewayWsUrl(url: string): void {
+  try { localStorage.setItem(GATEWAY_IDENTITY_KEY, url) } catch { /* noop */ }
+}
+function lastGatewayWsUrl(): string | null {
+  try { return localStorage.getItem(GATEWAY_IDENTITY_KEY) } catch { return null }
+}
+
 interface PendingRpc {
   resolve: (v: any) => void
   reject: (e: Error) => void
@@ -439,9 +455,18 @@ export class ServeGatewayClient {
     const base = { session_id: sessionId, ...payload }
 
     switch (type) {
-      case 'gateway.ready':
-        this.emit('gateway.ready', base)
+      case 'gateway.ready': {
+        // sameGateway：与上次成功连接的网关是否为同一进程。serve 网关
+        // `--port 0` 下重启必换端口（wsUrl 含端口+token），所以地址相同
+        // = 后端进程没死，只是前端侧重连/整页重载。前端据此决定是否
+        // bump gateway epoch：误 bump 会让所有缓存的会话绑定作废，用户
+        // 下一条消息被当成新会话（历史会话分裂 bug 的根因）。
+        const prev = lastGatewayWsUrl()
+        const sameGateway = prev !== null && prev === this.info.wsUrl
+        rememberGatewayWsUrl(this.info.wsUrl)
+        this.emit('gateway.ready', { ...base, sameGateway })
         return
+      }
 
       case 'message.start':
         this.emit('message.start', base)
@@ -880,6 +905,9 @@ export class ServeGatewayClient {
     }
     const res = await this.rpc('session.create', {
       source: 'helix',
+      // 会话重建/恢复时必须把前端保存的本对话历史带回去，否则后端会话像是
+      // 新建的一样，模型读不到之前的对话内容。
+      ...(Array.isArray(params?.messages) && params.messages.length > 0 ? { messages: params.messages } : {}),
       // 应用内维护的 MCP 服务器列表随会话一起注册；serve 模式下后端不会
       // 像 ACP 模式那样自动收到 session/new 的 mcpServers，必须在这里带上。
       ...(Array.isArray(mcpServers) ? { mcpServers } : {}),
@@ -934,7 +962,12 @@ export class ServeGatewayClient {
           const msg = (err as Error)?.message || ''
           if (/session.*not.*found|not found|no such session|unknown session/i.test(msg)) {
             warn('[ServeGateway] session not found on prompt — recreating session and retrying')
-            const res = await this.createSession({})
+            const { useHelixStore } = await import('@/stores/helix-store')
+            const st = useHelixStore.getState()
+            const history = st.chatMessages
+              .filter(m => m.sessionId === st.currentSessionId)
+              .map(m => ({ role: m.role, content: m.content }))
+            const res = await this.createSession({ messages: history })
             const newId = res?.session_id
             if (newId) {
               debug('[ServeGateway] recreated session for retry:', newId)

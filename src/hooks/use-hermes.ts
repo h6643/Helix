@@ -101,7 +101,13 @@ export function useHermes() {
           setHermesError(null)
           // CRITICAL: bump epoch on every (re)start so handleRun can tell a
           // brand-new gateway apart from the one that created its session.
-          useHermesStore.getState().bumpGatewayEpoch()
+          // 2026-08-19 修复：只在 gateway 真重启（地址变了，sameGateway=false）
+          // 时 bump。前端自身崩溃/整页重载也会重连并收到 gateway.ready，但
+          // 后端进程没死、会话还活着——若也 bump，所有缓存的会话绑定作废，
+          // 用户下一条消息会被当成新会话（历史对话分裂 bug 的根因）。
+          if (params?.sameGateway !== true) {
+            useHermesStore.getState().bumpGatewayEpoch()
+          }
           useHelixStore.getState().setConnectionNotice(null)
           break
 

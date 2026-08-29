@@ -999,8 +999,6 @@ export function HelixLayout() {
     { label: '新建窗口', shortcut: 'Ctrl+Shift+N', action: () => { window.open(window.location.href, '_blank'); closeWindowMenu() } },
     { label: '关闭窗口', shortcut: 'Ctrl+Shift+W', action: () => { window.close(); closeWindowMenu() } },
     { divider: true },
-    { label: '打开浏览器侧边栏', shortcut: '', action: () => { storeActions.setRightSidebarTab('browser'); closeWindowMenu() } },
-    { divider: true },
     { label: '折叠侧边栏', shortcut: 'Ctrl+B', action: () => {
       if (!showSidebar) {
         setShowSidebar(true)
@@ -1016,10 +1014,7 @@ export function HelixLayout() {
     { label: '打开代码编辑器', action: () => { storeActions.setRightSidebarTab('code'); closeWindowMenu() } },
     { divider: true },
     { label: '设置', shortcut: 'Ctrl+,', action: () => { storeActions.toggleSettings('api'); closeWindowMenu() } },
-    { label: '重新加载页面', shortcut: shortcutLabel('reload-page', customShortcuts), action: () => { window.location.reload(); closeWindowMenu() } },
-    { divider: true },
     { label: '查找', shortcut: shortcutLabel('search-chat', customShortcuts), action: () => { window.dispatchEvent(new CustomEvent('helix:conversation-search')); closeWindowMenu() } },
-    { divider: true },
     { label: '后退', shortcut: shortcutLabel('go-back', customShortcuts), action: () => {
       const entry = storeActions.navigateBack()
       if (entry) {
