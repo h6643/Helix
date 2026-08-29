@@ -135,14 +135,3 @@ Helix/
 
 ---
 
-## 常见问题
-
-- **网页搜索 Key 重启后丢失？** 已修复：启动时的 `.env` 同步逻辑现在会保留 `TAVILY/EXA/BRAVE_SEARCH_API_KEY`，不再被误清。
-- **运行时目录 `hermes-runtime` 看不到？** 它是构建产物、被 `.gitignore` 忽略，需先执行 `prepare-runtime.sh` 才会生成。
-- **只想改 hermes-agent 源码即时生效？** 可在运行时 venv 内对该子模块执行 editable 安装（`pip install -e <hermes-agent 路径> --no-deps`），无需重建运行时。
-
----
-
-## 许可
-
-详见仓库根目录许可证文件。Helix 前端以本项目许可证发布；内置的 hermes-agent 引擎遵循其自身（上游 / fork）许可证。
