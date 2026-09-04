@@ -29,11 +29,11 @@ export interface HooksConfig {
 }
 
 export const HOOK_META: Record<HookType, { label: string; desc: string; supportsMatcher: boolean }> = {
-  PreToolUse: { label: '工具调用前', desc: '可拦截/拒绝，返回 block', supportsMatcher: true },
+  PreToolUse: { label: '工具调用前', desc: '可拦截/拒绝', supportsMatcher: true },
   PostToolUse: { label: '工具调用后', desc: '审计/通知', supportsMatcher: true },
   PreVerify: { label: '收尾验证前', desc: '返回 continue 可续跑', supportsMatcher: false },
   SessionStart: { label: '会话开始', desc: '新会话创建时触发', supportsMatcher: false },
-  SessionEnd: { label: '会话结束', desc: '会话结束时触发（清理/摘要）', supportsMatcher: false },
+  SessionEnd: { label: '会话结束', desc: '会话结束时触发', supportsMatcher: false },
 }
 
 export const HOOK_TYPES: HookType[] = ['PreToolUse', 'PostToolUse', 'PreVerify', 'SessionStart', 'SessionEnd']

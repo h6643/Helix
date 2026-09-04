@@ -143,9 +143,6 @@ function ApprovalBar({ request, onApprove, pendingCount, onApproveAll, onRejectA
           )
         })}
       </div>
-      <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-1.5">
-        内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · ⌘/Ctrl+Enter 允许 · Esc 拒绝
-      </div>
     </div>
   )
 }

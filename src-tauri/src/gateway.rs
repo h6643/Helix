@@ -60,6 +60,11 @@ fn emit_simple(method: &str) {
 }
 
 /// Which gateway protocol this build runs (HELIX_GATEWAY_MODE, default serve).
+///
+/// 默认 serve：后端以 `hermes serve` 起 HTTP+WebSocket 网关（FastAPI/uvicorn），
+/// 是官方桌面版语义，插件管理/命令分发/MCP 管理等 RPC 方法原生可用。acp 模式
+/// （stdio JSON-RPC 子进程，不依赖 fastapi）作为轻量回退，需显式设置
+/// `HELIX_GATEWAY_MODE=acp` 切换。
 pub fn env_gateway_mode() -> &'static str {
     let mode = std::env::var("HELIX_GATEWAY_MODE").unwrap_or_default();
     if mode.eq_ignore_ascii_case("acp") {
@@ -189,9 +194,12 @@ fn helix_log_dir() -> std::path::PathBuf {
     dir
 }
 fn open_child_log(name: &str, header: &str) -> Option<std::fs::File> {
-    let mut f = OpenOptions::new().create(true).write(true).truncate(true)
+    // 追加而不是截断：serve 崩溃时的 Python traceback 与 gateway.rs 的
+    // "child exited: code=…" 记录必须保留到下一次诊断，否则每次重启的
+    // spawn banner 会把上一条死因擦掉（2026-08-31 反复断连排查结论）。
+    let mut f = OpenOptions::new().create(true).append(true)
         .open(helix_log_dir().join(name)).ok()?;
-    let _ = writeln!(f, "{header}");
+    let _ = writeln!(f, "\n{header}");
     let _ = f.flush();
     Some(f)
 }
@@ -286,9 +294,12 @@ fn spawn_candidate(state: &Arc<AppState>, cmd: &Path) -> Result<(), String> {
         a.push("0".into());
         a
     } else {
-        let mut a = pre;
-        a.push("acp".into());
-        a
+        // acp mode: spawn the ACP stdio adapter directly via its real entry
+        // point. `hermes acp` (cmd_acp in hermes_cli.main) references a
+        // non-existent `hermes_cli.acp` module in this fork and always exits
+        // with "ACP dependencies not installed", so we bypass it and run
+        // `python -m acp_adapter.entry`, which is the actual ACP server.
+        vec!["-m".to_string(), "acp_adapter.entry".to_string()]
     };
 
     let mut serve_cmd = Command::new(cmd);

@@ -432,11 +432,6 @@ export function BrowserView({
             点击消息中的链接以预览
           </div>
         )}
-        {pickMode && (
-          <div className="absolute top-2 left-2 z-10 px-2.5 py-1 rounded text-[calc(var(--helix-transcript-size)*0.7857)] text-primary bg-primary/10 border border-primary/20 pointer-events-none">
-            点击页面元素（Esc 取消）
-          </div>
-        )}
         {pickError && (
           <div className="absolute inset-x-0 top-0 z-10 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-red-500 bg-red-50/90 border-b border-red-100">
             {pickError}

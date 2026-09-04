@@ -813,12 +813,47 @@ pre code.hljs {
   border-radius: 0;
 }
 
+/* CodeCard 需要不透明背景 + 可见外框。.helix-md pre 的通用规则把 border 置
+   none、背景置 transparent，这里以更高特异性（属性选择器）覆盖，让整张卡片
+   有 1px 圆角轮廓，头部/内容区不会与消息气泡糊在一起。 */
+.helix-md pre[data-code-card-header] {
+  background: var(--color-card) !important;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+/* CodeCard 头部条：不透明灰底（--muted 浅/深主题均为实色），以 !important
+   压制下方 .helix-md pre > div { background: transparent } 的通用透明规则——
+   否则头部会被该规则打回透明，看起来像"没有背景"。
+
+   padding 同样需要 !important 恢复：.helix-md pre > div { padding: 0 } 是未
+   分层的通用规则，优先级高于 Tailwind utilities 层的 px-3 py-2，会把头部和
+   代码内容区的内边距一并清零（症状：头部文字/代码贴死边框，代码看起来"顶格
+   没有往右移"）。 */
+.helix-md pre > .helix-code-card-header,
+.helix-md pre > .helix-code-body {
+  padding-left: 0.75rem !important;
+  padding-right: 0.75rem !important;
+}
+
+.helix-md pre > .helix-code-card-header {
+  background: var(--muted) !important;
+  padding-top: 0.5rem !important;
+  padding-bottom: 0.5rem !important;
+}
+
+.helix-md pre > .helix-code-body {
+  padding-top: 0.5rem !important;
+  padding-bottom: 0.5rem !important;
+}
+
 .helix-md pre > div {
-  background: oklch(0.94 0.014 110);   /* 暖米色代码块背景 */
-  border: 1px solid oklch(0.86 0.012 100);
-  border-radius: 6px;
-  padding: 0.75em 1em;
-  overflow-x: auto;   /* auto（原 hidden）：盒图/diff 需要横向滚动 */
+  background: transparent;   /* 代码块内容区域透明 */
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  overflow-x: auto;
   font-size: 0.85em;
 }
 

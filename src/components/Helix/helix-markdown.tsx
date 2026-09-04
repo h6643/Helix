@@ -257,7 +257,7 @@ function MarkdownTable({ children }: { children: ReactNode }) {
   )
 }
 
-function CodeCard({ language, code, blockId }: { language: string; code: string; blockId?: string }) {
+export function CodeCard({ language, code, blockId, showRunButton = true, className, collapsible = true }: { language: string; code: string; blockId?: string; showRunButton?: boolean; className?: string; collapsible?: boolean }) {
   const trimmed = code.replace(/^\n+/, '').trimEnd()
   const [copied, setCopied] = useState(false)
   const [sent, setSent] = useState(false)
@@ -270,6 +270,9 @@ function CodeCard({ language, code, blockId }: { language: string; code: string;
   const boxDiagram = !isDiff && isBoxDiagram(trimmed)
   const lineCount = trimmed.split('\n').length
   const isLong = lineCount > 15 || trimmed.length > 800
+  // collapsible=false 时（如工具卡片里的命令/结果代码）永不折叠：内容全量显示，
+  // 不套 max-height 截断、不渲染"展开全部/收起"按钮，点击即见全部。
+  const foldable = collapsible !== false && isLong
 
   const body = isDiff ? (
     <DiffView code={trimmed} />
@@ -291,14 +294,15 @@ function CodeCard({ language, code, blockId }: { language: string; code: string;
   }
 
   return (
-    <pre>
-      <div>
-        <div className="flex items-center justify-between mb-1.5">
+    <pre className={className} data-code-card-header="true">
+      {/* 头部：不透明背景，显示语言类型和操作按钮（helix-code-card-header 由
+          globals.css 以 !important 压制 .helix-md pre > div 的通用透明规则） */}
+      <div className="flex items-center justify-between px-3 py-2 helix-code-card-header border-b border-border rounded-t-md">
         <span className="text-[calc(var(--helix-transcript-size)*0.7143)] uppercase tracking-wider text-foreground/40 select-none font-medium">
-          {isDiff ? 'diff' : `${language || (boxDiagram ? 'text' : 'code')} · ${lineCount} 行`}
+          {isDiff ? 'diff' : (language || (boxDiagram ? 'text' : 'code'))}
         </span>
         <span className="flex items-center gap-1">
-          {canRun && (
+          {showRunButton && canRun && (
             <button
               type="button"
               aria-label="执行代码"
@@ -328,25 +332,28 @@ function CodeCard({ language, code, blockId }: { language: string; code: string;
           </button>
         </span>
       </div>
-      <div className={isLong && collapsed ? 'helix-code-collapsed' : ''}>{body}</div>
-      {isLong && (
-        <button
-          type="button"
-          className="helix-code-expand-btn"
-          onClick={() =>
-            setCollapsed(prev => {
-              const next = !prev
-              if (blockId) {
-                if (next) expandedCodeBlocks.delete(blockId)
-                else expandedCodeBlocks.add(blockId)
-              }
-              return next
-            })
-          }
-        >
-          {collapsed ? '展开全部' : '收起'}
-        </button>
-      )}
+      {/* 代码内容区域：透明背景（helix-code-body：globals.css 恢复被
+          .helix-md pre > div { padding:0 } 清零的左右内边距） */}
+      <div className="px-3 py-2 bg-transparent helix-code-body">
+        <div className={foldable && collapsed ? 'helix-code-collapsed' : ''}>{body}</div>
+        {foldable && (
+          <button
+            type="button"
+            className="helix-code-expand-btn"
+            onClick={() =>
+              setCollapsed(prev => {
+                const next = !prev
+                if (blockId) {
+                  if (next) expandedCodeBlocks.delete(blockId)
+                  else expandedCodeBlocks.add(blockId)
+                }
+                return next
+              })
+            }
+          >
+            {collapsed ? '展开全部' : '收起'}
+          </button>
+        )}
       </div>
     </pre>
   )
@@ -357,6 +364,9 @@ function codeText(children: unknown): string {
   if (typeof children === 'string') return children
   if (typeof children === 'number') return String(children)
   if (Array.isArray(children)) return children.map(codeText).join('')
+  if (isValidElement(children)) {
+    return codeText((children.props as { children?: unknown })?.children)
+  }
   return ''
 }
 

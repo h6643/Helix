@@ -425,12 +425,6 @@ function buildTauriAPI(): ElectronAPI {
     save: (channels: unknown) => invoke('channels_save', { channels }),
   }
 
-  // ── kanban ──────────────────────────────────────────────────────────────
-  api.kanban = {
-    invoke: (verb: string, args?: string[], json?: boolean, board?: string) =>
-      invoke('command', { params: { verb, args: args ?? [], json: json ?? false, board: board ?? '' } }),
-  }
-
   // ── delegations ─────────────────────────────────────────────────────────
   api.delegations = {
     list: (sessionId?: string) => invoke('delegations_list', { sessionId: sessionId ?? null }),

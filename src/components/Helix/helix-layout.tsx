@@ -34,7 +34,6 @@ import { pushModelConfig, pushAgentConfigLive, pushConfigKeyValue } from '@/lib/
 import { isElectron, electronHermes, electronShell } from '@/lib/electron-bridge'
 import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
 import { isServeActive, getServeClient } from '@/lib/serve-gateway'
-import { markScanDone, runAutoArchiveScan, shouldScanNow } from '@/lib/auto-archive'
 import { useHelixStore } from '@/stores/helix-store'
 import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
 import { applyHelixPalette } from '@/lib/themes'
@@ -81,11 +80,7 @@ const ArtifactsBrowser = lazy(() => import('./artifacts-browser').then(m => ({ d
 const TerminalPanel = lazy(() => import('./terminal-panel').then(m => ({ default: m.TerminalPanel })))
 const WorktreePanel = lazy(() => import('./worktree-panel').then(m => ({ default: m.WorktreePanel })))
 const PluginManagerPanel = lazy(() => import('./plugin-manager').then(m => ({ default: m.PluginManager })))
-const KanbanPanel = lazy(() => import('./kanban-panel').then(m => ({ default: m.KanbanPanel })))
 const DelegationsPanel = lazy(() => import('./delegations-panel').then(m => ({ default: m.DelegationsPanel })))
-const RollbackPanel = lazy(() => import('./rollback-panel').then(m => ({ default: m.RollbackPanel })))
-const BackendSessionsPanel = lazy(() => import('./backend-sessions-panel').then(m => ({ default: m.BackendSessionsPanel })))
-const ProjectsPanel = lazy(() => import('./projects-panel').then(m => ({ default: m.ProjectsPanel })))
 const RightSidebar = lazy(() => import('./right-sidebar').then(m => ({ default: m.RightSidebar })))
 import { MoreActionsMenu } from './more-actions-menu'
 
@@ -317,20 +312,15 @@ export function HelixLayout() {
   const showCustomizePanel = useHelixStore(s => s.showCustomizePanel)
   const showRuntimePanel = useHelixStore(s => s.showRuntimePanel)
   const showWorktreePanel = useHelixStore(s => s.showWorktreePanel)
-  const showKanbanPanel = useHelixStore(s => s.showKanbanPanel)
   const showSubAgentPanel = useHelixStore(s => s.showSubAgentPanel)
   const showActivityFeed = useHelixStore(s => s.showActivityFeed)
   const showArtifactsBrowser = useHelixStore(s => s.showArtifactsBrowser)
   const showPluginManager = useHelixStore(s => s.showPluginManager)
-  const showRollbackPanel = useHelixStore(s => s.showRollbackPanel)
-  const showBackendSessionsPanel = useHelixStore(s => s.showBackendSessionsPanel)
-  const showProjectsPanel = useHelixStore(s => s.showProjectsPanel)
   // 打开任一主区覆盖页（计划/插件管理/技能/运行时/工作树）时，聊天区用
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
   // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
   // 切页面时让模型继续在后台运行，返回后还能接着看。
   // Only hide chat for overlay panels (delegations, runtime, worktree, plugin manager)
-  // Kanban/Plan/Skill panels render as floating cards inside the main area — chat stays visible behind them.
   const sidePanelOpen = showPluginManager || showRuntimePanel || showWorktreePanel || showSubAgentPanel
   const rightSidebarTab = useHelixStore(s => s.rightSidebarTab)
   const codeFullscreen = useHelixStore(s => s.codeFullscreen)
@@ -967,30 +957,6 @@ export function HelixLayout() {
   // Start global scheduled task runner
   useEffect(() => { startScheduledTaskRunner() }, [])
 
-  // 自动归档旧任务：开启后按 6h 节奏扫一次最近打开的工作区（重启后由
-  // autoArchiveLastScanAt 兜底去重）。仅桌面端（看板 IPC 在 Electron/Tauri 桥
-  // 上可用），失败静默——不影响正常使用。
-  useEffect(() => {
-    let cancelled = false
-    let timer: ReturnType<typeof setInterval> | null = null
-
-    const scan = async () => {
-      const st = useHelixStore.getState()
-      if (!st.autoArchiveOldTasks) return
-      if (!(await shouldScanNow())) return
-      await markScanDone()
-      if (cancelled) return
-      const res = await runAutoArchiveScan(st.archiveRetentionHours)
-      if (!cancelled && res.archived.length > 0) {
-        st.showToast({ type: 'success', title: '自动归档', description: `已归档 ${res.archived.length} 个旧任务` })
-      }
-    }
-
-    void scan()
-    timer = setInterval(scan, 6 * 60 * 60 * 1000)
-    return () => { cancelled = true; if (timer) clearInterval(timer) }
-  }, [])
-
   // ── Task list ───────────────────────────────────────────────────────────
   // 后端没有任务清单 RPC（hermes:getTasks 是空桩），任务清单 = 前端已接收的
   // live todos（来自 session/update 的 todo/plan 负载）。
@@ -1487,11 +1453,6 @@ export function HelixLayout() {
               </PanelSuspense>
             </div>
           )}
-          <div className={`absolute inset-0 z-20 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden flex flex-col ${showKanbanPanel ? '' : 'hidden'}`}>
-            <PanelSuspense>
-              <KanbanPanel />
-            </PanelSuspense>
-          </div>
         </div>
         {/* Floating card — right sidebar. Kept mounted at all times so switching
             tabs (and the browser <webview>) never rebuilds; visibility is toggled
@@ -1551,9 +1512,6 @@ export function HelixLayout() {
       {/* Overlay panels */}
       <Suspense fallback={null}>
         {showSessionManager && <SessionManager onClose={() => storeActions.toggleSessionManager()} />}
-        {showRollbackPanel && <RollbackPanel sessionId={activeSessionId ?? ''} onClose={() => storeActions.toggleRollbackPanel()} />}
-        {showBackendSessionsPanel && <BackendSessionsPanel sessionId={activeSessionId ?? ''} onClose={() => storeActions.toggleBackendSessionsPanel()} />}
-        {showProjectsPanel && <ProjectsPanel onClose={() => storeActions.toggleProjectsPanel()} />}
         {showCustomizePanel && <CustomizePanel onClose={() => storeActions.toggleCustomizePanel()} />}
         {showSettings && (
           <ApiSettings

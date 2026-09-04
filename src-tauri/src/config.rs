@@ -28,7 +28,7 @@ pub const APIHUB_DEFAULT: ApiHubDefault = ApiHubDefault {
 };
 
 const KNOWN_BASE_PROVIDERS: &[&str] = &[
-    "openai", "anthropic", "openrouter", "agnes-ai", "nous", "moa", "ollama", "vllm", "llamacpp",
+    "openai", "anthropic", "openrouter", "agnes-ai", "nous", "moa", "vllm", "llamacpp",
     "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "bedrock", "gemini",
     "deepseek", "qwen", "grok", "xai", "antling",
 ];

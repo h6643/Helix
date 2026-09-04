@@ -54,13 +54,13 @@ export function getToolLabel(toolName: string): string {
 
 export function getToolIcon(toolName: string) {
   const name = toolName.toLowerCase()
-  if (name.includes('read') || name.includes('view')) return <Eye className="size-3.5" />
-  if (name.includes('write') || name.includes('create')) return <Pencil className="size-3.5" />
-  if (name.includes('edit') || name.includes('modify')) return <Pencil className="size-3.5" />
-  if (name.includes('grep') || name.includes('search')) return <Search className="size-3.5" />
-  if (name.includes('bash') || name.includes('shell') || name.includes('terminal')) return <Terminal className="size-3.5" />
-  if (name.includes('glob') || name.includes('list')) return <FolderOpen className="size-3.5" />
-  return <Wrench className="size-3.5" />
+  if (name.includes('read') || name.includes('view')) return <Eye className="size-[0.9em]" />
+  if (name.includes('write') || name.includes('create')) return <Pencil className="size-[0.9em]" />
+  if (name.includes('edit') || name.includes('modify')) return <Pencil className="size-[0.9em]" />
+  if (name.includes('grep') || name.includes('search')) return <Search className="size-[0.9em]" />
+  if (name.includes('bash') || name.includes('shell') || name.includes('terminal')) return <Terminal className="size-[0.9em]" />
+  if (name.includes('glob') || name.includes('list')) return <FolderOpen className="size-[0.9em]" />
+  return <Wrench className="size-[0.9em]" />
 }
 
 function argToText(value: unknown): string {

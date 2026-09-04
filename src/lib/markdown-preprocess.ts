@@ -588,6 +588,13 @@ function padTableDelimiterRows(text: string): string {
     if (delimIndex >= lines.length || !TABLE_DASH_LINE_RE.test(lines[delimIndex])) {
       continue
     }
+    // A bare `---` thematic break matches TABLE_DASH_LINE_RE too (the pipes are
+    // optional in that regex) but carries no cells. Accepting it as a delimiter
+    // would splice away the blank line above it and drag the rule into the
+    // table, where it renders as a bogus `---` row. Require a real table row.
+    if (cellCount(lines[delimIndex]) < 2) {
+      continue
+    }
 
     const dashCells = cellCount(lines[delimIndex])
     if (dashCells > 0 && dashCells < headerCells) {
@@ -604,6 +611,65 @@ function padTableDelimiterRows(text: string): string {
   }
 
   return lines.join('\n')
+}
+
+/**
+ * GFM tables have no closing delimiter: models habitually mirror the separator
+ * row at the END of the body (`|---|---|` … `|---|---|`). The first one is
+ * consumed as the structural delimiter row; the trailing one has no header left
+ * to pair with, so remark-gfm parses it as an ordinary body row and renders a
+ * visible row of `---`. Keep only the FIRST delimiter row per table block and
+ * drop any repeats found inside the body.
+ *
+ * Guard notes:
+ *   - A body row must still look like a table row (`cellCount >= 2`), so a bare
+ *     `---` thematic break (no pipes) never reaches the dash test and is left
+ *     alone — it ends the table scan instead.
+ *   - A blank line ends the table, matching GFM (tables can't contain one).
+ */
+function dropDuplicateTableDelimiterRows(text: string): string {
+  const lines = text.split('\n')
+  const drop = new Set<number>()
+  let index = 0
+
+  while (index < lines.length) {
+    // Same recognition as padTableDelimiterRows: header + (optionally one blank
+    // line) + separator row.
+    let delimIndex = index + 1
+    if (delimIndex < lines.length && !lines[delimIndex].trim()) {
+      delimIndex += 1
+    }
+    const isTableStart =
+      cellCount(lines[index]) >= 2 &&
+      delimIndex < lines.length &&
+      TABLE_DASH_LINE_RE.test(lines[delimIndex])
+
+    if (!isTableStart) {
+      index += 1
+      continue
+    }
+
+    // The first separator row is legitimate — walk the body and drop repeats.
+    let cursor = delimIndex + 1
+    while (cursor < lines.length) {
+      const row = lines[cursor]
+
+      if (!row.trim()) break
+      if (cellCount(row) < 2) break
+      if (TABLE_DASH_LINE_RE.test(row)) {
+        drop.add(cursor)
+      }
+      cursor += 1
+    }
+
+    index = cursor
+  }
+
+  if (drop.size === 0) {
+    return text
+  }
+
+  return lines.filter((_, i) => !drop.has(i)).join('\n')
 }
 
 // LLMs glue consecutive ordered-list items onto one line — item 4's `4. `
@@ -709,8 +775,10 @@ export function preprocessMarkdown(text: string): string {
       const transformed = normalizeGluedListItems(
         normalizeSpacedEmphasis(
           closeDanglingStrongEmphasis(
-            padTableDelimiterRows(
-              normalizeAtxHeadings(normalizeVisibleProse(normalizeProseMath(neutralizeSetextUnderlines(part))))
+            dropDuplicateTableDelimiterRows(
+              padTableDelimiterRows(
+                normalizeAtxHeadings(normalizeVisibleProse(normalizeProseMath(neutralizeSetextUnderlines(part))))
+              )
             )
           )
         )

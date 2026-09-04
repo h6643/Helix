@@ -117,7 +117,28 @@ export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] })
       }
       if (createdEmpty) st.fillEditorTabContent(absolutePath, content)
     } catch (e: any) {
-      st.showToast({ type: 'error', title: '打开失败', description: e?.message || '读取文件出错' })
+      // 诊断：把实际尝试读取的绝对路径与 workDir 带出来，便于定位是路径拼错还是编码/权限问题
+      console.warn('[Helix] openChange failed:', {
+        rawFilePath: change.filePath,
+        workDir: st.selectedWorkDir ?? st.activeSessionWorkDir ?? '(空)',
+        absolutePath,
+        error: e,
+      })
+      // Tauri invoke 对 Result::Err 的 reject 是字符串（没有 .message），需按字符串取
+      const errText = (typeof e === 'string' ? e : e?.message) || '读取文件出错'
+      // 按错误文本分类：ENOENT（文件已被清理/未落盘）→ 友好提示；
+      // 沙箱拒绝（safe_path 白名单外）→ 明确说无权读取；其余原样带出。
+      const notFound = /os error 2|cannot find|No such file|找不到|不存在/i.test(errText)
+      const outside = /outside working directory/i.test(errText)
+      st.showToast({
+        type: 'error',
+        title: '打开失败',
+        description: notFound
+          ? `文件已不存在（可能已被后端清理）: ${absolutePath}`
+          : outside
+            ? `文件在工作区外，编辑器无权读取: ${absolutePath}`
+            : `${errText}｜尝试读取: ${absolutePath}`,
+      })
       if (createdEmpty) st.closeEditorTab(absolutePath)
     }
   }
@@ -186,7 +207,7 @@ export function FileChangeSummaryCard({ changes }: { changes: PendingChange[] })
                 data-tip="在侧边栏打开"
               >
                 <FileCode className="size-3.5 shrink-0 text-sky-500/80" />
-                <span className="truncate font-mono text-[length:var(--helix-transcript-size)] text-foreground/70">{change.fileName}</span>
+                <span className="break-all font-mono text-[length:var(--helix-transcript-size)] text-foreground/70">{change.fileName}</span>
                 <span className="shrink-0 tabular-nums text-[length:var(--helix-transcript-size)]">
                   {s.added > 0 && <span className="text-emerald-500 mr-1.5">+{s.added}</span>}
                   {s.removed > 0 && <span className="text-red-500">-{s.removed}</span>}

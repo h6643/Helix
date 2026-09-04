@@ -12,7 +12,7 @@ mod gateway;
 mod git;
 mod hermes;
 mod hooks;
-mod kanban;
+mod env;
 mod kernel;
 mod memory;
 mod paths;
@@ -309,8 +309,6 @@ pub fn run() {
             // channels
             channels::channels_list,
             channels::channels_save,
-            // kanban
-            kanban::command,
             // delegations
             delegations::delegations_list,
             delegations::delegations_read_log,

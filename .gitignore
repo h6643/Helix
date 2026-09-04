@@ -111,9 +111,6 @@ hooks/
 # 上条规则会误伤前端源码目录 src/hooks（前端 React hooks），这里显式放行。
 !src/hooks/
 image_cache/
-kanban/
-kanban.db
-kanban.db.init.lock
 lsp/
 git/
 bin/
@@ -138,3 +135,6 @@ hermes-agent/.git/
 
 # KaTeX fonts copied to repo root by vite build
 KaTeX_*
+
+# codex CLI temp dir
+.codex-tmp/

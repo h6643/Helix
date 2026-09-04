@@ -98,13 +98,6 @@ async function importChromeBookmarks(): Promise<void> {
 
 const ALL_PROVIDERS = getAllProviders()
 
-// Fallback personality presets — shown when the backend (Hermes config.yaml)
-// doesn't return any, so the dropdown is never empty.
-const BUILTIN_PERSONALITIES: Record<string, string> = {
-  温柔: '你是一位温柔、耐心、善解人意的助手。语气柔和，多用共情与鼓励。',
-  干练: '你是一位干练、利落的助手。直奔主题，结论先行，少铺垫。',
-}
-
 const PERSONALITY_LABELS: Record<string, string> = {}
 
 const CUSTOM_PROVIDER_ID = '__custom__'
@@ -620,27 +613,6 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   const [showAddModelModal, setShowAddModelModal] = useState(false)
   type ModelTab = 'main' | 'vision'
   const [modelTab, setModelTab] = useState<ModelTab>('main')
-
-  // Hermes config-backed toggles (streaming / compression / guardrails / stt / personality)
-  const { dispatchCommand, setHermesPersonality } = useHermes()
-  const [personalities, setPersonalities] = useState<Record<string, string>>(BUILTIN_PERSONALITIES)
-  useEffect(() => {
-    if (!isElectron) return
-    window.electron.hermes.listPersonalities()
-      .then((r: any) => {
-        const got = r?.personalities
-        if (r?.success && got && Object.keys(got).length > 0) {
-          // Only keep allowed personalities
-          const allowed = ['温柔', '干练']
-          const filtered: Record<string, string> = {}
-          for (const key of allowed) {
-            if (got[key]) filtered[key] = got[key]
-          }
-          if (Object.keys(filtered).length > 0) setPersonalities(filtered)
-        }
-      })
-      .catch(() => {})
-  }, [])
 
   const applyYamlKey = useCallback(async (key: string, value: boolean) => {
     if (!isElectron) return
@@ -1216,6 +1188,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       timestamp: msg.timestamp,
       reasoning: msg.reasoning,
       steps: msg.steps,
+      fileChanges: msg.fileChanges,
       blocks: msg.blocks,
     }))
     useHelixStore.getState().clearExecutionFlow()

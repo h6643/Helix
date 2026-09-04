@@ -14,7 +14,6 @@
 import { hermesApi } from '@/lib/electron-bridge'
 import { resolveBackendSid } from '@/lib/session-map'
 import { useHelixStore } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
 
 interface ContextBreakdownData {
   context_max: number
@@ -22,32 +21,7 @@ interface ContextBreakdownData {
   context_percent: number
   estimated_total?: number
   categories: Array<{ id: string; label: string; tokens: number; color: string }>
-}
-
-/**
- * 前端把本地用量快照写回后端：后端的 session.context_breakdown 会优先返回这份
- * 值，实现前端 → 后端的双向同步。
- */
-export async function syncContextUsageToBackend(
-  conversationId: string | null | undefined,
-  size: number,
-  used: number,
-  backendSid?: string | null,
-): Promise<void> {
-  const sid =
-    backendSid ||
-    (await resolveBackendSid(conversationId || null)) ||
-    useHermesStore.getState().hermesSessionId
-  if (!sid || !size || !used) return
-  try {
-    await hermesApi()?.send('session.context_usage.sync', {
-      session_id: sid,
-      context_max: size,
-      context_used: used,
-    })
-  } catch {
-    // Backend may not support this yet — degrade gracefully
-  }
+  toolsets?: Array<{ toolset: string; tool_count: number; schema_tokens: number }>
 }
 
 /**
@@ -56,11 +30,16 @@ export async function syncContextUsageToBackend(
  * - conversationId: Helix 会话 id（跨重启稳定），本地记录键。draft（null）时
  *   退化为用后端 sid 作键——与旧行为一致。
  * - backendSid: 调用方已知的后端 sid（如 handleRun 刚 session/new 出来的）；
- *   省略时按 session-map（epoch 校验）→ 全局 hermesSessionId 顺序解析。
+ *   省略时按 session-map（epoch 校验）解析。绝不兜底到全局 hermesSessionId
+ *   ——那是「最后一个跑过的对话」的后端会话，用它查询会把别的对话的
+ *   用量/分类写进本对话的快照（跨会话污染）。调用方没给 sid 且映射里
+ *   没有本对话的条目时，直接放弃捕获（返回 false）。
  *
- * 写回规则与 context-usage.tsx 旧逻辑一致：
- * - 仅当后端回报非零用量**或**分类非空才写（避免空会话把本地真实值覆盖成 0）；
- * - context_max 用 `后端值 || 本地已有值` 兜底，used 取 `max(后端, 本地)`。
+ * 写回规则：
+ * - 仅当后端返回非空分类才写（唯一目的是持久化分类/工具集明细，重启后
+ *   弹窗不显示"暂无上下文分类数据"）；
+ * - size/used 不改——环的读数唯一来源是 usage_prompt_complete 实测值
+ *   （agent-flow-panel 落盘），两个口径不同，合并会造成读数跳变。
  *
  * @returns 是否实际写入了本地快照（供调用方决定是否标记"已捕获"）。
  */
@@ -68,35 +47,28 @@ export async function captureContextBreakdown(
   conversationId: string | null | undefined,
   backendSid?: string | null,
 ): Promise<boolean> {
-  const sid =
-    backendSid ||
-    (await resolveBackendSid(conversationId || null)) ||
-    useHermesStore.getState().hermesSessionId
+  // 绝不兜底到全局 hermesSessionId（跨会话污染，见 doc 注释）。
+  const sid = backendSid || (await resolveBackendSid(conversationId || null))
   if (!sid) return false
   try {
     const result = await hermesApi()?.send('session.context_breakdown', { session_id: sid })
     if (!result || typeof result !== 'object') return false
     const data = result as ContextBreakdownData
-    const hasRealUsage = (data.context_used || 0) > 0 && (data.context_max || 0) > 0
-    if (!hasRealUsage && (data.categories?.length ?? 0) === 0) return false
+    if ((data.categories?.length ?? 0) === 0) return false
     const key = conversationId || sid
     const localPrev = useHelixStore.getState().contextUsage[key]
-    const isMeasured = (data.context_used || 0) > 0 && (data.context_used || 0) !== Number(data.estimated_total || 0)
+    // 只写分类/工具集明细，不改 size/used：环的 used/size 由 run 结束的
+    // usage_prompt_complete 实测值落盘（agent-flow-panel），是唯一写入口径。
+    // 此处是 breakdown RPC（anchored 口径，语义不同），若做 max() 合并会让
+    // 本地快照在「开弹窗/切会话」时被抬升，环随之跳变（"上下文乱变动"根因）。
+    // 从未跑过 run 的对话 localPrev 为空 → size/used 落 0，环显示空态，符合
+    // "没跑过就没有读数"的语义。
     useHelixStore.getState().setContextUsage(
       key,
-      data.context_max || localPrev?.size || 0,
-      isMeasured
-        ? Math.max(data.context_used || 0, localPrev?.used || 0)
-        : (localPrev?.used || 0),
-      data.categories?.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
-    )
-    await syncContextUsageToBackend(
-      conversationId,
-      data.context_max || localPrev?.size || 0,
-      isMeasured
-        ? Math.max(data.context_used || 0, localPrev?.used || 0)
-        : (localPrev?.used || 0),
-      sid,
+      localPrev?.size || 0,
+      localPrev?.used || 0,
+      data.categories.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
+      data.toolsets?.map((t) => ({ toolset: t.toolset, tool_count: t.tool_count, schema_tokens: t.schema_tokens })),
     )
     return true
   } catch {

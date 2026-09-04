@@ -42,6 +42,8 @@ export interface PersistedChatMessage {
   duration?: number
   thinkingTime?: number
   totalTokens?: number
+  thoughtTokens?: number
+  outputTokens?: number
   steps?: import('@/stores/helix-store').ExecutionStep[]
   fileChanges?: PendingChange[]
   /** Interleaved thinking/text/tool_group/file_change blocks. Was dropped from

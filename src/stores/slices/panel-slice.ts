@@ -22,10 +22,6 @@ export interface PanelSlice {
   showCustomizePanel: boolean
   showWorktreePanel: boolean
   showPluginManager: boolean
-  showKanbanPanel: boolean
-  showRollbackPanel: boolean
-  showBackendSessionsPanel: boolean
-  showProjectsPanel: boolean
   availableCommands: AvailableCommand[]
   /**
    * Hermes's in-session todo list, captured from `session/update` events that
@@ -51,10 +47,6 @@ export interface PanelSlice {
   toggleCustomizePanel: () => void
   toggleWorktreePanel: () => void
   togglePluginManager: () => void
-  toggleKanbanPanel: () => void
-  toggleRollbackPanel: () => void
-  toggleBackendSessionsPanel: () => void
-  toggleProjectsPanel: () => void
   setAvailableCommands: (cmds: AvailableCommand[]) => void
   /** Replace the Hermes todo list (called whenever a fresh todo payload arrives).
    *  sessionId 标识该清单归属的 UI 会话：写入按会话缓存，且仅当它就是当前
@@ -76,10 +68,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   showCustomizePanel: false,
   showWorktreePanel: false,
   showPluginManager: false,
-  showKanbanPanel: false,
-  showRollbackPanel: false,
-  showBackendSessionsPanel: false,
-  showProjectsPanel: false,
   availableCommands: [],
   hermesTodos: [],
   hermesTodosBySession: {},
@@ -134,10 +122,6 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   toggleCustomizePanel: () => set((s) => ({ showCustomizePanel: !s.showCustomizePanel })),
   toggleWorktreePanel: () => set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
   togglePluginManager: () => set((s) => ({ showPluginManager: !s.showPluginManager })),
-  toggleKanbanPanel: () => set((s) => ({ showKanbanPanel: !s.showKanbanPanel })),
-  toggleRollbackPanel: () => set((s) => ({ showRollbackPanel: !s.showRollbackPanel })),
-  toggleBackendSessionsPanel: () => set((s) => ({ showBackendSessionsPanel: !s.showBackendSessionsPanel })),
-  toggleProjectsPanel: () => set((s) => ({ showProjectsPanel: !s.showProjectsPanel })),
   setAvailableCommands: (cmds) => set({ availableCommands: cmds }),
   setHermesTodos: (todos, sessionId) => set((s) => {
     const bySession = sessionId

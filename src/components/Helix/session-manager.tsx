@@ -178,6 +178,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
         timestamp: msg.timestamp,
         reasoning: msg.reasoning,
         steps: msg.steps,
+        fileChanges: msg.fileChanges,
         blocks: msg.blocks,
       }))
       useHelixStore.setState({

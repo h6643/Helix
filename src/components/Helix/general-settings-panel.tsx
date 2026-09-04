@@ -7,18 +7,12 @@ import { SettingRow, SettingGroup, SectionHeading, Toggle, PopupSelect } from '.
 import { electronApp, electronDialog } from '@/lib/electron-bridge'
 import { CodingContextSetting } from './agents-settings'
 
-/** 归档保留时长选项（小时）— 任务最后更新时间早于该时长才进入自动归档候选。 */
-const RETENTION_OPTIONS = [
-  { label: '3 天', value: '72', },
-  { label: '7 天', value: '168', },
-  { label: '14 天', value: '336',},
-  { label: '30 天', value: '720',},
-]
-
 /** 集成终端 Shell 选项 — 仅新会话生效。 */
 const TERMINAL_SHELL_OPTIONS = [
-  { label: '自动（Git Bash）', value: 'auto'},
+  { label: 'Git Bash', value: 'auto'},
   { label: 'cmd.exe', value: 'cmd'},
+  { label: 'PowerShell 7', value: 'pwsh' },
+  { label: 'PowerShell 5', value: 'powershell' },
 ]
 
 export function GeneralSettingsPanel() {
@@ -31,8 +25,6 @@ export function GeneralSettingsPanel() {
     mcpServers, gitAutoCommit, gitAutoPush, gitPushConfirm,
     gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix,
     persistToStorage,
-    autoArchiveOldTasks, setAutoArchiveOldTasks,
-    archiveRetentionHours, setArchiveRetentionHours,
     enhancedFindGrep, setEnhancedFindGrep,
     terminalShell, setTerminalShell,
   } = useHelixStore()
@@ -60,7 +52,7 @@ export function GeneralSettingsPanel() {
     return () => {
       if (settingsPersistTimer.current) clearTimeout(settingsPersistTimer.current)
     }
-  }, [autoArchiveOldTasks, archiveRetentionHours, enhancedFindGrep, terminalShell, persistToStorage])
+  }, [enhancedFindGrep, terminalShell, persistToStorage])
 
   // 拉取当前生效的数据根目录（后端是权威来源）。
   useEffect(() => {
@@ -161,29 +153,8 @@ export function GeneralSettingsPanel() {
 
       <SettingGroup>
         <SettingRow
-          label="自动归档旧任务"
-          hint="定时扫描最近打开过的工作区，将已完成、无未读、未置顶且超过保留期的任务自动归档。"
-        >
-          <Toggle
-            enabled={!!autoArchiveOldTasks}
-            onToggle={() => setAutoArchiveOldTasks(!autoArchiveOldTasks)}
-          />
-        </SettingRow>
-        {autoArchiveOldTasks && (
-          <SettingRow
-            label="归档保留时长"
-          >
-            <PopupSelect
-              value={String(archiveRetentionHours)}
-              onChange={(v) => setArchiveRetentionHours(Number(v))}
-              options={RETENTION_OPTIONS}
-              className="w-36 rounded-md border border-border bg-background px-2 py-1 ui-text-sm2"
-            />
-          </SettingRow>
-        )}
-        <SettingRow
           label="增强 Find 和 Grep"
-          hint="在新建会话或应用重启后恢复的会话中使用增强 Find 和 Grep（ripgrep）。当前会话保持现有设置；Windows 的 Find 保持不变。"
+          hint="在新建会话或应用重启后恢复的会话中使用增强 Find 和 Grep（ripgrep）"
         >
           <Toggle
             enabled={!!enhancedFindGrep}
@@ -195,11 +166,11 @@ export function GeneralSettingsPanel() {
       <SettingGroup>
         <SettingRow
           label="集成终端 Shell"
-          hint="仅新会话生效。Windows 下 Bash 工具用此 shell。"
+          hint="仅新会话生效。Windows 下 Bash 工具用此 shell"
         >
           <PopupSelect
             value={terminalShell}
-            onChange={(v) => setTerminalShell(v === 'cmd' ? 'cmd' : 'auto')}
+            onChange={(v) => setTerminalShell(v as 'auto' | 'cmd' | 'pwsh' | 'powershell')}
             options={TERMINAL_SHELL_OPTIONS}
             className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 focus:outline-none focus:border-primary/40 transition-colors"
             popupWidth={160}
@@ -210,7 +181,7 @@ export function GeneralSettingsPanel() {
       <SettingGroup>
         <SettingRow
           label="HTTP 代理"
-          hint="模型、MCP、命令工具与应用渲染层的出口流量将经此代理；留空时直连，不读取系统环境变量。修改后需重启应用生效。"
+          hint="模型、MCP出口流量将经此代理"
         >
           <div className="flex flex-wrap items-center gap-2 justify-end">
             <input
@@ -230,7 +201,7 @@ export function GeneralSettingsPanel() {
       <SettingGroup>
         <SettingRow
           label="数据存储路径"
-          hint={`应用数据的根目录（默认为用户主目录）。修改后会把现有数据复制到新位置，重启 Helix 后生效。`}
+          hint={`应用数据的根目录`}
         >
           <div className="flex flex-wrap items-center gap-2 justify-end">
             <input
@@ -245,11 +216,11 @@ export function GeneralSettingsPanel() {
               {dataRootBusy ? '复制中…' : '应用'}
             </Button>
             {dataRootInfo.dataRootCustom && (
-              <Button size="sm" variant="ghost" onClick={resetDataRoot} disabled={dataRootBusy}>恢复默认</Button>
+              <Button size="sm" variant="outline" onClick={resetDataRoot} disabled={dataRootBusy}>恢复默认</Button>
             )}
           </div>
         </SettingRow>
-        <SettingRow label="配置管理" hint="导出当前配置为 JSON 文件备份，或从备份文件导入恢复；重置将清空全部设置。">
+        <SettingRow label="配置管理" hint="导出当前配置">
         <div className="flex flex-wrap gap-2 justify-end">
           <Button size="sm" variant="outline" onClick={async () => {
             try {

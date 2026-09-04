@@ -78,7 +78,6 @@ function buildDisplayProviders(available: string[] | null): SearchProvider[] {
       pluginName: name,
       name,
       envKey: '',
-      description: '后端已安装此搜索后端，前端暂未提供其配置项',
       signupUrl: '',
     }
   })

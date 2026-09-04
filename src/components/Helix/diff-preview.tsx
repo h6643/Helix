@@ -266,7 +266,9 @@ interface DiffPreviewProps {
 // Lines carry their own +/-/context markers, so we colorize them instead of
 // recomputing a diff from old/new content.
 function UnifiedDiffTextViewer({ diff }: { diff: string }) {
-  const lines = useMemo(() => diff.split('\n'), [diff])
+  // Normalize \r\n to \n for consistent splitting across platforms
+  const normalizedDiff = useMemo(() => diff.replace(/\r\n/g, '\n').replace(/\r/g, '\n'), [diff])
+  const lines = useMemo(() => normalizedDiff.split('\n'), [normalizedDiff])
   return (
     <div className="font-mono text-[calc(var(--helix-font-size,13px)*0.9231)]">
       <div className="max-h-[500px] overflow-y-auto">

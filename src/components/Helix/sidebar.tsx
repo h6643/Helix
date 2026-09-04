@@ -21,7 +21,6 @@ import {
   GitBranch,
   AlertTriangle,
   PanelLeft,
-  SquareKanban,
   Users,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
@@ -284,7 +283,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
     toggleScheduledTasksPanel,
     toggleSkillPanel,
     toggleSessionManager,
-    toggleKanbanPanel,
     showToast,
     setSelectedWorkDir,
     setWorkDir,
@@ -299,7 +297,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       toggleScheduledTasksPanel: s.toggleScheduledTasksPanel,
       toggleSkillPanel: s.toggleSkillPanel,
       toggleSessionManager: s.toggleSessionManager,
-      toggleKanbanPanel: s.toggleKanbanPanel,
       showToast: s.showToast,
       setSelectedWorkDir: s.setSelectedWorkDir,
       setWorkDir: s.setWorkDir,
@@ -307,7 +304,6 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   )
   const showScheduledTasksPanel = useHelixStore((s) => s.showScheduledTasksPanel)
           const showSkillPanel = useHelixStore((s) => s.showSkillPanel)
-  const showKanbanPanel = useHelixStore((s) => s.showKanbanPanel)
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir)
   const directoryProjectDir = useHelixStore((s) => s.directoryProjectDir)
   const toggleDirectoryProject = useHelixStore((s) => s.toggleDirectoryProject)
@@ -461,7 +457,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
     // full-area panels so the chat is visible again.
     const state = useHelixStore.getState()
     if (state.showScheduledTasksPanel || state.showSkillPanel) {
-      useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false, showKanbanPanel: false })
+      useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false })
     }
     onNewTask?.()
   }, [clearChat, onNewTask])
@@ -510,8 +506,8 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
       // (hermesSessionMapRef in agent-flow-panel); resetting the legacy global
       // id would be meaningless at best and confusing at worst.
       // Same as above: navigating to a session must close the panels.
-    if (state.showScheduledTasksPanel || state.showSkillPanel || state.showKanbanPanel) {
-      useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false, showKanbanPanel: false })
+    if (state.showScheduledTasksPanel || state.showSkillPanel) {
+      useHelixStore.setState({ showScheduledTasksPanel: false, showSkillPanel: false })
     }
       // Load just the target session (single IndexedDB read) instead of
       // fetching every session from disk just to pick one. Fall back to the
@@ -536,6 +532,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         timestamp: msg.timestamp,
         reasoning: msg.reasoning,
         steps: msg.steps,
+        fileChanges: msg.fileChanges,
         blocks: msg.blocks,
         // Tag with the owning session so concurrent sessions' messages can
         // coexist in the store without leaking across the per-session filter.
@@ -786,22 +783,12 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
     { id: 'search', label: '搜索', icon: Search, action: () => toggleSessionManager() },
     { id: 'scheduled', label: '计划', icon: Clock, action: () => {
         if (!showScheduledTasksPanel && showSkillPanel) toggleSkillPanel()
-        if (showKanbanPanel) toggleKanbanPanel()
         toggleScheduledTasksPanel()
       }
     },
     { id: 'plugins', label: '插件', icon: Puzzle, action: () => {
         if (!showSkillPanel && showScheduledTasksPanel) toggleScheduledTasksPanel()
-        if (showKanbanPanel) toggleKanbanPanel()
         toggleSkillPanel()
-      }
-    },
-    { id: 'kanban', label: '看板', icon: SquareKanban, action: () => {
-        if (showScheduledTasksPanel) toggleScheduledTasksPanel()
-        if (showSkillPanel) toggleSkillPanel()
-        // 打开看板时清空对话选中，避免两者同时高亮
-        if (!showKanbanPanel) useHelixStore.setState({ currentSessionId: null })
-        toggleKanbanPanel()
       }
     },
   ]
@@ -814,8 +801,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
           {topActions.map(item => {
             const isActive =
               (item.id === 'scheduled' && showScheduledTasksPanel) ||
-              (item.id === 'plugins' && showSkillPanel) ||
-              (item.id === 'kanban' && showKanbanPanel)
+              (item.id === 'plugins' && showSkillPanel)
             return (
               <button
                 key={item.id}
@@ -863,8 +849,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
           {topActions.map(item => {
             const isActive =
               (item.id === 'scheduled' && showScheduledTasksPanel) ||
-              (item.id === 'plugins' && showSkillPanel) ||
-              (item.id === 'kanban' && showKanbanPanel)
+              (item.id === 'plugins' && showSkillPanel)
             return (
               <button
                 key={item.id}
@@ -912,8 +897,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
                   selectedWorkDir === project.dir &&
                   // 计划/插件/看板等全屏面板打开时，项目不高亮——避免两处同时亮
                   !showScheduledTasksPanel &&
-                  !showSkillPanel &&
-                  !showKanbanPanel
+                  !showSkillPanel
                 return (
                   <div key={project.dir} className="group rounded-lg overflow-hidden">
                     <div

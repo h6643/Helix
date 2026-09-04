@@ -1,11 +1,12 @@
 'use client'
 
 import { ChevronRight, X, Copy, CheckCheck, Image as ImageIcon } from 'lucide-react'
-import React, { useState, useMemo, useEffect } from 'react'
+import React, { useState } from 'react'
 import { formatDurationSeconds } from '@/lib/format'
 import { normalizeAcpContent, stripEmoji } from '@/lib/text-utils'
 import { getToolIcon, getToolDisplayLabel, extractCommandSnippet, extractToolPath } from '@/lib/tool-display-utils'
 import type { ExecutionStep } from '@/stores/helix-store'
+import { CodeCard } from '@/components/Helix/helix-markdown'
 
 const TOOL_RESULT_CLAMP = 20_000
 
@@ -14,6 +15,17 @@ const TOOL_RESULT_CLAMP = 20_000
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07/g
 function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
+}
+
+// Hermes 的 mktemp 包装（cache/terminal/hermes-snap-*.sh.tmp.XXXX）若
+// cache/terminal 目录缺失就会刷一行 mktemp: failed to create...。这是环境噪音
+// 不是工具执行失败，从渲染内容里整行剥掉。
+function stripMktempNoise(s: string): string {
+  return s
+    .split('\n')
+    .filter(line => !/^\s*mktemp:\s+failed to create file via template/i.test(line))
+    .join('\n')
+    .replace(/^\n+|\n+$/g, '')
 }
 
 // ── Result count extraction ──────────────────────────────────────────────
@@ -97,67 +109,7 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
-// ── Polymorphic result renderers ────────────────────────────────────────
-
-function DiffRenderer({ content }: { content: string }) {
-  const lines = content.split('\n')
-  return (
-    <div className="text-[0.85em] font-mono leading-relaxed">
-      {lines.map((line, i) => {
-        let className = 'text-foreground/50'
-        if (line.startsWith('+') && !line.startsWith('+++')) className = 'text-emerald-500/80 bg-emerald-500/5'
-        else if (line.startsWith('-') && !line.startsWith('---')) className = 'text-red-500/80 bg-red-500/5'
-        else if (line.startsWith('@@')) className = 'text-sky-500/80'
-        else if (line.startsWith('diff ') || line.startsWith('index ')) className = 'text-muted-foreground font-semibold'
-        else if (line.startsWith('---') || line.startsWith('+++')) className = 'text-amber-500/80'
-        return (
-          <div key={i} className={`${className} px-1 -mx-1`}>
-            {line || '\u00A0'}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-function SearchRenderer({ content, toolName }: { content: string; toolName: string }) {
-  const name = (toolName || '').toLowerCase()
-  const lines = content.split('\n').filter(l => l.trim())
-
-  // Try to parse file:line format
-  const hasFileLine = lines.some(l => /^[\w/.]+\.\w+:\d+/.test(l.trim()))
-  if (hasFileLine || name.includes('grep') || name.includes('search')) {
-    return (
-      <div className="text-[0.85em] font-mono space-y-0.5">
-        {lines.map((line, i) => {
-          const match = line.match(/^([\w/.]+\.\w+):(\d+):?(.*)$/)
-          if (match) {
-            const [, file, ln, rest] = match
-            return (
-              <div key={i} className="flex gap-1">
-                <span className="text-sky-500/80 shrink-0">{file}:{ln}</span>
-                {rest && <span className="text-foreground/50 truncate">{rest}</span>}
-              </div>
-            )
-          }
-          return <div key={i} className="text-foreground/50">{line}</div>
-        })}
-      </div>
-    )
-  }
-
-  // Fallback: numbered lines
-  return (
-    <div className="text-[0.85em] font-mono space-y-0.5">
-      {lines.map((line, i) => (
-        <div key={i} className="flex gap-2">
-          <span className="text-muted-foreground/60 shrink-0 w-5 text-right">{i + 1}</span>
-          <span className="text-foreground/50">{stripAnsi(line)}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
+// ── Result renderers ────────────────────────────────────────────────────
 
 function ImageRenderer({ content }: { content: string }) {
   const [error, setError] = useState(false)
@@ -172,24 +124,6 @@ function ImageRenderer({ content }: { content: string }) {
       />
     </div>
   )
-}
-
-function PlainRenderer({ content }: { content: string }) {
-  return (
-    <div className="text-[0.85em] text-foreground/50 whitespace-pre-wrap break-all leading-relaxed font-mono">
-      {stripAnsi(content)}
-    </div>
-  )
-}
-
-function ResultRenderer({ content, toolName }: { content: string; toolName: string }) {
-  const kind = useMemo(() => detectResultKind(toolName, content), [toolName, content])
-  switch (kind) {
-    case 'diff': return <DiffRenderer content={content} />
-    case 'image': return <ImageRenderer content={content} />
-    case 'search': return <SearchRenderer content={content} toolName={toolName} />
-    default: return <PlainRenderer content={content} />
-  }
 }
 
 // ── Main component ──────────────────────────────────────────────────────
@@ -208,6 +142,7 @@ function toolActionText(step: ExecutionStep): string {
   // 工具只显示工具名，不拿参数当标题。
   const isCommandTool = /bash|terminal|shell|run|execute|command/i.test(step.toolName || '')
   if (!isCommandTool) return ''
+
   const cmd = extractCommandSnippet(step.toolParams)
   if (cmd) {
     // 非命令工具（GUI/浏览器/MCP 等）的参数可能把错误文案放在 text/input 里，
@@ -215,106 +150,13 @@ function toolActionText(step: ExecutionStep): string {
     // 说明时不当作命令标题，回退到工具名。
     const looksLikeError = /^\(|prevented|failed|error|cannot|unable|permission|denied|timeout/i.test(cmd)
     if (looksLikeError) return ''
-    // execute_code：不裸显示代码第一行（如 "const id = …"），优先提取
-    // 有意义的标识（函数/类定义、行注释），提取不到就显示稳定的「执行代码」。
-    if (step.toolName === 'execute_code') {
-      const fn = cmd.match(/^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/m)
-        || cmd.match(/^\s*(?:export\s+)?(?:async\s+)?class\s+([A-Za-z_$][\w$]*)/m)
-        || cmd.match(/^\s*def\s+([A-Za-z_][\w]*)/m)
-        || cmd.match(/^\s*#\s*(.+)$/m)
-        || cmd.match(/^\s*\/\/\s*(.+)$/m)
-      if (fn) return fn[1].slice(0, 50)
-      return '执行代码'
-    }
-    // For bash commands, show only the first line.
+    // bash/terminal：标题返回命令完整首行（不手动截断 50）——命令卡已不可
+    // 展开、标题是唯一查看入口，截断太短会看不到命令本体；视觉过长由外层
+    // CSS truncate 省略，完整命令放 title 悬停可见。
     const firstLine = cmd.split('\n')[0]
-    return firstLine.length > 50 ? firstLine.slice(0, 50) + '…' : firstLine
+    return firstLine
   }
   return ''
-}
-
-// 把 shell 复合命令拆成逐条命令（按换行 / && / ; 拆分，字符串内不拆）。
-// 用于展开区的"命令"滚动列表 —— 多命令不再只显示 "第一条 + N commands" 摘要。
-function splitCommands(command: string): string[] {
-  if (!command) return []
-  const out: string[] = []
-  let cur = ''
-  let inSingle = false
-  let inDouble = false
-  let escaped = false
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]
-    if (escaped) { cur += ch; escaped = false; continue }
-    if (ch === '\\' && !inSingle) { cur += ch; escaped = true; continue }
-    if (ch === "'" && !inDouble) { inSingle = !inSingle; cur += ch; continue }
-    if (ch === '"' && !inSingle) { inDouble = !inDouble; cur += ch; continue }
-    if (!inSingle && !inDouble && (ch === '\n' || ch === ';')) {
-      const t = cur.trim()
-      if (t) out.push(t)
-      cur = ''
-      continue
-    }
-    if (!inSingle && !inDouble && ch === '&' && command[i + 1] === '&') {
-      const t = cur.trim()
-      if (t) out.push(t)
-      cur = ''
-      i++
-      continue
-    }
-    cur += ch
-  }
-  const tail = cur.trim()
-  if (tail) out.push(tail)
-  return out
-}
-
-/** 多命令流水展示：
- *  - 运行中：逐条滚动 —— 当前命令高亮"执行中 XXX"，每条停留约 2 秒后切
- *    下一条，最后一条停留到完成。后端把复合命令当一个进程执行，无法逐条
- *    报真实进度，这里用时间轮播呈现"一条接一条"的视觉流水。
- *  - 完成态：展开全部命令（紧凑列表，限高滚动）。
- */
-function CommandScroller({ cmds, running }: { cmds: string[]; running: boolean }) {
-  const [idx, setIdx] = useState(0)
-  useEffect(() => {
-    if (!running || cmds.length <= 1) return
-    setIdx(0)
-    const t = setInterval(() => {
-      setIdx(i => (i < cmds.length - 1 ? i + 1 : i))
-    }, 2000)
-    return () => clearInterval(t)
-  }, [running, cmds.length])
-
-  if (running) {
-    const cur = cmds[Math.min(idx, cmds.length - 1)]
-    return (
-      <div className="rounded border border-border/20 overflow-hidden">
-        <div className="px-2 py-0.5 text-[0.72em] text-foreground/40 border-b border-border/20 flex items-center justify-between">
-          <span>命令流水</span>
-          <span className="text-primary/60">{idx + 1}/{cmds.length}</span>
-        </div>
-        <div className="px-2 py-1 text-[0.8em] font-mono text-foreground/70 whitespace-pre-wrap break-all leading-relaxed">
-          <span className="text-primary/80 flowing-text">执行中</span>{' '}
-          {cur}
-        </div>
-      </div>
-    )
-  }
-  return (
-    <div className="rounded border border-border/20 overflow-hidden">
-      <div className="px-2 py-0.5 text-[0.72em] text-foreground/40 border-b border-border/20">
-        已执行 {cmds.length} 条命令
-      </div>
-      <div className="max-h-24 overflow-y-auto">
-        {cmds.map((c, i) => (
-          <div key={i} className="px-2 py-0.5 text-[0.8em] font-mono text-foreground/60 border-b border-border/10 last:border-b-0 whitespace-pre-wrap break-all">
-            <span className="text-emerald-500/60 mr-1.5">✓</span>
-            {c}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
 }
 
 // Action verb shown before the concrete action, derived from the tool type:
@@ -359,10 +201,20 @@ function ToolCard({
   isRunning: boolean
 }) {
   const [open, setOpen] = useState(false)
-  const [expandedResults, setExpandedResults] = useState<Set<string>>(new Set())
   const path = extractToolPath(step)
   const hasSubSteps = step.subSteps && step.subSteps.length > 0
-  const hasParams = !hasSubSteps && !!step.toolParams && Object.keys(step.toolParams).length > 0
+  const isCommandTool = /bash|terminal|shell|run|execute|command/i.test(step.toolName || '')
+  // 命令类 + 读文件类（read_file/list_directory…）点击不展开（标题/状态/错误外露即可）；
+  // 文件修改等其余工具保留展开。
+  const canExpand =
+    !isCommandTool && !/read|view|list|directory/i.test(step.toolName || '')
+  // 紧凑工具：命令/搜索/罗列类工具，具体动作（命令/查询/路径）已经在标题里展示，
+  // 参数区和结果区再平铺一遍纯属冗余。约定是"只显示标题/动作就够了"。
+  const isCompactTool = isCommandTool || /grep|search|glob|list/i.test(step.toolName || '')
+  const visibleParamEntries = isCompactTool
+    ? []
+    : (step.toolParams ? Object.entries(step.toolParams) : [])
+  const hasParams = !hasSubSteps && visibleParamEntries.length > 0
   const stepStatus = results.length > 0
     ? (step.status === 'failed' ? 'failed' : 'completed')
     : (step.status || (step.finishedAt ? 'completed' : step.startedAt ? 'running' : undefined))
@@ -372,15 +224,10 @@ function ToolCard({
   // 动词随状态变化:运行中"执行/搜索/读取",完成态加"已"前缀("已执行/已搜索/已读取")。
   const verb = toolVerb(step.toolName || '')
   const verbText = stepStatus === 'completed' && !failed ? `已${verb}` : verb
-
-  const toggleResult = (id: string) => {
-    setExpandedResults(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
+  // 完整标题（verb + action/label）：action 为空时回退到工具显示名。title 属性
+  // 用于悬停查看全文——命令类标题可能被 CSS truncate 视觉截断。
+  const titleLabel = action || getToolDisplayLabel(step.toolName || '', step.toolKind, path, step.toolParams)
+  const fullTitle = `${verbText} ${titleLabel}`
 
   return (
     <div className="group">
@@ -388,16 +235,16 @@ function ToolCard({
           动作词(执行/搜索/读取) + 具体动作，完成态显示"已执行/已搜索/已读取"。 */}
       <button
         type="button"
-        onClick={() => setOpen(prev => !prev)}
-        className="w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80"
+        onClick={() => { if (canExpand) setOpen(prev => !prev) }}
+        className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${canExpand ? '' : 'cursor-default'}`}
       >
         {failed ? (
           <X className="size-3.5 text-red-500 shrink-0" />
         ) : (
           getToolIcon(step.toolName || '')
         )}
-        <span className={`font-medium truncate ${running ? 'flowing-text' : ''}`}>
-          {verbText} {action || getToolDisplayLabel(step.toolName || '', step.toolKind, path, step.toolParams)}
+        <span className={`font-medium truncate ${running ? 'flowing-text' : ''}`} title={fullTitle}>
+          {verbText} {titleLabel}
         </span>
         {step.duration_s != null && step.duration_s > 0 && (
           <span className="text-[0.72em] text-muted-foreground shrink-0">{formatDurationSeconds(step.duration_s)}</span>
@@ -410,22 +257,27 @@ function ToolCard({
           const diff = step.content ? extractDiffStats(step.content) : ''
           return diff ? <span className="text-[0.72em] text-emerald-500/60 shrink-0">{diff}</span> : null
         })()}
-        <ChevronRight className={`size-3.5 shrink-0 text-foreground/30 transition-all ${open ? 'rotate-90' : ''}`} />
+        {canExpand && <ChevronRight className={`size-3.5 shrink-0 text-foreground/30 transition-all ${open ? 'rotate-90' : ''}`} />}
       </button>
 
-      {open && (
+      {/* 命令类不可展开：运行中的实时输出与失败错误直接外露在标题下，不依赖展开。 */}
+      {!canExpand && running && step.content && (
+        <div className="ml-1 mt-1 text-[0.85em] text-foreground/40 font-mono max-h-16 overflow-hidden leading-relaxed whitespace-pre-wrap break-all">
+          {stripAnsi(step.content.slice(-200))}
+        </div>
+      )}
+      {!canExpand && results.some(r => r.type === 'error') && (
+        <div className="ml-1 mt-1 flex items-start gap-1">
+          <div className="flex-1 min-w-0 text-[0.8em] text-red-500/80 font-mono whitespace-pre-wrap break-all leading-relaxed">
+            {results.filter(r => r.type === 'error')
+              .map(r => stripMktempNoise(stripEmoji(normalizeAcpContent(r.content || ''))))
+              .filter(Boolean).join('\n')}
+          </div>
+        </div>
+      )}
+
+      {canExpand && open && (
         <div className="pb-1 pt-1 pl-3 border-l-2 border-border/60 space-y-1.5">
-          {/* 命令流水 — 多命令（&& / ; / 换行连接）执行中逐条滚动：
-              当前命令高亮"执行中"，每条停留约 2 秒后切下一条（最后一条停留到
-              完成）；完成态展开全部（紧凑限高滚动）。不再一次列一大张卡片。 */}
-          {(() => {
-            const raw = extractCommandSnippet(step.toolParams)
-            const cmds = raw ? splitCommands(raw) : []
-            if (cmds.length > 1) {
-              return <CommandScroller cmds={cmds} running={running} />
-            }
-            return null
-          })()}
           {/* Streaming output preview — shown while tool is running.
               tool.progress → tool_call_update(in_progress) → tool_output_delta 把
               实时输出追加到 step.content（agent-flow-panel），这里显示它的末尾。 */}
@@ -465,67 +317,72 @@ function ToolCard({
             <div className="rounded border border-border/20 divide-y divide-border/20">
               {hasParams && (
                 <div className="p-1.5 space-y-1.5">
-                  {Object.entries(step.toolParams!).map(([k, v]) => (
+                  {visibleParamEntries.map(([k, v]) => (
                     <div key={k} className="flex flex-col">
                       <span className="text-[0.72em] text-foreground/40 font-medium uppercase tracking-wide">{k}</span>
-                      <pre className="text-[0.85em] text-foreground/70 bg-muted/20 rounded px-2 py-1.5 overflow-x-auto font-mono whitespace-pre-wrap break-all">{typeof v === 'string' ? v : JSON.stringify(v, null, 2)}</pre>
+                      <div className="helix-md">
+                        <CodeCard
+                          language="json"
+                          code={typeof v === 'string' ? v : JSON.stringify(v, null, 2)}
+                          showRunButton={false}
+                          className="!leading-snug !my-0"
+                        />
+                      </div>
                     </div>
                   ))}
                 </div>
               )}
               {results.map((r) => {
                 if (r.type === 'error') {
+                  const errFiltered = stripMktempNoise(stripEmoji(normalizeAcpContent(r.content || '')))
+                  if (!errFiltered) return null
                   return (
                     <div key={r.id} className="flex items-start gap-1 p-1.5">
                       <div className="flex-1 min-w-0 text-[0.85em] text-red-500/80 font-mono whitespace-pre-wrap break-all leading-relaxed">
-                        {stripEmoji(normalizeAcpContent(r.content || ''))}
+                        {errFiltered}
                       </div>
-                      <CopyButton text={r.content || ''} />
+                      <CopyButton text={errFiltered} />
                     </div>
                   )
                 }
-                const isExpanded = expandedResults.has(r.id)
-                const raw = stripEmoji(normalizeAcpContent(r.content || ''))
-                const clamped = raw.length > TOOL_RESULT_CLAMP ? raw.slice(0, TOOL_RESULT_CLAMP) + `\n\n… (${raw.length - TOOL_RESULT_CLAMP} 字符已截断)` : raw
-                const isLong = clamped.length > 500 || clamped.split('\n').length > 10
-                const fullText = r.content || ''
+                // 紧凑工具（命令/搜索/罗列）只显示标题，正常结果不展开。
+                // Note: r.type is typed as ExecutionStep['type'] which doesn't include 'error',
+                // but the runtime value might be 'error' from legacy code. Use type assertion.
+                if ((r.type as string) !== 'error' && isCompactTool) return null
+                const raw = stripMktempNoise(stripEmoji(normalizeAcpContent(r.content || '')))
+                if (!raw) return null
+                const fullText = raw
                 const isImage = detectResultKind(r.toolName || '', raw) === 'image'
 
-                return (
-                  <div key={r.id} className="relative p-1.5">
-                    <div className="absolute top-2 right-2 z-10">
-                      <CopyButton text={fullText} />
+                // 图片结果不是代码块，保持原样渲染。
+                if (isImage) {
+                  return (
+                    <div key={r.id} className="relative p-1.5">
+                      <div className="absolute top-2 right-2 z-10">
+                        <CopyButton text={fullText} />
+                      </div>
+                      <ImageRenderer content={raw} />
                     </div>
-                    {isLong && !isExpanded && !isImage ? (
-                      <div>
-                        <div className="relative overflow-hidden max-h-20 rounded border border-border/20">
-                          <ResultRenderer content={clamped} toolName={r.toolName || ''} />
-                          <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-card to-transparent" />
-                        </div>
-                        <button
-                          onClick={() => toggleResult(r.id)}
-                          className="mt-1 text-foreground/40 hover:text-foreground/70 transition-colors text-[0.85em]"
-                        >
-                          展开 ▼
-                        </button>
-                      </div>
-                    ) : (
-                      <div>
-                        <div className={`rounded border border-border/20 ${isLong ? 'max-h-40 overflow-y-auto' : ''}`}>
-                          <div className="p-1.5">
-                            <ResultRenderer content={isExpanded ? raw : clamped} toolName={r.toolName || ''} />
-                          </div>
-                        </div>
-                        {isLong && (
-                          <button
-                            onClick={() => toggleResult(r.id)}
-                            className="block w-full text-center py-0.5 text-foreground/40 hover:text-foreground/70 hover:bg-muted/30 transition-colors border-t border-border/20 text-[0.85em]"
-                          >
-                            折叠 ▲
-                          </button>
-                        )}
-                      </div>
-                    )}
+                  )
+                }
+
+                // 其余结果（diff / plain 文本）统一走 WorkBuddy 风格代码卡片：
+                // 语言标签 + 行数 + 复制按钮 + 语法高亮 + 过长自动折叠/展开。
+                // diff 由 CodeCard 内部的 DiffView 处理；plain 用 text 高亮。
+                const resultLang = detectResultKind(r.toolName || '', raw) === 'diff' ? 'diff' : 'text'
+                const clamped = raw.length > TOOL_RESULT_CLAMP ? raw.slice(0, TOOL_RESULT_CLAMP) + `\n\n… (${raw.length - TOOL_RESULT_CLAMP} 字符已截断)` : raw
+                const isLong = clamped.length > 500 || clamped.split('\n').length > 10
+
+                return (
+                  <div key={r.id} className="p-1.5">
+                    <div className="helix-md">
+                      <CodeCard
+                        language={resultLang}
+                        code={clamped}
+                        showRunButton={false}
+                        className="!leading-snug !my-0"
+                      />
+                    </div>
                   </div>
                 )
               })}

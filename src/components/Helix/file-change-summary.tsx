@@ -11,9 +11,11 @@ function DiffBody({ change }: { change: PendingChange }) {
     [change.oldContent, change.newContent]
   )
   if (change.unifiedDiff) {
+    // Normalize CRLF to LF for consistent line splitting across platforms
+    const normalizedDiff = change.unifiedDiff.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     return (
       <div className="font-mono text-[calc(var(--helix-transcript-size)*0.7857)] leading-relaxed rounded-md overflow-hidden">
-        {change.unifiedDiff.split('\n').map((line, i) => {
+        {normalizedDiff.split('\n').map((line, i) => {
           if (line.startsWith('+++') || line.startsWith('---')) {
             return (
               <div key={i} className="bg-purple-500/10 px-2 py-px text-purple-300/80 whitespace-pre-wrap">{line}</div>
@@ -86,7 +88,7 @@ export function FileChangeSummary({ changes }: { changes: PendingChange[]; hideH
       >
         <FilePen className="size-3.5 shrink-0 text-foreground/40" />
         <span className="font-medium shrink-0">已编辑</span>
-        <span className="flex-1 truncate font-mono text-[length:var(--helix-transcript-size)] text-muted-foreground">{changes.map(c => c.fileName).join('、')}</span>
+        <span className="flex-1 break-all font-mono text-[length:var(--helix-transcript-size)] text-muted-foreground">{changes.map(c => c.fileName).join('、')}</span>
         <span className="shrink-0 flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)] tabular-nums">
           <span className="text-emerald-500">+{totalAdded}</span>
           <span className="text-red-500">-{totalRemoved}</span>

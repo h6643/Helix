@@ -22,6 +22,7 @@ import {
   Undo2,
   Archive,
   Link,
+  Sparkles,
 } from 'lucide-react'
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
@@ -36,7 +37,6 @@ import { buildAcpMcpServers } from '@/lib/mcp'
 import { detectScheduledTasks, syncTaskToBackend, type DetectedTask } from '@/lib/schedule-utils'
 import { isServeActive } from '@/lib/serve-gateway'
 import { debug } from '@/lib/logger'
-import { syncContextUsageToBackend } from '@/lib/context-capture'
 import { decodeBase64Utf8, extractThinkTags, normalizeAcpContent, normalizeAcpContentRaw, stripEmoji, extractKaomojiStatus } from '@/lib/text-utils'
 import { ContextUsageIndicator } from './context-usage'
 
@@ -64,7 +64,9 @@ import { HelixMarkdown } from './helix-markdown'
 // and the context-usage indicator falls back to the per-conversation store).
 // SessionMapEntry / SESSION_MAP_KEY / loadSessionMap / resolveBackendSid 已迁移到
 // @/lib/session-map 模块，供多个组件复用；这里仅导入所需引用。
-import { SESSION_MAP_KEY, loadSessionMap, type SessionMapEntry } from '@/lib/session-map'
+import { SESSION_MAP_KEY, loadSessionMap, resolveBackendSid, type SessionMapEntry } from '@/lib/session-map'
+import { mapBackendMessages } from '@/lib/session-resync'
+import { resyncCurrentSessionFromBackend, isCurrentSessionRenderBroken } from '@/lib/session-resync'
 import { captureContextBreakdown } from '@/lib/context-capture'
 
 async function persistSessionMap(map: Map<string, SessionMapEntry>) {
@@ -173,9 +175,14 @@ function isNearDuplicate(aN: string, bN: string): boolean {
 // "**加粗**后"), which breaks CommonMark strong rendering (a `**` closer must
 // be followed by whitespace/punctuation). The done handler already repairs
 // msg.content from the backend's final text; here we apply the same fix to the
-// blocks path so rendering matches. Only fires when the joined text blocks are
-// normalized-equivalent to msg.content AND content is not shorter (i.e. it is
-// the same or a fuller version) — never guesses, never corrupts normal text.
+// blocks path so rendering matches.
+//
+// CRITICAL FIX (2026-09-02): Always replace text blocks with authoritative
+// content, never skip. Old logic would skip replacement when blocks matched
+// content (normalized comparison), but that left streaming-stage raw text
+// rendered alongside done-stage preprocessed text, causing duplicate display.
+// Now we always consolidate ALL text into a single block at the END of the
+// block list, ensuring only the authoritative (preprocessed) version renders.
 function reconcileBlocksWithContent(
   blocks: NonNullable<ChatMessage['blocks']>,
   content?: string | null,
@@ -743,6 +750,9 @@ type DisplayItem =
   | { kind: 'summary'; id: string; count: number; preview: string; startTs?: number; endTs?: number }
   | { kind: 'message'; msg: ChatMessage }
   | { kind: 'status'; id: string; text: string }
+  | { kind: 'compressing'; id: string; text: string }
+  | { kind: 'divider'; id: string; text: string }
+  | { kind: 'fileChanges'; id: string; msg: ChatMessage; changes: PendingChange[] }
 
 function truncateStr(s: string | undefined, max: number): string | undefined {
   if (!s || s.length <= max) return s
@@ -899,10 +909,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   const reasoning = useMemo(() => normalizeAcpContentRaw(msg.reasoning || ''), [msg.reasoning])
   const messageDuration = msg.duration ?? msg.thinkingTime
   const isStreaming = msg.isStreaming === true
-  const msgFileChanges = useMemo(
-    () => (msg.fileChanges && msg.fileChanges.length > 0 ? msg.fileChanges : collectFileChanges(msg.blocks ?? [])),
-    [msg.blocks, msg.fileChanges],
-  )
 
   return (
     <div
@@ -974,7 +980,11 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                       if (seg.kind === 'thinking') {
                         const firstBlock = seg.blocks[0]
                         const firstContent = firstBlock && 'content' in firstBlock ? String(firstBlock.content) : ''
-                        return isStreaming ? (
+                        // 完成后仍保留「思考完成」折叠卡。若按旧逻辑在 !isStreaming 时返回 null，
+                        // 纯「思考→回答」（无工具调用）的消息过程区只剩空壳——外层「执行过程」
+                        // 点开一片空白。仅当所有思考块内容为空时才跳过，避免出现空卡。
+                        if (!seg.blocks.some(b => 'content' in b && String(b.content || '').trim())) return null
+                        return (
                           <details key={si} className="mb-2 mt-3 group/details">
                             <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize }}>
                               <span>{isStreaming ? (extractKaomojiStatus(firstContent).status || '思考') : '思考完成'}</span>
@@ -991,8 +1001,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                               })}
                             </div>
                           </details>
-                        ) : (
-                          null
                         )
                       }
                       return (
@@ -1006,7 +1014,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                               b.type === 'tool_group'
                                 ? <InlineToolGroup key={i} steps={b.steps} isRunning={false} fontSize={fontSize} />
                                 : b.type === 'file_change'
-                                  ? <FileChangeSummary key={i} changes={b.changes} />
+                                  ? <FileChangeSummary key={b.changes?.[0]?.fileId || `fc-${i}`} changes={b.changes} />
                                   : null
                             )}
                           </div>
@@ -1075,7 +1083,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                               b.type === 'tool_group'
                                 ? <InlineToolGroup key={i} steps={b.steps} isRunning={false} fontSize={fontSize} />
                                 : b.type === 'file_change'
-                                  ? <FileChangeSummary key={i} changes={b.changes} />
+                                  ? <FileChangeSummary key={b.changes?.[0]?.fileId || `fc-${i}`} changes={b.changes} />
                                   : null
                             )}
                           </div>
@@ -1095,11 +1103,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 ) : (
                   <HelixMarkdown text={mdContent} />
                 )}
-              </div>
-            )}
-            {msgFileChanges.length > 0 && (
-              <div className="mt-2">
-                <FileChangeSummaryCard changes={msgFileChanges} />
               </div>
             )}
             {(messageDuration ?? 0) > 0 && (
@@ -1156,11 +1159,11 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             )}
             {content && (
-              <div className="helix-md leading-normal" style={{ fontSize }}>
+              <div className="leading-normal" style={{ fontSize }}>
                 {searchOpen && searchQuery.trim() ? (
                   <div className="whitespace-pre-wrap"><HighlightText text={content} query={searchQuery} active={isSearchActive} /></div>
                 ) : (
-                  <HelixMarkdown text={content} />
+                  <div className="whitespace-pre-wrap">{content}</div>
                 )}
               </div>
             )}
@@ -1190,6 +1193,7 @@ const DRAFT_SESSION_KEY = '__draft__'
 const EMPTY_LINKS: LinkAttachment[] = []
 
 export function AgentFlowPanel() {
+  const currentSessionId = useHelixStore(s => s.currentSessionId)
   const [steps, setSteps] = useState<ExecutionStep[]>([])
   useEffect(() => { stepsRef.current = steps }, [steps])
   const [input, setInput] = useState('')
@@ -1212,6 +1216,14 @@ export function AgentFlowPanel() {
   const [showApprovalModeDropdown, setShowApprovalModeDropdown] = useState(false)
   const approvalMode = useHelixStore(s => s.approvalMode)
   const setApprovalMode = useHelixStore(s => s.setApprovalMode)
+  // 压缩完成提示 divider（手动 /compact 与自动压缩都会写入，持久化显示，切会话时清空）
+  const compressionNotice = useHelixStore(s =>
+    s.compressionNotices[currentSessionId ?? DRAFT_SESSION_KEY],
+  )
+  // 压缩进行中标记：手动 /compact 与自动压缩共用。用它驱动对话流里的
+  // 「压缩中…」动画行，让用户知道压缩正在发生（之前该标记只做并发保护，
+  // UI 无任何反馈，表现为"点了压缩却什么都没发生"）。
+  const compressionBusy = useHelixStore(s => s.compressionBusy)
   const [showNewProjectForm, setShowNewProjectForm] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [fileSkills, setFileSkills] = useState<Array<{ name: string; description: string }>>([])
@@ -1276,6 +1288,7 @@ export function AgentFlowPanel() {
   // aborts a parallel run in another conversation.
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map())
   const doneProcessedRef = useRef(false)
+  const planAutoExecutedRef = useRef(false)  // 防 plan 模式自动执行循环
   const synthDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const forceDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savedSessionRef = useRef(false)
@@ -1348,7 +1361,6 @@ const tabInputs = useHelixStore(s => s.tabInputs)
 const setTabInput = useHelixStore(s => s.setTabInput)
 const clearTabInput = useHelixStore(s => s.clearTabInput)
   const chatMessages = useHelixStore(s => s.chatMessages)
-  const currentSessionId = useHelixStore(s => s.currentSessionId)
   // Link cards picked from the in-app browser ("选取网页元素加入聊天") live in the
   // store (not local state) so preview-rail can append them from another surface.
   const pendingLinks = useHelixStore((s) => {
@@ -1377,8 +1389,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   }, [approvalQueue, clarifyQueue, pendingTaskCreations, currentSessionId, setSessionPendingApproval])
   // 切换会话时清空上一次的自动压缩内联提示，避免把旧提示带进新对话；
   // 同时清掉不属于当前会话的待审批计划（切走即作废，防止串到别的会话）。
+  // NOTE: clearCompressionNotice 不能放入依赖数组——它是 zustand 方法引用，
+  // 每次 setState 都生成新函数，会导致 effect 无限重触发（Maximum update depth exceeded）。
   useEffect(() => {
     setAutoCompressNotices([])
+    useHelixStore.getState().clearCompressionNotice(currentSessionId ?? DRAFT_SESSION_KEY)
     setPendingPlanReview(prev => (prev && prev.sessionId === (currentSessionId ?? DRAFT_SESSION_KEY) ? prev : null))
   }, [currentSessionId])
   const sessionMessages = useMemo(() => {
@@ -1415,13 +1430,41 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     const recentStart = Math.max(0, n - DISPLAY_LIMIT)
     for (let i = recentStart; i < n; i++) {
       items.push({ kind: 'message', msg: truncateMessage(sessionMessages[i]) })
+      const changes = sessionMessages[i].fileChanges?.length
+        ? [...sessionMessages[i].fileChanges!]
+        : collectFileChanges(sessionMessages[i].blocks ?? [])
+      if (changes.length > 0) {
+        items.push({ kind: 'fileChanges', id: `file-changes-${sessionMessages[i].id}`, msg: sessionMessages[i], changes })
+      }
     }
     // 自动压缩事件以居中状态行的形式插入对话流末尾
     for (const notice of autoCompressNotices) {
       items.push({ kind: 'status', id: notice.id, text: notice.text })
     }
+    // 压缩完成提示以 WorkBuddy 风格的 inline divider 插入对话流。锚定到压缩后
+    // 的最后一条消息之后，后续新消息不会把该时间点往上顶。
+    if (compressionNotice) {
+      const parts: string[] = [compressionNotice.source === 'auto' ? '上下文已自动压缩' : '上下文已压缩']
+      if (compressionNotice.beforeTokens != null && compressionNotice.afterTokens != null) {
+        parts.push(`${(compressionNotice.beforeTokens / 1000).toFixed(0)}k → ${(compressionNotice.afterTokens / 1000).toFixed(0)}k`)
+      }
+      if (compressionNotice.removed != null) {
+        parts.push(`移除 ${compressionNotice.removed} 条`)
+      }
+      const anchorIndex = compressionNotice.anchorMessageId
+        ? items.findIndex(item => item.kind === 'message' && item.msg.id === compressionNotice.anchorMessageId)
+        : -1
+      const divider = { kind: 'divider', id: `compression-${compressionNotice.ts}`, text: parts.join(' · ') } as DisplayItem
+      if (anchorIndex >= 0) items.splice(anchorIndex + 1, 0, divider)
+      else items.push(divider)
+    }
+    // 压缩进行中：在对话流末尾插入一个 spinner + 文案的「压缩中…」动画行，
+    // 让用户看到压缩正在发生（压缩完成会被上面的 divider 取代）。
+    if (compressionBusy) {
+      items.push({ kind: 'compressing', id: 'compressing', text: '上下文压缩中…' })
+    }
     return items
-  }, [sessionMessages, autoCompressNotices])
+  }, [sessionMessages, autoCompressNotices, compressionNotice, compressionBusy])
 
   // ── Conversation content search (Ctrl+F) ──────────────────────────────
   const [conversationSearchOpen, setConversationSearchOpen] = useState(false)
@@ -1532,12 +1575,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return !!streamingDrafts[currentSessionId || '']?.isAgentRunning
   }, [streamingDrafts, currentSessionId])
   const isChatLoading = useHelixStore(s => s.isChatLoading)
-  // 覆盖面板（看板/定时任务/技能）打开时，把聊天输入区降一级（z-20），避免
+  // 覆盖面板（定时任务/技能）打开时，把聊天输入区降一级（z-20），避免
   // 和面板（z-30）争焦点；历史条/上下文指示器也在面板打开时隐藏（遮挡感）。
-  const showKanbanPanel = useHelixStore(s => s.showKanbanPanel)
   const showScheduledTasksPanel = useHelixStore(s => s.showScheduledTasksPanel)
   const showSkillPanel = useHelixStore(s => s.showSkillPanel)
-  const overlayPanelOpen = showKanbanPanel || showScheduledTasksPanel || showSkillPanel
+  const overlayPanelOpen = showScheduledTasksPanel || showSkillPanel
   // Per-session busy: only the conversation that is itself running shows a
   // stop button. A global isChatLoading (even if set by a future caller) must
   // never lock the input of a different/new conversation.
@@ -1697,32 +1739,27 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // that consumers outside handleRun (ContextUsageIndicator, compaction, etc.)
     // target the RIGHT session.  Without this they read a stale global that still
     // points at a different conversation's session → "session not found" RPC errors.
-    // Only trust a cached session if its gateway epoch still matches the live
-    // epoch — a mismatch means the gateway restarted and the backend session is
-    // dead. A dead id must NOT be advertised globally (it would make the
-    // context-usage indicator query the wrong/empty session and show the same
-    // usage for every conversation). Instead fall back to the per-conversation
-    // store (contextUsage[currentSessionId], already persisted & correct).
+    // 2026-08-31 对齐官方桌面版语义：后端 SessionManager 把会话持久化到 state.db，
+    // 内存未命中时 get_session() 会透明恢复（_restore 重建 AIAgent + 历史）。因此
+    // epoch 不匹配（网关重启）不再视为会话死亡——直接把持久化 sid 广播给全局，
+    // 死活由后端判定（恢复成功 or 真正 not found），调用方各自兜底。
     const entry = currentSessionId ? sessionMapRef.current.get(currentSessionId) : null
-    const liveEpoch = useHermesStore.getState().gatewayEpoch
-    const hermesSid = entry && entry.epoch === liveEpoch ? entry.sid : null
+    const hermesSid = entry?.sid ?? null
     hermesSessionIdRef.current = hermesSid
     try { useHermesStore.getState().setHermesSessionId(hermesSid) } catch {}
   }, [currentSessionId])
 
   // Restore persisted per-conversation sessions on mount so the conversation→
-  // backend-session mapping survives an app restart. Dead sessions (epoch
-  // mismatch after a gateway restart) are silently dropped — the run path
-  // recreates them and the context-usage indicator falls back to the store.
+  // backend-session mapping survives an app restart. 对齐官方语义：映射里的 sid
+  // 直接恢复全局绑定，不再按 epoch 丢弃——重启后第一次 RPC 由后端从 state.db
+  // 透明恢复；真正不存在的会话由调用方收到 "session not found" 后各自兜底。
   useEffect(() => {
     let cancelled = false
     loadSessionMap().then((m) => {
       if (cancelled) return
       sessionMapRef.current = m
       const cid = useHelixStore.getState().currentSessionId
-      const entry = cid ? m.get(cid) : null
-      const liveEpoch = useHermesStore.getState().gatewayEpoch
-      const sid = entry && entry.epoch === liveEpoch ? entry.sid : null
+      const sid = cid ? m.get(cid)?.sid ?? null : null
       hermesSessionIdRef.current = sid
       try { useHermesStore.getState().setHermesSessionId(sid) } catch {}
     }).catch(() => {})
@@ -2184,19 +2221,11 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // regular prompts).  These show up in the "/" autocomplete picker alongside
   // skills, Hermes commands, and shell commands.
   const BUILTIN_COMMANDS = useMemo(() => [
-    { name: 'compact', description: '压缩上下文', action: 'compact' as const },
-    { name: 'clear', description: '清空当前对话', action: 'clear' as const },
+    { name: 'compact', aliases: ['summarize', 'compress'], description: '压缩上下文', action: 'compact' as const },
+    { name: 'resync', aliases: ['sync'], description: '从后端重新同步当前会话消息（无需重启应用）', action: 'resync' as const },
+    { name: 'clear', aliases: ['clean'], description: '清空当前对话', action: 'clear' as const },
     { name: 'reset', description: '重置会话（清空对话+上下文）', action: 'reset' as const },
-    { name: 'background', description: '后台运行一个任务，不打断当前对话', action: 'background' as const, aliases: ['bg', 'btw'] },
-    { name: 'undo', description: '撤销上一条消息并同步截断后端历史', action: 'undo' as const },
-    { name: 'save', description: '保存当前会话到磁盘（~/hermes/sessions/saved/*.json）', action: 'save' as const },
-    { name: 'branch', description: '从当前对话分叉出一个新分支会话', action: 'branch' as const },
-    { name: 'steer', description: '偏离当前思路，告诉模型换方向：/steer <text>', action: 'steer' as const },
-    { name: 'redirect', description: '重定向话题到新方向：/redirect <text>', action: 'redirect' as const },
     { name: 'image', description: '生成一张图片：/image <prompt>', action: 'image' as const },
-    { name: 'rollback', description: '打开回滚面板（文件版本回滚）', action: 'rollback' as const },
-    { name: 'sessions', description: '打开后端会话管理面板', action: 'sessions' as const },
-    { name: 'projects', description: '打开项目管理面板', action: 'projects' as const },
     { name: 'mcp', description: '管理 MCP 服务器', action: 'mcp' as const },
     { name: 'model', description: '切换到模型选择设置', action: 'model' as const },
     { name: 'skill', description: '打开技能管理面板', action: 'skill' as const },
@@ -2225,15 +2254,25 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     return [...builtinCmds, ...allSkills, ...hermesCmds]
   }, [allSkills, availableCommands, BUILTIN_COMMANDS])
 
+  const slashCmd = input.startsWith('/') ? input.slice(1).split(' ')[0].toLowerCase() : ''
+  const matchedQuickCmds = input.startsWith('/') ? QUICK_COMMANDS.filter(c => !slashCmd || c.cmd.slice(1).startsWith(slashCmd)) : []
   const filteredSkills = useMemo(() => {
     if (input.startsWith('/')) {
       const query = input.slice(1).toLowerCase()
+      // 命令/技能按「名称前缀」精确匹配（与快捷指令的 startsWith 规则一致），
+      // 避免 /fi 误中 notification / specification 等含 "fi" 子串的 description 风格名称。
+      const prefix = allSlashItems.filter(s => s.name.toLowerCase().startsWith(query))
+      if (prefix.length > 0) return prefix
+      // 已有快捷指令命中（如 /fi → /fix）时，不再退化到子串匹配，避免把名字里夹带
+      // "fi" 的命令/技能当成"描述"误显示。只有连快捷指令都没命中，才退化为子串匹配，
+      // 保留中段检索技能的能力。
+      if (matchedQuickCmds.length > 0) return []
       return allSlashItems.filter(s => s.name.toLowerCase().includes(query))
     }
     return allSlashItems
-  }, [allSlashItems, input])
-  const slashCmd = input.startsWith('/') ? input.slice(1).split(' ')[0].toLowerCase() : ''
-  const matchedQuickCmds = input.startsWith('/') ? QUICK_COMMANDS.filter(c => !slashCmd || c.cmd.slice(1).startsWith(slashCmd)) : []
+  }, [allSlashItems, input, matchedQuickCmds])
+  // 快捷指令与「命令/技能」共用同一套键盘选中索引：先排快捷指令，再排命令。
+  const slashTotal = matchedQuickCmds.length + filteredSkills.length
   const [selectedSkillIndex, setSelectedSkillIndex] = useState(0)
   const [slashMenuOpen, setSlashMenuOpen] = useState(true)
   const showSlashMenu = input.startsWith('/') && slashMenuOpen && (filteredSkills.length > 0 || matchedQuickCmds.length > 0) && !input.includes(' ')
@@ -2501,63 +2540,20 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     }
   }, [setStreamingDraft, currentSessionId, isBusy, isRunning])
 
-  // Builtin-command helper: resolve (or create) the backend session for the
-  // current conversation. Reuses the same params/epoch logic as the main flow.
-  // Returns the backend sid, or null when no conversation / creation failed.
-  const ensureBuiltinSid = async (): Promise<string | null> => {
-    const cid = currentSessionId
-    if (!cid) return null
-    const liveEpoch = useHermesStore.getState().gatewayEpoch
-    const cached = sessionMapRef.current.get(cid)
-    if (cached && cached.epoch === liveEpoch && cached.sid) return cached.sid
-    try {
-      const st = useHelixStore.getState()
-      const res = await hermesApi()!.send('session/new', {
-        mcpServers: buildAcpMcpServers(st.mcpServers),
-        messages: st.chatMessages
-          .filter(m => m.sessionId === cid)
-          .map(m => ({ role: m.role, content: m.content })),
-        cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? undefined,
-        search_engine: st.enhancedFindGrep ? 'rg' : '',
-        terminal_shell: st.terminalShell,
-      }) as any
-      const sid = res?._meta?.hermes?.sessionProvenance?.acpSessionId
-        || res?.session_id
-        || res?.sessionID
-        || (typeof res === 'string' ? res : null)
-      if (!sid) return null
-      sessionMapRef.current.set(cid, { sid, epoch: liveEpoch })
-      persistSessionMap(sessionMapRef.current)
-      return sid
-    } catch (e) {
-      console.warn('[Helix] ensureBuiltinSid failed:', e)
-      return null
-    }
-  }
 
   // Undo last round (same semantics as the /undo builtin command, exposed as a
   // toolbar button): truncate backend history back to the last user prompt and
   // drop all local messages after it.
+  // 2026-09-02 提速：本地优先。旧实现 await ensureBuiltinSid() —— 缓存未命中时
+  // 先 session/new 全量重放历史再 session.undo，长对话撤回要等好几秒。现在：
+  // ① 本地截断同步立即执行（UI 瞬间响应，被撤回文本放回输入框）；
+  // ② 后端截断转后台尽力而为：sid 有效就异步 session.undo；失败/无 sid/epoch
+  //    过期就删掉映射条目——下一条消息 handleRun 会用已截断的本地历史作
+  //    seedHistory 重建（语义等价，撤回时零等待）。
   const handleUndoChat = useCallback(async () => {
     try {
       const cid = currentSessionId
-      // 尽量拿到后端 sid：缓存没有就惰性重建（重启后/首次都会走到这里）。
-      // 重建走 session/new 会带本地历史作为 seedHistory，即使重启后后端
-      // session 已销毁，也能恢复出可截断的历史。
-      let sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
-      if (!sid) {
-        try { sid = await ensureBuiltinSid() } catch { sid = null }
-      }
-      // 后端截断为 best-effort：后端未就绪或历史为空时仅前端删除即可。
-      let removed = 0
-      if (sid) {
-        try {
-          const r = await hermesApi()!.send('session.undo', { session_id: sid })
-          removed = (r as any)?.removed ?? 0
-        } catch (e) {
-          console.warn('[Helix] session.undo failed (continuing with local purge):', e)
-        }
-      }
+      // ① 本地截断：立即从 UI 移除最后一轮（同步，无网络往返）。
       const all = useHelixStore.getState().chatMessages
       const local = all.filter(m => !m.sessionId || m.sessionId === cid)
       const lastUserIdx = [...local].reverse().findIndex(m => m.role === 'user')
@@ -2573,13 +2569,37 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         setInputSynced(withdrawnText)
         requestAnimationFrame(() => inputRef.current?.focus())
       }
-      storeActions.showToast({
-        type: 'success',
-        title: '已撤回',
-        description: sid
-          ? `已截断后端历史（移除 ${removed} 条记录），原消息已放回输入框`
-          : '已移除本地最后一轮对话（后端未连接，未同步后端）'
-      })
+
+      // ② 后端同步（后台、尽力而为，不阻塞 UI）。
+      const liveEpoch = useHermesStore.getState().gatewayEpoch
+      const entry = cid ? sessionMapRef.current.get(cid) : null
+      if (entry && (entry.epoch !== liveEpoch || !entry.sid)) {
+        // epoch 过期 = 网关已重启，后端会话必死：直接删条目（省一次注定
+        // 失败的 RPC），下次 handleRun 用截断后的 seedHistory 重建。
+        sessionMapRef.current.delete(cid!)
+        persistSessionMap(sessionMapRef.current)
+      }
+      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+      if (sid) {
+        hermesApi()!.send('session.undo', { session_id: sid })
+          .then((r: any) => {
+            debug('[HelixTrace] 撤回后端截断完成', { removed: r?.removed ?? 0 })
+          })
+          .catch((e: any) => {
+            // 截断失败（会话已被回收 / 正在运行 / 历史已变化）：删映射条目，
+            // 下一条消息 handleRun 会用已截断的本地历史重建，前后端重新对齐。
+            console.warn('[Helix] session.undo failed (will rebuild on next prompt):', e)
+            if (cid) {
+              sessionMapRef.current.delete(cid)
+              persistSessionMap(sessionMapRef.current)
+            }
+          })
+      } else if (cid) {
+        // 无可用 sid（重启后 / 草稿会话）：删掉残留条目即可，下次 handleRun
+        // 的 seedHistory 本来就是截断后的历史，无需现在重建。
+        sessionMapRef.current.delete(cid)
+        persistSessionMap(sessionMapRef.current)
+      }
     } catch (e) {
       storeActions.showToast({ type: 'error', title: '撤回失败', description: String(e) })
     }
@@ -2683,7 +2703,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // clicks it, and ACP receives a second prompt → "Queued (1 queued)" and
     // the model gets interrupted mid-thought.
     useHelixStore.setState({ isChatLoading: true })
-
+    // Set estimated tokens while waiting for API response (shows ~Xk during request)
+    const inputText = (currentInput || '').length
+    const inputTokens = Math.ceil(inputText / 2) // rough estimate: ~2 chars per token
+    const previousUsed = currentSessionId
+      ? useHelixStore.getState().contextUsage[currentSessionId]?.used || 0
+      : 0
+    const estimatedTokens = Math.max(100, previousUsed + inputTokens)
+    // Note: activeSessionId is declared later in this function, so we can't use it here.
+    // We'll set the estimated token in the finally block instead.
+    // FIX: Store estimated tokens immediately so context ring shows ~Xk while loading
+    const tempSessionId = currentSessionId || 'pending'
+    useHelixStore.getState().setEstimatedTokens(tempSessionId, estimatedTokens)
 
     // --- Built-in slash commands (handled client-side, never sent to Hermes) ---
     const builtinMatch = baseTrimmed.match(/^\/(\S+)/)
@@ -2697,32 +2728,115 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           case 'compact': {
             // Compact: call backend session.compress RPC and update frontend messages
             try {
-              const result = await hermesApi()?.send('session.compress', { session_id: currentSessionId })
+              // 并发保护：后端压缩有全局锁，第二次调用会被拒（lock_held），
+              // 表现为"点了压缩但什么都没发生"。手动/自动共用 busy 标记。
+              if (useHelixStore.getState().compressionBusy) {
+                storeActions.showToast({ type: 'warning', title: '压缩进行中', description: '上一次压缩还没结束，请稍后再试' })
+                break
+              }
+              useHelixStore.getState().setCompressionBusy(true)
+              // session.compress 的 session_id 必须是后端 sid，不能直接传前端对话 id
+              // （currentSessionId）——后端会话表里没有这个 id，必报 4001 "session not
+              // found"。与 context-usage 的自动压缩路径保持一致：先解析映射拿 sid。
+              // 2026-08-31 对齐官方语义：resolveBackendSid 不再按 epoch 丢弃持久化
+              // sid——网关重启后后端会从 state.db 透明恢复该会话（get_session→_restore）。
+              const sid = (await resolveBackendSid(currentSessionId)) || useHermesStore.getState().hermesSessionId
+              if (!sid) {
+                storeActions.showToast({ type: 'warning', title: '当前会话还没有后端会话', description: '先发送一条消息建立会话后再压缩' })
+                break
+              }
+              let result = await hermesApi()?.send('session.compress', { session_id: sid })
+              // 会话不在内存（网关重启/空闲回收后）：与 prompt 路径一致，先
+              // session.resume 从 state.db 捞回原会话再重试压缩，避免"压缩失败"。
+              // resume 用 storedId（DB 主键）才能跨重启恢复；ui_session 查不到 DB 行。
+              if (!result || (typeof result === 'object' && (result as any).error)) {
+                const errText = String((result as any)?.error || '')
+                if (/session.*not.*found|not found|no such session|unknown session/i.test(errText)) {
+                  const entry = currentSessionId ? sessionMapRef.current.get(currentSessionId) : null
+                  const resumeId = entry?.storedId || sid
+                  debug('[Helix] /compact: session not in memory, trying resume →', resumeId)
+                  const resumeRes = await hermesApi()?.send('session.resume', { session_id: resumeId }).catch(() => null)
+                  if (resumeRes) {
+                    const restoredId = resumeRes?.session_id || resumeId
+                    debug('[Helix] /compact: resumed, retrying compress')
+                    result = await hermesApi()?.send('session.compress', { session_id: restoredId })
+                  }
+                }
+              }
+              // 压缩成功说明 sid 在后端活着（可能刚被透明恢复）：刷新映射 epoch 并
+              // 恢复全局绑定，让 handleRun / context-usage 后续都命中同一会话。
+              if (currentSessionId) {
+                sessionMapRef.current.set(currentSessionId, { sid, epoch: useHermesStore.getState().gatewayEpoch })
+                persistSessionMap(sessionMapRef.current)
+                hermesSessionIdRef.current = sid
+                try { useHermesStore.getState().setHermesSessionId(sid) } catch {}
+              }
               if (result && typeof result === 'object') {
                 const r = result as any
                 if (r.status === 'compressed' && Array.isArray(r.messages)) {
                   // Update frontend messages with compressed messages from backend
-                  const msgs = r.messages.map((m: any) => ({
-                    id: m.id || generateId(),
-                    role: m.role as 'user' | 'assistant' | 'system',
-                    content: m.content || '',
-                    images: m.images,
-                    timestamp: m.timestamp || Date.now(),
-                    reasoning: m.reasoning,
-                    steps: m.steps,
-                    sessionId: currentSessionId,
+                  const msgs = mapBackendMessages(r.messages, currentSessionId || '')
+                  // 仅替换「当前会话」的消息：chatMessages 是跨会话全局数组（靠 sessionId
+                  // 区分），之前用 msgs 整体覆盖会清掉所有其他会话的历史（"压缩后消息全空"）。
+                  useHelixStore.setState((state) => ({
+                    chatMessages: [
+                      ...state.chatMessages.filter((m) => m.sessionId && m.sessionId !== currentSessionId),
+                      ...msgs,
+                    ],
                   }))
-                  useHelixStore.setState({ chatMessages: msgs })
-                  storeActions.showToast({ type: 'success', title: '上下文已压缩' })
+                  // 压缩提示卡片：transcript 顶部可关闭，8s 自动消失（不做 toast，
+                  // 与 WorkBuddy 的"过程卡片"风格一致）
+                  const anchorMessageId = msgs.length > 0 ? msgs[msgs.length - 1].id : undefined
+                  useHelixStore.getState().setCompressionNotice({
+                    ts: Date.now(),
+                    sessionId: currentSessionId || DRAFT_SESSION_KEY,
+                    anchorMessageId,
+                    source: 'manual',
+                    removed: Number(r.removed) || undefined,
+                    beforeTokens: Number(r.before_tokens) || undefined,
+                    afterTokens: Number(r.after_tokens) || undefined,
+                    messageCount: Number(r.after_messages) || undefined,
+                  })
+                  // 自动自愈：极端情况下压缩回包异常/映射失败会让当前会话仍为空。
+                  // 直接异步从后端拉权威历史覆盖，无需用户手动输入 /resync。
+                  if (isCurrentSessionRenderBroken(currentSessionId)) {
+                    await resyncCurrentSessionFromBackend({
+                      sessionId: currentSessionId || '',
+                      showToast: true,
+                      toastMessage: '压缩后消息异常，已自动从后端恢复',
+                    })
+                  }
                 } else if (r.status === 'aborted') {
                   storeActions.showToast({ type: 'warning', title: '压缩已中止' })
+                } else if (r.lock_held) {
+                  // 后端压缩锁被占用：这次调用没有执行压缩，绝不能报成功
+                  storeActions.showToast({
+                    type: 'warning',
+                    title: '压缩进行中',
+                    description: r.message || '另一个压缩任务正在运行，请稍后再试',
+                  })
                 } else {
-                  storeActions.showToast({ type: 'success', title: '上下文已压缩' })
+                  // 未知响应形状：不做 toast，仅静默（避免误报"已压缩"）
+                  debug('[Helix] /compact: unrecognized compress response', r)
                 }
               }
             } catch (e) {
+              // 后端明确说会话不存在（从未跑过/已被删）：清掉失效映射，避免下次再撞
+              if (String(e).includes('session not found') && currentSessionId) {
+                sessionMapRef.current.delete(currentSessionId)
+                persistSessionMap(sessionMapRef.current)
+              }
               storeActions.showToast({ type: 'error', title: '压缩失败', description: String(e) })
+            } finally {
+              useHelixStore.getState().setCompressionBusy(false)
             }
+            break
+          }
+          case 'resync': {
+            // Manual nudge: pull authoritative history from backend for the current
+            // session. The same logic also runs automatically after compaction, so
+            // typing this is rarely needed — it's just a manual escape hatch.
+            await resyncCurrentSessionFromBackend({ sessionId: currentSessionId || '', showToast: true })
             break
           }
           case 'reset': {
@@ -2738,172 +2852,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           case 'clear': {
             // Clear: only clear frontend messages (keep backend session alive)
             await storeActions.clearChatInPlace()
-            break
-          }
-          case 'background': {
-            // /background|/bg|/btw <prompt> — 启动一个后台任务，不打断当前对话：
-            // 为它新建（或复用）一个独立会话，prompt.background 派发（ack-only，
-            // 只回 { task_id }），完成后走 background.complete 事件通知前端渲染。
-            const bgMatch = baseTrimmed.match(/^\/(?:background|bg|btw)\s+([\s\S]+)$/i)
-            const bgText = bgMatch ? bgMatch[1].trim() : ''
-            if (!bgText) {
-              storeActions.showToast({ type: 'warning', title: '缺少参数', description: '/btw <你的提示> — 把任务放到后台运行，不打断当前对话' })
-              break
-            }
-            try {
-              // 当前对话没有 id（新建未进入 store）时，为后台任务临时分配一个，
-              // 并同步 activeSessionWorkDir 到所选项目，避免 session/new 拿错 cwd。
-              let bgCid = currentSessionId
-              if (!bgCid) {
-                bgCid = 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
-                const stNew = useHelixStore.getState()
-                stNew.setCurrentSessionId(bgCid)
-                useHelixStore.setState({ activeSessionWorkDir: stNew.selectedWorkDir })
-                stNew.pushNavigation({ type: 'chat', sessionId: bgCid })
-                stNew.persistToStorage()
-              }
-              const st0 = useHelixStore.getState()
-              const bgLiveEpoch = useHermesStore.getState().gatewayEpoch
-              let bgSid: string | null = sessionMapRef.current.get(bgCid)?.sid ?? null
-              if (bgSid && sessionMapRef.current.get(bgCid)?.epoch !== bgLiveEpoch) bgSid = null
-              if (!bgSid) {
-                const res = await hermesApi()!.send('session/new', {
-                  mcpServers: buildAcpMcpServers(st0.mcpServers),
-                  cwd: st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined,
-                  search_engine: st0.enhancedFindGrep ? 'rg' : '',
-                  terminal_shell: st0.terminalShell,
-                }) as any
-                bgSid = res?._meta?.hermes?.sessionProvenance?.acpSessionId
-                  || res?.session_id
-                  || res?.sessionID
-                  || (typeof res === 'string' ? res : null)
-                if (!bgSid) throw new Error('后端未能创建会话')
-                sessionMapRef.current.set(bgCid, { sid: bgSid, epoch: bgLiveEpoch })
-                persistSessionMap(sessionMapRef.current)
-              }
-              // 后台任务的消息挂在 bgCid 下，切过去能看到（async 上下文里用 ref 兜底）。
-              useHelixStore.getState().addChatMessage({ role: 'user', content: baseTrimmed, sessionId: bgCid })
-              // 后台派发是 ack-only 的：只返回 { task_id }，没有流式事件。
-              const r = await hermesApi()!.send('prompt.background', { session_id: bgSid, text: bgText })
-              const bgTaskId = (r as any)?.task_id
-              if (typeof bgTaskId === 'string' && bgTaskId) {
-                useBackgroundTasksStore.getState().startTask(bgTaskId, bgText, bgCid)
-              }
-              storeActions.showToast({ type: 'success', title: '已转后台执行', description: bgText.slice(0, 40), duration: 4000 })
-              debug('[HelixTrace] /btw dispatched', { bgCid, bgSid, taskId: bgTaskId })
-            } catch (e) {
-              storeActions.showToast({ type: 'error', title: '后台任务启动失败', description: String(e) })
-            }
-            break
-          }
-          case 'undo': {
-            // /undo — 撤销上一轮对话：后端 session.undo 截断历史 + 前端同步删除本地消息。
-            // 前端本地删除始终执行（不依赖后端 removed）；后端截断为 best-effort，
-            // 后端未就绪或历史为空时仅前端删除，避免重启后硬报错。
-            try {
-              let sid = await ensureBuiltinSid()
-              let removed = 0
-              if (sid) {
-                try {
-                  const r = await hermesApi()!.send('session.undo', { session_id: sid })
-                  removed = (r as any)?.removed ?? 0
-                } catch (e) {
-                  console.warn('[Helix] /undo session.undo failed (continuing with local purge):', e)
-                }
-              }
-              const all = useHelixStore.getState().chatMessages
-              const local = all.filter(m => !m.sessionId || m.sessionId === currentSessionId)
-              // 后端 del history[last_user_idx:] — 前端删到上一条用户消息为止。
-              const lastUserIdx = [...local].reverse().findIndex(m => m.role === 'user')
-              const kept = lastUserIdx >= 0
-                ? all.filter(m => !local.includes(m) || local.indexOf(m) < local.length - 1 - lastUserIdx)
-                : all
-              useHelixStore.setState({ chatMessages: kept })
-              storeActions.showToast({
-                type: 'success',
-                title: '已撤销',
-                description: sid
-                  ? `已截断后端历史（移除 ${removed} 条记录）`
-                  : '已移除本地最后一轮对话（后端未连接，未同步后端）'
-              })
-            } catch (e) {
-              storeActions.showToast({ type: 'error', title: '撤销失败', description: String(e) })
-            }
-            break
-          }
-          case 'save': {
-            // /save — 把当前会话存档为 JSON（~/.hermes/sessions/saved/）。
-            try {
-              const sid = await ensureBuiltinSid()
-              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法保存', description: '当前对话还没有后端会话' }); break }
-              const r = await hermesApi()!.send('session.save', { session_id: sid })
-              const file = (r as any)?.file
-              storeActions.showToast({ type: 'success', title: '会话已保存', description: file || undefined, duration: 6000 })
-            } catch (e) {
-              storeActions.showToast({ type: 'error', title: '保存失败', description: String(e) })
-            }
-            break
-          }
-          case 'branch': {
-            // /branch — 从当前会话分叉出一个新分支（后端 session.branch 返回新 sid +
-            // 完整消息列表），前端切到新会话并沿用同一个项目目录。
-            try {
-              const sid = await ensureBuiltinSid()
-              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法分叉', description: '当前对话还没有后端会话' }); break }
-              const r = await hermesApi()!.send('session.branch', { session_id: sid }) as any
-              const newSid = r?.session_id
-              if (!newSid) throw new Error('branch 未返回 session_id')
-              const title = r?.title || '分支会话'
-              const newCid = 'session-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6)
-              const msgs = (Array.isArray(r.messages) ? r.messages : []).map((m: any) => ({
-                id: m.id || generateId(),
-                role: (m.role === 'assistant' || m.role === 'user' ? m.role : m.role === 'tool' ? 'assistant' : 'user') as 'user' | 'assistant' | 'system',
-                content: (typeof m.content === 'string' ? m.content : '') || '',
-                timestamp: m.timestamp || Date.now(),
-                reasoning: m.reasoning,
-                sessionId: newCid,
-              }))
-              const stB = useHelixStore.getState()
-              stB.setCurrentSessionId(newCid)
-              useHelixStore.setState({ chatMessages: msgs })
-              useHelixStore.setState({ activeSessionWorkDir: stB.activeSessionWorkDir ?? stB.selectedWorkDir })
-              stB.pushNavigation({ type: 'chat', sessionId: newCid })
-              await stB.persistToStorage()
-              // 新分支的会话映射立即注册，防止后续 prompt 再用旧 sid 起新会话。
-              sessionMapRef.current.set(newCid, { sid: newSid, epoch: useHermesStore.getState().gatewayEpoch })
-              persistSessionMap(sessionMapRef.current)
-              useHelixStore.getState().showToast({ type: 'success', title: `已创建分支「${title}」`, description: `${msgs.length} 条消息` })
-            } catch (e) {
-              storeActions.showToast({ type: 'error', title: '分叉失败', description: String(e) })
-            }
-            break
-          }
-          case 'steer': {
-            // /steer <text> — 偏离当前思路：告诉模型换方向，agent 采纳后调整后续行为。
-            const steerText = baseTrimmed.replace(/^\/(?:steer)\s+/i, '').trim()
-            if (!steerText) { storeActions.showToast({ type: 'warning', title: '缺少参数', description: '/steer <你的新方向>' }); break }
-            try {
-              const sid = await ensureBuiltinSid()
-              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法转向', description: '当前对话还没有后端会话' }); break }
-              const r = await hermesApi()!.send('session.steer', { session_id: sid, text: steerText }) as any
-              storeActions.showToast({ type: r?.status === 'rejected' ? 'warning' : 'success', title: r?.status === 'rejected' ? '方向被拒绝' : '已转向', description: steerText.slice(0, 60) })
-            } catch (e) {
-              storeActions.showToast({ type: 'error', title: '转向失败', description: String(e) })
-            }
-            break
-          }
-          case 'redirect': {
-            // /redirect <text> — 重定向话题到新方向（与 steer 类似但用于扭转整个对话走向）。
-            const redirectText = baseTrimmed.replace(/^\/(?:redirect)\s+/i, '').trim()
-            if (!redirectText) { storeActions.showToast({ type: 'warning', title: '缺少参数', description: '/redirect <新方向>' }); break }
-            try {
-              const sid = await ensureBuiltinSid()
-              if (!sid) { storeActions.showToast({ type: 'warning', title: '无法重定向', description: '当前对话还没有后端会话' }); break }
-              const r = await hermesApi()!.send('session.redirect', { session_id: sid, text: redirectText }) as any
-              storeActions.showToast({ type: r?.status === 'rejected' ? 'warning' : 'success', title: r?.status === 'rejected' ? '重定向被拒绝' : '已重定向', description: redirectText.slice(0, 60) })
-            } catch (e) {
-              storeActions.showToast({ type: 'error', title: '重定向失败', description: String(e) })
-            }
             break
           }
           case 'image': {
@@ -2935,15 +2883,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             }
             break
           }
-          case 'rollback':
-            storeActions.toggleRollbackPanel()
-            break
-          case 'sessions':
-            storeActions.toggleBackendSessionsPanel()
-            break
-          case 'projects':
-            storeActions.toggleProjectsPanel()
-            break
           case 'mcp':
             storeActions.toggleSettings('mcp')
             break
@@ -2971,6 +2910,16 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // new conversation (currentSessionId === null) has no draft of its own, so
     // it must NEVER stop another session's run; it always starts a fresh
     // concurrent run instead.
+    // 独立的压缩闸门：压缩走自己的 compressionBusy 标志，与下方的 isAgentRunning
+    // （agent 流式输出中）是**两个不同状态**，互不复用、互不覆盖。此前发送路径只
+    // 认 isAgentRunning，压缩期间仍能发消息，会与后端 session.compress 改写同一会话
+    // transcript 产生竞态（新消息被卷走 / prompt 与 compress 交错）。这里独立拦截——
+    // 不调用 handleStop，因为压缩不占 running 槽位，无需"先停"，只拦住这一发即可。
+    if (useHelixStore.getState().compressionBusy) {
+      storeActions.showToast({ type: 'warning', title: '上下文压缩中', description: '正在压缩上下文，稍候即可继续发送' })
+      return
+    }
+
     const activeDraft = currentSessionId ? streamingDrafts[currentSessionId] : undefined
     if (activeDraft?.isAgentRunning) {
       handleStop(currentSessionId ?? undefined)
@@ -3324,7 +3273,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         if (!sessionId) {
           throw new Error('无法创建 Hermes 会话：session/new 缺少 session_id')
         }
-        sessionMapRef.current.set(myCid, { sid: sessionId, epoch: liveEpoch })
+        // storedId = state.db 持久化 key（serve 模式 session.create 返回
+        // stored_session_id；ACP 模式无此字段）。重启后 resume 用它才能恢复。
+        const storedId = (typeof res === 'object' && res ? (res as any)?.stored_session_id : null) || undefined
+        sessionMapRef.current.set(myCid, { sid: sessionId, epoch: liveEpoch, storedId })
         persistSessionMap(sessionMapRef.current)
         sessionEpochRef.current = liveEpoch
         // 不要在这里无条件写全局 hermesSessionId：后台 run 建会话时会把全局
@@ -3966,7 +3918,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             if (su === 'tool_call_update') {
               const raw = params?.update?.inlineDiff
               if (typeof raw === 'string' && raw.trim()) {
-                const diff = raw.replace(/\u001b\[[0-9;]*m/g, '')
+                // Normalize CRLF to LF for consistent line splitting
+                const diff = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\u001b\[[0-9;]*m/g, '')
                 const filePath = inferDiffPath(diff)
                 if (filePath) {
                   const fileName = filePath.split(/[/\\]/).pop() || filePath
@@ -4402,6 +4355,8 @@ promptSentAtRef.current = Date.now()
               }
               let newText: string
               if (!curTrim) {
+                // 新内容以 ** 开头时，不能丢弃开头的 **（否则 Markdown 加粗不渲染）
+                // 保留原始内容，让 reconcileBlocksWithContent 在 done 时处理
                 newText = incRaw
               } else if (incTrim.startsWith(curTrim)) {
                 // New text is a superset of accumulated text (Hermes full resend).
@@ -4582,6 +4537,10 @@ promptSentAtRef.current = Date.now()
                 // blocks 的 text 块，让 blocks 渲染路径与 msg.content 一致——否则
                 // "**加粗** 后"黏成 "**加粗**后" 时 strong 闭合符后紧跟非空白字符，
                 // CommonMark 不渲染加粗（用户可见症状：** 原样显示）。
+                //
+                // 修复重复显示 bug：始终用权威全文替换 text blocks，而不是跳过。
+                // 旧逻辑在"内容匹配"时跳过替换，但跳过时没有重新应用 Markdown 预处理，
+                // 导致流式阶段渲染的原始文本和 done 阶段渲染的预处理后文本同时存在。
                 if (finalBlocks && content) {
                   finalBlocks = reconcileBlocksWithContent(finalBlocks, content)
                 }
@@ -4621,15 +4580,22 @@ promptSentAtRef.current = Date.now()
                 thinkingStartTimeRef.current = 0
                 thinkingDurationRef.current = 0
                 curState.setChatMessageStreaming(msgId, false)
-                // 两阶段计划模式：plan 模式下模型产出方案后不直接执行，而是先弹
-                // 审批浮条让用户“批准执行”或“继续调整”。批准时才把模式切到
-                // accept_edits 并重新跑 handleRun（此时 getState() 已是批准后的
-                // 模式，handleRun 的只读前缀判定自然放行）。
-                if (content && useHelixStore.getState().approvalMode === 'plan') {
-                  setPendingPlanReview({
-                    sessionId: useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY,
-                    content,
-                  })
+                // 计划模式（plan）：自动执行计划，无需用户审批
+                // 旧逻辑是先弹审批浮条让用户确认，现在改为自动切换到 accept_edits 并执行
+                // 防循环 guard：用 ref 标记是否已触发过自动执行，避免同一轮 run 内反复触发
+                if (content && useHelixStore.getState().approvalMode === 'plan' && !planAutoExecutedRef.current) {
+                  planAutoExecutedRef.current = true
+                  const cid = useHelixStore.getState().currentSessionId
+                  setApprovalMode('accept_edits')
+                  const hermesSid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+                  if (hermesSid) {
+                    hermesApi()!.send('session/set_mode', {
+                      session_id: hermesSid,
+                      mode_id: 'accept_edits',
+                    }).catch((e: any) => console.warn('[Helix] set_mode(accept_edits) failed:', e))
+                  }
+                  setInputSynced('[计划已获批准] 请按你刚才给出的计划开始执行。')
+                  setTimeout(() => handleRun(), 0)
                 }
               } else {
                 // 防御性兜底：run 结束但无任何可见内容（根因已修复，极少触发）。
@@ -4738,9 +4704,39 @@ promptSentAtRef.current = Date.now()
                 // 不再用客户端估算。无后端数据时上下文环显示空态。
                 const ctxMax = Number(u.context_max) || 0
                 const ctxUsed = Number(u.context_used) || 0
+                // 后端 in-turn 自动压缩对前端不可见（"上下文数量无故变小"根因）：
+                // 后端每次 usage 载荷携带 compressions 累计计数（server.py
+                // _get_usage → compression_count，mapUsage 的 ...u 原样透传）。
+                // 计数器相对上一轮快照增长 = 后端在工具循环中途自发压缩过 ——
+                // 用压缩前的环读数 → 本轮读数拼出 divider，让掉数字变得"有故"。
+                // 必须在 setContextUsage 覆盖快照之前取旧值。
+                const store = useHelixStore.getState()
+                const compressions = Number(u.compressions) || 0
+                const prevCount = activeSessionId
+                  ? store.backendCompressionCounts?.[activeSessionId] : undefined
+                const beforeTokens = activeSessionId
+                  ? store.contextUsage[activeSessionId]?.used : undefined
                 if (ctxMax && ctxUsed && activeSessionId) {
                   useHelixStore.getState().setContextUsage(activeSessionId, ctxMax, ctxUsed)
-                  void syncContextUsageToBackend(activeSessionId, ctxMax, ctxUsed, sessionId)
+                  // Clear estimated tokens once real usage arrives
+                  useHelixStore.getState().clearEstimatedTokens(activeSessionId)
+                }
+                if (activeSessionId && prevCount != null && compressions > prevCount
+                  && beforeTokens && ctxUsed && beforeTokens > ctxUsed) {
+                  const chatMessages = useHelixStore.getState().chatMessages
+                  const anchorMessage = [...chatMessages].reverse()
+                    .find(message => message.sessionId === activeSessionId)
+                  store.setCompressionNotice({
+                    ts: Date.now(),
+                    sessionId: activeSessionId,
+                    source: 'auto',
+                    anchorMessageId: anchorMessage?.id,
+                    beforeTokens,
+                    afterTokens: ctxUsed,
+                  })
+                }
+                if (activeSessionId && compressions > 0) {
+                  store.setBackendCompressionCount(activeSessionId, compressions)
                 }
               }
             } else if (parsed.type === 'available_commands') {
@@ -4874,6 +4870,9 @@ promptSentAtRef.current = Date.now()
       runCompleted = true
       const sid = activeSessionId
       if (sid) {
+        // Keep the estimated value until the provider's usage frame replaces it;
+        // clearing here could make the context ring briefly fall back to the old
+        // snapshot while the backend is still flushing usage_prompt_complete.
         // Clear the draft's responseBlocks at the same time we drop isAgentRunning:
         // the completed message was already committed to chatMessages (it renders
         // via TranscriptMessage), so any blocks still sitting in the draft would
@@ -4928,6 +4927,8 @@ promptSentAtRef.current = Date.now()
       // streaming buffers, steps, and response blocks are no longer needed.
       // Without this, long conversations accumulate multi-MB of stale refs
       // across turns, eventually blowing the V8 heap past 3 GB.
+      // Reset plan auto-execution guard for next turn.
+      planAutoExecutedRef.current = false
       setTimeout(() => {
         // Large text / reasoning buffers (can be multi-MB with tool output).
         if (textBufferRef.current) textBufferRef.current = ''
@@ -4987,12 +4988,22 @@ promptSentAtRef.current = Date.now()
   // External "send" trigger (Command Center / Review panel call injectAndSend,
   // which bumps requestSendSignal). Fires handleRun with the injected text.
   const requestSendSignal = useHelixStore((s) => s.requestSendSignal)
+  // handleRun 经 ref 引用，绝不进依赖数组：它依赖 input（每次粘贴/键入都变），
+  // 放进 deps 会让本 effect 在"信号已是 1"后随每次输入变化重跑 —— `> 0` 的
+  // 守卫永久为真，输入框一有内容就发送（"点过代码块运行后，粘贴任何内容
+  // 都自动发出"的根因）。ref 方案下 effect 只对信号本身的递增做出反应。
+  const handleRunRef = useRef(handleRun)
+  useEffect(() => { handleRunRef.current = handleRun }, [handleRun])
+  const lastSendSignalRef = useRef(requestSendSignal)
   useEffect(() => {
-    if (requestSendSignal > 0) {
-      const text = inputValueRef.current
-      if (text.trim()) handleRun()
+    if (requestSendSignal !== lastSendSignalRef.current) {
+      lastSendSignalRef.current = requestSendSignal
+      if (requestSendSignal > 0) {
+        const text = inputValueRef.current
+        if (text.trim()) handleRunRef.current()
+      }
     }
-  }, [requestSendSignal, handleRun])
+  }, [requestSendSignal])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -5030,10 +5041,10 @@ promptSentAtRef.current = Date.now()
           return
         }
       }
-      if (showSlashMenu && filteredSkills.length > 0) {
+      if (showSlashMenu && slashTotal > 0) {
         if (e.key === 'ArrowDown') {
           e.preventDefault()
-          setSelectedSkillIndex(prev => Math.min(prev + 1, filteredSkills.length - 1))
+          setSelectedSkillIndex(prev => Math.min(prev + 1, slashTotal - 1))
           return
         }
         if (e.key === 'ArrowUp') {
@@ -5048,8 +5059,14 @@ promptSentAtRef.current = Date.now()
           // sending a bare "/" to the agent. Once a query is typed, Enter runs
           // the highlighted item directly.
           e.preventDefault()
-          const idx = Math.min(selectedSkillIndex, filteredSkills.length - 1)
-          const selected = filteredSkills[idx] as any
+          const idx = Math.min(selectedSkillIndex, slashTotal - 1)
+          // 选中的是快捷指令：把它的提示词模板填入输入框（不立即执行）
+          if (idx < matchedQuickCmds.length) {
+            setInputSynced(matchedQuickCmds[idx].prompt)
+            inputRef.current?.focus()
+            return
+          }
+          const selected = filteredSkills[idx - matchedQuickCmds.length] as any
           if (!selected) return
           if (!hasSlashQuery) {
             handleSkillSelect(selected)
@@ -5094,7 +5111,7 @@ promptSentAtRef.current = Date.now()
         }
       }
     },
-    [handleRun, handleStop, showSlashMenu, filteredSkills, handleSkillSelect, selectedSkillIndex, setInputSynced]
+    [handleRun, handleStop, showSlashMenu, filteredSkills, matchedQuickCmds, slashTotal, handleSkillSelect, selectedSkillIndex, setInputSynced]
   )
 
   const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
@@ -5353,7 +5370,7 @@ promptSentAtRef.current = Date.now()
           <ChevronDown className="size-3" />
         </button>
         {showApprovalModeDropdown && (
-          <div className="absolute bottom-full left-0 mb-2 w-56 bg-popover rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
+          <div className="absolute bottom-full left-0 mb-2 w-44 bg-popover rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
             {[
               {
                 id: 'default' as const,
@@ -5400,7 +5417,7 @@ promptSentAtRef.current = Date.now()
                       })
                     }
                   }}
-                  className={`w-full flex items-start gap-2.5 px-3 py-2 text-left hover:bg-muted transition-colors ${active ? 'bg-primary/5' : ''}`}
+                  className={`w-full flex items-start gap-2.5 px-3 py-1.5 text-left hover:bg-muted transition-colors ${active ? 'bg-primary/5' : ''}`}
                 >
                   <div className="mt-0.5 shrink-0 w-6 h-6 rounded-full bg-muted flex items-center justify-center">
                     <Icon className="size-3.5 text-foreground/70" />
@@ -5577,15 +5594,18 @@ promptSentAtRef.current = Date.now()
                 {matchedQuickCmds.length > 0 && (
                   <>
                     <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">快捷指令</p>
-                    {matchedQuickCmds.map((qc) => (
+                    {matchedQuickCmds.map((qc, j) => (
                       <button
                         key={qc.cmd}
                         type="button"
+                        ref={j === selectedSkillIndex ? (el) => { if (el) el.scrollIntoView({ block: 'nearest' }) } : undefined}
                         onClick={() => {
                           setInputSynced(qc.prompt)
                           inputRef.current?.focus()
                         }}
-                        className="w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 hover:bg-muted/30"
+                        className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
+                          j === selectedSkillIndex ? 'bg-primary/10 text-primary' : 'hover:bg-muted/30'
+                        }`}
                       >
                         <code className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-primary/70 shrink-0 w-20">{qc.cmd}</code>
                         <div className="min-w-0 flex-1">
@@ -5606,7 +5626,7 @@ promptSentAtRef.current = Date.now()
                       <button
                         key={skill.id}
                         type="button"
-                        ref={index === selectedSkillIndex ? (el) => { if (el) el.scrollIntoView({ block: 'nearest' }) } : undefined}
+                        ref={(matchedQuickCmds.length + index) === selectedSkillIndex ? (el) => { if (el) el.scrollIntoView({ block: 'nearest' }) } : undefined}
                         onClick={() => {
                           if ((skill as any).isBuiltinCommand) {
                             setInputSynced(`/${skill.name}`)
@@ -5621,7 +5641,7 @@ promptSentAtRef.current = Date.now()
                           }
                         }}
                         className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
-                          index === selectedSkillIndex
+                          (matchedQuickCmds.length + index) === selectedSkillIndex
                             ? 'bg-primary/10 text-primary'
                             : 'hover:bg-muted/30'
                         }`}
@@ -6037,6 +6057,32 @@ promptSentAtRef.current = Date.now()
                     <Archive className="size-3 shrink-0" />
                     <span>{item.text}</span>
                   </div>
+                ) : item.kind === 'compressing' ? (
+                  <div
+                    key={item.id}
+                    className="flex w-full items-center justify-center gap-2 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70"
+                  >
+                    <svg className="size-3.5 animate-spin text-muted-foreground/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M21 12a9 9 0 1 1-6.219-8.56" strokeLinecap="round" />
+                    </svg>
+                    <span>{item.text}</span>
+                  </div>
+                ) : item.kind === 'divider' ? (
+                  <div
+                    key={item.id}
+                    className="flex items-center gap-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60 animate-scale-in"
+                  >
+                    <div className="h-px flex-1 bg-border/60" />
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <Sparkles className="size-3 shrink-0" />
+                      <span>{item.text}</span>
+                    </div>
+                    <div className="h-px flex-1 bg-border/60" />
+                  </div>
+                ) : item.kind === 'fileChanges' ? (
+                  <div key={item.id} className="px-1">
+                    <FileChangeSummaryCard changes={item.changes} />
+                  </div>
                 ) : (
                   <TranscriptMessage
                     key={item.msg.id}
@@ -6102,7 +6148,6 @@ promptSentAtRef.current = Date.now()
                       const answerBlocks = lastTextIndex >= 0 ? normalizedBlocks.slice(lastTextIndex) : []
                       const processSegments = buildProcessSegments(processBlocks)
                       const answerSegments = buildProcessSegments(answerBlocks)
-                      const liveFileChanges = collectFileChanges(normalizedBlocks)
                       return (
                       <>
                          <details className="my-2 group/details">
@@ -6136,7 +6181,9 @@ promptSentAtRef.current = Date.now()
                             const firstBlock = seg.blocks[0]
                             const firstContent = firstBlock && 'content' in firstBlock ? String(firstBlock.content) : ''
                             const thinkingDone = !streamingActive || si < processSegments.length - 1 || answerBlocks.length > 0
-                            if (thinkingDone) {
+                            // 思考完成后保留「思考完成」折叠卡（与已完成消息的渲染一致），
+                            // 避免「执行过程」点开后空白；仅内容全空时才跳过。
+                            if (thinkingDone && !seg.blocks.some(b => 'content' in b && String(b.content || '').trim())) {
                               return null
                             }
                             return (
@@ -6253,11 +6300,6 @@ promptSentAtRef.current = Date.now()
                           )
                         })}
                          </div>
-                        {liveFileChanges.length > 0 && (
-                          <div className="mt-2">
-                            <FileChangeSummaryCard changes={liveFileChanges} />
-                          </div>
-                        )}
                       </>
                       )
                     })()}

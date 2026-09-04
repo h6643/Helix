@@ -23,6 +23,7 @@ export type HermesEvent =
   | 'gateway.retry'
   | 'gateway.sessionInvalidated'
   | 'gateway.sessionReplaced'
+  | 'gateway.sessionCreated'
   | 'session/update'
   | 'session/request_permission'
   | 'session/info'
@@ -30,6 +31,7 @@ export type HermesEvent =
 
 export interface HermesEventParams {
   session_id?: string
+  sessionId?: string
   content?: string
   tool_name?: string
   tool_call_id?: string
@@ -58,8 +60,10 @@ export function useHermes() {
     setHermesError,
     bumpGatewayEpoch,
   } = useHermesStore()
-  const { isChatLoading } = useHelixStore()
-  const workDirEpoch = useHelixStore(s => s.workDirEpoch)
+  const { isChatLoading, selectedWorkDir } = useHelixStore()
+  // Track the actual workDir to avoid unnecessary session invalidation
+  // (workDirEpoch increments on every file-tree refresh, causing spurious session drops)
+  const lastWorkDirRef = useRef<string | null>(null)
 
   const currentMessageIdRef = useRef<string | null>(null)
   // Multi-subscriber event registry. Parallel runs each register their own
@@ -146,6 +150,17 @@ export function useHermes() {
             debug('[useHermes] session replaced (recovered):', params.newId)
             setHermesSessionId(params.newId as string)
             hermesSessionIdRef.current = params.newId as string
+          }
+          break
+
+        case 'gateway.sessionCreated':
+          if (params?.sessionId) {
+            debug('[useHermes] new session created:', params.sessionId)
+            useHelixStore.getState().showToast({
+              type: 'info',
+              title: '新会话已创建',
+              description: `会话 ID: ${(params.sessionId as string).substring(0, 16)}…`,
+            })
           }
           break
 
@@ -263,10 +278,16 @@ export function useHermes() {
 
   // When the working directory changes, the cached Hermes session still has the
   // old cwd. Drop it so the next prompt recreates the session in the new project.
+  // Only invalidate when workDir actually changes (not on every epoch bump).
   useEffect(() => {
-    if (workDirEpoch === 0) return
-    setHermesSessionId(null)
-  }, [workDirEpoch, setHermesSessionId])
+    if (!selectedWorkDir) return
+    const prevWorkDir = lastWorkDirRef.current
+    if (prevWorkDir !== selectedWorkDir) {
+      lastWorkDirRef.current = selectedWorkDir
+      debug('[useHermes] WorkDir changed: ' + prevWorkDir + ' -> ' + selectedWorkDir + ', invalidating session')
+      setHermesSessionId(null)
+    }
+  }, [selectedWorkDir, setHermesSessionId])
 
   // Push the frontend-selected model into Hermes config.yaml so the next session
   // (which reloads config on creation) actually uses it. No-op when the user hasn't

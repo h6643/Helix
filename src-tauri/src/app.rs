@@ -225,7 +225,7 @@ pub fn quit(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     Ok(())
 }
 
-// ── data-root relocation (Settings → 数据存储路径) ─────────────────────────
+
 
 /// Returns the effective data-root info for the Settings UI.
 #[tauri::command]

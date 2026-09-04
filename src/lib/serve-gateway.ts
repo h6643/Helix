@@ -164,6 +164,10 @@ export class ServeGatewayClient {
   /** Sessions with an in-flight prompt (ack-only model): tracked solely so a WS
    *  reconnect can session.resume them to restore the event stream. */
   private inflightSessions = new Set<string>()
+  /** ui_session → 持久化 DB key（session.create 返回的 stored_session_id）。
+   *  重启后 ui_session 一定失效，而 stored_session_id 是 state.db 的主键——
+   *  resume 用它能从磁盘透明恢复同一会话（2026-08-31）。 */
+  private storedSessionIds = new Map<string, string>()
   private listeners = new Set<EventCallback>()
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -919,6 +923,12 @@ export class ServeGatewayClient {
       ...(searchEngine ? { search_engine: searchEngine } : {}),
       ...(terminalShell ? { terminal_shell: terminalShell } : {}),
     })
+    // 记住持久化 DB key：后端 session.create 同时返回 session_id（内存态
+    // ui_session，进程重启即失效）和 stored_session_id（state.db 主键，跨
+    // 重启存活）。prompt 遇 not-found 时 resume 用后者才能从磁盘恢复。
+    if (res?.session_id && res?.stored_session_id) {
+      this.storedSessionIds.set(res.session_id, res.stored_session_id)
+    }
     return res
   }
 
@@ -955,13 +965,40 @@ export class ServeGatewayClient {
         try {
           await this.rpc('prompt.submit', { session_id: sessionId, text })
         } catch (err) {
-          // "session not found" 的自动恢复兜底（对齐主进程 ACP 路径）。正常
-          // 并发下后端不挤会话，但网关重启/会话回收会让旧 id 失效。这里自动
-          // 重建会话并重放 prompt，尽力让该对话也跑完；返回新 session_id 让
-          // 前端把 conversation→session 映射改绑。
+          // "session not found" 的自动恢复兜底（对齐官方桌面版语义）。后端
+          // tui_gateway 的会话是持久化的（state.db）：网关重启 / 空闲回收
+          // （idle reaper）只会把会话踢出内存，state.db 里 agent+历史还在。
+          // 官方正解（后端注释原文：client is expected to recover via
+          // session.resume on the STORED session id）是先 session.resume 把
+          // 原会话从 DB 捞回来 —— 同一 sid 复活，不新建 id、不丢上下文。
+          // 只有 resume 也失败（会话真的被删/从未建过）才退回 createSession。
           const msg = (err as Error)?.message || ''
           if (/session.*not.*found|not found|no such session|unknown session/i.test(msg)) {
-            warn('[ServeGateway] session not found on prompt — recreating session and retrying')
+            try {
+              // resume 用 DB 持久化 key（stored_session_id）才能从 state.db 恢复
+              // 同一会话（ui_session 在进程重启后必然不在内存、也查不到 DB 行）。
+              // 只对"能从 DB 快速恢复"的场景有价值；给 8s 上限，慢就放弃走
+              // createSession（重建 agent 的路径更可靠，事件流正常）。
+              const resumeId = this.storedSessionIds.get(sessionId) || sessionId
+              debug('[ServeGateway] session not found on prompt — trying resume restore:', sessionId, '→', resumeId)
+              const resumeRes = await this.rpc('session.resume', { session_id: resumeId }, 8_000)
+              if (resumeRes) {
+                // resume 成功后会话注册在 resumeId 名下，事件也以它发出：
+                // 若与原 sid 不同，发 sessionReplaced 让前端改绑；prompt 用恢复后的 id 重发。
+                const restoredId = resumeRes?.session_id || resumeId
+                debug('[ServeGateway] resumed session, retrying prompt with sid:', restoredId)
+                if (restoredId !== sessionId) {
+                  this.storedSessionIds.set(restoredId, restoredId)
+                  this.emit('gateway.sessionReplaced', { oldId: sessionId, newId: restoredId })
+                }
+                await this.rpc('prompt.submit', { session_id: restoredId, text })
+                this.inflightSessions.add(restoredId)
+                return { status: 'streaming' }
+              }
+            } catch (resumeErr) {
+              debug('[ServeGateway] session.resume failed — falling back to recreate:', String(resumeErr))
+            }
+            warn('[ServeGateway] session not found + resume failed — recreating session and retrying')
             const { useHelixStore } = await import('@/stores/helix-store')
             const st = useHelixStore.getState()
             const history = st.chatMessages

@@ -261,6 +261,14 @@ async fn acp_send(state: &Arc<AppState>, method: &str, params: Value) -> Result<
 
                         );
 
+                        emit_hermes_event(
+
+                            "gateway.sessionCreated",
+
+                            &json!({ "sessionId": new_id }),
+
+                        );
+
                         let mut retry = params.clone();
 
                         retry["session_id"] = json!(new_id);
@@ -1799,7 +1807,7 @@ async fn install_memory_provider_official(provider: String, force: bool, hermes_
 
                 .arg("--no-allow-tool-override")
 
-                .envs(crate::kanban::build_clean_env(hermes_bin))
+                .envs(crate::env::build_clean_env(hermes_bin))
 
                 .env("HERMES_HOME", hermes_home.display().to_string());
 
@@ -1849,7 +1857,7 @@ async fn install_memory_provider_official(provider: String, force: bool, hermes_
 
 /// - 其他仓库 → 交给 `hermes plugins install <identifier> --enable`（免交互确认）。
 
-/// `--force` 在重装时覆盖已存在插件。环境用 kanban 的 `build_clean_env`（清 npm 变量、
+/// `--force` 在重装时覆盖已存在插件。环境用 `build_clean_env`（清 npm 变量、
 
 /// hermes venv bin 前置到 PATH），并钉住 `HERMES_HOME` 指向本应用的数据目录，否则插件
 
@@ -1912,7 +1920,7 @@ pub async fn hermes_install_plugin(identifier: String, force: Option<bool>) -> V
 
         child
 
-            .envs(crate::kanban::build_clean_env(&hermes_bin))
+            .envs(crate::env::build_clean_env(&hermes_bin))
 
             .env("HERMES_HOME", hermes_home.display().to_string())
 
@@ -2478,7 +2486,7 @@ pub fn hermes_cron_list() -> Value {
             _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(["cron", "list", "--json"])
 
-                .envs(crate::kanban::build_clean_env(&cmd))
+                .envs(crate::env::build_clean_env(&cmd))
 
                 .current_dir(hermes_data_dir())
             ;
@@ -2551,7 +2559,7 @@ pub fn hermes_cron_create(schedule: String, command: String, name: Option<String
             _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(&args)
 
-                .envs(crate::kanban::build_clean_env(&cmd))
+                .envs(crate::env::build_clean_env(&cmd))
 
                 .current_dir(hermes_data_dir())
             ;
@@ -2608,7 +2616,7 @@ pub fn hermes_cron_delete(job_id: String) -> Value {
             _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(["cron", "delete", &job_id])
 
-                .envs(crate::kanban::build_clean_env(&cmd))
+                .envs(crate::env::build_clean_env(&cmd))
 
                 .current_dir(hermes_data_dir())
             ;
@@ -2665,7 +2673,7 @@ pub fn hermes_cron_run(job_id: String) -> Value {
             _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(["cron", "run", &job_id])
 
-                .envs(crate::kanban::build_clean_env(&cmd))
+                .envs(crate::env::build_clean_env(&cmd))
 
                 .current_dir(hermes_data_dir())
             ;
@@ -2722,7 +2730,7 @@ pub fn hermes_doctor() -> Value {
             _cmd.args(crate::kernel::hermes_subcommand_prefix(&cmd));
             _cmd.args(["doctor"])
 
-                .envs(crate::kanban::build_clean_env(&cmd))
+                .envs(crate::env::build_clean_env(&cmd))
 
                 .current_dir(hermes_data_dir())
             ;

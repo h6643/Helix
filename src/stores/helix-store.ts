@@ -74,6 +74,7 @@ import { createPanelSlice, type PanelSlice } from './slices/panel-slice'
 import { createSkillSlice, type SkillSlice } from './slices/skill-slice'
 import { createTerminalSlice, type TerminalSlice } from './slices/terminal-slice'
 import { createToastSlice, type ToastSlice } from './slices/toast-slice'
+import { createCompactNoticeSlice, type CompactNoticeSlice } from './slices/compact-notice-slice'
 
 export type {
   FileNode, ImageAttachment, FileAttachment, LinkAttachment, ExecutionStep, ChatMessage,
@@ -85,7 +86,7 @@ export type {
 }
 export { DEFAULT_SHORTCUTS }
 
-interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, AgentSettingsSlice, PanelSlice, ApiConfigSlice, SkillSlice {
+interface HelixState extends GitSlice, ToastSlice, CompactNoticeSlice, TerminalSlice, EditorSlice, AgentSettingsSlice, PanelSlice, ApiConfigSlice, SkillSlice {
   // File system
   files: FileNode[]
   selectedFileId: string | null
@@ -259,8 +260,12 @@ interface HelixState extends GitSlice, ToastSlice, TerminalSlice, EditorSlice, A
   clearExecutionFlow: () => void
   modelUsage: Record<string, { prompt: number; completion: number; total: number; cost: number }>
   addModelUsage: (model: string, usage: { prompt: number; completion: number; total: number; cost: number }) => void
-  contextUsage: Record<string, { size: number; used: number; categories?: Array<{ id: string; label: string; tokens: number; color: string }> }>
-  setContextUsage: (sessionId: string, size: number, used: number, categories?: Array<{ id: string; label: string; tokens: number; color: string }>) => void
+  contextUsage: Record<string, { size: number; used: number; categories?: Array<{ id: string; label: string; tokens: number; color: string }>; toolsets?: Array<{ toolset: string; tool_count: number; schema_tokens: number }> }>
+  setContextUsage: (sessionId: string, size: number, used: number, categories?: Array<{ id: string; label: string; tokens: number; color: string }>, toolsets?: Array<{ toolset: string; tool_count: number; schema_tokens: number }>) => void
+  // Estimated tokens for in-flight requests (shows ~Xk while waiting for API response)
+  estimatedTokens: Record<string, number>
+  setEstimatedTokens: (sessionId: string, tokens: number) => void
+  clearEstimatedTokens: (sessionId: string) => void
   sessionUsageStats: {
     requestCount: number
     totalTokens: number
@@ -725,6 +730,7 @@ async function persistSessionById(sessionId: string): Promise<void> {
         thoughtTokens: m.thoughtTokens,
         outputTokens: m.outputTokens,
         steps: m.steps,
+        fileChanges: m.fileChanges,
         blocks: m.blocks,
       })
     }
@@ -752,6 +758,7 @@ async function persistSessionById(sessionId: string): Promise<void> {
 export const useHelixStore = create<HelixState>()((set, get, store) => ({
   ...createGitSlice(set, get, store),
   ...createToastSlice(set, get, store),
+  ...createCompactNoticeSlice(set, get, store),
   ...createTerminalSlice(set, get, store),
   ...createEditorSlice(set, get, store),
   ...createAgentSettingsSlice(set, get, store),
@@ -889,6 +896,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // Panel state — in slices/panel-slice.ts
   modelUsage: {},
   contextUsage: {},
+  estimatedTokens: {},
   sessionUsageStats: {
     requestCount: 0,
     totalTokens: 0,
@@ -1395,6 +1403,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         thoughtTokens: m.thoughtTokens,
         outputTokens: m.outputTokens,
         steps: m.steps,
+        fileChanges: m.fileChanges,
         blocks: m.blocks,
       })),
       files: collectFiles(state.files),
@@ -1598,12 +1607,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         },
       }
     }),
-  setContextUsage: (sessionId, size, used, categories) => {
+  setContextUsage: (sessionId, size, used, categories, toolsets) => {
     set((s) => {
       const prev = s.contextUsage[sessionId]
-      const next: { size: number; used: number; categories?: Array<{ id: string; label: string; tokens: number; color: string }> } = { size, used }
+      const next: { size: number; used: number; categories?: Array<{ id: string; label: string; tokens: number; color: string }>; toolsets?: Array<{ toolset: string; tool_count: number; schema_tokens: number }> } = { size, used }
       if (categories) next.categories = categories
       else if (prev?.categories) next.categories = prev.categories
+      if (toolsets) next.toolsets = toolsets
+      else if (prev?.toolsets) next.toolsets = prev.toolsets
       return { contextUsage: { ...s.contextUsage, [sessionId]: next } }
     })
     // Persist immediately so a cold restart restores the latest usage snapshot
@@ -1614,6 +1625,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       persistence.saveSetting('contextUsage', get().contextUsage).catch(() => {})
     })
   },
+  // Set estimated tokens for a session (shown while request is in-flight)
+  setEstimatedTokens: (sessionId, tokens) => set({ estimatedTokens: { ...get().estimatedTokens, [sessionId]: tokens } }),
+  // Clear estimated tokens after real usage arrives
+  clearEstimatedTokens: (sessionId) => set((s) => {
+    const { [sessionId]: _, ...rest } = s.estimatedTokens
+    return { estimatedTokens: rest }
+  }),
   addSessionUsageStats: (model, usage) =>
     set((state) => {
       const input = usage.inputTokens || 0
@@ -1775,7 +1793,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           duration: msg.duration,
           thinkingTime: msg.thinkingTime,
           totalTokens: msg.totalTokens,
+          thoughtTokens: msg.thoughtTokens,
+          outputTokens: msg.outputTokens,
           steps: msg.steps,
+          fileChanges: msg.fileChanges,
           blocks: msg.blocks,
         }))
 
@@ -2430,6 +2451,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             content: m.content,
             timestamp: m.timestamp,
             isStreaming: m.isStreaming ?? false,
+            fileChanges: m.fileChanges,
           })),
           sessionId
         ),
@@ -2462,8 +2484,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('reasoningEffort', state.reasoningEffort),
         persistence.saveSetting('personality', state.personality),
         persistence.saveSetting('fastMode', state.fastMode),
-        persistence.saveSetting('autoArchiveOldTasks', state.autoArchiveOldTasks),
-        persistence.saveSetting('archiveRetentionHours', state.archiveRetentionHours),
         persistence.saveSetting('enhancedFindGrep', state.enhancedFindGrep),
         persistence.saveSetting('terminalShell', state.terminalShell),
         persistence.saveSetting('approvalMode', state.approvalMode),
@@ -2509,7 +2529,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, autoArchiveOldTasks, archiveRetentionHours, enhancedFindGrep, terminalShell, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, approvalMode, approvalModeBySession, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, enhancedFindGrep, terminalShell, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, approvalMode, approvalModeBySession, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
         safeLoad(persistence.loadMemories(), 'memories'),
         safeLoad(persistence.loadTasks(), 'tasks'),
         safeLoad(persistence.loadCheckpoints(), 'checkpoints'),
@@ -2547,10 +2567,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(persistence.loadSetting<string>('reasoningEffort'), 'reasoningEffort'),
         safeLoad(persistence.loadSetting<string>('personality'), 'personality'),
         safeLoad(persistence.loadSetting<boolean>('fastMode'), 'fastMode'),
-        safeLoad(persistence.loadSetting<boolean>('autoArchiveOldTasks'), 'autoArchiveOldTasks'),
-        safeLoad(persistence.loadSetting<number>('archiveRetentionHours'), 'archiveRetentionHours'),
         safeLoad(persistence.loadSetting<boolean>('enhancedFindGrep'), 'enhancedFindGrep'),
-        safeLoad(persistence.loadSetting<'auto' | 'cmd'>('terminalShell'), 'terminalShell'),
+        safeLoad(persistence.loadSetting<'auto' | 'cmd' | 'pwsh' | 'powershell'>('terminalShell'), 'terminalShell'),
         safeLoad(persistence.loadSetting<string>('editorTheme'), 'editorTheme'),
         safeLoad(persistence.loadSetting<boolean>('gitAutoCommit'), 'gitAutoCommit'),
         safeLoad(persistence.loadSetting<boolean>('gitAutoPush'), 'gitAutoPush'),
@@ -3068,10 +3086,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         reasoningEffort: (reasoningEffort as any) || get().reasoningEffort,
         personality: personality || get().personality,
         fastMode: fastMode ?? get().fastMode,
-        autoArchiveOldTasks: autoArchiveOldTasks ?? get().autoArchiveOldTasks,
-        archiveRetentionHours: archiveRetentionHours ?? get().archiveRetentionHours,
         enhancedFindGrep: enhancedFindGrep ?? get().enhancedFindGrep,
-        terminalShell: (terminalShell === 'cmd' ? 'cmd' : 'auto'),
+        terminalShell: (terminalShell === 'cmd' || terminalShell === 'pwsh' || terminalShell === 'powershell' ? terminalShell : 'auto'),
         availableModels: availableModels || [],
         providerModels: cleanedProviderModels,
         editorTheme: (editorTheme as 'vs-dark' | 'light' | null | undefined) ?? get().editorTheme,
