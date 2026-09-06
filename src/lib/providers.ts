@@ -1,6 +1,6 @@
 /**
  * Minimal provider presets for UI display only.
- * Actual provider resolution is handled by Hermes.
+ * Actual provider resolution is handled by Helix.
  */
 
 export interface ProviderConfig {
@@ -41,8 +41,8 @@ const PROVIDERS: ProviderConfig[] = [
   { id: 'nvidia', name: 'NVIDIA NIM', baseUrl: 'https://integrate.api.nvidia.com/v1', models: ['nvidia/llama-3.1-405b-instruct', 'nvidia/nemotron-4-340b-instruct'], envKey: 'NVIDIA_API_KEY', website: 'https://build.nvidia.com' },
   { id: 'gmi', name: 'GMI Cloud', baseUrl: 'https://api.gmi-serving.com/v1', models: ['gmi-default'], envKey: 'GMI_API_KEY', website: 'https://gmi.cloud' },
   { id: 'azure-foundry', name: 'Azure Foundry', baseUrl: 'https://YOUR_RESOURCE.services.ai.azure.com/models', models: ['gpt-4o', 'Phi-4'], envKey: 'AZURE_FOUNDRY_API_KEY', website: 'https://azure.microsoft.com/en-us/products/ai-services' },
-  // ── Agnes / Hermes ───────────────────────────────────────────────────────
-  { id: 'nous', name: 'Nous Research', baseUrl: 'https://inference-api.nousresearch.com/v1', models: ['hermes-3-llama-3.1-405b', 'hermes-3-llama-3.1-70b'], envKey: 'NOUS_API_KEY', website: 'https://nousresearch.com' },
+  // ── Agnes / Helix ───────────────────────────────────────────────────────
+  { id: 'nous', name: 'Nous Research', baseUrl: 'https://inference-api.nousresearch.com/v1', models: ['helix-3-llama-3.1-405b', 'helix-3-llama-3.1-70b'], envKey: 'NOUS_API_KEY', website: 'https://nousresearch.com' },
   // ── China ────────────────────────────────────────────────────────────────
   { id: 'qwen', name: 'Alibaba Qwen', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen3-235b-a22b', 'qwen-max', 'qwen2.5-72b-instruct', 'qwen-plus'], envKey: 'DASHSCOPE_API_KEY', website: 'https://dashscope.console.aliyun.com' },
   { id: 'minimax', name: 'MiniMax', baseUrl: 'https://api.minimax.chat/v1', models: ['MiniMax-Text-01', 'abab6.5s-chat', 'abab6.5t-chat'], envKey: 'MINIMAX_API_KEY', website: 'https://platform.minimax.chat' },

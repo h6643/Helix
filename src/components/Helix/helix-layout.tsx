@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import {
   Minus,
@@ -28,10 +28,10 @@ import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentVersion } from '@/hooks/use-check-update'
 import { createPortal } from 'react-dom'
-import { useProviderStore } from '@/hermes-ui/provider-store'
+import { useProviderStore } from '@/stores/slices/provider-store'
 import { useCheckUpdate } from '@/hooks/use-check-update'
 import { pushModelConfig, pushAgentConfigLive, pushConfigKeyValue } from '@/lib/config-sync'
-import { isElectron, electronHermes, electronShell } from '@/lib/electron-bridge'
+import { isElectron, electronHelix, electronShell } from '@/lib/electron-bridge'
 import { startScheduledTaskRunner } from '@/lib/scheduled-task-runner'
 import { isServeActive, getServeClient } from '@/lib/serve-gateway'
 import { useHelixStore } from '@/stores/helix-store'
@@ -48,10 +48,10 @@ import { BackgroundTasksPanel } from './background-tasks-panel'
 
 
 import { ToastContainer } from './toast-container'
-import { useHermesStore } from '@/stores/hermes-store'
+import { useGatewayStore } from '@/stores/gateway-store'
 import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
 
-// Process-wide guard so the startup restore + Hermes sync runs exactly once.
+// Process-wide guard so the startup restore + Helix sync runs exactly once.
 // A component-local useRef resets whenever this layout remounts (e.g. tab
 // switches that unmount/remount the tree), which would re-trigger
 // restoreFromStorage() and overwrite the user's live model/provider selection
@@ -108,6 +108,10 @@ const SIDEBAR_MAX = 500
 const SIDEBAR_COLLAPSED = 48
 const SIDEBAR_DEFAULT = 280
 const STORAGE_KEY = 'helix-sidebar-width'
+
+// 网关探测心跳间隔：连接正常时也保持这个频率回查一次状态，
+// 避免后端在无事件通知的情况下恢复/掉线后，UI 状态永久漂移。
+const HEALTHY_HEARTBEAT_MS = 10_000
 
 // Right sidebar (code editor / browser)
 const RIGHT_SIDEBAR_MIN = 280
@@ -346,7 +350,7 @@ export function HelixLayout() {
   const navigationHistory = useHelixStore(s => s.navigationHistory)
   const navigationIndex = useHelixStore(s => s.navigationIndex)
   const customShortcuts = useHelixStore(s => s.customShortcuts)
-  const hermesTodos = useHelixStore(s => s.hermesTodos)
+  const helixTodos = useHelixStore(s => s.helixTodos)
   // Stable action references — these never change so getState() is safe
   const storeActions = useMemo(() => useHelixStore.getState(), [])
   const [restoreReady, setRestoreReady] = useState(startupSyncDone)
@@ -447,7 +451,7 @@ export function HelixLayout() {
     return () => observer.disconnect()
   }, [])
 
-  // Re-assert the frontend's restored model config into Hermes on startup so
+  // Re-assert the frontend's restored model config into Helix on startup so
   // the backend always matches the user's choice. This runs once after the
   // store rehydrates from IndexedDB: it (a) writes the active profile to the
   // cold-start cache and (b) pushes it to the running gateway. No hardcoded
@@ -485,7 +489,7 @@ export function HelixLayout() {
     return () => { cancelled = true }
   }, [storeActions.restoreFromStorage])
 
-  // Sync agent settings to Hermes via live config.set (no gateway restart).
+  // Sync agent settings to Helix via live config.set (no gateway restart).
   // personality + reasoningEffort + fastMode are pushed instantly.
   // Removed: temperature, maxOutputTokens, customInstructions, Chinese language injection.
   const agentSettingsSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -516,7 +520,7 @@ export function HelixLayout() {
   }, [])
 
   // ── Reasoning-effort: live push via config.set (no restart, no translation) ──
-  // Uses Hermes native effort scale (none/minimal/low/medium/high/xhigh/max/ultra)
+  // Uses Helix native effort scale (none/minimal/low/medium/high/xhigh/max/ultra)
   // directly — no toBackendReasoningEffort translation needed.
   const reasoningFastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
@@ -528,16 +532,16 @@ export function HelixLayout() {
         const effort = useHelixStore.getState().reasoningEffort
         pushConfigKeyValue('agent.reasoning_effort', effort)
         // Also live-update current session if idle
-        const hermes = useHermesStore.getState()
-        if (hermes.hermesSessionId && !useHelixStore.getState().isChatLoading) {
+        const gw = useGatewayStore.getState()
+        if (gw.helixSessionId && !useHelixStore.getState().isChatLoading) {
           if (isServeActive()) {
             // serve 网关没有 ACP 控制令牌语义：直接 config.set，避免被当成用户消息执行
-            getServeClient()?.rpc('config.set', { key: 'agent.reasoning_effort', value: effort, session_id: hermes.hermesSessionId })
+            getServeClient()?.rpc('config.set', { key: 'agent.reasoning_effort', value: effort, session_id: gw.helixSessionId })
               .catch(() => {})
           } else {
-            window.electron?.hermes?.send?.('session/prompt', {
-              session_id: hermes.hermesSessionId,
-              prompt: [{ type: 'text', text: `__hermes_set_reasoning__:${effort}` }],
+            window.electron?.helix?.send?.('session/prompt', {
+              session_id: gw.helixSessionId,
+              prompt: [{ type: 'text', text: `__helix_set_reasoning__:${effort}` }],
             }).catch(() => {})
           }
         }
@@ -549,20 +553,20 @@ export function HelixLayout() {
     }
   }, [])
 
-  // ── Bridge: hermes-ui useProviderStore → Helix useHelixStore ───────────────
-  // The user can switch the active model from the hermes-ui ProviderSettings /
-  // ModelSelector panels (which write to useProviderStore and push to Hermes).
+  // ── Bridge: helix-ui useProviderStore → Helix useHelixStore ───────────────
+  // The user can switch the active model from the helix-ui ProviderSettings /
+  // ModelSelector panels (which write to useProviderStore and push to Helix).
   // Those are a SEPARATE store from useHelixStore (the one the input-bar model
   // selector reads). Without this bridge the input bar keeps showing the old
   // model even after a backend-side switch. Mirror the active model (and its
   // owning provider's config) into useHelixStore whenever it changes out-of-band.
   useEffect(() => {
     if (!isElectron()) return
-    // On the FIRST fire (which is the hermes-ui hydration), the Helix store has
-    // already restored its own active model — and unlike hermes-ui it knows about
-    // fetched-only models. If hermes-ui hydrated to a declared default (pro) while
-    // Helix restored a fetched model (flash), don't let hermes-ui clobber Helix.
-    // Instead sync hermes-ui to Helix so the two agree, then return.
+    // On the FIRST fire (which is the helix-ui hydration), the Helix store has
+    // already restored its own active model — and unlike helix-ui it knows about
+    // fetched-only models. If helix-ui hydrated to a declared default (pro) while
+    // Helix restored a fetched model (flash), don't let helix-ui clobber Helix.
+    // Instead sync helix-ui to Helix so the two agree, then return.
     let firstFire = true
     const unsub = useProviderStore.subscribe((state, prev) => {
       const model = state.activeModel
@@ -585,7 +589,7 @@ export function HelixLayout() {
         // and apiConfig all stay consistent and the stale session is cancelled.
         helix.onModelSwitched(model)
         // Keep the selected provider's credentials in sync too, in case the
-        // hermes-ui provider carries a different key/baseUrl.
+        // helix-ui provider carries a different key/baseUrl.
         const existing = helix.providers.find((p) => p.models.includes(model))
         if (existing && (existing.apiKey !== provider.apiKey || existing.baseUrl !== provider.baseUrl)) {
           useHelixStore.setState({
@@ -598,15 +602,15 @@ export function HelixLayout() {
         // path (agent-flow-panel.syncConfigToBackend): cancel any in-flight
         // session, drop the cached id, and push the resolved config so the
         // backend picks up the new key immediately. Without this, an out-of-band
-        // switch (hermes-ui ModelSelector / settings) only takes effect on the
+        // switch (helix-ui ModelSelector / settings) only takes effect on the
         // next sendPrompt via the configHash check, and a run in flight keeps
         // streaming against the old endpoint.
-        const hs = useHermesStore.getState()
-        const sid = hs.hermesSessionId
+        const gw = useGatewayStore.getState()
+        const sid = gw.helixSessionId
         if (sid) {
-          try { electronHermes.notify('session/cancel', { session_id: sid }) } catch {}
+          try { electronHelix.notify('session/cancel', { session_id: sid }) } catch {}
         }
-        hs.setHermesSessionId(null)
+        gw.setHelixSessionId(null)
         const s = useHelixStore.getState()
         const cfg = s.apiConfig
         const ap = s.activeProviderId ? s.providers.find((p) => p.id === s.activeProviderId) : undefined
@@ -660,63 +664,80 @@ export function HelixLayout() {
     return () => { try { removeListener?.() } catch {} }
   }, [])
 
-  // ── Hermes gateway connection status ──────────────────────────────────
+  // ── Helix gateway connection status ──────────────────────────────────
   // The connection dot next to the Settings button lives in the always-mounted
-  // sidebar, but detection used to only live inside useHermes(), which is
+  // sidebar, but detection used to only live inside useHelix(), which is
   // mounted lazily (settings / skill panels). That is why the badge stayed on
   // "connecting" until the settings panel was opened. Detect here at the top
   // level so the badge reflects reality from startup onward.
   useEffect(() => {
     if (!isElectron()) return
-    const hermes = (window as any).electron?.hermes
-    if (!hermes?.status) return
+    const helix = (window as any).electron?.helix
+    if (!helix?.status) return
     let timer: any = null
     let startupTimer: any = null
     let stopped = false
-    const unsubscribe = hermes.onEvent?.((event: string, params?: any) => {
-      if (event === 'gateway.ready') {
-        useHermesStore.getState().setHermesConnected(true)
-        useHermesStore.getState().setHermesError(null)
+
+    // 安排下一次探测（同一时刻只保留一个 timer）。
+    const scheduleProbe = (delay: number, retries: number) => {
+      if (stopped) return
+      if (timer) { clearTimeout(timer); timer = null }
+      timer = setTimeout(() => { timer = null; void probe(retries) }, delay)
+    }
+
+    // 关键：连上之后也要保持低频心跳，而不是彻底停止探测。
+    // 后端重启（例如设置里保存配置触发 respawn）时，gateway.ready 事件可能早于
+    // 本订阅建立就被发出而丢失；一旦探测在"成功"时停止，又没有任何机制重启它，
+    // 徽章就会永久停在"连接中"——尽管后端其实已经恢复、能够正常回复。
+    const probe = async (retries = 0) => {
+      if (stopped) return
+      let connected = false
+      try {
+        const st = await helix.status()
+        connected = !!st?.connected
+      } catch {
+        connected = false
+      }
+      if (stopped) return
+      if (connected) {
+        useGatewayStore.getState().setHelixConnected(true)
+        useGatewayStore.getState().setHelixError(null)
         useHelixStore.getState().setGatewayStatus('ready')
-        if (timer) { clearTimeout(timer); timer = null }
         if (startupTimer) { clearTimeout(startupTimer); startupTimer = null }
+        scheduleProbe(HEALTHY_HEARTBEAT_MS, 0)
+      } else {
+        useGatewayStore.getState().setHelixConnected(false)
+        useHelixStore.getState().setGatewayStatus('connecting')
+        // 未连上时用递增间隔重试：前 12 次 1.5s，之后 3s。
+        scheduleProbe(retries < 12 ? 1500 : 3000, retries + 1)
+      }
+    }
+
+    const unsubscribe = helix.onEvent?.((event: string, params?: any) => {
+      if (event === 'gateway.ready') {
+        useGatewayStore.getState().setHelixConnected(true)
+        useGatewayStore.getState().setHelixError(null)
+        useHelixStore.getState().setGatewayStatus('ready')
+        if (startupTimer) { clearTimeout(startupTimer); startupTimer = null }
+        scheduleProbe(HEALTHY_HEARTBEAT_MS, 0)
       } else if (event === 'gateway.disconnected') {
-        useHermesStore.getState().setHermesConnected(false)
+        useGatewayStore.getState().setHelixConnected(false)
         useHelixStore.getState().setGatewayStatus('disconnected')
+        scheduleProbe(1500, 0)
       } else if (event === 'gateway.retry') {
         const phase = params?.phase as 'error' | 'retrying' | 'recovered' | undefined
         if (phase === 'recovered') {
-          useHermesStore.getState().setHermesConnected(true)
+          useGatewayStore.getState().setHelixConnected(true)
           useHelixStore.getState().setGatewayStatus('ready')
+          scheduleProbe(HEALTHY_HEARTBEAT_MS, 0)
         } else {
-          useHermesStore.getState().setHermesConnected(false)
+          useGatewayStore.getState().setHelixConnected(false)
           useHelixStore.getState().setGatewayStatus('connecting')
+          scheduleProbe(1500, 0)
         }
       }
     })
-    const tryConnect = async (retries = 0) => {
-      if (stopped) return
-      try {
-        const st = await hermes.status()
-        if (st?.connected) {
-          useHermesStore.getState().setHermesConnected(true)
-          useHelixStore.getState().setGatewayStatus('ready')
-          if (timer) { clearTimeout(timer); timer = null }
-          if (startupTimer) { clearTimeout(startupTimer); startupTimer = null }
-          return
-        }
-        useHermesStore.getState().setHermesConnected(false)
-      } catch {
-        useHermesStore.getState().setHermesConnected(false)
-      }
-      useHelixStore.getState().setGatewayStatus('connecting')
-      // Continue polling with increasing intervals: 1.5s for first 12, then 3s up to 60s total
-      const delay = retries < 12 ? 1500 : 3000
-      if (timer === null) {
-        timer = setTimeout(() => { timer = null; tryConnect(retries + 1) }, delay)
-      }
-    }
-    tryConnect()
+    void probe()
     // Startup safety timeout: if gateway never becomes ready within 60s,
     // transition to 'disconnected' so the user sees a retry button instead
     // of being stuck on the blocking overlay forever.
@@ -958,7 +979,7 @@ export function HelixLayout() {
   useEffect(() => { startScheduledTaskRunner() }, [])
 
   // ── Task list ───────────────────────────────────────────────────────────
-  // 后端没有任务清单 RPC（hermes:getTasks 是空桩），任务清单 = 前端已接收的
+  // 后端没有任务清单 RPC（helix:getTasks 是空桩），任务清单 = 前端已接收的
   // live todos（来自 session/update 的 todo/plan 负载）。
 
   const windowMenuItems: (WindowMenuItem | { divider: true })[] = useMemo(() => [
@@ -1285,7 +1306,7 @@ export function HelixLayout() {
                       )}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
-                  {(hermesTodos.length > 0) && (
+                  {(helixTodos.length > 0) && (
                     <div className="relative" ref={todoPopoverRef}>
                       <button
                         onClick={() => setTodoPopoverOpen(o => !o)}
@@ -1293,24 +1314,24 @@ export function HelixLayout() {
                         data-tip="任务清单"
                       >
                         <ListTodo className="size-4" />
-                        {hermesTodos.length > 0 && (
+                        {helixTodos.length > 0 && (
                           <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[calc(var(--helix-transcript-size)*0.6429)] font-medium flex items-center justify-center">
-                            {hermesTodos.length}
+                            {helixTodos.length}
                           </span>
                         )}
                       </button>
-                      {todoPopoverOpen && hermesTodos.length > 0 && (
+                      {todoPopoverOpen && helixTodos.length > 0 && (
                         <div className="absolute right-0 top-[calc(100%+6px)] z-50 w-72 max-h-[60vh] overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-xl">
                           <div className="sticky top-0 flex items-center justify-between px-3 py-2 border-b border-border bg-popover rounded-t-xl">
                             <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">任务清单</span>
                             <div className="flex items-center gap-2">
                               <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
-                                {hermesTodos.filter(t => t.status === 'completed').length}/{hermesTodos.length}
+                                {helixTodos.filter(t => t.status === 'completed').length}/{helixTodos.length}
                               </span>
                             </div>
                           </div>
                           <ul className="py-1">
-                            {hermesTodos.map((todo) => (
+                            {helixTodos.map((todo) => (
                               <li key={todo.id} className="flex items-start gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)]">
                                 {todo.status === 'completed' ? (
                                   <CheckCircle2 className="size-4 text-green-500 shrink-0 mt-0.5" />

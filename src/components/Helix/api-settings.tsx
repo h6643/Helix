@@ -1,35 +1,31 @@
-'use client'
+﻿'use client'
 
 import {
   Settings, Sun, Plug, Archive, ChevronLeft, Search,
   X,
-  Globe, Keyboard, GitBranch, Zap, Brain, Bot, Activity, Workflow,
-  MessageSquare,
+  Globe, Keyboard, GitBranch, Zap, Bot, Activity, Workflow,
   RefreshCw,
 } from 'lucide-react'
 import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
-import { useHermes } from '@/hooks/use-hermes'
 import { pushModelConfig } from '@/lib/config-sync'
-import { isElectron, hermesApi, electronFS, electronDialog, electronApp } from '@/lib/electron-bridge'
+import { isElectron, helixApi, electronFS, electronDialog, electronApp } from '@/lib/electron-bridge'
 import { getCurrentVersion } from '@/hooks/use-check-update'
 import { persistence } from '@/lib/persist'
 import { getAllProviders, getBaseUrl } from '@/lib/providers'
-import { useHelixStore, type ApiConfig, type BrowserBookmark } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
+import { useHelixStore, type ApiConfig } from '@/stores/helix-store'
+import { useGatewayStore } from '@/stores/gateway-store'
 import { AgentsSettings } from './agents-settings'
 import { AppearanceSettingsPanel } from './appearance-settings-panel'
 import { GeneralSettingsPanel } from './general-settings-panel'
 import { GitSettingsPanel } from './git-settings-panel'
 import { HookSettings } from './hook-settings'
-import { LearningView } from './learning-view'
-import { MemorySettings } from './memory-settings'
 import { McpEditorForm, type McpFormData } from './mcp-editor-form'
 import { ShortcutsPage } from './shortcuts-page'
 import { ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel } from './usage-stats'
 import { PopupSelect, SettingGroup } from './settings-ui'
-import { WebSearchSettings } from './web-search-settings'
 import { VisionModelSettings } from './vision-model-settings'
+import { WebSearchSettings } from './web-search-settings'
 
 function SectionTitle({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -37,63 +33,6 @@ function SectionTitle({ children, className }: { children: React.ReactNode; clas
       <h3 className="ui-title font-semibold text-foreground">{children}</h3>
     </div>
   )
-}
-
-// ── Chrome bookmark import ──────────────────────────────────────────────────────
-function parseChromeBookmarks(content: string): BrowserBookmark[] {
-  try {
-    const data = JSON.parse(content)
-    const bar = (data?.roots?.bookmark_bar?.children ?? []) as any[]
-    const norm = (n: any): BrowserBookmark | null => {
-      if (!n) return null
-      if (n.type === 'url') return { name: String(n.name ?? ''), type: 'url', url: String(n.url ?? '') }
-      if (n.type === 'folder') return { name: String(n.name ?? ''), type: 'folder', children: (n.children ?? []).map(norm).filter(Boolean) as BrowserBookmark[] }
-      return null
-    }
-    return bar.map(norm).filter(Boolean) as BrowserBookmark[]
-  } catch {
-    return []
-  }
-}
-
-// Chrome's default User Data directory on this machine. Used as both the first
-// auto-detect path and the directory picker's starting location.
-const CHROME_DEFAULT_DIR = 'C:/Users/hyt/AppData/Local/Google/Chrome/User Data/Default'
-
-async function tryReadBookmarks(dir: string): Promise<string | null> {
-  if (typeof window === 'undefined' || !window.electron?.hermesSkills) return null
-  for (const cand of [`${dir}/Bookmarks`, `${dir}/Default/Bookmarks`]) {
-    const c = await window.electron.hermesSkills.readFile(cand)
-    if (c) return c
-  }
-  return null
-}
-
-async function importChromeBookmarks(): Promise<void> {
-  const toast = useHelixStore.getState().showToast
-  try {
-    // 1. Try the default path without a dialog (most users have it there).
-    let content = await tryReadBookmarks(CHROME_DEFAULT_DIR)
-    // 2. Otherwise let the user pick the Chrome "Default" or "User Data" dir.
-    if (!content) {
-      const picked = await electronDialog.openDirectory(CHROME_DEFAULT_DIR)
-      if (!picked) return // user cancelled
-      content = await tryReadBookmarks(picked)
-    }
-    if (!content) {
-      toast({ type: 'warning', title: '未找到书签', description: '该目录中未发现 Chrome 的 Bookmarks 文件' })
-      return
-    }
-    const items = parseChromeBookmarks(content)
-    if (items.length === 0) {
-      toast({ type: 'warning', title: '没有可导入的书签', description: '书签栏为空' })
-      return
-    }
-    useHelixStore.getState().setBrowserBookmarks(items)
-    toast({ type: 'success', title: '已导入书签', description: `从 Chrome 导入了 ${items.length} 个书签项` })
-  } catch (e: any) {
-    toast({ type: 'error', title: '导入失败', description: String(e?.message ?? e) })
-  }
 }
 
 const ALL_PROVIDERS = getAllProviders()
@@ -134,7 +73,7 @@ interface SettingsProps {
   setSidebarCollapsed: (v: boolean | ((prev: boolean) => boolean)) => void
 }
 
-type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'browser' | 'git' | 'skills' | 'hook' | 'usage' | 'help' | 'agents' | 'learning' | 'channels'
+type SettingsPage = 'general' | 'appearance' | 'api' | 'shortcuts' | 'mcp' | 'archive' | 'git' | 'hook' | 'usage' | 'help' | 'agents' | 'websearch'
 
 interface NavItem {
   id: SettingsPage
@@ -153,7 +92,6 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'general', label: '常规', icon: Settings },
       { id: 'appearance', label: '外观', icon: Sun },
-      { id: 'learning', label: '记忆', icon: Brain },
       { id: 'shortcuts', label: '快捷键', icon: Keyboard },
     ],
   },
@@ -169,11 +107,10 @@ const NAV_GROUPS: NavGroup[] = [
    {
     title: '集成',
     items: [
-      { id: 'channels', label: 'Channels', icon: MessageSquare },
       { id: 'git', label: 'Git', icon: GitBranch },
       { id: 'hook', label: 'Hooks', icon: Workflow },
-      { id: 'browser', label: '浏览器', icon: Globe },
       { id: 'archive', label: '历史归档', icon: Archive },
+      { id: 'websearch', label: '搜索引擎', icon: Search },
     ],
   },
 ]
@@ -197,237 +134,6 @@ const Toggle = ({ enabled, onToggle }: { enabled: boolean; onToggle: () => void 
   </button>
 )
 
-// ─── Channels settings ──────────────────────────────────────────────────────
-interface ChannelConfig {
-  id: string
-  name: string
-  description: string
-  enabled: boolean
-  config: Record<string, string>
-  envKeys?: string[]
-}
-
-function ChannelsSettings() {
-  const showToast = useHelixStore(s => s.showToast)
-  const [channels, setChannels] = useState<ChannelConfig[]>([])
-  const [expandedChannel, setExpandedChannel] = useState<string | null>(null)
-  const [savingChannels, setSavingChannels] = useState(false)
-
-  // Load from .env via Tauri or fallback to localStorage
-  useEffect(() => {
-    const loadChannels = async () => {
-      if (isElectron()) {
-        try {
-          const api = (window as any).electron?.channels
-          if (!api?.list) return
-          const result = await api.list()
-          if (result?.ok && result.channels) {
-            setChannels(result.channels)
-            return
-          }
-        } catch (e) {
-          console.error('[ChannelsSettings] Failed to load from Tauri:', e)
-        }
-      }
-      // Fallback to localStorage
-      try {
-        const saved = localStorage.getItem('helix-channels')
-        if (saved) {
-          const data = JSON.parse(saved)
-          if (data.channels) setChannels(data.channels)
-        }
-      } catch {}
-    }
-    loadChannels()
-  }, [])
-
-  const handleToggle = (id: string) => {
-    setChannels(prev => prev.map(ch => ch.id === id ? { ...ch, enabled: !ch.enabled } : ch))
-  }
-
-  const handleConfigChange = (id: string, key: string, value: string) => {
-    setChannels(prev => prev.map(ch => ch.id === id ? { ...ch, config: { ...ch.config, [key]: value } } : ch))
-  }
-
-  const addChannel = () => {
-    const id = `ch_${Date.now()}`
-    setChannels(prev => [...prev, { id, name: 'New Channel', description: '', enabled: false, config: {}, envKeys: [] }])
-  }
-
-  const removeChannel = async (id: string) => {
-    const remaining = channels.filter(ch => ch.id !== id)
-    setChannels(remaining)
-    if (expandedChannel === id) setExpandedChannel(null)
-    // 立即持久化删除——否则重进设置页会从 channels.json 读回旧数据（"过一会又回来"）。
-    try {
-      await persistChannels(remaining)
-      showToast({ type: 'success', title: '渠道已删除' })
-    } catch {
-      showToast({ type: 'error', title: '删除保存失败' })
-    }
-  }
-
-  const updateChannelMeta = (id: string, patch: Partial<Pick<ChannelConfig, 'name' | 'description'>>) => {
-    setChannels(prev => prev.map(ch => ch.id === id ? { ...ch, ...patch } : ch))
-  }
-
-  const renameConfigKey = (id: string, oldKey: string, newKey: string) => {
-    const key = newKey.trim()
-    if (!key || key === oldKey) return
-    setChannels(prev => prev.map(ch => {
-      if (ch.id !== id) return ch
-      const config: Record<string, string> = {}
-      for (const [k, v] of Object.entries(ch.config)) config[k === oldKey ? key : k] = v
-      return { ...ch, config, envKeys: Object.keys(config) }
-    }))
-  }
-
-  const addConfigKey = (id: string) => {
-    setChannels(prev => prev.map(ch => {
-      if (ch.id !== id) return ch
-      const key = `NEW_KEY_${Object.keys(ch.config).length + 1}`
-      return { ...ch, config: { ...ch.config, [key]: '' }, envKeys: [...Object.keys(ch.config), key] }
-    }))
-  }
-
-  const removeConfigKey = (id: string, key: string) => {
-    setChannels(prev => prev.map(ch => {
-      if (ch.id !== id) return ch
-      const config = { ...ch.config }
-      delete config[key]
-      return { ...ch, config, envKeys: Object.keys(config) }
-    }))
-  }
-
-  // 持久化给定的渠道列表（删除/添加/编辑后即时调用，避免重进设置页时从
-  // channels.json 读回旧数据——"删除过一会又回来"的根因）。
-  const persistChannels = async (list: ChannelConfig[]) => {
-    setSavingChannels(true)
-    try {
-      // Ensure envKeys stays in sync with the actual config keys before persisting.
-      const payload = list.map(ch => ({ ...ch, envKeys: Object.keys(ch.config) }))
-      if (isElectron()) {
-        const api = (window as any).electron?.channels
-        if (api?.save) {
-          await api.save(payload)
-        }
-      } else {
-        // Fallback to localStorage
-        localStorage.setItem('helix-channels', JSON.stringify({ channels: payload }))
-      }
-    } finally {
-      setSavingChannels(false)
-    }
-  }
-
-  const saveChannels = async () => {
-    await persistChannels(channels)
-    showToast({ type: 'success', title: '渠道配置已保存' })
-  }
-
-  return (
-    <div className="max-w-3xl space-y-4">
-      <div className="flex items-center justify-between">
-        <SectionTitle>Channels</SectionTitle>
-        <button onClick={addChannel} className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors">
-          + 添加渠道
-        </button>
-      </div>
-      <div className="space-y-3">
-        {channels.map(channel => (
-          <div key={channel.id} className="border border-border/50 rounded-xl overflow-hidden">
-            <div className="flex items-center justify-between p-4 hover:bg-accent/30 transition-colors">
-              <div className="flex-1 min-w-0">
-                <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">{channel.name || channel.id}</p>
-                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-0.5">{channel.description}</p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0 ml-4">
-                <button
-                  onClick={() => setExpandedChannel(expandedChannel === channel.id ? null : channel.id)}
-                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
-                >
-                  Configure
-                </button>
-                <Toggle enabled={channel.enabled} onToggle={() => handleToggle(channel.id)} />
-                <button
-                  onClick={() => removeChannel(channel.id)}
-                  className="px-2 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-600/80 border border-border/50 rounded-lg hover:bg-red-500/10 transition-colors"
-                >
-                  删除
-                </button>
-              </div>
-            </div>
-            {expandedChannel === channel.id && (
-              <div className="px-4 pb-4 pt-2 border-t border-border/30 bg-muted/20 space-y-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-muted-foreground mb-1">名称</label>
-                    <input
-                      value={channel.name}
-                      onChange={e => updateChannelMeta(channel.id, { name: e.target.value })}
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-muted-foreground mb-1">描述</label>
-                    <input
-                      value={channel.description}
-                      onChange={e => updateChannelMeta(channel.id, { description: e.target.value })}
-                      className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground text-center focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <label className="block text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-muted-foreground">配置字段（环境变量）</label>
-                  {Object.entries(channel.config).map(([key, value]) => (
-                    <div key={key} className="flex items-center gap-2">
-                      <input
-                        value={key}
-                        onChange={e => renameConfigKey(channel.id, key, e.target.value)}
-                        className="w-2/5 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground text-center font-mono focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                      <input
-                        type={key.toLowerCase().includes('secret') || key.toLowerCase().includes('token') || key.toLowerCase().includes('password') ? 'password' : 'text'}
-                        value={value}
-                        onChange={e => handleConfigChange(channel.id, key, e.target.value)}
-                        placeholder={`Enter ${key.replace(/_/g, ' ')}`}
-                        className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-                      />
-                      <button
-                        onClick={() => removeConfigKey(channel.id, key)}
-                        className="px-2 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-600/80 border border-border/50 rounded-lg hover:bg-red-500/10"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))}
-                  {Object.keys(channel.config).length === 0 && (
-                    <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">暂无配置字段，点击下方添加。</p>
-                  )}
-                  <button
-                    onClick={() => addConfigKey(channel.id)}
-                    className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground border border-border/50 rounded-lg hover:bg-accent/60 transition-colors"
-                  >
-                    + 添加字段
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
-        {channels.length === 0 && (
-          <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">尚无渠道，点击右上角「添加渠道」。</p>
-        )}
-      </div>
-      <div className="flex justify-end pt-2">
-        <Button size="sm" variant="outline" onClick={saveChannels} disabled={savingChannels}>
-          {savingChannels ? '保存中...' : '保存'}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
 // ─── Main component ──────────────────────────────────────────────────────────
 export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setSidebarWidth, saveSidebarWidth, showSidebar, setShowSidebar, sidebarCollapsed, setSidebarCollapsed }: SettingsProps) {
   const {
@@ -449,7 +155,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     gitRemoteUrl, setGitRemoteUrl,
     gitCommitTemplate, setGitCommitTemplate,
     gitBranchPrefix, setGitBranchPrefix,
-    // Hermes config-backed toggles
+    // Helix config-backed toggles
     personality, setPersonality,
     // Agent settings
     autoCompactContext, setAutoCompactContext,
@@ -458,8 +164,6 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   const settingsPage = useHelixStore(s => s.settingsPage)
   const setSettingsPage = useHelixStore(s => s.setSettingsPage)
   const pushNavigation = useHelixStore(s => s.pushNavigation)
-  const setBrowserBookmarks = useHelixStore(s => s.setBrowserBookmarks)
-  const browserBookmarks = useHelixStore(s => s.browserBookmarks)
   const [page, setPage] = useState<SettingsPage>((settingsPage as SettingsPage) || 'general')
   const [navSearch, setNavSearch] = useState('')
   const navSearchRef = useRef<HTMLInputElement>(null)
@@ -550,10 +254,10 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   }, [apiConfig])
 
   // Mirror the backend's actual config when running in Electron so the form
-  // shows what Hermes is really using.
+  // shows what Helix is really using.
   //
-  // CRITICAL: the backend's hermes:getConfig does NOT return the API key — the
-  // key lives in Hermes's .env and is never echoed back over IPC (security).
+  // CRITICAL: the backend's helix:getConfig does NOT return the API key — the
+  // key lives in Helix's .env and is never echoed back over IPC (security).
   // So we must PRESERVE the key already in the store instead of clobbering it
   // with ''. And we must NOT call persistToStorage() here: this is a read-only
   // mirror. Persisting would overwrite the saved profile with an empty key and
@@ -561,7 +265,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   // they open Settings (the old behaviour).
   useEffect(() => {
     if (!isElectron()) return
-    const h = (window as any).electron?.hermes
+    const h = (window as any).electron?.helix
     if (!h?.getConfig) return
     h.getConfig().then((r: any) => {
       if (!r || !r.model) return
@@ -617,9 +321,9 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   const applyYamlKey = useCallback(async (key: string, value: boolean) => {
     if (!isElectron) return
     try {
-      const r: any = await window.electron.hermes.setYamlKey(key, value)
+      const r: any = await window.electron.helix.setYamlKey(key, value)
       if (r?.success && r?.changed) {
-        showToast({ title: '设置已保存', description: 'Hermes 已重启生效', type: 'success' })
+        showToast({ title: '设置已保存', description: 'Helix 已重启生效', type: 'success' })
       } else if (!r?.success) {
         showToast({ title: '保存失败', description: r?.error || '未知错误', type: 'error' })
       }
@@ -679,11 +383,11 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
   // MCP status - read the REAL runtime connection state from the backend via
   // `mcp.servers.status` (session-independent; covers both config.yaml servers
   // and session-injected servers). Replaces the old tools/list tool-name probe.
-  const hermesSessionId = useHermesStore(s => s.hermesSessionId)
+  const helixSessionId = useGatewayStore(s => s.helixSessionId)
   const [mcpStatusAttempt, setMcpStatusAttempt] = useState(0)
   const fetchMcpStatus = useCallback(async () => {
     try {
-      const result = await hermesApi()!.send('mcp.servers.status', {}) as any
+      const result = await helixApi()!.send('mcp.servers.status', {}) as any
       const servers: any[] = result?.servers || []
       const status: Record<string, string> = {}
       for (const s of servers) {
@@ -696,7 +400,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
       // schedule a retry instead of wiping to {} (which shows "检测中" forever).
       setMcpStatusAttempt(a => a + 1)
     }
-  }, [mcpServers, gatewayMcp, hermesSessionId])
+  }, [mcpServers, gatewayMcp, helixSessionId])
 
   // Run on mount + whenever session id / server list changes.
   useEffect(() => {
@@ -807,8 +511,8 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     try {
       let models: string[] = []
       if (isElectron()) {
-        // Use Electron IPC to fetch models (Hermes backend)
-        const result = await window.electron.hermes.fetchModels({
+        // Use Electron IPC to fetch models (Helix backend)
+        const result = await window.electron.helix.fetchModels({
           baseUrl: localConfig.baseUrl,
           apiKey: localConfig.apiKey,
         }) as any
@@ -862,9 +566,9 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     // Persist the selection so it survives a cold restart (otherwise the active
     // profile is forgotten and restoreFromStorage reverts to the old apiConfig).
     try { await persistToStorage() } catch {}
-    // Invalidate the cached Hermes session so the next prompt rebuilds it with
+    // Invalidate the cached Helix session so the next prompt rebuilds it with
     // the newly-selected profile's model/key (prevents stale-session 401s).
-    useHermesStore.getState().setHermesSessionId(null)
+    useGatewayStore.getState().setHelixSessionId(null)
     if (isElectron()) {
       try {
         const cfg = {
@@ -873,14 +577,14 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
           baseUrl: p.config.baseUrl,
           apiKey: p.config.apiKey,
         }
-        // serve 模式：hermes:setConfig 是 no-op（main.js 直接 return success），
+        // serve 模式：helix:setConfig 是 no-op（main.js 直接 return success），
         // 必须走 pushModelConfig —— 内部按模式分流：serve → setModel 写
         // config.yaml（生效）；acp → setConfig + cacheConfig（行为不变）。
         // 否则在设置里切换 profile 永远到不了网关，config.yaml 残留旧配置
         // （如 deepseek+Ling 错配 → 400 无输出）。
         pushModelConfig(cfg)
         // Persist the active profile so the next cold start re-asserts it
-        // into Hermes config.yaml (no hardcoded pin, free switching preserved).
+        // into Helix config.yaml (no hardcoded pin, free switching preserved).
         await window.electron.profile.cacheConfig(cfg)
       } catch {}
     }
@@ -977,9 +681,9 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     }
     await persistToStorage()
 
-    // Sync to Hermes if running in Electron or Tauri
-    const hermes = (window as any).electron?.hermes
-    if (isElectron() || hermes?.setConfig) {
+    // Sync to Helix if running in Electron or Tauri
+    const helix = (window as any).electron?.helix
+    if (isElectron() || helix?.setConfig) {
       try {
         const cfg = {
           model: localConfig.model,
@@ -987,17 +691,17 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
           baseUrl: localConfig.baseUrl,
           apiKey: localConfig.apiKey,
         }
-        await hermes.setConfig(cfg)
+        await helix.setConfig(cfg)
         // Persist the active profile so the next cold start re-asserts it
-        // into Hermes config.yaml (no hardcoded pin, free switching preserved).
+        // into Helix config.yaml (no hardcoded pin, free switching preserved).
         await (window as any).electron?.profile?.cacheConfig?.(cfg)
         // Invalidate the cached session so the next prompt creates a fresh one
         // with the updated config. Without this, a stale session ID could be
         // reused against a restarted gateway, producing 401 errors.
-        useHermesStore.getState().setHermesSessionId(null)
-        showToast({ type: 'success', title: keyMissing ? '已保存并同步到 Hermes（复用其已配置密钥）' : 'API 配置已保存（已同步到 Hermes）' })
+        useGatewayStore.getState().setHelixSessionId(null)
+        showToast({ type: 'success', title: keyMissing ? '已保存并同步到 Helix（复用其已配置密钥）' : 'API 配置已保存（已同步到 Helix）' })
       } catch (err) {
-        showToast({ type: 'warning', title: 'API 配置已保存（Hermes 同步失败）' })
+        showToast({ type: 'warning', title: 'API 配置已保存（Helix 同步失败）' })
       }
     } else {
       showToast({ type: 'success', title: 'API 配置已保存' })
@@ -1018,7 +722,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     if (reloadingMcp) return
     setReloadingMcp(true)
     try {
-      await hermesApi()!.send('reload.mcp', { session_id: hermesSessionId, confirm: true })
+      await helixApi()!.send('reload.mcp', { session_id: helixSessionId, confirm: true })
       showToast({ type: 'success', title: 'MCP 工具已重新加载', description: '新的工具 schema 将应用到当前会话' })
       setTimeout(fetchMcpStatus, 1000)
     } catch (e: any) {
@@ -1026,7 +730,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
     } finally {
       setReloadingMcp(false)
     }
-  }, [reloadingMcp, hermesSessionId, showToast, fetchMcpStatus])
+  }, [reloadingMcp, helixSessionId, showToast, fetchMcpStatus])
 
   const resetMcpForm = useCallback(() => {
     setMcpForm({ name: '', type: 'local', command: '', url: '', args: '' })
@@ -1353,13 +1057,13 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             const final = useHelixStore.getState().apiConfig
             setLocalConfig({ ...final })
             await persistToStorage()
-            const hermes = (window as any).electron?.hermes
-            if (isElectron() || hermes?.setConfig) {
+            const helix = (window as any).electron?.helix
+            if (isElectron() || helix?.setConfig) {
               try {
                 const cfg = { model: final.model, provider: final.provider && final.provider !== '__custom__' ? final.provider : 'custom', baseUrl: final.baseUrl, apiKey: final.apiKey }
-                await hermes.setConfig(cfg)
+                await helix.setConfig(cfg)
                 await (window as any).electron?.profile?.cacheConfig?.(cfg)
-                useHermesStore.getState().setHermesSessionId(null)
+                useGatewayStore.getState().setHelixSessionId(null)
               } catch {}
             }
             showToast({ type: 'success', title: `已切换到 ${final.model}` })
@@ -1647,11 +1351,7 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
             {/* Gateway-loaded MCP servers (config.yaml mcp_servers) — editable */}
             {gatewayMcpLoaded && !isAddingMcp && !editingMcpName && !gatewayEditing && (
               <section className="space-y-2">
-                {Object.keys(gatewayMcp).length === 0 ? (
-                  <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 px-4 py-3 border border-dashed border-border/40 rounded-lg">
-                    config.yaml 未配置 mcp_servers —— 在该文件的 mcp_servers 段添加的网关级服务器会显示在这里
-                  </p>
-                ) : (
+                {Object.keys(gatewayMcp).length === 0 ? null : (
                   <div className="max-w-3xl space-y-2">
                     {Object.entries(gatewayMcp).map(([name, cfg]) => {
                       const st = mcpStatus[name]
@@ -1787,27 +1487,6 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
           </div>
         )
 
-      case 'browser':
-        return (
-          <div className="space-y-4">
-            <SectionTitle>浏览器</SectionTitle>
-            <div className="border border-border/50 rounded-xl overflow-hidden">
-              <SettingRow icon={<Globe className="size-4 text-foreground/60" />} label="从 Chrome 导入书签">
-                <div className="ml-auto flex items-center">
-                  {browserBookmarks.length > 0 && (
-                    <span className="mr-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">已导入 {browserBookmarks.length} 个书签项</span>
-                  )}
-                  <Button variant="outline" size="sm" onClick={() => importChromeBookmarks()}>
-                    选择 Chrome 数据目录
-                  </Button>
-                </div>
-              </SettingRow>
-            </div>
-
-            <WebSearchSettings />
-          </div>
-        )
-
       case 'git':
         return <GitSettingsPanel />
 
@@ -1872,15 +1551,8 @@ export function ApiSettings({ themeStyle, onSelectThemeStyle, sidebarWidth, setS
 
       case 'agents':
         return <AgentsSettings />
-      case 'learning':
-        return (
-          <div className="space-y-6">
-            <MemorySettings />
-            <LearningView />
-          </div>
-        )
-      case 'channels':
-        return <ChannelsSettings />
+      case 'websearch':
+        return <WebSearchSettings />
     }
   }
 

@@ -1,6 +1,6 @@
 /**
- * Markdown fence classification helpers — ported from the official
- * hermes-agent desktop renderer (lib/markdown-code.ts), trimmed to the parts
+ * Markdown fence classification helpers — ported from the upstream
+ * agent desktop renderer (lib/markdown-code.ts), trimmed to the parts
  * the preprocess pipeline needs. These distinguish LLM-output fences that are
  * *prose* (lists/table-of-contents wrapped in ``` fences) from real code, so
  * the preprocessor can unwrap the fake ones and markdown can render properly.

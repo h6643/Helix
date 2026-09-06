@@ -99,7 +99,7 @@
   --helix-font-size: 13px;
 
   /* Context-usage category colors — match backend `session.context_breakdown`
-     payload (var(--context-usage-*), see hermes-agent context_breakdown.py). */
+     payload (var(--context-usage-*), see upstream agent context_breakdown.py). */
   --context-usage-system: oklch(0.72 0.02 250);
   --context-usage-tools: oklch(0.72 0.16 55);
   --context-usage-rules: oklch(0.70 0.15 160);
@@ -892,7 +892,7 @@ pre code.hljs {
 }
 
 /* ── 代码块折叠：长块（>15 行或 >800 字符）默认收起，底部渐隐遮罩 + 展开按钮
-   （参考 hermes-desktop AgentMarkdown 的 chat-code-collapsed/expand-btn） ── */
+   （参考上游桌面版 AgentMarkdown 的 chat-code-collapsed/expand-btn） ── */
 .helix-md .helix-code-collapsed {
   max-height: 180px;
   overflow: hidden;
@@ -930,7 +930,7 @@ pre code.hljs {
   font-variant-ligatures: none;
 }
 
-/* ── diff 视图：+ 绿 / - 红 / @@ 色块（参考 hermes-desktop chat-diff-*） ── */
+/* ── diff 视图：+ 绿 / - 红 / @@ 色块（参考上游桌面版 chat-diff-*） ── */
 .helix-md .helix-diff-content {
   font-family: var(--font-mono);
   font-size: 0.85em;

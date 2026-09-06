@@ -1,5 +1,5 @@
 /**
- * Hermes Store — connection + session state for the Hermes backend.
+ * Gateway Store — connection + session state for the backend gateway.
  *
  * State machine for gateway connection: idle → connecting → open → closed/error → connecting (retry).
  * Includes CWD tracking, interruption state, and auto-compaction flag.
@@ -9,27 +9,14 @@ import { create } from 'zustand'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export interface McpServerConfig {
-  name?: string
-  type: 'local' | 'remote'
-  command?: string[]
-  url?: string
-  environment?: Record<string, string>
-  enabled?: boolean
-  cwd?: string
-  timeout?: number
-  headers?: Record<string, string>
-  envPassthrough?: boolean
-}
-
 export type GatewayState = 'idle' | 'connecting' | 'open' | 'closed' | 'error'
 
-interface HermesState {
+interface GatewayStateStore {
   // ── Gateway connection state machine ─────────────────────────────────────
   gatewayState: GatewayState
-  hermesConnected: boolean // derived: gatewayState === 'open'
-  hermesSessionId: string | null
-  hermesError: string | null
+  helixConnected: boolean // derived: gatewayState === 'open'
+  helixSessionId: string | null
+  helixError: string | null
   gatewayEpoch: number
 
   // ── Session tracking ─────────────────────────────────────────────────────
@@ -40,9 +27,9 @@ interface HermesState {
 
   // ── Actions ──────────────────────────────────────────────────────────────
   setGatewayState: (state: GatewayState) => void
-  setHermesConnected: (connected: boolean) => void
-  setHermesSessionId: (id: string | null) => void
-  setHermesError: (error: string | null) => void
+  setHelixConnected: (connected: boolean) => void
+  setHelixSessionId: (id: string | null) => void
+  setHelixError: (error: string | null) => void
   bumpGatewayEpoch: () => void
   setCurrentCwd: (cwd: string | null) => void
   setCurrentBranch: (branch: string | null) => void
@@ -52,11 +39,11 @@ interface HermesState {
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
-export const useHermesStore = create<HermesState>((set) => ({
+export const useGatewayStore = create<GatewayStateStore>((set) => ({
   gatewayState: 'idle',
-  hermesConnected: false,
-  hermesSessionId: null,
-  hermesError: null,
+  helixConnected: false,
+  helixSessionId: null,
+  helixError: null,
   gatewayEpoch: 0,
   currentCwd: null,
   currentBranch: null,
@@ -65,12 +52,12 @@ export const useHermesStore = create<HermesState>((set) => ({
 
   setGatewayState: (state) => set({
     gatewayState: state,
-    hermesConnected: state === 'open',
-    hermesError: state === 'error' ? 'Gateway error' : state === 'closed' ? 'Gateway disconnected' : null,
+    helixConnected: state === 'open',
+    helixError: state === 'error' ? 'Gateway error' : state === 'closed' ? 'Gateway disconnected' : null,
   }),
-  setHermesConnected: (connected) => set({ hermesConnected: connected }),
-  setHermesSessionId: (id) => set({ hermesSessionId: id }),
-  setHermesError: (error) => set({ hermesError: error }),
+  setHelixConnected: (connected) => set({ helixConnected: connected }),
+  setHelixSessionId: (id) => set({ helixSessionId: id }),
+  setHelixError: (error) => set({ helixError: error }),
   bumpGatewayEpoch: () => set((s) => ({ gatewayEpoch: s.gatewayEpoch + 1 })),
   setCurrentCwd: (cwd) => set({ currentCwd: cwd }),
   setCurrentBranch: (branch) => set({ currentBranch: branch }),

@@ -1,10 +1,10 @@
-'use client'
+﻿'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, X, XCircle, CheckCircle2, Trash2, Terminal, Pause, Play } from 'lucide-react'
 import { useBackgroundTasksStore, type BackgroundTask } from '@/stores/background-tasks-store'
 import { getServeClient } from '@/lib/serve-gateway'
-import { useHermesStore } from '@/stores/hermes-store'
+import { useGatewayStore } from '@/stores/gateway-store'
 import { useHelixStore } from '@/stores/helix-store'
 
 function formatDuration(ms: number): string {
@@ -24,7 +24,7 @@ async function toggleTaskPaused(task: BackgroundTask): Promise<void> {
   useBackgroundTasksStore.getState().setTaskPaused(task.id, target)
   try {
     await client.rpc(target ? 'process.pause' : 'process.resume', {
-      session_id: useHermesStore.getState().hermesSessionId ?? undefined,
+      session_id: useGatewayStore.getState().helixSessionId ?? undefined,
       task_id: task.id,
       proc_id: task.procSessionId ?? undefined,
       command: task.command,

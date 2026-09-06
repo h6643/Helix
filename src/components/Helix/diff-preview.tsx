@@ -12,7 +12,7 @@ export interface DiffChange {
   oldContent: string
   newContent: string
   language: string
-  /** Backend-rendered unified diff (Hermes inline_diff). When present the
+  /** Backend-rendered unified diff (Helix inline_diff). When present the
    *  viewers render these lines directly instead of recomputing from
    *  old/new content. */
   unifiedDiff?: string
@@ -262,7 +262,7 @@ interface DiffPreviewProps {
   onOpenFile?: (change: DiffChange) => void
 }
 
-// Renders a backend-provided unified diff string directly (Hermes inline_diff).
+// Renders a backend-provided unified diff string directly (Helix inline_diff).
 // Lines carry their own +/-/context markers, so we colorize them instead of
 // recomputing a diff from old/new content.
 function UnifiedDiffTextViewer({ diff }: { diff: string }) {

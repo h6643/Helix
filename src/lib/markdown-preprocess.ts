@@ -1,5 +1,5 @@
 /**
- * Markdown preprocessor — ported from the official hermes-agent desktop
+ * Markdown preprocessor — ported from the upstream agent desktop
  * renderer (lib/markdown-preprocess.ts). LLMs emit noisy markdown: stray
  * fences, prose wrapped in fenced code blocks, unmarked bare URLs, bracketed
  * citation markers like `[1,2]`, and bare `---` divider lines that CommonMark
@@ -717,12 +717,12 @@ const GLUED_BULLET_ITEM_RE = /(?<=[^\n\s*-])(- )(?=[^\s-])(?<![A-Za-z0-9] - [A-Z
 const GLUED_BULLET_NOSPACE_LINE_START_RE = /^( {0,3})-(?=[*_\p{L}])/gmu
 const GLUED_BULLET_NOSPACE_MIDLINE_RE = /(?<=\p{Script=Han})-(?=\p{Script=Han}{4})/gu
 
-// Glued-list repair must NOT touch inline code spans: `` `- hermes-cli` `` —
+// Glued-list repair must NOT touch inline code spans: `` `- helix-cli` `` —
 // `- ` inside backticks is a literal dash, not a bullet. Without the
 // INLINE_CODE_SPLIT_RE guard, GLUED_BULLET_ITEM_RE inserts a `\n` into the
 // code span, splitting the backtick pair so CommonMark renders the backticks
 // literally and the code text as a list item (user-visible: `` ` `` 换行
-// `` hermes-cli` `` 而非行内代码)。Same protection pattern as
+// `` helix-cli` `` 而非行内代码)。Same protection pattern as
 // normalizeVisibleProse — only prose segments get the list repair.
 function normalizeGluedListItems(text: string): string {
   return text

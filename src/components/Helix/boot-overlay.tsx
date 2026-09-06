@@ -8,15 +8,15 @@ import { useHelixStore } from '@/stores/helix-store'
 type BootstrapStage = 'preparing' | 'done' | null
 
 const STAGE_LABELS: Record<string, string> = {
-  preparing: '正在准备 Hermes 运行环境...',
+  preparing: '正在准备 Helix 运行环境...',
 }
 
 /**
- * BootOverlay — shown over the app while the Hermes gateway is connecting or
+ * BootOverlay — shown over the app while the Helix gateway is connecting or
  * when it fails/disconnects, mirroring the official app's boot/connecting
  * surface with clear recovery semantics.
  *
- * Also handles first-run bootstrap progress (extracting bundled hermes-agent).
+ * Also handles first-run bootstrap progress (extracting the bundled agent runtime).
  */
 export function BootOverlay() {
   const status = useHelixStore((s) => s.gatewayStatus)
@@ -46,7 +46,7 @@ export function BootOverlay() {
       try {
         const { listen } = await import('@tauri-apps/api/event')
         unlisten = await listen<{ method: string; params: { stage: string; message: string } }>(
-          'hermes:event',
+          'helix:event',
           (event) => {
             if (event.payload.method === 'bootstrap:progress') {
               const { stage, message } = event.payload.params
@@ -79,10 +79,10 @@ export function BootOverlay() {
 
   const retry = () => {
     setGatewayStatus('connecting')
-    const hermes = (window as any).electron?.hermes
+    const helix = (window as any).electron?.helix
     const probe = async (n = 0) => {
       try {
-        const st = await hermes?.status?.()
+        const st = await helix?.status?.()
         if (st?.connected) {
           useHelixStore.getState().setGatewayStatus('ready')
           return
@@ -123,14 +123,14 @@ export function BootOverlay() {
           {isBootstrapping
             ? (STAGE_LABELS[bootstrapStage!] ?? bootstrapMessage)
             : isConnecting
-              ? '正在连接 Hermes 网关…'
-              : '无法连接到 Hermes 网关'}
+              ? '正在连接 Helix 网关…'
+              : '无法连接到 Helix 网关'}
         </h1>
         <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground leading-relaxed">
           {isBootstrapping
             ? '首次启动需要安装运行环境，请耐心等待。'
             : isConnecting
-              ? '正在启动 Hermes Agent，请稍候。'
+              ? '正在启动 Helix Agent，请稍候。'
               : '网关未运行或已断开。'}
         </p>
 

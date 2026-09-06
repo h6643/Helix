@@ -73,11 +73,7 @@ pub fn secure_encrypt(plaintext: String) -> Option<String> {
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
     match cipher.encrypt(nonce, plaintext.as_bytes()) {
-        Ok(ct) => Some(format!(
-            "{}:{}",
-            hex::encode(nonce_bytes),
-            hex::encode(&ct)
-        )),
+        Ok(ct) => Some(format!("{}:{}", hex::encode(nonce_bytes), hex::encode(&ct))),
         Err(_) => None,
     }
 }
@@ -117,8 +113,8 @@ pub fn show_item_in_folder(state: State<'_, Arc<AppState>>, relative_path: Strin
     let resolved = match resolved {
         Some(p) => p,
         None => {
-            // Also allow the Hermes memory directory (learning view "reveal in folder").
-            let mem_dir = crate::paths::hermes_data_dir().join("memories");
+            // Also allow the Helix memory directory (learning view "reveal in folder").
+            let mem_dir = crate::paths::helix_data_dir().join("memories");
             let candidate = std::path::Path::new(&relative_path).to_path_buf();
             if candidate.starts_with(&mem_dir) {
                 candidate

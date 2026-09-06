@@ -1,28 +1,24 @@
 /**
  * Global scheduled task runner — runs independently of any component mount.
  * Checks every 30 seconds for due tasks and dispatches them to a DEDICATED
- * Hermes session so they never interrupt or pollute the active conversation.
+ * Helix session so they never interrupt or pollute the active conversation.
  */
-import { hermesApi } from '@/lib/electron-bridge'
+import { helixApi } from '@/lib/electron-bridge'
 import { parseScheduleForTask } from '@/lib/schedule-utils'
 import { useHelixStore } from '@/stores/helix-store'
 
 let _started = false
-// Cached Hermes session ID for scheduled tasks (separate from any conversation).
+// Cached Helix session ID for scheduled tasks (separate from any conversation).
 let _taskSessionId: string | null = null
 
 async function getOrCreateTaskSession(): Promise<string | null> {
   if (_taskSessionId) return _taskSessionId
   try {
-    const res = await hermesApi()!.send('session/new', {
+    const res = await helixApi()!.send('session/new', {
       cwd: useHelixStore.getState().selectedWorkDir || '',
       mcpServers: [],
-      // 增强 Find 和 Grep 对定时任务会话同样生效（新建会话时带上）。
-      search_engine: useHelixStore.getState().enhancedFindGrep ? 'rg' : '',
-      // 集成终端 Shell：仅新会话生效。
-      terminal_shell: useHelixStore.getState().terminalShell,
     }) as any
-    const sid = res?._meta?.hermes?.sessionProvenance?.acpSessionId
+    const sid = res?._meta?.helix?.sessionProvenance?.acpSessionId
       || res?.session_id
       || res?.sessionID
       || (typeof res === 'string' ? res : null)
@@ -39,7 +35,7 @@ async function getOrCreateTaskSession(): Promise<string | null> {
 async function runTask(task: { id: string; label: string; prompt: string; scheduleText?: string }) {
   const { updateScheduledTask, showToast } = useHelixStore.getState()
 
-  // Create / reuse a DEDICATED Hermes session for background tasks — NEVER the
+  // Create / reuse a DEDICATED Helix session for background tasks — NEVER the
   // active conversation's session.  This prevents the task from polluting the
   // user's current conversation context or interrupting a running agent.
   const taskSid = await getOrCreateTaskSession()
@@ -54,7 +50,7 @@ async function runTask(task: { id: string; label: string; prompt: string; schedu
   // onEvent handler claims (they filter by their own session_id), so the UI stays
   // untouched.  The task runs silently in the background.
   try {
-    await hermesApi()!.send('session/prompt', {
+    await helixApi()!.send('session/prompt', {
       session_id: taskSid,
       prompt: [{ type: 'text', text: task.prompt }],
     })

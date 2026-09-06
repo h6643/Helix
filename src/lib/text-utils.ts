@@ -51,7 +51,7 @@ export function normalizeAcpContent(content: unknown, opts?: { stripSystemRemind
   } else text = String(content)
 
   // Strip <system-reminder> tags only when requested — do NOT trim, because
-  // Hermes streams messages as word/token chunks and any trim() here would eat
+  // Helix streams messages as word/token chunks and any trim() here would eat
   // the leading space of each chunk and glue words together ("I'llhelpyouexplore").
   const stripSystemReminder = opts?.stripSystemReminder ?? true
   const cleaned = stripSystemReminder ? text.replace(SYSTEM_REMINDER_RE, '') : text

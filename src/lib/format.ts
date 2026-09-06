@@ -31,7 +31,7 @@ export function formatTokens(n: number): string {
 
 /**
  * Format duration in seconds to a human-readable string.
- * Matches Hermes Desktop behavior:
+ * Matches Helix Desktop behavior:
  *   < 1s   → "500ms"
  *   < 60s  → "2.5s" or "10s"
  *   < 60m  → "3m 15s" or "5m"

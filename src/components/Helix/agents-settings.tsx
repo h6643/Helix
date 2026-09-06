@@ -68,7 +68,7 @@ export function AgentsSettings() {
 
   useEffect(() => {
     let alive = true
-    const api = (window as any).electron?.hermes
+    const api = (window as any).electron?.helix
     if (!api?.getConfig) {
       setErr('网关未连接，无法读取配置')
       setLoading(false)
@@ -110,7 +110,7 @@ export function AgentsSettings() {
   }, [])
 
   const setKey = (key: string, value: any) =>
-    (window as any).electron?.hermes?.setYamlKey(`delegation.${key}`, value)
+    (window as any).electron?.helix?.setYamlKey(`delegation.${key}`, value)
 
   const save = async () => {
     setSaving(true)
@@ -128,7 +128,7 @@ export function AgentsSettings() {
       const payload = identities
         .filter((i) => i.name.trim())
         .map(({ name, system_prompt }) => ({ name: name.trim(), system_prompt }))
-      await (window as any).electron?.hermes?.setDelegationIdentities?.(payload)
+      await (window as any).electron?.helix?.setDelegationIdentities?.(payload)
       setSaved(true)
       setAdding(false)
       setTimeout(() => setSaved(false), 2000)
@@ -310,7 +310,7 @@ export function CodingContextSetting() {
 
   useEffect(() => {
     let alive = true
-    const api = (window as any).electron?.hermes
+    const api = (window as any).electron?.helix
     if (!api?.getConfig) return
     api
       .getConfig()
@@ -328,7 +328,7 @@ export function CodingContextSetting() {
     setCodingContext(v)
     setErr(null)
     try {
-      await (window as any).electron?.hermes?.setYamlKey('agent.coding_context', v)
+      await (window as any).electron?.helix?.setYamlKey('agent.coding_context', v)
     } catch (e: any) {
       setCodingContext(prev) // 失败回滚
       setErr(String(e?.message || e))

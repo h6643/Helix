@@ -1,5 +1,5 @@
 /**
- * session-map.ts — conversation → 后端 Hermes 会话映射的读写。
+ * session-map.ts — conversation → 后端 Helix 会话映射的读写。
  *
  * 从 agent-flow-panel.tsx 拆出（该文件导出非组件成员会破坏 React Fast
  * Refresh，导致 Vite 每次 HMR 全量刷新页面）。会话恢复逻辑（/resync、

@@ -1,9 +1,9 @@
-'use client'
+﻿'use client'
 
 import { AlertTriangle, Check, Loader2, Pencil } from 'lucide-react'
 import React, { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
-import type { ApprovalLevel } from '@/hermes-ui/api-client'
+import type { ApprovalLevel } from '@/stores/helix-types'
 
 export interface ApprovalRequest {
   id: string

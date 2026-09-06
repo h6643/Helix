@@ -3,7 +3,7 @@
 /**
  * HelixMarkdown — markdown renderer for assistant messages.
  *
- * Renders react-markdown + remark-gfm through the official hermes-agent
+ * Renders react-markdown + remark-gfm through the upstream agent
  * preprocess pipeline (lib/markdown-preprocess.ts), then applies the official
  * desktop renderer's component overrides (markdown-text.tsx): heading sizes,
  * quiet `---` spacing, GFM alert blockquotes, styled tables, code cards, and
@@ -147,7 +147,7 @@ function MarkdownAlert({ children, type }: { children: ReactNode; type: AlertTyp
 
 // Box Drawing (U+2500–U+257F) plus Block Elements (U+2580–U+259F): tree
 // connectors (├── └── │) and progress-bar/shading glyphs (█ ░ ▒ ▓).
-// Ported from hermes-desktop AgentMarkdown: a fence is a "box diagram" only
+// Ported from helix-desktop AgentMarkdown: a fence is a "box diagram" only
 // when box-drawing characters dominate it (≥ half of its non-empty lines).
 // Such output must never go through shiki — per-glyph token spans fragment
 // and misalign under imperfect Unicode metrics. A stray │ in a comment must
@@ -161,7 +161,7 @@ function isBoxDiagram(code: string): boolean {
   return boxLines * 2 >= lines.length
 }
 
-// Diff viewer with colored +/-/@@ lines (ported from hermes-desktop).
+// Diff viewer with colored +/-/@@ lines (ported from helix-desktop).
 function DiffView({ code }: { code: string }) {
   const lines = code.split('\n')
 

@@ -1,4 +1,0 @@
-[submodule "hermes-agent"]
-	path = hermes-agent
-	url = https://github.com/h6643/hermes-agent.git
-	branch = master

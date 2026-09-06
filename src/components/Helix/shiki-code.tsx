@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * Syntax-highlighted code body — ported from the official hermes-agent
+ * Syntax-highlighted code body — ported from the upstream agent
  * shiki-highlighter.tsx. Renders a fence's code through shiki's `codeToHtml`
  * with the official dual theme (`github-light-default` / `github-dark-dimmed`,
  * `defaultColor="light-dark()"` so the app's `.light`/`.dark` color-scheme

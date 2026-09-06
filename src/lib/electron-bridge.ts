@@ -1,4 +1,4 @@
-import { getServeHermesFacade } from '@/lib/serve-gateway'
+import { getServeHelixFacade } from '@/lib/serve-gateway'
 import { installTauriBridge, isTauri } from '@/lib/tauri-bridge'
 import type { ElectronAPI } from '@/types/electron'
 
@@ -35,13 +35,13 @@ export function isRealElectron(): boolean {
 }
 
 // serve 模式下包裹 window.electron 的 Proxy 缓存：
-// 拦截 `.hermes` 返回网关门面，其余属性透传原 contextBridge 对象。
+// 拦截 `.helix` 返回网关门面，其余属性透传原 contextBridge 对象。
 // （contextBridge 暴露的 window.electron 不可重赋值，只能在读取层分流。）
 //
 // 关键坑：contextBridge 暴露的对象属性是 non-writable + non-configurable，
 // JS Proxy 不变量要求 get 陷阱对这类属性必须原样返回 target 上的值——
-// 直接以 window.electron 为 target 并对 `hermes` 返回门面会抛
-// "property 'hermes' is a read-only and non-configurable data property..."。
+// 直接以 window.electron 为 target 并对 `helix` 返回门面会抛
+// "property 'helix' is a read-only and non-configurable data property..."。
 // 解法：以空对象为 target（无自有属性 → 不受不变量约束），闭包转发到真实 api。
 let serveProxyCache: ElectronAPI | null = null
 
@@ -49,8 +49,8 @@ function wrapWithServeProxy(api: ElectronAPI): ElectronAPI {
   if (serveProxyCache) return serveProxyCache
   serveProxyCache = new Proxy({} as Record<string | symbol, unknown>, {
     get(_target, prop: string | symbol) {
-      if (prop === 'hermes') {
-        const facade = getServeHermesFacade()
+      if (prop === 'helix') {
+        const facade = getServeHelixFacade()
         if (facade) return facade
       }
       return (api as any)[prop as any]
@@ -64,25 +64,25 @@ function wrapWithServeProxy(api: ElectronAPI): ElectronAPI {
 
 /**
  * Get Electron API
- * serve 网关激活时返回 Proxy（`.hermes` 分流到网关门面），否则原样返回。
+ * serve 网关激活时返回 Proxy（`.helix` 分流到网关门面），否则原样返回。
  */
 export function getElectronAPI(): ElectronAPI | null {
   if (isElectron()) {
-    if (getServeHermesFacade()) return wrapWithServeProxy(window.electron!)
+    if (getServeHelixFacade()) return wrapWithServeProxy(window.electron!)
     return window.electron!
   }
   return null
 }
 
 /**
- * 获取 hermes API（模式感知）。
+ * 获取 helix API（模式感知）。
  * serve 模式 → 网关门面（WS/REST 直连）；acp 模式 → 原 IPC 桥。
- * 渲染层所有直摸 `window.electron.hermes` 的调用点应改用本函数。
+ * 渲染层所有直摸 `window.electron.helix` 的调用点应改用本函数。
  */
-export function hermesApi(): ElectronAPI['hermes'] | null {
-  const facade = getServeHermesFacade()
+export function helixApi(): ElectronAPI['helix'] | null {
+  const facade = getServeHelixFacade()
   if (facade) return facade
-  return (typeof window !== 'undefined' ? window.electron?.hermes : null) ?? null
+  return (typeof window !== 'undefined' ? window.electron?.helix : null) ?? null
 }
 
 /**
@@ -125,13 +125,13 @@ export const electronFS = {
     throw new Error('File system not available in browser mode')
   },
 
-  // Absolute Hermes memory directory, computed in the main process.
+  // Absolute Helix memory directory, computed in the main process.
   // Use this instead of deriving the path from process.env in the renderer
   // (which is undefined in a Next.js client bundle).
   async memoryDir(): Promise<string | null> {
     const api = getElectronAPI()
-    if (api && typeof api.fs.hermesMemoryDir === 'function') {
-      return api.fs.hermesMemoryDir()
+    if (api && typeof api.fs.helixMemoryDir === 'function') {
+      return api.fs.helixMemoryDir()
     }
     return null
   },
@@ -333,40 +333,48 @@ export const electronApp = {
     }
     throw new Error('App not available in browser mode')
   },
+
+  async readEnvKey(key: string): Promise<string> {
+    const api = getElectronAPI()
+    if (api) {
+      return api.app.readEnvKey(key)
+    }
+    return ''
+  },
 }
 
 /**
- * Hermes bridge (Electron only) — JSON-RPC send / notify.
+ * Helix bridge (Electron only) — JSON-RPC send / notify.
  *
  * `notify` is a JSON-RPC notification (no response expected). It is only
- * available in preload builds that expose `hermes.notify`. If the running
+ * available in preload builds that expose `helix.notify`. If the running
  * app has an older preload (not yet restarted after a code change), calling
  * `notify` directly throws "is not a function" and white-screens the UI.
  * This wrapper degrades gracefully: it no-ops with a warning instead of
  * crashing, so the app keeps working until the user restarts Helix.
  */
-export const electronHermes = {
+export const electronHelix = {
   async send(method: string, params?: any): Promise<any> {
     const api = getElectronAPI()
-    if (api?.hermes) {
-      return api.hermes.send(method, params)
+    if (api?.helix) {
+      return api.helix.send(method, params)
     }
     return null
   },
 
   notify(method: string, params?: any): void {
     const api = getElectronAPI()
-    const h = api?.hermes as any
+    const h = api?.helix as any
     if (h?.notify) {
       h.notify(method, params)
       return
     }
-    console.warn(`[electron-bridge] hermes.notify unavailable; skipped "${method}". Restart Helix to enable.`)
+    console.warn(`[electron-bridge] helix.notify unavailable; skipped "${method}". Restart Helix to enable.`)
   },
 
   async interrupt(sessionId: string): Promise<void> {
     const api = getElectronAPI()
-    const h = api?.hermes as any
+    const h = api?.helix as any
     if (h?.interrupt) {
       await h.interrupt(sessionId)
     }
@@ -374,7 +382,7 @@ export const electronHermes = {
 
   async update(): Promise<{ ok: boolean; message: string }> {
     const api = getElectronAPI()
-    const h = api?.hermes as any
+    const h = api?.helix as any
     if (h?.update) {
       return h.update()
     }
@@ -384,7 +392,7 @@ export const electronHermes = {
   /** Live config push: set a single key/value pair without gateway restart */
   async setConfigKeyValue(key: string, value: any, sessionId?: string): Promise<void> {
     const api = getElectronAPI()
-    const h = api?.hermes as any
+    const h = api?.helix as any
     if (h?.setConfigKeyValue) {
       await h.setConfigKeyValue({ key, value, session_id: sessionId })
     }
@@ -393,7 +401,7 @@ export const electronHermes = {
   /** Respond to an approval request from the backend */
   async approvalRespond(params: { session_id?: string; tool_call_id?: string; choice: string }): Promise<void> {
     const api = getElectronAPI()
-    const h = api?.hermes as any
+    const h = api?.helix as any
     if (h?.approvalRespond) {
       await h.approvalRespond(params)
     }

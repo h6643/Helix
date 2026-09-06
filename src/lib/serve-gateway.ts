@@ -1,12 +1,12 @@
 'use client'
 
 /**
- * serve-gateway.ts — hermes serve 网关适配器（阶段2，任务64）
+ * serve-gateway.ts — helix serve 网关适配器（阶段2，任务64）
  *
- * 目标：渲染层直连 `hermes serve` 的 WS JSON-RPC + REST 网关，同时对外保持与
- * `window.electron.hermes`（ACP IPC 桥）**完全同形**的接口。所有现有调用点
- * （api-client.ts / use-hermes.ts / agent-flow-panel.tsx / ...）零逻辑改动，
- * 仅把 `window.electron.hermes` 换成 `hermesApi()` 即可按模式自动分流。
+ * 目标：渲染层直连 `helix serve` 的 WS JSON-RPC + REST 网关，同时对外保持与
+ * `window.electron.helix`（ACP IPC 桥）**完全同形**的接口。所有现有调用点
+ * （api-client.ts / use-helix.ts / agent-flow-panel.tsx / ...）零逻辑改动，
+ * 仅把 `window.electron.helix` 换成 `helixApi()` 即可按模式自动分流。
  *
  * 协议事实（源码核查，见 docs/serve-migration.md）：
  * - WS 端点 ws://127.0.0.1:<port>/api/ws?token=<t>，换行分隔 JSON-RPC 2.0。
@@ -72,13 +72,20 @@ function num(u: any, ...keys: string[]): number | undefined {
 
 function mapUsage(u: any): any {
   if (!u || typeof u !== 'object') return null
+  const totalUsage = u.total && typeof u.total === 'object' ? u.total : u
+  const lastUsage = u.last && typeof u.last === 'object' ? u.last : undefined
+  const contextWindow = num(u, 'modelContextWindow', 'model_context_window')
+  const totalTokens = num(totalUsage, 'totalTokens', 'total_tokens', 'total')
   return {
-    totalTokens: num(u, 'totalTokens', 'total_tokens', 'total'),
-    inputTokens: num(u, 'inputTokens', 'input_tokens', 'prompt_tokens', 'input', 'prompt'),
-    outputTokens: num(u, 'outputTokens', 'output_tokens', 'completion_tokens', 'output', 'completion'),
-    thoughtTokens: num(u, 'thoughtTokens', 'thought_tokens', 'reasoning_tokens', 'reasoning'),
-    cachedReadTokens: num(u, 'cachedReadTokens', 'cache_read_tokens', 'cache_read_input_tokens'),
-    cachedWriteTokens: num(u, 'cachedWriteTokens', 'cache_write_tokens', 'cache_creation_input_tokens'),
+    totalTokens,
+    inputTokens: num(totalUsage, 'inputTokens', 'input_tokens', 'prompt_tokens', 'input', 'prompt'),
+    outputTokens: num(totalUsage, 'outputTokens', 'output_tokens', 'completion_tokens', 'output', 'completion'),
+    thoughtTokens: num(totalUsage, 'thoughtTokens', 'thought_tokens', 'reasoningOutputTokens', 'reasoning_output_tokens', 'reasoning'),
+    cachedReadTokens: num(totalUsage, 'cachedReadTokens', 'cachedInputTokens', 'cache_read_tokens', 'cache_read_input_tokens'),
+    cachedWriteTokens: num(totalUsage, 'cachedWriteTokens', 'cacheWriteInputTokens', 'cache_write_tokens', 'cache_creation_input_tokens'),
+    context_max: contextWindow,
+    context_used: totalTokens,
+    ...(lastUsage ? { lastUsage } : {}),
     ...u,
   }
 }
@@ -109,7 +116,7 @@ function lastAssistantText(messages: any): string {
 
 /**
  * 归一化用于判重比较（与 agent-flow-panel.normalizeForCompare 等价：去空白+标点+小写）。
- * Hermes 全文重发时经常带微小差异（"CLI和配置" vs "CLI 和配置"），不归一化直接比会判为不同。
+ * Helix 全文重发时经常带微小差异（"CLI和配置" vs "CLI 和配置"），不归一化直接比会判为不同。
  */
 function normText(s: string): string {
   return s.replace(/[\s\p{P}]/gu, '').toLowerCase()
@@ -131,7 +138,7 @@ function authoritativeOverrides(authoritative: string, eventText: string): boole
 }
 
 /**
- * Derive a Hermes-style tool "kind" from the tool name. The ACP adapter maps
+ * Derive a Helix-style tool "kind" from the tool name. The ACP adapter maps
  * file-modifying tools (write_file / edit / str_replace / apply_patch) to
  * kind='edit', which the UI uses to detect pending file changes for the diff
  * preview. serve events don't carry a `kind`, so reconstruct it from the name.
@@ -144,7 +151,7 @@ function toolKindFromName(name: string): string {
   return ''
 }
 
-// Hermes ships the terminal-styled inline diff with ANSI SGR codes around every
+// Helix ships the terminal-styled inline diff with ANSI SGR codes around every
 // line (see agent/display.py _render_inline_unified_diff). Strip them so the
 // renderer can consume plain text.
 function stripAnsi(s: unknown): string {
@@ -197,7 +204,7 @@ export class ServeGatewayClient {
     if (!changed || this.disposed) return
     // 地址变了 = 网关是全新进程：旧实例上做过的模型同步对它无效，
     // 必须重置标志，让下一次 session/new 重新走 ensureModelSynced。
-    // （否则 respawn 后的新实例会拿 HERMES_HOME 里可能陈旧的配置建 agent → 30s 超时）
+    // （否则 respawn 后的新实例会拿 ~/.helix 里可能陈旧的配置建 agent → 30s 超时）
     this.modelSynced = false
     this.modelSyncPromise = null
     debug('[ServeGateway] 网关地址变更 → port=', next.port, '，重连')
@@ -212,7 +219,7 @@ export class ServeGatewayClient {
   /** 重连前向主进程拉最新网关信息，防止对已死端口无限重试 */
   private async refreshInfoFromMain(): Promise<void> {
     try {
-      const ipc = (window as any).electron?.hermes
+      const ipc = (window as any).electron?.helix
       const info = await ipc?.getGatewayInfo?.()
       if (info?.mode === 'serve' && !info.pending && info.wsUrl && info.baseUrl) {
         if (info.wsUrl !== this.info.wsUrl) {
@@ -236,7 +243,7 @@ export class ServeGatewayClient {
         // 唤醒 CONNECTING 窗口内挂起的 rpc 调用
         const waiters = this.openWaiters.splice(0)
         for (const w of waiters) { try { w() } catch { /* noop */ } }
-        // 对齐官方桌面端：WS 断开时 Hermes 会把运行中的会话 detach 到 drop
+        // 对齐官方桌面端：WS 断开时 Helix 会把运行中的会话 detach 到 drop
         // sentinel 继续执行，客户端重连后必须调用 session.resume 把 transport
         // 重绑回会话（server.py _live_session_payload 里 session["transport"]=
         // transport），事件流才会恢复。不 resume 的话，断连期间产生的事件永久丢失。
@@ -263,7 +270,7 @@ export class ServeGatewayClient {
         if (this.ws !== ws) return
         this.ws = null
         // 只失败普通 RPC（session/list、tools/list 等），**保留** in-flight 的
-        // session/prompt。官方行为：WS 断开只是客户端掉线，Hermes 会把运行中
+        // session/prompt。官方行为：WS 断开只是客户端掉线，Helix 会把运行中
         // 的会话 detach 继续跑；重连后 session.resume 重绑 transport 恢复事件流，
         // 最终 run.completed 会正常 resolve 这个 prompt。若这里立刻 reject，
         // 前端会把一次瞬时断连当成 run 失败 → 丢失整个回复（显示"停止思考"）。
@@ -331,7 +338,7 @@ export class ServeGatewayClient {
 
   /**
    * 重连后恢复断连期间仍在运行的会话（对齐官方桌面端）。
-   * WS 断开时 Hermes 把会话 detach 到 drop sentinel 继续执行；重连后必须
+   * WS 断开时 Helix 把会话 detach 到 drop sentinel 继续执行；重连后必须
    * session.resume 把 transport 重绑回会话，事件流才恢复。对每个 in-flight 会话：
    * - running=true  → 会话仍在跑，transport 已重绑，后续 run.completed 事件正常到达
    * - running=false → 断连期间已跑完（run.completed 发往 drop sink 丢失），用返回的
@@ -585,7 +592,7 @@ export class ServeGatewayClient {
       }
 
       // ── serve 模式结束事件 ─────────────────────────────────────
-      // Hermes 的 serve 运行以 run.completed / run.cancelled / run.failed 收尾，
+      // Helix 的 serve 运行以 run.completed / run.cancelled / run.failed 收尾，
       // 而非 ACP 的 message.complete。原先这里没有对应 case，结束事件被直接丢弃，
       // 前端永远收不到 run_complete，只能等 90s 兜底才结束（表现为"思考完还转 1 分多钟"）。
       case 'run.completed': {
@@ -660,7 +667,7 @@ export class ServeGatewayClient {
               toolCallId: toolId,
               title: name || 'tool',
               kind: toolKindFromName(name),
-              // Hermes `tool.start` never carries raw `args` — only a
+              // Helix `tool.start` never carries raw `args` — only a
               // display `context` preview (e.g. "foo.ts 1-50" for read_file,
               // a summarized command for terminal). Fall back to it so the
               // frontend can show what the tool actually operated on.
@@ -743,7 +750,7 @@ export class ServeGatewayClient {
           useBackgroundTasksStore.getState().finishTask(toolId, taskStatus)
         }
         this.emit('tool.complete', { ...base, tool_call_id: toolId, tool_name: name, inline_diff: inlineDiff })
-        // Hermes `todo` 工具：后端 tool.complete 在 payload.todos 附带全量列表，
+        // Helix `todo` 工具：后端 tool.complete 在 payload.todos 附带全量列表，
         // 转成专门的 todo_update 事件喂给 extractTodoList，驱动右上角任务面板
         // （否则 todo 只作为工具卡片出现在对话流里，面板永远为空）。
         if (Array.isArray(payload?.todos) && payload.todos.length) {
@@ -790,7 +797,7 @@ export class ServeGatewayClient {
       }
 
       case 'clarify.request': {
-        // Hermes 的 clarify 工具阻塞等待用户输入。官方桌面端收到后渲染
+        // Helix 的 clarify 工具阻塞等待用户输入。官方桌面端收到后渲染
         // ClarifyTool 浮动条，用户回应后发 `clarify.respond` 解锁后端。
         // 之前 Helix 没有此映射 → clarify.request 被静默丢弃 → run 永久挂起
         // （表现为"无浮动条却一直转"）。这里翻译成 ACP session/update，
@@ -894,19 +901,6 @@ export class ServeGatewayClient {
       const { useHelixStore } = await import('@/stores/helix-store')
       mcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers)
     }
-    // 常规「增强 Find 和 Grep」：显式传入的 search_engine 优先（'' = 用默认
-    // 引擎），未传时（如「session not found」自动重建路径）回退到当前设置值。
-    let searchEngine = params?.search_engine
-    if (searchEngine === undefined) {
-      const { useHelixStore } = await import('@/stores/helix-store')
-      searchEngine = useHelixStore.getState().enhancedFindGrep ? 'rg' : ''
-    }
-    // 常规「集成终端 Shell」：仅新会话生效（未传时回退到当前设置值）。
-    let terminalShell = params?.terminal_shell
-    if (terminalShell === undefined) {
-      const { useHelixStore } = await import('@/stores/helix-store')
-      terminalShell = useHelixStore.getState().terminalShell
-    }
     const res = await this.rpc('session.create', {
       source: 'helix',
       // 会话重建/恢复时必须把前端保存的本对话历史带回去，否则后端会话像是
@@ -920,8 +914,6 @@ export class ServeGatewayClient {
       // 必须随 session.create 传给后端，否则会话 cwd 落到配置/TERMINAL_CWD/
       // 启动目录，模型读到的目录和界面显示的项目脱节。
       ...(params?.cwd ? { cwd: params.cwd } : {}),
-      ...(searchEngine ? { search_engine: searchEngine } : {}),
-      ...(terminalShell ? { terminal_shell: terminalShell } : {}),
     })
     // 记住持久化 DB key：后端 session.create 同时返回 session_id（内存态
     // ui_session，进程重启即失效）和 stored_session_id（state.db 主键，跨
@@ -939,7 +931,7 @@ export class ServeGatewayClient {
         debug('[ServeGateway] send session/new (modelSynced=', this.modelSynced, ', connected=', this.connected, ')')
         // 建会话前强制同步一次前端模型配置（本客户端生命周期内一次）。
         // 原因：聊天主路径（agent-flow-panel）直接 session/new，不经过
-        // use-hermes 的 setHermesModel；而 HERMES_HOME 下 config.yaml 里
+        // use-helix 的 setHelixModel；而 ~/.helix 下 config.yaml 里
         // 可能残留旧 IPC 直写的 provider（如 'agnes-ai'），serve 的模型解析
         // 不认识 → base_url 被丢弃 → agent 构建 30s 超时 → error 事件。
         const res = await this.createSession(params)
@@ -1155,7 +1147,7 @@ export class ServeGatewayClient {
    * 确保后端模型配置与前端一致（每次 session/new 前都同步）。
    * 注意：绝不能依赖 modelSynced 短路。UI 切换 provider/模型有多个入口
    * （applyProfile 走 pushModelConfig；输入栏走 pushModelConfig；设置页保存走
-   * hermes:setConfig，serve 下同样写 config.yaml），一旦某入口没触发 setModel，
+   * helix:setConfig，serve 下同样写 config.yaml），一旦某入口没触发 setModel，
    * modelSynced 会停留 true，网关将一直使用旧 config.yaml
    * （如 deepseek+Ling 错配 → 400 无输出）。
    * 因此每次都读取 store 的实时 apiConfig 写回，代价只是一次文件写。
@@ -1199,27 +1191,27 @@ export class ServeGatewayClient {
   }
 
   /**
-   * 模型配置 → 通过 preload 的 hermes.setModel IPC 写回后端 config.yaml/.env。
+   * 模型配置 → 通过 preload 的 helix.setModel IPC 写回后端 config.yaml/.env。
    * 不走浏览器直接 fetch /api/model/set：渲染层跑在 localhost:3000，而 serve
    * 网关在 127.0.0.1:<port>，跨域请求会被浏览器 CORS 拦截 → "Failed to fetch"。
-   * 走 IPC 是主进程侧发起，无此限制。主进程 hermes:setModel 内部已做 isBadConfig
+   * 走 IPC 是主进程侧发起，无此限制。主进程 helix:setModel 内部已做 isBadConfig
    * 校验，死端点会被自动回落成 live（ant-ling），从根上杜绝"每次重启变回死配置"。
    * serve 模式下 restartGatewayDebounced 已被守卫短路，写盘后网关在下次
    * session.create 重读 config.yaml，无需重启。
    */
   async setModel(params: { model: string; baseUrl?: string; apiKey?: string; provider?: string }): Promise<any> {
-    // 必须直取原始 IPC 桥（window.electron.hermes），绝不能经 getElectronAPI()：
-    // serve 模式下它返回门面 Proxy，`.hermes` 会被分流回 routerFacade.setModel →
+    // 必须直取原始 IPC 桥（window.electron.helix），绝不能经 getElectronAPI()：
+    // serve 模式下它返回门面 Proxy，`.helix` 会被分流回 routerFacade.setModel →
     // 再次调用本方法 → 无限递归（modelSynced 永不置位，首次 session/new 永久
     // 挂起在 ensureModelSynced，WS 零消息）。这里只需要主进程写 config.yaml
-    // （hermes:setModel），serve 模式 restartGatewayDebounced 是 no-op，不会重启网关。
-    const hermes = (typeof window !== 'undefined' ? (window as any).electron?.hermes : null) as any
-    if (!hermes?.setModel) {
+    // （helix:setModel），serve 模式 restartGatewayDebounced 是 no-op，不会重启网关。
+    const helix = (typeof window !== 'undefined' ? (window as any).electron?.helix : null) as any
+    if (!helix?.setModel) {
       // 纯浏览器（无 Electron 桥）：没有本地网关可写，静默跳过。
       debug('[ServeGateway] 无 Electron 桥，跳过 setModel（纯浏览器环境）')
       return { skipped: true }
     }
-    const res = await hermes.setModel({
+    const res = await helix.setModel({
       model: params.model,
       baseUrl: params.baseUrl,
       apiKey: params.apiKey,
@@ -1256,7 +1248,7 @@ export function getGatewayMode(): Promise<'acp' | 'serve'> {
     try {
       if (typeof window === 'undefined') return 'acp'
       installTauriBridge() // 惰性桥：先装再读，避免误判 acp
-      const ipc = (window as any).electron?.hermes
+      const ipc = (window as any).electron?.helix
       if (!ipc?.getGatewayInfo) return 'acp'
       const info = await ipc.getGatewayInfo()
       return info?.mode === 'serve' ? 'serve' : 'acp'
@@ -1272,7 +1264,7 @@ export function getServeClient(): ServeGatewayClient | null {
 }
 
 /**
- * 常驻路由器门面（与 window.electron.hermes 同形）。
+ * 常驻路由器门面（与 window.electron.helix 同形）。
  *
  * 关键设计：门面在**首次访问时立即存在**，不等 serve 握手完成——否则
  * 早期构造的订阅者（如 api-client 的 constructor）会拿到未分流的原始
@@ -1347,20 +1339,20 @@ function buildRouterFacade(ipc: any): any {
  * 返回模式感知门面。Electron + 新 preload（有 getGatewayInfo）时恒返回
  * 路由器（acp 模式内部自动落回 IPC）；旧 preload / 浏览器返回 null。
  */
-export function getServeHermesFacade(): any | null {
+export function getServeHelixFacade(): any | null {
   if (typeof window === 'undefined') return null
   // 确保 Tauri invoke 桥已装好（window.electron 是惰性安装的）。若模块加载
   // 顺序导致本函数先于任何 isElectron()/installTauriBridge() 执行，直接读
   // window.electron 会拿到 undefined → 错误地走 acp/null 分支。
   installTauriBridge()
-  const ipc = (window as any).electron?.hermes
+  const ipc = (window as any).electron?.helix
   if (!ipc?.getGatewayInfo) return null
   if (!routerFacade) routerFacade = buildRouterFacade(ipc)
   return routerFacade
 }
 
 /**
- * 幂等初始化（首次 RPC / use-hermes 挂载时触发）。
+ * 幂等初始化（首次 RPC / use-helix 挂载时触发）。
  * acp 模式立即 resolve null；serve 模式轮询 getGatewayInfo 直到握手完成，然后连 WS。
  */
 export function initServeGateway(): Promise<ServeGatewayClient | null> {
@@ -1368,12 +1360,12 @@ export function initServeGateway(): Promise<ServeGatewayClient | null> {
   initPromise = (async () => {
     if (typeof window === 'undefined') return null
     // 惰性桥竞态修复：window.electron 由 installTauriBridge() 惰性安装。
-    // 若 use-hermes 的 useEffect 先于任何 isElectron() 触发 initServeGateway，
+    // 若 use-helix 的 useEffect 先于任何 isElectron() 触发 initServeGateway，
     // 直接读 window.electron 会得到 undefined → 提前 return null 且被
     // initPromise 永久缓存 → 之后桥装好也不重试 → serve 网关永不连接。
     // 这里先强制装桥（幂等），保证下面能读到 getGatewayInfo。
     installTauriBridge()
-    const ipc = (window as any).electron?.hermes
+    const ipc = (window as any).electron?.helix
     if (!ipc?.getGatewayInfo) return null
     try {
       // serve 冷启动最长 90s：pending 时以 2s 间隔轮询

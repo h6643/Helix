@@ -20,14 +20,14 @@ let pushCooldown: ReturnType<typeof setTimeout> | null = null
 let lastPushJson = ''
 
 /**
- * Push a config key/value pair to the Hermes backend in real-time.
+ * Push a config key/value pair to the Helix backend in real-time.
  * No gateway restart required — takes effect on the next prompt.
  */
 export function pushConfigKeyValue(key: string, value: ConfigValue, sessionId?: string) {
-  // Tauri mode: use tauri bridge via window.electron.hermes
+  // Tauri mode: use tauri bridge via window.electron.helix
   if (!isElectron()) {
-    const hermes = (window as any).electron?.hermes
-    if (hermes?.setConfigKeyValue) {
+    const helix = (window as any).electron?.helix
+    if (helix?.setConfigKeyValue) {
       const payload = { key, value, session_id: sessionId }
       const json = JSON.stringify(payload)
       if (json === lastPushJson) return
@@ -36,15 +36,15 @@ export function pushConfigKeyValue(key: string, value: ConfigValue, sessionId?: 
       if (pushCooldown) clearTimeout(pushCooldown)
       pushCooldown = setTimeout(() => {
         pushCooldown = null
-        hermes.setConfigKeyValue(payload).catch(() => {})
+        helix.setConfigKeyValue(payload).catch(() => {})
       }, 150)
     }
     return
   }
 
   const serve = isServeActive() ? getServeClient() : null
-  const hermes = window.electron?.hermes as any
-  if (!serve && !hermes?.setConfigKeyValue) return
+  const helix = window.electron?.helix as any
+  if (!serve && !helix?.setConfigKeyValue) return
 
   const payload = { key, value, session_id: sessionId }
   const json = JSON.stringify(payload)
@@ -59,7 +59,7 @@ export function pushConfigKeyValue(key: string, value: ConfigValue, sessionId?: 
       // serve 模式：官方 WS config.set，live 生效，无需重启网关
       serve.rpc('config.set', { key, value, session_id: sessionId }).catch(() => {})
     } else {
-      hermes.setConfigKeyValue({ key, value, session_id: sessionId }).catch(() => {})
+      helix.setConfigKeyValue({ key, value, session_id: sessionId }).catch(() => {})
     }
   }, 150)
 }
@@ -78,11 +78,11 @@ export function pushModelConfig(payload: {
   const hasModelPayload = !!(payload.model || payload.baseUrl || payload.apiKey || payload.provider)
   if (!hasModelPayload) return
 
-  // Tauri mode: use tauri bridge via window.electron.hermes
+  // Tauri mode: use tauri bridge via window.electron.helix
   if (!isElectron()) {
-    const hermes = (window as any).electron?.hermes
-    if (hermes?.setConfig) {
-      hermes.setConfig(payload).catch((e: unknown) => {
+    const helix = (window as any).electron?.helix
+    if (helix?.setConfig) {
+      helix.setConfig(payload).catch((e: unknown) => {
         console.warn('[config-sync] tauri setConfig 失败:', e)
       })
     }
@@ -95,7 +95,7 @@ export function pushModelConfig(payload: {
   // 按"模式"分流，而不是按"连接状态"（isServeActive）分流。
   // 关键竞态：App 启动时 helix-layout 立即调本函数，此刻 serve 还在冷启动、
   // WS 未连上 → isServeActive()===false → 若据此落 IPC，会触发
-  // hermes:setConfig 直写 config.yaml（原样写入私有 provider 名）并
+  // helix:setConfig 直写 config.yaml（原样写入私有 provider 名）并
   // restartGatewayDebounced 杀掉 serve → 新实例读坏配置 → agent 构建 30s 超时。
   // getGatewayMode 从第一秒起就能拿到真实模式（pending 也返回 mode），
   // serve 模式下等网关就绪后走 REST，绝不落 IPC。
@@ -129,7 +129,7 @@ function pushModelConfigViaIpc(
   payload: { model?: string; provider?: string; baseUrl?: string; apiKey?: string },
   hasModelPayload: boolean,
 ) {
-  const hermes = window.electron?.hermes
+  const helix = window.electron?.helix
   const profile = window.electron?.profile
   if (!hasModelPayload) return
 
@@ -144,8 +144,8 @@ function pushModelConfigViaIpc(
     }
   } catch {}
   try {
-    if (hermes?.setConfig && (payload.model || payload.baseUrl || payload.apiKey || payload.provider)) {
-      hermes.setConfig({
+    if (helix?.setConfig && (payload.model || payload.baseUrl || payload.apiKey || payload.provider)) {
+      helix.setConfig({
         model: payload.model,
         provider: payload.provider,
         baseUrl: payload.baseUrl,
@@ -164,8 +164,8 @@ export function pushAgentConfigLive(payload: {
   reasoningEffort?: string
   fastMode?: boolean
 }) {
-  const hermes = (window as any).electron?.hermes as any
-  const isTauri = !isElectron() && !!hermes?.setConfigKeyValue
+  const helix = (window as any).electron?.helix as any
+  const isTauri = !isElectron() && !!helix?.setConfigKeyValue
 
   if (!isElectron() && !isTauri) return
 

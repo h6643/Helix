@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import {
   Plus,
@@ -30,7 +30,7 @@ import { isElectron, electronDialog, electronShell } from '@/lib/electron-bridge
 import { persistence, type PersistedSession } from '@/lib/persist'
 import { timeAgo } from '@/lib/format'
 import { useHelixStore } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
+import { useGatewayStore } from '@/stores/gateway-store'
 import { FileTreePanel } from './file-tree-panel'
 
 interface SidebarProps {
@@ -319,7 +319,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
   const currentSessionId = useHelixStore(s => s.currentSessionId)
   const sessionPendingApproval = useHelixStore(s => s.sessionPendingApproval)
   const streamingDrafts = useHelixStore(s => s.streamingDrafts)
-  const hermesConnected = useHermesStore(s => s.hermesConnected)
+  const helixConnected = useGatewayStore(s => s.helixConnected)
   const [sessions, setSessions] = useState<PersistedSession[]>([])
   const [persistedFolders, setPersistedFolders] = useState<Set<string>>(new Set())
   const [pinnedProjectDirs, setPinnedProjectDirs] = useState<Set<string>>(new Set())
@@ -501,9 +501,9 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
         void state.flushSessionPersist()
       }
       useHelixStore.getState().clearExecutionFlow()
-      // NOTE: do NOT reset the Hermes session here — under the concurrent
-      // multi-session design each conversation owns its own Hermes ACP session
-      // (hermesSessionMapRef in agent-flow-panel); resetting the legacy global
+      // NOTE: do NOT reset the Helix session here — under the concurrent
+      // multi-session design each conversation owns its own Helix ACP session
+      // (helixSessionMapRef in agent-flow-panel); resetting the legacy global
       // id would be meaningless at best and confusing at worst.
       // Same as above: navigating to a session must close the panels.
     if (state.showScheduledTasksPanel || state.showSkillPanel) {
@@ -599,7 +599,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
           useHelixStore.setState({ selectedWorkDir: null })
         }
         useHelixStore.getState().clearExecutionFlow()
-        useHermesStore.getState().setHermesSessionId(null)
+        useGatewayStore.getState().setHelixSessionId(null)
       }
       setDeleteTarget(null)
     } catch (e) {
@@ -825,7 +825,7 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
           >
             <Settings className="size-[18px]" />
             {isElectron() && (
-              <span className={`block w-1.5 h-1.5 rounded-full mx-auto mt-1 ${hermesConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+              <span className={`block w-1.5 h-1.5 rounded-full mx-auto mt-1 ${helixConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
             )}
           </button>
         </div>
@@ -1182,9 +1182,9 @@ export function Sidebar({ onNewTask, collapsed = false, onToggle }: SidebarProps
           <Settings className="size-4 shrink-0" />
           <span>设置</span>
           {isElectron() && (
-            <span className={`ml-auto flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.7143)] ${hermesConnected ? 'text-emerald-500' : 'text-amber-500'}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${hermesConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
-              {hermesConnected ? '已连接' : '连接中'}
+            <span className={`ml-auto flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.7143)] ${helixConnected ? 'text-emerald-500' : 'text-amber-500'}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${helixConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+              {helixConnected ? '已连接' : '连接中'}
             </span>
           )}
         </button>

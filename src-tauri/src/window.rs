@@ -45,7 +45,13 @@ pub fn new_window() {
     let handle = app_handle();
     let _ = tauri::WebviewWindowBuilder::new(
         handle,
-        format!("helix-win-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)),
+        format!(
+            "helix-win-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ),
         tauri::WebviewUrl::App("/".into()),
     )
     .title("Helix")

@@ -9,14 +9,14 @@ interface MemNode {
   isDir: boolean
 }
 
-// Read-only view of Hermes learning / memory. The gateway's `/api/learning`
+// Read-only view of Helix learning / memory. The gateway's `/api/learning`
 // REST endpoint isn't exposed over Helix's stdio gateway, so we read the local
 // memory store directly via the fs bridge (read-only).
 //
 // NOTE: the memory dir is fetched from the MAIN process via electronFS.memoryDir()
 // — never derived from process.env.LOCALAPPDATA in the renderer. In a Next.js
 // client bundle `process.env.LOCALAPPDATA` is undefined at runtime, which used
-// to produce a bogus "/hermes/memory" path rejected by the fs sandbox.
+// to produce a bogus "/helix/memory" path rejected by the fs sandbox.
 export function LearningView({ onClose }: { onClose?: () => void }) {
   const [nodes, setNodes] = useState<MemNode[]>([])
   const [loading, setLoading] = useState(false)
@@ -30,18 +30,18 @@ export function LearningView({ onClose }: { onClose?: () => void }) {
     setActive(null)
     try {
       const MEMORY_DIR = await electronFS.memoryDir()
-      if (!MEMORY_DIR) throw new Error('无法获取 Hermes 记忆目录（非 Electron 环境？）')
+      if (!MEMORY_DIR) throw new Error('无法获取 Helix 记忆目录（非 Electron 环境？）')
       const list = await electronFS.readDir(MEMORY_DIR)
       setNodes(
         (list as { name: string; isDirectory: boolean }[])
           // Skip editor/process lockfiles and dotfiles — they are not memory
-          // content (e.g. MEMORY.md.lock is Hermes's concurrent-write lock).
+          // content (e.g. MEMORY.md.lock is Helix's concurrent-write lock).
           .filter(
             (n) =>
               // Skip editor/process lockfiles and dotfiles — not memory content.
               !n.name.startsWith('.') &&
               !n.name.endsWith('.lock') &&
-              // Skip Hermes auto-backups: `MEMORY.md.bak.<ts>`, `USER.md.bak.<ts>`, etc.
+              // Skip Helix auto-backups: `MEMORY.md.bak.<ts>`, `USER.md.bak.<ts>`, etc.
               !/\.bak(\.|$)/.test(n.name) &&
               n.name !== 'MEMORY.md' &&
               n.name !== 'USER.md'

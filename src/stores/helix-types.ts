@@ -33,7 +33,7 @@ export interface FileAttachment {
   mime: string
   kind: 'image' | 'text' | 'file'
   dataUrl?: string     // image preview (data: URL), only for kind === 'image'
-  base64?: string      // raw base64 payload (without data: prefix), for sending to Hermes
+  base64?: string      // raw base64 payload (without data: prefix), for sending to Helix
   path?: string        // Electron: absolute file path for binary files
 }
 
@@ -87,7 +87,7 @@ export interface StreamingDraft {
   isAgentRunning: boolean
   textBuffer?: string
   thoughtBuffer?: string
-  hermesSessionId?: string | null
+  helixSessionId?: string | null
   // When this run started (ms epoch). Per-session so each conversation's live
   // timer keeps its own elapsed time instead of sharing one global timestamp.
   startedAt?: number
@@ -95,7 +95,7 @@ export interface StreamingDraft {
   totalTokens?: number
 }
 
-// Transient notice about the Hermes gateway connection (e.g. upstream dropped the
+// Transient notice about the Helix gateway connection (e.g. upstream dropped the
 // stream and is retrying). Shown in the execution status box; not persisted.
 export interface ConnectionNotice {
   phase: 'error' | 'retrying' | 'recovered'
@@ -164,7 +164,7 @@ export interface PendingChange {
   oldContent: string
   newContent: string
   language: string
-  /** Backend-rendered unified diff (from Hermes tool.complete inline_diff),
+  /** Backend-rendered unified diff (from Helix tool.complete inline_diff),
    *  ANSI-stripped. When present, DiffPreview renders it directly instead of
    *  recomputing a diff from old/new content. */
   unifiedDiff?: string
@@ -172,6 +172,25 @@ export interface PendingChange {
 
 export type ApiProvider = string
 export type AgentEngine = 'helix'
+
+// Helix native reasoning scale (none/minimal/low/medium/high/xhigh/max/ultra).
+export type ReasoningEffortLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+
+// Tool approval choices written back to the backend approval state machine.
+export type ApprovalLevel = 'once' | 'session' | 'always' | 'deny'
+
+export interface McpServerConfig {
+  name?: string
+  type: 'local' | 'remote'
+  command?: string[]
+  url?: string
+  environment?: Record<string, string>
+  enabled?: boolean
+  cwd?: string
+  timeout?: number
+  headers?: Record<string, string>
+  envPassthrough?: boolean
+}
 
 export interface ApiConfig {
   provider: ApiProvider
@@ -191,8 +210,8 @@ export interface ApiProfile {
 
 /**
  * Multi-provider config used by the flattened model selector.
- * Mirrors the hermes-ui ProviderConfig shape so the selector can read from
- * either the main store or the standalone hermes-ui store.
+ * Mirrors the helix-ui ProviderConfig shape so the selector can read from
+ * either the main store or the standalone helix-ui store.
  */
 export interface ProviderConfig {
   id: string
@@ -227,7 +246,7 @@ export interface MemoryEntry {
   category: MemoryCategory
   createdAt: number
   /** Origin of a MEMORY.md entry: 'manual' (added via Helix UI) vs 'auto'
-   * (appended by Hermes self-evolution). Undefined for user-profile entries. */
+   * (appended by Helix self-evolution). Undefined for user-profile entries. */
   source?: 'manual' | 'auto'
 }
 
@@ -236,8 +255,8 @@ export interface AvailableCommand {
   description?: string
 }
 
-// A plugin managed by the Hermes backend (serve gateway `plugins.manage` /
-// `hermes plugins` / Plugins Hub). Mirrors the backend row shape.
+// A plugin managed by the Helix backend (serve gateway `plugins.manage` /
+// `helix plugins` / Plugins Hub). Mirrors the backend row shape.
 export interface BackendPlugin {
   name: string
   key?: string
@@ -288,11 +307,11 @@ export interface ToolCallEntry {
 }
 
 /**
- * A single task item in Hermes's in-session todo list (emitted via
+ * A single task item in Helix's in-session todo list (emitted via
  * `session/update` with a todo/plan-style `sessionUpdate` name, or via the
- * `todo_write` tool result). `status` mirrors Hermes's own states.
+ * `todo_write` tool result). `status` mirrors Helix's own states.
  */
-export interface HermesTodo {
+export interface HelixTodo {
   id: string
   content: string
   status: 'pending' | 'in_progress' | 'completed' | 'cancelled'

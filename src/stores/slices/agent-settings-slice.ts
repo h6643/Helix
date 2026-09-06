@@ -1,19 +1,19 @@
-/**
- * Agent behaviour settings slice — Hermes Desktop style.
+﻿/**
+ * Agent behaviour settings slice — Helix Desktop style.
  *
  * Changes from original:
  * - Removed temperature, maxOutputTokens (backend-managed)
  * - Removed customInstructions (backend-managed via SOUL.md)
  * - Removed smartTruncation, compressionEnabled, toolGuardrailsEnabled (backend-managed)
  * - Removed streamingEnabled (always on)
- * - Changed reasoningEffort to Hermes native scale: none/minimal/low/medium/high/xhigh/max/ultra
+ * - Changed reasoningEffort to Helix native scale: none/minimal/low/medium/high/xhigh/max/ultra
  * - Added perModelPresets (reasoning + fast per provider::model key)
  * - Added fastMode (service tier)
  * - Personality is now named preset (not free text)
  */
 import type { StateCreator } from 'zustand'
-import { loadModelPresets, saveModelPreset } from '@/hermes-ui/api-client'
-import type { ReasoningEffortLevel } from '@/hermes-ui/types'
+import type { ReasoningEffortLevel } from '@/stores/helix-types'
+import { loadModelPresets, saveModelPreset } from '@/stores/agent-presets'
 
 export interface AgentSettingsSlice {
   agentMaxIterations: number
@@ -22,9 +22,6 @@ export interface AgentSettingsSlice {
   reasoningEffort: ReasoningEffortLevel
   personality: string
   fastMode: boolean
-  // 增强 Find 和 Grep：新建会话（或应用重启后恢复的会话）使用 ripgrep 增强的
-  // 文件/内容搜索。当前会话保持创建时的设置；Windows 的 Find 保持不变。
-  enhancedFindGrep: boolean
   // 集成终端 Shell（仅新会话生效）：Windows 下 Bash 工具用此 shell。
   // 'auto' = 自动优先 Git Bash，找不到回退 cmd.exe；'cmd' = 始终用 cmd.exe；
   // 'pwsh' = PowerShell 7；'powershell' = PowerShell 5。
@@ -39,12 +36,11 @@ export interface AgentSettingsSlice {
   setReasoningEffort: (v: ReasoningEffortLevel) => void
   setPersonality: (v: string) => void
   setFastMode: (v: boolean) => void
-  setEnhancedFindGrep: (v: boolean) => void
   setTerminalShell: (v: 'auto' | 'cmd' | 'pwsh' | 'powershell') => void
   setAgentPresets: (presets: Record<string, { name: string; systemPrompt: string }>) => void
   setActivePreset: (preset: string | null) => void
 
-  // Per-model presets (Hermes Desktop style)
+  // Per-model presets (Helix Desktop style)
   applyModelPreset: (providerModelKey: string) => void
   saveCurrentAsModelPreset: (providerModelKey: string) => void
 }
@@ -56,7 +52,6 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   reasoningEffort: 'medium',
   personality: 'helpful',
   fastMode: false,
-  enhancedFindGrep: false,
   terminalShell: 'auto', // 自动：优先 Git Bash，找不到回退 cmd.exe
   // Agent presets defaults
   agentPresets: {},
@@ -68,7 +63,6 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   setReasoningEffort: (v) => set({ reasoningEffort: v }),
   setPersonality: (v) => set({ personality: v }),
   setFastMode: (v) => set({ fastMode: v }),
-  setEnhancedFindGrep: (v) => set({ enhancedFindGrep: v }),
   setTerminalShell: (v) => set({ terminalShell: v }),
   setAgentPresets: (presets) => set({ agentPresets: presets }),
   setActivePreset: (preset) => set({ activePreset: preset }),

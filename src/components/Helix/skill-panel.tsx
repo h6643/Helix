@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import {
   X,
@@ -10,8 +10,7 @@ import {
 } from 'lucide-react'
 import React, { useState, useMemo, useEffect } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { useHermes } from '@/hooks/use-hermes'
-import { hermesApi, electronFS } from '@/lib/electron-bridge'
+import { helixApi, electronFS } from '@/lib/electron-bridge'
 import type { BackendPlugin } from '@/stores/helix-types'
 
 interface SkillPanelProps {
@@ -32,7 +31,6 @@ type TabKey = 'plugins' | 'skills'
 export function SkillPanel({ onClose }: SkillPanelProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('plugins')
   const [searchQuery, setSearchQuery] = useState('')
-  const { dispatchCommand } = useHermes()
 
   // Plugins state
   const [plugins, setPlugins] = useState<BackendPlugin[]>([])
@@ -59,7 +57,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
   const loadPlugins = async () => {
     setPluginsLoading(true)
     try {
-      const api = hermesApi()
+      const api = helixApi()
       if (!api) return
       const res = await api.send('plugins.manage', { action: 'list' }) as any
       if (Array.isArray(res?.plugins)) {
@@ -80,7 +78,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
   const loadSkills = async () => {
     setSkillsLoading(true)
     try {
-      const list = await window.electron?.hermesSkills.listSkills()
+      const list = await window.electron?.helixSkills.listSkills()
       if (Array.isArray(list)) setSkills(list)
     } catch (e) {
       console.error('loadSkills error:', e)
@@ -101,7 +99,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
     if (skill.isBuiltin) return
     setSkillsLoading(true)
     try {
-      await window.electron?.hermesSkills.deleteDir(skill.path)
+      await window.electron?.helixSkills.deleteDir(skill.path)
       await loadSkills()
     } catch (e) {
       console.error('deleteSkill error:', e)
@@ -112,7 +110,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
   const handleTogglePlugin = async (plugin: BackendPlugin) => {
     const enable = plugin.status !== 'enabled'
     try {
-      const api = hermesApi()
+      const api = helixApi()
       if (!api) return
       await api.send('plugins.manage', { action: 'toggle', name: plugin.name, enable })
       await loadPlugins()
@@ -124,7 +122,7 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
   const handleDeletePlugin = async (plugin: BackendPlugin) => {
     if (plugin.source === 'bundled') return
     try {
-      const pluginsDir = await window.electron?.hermesSkills.getPluginsDir()
+      const pluginsDir = await window.electron?.helixSkills.getPluginsDir()
       if (!pluginsDir) return
       const pluginPath = `${pluginsDir}/${plugin.name}`
       await electronFS.deleteFile(pluginPath)
@@ -191,8 +189,8 @@ export function SkillPanel({ onClose }: SkillPanelProps) {
           <button
             onClick={async () => {
               if (activeTab === 'skills') {
-                if (window.electron?.hermesSkills) {
-                  const dir = await window.electron.hermesSkills.getDir()
+                if (window.electron?.helixSkills) {
+                  const dir = await window.electron.helixSkills.getDir()
                   if (dir) {
                     window.electron.shell.showItemInFolder(dir)
                   }

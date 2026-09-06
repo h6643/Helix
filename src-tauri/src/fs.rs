@@ -1,7 +1,7 @@
 //! `fs:*` commands — path-validated file operations scoped to the working
 //! directory. Port of `electron/ipc/fs.js`.
 
-use crate::paths::hermes_data_dir;
+use crate::paths::helix_data_dir;
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ fn norm(p: &str) -> String {
     p.replace('\\', "/").trim_end_matches('/').to_string()
 }
 
-/// Allowed roots: current workDir + user-selected projects + hermes memories.
+/// Allowed roots: current workDir + user-selected projects + helix memories.
 fn allowed_roots(state: &AppState) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = vec![state.work_dir.read().unwrap().clone()];
     roots.extend(state.allowed_roots.read().unwrap().clone());
@@ -32,8 +32,8 @@ fn safe_path(state: &AppState, file_path: &str) -> Option<PathBuf> {
         work_dir.join(file_path)
     };
 
-    // Allow hermes memory directory (used by learning view).
-    let memory_dir = hermes_data_dir().join("memories");
+    // Allow helix memory directory (used by learning view).
+    let memory_dir = helix_data_dir().join("memories");
     if norm(&resolved.display().to_string()).starts_with(&norm(&memory_dir.display().to_string())) {
         return Some(resolved);
     }
@@ -84,7 +84,11 @@ pub fn read(state: State<'_, Arc<AppState>>, file_path: String) -> Result<String
 }
 
 #[tauri::command]
-pub fn write(state: State<'_, Arc<AppState>>, file_path: String, content: String) -> Result<Value, String> {
+pub fn write(
+    state: State<'_, Arc<AppState>>,
+    file_path: String,
+    content: String,
+) -> Result<Value, String> {
     let resolved = safe_path(&state, &file_path).ok_or_else(outside_err)?;
     if let Some(dir) = resolved.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -130,8 +134,8 @@ pub fn readdir(state: State<'_, Arc<AppState>>, dir_path: String) -> Result<Valu
 }
 
 #[tauri::command]
-pub fn hermes_memory_dir() -> String {
-    hermes_data_dir().join("memories").display().to_string()
+pub fn helix_memory_dir() -> String {
+    helix_data_dir().join("memories").display().to_string()
 }
 
 #[tauri::command]
@@ -177,7 +181,10 @@ pub fn delete(state: State<'_, Arc<AppState>>, file_path: String) -> Result<Valu
 }
 
 #[tauri::command]
-pub fn scan_tree(state: State<'_, Arc<AppState>>, relative_path: Option<String>) -> Result<Value, String> {
+pub fn scan_tree(
+    state: State<'_, Arc<AppState>>,
+    relative_path: Option<String>,
+) -> Result<Value, String> {
     let work_dir = state.work_dir.read().unwrap().clone();
     let root = match relative_path {
         Some(rp) => safe_path(&state, &rp).ok_or_else(outside_err)?,
@@ -227,9 +234,16 @@ fn build_file_tree(dir: &Path, base: &str, depth: usize, counter: &mut usize) ->
         let at = a.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let bt = b.get("type").and_then(|v| v.as_str()).unwrap_or("");
         if at != bt {
-            return if at == "folder" { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+            return if at == "folder" {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
         }
-        a.get("name").and_then(|v| v.as_str()).unwrap_or("").cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or(""))
+        a.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or(""))
     });
     nodes
 }

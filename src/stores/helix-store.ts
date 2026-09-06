@@ -1,4 +1,4 @@
-import { create } from 'zustand'
+﻿import { create } from 'zustand'
 import type { StateCreator } from 'zustand'
 import { cleanUrl } from '@/lib/url-utils'
 import { applyHelixPalette } from '@/lib/themes'
@@ -7,9 +7,9 @@ import { isElectron, getElectronAPI, electronFS, electronApp } from '@/lib/elect
 import { generateId, truncateString } from '@/lib/format'
 import { debug, warn, error as logError } from '@/lib/logger'
 import { defaultFiles } from '@/lib/seed-data'
-import type { McpServerConfig } from '@/stores/hermes-store'
-import { useHermesStore } from '@/stores/hermes-store'
-export type { McpServerConfig } from '@/stores/hermes-store'
+import type { McpServerConfig } from '@/stores/helix-types'
+import { useGatewayStore } from '@/stores/gateway-store'
+export type { McpServerConfig } from '@/stores/helix-types'
 import type {
   FileNode, ImageAttachment, FileAttachment, LinkAttachment, ExecutionStep,
   StreamingResponseBlock, StreamingDraft, ConnectionNotice,
@@ -20,14 +20,6 @@ import type {
   ToolCallEntry, SubAgent, ProviderConfig,
 } from './helix-types'
 import { DEFAULT_SHORTCUTS } from './helix-types'
-
-/** A bookmark node (mirrors the subset of Chrome's Bookmarks JSON we care about). */
-export interface BrowserBookmark {
-  name: string
-  type: 'url' | 'folder'
-  url?: string
-  children?: BrowserBookmark[]
-}
 
 /** A server / virtual machine the user can connect to from the breadcrumb. */
 export interface ExternalService {
@@ -150,10 +142,6 @@ interface HelixState extends GitSlice, ToastSlice, CompactNoticeSlice, TerminalS
   browserAddSeq: number
   requestAddBrowserPage: () => void
 
-  // Browser bookmarks (imported from Chrome etc.)
-  browserBookmarks: BrowserBookmark[]
-  setBrowserBookmarks: (items: BrowserBookmark[]) => void
-
   // Browser settings
   browserHomeUrl: string
   setBrowserHomeUrl: (url: string) => void
@@ -171,8 +159,6 @@ interface HelixState extends GitSlice, ToastSlice, CompactNoticeSlice, TerminalS
   // tree) stays visible. Driven by the maximize button in the right sidebar.
   codeFullscreen: boolean
   toggleCodeFullscreen: () => void
-  showLearningView: boolean
-  toggleLearningView: () => void
   approvalMode: 'default' | 'accept_edits' | 'dont_ask' | 'plan'
   approvalModeBySession: Record<string, 'default' | 'accept_edits' | 'dont_ask' | 'plan'>
   setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask' | 'plan') => void
@@ -372,7 +358,7 @@ interface HelixState extends GitSlice, ToastSlice, CompactNoticeSlice, TerminalS
   addMemory: (entry: Omit<MemoryEntry, 'id' | 'createdAt'>) => Promise<void>
   removeMemory: (id: string) => Promise<void>
   loadMemories: () => Promise<void>
-  // User profile (Hermes USER.md) — separate from the agent's MEMORY.md.
+  // User profile (Helix USER.md) — separate from the agent's MEMORY.md.
   addUserMemory: (entry: Omit<MemoryEntry, 'id' | 'createdAt'>) => Promise<void>
   removeUserMemory: (id: string) => Promise<void>
   loadUserMemories: () => Promise<void>
@@ -943,11 +929,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   previewRailNavSeq: 0,
   browserAddSeq: 0,
   browserHomeUrl: '',
-  browserBookmarks: [],
   rightSidebarTab: null,
   directoryProjectDir: null,
   codeFullscreen: false,
-  showLearningView: false,
   approvalMode: 'accept_edits' as const,
   approvalModeBySession: {},
   startupGreeting: '有什么可以帮你的？',
@@ -990,7 +974,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // Actions - Files
   setFiles: (files) => set({ files }),
   syncFilesFromDisk: async () => {
-    // Files are now managed by Hermes, not local API
+    // Files are now managed by Helix, not local API
     set({ files: [] })
   },
   selectFile: (fileId) => set({ selectedFileId: fileId }),
@@ -1187,10 +1171,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set(() => ({ browserHomeUrl: trimmed }))
     import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('browserHomeUrl', trimmed)).catch(() => {})
   },
-  setBrowserBookmarks: (items: BrowserBookmark[]) => {
-    set(() => ({ browserBookmarks: items }))
-    import('@/lib/persist').then(({ persistence }) => persistence.saveSetting('browserBookmarks', items)).catch(() => {})
-  },
   setRightSidebarTab: (tab) => set(() => {
     if (tab === 'browser') return { rightSidebarTab: 'browser', showPreviewRail: true, editorOpen: false }
     if (tab === 'code') return { rightSidebarTab: 'code', showPreviewRail: false, editorOpen: true }
@@ -1202,7 +1182,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     directoryProjectDir: s.directoryProjectDir === dir ? null : dir,
   })),
   toggleCodeFullscreen: () => set((s) => ({ codeFullscreen: !s.codeFullscreen })),
-  toggleLearningView: () => set((s) => ({ showLearningView: !s.showLearningView })),
   setApprovalMode: (v: 'default' | 'accept_edits' | 'dont_ask' | 'plan') => {
     set((s) => {
       // 新对话尚未分配 id 时先存到草稿键，避免选择后重启丢失。
@@ -1291,11 +1270,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       selectedWorkDir: null,
       contextUsage: {},
     })
-    // Reset the Hermes backend session so a fresh ACP session is created on the
-    // next prompt. Without this the UI clears but Hermes keeps the full
+    // Reset the Helix backend session so a fresh ACP session is created on the
+    // next prompt. Without this the UI clears but Helix keeps the full
     // conversation history, so the model still answers with prior context.
-    import('@/stores/hermes-store').then(({ useHermesStore }) => {
-      useHermesStore.getState().setHermesSessionId(null)
+    import('@/stores/gateway-store').then(({ useGatewayStore }) => {
+      useGatewayStore.getState().setHelixSessionId(null)
     })
     if (prevId) {
       // NOTE: We no longer delete chatMessages here. Since we switched to the
@@ -1318,8 +1297,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       chatMessages: [],
       contextUsage: {},
     })
-    import('@/stores/hermes-store').then(({ useHermesStore }) => {
-      useHermesStore.getState().setHermesSessionId(null)
+    import('@/stores/gateway-store').then(({ useGatewayStore }) => {
+      useGatewayStore.getState().setHelixSessionId(null)
     })
     // Persist empty state to IndexedDB so cleared messages don't reappear
     // on next session load.
@@ -1415,8 +1394,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       branchName: branchLabel,
     })
 
-    // Reset Hermes session for the new branch
-    useHermesStore.getState().setHermesSessionId(null)
+    // Reset Helix session for the new branch
+    useGatewayStore.getState().setHelixSessionId(null)
 
     // Switch to the new session
     state.setCurrentSessionId(newSessionId)
@@ -1538,7 +1517,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }
     const api = getElectronAPI()
     // 对话正在运行时，点另一个项目只是“浏览”，绝不能打断它：
-    // 不卸载当前对话、不 bump workDirEpoch（那会把全局 hermesSessionId 置空），
+    // 不卸载当前对话、不 bump workDirEpoch（那会把全局 helixSessionId 置空），
     // 也不触发 agent-flow-panel 的 [selectedWorkDir] effect（那会从 sessionMapRef
     // 里删掉正在跑的会话 → 下次 session/prompt 拿到死会话 → "session not found" → 模型停止）。
     // 只切 selectedWorkDir + 文件树；新对话的第一条消息会用新 cwd 新建后端会话。
@@ -1710,11 +1689,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
     }),
   setCurrentSessionId: (id) => set((state) => {
-    if (!id) return { currentSessionId: id, activeSessionWorkDir: null, hermesTodos: [] }
+    if (!id) return { currentSessionId: id, activeSessionWorkDir: null, helixTodos: [] }
     // Skip if clicking the same session that's already loaded
     if (id === state.currentSessionId) return {}
     // 任务清单跟随会话：恢复目标会话缓存的 todo 列表（无则清空）
-    const hermesTodos = state.hermesTodosBySession?.[id] ?? []
+    const helixTodos = state.helixTodosBySession?.[id] ?? []
     // 访问权限跟随会话：每个对话记住自己的审批模式。
     const draftMode = state.approvalModeBySession?.['__draft__']
     const approvalMode = state.approvalModeBySession?.[id] ?? draftMode ?? state.approvalMode
@@ -1725,7 +1704,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     const idx = state.sessionHistoryIndex
     // Check if the target ID already exists at the current position (deduplicate)
     if (history[idx] === id) {
-      return { currentSessionId: id, hermesTodos, approvalMode, approvalModeBySession }
+      return { currentSessionId: id, helixTodos, approvalMode, approvalModeBySession }
     }
     // Remove any forward history when navigating to a new session
     const newHistory = [...history.slice(0, idx + 1), id]
@@ -1733,7 +1712,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       currentSessionId: id,
       sessionHistory: newHistory,
       sessionHistoryIndex: newHistory.length - 1,
-      hermesTodos,
+      helixTodos,
       approvalMode,
       approvalModeBySession,
     }
@@ -1801,7 +1780,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         }))
 
       useHelixStore.getState().clearExecutionFlow()
-      useHermesStore.getState().setHermesSessionId(null)
+      useGatewayStore.getState().setHelixSessionId(null)
 
       const panelState = get()
       if (panelState.showScheduledTasksPanel || panelState.showSkillPanel) {
@@ -1981,8 +1960,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   setGoal: (goal) => set({ goal }),
 
   // Actions - Memory
-  // Helix's manual memories are synchronized with Hermes's backend memory_manager
-  // (memories/MEMORY.md). Hermes is the single source of truth; the local `memories`
+  // Helix's manual memories are synchronized with Helix's backend memory_manager
+  // (memories/MEMORY.md). Helix is the single source of truth; the local `memories`
   // array is an optimistic cache re-synced from the backend so the two systems
   // stop keeping separate copies.
   addMemory: async (entry) => {
@@ -1994,7 +1973,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }))
     if (isElectron()) {
       try {
-        await getElectronAPI()?.hermes.addMemoryEntry('memory', content)
+        await getElectronAPI()?.helix.addMemoryEntry('memory', content)
         await get().loadMemories()
       } catch (e) {
         logError('[helix] addMemory sync failed:', e)
@@ -2010,7 +1989,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set((state) => ({ memories: state.memories.filter((m) => m.id !== id) }))
     if (isElectron()) {
       try {
-        await getElectronAPI()?.hermes.removeMemoryEntry('memory', item.content)
+        await getElectronAPI()?.helix.removeMemoryEntry('memory', item.content)
       } catch (e) {
         logError('[helix] removeMemory sync failed:', e)
       }
@@ -2028,22 +2007,22 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         return
       }
       debug('[helix] loadMemories: calling listMemories...')
-      let res = await api.hermes.listMemories()
+      let res = await api.helix.listMemories()
       debug('[helix] loadMemories: response', { memoryLen: res?.memory?.length, userLen: res?.user?.length, manualLen: res?.manual?.length })
       if (!res) {
         warn('[helix] loadMemories: got null/undefined response from IPC')
         return
       }
-      // One-time migration: if Hermes is empty but legacy local memories exist,
-      // push them into Hermes so nothing is lost on first sync.
+      // One-time migration: if Helix is empty but legacy local memories exist,
+      // push them into Helix so nothing is lost on first sync.
       if ((res.memory?.length ?? 0) === 0) {
         const { persistence } = await import('@/lib/persist')
         const local = await persistence.loadMemories()
         if (local && local.length) {
           for (const m of local) {
-            await api.hermes.addMemoryEntry('memory', m.content)
+            await api.helix.addMemoryEntry('memory', m.content)
           }
-          res = await api.hermes.listMemories()
+          res = await api.helix.listMemories()
         }
       }
       const hashText = (s: string) => {
@@ -2065,7 +2044,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }
   },
   // ── User profile (USER.md) ────────────────────────────────────────────────
-  // Separate from MEMORY.md: profile facts about the user that Hermes keeps in
+  // Separate from MEMORY.md: profile facts about the user that Helix keeps in
   // USER.md. No origin tagging here — everything in USER.md is user-provided.
   addUserMemory: async (entry) => {
     const content = entry.content.trim()
@@ -2075,7 +2054,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }))
     if (isElectron()) {
       try {
-        await getElectronAPI()?.hermes.addMemoryEntry('user', content)
+        await getElectronAPI()?.helix.addMemoryEntry('user', content)
         await get().loadUserMemories()
       } catch (e) {
         logError('[helix] addUserMemory sync failed:', e)
@@ -2088,7 +2067,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set((state) => ({ userMemories: state.userMemories.filter((m) => m.id !== id) }))
     if (isElectron()) {
       try {
-        await getElectronAPI()?.hermes.removeMemoryEntry('user', item.content)
+        await getElectronAPI()?.helix.removeMemoryEntry('user', item.content)
       } catch (e) {
         logError('[helix] removeUserMemory sync failed:', e)
       }
@@ -2106,7 +2085,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         return
       }
       debug('[helix] loadUserMemories: calling listMemories...')
-      const res = await api.hermes.listMemories()
+      const res = await api.helix.listMemories()
       debug('[helix] loadUserMemories: response', { userLen: res?.user?.length })
       const hashText = (s: string) => {
         let h = 5381
@@ -2484,7 +2463,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting('reasoningEffort', state.reasoningEffort),
         persistence.saveSetting('personality', state.personality),
         persistence.saveSetting('fastMode', state.fastMode),
-        persistence.saveSetting('enhancedFindGrep', state.enhancedFindGrep),
         persistence.saveSetting('terminalShell', state.terminalShell),
         persistence.saveSetting('approvalMode', state.approvalMode),
         persistence.saveSetting('approvalModeBySession', state.approvalModeBySession),
@@ -2513,7 +2491,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const { persistence } = await import('@/lib/persist')
       const sessionId = 'current-session'
 
-      // MCP config is now managed by Hermes
+      // MCP config is now managed by Helix
       const fileMcpConfig: Record<string, any> = {}
 
       // Helper: load a setting without throwing — a single corrupted key
@@ -2529,7 +2507,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : null
 
       // Load individual pieces for settings and non-session state
-      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, enhancedFindGrep, terminalShell, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, approvalMode, approvalModeBySession, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
+      const [memories, tasks, checkpoints, notes, chatMessages, goal, apiConfig, apiHistory, apiProfiles, fontFamily, fontSize, interfaceFont, transcriptFontSize, themeStyle, sessionUsageStats, dailyUsage, scheduledTasks, mcpServers, customShortcuts, customizedIdsArr, agentMaxIterations, autoCompactContext, autoSaveSession, availableModels, providerModels, reasoningEffort, personality, fastMode, terminalShell, editorTheme, gitAutoCommit, gitAutoPush, gitPushConfirm, gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix, approvalMode, approvalModeBySession, startupGreeting, providers, activeModel, activeProviderId, savedSessionHistory, savedSessionHistoryIndex, savedSelectedWorkDir, loadedHasOnboarded, contextUsage, externalServices] = await Promise.all([
         safeLoad(persistence.loadMemories(), 'memories'),
         safeLoad(persistence.loadTasks(), 'tasks'),
         safeLoad(persistence.loadCheckpoints(), 'checkpoints'),
@@ -2567,7 +2545,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(persistence.loadSetting<string>('reasoningEffort'), 'reasoningEffort'),
         safeLoad(persistence.loadSetting<string>('personality'), 'personality'),
         safeLoad(persistence.loadSetting<boolean>('fastMode'), 'fastMode'),
-        safeLoad(persistence.loadSetting<boolean>('enhancedFindGrep'), 'enhancedFindGrep'),
         safeLoad(persistence.loadSetting<'auto' | 'cmd' | 'pwsh' | 'powershell'>('terminalShell'), 'terminalShell'),
         safeLoad(persistence.loadSetting<string>('editorTheme'), 'editorTheme'),
         safeLoad(persistence.loadSetting<boolean>('gitAutoCommit'), 'gitAutoCommit'),
@@ -2604,7 +2581,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // Restore which named profile was active before the restart, so the selection
       // survives a cold start (the profile list itself is persisted to IndexedDB).
       const loadedActiveProfileId = (await safeLoad(persistence.loadSetting<string | null>('activeProfileId'), 'activeProfileId')) ?? null
-      const savedBookmarks = (await safeLoad(persistence.loadSetting<BrowserBookmark[]>('browserBookmarks'), 'browserBookmarks')) ?? null
 
       // ── Build multi-provider config for the flattened model selector ──
       // Always rebuild `builtProviders` from the authoritative declared sources
@@ -2876,7 +2852,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         : prunedIndex
 
       set({
-        // memories are global and owned by the Hermes backend (memories/MEMORY.md);
+        // memories are global and owned by the Helix backend (memories/MEMORY.md);
         // do NOT overwrite them from a per-session snapshot.
         tasks: tasks as TaskNode[],
         checkpoints: checkpoints as SessionCheckpoint[],
@@ -2887,7 +2863,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         activeSessionWorkDir: latestSession?.workDir ?? null,
         sessionHistory: restoredHistory,
         sessionHistoryIndex: restoredIndex,
-        // 没选项目时默认使用 Hermes sessions 目录；恢复会话时跟随会话自己的目录。
+        // 没选项目时默认使用 Helix sessions 目录；恢复会话时跟随会话自己的目录。
         selectedWorkDir: latestSession?.workDir ?? defaultSessionsDir,
         // Never downgrade a fresh true set while restore was still loading.
         // Startup renders from the default false before IndexedDB finishes;
@@ -2897,7 +2873,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         apiConfig: (() => {
           const resolve = (cfg: any) => {
             // Validation gate: reject stale/bad profiles so a poisoned IndexedDB
-            // entry can never re-enter the store and get pushed to Hermes.
+            // entry can never re-enter the store and get pushed to Helix.
             if (!cfg || !cfg.baseUrl) {
               return { ...defaults }
             }
@@ -3086,7 +3062,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         reasoningEffort: (reasoningEffort as any) || get().reasoningEffort,
         personality: personality || get().personality,
         fastMode: fastMode ?? get().fastMode,
-        enhancedFindGrep: enhancedFindGrep ?? get().enhancedFindGrep,
         terminalShell: (terminalShell === 'cmd' || terminalShell === 'pwsh' || terminalShell === 'powershell' ? terminalShell : 'auto'),
         availableModels: availableModels || [],
         providerModels: cleanedProviderModels,
@@ -3102,7 +3077,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         approvalModeBySession: approvalModeBySession ?? get().approvalModeBySession,
         startupGreeting: startupGreeting || get().startupGreeting,
         browserHomeUrl: '',
-        browserBookmarks: savedBookmarks ?? get().browserBookmarks,
       })
 
       // Permanently scrub the pollution from IndexedDB: write back the cleaned
@@ -3140,7 +3114,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
 
       // Auto-detect AGENTS.md / CLAUDE.md from project root as fallback
-      // Custom instructions are now managed by Hermes
+      // Custom instructions are now managed by Helix
       // No local API call needed
 
       // Set default workDir from the main process (not renderer process.cwd(),
@@ -3166,6 +3140,25 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       document.documentElement.style.setProperty('--helix-font-size', `${s.fontSize}px`)
       document.documentElement.style.setProperty('--helix-interface-font', s.interfaceFont)
       document.documentElement.style.setProperty('--helix-transcript-size', `${s.transcriptFontSize}px`)
+      // Auto-populate MCP server env vars from .env file (e.g. TAVILY_API_KEY)
+      if (isElectron()) {
+        try {
+          const envKey = await (window as any).electron?.app?.readEnvKey('TAVILY_API_KEY')
+          if (envKey) {
+            const current = get().mcpServers
+            const tavily = current?.tavily
+            if (tavily?.type === 'local' && (!tavily.environment?.TAVILY_API_KEY || tavily.environment.TAVILY_API_KEY === '')) {
+              const updated = {
+                ...current,
+                tavily: { ...tavily, environment: { ...tavily.environment, TAVILY_API_KEY: envKey } },
+              }
+              set({ mcpServers: updated })
+              const { persistence } = await import('@/lib/persist')
+              await persistence.saveSetting('mcpServers', updated)
+            }
+          }
+        } catch { /* ignore */ }
+      }
     } catch (e) {
       logError('Failed to restore:', e)
       get().showToast({ type: 'error', title: '数据恢复失败', description: '本地存储读取异常，部分设置可能未加载' })

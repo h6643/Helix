@@ -3,7 +3,7 @@
  * Zero business-logic cross-references; purely UI state.
  */
 import type { StateCreator } from 'zustand'
-import type { AvailableCommand, HermesTodo } from '../helix-types'
+import type { AvailableCommand, HelixTodo } from '../helix-types'
 
 type NavEntry =
   | { type: 'chat'; sessionId: string }
@@ -24,14 +24,14 @@ export interface PanelSlice {
   showPluginManager: boolean
   availableCommands: AvailableCommand[]
   /**
-   * Hermes's in-session todo list, captured from `session/update` events that
+   * Helix's in-session todo list, captured from `session/update` events that
    * carry a todo/plan payload. Empty by default so the header button stays
    * hidden until the backend actually streams a list.
    */
-  hermesTodos: HermesTodo[]
+  helixTodos: HelixTodo[]
   /** 按会话缓存的 todo 列表（仅内存，不持久化）：切会话时按 currentSessionId
    *  恢复对应清单，避免 A 会话的任务清单串到 B 会话。 */
-  hermesTodosBySession: Record<string, HermesTodo[]>
+  helixTodosBySession: Record<string, HelixTodo[]>
   toggleCommandPalette: () => void
   setCommandPaletteOpen: (open: boolean) => void
   toggleTaskPanel: () => void
@@ -48,12 +48,12 @@ export interface PanelSlice {
   toggleWorktreePanel: () => void
   togglePluginManager: () => void
   setAvailableCommands: (cmds: AvailableCommand[]) => void
-  /** Replace the Hermes todo list (called whenever a fresh todo payload arrives).
+  /** Replace the Helix todo list (called whenever a fresh todo payload arrives).
    *  sessionId 标识该清单归属的 UI 会话：写入按会话缓存，且仅当它就是当前
    *  查看的会话时才更新展示列表（并行 run 不互相覆盖）。 */
-  setHermesTodos: (todos: HermesTodo[], sessionId?: string) => void
+  setHelixTodos: (todos: HelixTodo[], sessionId?: string) => void
   /** Clear the todo list (e.g. when a run completes or the session is reset). */
-  clearHermesTodos: () => void
+  clearHelixTodos: () => void
 }
 
 export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (set, get) => ({
@@ -69,8 +69,8 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   showWorktreePanel: false,
   showPluginManager: false,
   availableCommands: [],
-  hermesTodos: [],
-  hermesTodosBySession: {},
+  helixTodos: [],
+  helixTodosBySession: {},
 
   toggleCommandPalette: () =>
     set((state) => ({ showCommandPalette: !state.showCommandPalette })),
@@ -123,16 +123,16 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (s
   toggleWorktreePanel: () => set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
   togglePluginManager: () => set((s) => ({ showPluginManager: !s.showPluginManager })),
   setAvailableCommands: (cmds) => set({ availableCommands: cmds }),
-  setHermesTodos: (todos, sessionId) => set((s) => {
+  setHelixTodos: (todos, sessionId) => set((s) => {
     const bySession = sessionId
-      ? { ...s.hermesTodosBySession, [sessionId]: todos }
-      : s.hermesTodosBySession
+      ? { ...s.helixTodosBySession, [sessionId]: todos }
+      : s.helixTodosBySession
     const cur = (s as unknown as { currentSessionId: string | null }).currentSessionId
     const isVisible = sessionId === undefined || sessionId === cur
     return {
-      hermesTodosBySession: bySession,
-      ...(isVisible ? { hermesTodos: todos } : {}),
+      helixTodosBySession: bySession,
+      ...(isVisible ? { helixTodos: todos } : {}),
     }
   }),
-  clearHermesTodos: () => set({ hermesTodos: [] }),
+  clearHelixTodos: () => set({ helixTodos: [] }),
 })

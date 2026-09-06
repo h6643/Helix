@@ -1,12 +1,20 @@
 //! Profile cache + activation.
 //! Port of `electron/ipc/security.js` (profile:cacheConfig) and the
-//! `applyActiveProfileCache` / writeHermesConfig logic from `electron/main.js`.
+//! `applyActiveProfileCache` / writeHelixConfig logic from `electron/main.js`.
 
-use crate::config::{write_hermes_config, APIHUB_DEFAULT};
+use crate::config::{write_helix_config, APIHUB_DEFAULT};
 use crate::state::user_data_dir;
 use serde_json::{json, Value};
 
 pub const ACTIVE_PROFILE_FILE: &str = "active-profile.json";
+
+/// Read a string field from a profile config, accepting both the camelCase
+/// (renderer: baseUrl/apiKey) and snake_case (legacy) spellings.
+fn cfg_str<'a>(cfg: &'a Value, camel: &str, snake: &str) -> Option<&'a str> {
+    cfg.get(camel)
+        .or_else(|| cfg.get(snake))
+        .and_then(|v| v.as_str())
+}
 
 pub fn active_profile_path() -> Option<std::path::PathBuf> {
     user_data_dir().map(|d| d.join(ACTIVE_PROFILE_FILE))
@@ -14,16 +22,18 @@ pub fn active_profile_path() -> Option<std::path::PathBuf> {
 
 fn is_bad_config(cfg: &Value) -> bool {
     // Mirror electron/ipc/security.js isBadConfig: empty baseUrl == bad.
-    cfg.get("base_url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().is_empty())
-        .unwrap_or(true)
+    // Both key spellings are accepted — the renderer writes camelCase, older
+    // cached files may carry snake_case.
+    let base = cfg_str(cfg, "baseUrl", "base_url").unwrap_or("");
+    base.trim().is_empty()
 }
 
-/// Re-assert the user's last-saved model profile into Hermes config.yaml
+/// Re-assert the user's last-saved model profile into Helix config.yaml
 /// BEFORE spawning the gateway. Called from lib.rs setup.
 pub fn apply_active_profile_cache() {
-    let Some(path) = active_profile_path() else { return };
+    let Some(path) = active_profile_path() else {
+        return;
+    };
     if !path.exists() {
         return;
     }
@@ -35,23 +45,35 @@ pub fn apply_active_profile_cache() {
         Ok(c) => c,
         Err(_) => return,
     };
-    let provider = cfg.get("provider").and_then(|v| v.as_str());
+    let provider = cfg_str(&cfg, "provider", "provider");
     if provider.is_none() || provider.unwrap().trim().is_empty() {
         return;
     }
     if is_bad_config(&cfg) {
         return;
     }
-    let model = cfg.get("model").and_then(|v| v.as_str());
-    let base_url = cfg.get("base_url").and_then(|v| v.as_str());
-    let api_key = cfg.get("api_key").and_then(|v| v.as_str());
-    write_hermes_config(model, provider, base_url, api_key);
+    let model = cfg_str(&cfg, "model", "model");
+    let base_url = cfg_str(&cfg, "baseUrl", "base_url");
+    let api_key = cfg_str(&cfg, "apiKey", "api_key");
+    write_helix_config(model, provider, base_url, api_key);
 }
 
 /// Persist the active profile to userData/active-profile.json.
 #[tauri::command]
 pub fn cache_config(cfg: Value) -> Value {
+    // Normalize to one shape (camelCase) before writing so every reader can
+    // rely on the same keys.
     let mut cfg = cfg;
+    if cfg.get("base_url").is_some() && cfg.get("baseUrl").is_none() {
+        if let Some(b) = cfg.get("base_url").cloned() {
+            cfg["baseUrl"] = b;
+        }
+    }
+    if cfg.get("api_key").is_some() && cfg.get("apiKey").is_none() {
+        if let Some(k) = cfg.get("api_key").cloned() {
+            cfg["apiKey"] = k;
+        }
+    }
     if is_bad_config(&cfg) {
         // Fall back to the known-good apihub default (mirror Electron).
         cfg = json!({
@@ -79,11 +101,11 @@ pub fn activate_profile(cfg: Value) -> Value {
     if is_bad_config(&cfg) {
         return json!({ "success": false, "error": "invalid profile config" });
     }
-    let model = cfg.get("model").and_then(|v| v.as_str());
-    let provider = cfg.get("provider").and_then(|v| v.as_str());
-    let base_url = cfg.get("baseUrl").or_else(|| cfg.get("base_url")).and_then(|v| v.as_str());
-    let api_key = cfg.get("apiKey").or_else(|| cfg.get("api_key")).and_then(|v| v.as_str());
-    write_hermes_config(model, provider, base_url, api_key);
+    let model = cfg_str(&cfg, "model", "model");
+    let provider = cfg_str(&cfg, "provider", "provider");
+    let base_url = cfg_str(&cfg, "baseUrl", "base_url");
+    let api_key = cfg_str(&cfg, "apiKey", "api_key");
+    write_helix_config(model, provider, base_url, api_key);
     let _ = cache_config(cfg);
     json!({ "success": true })
 }

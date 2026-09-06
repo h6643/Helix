@@ -8,7 +8,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import React, { useState, useEffect, useCallback } from 'react'
-import { hermesApi } from '@/lib/electron-bridge'
+import { helixApi } from '@/lib/electron-bridge'
 import type { BackendPlugin } from '@/stores/helix-types'
 
 interface PluginManagerProps {
@@ -25,8 +25,8 @@ export function PluginManager({ onClose }: PluginManagerProps) {
     setBackendLoading(true)
     setBackendError(null)
     try {
-      const api = hermesApi()
-      if (!api?.send) throw new Error('Hermes 网关不可用')
+      const api = helixApi()
+      if (!api?.send) throw new Error('Helix 网关不可用')
       // Guard against a serve gateway that never answers plugins.manage: the
       // underlying WS RPC can block up to 60s, which would pin this panel on
       // "正在加载后端插件…" for a full minute. Race it with a 20s timeout so
@@ -57,8 +57,8 @@ export function PluginManager({ onClose }: PluginManagerProps) {
     const enable = p.status !== 'enabled'
     setBackendToggling(p.name)
     try {
-      const api = hermesApi()
-      if (!api?.send) throw new Error('Hermes 网关不可用')
+      const api = helixApi()
+      if (!api?.send) throw new Error('Helix 网关不可用')
       const res = await api.send('plugins.manage', { action: 'toggle', name: p.name, enable })
       if (res?.plugin) {
         setBackendPlugins(prev => prev.map(x => x.name === res.plugin.name ? res.plugin : x))
@@ -77,7 +77,7 @@ export function PluginManager({ onClose }: PluginManagerProps) {
         <div className="flex items-center gap-2">
           <h2 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold">插件管理</h2>
           <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 font-mono ml-1">
-            {backendPlugins.length} 个 Hermes 插件
+            {backendPlugins.length} 个 Helix 插件
           </span>
         </div>
         <button onClick={onClose} className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors">
@@ -90,7 +90,7 @@ export function PluginManager({ onClose }: PluginManagerProps) {
 
           <div className="flex items-center justify-between">
             <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 pb-1">
-              Hermes 网关托管插件，与 hermes plugins / Plugins Hub 同源
+              Helix 网关托管插件，与 helix plugins / Plugins Hub 同源
             </p>
             <button
               onClick={() => loadBackendPlugins()}
@@ -107,7 +107,7 @@ export function PluginManager({ onClose }: PluginManagerProps) {
             </div>
           ) : backendError ? (
             <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-red-500/80">
-              <p>无法连接 Hermes 网关加载插件</p>
+              <p>无法连接 Helix 网关加载插件</p>
               <p className="text-muted-foreground/50 mt-1 text-[calc(var(--helix-transcript-size)*0.8571)]">{backendError}</p>
               <button
                 onClick={() => loadBackendPlugins()}
@@ -118,7 +118,7 @@ export function PluginManager({ onClose }: PluginManagerProps) {
             </div>
           ) : backendPlugins.length === 0 ? (
             <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-muted-foreground/60">
-              暂无后端插件，可在 Hermes 中执行 hermes plugins install owner/repo 安装
+              暂无后端插件，可在 Helix 中执行 helix plugins install owner/repo 安装
             </div>
           ) : (
             backendPlugins.map((p, i) => (

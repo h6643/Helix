@@ -1,12 +1,12 @@
-//! Hooks IPC — read/write the `hooks:` block + `hooks_auto_accept` in Hermes
-//! config.yaml. Port of `electron/ipc/hooks.js`. Hermes registers hooks at
+//! Hooks IPC — read/write the `hooks:` block + `hooks_auto_accept` in Helix
+//! config.yaml. Port of `electron/ipc/hooks.js`. Helix registers hooks at
 //! GATEWAY STARTUP, so a save restarts the gateway (acp mode only).
 //!
 //! NOTE: This file is byte-level YAML editing (no js-yaml dep) so the rest of
 //! the config file is preserved untouched.
 
 use crate::config::config_yaml_path;
-use crate::gateway::{env_gateway_mode, kill_current, spawn_gateway};
+use crate::gateway::{kill_current, spawn_gateway};
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -93,7 +93,9 @@ fn parse_hooks(text: &str) -> Value {
         if trimmed.ends_with(':') && !trimmed.starts_with('-') {
             let ev = trimmed[..trimmed.len() - 1].to_string();
             if !ev.is_empty()
-                && ev.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                && ev
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
             {
                 cur_event = Some(ev);
                 cur_item_idx = None;
@@ -157,8 +159,16 @@ fn parse_hooks(text: &str) -> Value {
     }
     let mut map = serde_json::Map::new();
     for e in hooks {
-        let ev = e.get("event").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let items = e.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let ev = e
+            .get("event")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let items = e
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         map.insert(ev, json!(items));
     }
     json!(map)
@@ -169,7 +179,9 @@ pub fn hooks_list() -> Value {
     let yaml_path = config_yaml_path();
     let text = match std::fs::read_to_string(&yaml_path) {
         Ok(t) => t,
-        Err(_) => return json!({ "ok": true, "config": { "enabled": false, "autoAccept": false, "hooks": {} } }),
+        Err(_) => {
+            return json!({ "ok": true, "config": { "enabled": false, "autoAccept": false, "hooks": {} } })
+        }
     };
     let hooks = parse_hooks(&text);
     let enabled = hooks.as_object().map(|m| !m.is_empty()).unwrap_or(false);
@@ -191,8 +203,15 @@ pub fn hooks_save(state: State<'_, Arc<AppState>>, config: Value) -> Value {
     if !hooks_v.map(|h| h.is_object()).unwrap_or(false) {
         return json!({ "ok": false, "error": "invalid hooks config" });
     }
-    let enabled = config.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    let hooks_map = if enabled { hooks_v.unwrap().clone() } else { json!({}) };
+    let enabled = config
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let hooks_map = if enabled {
+        hooks_v.unwrap().clone()
+    } else {
+        json!({})
+    };
 
     let yaml_path = config_yaml_path();
     let text = std::fs::read_to_string(&yaml_path).unwrap_or_default();
@@ -207,17 +226,18 @@ pub fn hooks_save(state: State<'_, Arc<AppState>>, config: Value) -> Value {
     if std::fs::rename(&tmp, &yaml_path).is_err() {
         return json!({ "ok": false, "error": "rename failed" });
     }
-    // Hermes registers hooks at gateway startup — restart to apply (acp only).
-    if env_gateway_mode() != "serve" {
-        kill_current(&state);
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let _ = spawn_gateway(&state);
-    }
+    // Hooks are registered at gateway startup — restart so the save applies.
+    kill_current(&state);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = spawn_gateway(&state);
     json!({ "ok": true })
 }
 
 fn serialize_hooks(hooks_map: &Value, auto_accept: bool) -> String {
-    let mut lines = vec![format!("hooks_auto_accept: {}", if auto_accept { "true" } else { "false" })];
+    let mut lines = vec![format!(
+        "hooks_auto_accept: {}",
+        if auto_accept { "true" } else { "false" }
+    )];
     lines.push("hooks:".to_string());
     if let Some(map) = hooks_map.as_object() {
         let mut wrote = false;

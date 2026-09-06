@@ -200,7 +200,7 @@ export function extractToolPath(step: ExecutionStep): string {
   if (step.toolParams?.file_path && typeof step.toolParams.file_path === 'string') {
     return step.toolParams.file_path as string
   }
-  // Hermes `tool.start` carries a display `context` preview (e.g. "foo.ts 1-50")
+  // Helix `tool.start` carries a display `context` preview (e.g. "foo.ts 1-50")
   // instead of raw args — surface it so read/run steps show what they acted on.
   if (step.toolParams?.context && typeof step.toolParams.context === 'string') {
     return step.toolParams.context as string

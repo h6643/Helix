@@ -1,19 +1,15 @@
 //! `app:*` Tauri commands + work-dir persistence.
-//! Port of `electron/main.js` (app:getInfo / syncWorkDir / getHermesVersion /
-//! setWorkDir / quit) and the workdir.json persistence helpers.
+//! Port of `electron/main.js` (app:getInfo / syncWorkDir / setWorkDir / quit)
+//! and the workdir.json persistence helpers.
 
-use crate::gateway::{env_gateway_mode, kill_current, shutdown, spawn_gateway};
-use crate::kernel::resolve_hermes_cmd;
-use crate::paths::{data_root_pointer_path, default_hermes_data_dir, hermes_data_dir};
+use crate::gateway::{kill_current, shutdown, spawn_gateway};
+use crate::paths::{data_root_pointer_path, default_helix_data_dir, helix_data_dir};
 use crate::state::{user_data_dir, AppState};
 use serde_json::{json, Value};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use tauri::State;
 
 pub const WORKDIR_FILE: &str = "workdir.json";
@@ -53,7 +49,11 @@ fn display_path(p: &Path) -> String {
         // char (e.g. `\\?\D:\桌面\...` → `D:\桌...`); `get(..4)` returns None
         // there and falls through to the plain strip. `rest[4..]` below is safe
         // because the `UNC\` prefix is 4 ASCII bytes.
-        Some(rest) if rest.get(..4).is_some_and(|r| r.eq_ignore_ascii_case("UNC\\")) => {
+        Some(rest)
+            if rest
+                .get(..4)
+                .is_some_and(|r| r.eq_ignore_ascii_case("UNC\\")) =>
+        {
             format!("\\\\{}", &rest[4..])
         }
         Some(rest) => rest.to_string(),
@@ -99,71 +99,12 @@ pub fn sync_work_dir(state: State<'_, Arc<AppState>>, dir: String) -> Value {
     let resolved = if std::path::Path::new(&d).is_absolute() {
         PathBuf::from(&d)
     } else {
-        state
-            .work_dir
-            .read()
-            .unwrap()
-            .join(&d)
+        state.work_dir.read().unwrap().join(&d)
     };
-    let resolved = resolved
-        .canonicalize()
-        .unwrap_or(resolved);
+    let resolved = resolved.canonicalize().unwrap_or(resolved);
     *state.work_dir.write().unwrap() = resolved.clone();
     state.add_allowed_root(resolved.to_str().unwrap_or(""));
     json!({ "success": true, "workDir": display_path(&resolved) })
-}
-
-/// Get installed Hermes backend version via `hermes --version`.
-#[tauri::command]
-pub fn get_hermes_version() -> Option<String> {
-    let cmd = resolve_hermes_cmd()?;
-    let mut ver_cmd = Command::new(&cmd);
-    ver_cmd.arg("--version");
-    #[cfg(windows)]
-    ver_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    let out = ver_cmd.output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).to_string();
-    // Hermes prints e.g. "Hermes Agent v1.x.y (1.2.3)" — grab the (x.y.z) group.
-    parse_version(&s)
-}
-
-pub fn parse_version(s: &str) -> Option<String> {
-    // Match "(x.y.z)" or "(x.y.z.w)" inside the output.
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '(' {
-            let mut j = i + 1;
-            let mut buf = String::new();
-            let mut segments = 0;
-            let mut ok = false;
-            while j < chars.len() {
-                let c = chars[j];
-                if c == ')' {
-                    ok = true;
-                    break;
-                }
-                if c.is_ascii_digit() {
-                    buf.push(c);
-                } else if c == '.' {
-                    segments += 1;
-                    buf.push(c);
-                } else {
-                    break;
-                }
-                j += 1;
-            }
-            if ok && segments >= 2 && segments <= 3 && !buf.is_empty() {
-                return Some(buf);
-            }
-            i = j;
-        }
-        i += 1;
-    }
-    None
 }
 
 #[tauri::command]
@@ -175,8 +116,14 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
         None => String::new(),
     };
     // Drive roots / "/" resolve back to the home dir (mirror Electron).
-    let is_root = d == "/" || d == "\\" || (d.len() == 3 && d.as_bytes()[1] == b':' && d.ends_with(['/', '\\']));
-    let base = if is_root { home.clone() } else { state.work_dir.read().unwrap().clone() };
+    let is_root = d == "/"
+        || d == "\\"
+        || (d.len() == 3 && d.as_bytes()[1] == b':' && d.ends_with(['/', '\\']));
+    let base = if is_root {
+        home.clone()
+    } else {
+        state.work_dir.read().unwrap().clone()
+    };
     let target = if is_root || d.is_empty() {
         base
     } else if std::path::Path::new(&d).is_absolute() {
@@ -186,7 +133,10 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
     };
     // Ensure the directory exists — explicit_cwd requires isdir() == true.
     if let Err(e) = std::fs::create_dir_all(&target) {
-        eprintln!("[setWorkDir] failed to create directory: {} {e}", target.display());
+        eprintln!(
+            "[setWorkDir] failed to create directory: {} {e}",
+            target.display()
+        );
     }
     // Canonicalize so the path returned to the renderer matches the canonicalized
     // form stored in allowed_roots. Windows paths are case-insensitive but compared
@@ -196,22 +146,16 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
     *state.work_dir.write().unwrap() = canonical.clone();
     state.add_allowed_root(canonical.to_str().unwrap_or(""));
     persist_work_dir(canonical.to_str().unwrap_or(""));
-    // serve mode: cwd applied per-session via explicit_cwd — no restart.
-    // acp mode: gateway cwd is fixed at spawn time — restart to apply.
-    if env_gateway_mode() != "serve" {
-        kill_current(&state);
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let _ = spawn_gateway(&state);
-    }
+    // Backend cwd is fixed at spawn time — restart to apply.
+    kill_current(&state);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = spawn_gateway(&state);
     json!({ "success": true, "workDir": display_path(&canonical) })
 }
 
-/// Kill + respawn the gateway. serve mode: no-op (config re-read per session).
+/// Kill + respawn the backend.
 #[tauri::command]
 pub fn restart_gateway(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    if env_gateway_mode() == "serve" {
-        return Ok(());
-    }
     kill_current(&state);
     std::thread::sleep(std::time::Duration::from_millis(300));
     spawn_gateway(&state)
@@ -225,13 +169,17 @@ pub fn quit(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     Ok(())
 }
 
-
+/// Read a key value from the helix .env file (e.g. TAVILY_API_KEY).
+#[tauri::command]
+pub fn read_env_key(key: String) -> String {
+    crate::config::read_env_key(&key)
+}
 
 /// Returns the effective data-root info for the Settings UI.
 #[tauri::command]
 pub fn get_data_root() -> Value {
-    let default = default_hermes_data_dir();
-    let current = hermes_data_dir();
+    let default = default_helix_data_dir();
+    let current = helix_data_dir();
     let custom = current != default;
     json!({
         "dataRoot": current.display().to_string(),
@@ -240,7 +188,7 @@ pub fn get_data_root() -> Value {
     })
 }
 
-/// Set (or clear) the Hermes data-root override.
+/// Set (or clear) the Helix data-root override.
 ///
 /// - `path` empty  → restore the default location (copy current data there,
 ///   then delete the pointer so the default is used on next launch).
@@ -249,9 +197,9 @@ pub fn get_data_root() -> Value {
 ///   the old location until Helix is restarted.
 #[tauri::command]
 pub fn set_data_root(path: String) -> Result<Value, String> {
-    let current = hermes_data_dir();
+    let current = helix_data_dir();
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let default = default_hermes_data_dir();
+    let default = default_helix_data_dir();
 
     // Resolve the requested target path.
     let raw = path.trim();
@@ -259,7 +207,11 @@ pub fn set_data_root(path: String) -> Result<Value, String> {
         default.clone()
     } else {
         let expanded = if raw.starts_with('~') {
-            home.join(raw.trim_start_matches('~').trim_start_matches('/').trim_start_matches('\\'))
+            home.join(
+                raw.trim_start_matches('~')
+                    .trim_start_matches('/')
+                    .trim_start_matches('\\'),
+            )
         } else if Path::new(raw).is_absolute() {
             PathBuf::from(raw)
         } else {
@@ -351,8 +303,7 @@ fn write_pointer(target: &Path) -> io::Result<()> {
 fn remove_pointer() -> Result<(), String> {
     if let Some(ptr) = data_root_pointer_path() {
         if ptr.exists() {
-            std::fs::remove_file(&ptr)
-                .map_err(|e| format!("无法清除数据路径配置: {e}"))?;
+            std::fs::remove_file(&ptr).map_err(|e| format!("无法清除数据路径配置: {e}"))?;
         }
     }
     Ok(())
@@ -370,8 +321,14 @@ mod tests {
         assert_eq!(display_path(Path::new("\\\\?\\C:\\Windows")), "C:\\Windows");
         // CJK immediately after the drive root: byte 4 falls inside a multi-byte
         // char — must strip without panicking on the byte-index slice.
-        assert_eq!(display_path(Path::new("\\\\?\\D:\\桌面\\客户知识库\\wiki")), "D:\\桌面\\客户知识库\\wiki");
+        assert_eq!(
+            display_path(Path::new("\\\\?\\D:\\桌面\\客户知识库\\wiki")),
+            "D:\\桌面\\客户知识库\\wiki"
+        );
         // UNC share.
-        assert_eq!(display_path(Path::new("\\\\?\\UNC\\server\\share")), "\\\\server\\share");
+        assert_eq!(
+            display_path(Path::new("\\\\?\\UNC\\server\\share")),
+            "\\\\server\\share"
+        );
     }
 }

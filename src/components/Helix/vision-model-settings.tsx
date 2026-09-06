@@ -5,7 +5,6 @@ import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
 import { PopupSelect, SettingGroup } from './settings-ui'
 import { isElectron } from '@/lib/electron-bridge'
-import { getAllProviders } from '@/lib/providers'
 
 const VISION_PROVIDERS = [
   { id: 'gemini', name: 'Gemini' },
@@ -62,12 +61,6 @@ export function VisionModelSettings() {
   const knownBaseUrl = PROVIDER_BASE_URLS[provider]
   const showApiKey = provider !== 'auto'
   const showBaseUrl = !knownBaseUrl && provider !== 'auto'
-  // 各 provider 的视觉模型候选
-  const geminiModels = getAllProviders().find((p) => p.id === 'gemini')?.models ?? []
-  const VISION_MODELS: Record<string, string[]> = {
-    gemini: Array.from(new Set([...geminiModels, 'gemini-3.6-flash'])),
-    zai: ['glm-5v-turbo', 'glm-4v-flash', 'glm-4v-plus'],
-  }
 
   const save = async () => {
     setSaving(true)
@@ -108,26 +101,16 @@ export function VisionModelSettings() {
             />
           </div>
 
-          {/* Model */}
+          {/* Model：纯文本输入，不限制预设列表 */}
           <div>
             <label className="block ui-text font-medium text-foreground mb-1.5">模型名称</label>
-            {(VISION_MODELS[provider]?.length ?? 0) > 0 ? (
-              <PopupSelect
-                value={model}
-                onChange={setModel}
-                placeholder="选择模型"
-                className="w-full ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2"
-                options={VISION_MODELS[provider].map((m) => ({ label: m, value: m }))}
-              />
-            ) : (
-              <input
-                type="text"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="如 openai/gpt-4o、glm-5v-turbo、gemini-2.5-pro-0325"
-                className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-              />
-            )}
+            <input
+              type="text"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="如 gpt-4o、glm-5v-turbo、gemini-2.5-pro、claude-3.5-sonnet ..."
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+            />
           </div>
 
           {/* Base URL：已知 endpoint 自动填充（只读）；未知则手填 */}

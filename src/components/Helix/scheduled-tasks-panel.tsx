@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import {
   Search,
@@ -14,10 +14,10 @@ import {
 } from 'lucide-react'
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { hermesApi } from '@/lib/electron-bridge'
+import { helixApi } from '@/lib/electron-bridge'
 import { parseChineseSchedule } from '@/lib/schedule-utils'
 import { useHelixStore, type ScheduledTask } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
+import { useGatewayStore } from '@/stores/gateway-store'
 
 interface ScheduledTasksPanelProps {
   onClose: () => void
@@ -339,7 +339,7 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [isAdding, setIsAdding] = useState(false)
 
-  // Pull scheduled tasks from Hermes backend on mount
+  // Pull scheduled tasks from Helix backend on mount
   useEffect(() => {
     const load = async () => {
       try {
@@ -409,16 +409,16 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
   const handleRunNow = useCallback(async (task: ScheduledTask) => {
     try {
       const { addChatMessage, updateScheduledTask, showToast } = useHelixStore.getState()
-      const { hermesSessionId } = useHermesStore.getState()
+      const { helixSessionId } = useGatewayStore.getState()
       addChatMessage({ role: 'system', content: `[定时任务] ${task.label}: ${task.prompt}` })
-      if (hermesSessionId) {
+      if (helixSessionId) {
         try {
-          await hermesApi()!.send('session/prompt', {
-            session_id: hermesSessionId,
+          await helixApi()!.send('session/prompt', {
+            session_id: helixSessionId,
             prompt: [{ type: 'text', text: task.prompt }],
           })
         } catch (e) {
-          console.error('[ScheduledTask] Failed to dispatch to Hermes:', e)
+          console.error('[ScheduledTask] Failed to dispatch to Helix:', e)
         }
       }
       updateScheduledTask(task.id, { lastRunAt: Date.now() })
@@ -430,7 +430,7 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
     }
   }, [])
 
-  // Sync toggle/delete to Hermes backend
+  // Sync toggle/delete to Helix backend
   const handleToggle = useCallback(async (task: ScheduledTask) => {
     toggleScheduledTask(task.id)
     try {

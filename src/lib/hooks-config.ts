@@ -1,8 +1,8 @@
 /**
  * Helix hooks — simplified 5-point hook configuration.
  *
- * Helix's agent loop and tool execution live in the external `hermes`
- * subprocess. Hermes ships its OWN hooks engine that fires at REAL execution
+ * Helix's agent loop and tool execution live in the external `helix`
+ * subprocess. Helix ships its OWN hooks engine that fires at REAL execution
  * points. This file defines the 5 hook points exposed in the UI.
  */
 

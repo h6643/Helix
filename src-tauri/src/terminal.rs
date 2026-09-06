@@ -152,8 +152,7 @@ fn spawn_shell(
 #[cfg(unix)]
 fn emit_terminal_data(id: u32, data: &[u8]) {
     let text = String::from_utf8_lossy(data).into_owned();
-    let _ = crate::state::app_handle()
-        .emit("terminal:data", json!({ "id": id, "data": text }));
+    let _ = crate::state::app_handle().emit("terminal:data", json!({ "id": id, "data": text }));
 }
 
 #[cfg(unix)]
@@ -201,13 +200,7 @@ fn kill_session(id: u32) {
 fn write_all(fd: std::os::unix::io::RawFd, bytes: &[u8]) -> Result<(), String> {
     let mut offset = 0;
     while offset < bytes.len() {
-        let n = unsafe {
-            libc::write(
-                fd,
-                bytes[offset..].as_ptr().cast(),
-                bytes.len() - offset,
-            )
-        };
+        let n = unsafe { libc::write(fd, bytes[offset..].as_ptr().cast(), bytes.len() - offset) };
         if n < 0 {
             let err = IoError::last_os_error();
             let code = err.raw_os_error().unwrap_or(-1);
@@ -223,12 +216,7 @@ fn write_all(fd: std::os::unix::io::RawFd, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn read_loop(
-    id: u32,
-    master: std::os::unix::io::RawFd,
-    pid: libc::pid_t,
-    stop: Arc<AtomicBool>,
-) {
+fn read_loop(id: u32, master: std::os::unix::io::RawFd, pid: libc::pid_t, stop: Arc<AtomicBool>) {
     let mut buf = [0u8; 8192];
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -300,14 +288,10 @@ pub fn terminal_start(
 
     let stop = Arc::new(AtomicBool::new(false));
     let reader_stop = Arc::clone(&stop);
-    terminal_state().lock().unwrap().insert(
-        id,
-        TerminalSession {
-            master,
-            pid,
-            stop,
-        },
-    );
+    terminal_state()
+        .lock()
+        .unwrap()
+        .insert(id, TerminalSession { master, pid, stop });
     thread::spawn(move || read_loop(id, master, pid, reader_stop));
     Ok(json!({ "ok": true }))
 }
@@ -366,9 +350,9 @@ pub fn terminal_kill(id: u32) -> Result<Value, String> {
 #[cfg(windows)]
 use std::collections::HashMap;
 #[cfg(windows)]
-use std::sync::{Arc, Mutex, OnceLock};
-#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(windows)]
 use std::thread;
 #[cfg(windows)]
@@ -376,7 +360,9 @@ use tauri::Emitter;
 #[cfg(windows)]
 use windows::core::{PCWSTR, PWSTR};
 #[cfg(windows)]
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HANDLE_FLAGS, SetHandleInformation, HANDLE_FLAG_INHERIT};
+use windows::Win32::Foundation::{
+    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+};
 #[cfg(windows)]
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 #[cfg(windows)]
@@ -385,15 +371,14 @@ use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::Pipes::CreatePipe;
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
-    CreateProcessW, PROCESS_INFORMATION, PROCESS_CREATION_FLAGS, STARTUPINFOW, TerminateProcess,
-    STARTF_USESTDHANDLES,
+    CreateProcessW, TerminateProcess, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOW,
 };
 
 #[cfg(windows)]
 fn emit_terminal_data(id: u32, data: &[u8]) {
     let text = String::from_utf8_lossy(data).into_owned();
-    let _ = crate::state::app_handle()
-        .emit("terminal:data", json!({ "id": id, "data": text }));
+    let _ = crate::state::app_handle().emit("terminal:data", json!({ "id": id, "data": text }));
 }
 
 #[cfg(windows)]
@@ -446,14 +431,7 @@ fn read_loop(id: u32, h_out_read: usize, stop: Arc<AtomicBool>) {
             return;
         }
         let mut bytes_read: u32 = 0;
-        let ok = unsafe {
-            ReadFile(
-                h_out_read,
-                Some(&mut buf),
-                Some(&mut bytes_read),
-                None,
-            )
-        };
+        let ok = unsafe { ReadFile(h_out_read, Some(&mut buf), Some(&mut bytes_read), None) };
         // 0 字节 = 子进程已退出（管道写端全部关闭）→ EOF
         if ok.is_err() || bytes_read == 0 {
             break;
@@ -527,15 +505,13 @@ pub fn terminal_start(
         // `std::fs::canonicalize` yields verbatim `\\?\` paths; if one leaks in
         // here the shell starts in a verbatim cwd and the prompt renders as
         // `Microsoft.PowerShell.Core\FileSystem::\\?\D:\...`. Strip the prefix.
-        let cwd_wide: Option<Vec<u16>> = cwd
-            .filter(|c| !c.trim().is_empty())
-            .map(|c| {
-                let c = match c.strip_prefix("\\\\?\\") {
-                    Some(rest) => rest.to_string(),
-                    None => c,
-                };
-                c.encode_utf16().chain(std::iter::once(0u16)).collect()
-            });
+        let cwd_wide: Option<Vec<u16>> = cwd.filter(|c| !c.trim().is_empty()).map(|c| {
+            let c = match c.strip_prefix("\\\\?\\") {
+                Some(rest) => rest.to_string(),
+                None => c,
+            };
+            c.encode_utf16().chain(std::iter::once(0u16)).collect()
+        });
         let cwd_pcwstr: Option<PCWSTR> = cwd_wide.as_ref().map(|v| PCWSTR(v.as_ptr()));
 
         let mut pi = PROCESS_INFORMATION::default();
@@ -701,20 +677,26 @@ mod windows_tests {
                 lpSecurityDescriptor: std::ptr::null_mut(),
                 bInheritHandle: true.into(),
             };
-            assert!(CreatePipe(
-                &mut h_in_read,
-                &mut h_in_write,
-                Some(&inheritable as *const SECURITY_ATTRIBUTES),
-                0,
-            )
-            .is_ok(), "create input pipe");
-            assert!(CreatePipe(
-                &mut h_out_read,
-                &mut h_out_write,
-                Some(&inheritable as *const SECURITY_ATTRIBUTES),
-                0,
-            )
-            .is_ok(), "create output pipe");
+            assert!(
+                CreatePipe(
+                    &mut h_in_read,
+                    &mut h_in_write,
+                    Some(&inheritable as *const SECURITY_ATTRIBUTES),
+                    0,
+                )
+                .is_ok(),
+                "create input pipe"
+            );
+            assert!(
+                CreatePipe(
+                    &mut h_out_read,
+                    &mut h_out_write,
+                    Some(&inheritable as *const SECURITY_ATTRIBUTES),
+                    0,
+                )
+                .is_ok(),
+                "create output pipe"
+            );
 
             let mut si = STARTUPINFOW::default();
             si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -779,5 +761,4 @@ mod windows_tests {
             let _ = CloseHandle(h_out_write);
         }
     }
-
 }

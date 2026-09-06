@@ -11,7 +11,7 @@
  * 重启后分类数据必丢（"重启后有的会消失"根因）。
  */
 
-import { hermesApi } from '@/lib/electron-bridge'
+import { helixApi } from '@/lib/electron-bridge'
 import { resolveBackendSid } from '@/lib/session-map'
 import { useHelixStore } from '@/stores/helix-store'
 
@@ -30,7 +30,7 @@ interface ContextBreakdownData {
  * - conversationId: Helix 会话 id（跨重启稳定），本地记录键。draft（null）时
  *   退化为用后端 sid 作键——与旧行为一致。
  * - backendSid: 调用方已知的后端 sid（如 handleRun 刚 session/new 出来的）；
- *   省略时按 session-map（epoch 校验）解析。绝不兜底到全局 hermesSessionId
+ *   省略时按 session-map（epoch 校验）解析。绝不兜底到全局 helixSessionId
  *   ——那是「最后一个跑过的对话」的后端会话，用它查询会把别的对话的
  *   用量/分类写进本对话的快照（跨会话污染）。调用方没给 sid 且映射里
  *   没有本对话的条目时，直接放弃捕获（返回 false）。
@@ -47,14 +47,16 @@ export async function captureContextBreakdown(
   conversationId: string | null | undefined,
   backendSid?: string | null,
 ): Promise<boolean> {
-  // 绝不兜底到全局 hermesSessionId（跨会话污染，见 doc 注释）。
+  // 绝不兜底到全局 helixSessionId（跨会话污染，见 doc 注释）。
   const sid = backendSid || (await resolveBackendSid(conversationId || null))
   if (!sid) return false
   try {
-    const result = await hermesApi()?.send('session.context_breakdown', { session_id: sid })
+    const result = await helixApi()?.send('session.context_breakdown', { session_id: sid })
     if (!result || typeof result !== 'object') return false
     const data = result as ContextBreakdownData
-    if ((data.categories?.length ?? 0) === 0) return false
+    const hasBreakdown = (data.categories?.length ?? 0) > 0
+      || ((data.context_used ?? 0) > 0 && (data.context_max ?? 0) > 0)
+    if (!hasBreakdown) return false
     const key = conversationId || sid
     const localPrev = useHelixStore.getState().contextUsage[key]
     // 只写分类/工具集明细，不改 size/used：环的 used/size 由 run 结束的
@@ -65,8 +67,8 @@ export async function captureContextBreakdown(
     // "没跑过就没有读数"的语义。
     useHelixStore.getState().setContextUsage(
       key,
-      localPrev?.size || 0,
-      localPrev?.used || 0,
+      localPrev?.size || data.context_max || 0,
+      localPrev?.used || data.context_used || 0,
       data.categories.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
       data.toolsets?.map((t) => ({ toolset: t.toolset, tool_count: t.tool_count, schema_tokens: t.schema_tokens })),
     )

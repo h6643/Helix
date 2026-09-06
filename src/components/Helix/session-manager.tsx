@@ -1,4 +1,4 @@
-'use client'
+﻿'use client'
 
 import {
   FolderOpen,
@@ -18,7 +18,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { timeAgo } from '@/lib/format'
 import { persistence, type PersistedSession } from '@/lib/persist'
 import { useHelixStore } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
+import { useGatewayStore } from '@/stores/gateway-store'
 
 export function SessionManager({ onClose }: { onClose: () => void }) {
   const [sessions, setSessions] = useState<PersistedSession[]>([])
@@ -157,7 +157,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
       const state = useHelixStore.getState()
       await state.flushSessionPersist()
       state.clearExecutionFlow()
-      useHermesStore.getState().setHermesSessionId(null)
+      useGatewayStore.getState().setHelixSessionId(null)
       const all = await persistence.loadSessions()
       const fresh = all.find(s => s.id === session.id) || session
       // 丢弃 draft-partial 占位（同 sidebar/navigateSession）：并发下切换/打开

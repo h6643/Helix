@@ -3,17 +3,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { useHelixStore } from '@/stores/helix-store'
-import { SettingRow, SettingGroup, SectionHeading, Toggle, PopupSelect } from './settings-ui'
+import { SettingRow, SettingGroup, SectionHeading, PopupSelect } from './settings-ui'
 import { electronApp, electronDialog } from '@/lib/electron-bridge'
 import { CodingContextSetting } from './agents-settings'
-
-/** 集成终端 Shell 选项 — 仅新会话生效。 */
-const TERMINAL_SHELL_OPTIONS = [
-  { label: 'Git Bash', value: 'auto'},
-  { label: 'cmd.exe', value: 'cmd'},
-  { label: 'PowerShell 7', value: 'pwsh' },
-  { label: 'PowerShell 5', value: 'powershell' },
-]
 
 export function GeneralSettingsPanel() {
   const showToast = useHelixStore(s => s.showToast)
@@ -25,8 +17,6 @@ export function GeneralSettingsPanel() {
     mcpServers, gitAutoCommit, gitAutoPush, gitPushConfirm,
     gitAutoBranch, gitRemoteUrl, gitCommitTemplate, gitBranchPrefix,
     persistToStorage,
-    enhancedFindGrep, setEnhancedFindGrep,
-    terminalShell, setTerminalShell,
   } = useHelixStore()
 
   const [dataRootInfo, setDataRootInfo] = useState<{
@@ -42,7 +32,7 @@ export function GeneralSettingsPanel() {
   const [proxyBusy, setProxyBusy] = useState(false)
 
   // 常规面板的开关/选项改动即生效（无保存按钮），防抖写入 IndexedDB，
-  // 避免「增强 Find 和 Grep」「自动归档」「终端 Shell」等重启后丢失。
+  // 避免设置项重启后丢失。
   const settingsPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (settingsPersistTimer.current) clearTimeout(settingsPersistTimer.current)
@@ -52,7 +42,7 @@ export function GeneralSettingsPanel() {
     return () => {
       if (settingsPersistTimer.current) clearTimeout(settingsPersistTimer.current)
     }
-  }, [enhancedFindGrep, terminalShell, persistToStorage])
+  }, [persistToStorage])
 
   // 拉取当前生效的数据根目录（后端是权威来源）。
   useEffect(() => {
@@ -150,33 +140,6 @@ export function GeneralSettingsPanel() {
       <SectionHeading>常规</SectionHeading>
 
       <CodingContextSetting />
-
-      <SettingGroup>
-        <SettingRow
-          label="增强 Find 和 Grep"
-          hint="在新建会话或应用重启后恢复的会话中使用增强 Find 和 Grep（ripgrep）"
-        >
-          <Toggle
-            enabled={!!enhancedFindGrep}
-            onToggle={() => setEnhancedFindGrep(!enhancedFindGrep)}
-          />
-        </SettingRow>
-      </SettingGroup>
-
-      <SettingGroup>
-        <SettingRow
-          label="集成终端 Shell"
-          hint="仅新会话生效。Windows 下 Bash 工具用此 shell"
-        >
-          <PopupSelect
-            value={terminalShell}
-            onChange={(v) => setTerminalShell(v as 'auto' | 'cmd' | 'pwsh' | 'powershell')}
-            options={TERMINAL_SHELL_OPTIONS}
-            className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 focus:outline-none focus:border-primary/40 transition-colors"
-            popupWidth={160}
-          />
-        </SettingRow>
-      </SettingGroup>
 
       <SettingGroup>
         <SettingRow

@@ -1,7 +1,7 @@
-import { hermesApi } from '@/lib/electron-bridge'
+﻿import { helixApi } from '@/lib/electron-bridge'
 import { loadSessionMap, resolveBackendSid } from '@/lib/session-map'
 import { useHelixStore } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
+import { useGatewayStore } from '@/stores/gateway-store'
 import type { ChatMessage } from '@/stores/helix-types'
 
 function genId(): string {
@@ -71,17 +71,17 @@ export async function resyncCurrentSessionFromBackend(opts: ResyncOptions = {}):
     return 0
   }
   try {
-    const sid = (await resolveBackendSid(currentSessionId)) || useHermesStore.getState().hermesSessionId
+    const sid = (await resolveBackendSid(currentSessionId)) || useGatewayStore.getState().helixSessionId
     if (!sid) {
       if (opts.showToast) store.showToast({ type: 'warning', title: '当前会话还没有后端会话', description: '先发送一条消息建立会话后再同步' })
       return 0
     }
-    let res: any = await hermesApi()?.send('session.resume', { session_id: sid }).catch(() => null)
+    let res: any = await helixApi()?.send('session.resume', { session_id: sid }).catch(() => null)
     // 会话不在内存（网关重启 / 空闲回收后）：用 storedId 从 state.db 透明恢复
     if (!res || (typeof res === 'object' && (res as any).error)) {
       const map = await loadSessionMap()
       const storedId = map.get(currentSessionId)?.storedId || sid
-      res = await hermesApi()?.send('session.resume', { session_id: storedId }).catch(() => null)
+      res = await helixApi()?.send('session.resume', { session_id: storedId }).catch(() => null)
     }
     if (!res || !Array.isArray((res as any).messages)) {
       if (opts.showToast) store.showToast({ type: 'error', title: '同步失败', description: '后端未返回该会话的消息' })

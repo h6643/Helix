@@ -86,18 +86,13 @@ src-tauri/target/
 # Skills (user-specific, not shared)
 skills/
 
-# hermes-agent is now a git submodule (see .gitmodules). Its internal paths are
-# no longer tracked by this repo — only the nested .git must stay untracked.
-
 AGENTS.md
 
 .playwright-mcp/
 
 # accidental diff/artifact files
-src/hermes.rs:*
-~hermes/
 
-# Hermes data dir mistakenly created at repo root (HERMES_HOME once pointed here).
+# Helix data dir mistakenly created at repo root.
 # These are NOT Helix source — never commit them. NOTE: scripts/ is Helix's own dir (prepare-runtime.sh), do NOT ignore it.
 config.yaml
 auth.json
@@ -120,18 +115,14 @@ channel_directory.json
 channels.json
 gateway_state.json
 gateway-starts.log
-.hermes_history
 
-# Hermes runtime dotfiles left at repo root (HERMES_HOME once pointed here).
+# Helix runtime dotfiles left at repo root.
 .mcp-discovery.lock
 .no-bundled-skills
 .npm_lock_hash_*
 .processes_*.tmp
 .skills_prompt_snapshot.json
 .update_check
-
-# nested hermes-agent .git must not be tracked (vendored dir keeps its own git)
-hermes-agent/.git/
 
 # KaTeX fonts copied to repo root by vite build
 KaTeX_*

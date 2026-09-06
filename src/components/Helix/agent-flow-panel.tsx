@@ -27,10 +27,10 @@ import {
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
-import type { ReasoningEffortLevel } from '@/hermes-ui/types'
-import { useProviderStore } from '@/hermes-ui/provider-store'
+import type { ReasoningEffortLevel } from '@/stores/helix-types'
+import { useProviderStore } from '@/stores/slices/provider-store'
 import { pushModelConfig } from '@/lib/config-sync'
-import { isElectron, electronDialog, electronHermes, electronGit, hermesApi } from '@/lib/electron-bridge'
+import { isElectron, electronDialog, electronHelix, electronGit, helixApi } from '@/lib/electron-bridge'
 import { generateId } from '@/lib/format'
 import { processClipboardImage, canAddMoreImages, blobToDataUrl, compressImage } from '@/lib/image-utils'
 import { buildAcpMcpServers } from '@/lib/mcp'
@@ -46,11 +46,11 @@ import { HistoryStrip } from './history-strip'
 import { FileChangeSummaryCard } from './file-change-summary-card'
 import { FileChangeSummary } from './file-change-summary'
 import { ApprovalDialog, ClarifyBar, PlanReviewBar, type ApprovalRequest, type PlanReviewRequest } from './approval-dialog'
-import type { ApprovalLevel } from '@/hermes-ui/api-client'
+import type { ApprovalLevel } from '@/stores/helix-types'
 import { ScheduledTaskConfirm } from './scheduled-task-confirm'
 import { useHelixStore, type ImageAttachment, type FileAttachment, type LinkAttachment, type ExecutionStep, type StreamingResponseBlock } from '@/stores/helix-store'
-import { useHermesStore } from '@/stores/hermes-store'
-import type { ChatMessage, HermesTodo, PendingChange } from '@/stores/helix-types'
+import { useGatewayStore } from '@/stores/gateway-store'
+import type { ChatMessage, HelixTodo, PendingChange } from '@/stores/helix-types'
 import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
 import { HelixMarkdown } from './helix-markdown'
 
@@ -1300,11 +1300,11 @@ export function AgentFlowPanel() {
   const runStartedAtRef = useRef<number>(0)
   const firstContentAtRef = useRef<number>(0)
   const stepsRef = useRef<ExecutionStep[]>([])
-  const hermesSessionIdRef = useRef<string | null>(null)
+  const helixSessionIdRef = useRef<string | null>(null)
   // The gateway epoch (bumped on every restart) at the moment our current
-  // hermesSessionIdRef was created. If the live epoch is higher, the gateway
+  // helixSessionIdRef was created. If the live epoch is higher, the gateway
   // restarted since → the cached session is dead and must be recreated even
-  // though hermesConnected may already be true again.
+  // though helixConnected may already be true again.
   const sessionEpochRef = useRef<number>(0)
   // Per-conversation Hermes ACP session ids. Each entry stores the backend
   // session id AND the gateway epoch it was created under, so we can detect
@@ -1720,7 +1720,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
   // Switching conversations: clear the *front-end* streaming UI so the newly
   // focused conversation starts with a clean panel. We deliberately do NOT
-  // touch sessionMapRef / hermesSessionIdRef or cancel anything — a run that is
+  // touch sessionMapRef / helixSessionIdRef or cancel anything — a run that is
   // still streaming in a *background* conversation must keep going (true
   // concurrency: the backend supports N parallel sessions). Its sid stays in
   // the map; when you switch back, the run resumes rendering into the UI.
@@ -1735,7 +1735,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // 后台 run 的真实内容在 draft 里，但读不到 → "切回来只剩工作中和时间，思考消失"。
     // 重置为 null 让恢复走 streamingDrafts 分支。
     liveStateOwnerRef.current = null
-    // Sync the GLOBAL hermesSessionId to this conversation's backend session so
+    // Sync the GLOBAL helixSessionId to this conversation's backend session so
     // that consumers outside handleRun (ContextUsageIndicator, compaction, etc.)
     // target the RIGHT session.  Without this they read a stale global that still
     // points at a different conversation's session → "session not found" RPC errors.
@@ -1744,9 +1744,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     // epoch 不匹配（网关重启）不再视为会话死亡——直接把持久化 sid 广播给全局，
     // 死活由后端判定（恢复成功 or 真正 not found），调用方各自兜底。
     const entry = currentSessionId ? sessionMapRef.current.get(currentSessionId) : null
-    const hermesSid = entry?.sid ?? null
-    hermesSessionIdRef.current = hermesSid
-    try { useHermesStore.getState().setHermesSessionId(hermesSid) } catch {}
+    const helixSid = entry?.sid ?? null
+    helixSessionIdRef.current = helixSid
+    try { useGatewayStore.getState().setHelixSessionId(helixSid) } catch {}
   }, [currentSessionId])
 
   // Restore persisted per-conversation sessions on mount so the conversation→
@@ -1760,8 +1760,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       sessionMapRef.current = m
       const cid = useHelixStore.getState().currentSessionId
       const sid = cid ? m.get(cid)?.sid ?? null : null
-      hermesSessionIdRef.current = sid
-      try { useHermesStore.getState().setHermesSessionId(sid) } catch {}
+      helixSessionIdRef.current = sid
+      try { useGatewayStore.getState().setHelixSessionId(sid) } catch {}
     }).catch(() => {})
     return () => { cancelled = true }
   }, [])
@@ -1770,18 +1770,18 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // are destroyed server-side. Clear our cached session id DIRECTLY on the
   // event (not via a store-effect indirection) so the very next handleRun
   // unconditionally recreates a fresh session. The store-effect approach was
-  // unreliable: handleRun only wrote hermesSessionIdRef (never the store), so
-  // the store stayed null and the [hermesSessionId] effect never re-fired on a
+  // unreliable: handleRun only wrote helixSessionIdRef (never the store), so
+  // the store stayed null and the [helixSessionId] effect never re-fired on a
   // second restart — leaving a stale id in the ref and causing prompts to hit a
   // dead session with no output.
   useEffect(() => {
-    const unsub = window.electron?.hermes?.onEvent?.((event: string) => {
+    const unsub = window.electron?.helix?.onEvent?.((event: string) => {
       if (event === 'gateway.sessionInvalidated') {
         // All backend sessions are destroyed on restart — drop every cached id.
         sessionMapRef.current.clear()
         persistSessionMap(sessionMapRef.current)
         // Force the next run to re-verify the gateway is fully up (it may still
-        // be recycling) rather than trusting hermesConnected which is already
+        // be recycling) rather than trusting helixConnected which is already
         // true after a prior restart.
         sessionEpochRef.current = -1
       }
@@ -1792,27 +1792,27 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // 网关重连（同一进程，如 WebView2 崩溃自动恢复/整页重载）后，自动把当前
   // 对话的后端会话 resume 回来：① 后端断连时会把会话 detach 到 drop
   // sentinel 继续执行，重连后必须 session.resume 重绑 transport 事件流；
-  // ② 崩溃恢复后 hermesSessionId/全局绑定可能已丢，resume 能把它找回来，
+  // ② 崩溃恢复后 helixSessionId/全局绑定可能已丢，resume 能把它找回来，
   // 避免用户下一条消息被当成新会话（历史会话分裂 bug 的另一半）。
   useEffect(() => {
     let unsub: (() => void) | undefined
     try {
-      unsub = hermesApi()!.onEvent((method: string, params: any) => {
+      unsub = helixApi()!.onEvent((method: string, params: any) => {
         if (method !== 'gateway.ready') return
         if (params?.sameGateway !== true) return // 真重启：后端会话已死，交给 handleRun 重建
         const cid = useHelixStore.getState().currentSessionId
         if (!cid) return
         const entry = sessionMapRef.current.get(cid)
         if (!entry?.sid) return
-        if (useHermesStore.getState().hermesSessionId === entry.sid) return
+        if (useGatewayStore.getState().helixSessionId === entry.sid) return
         debug('[HelixTrace] 网关重连（同一进程），自动 resume 当前会话 →', entry.sid)
-        hermesApi()!.send('session.resume', { session_id: entry.sid })
+        helixApi()!.send('session.resume', { session_id: entry.sid })
           .then((res: any) => {
             if (!res) return
             // 重绑成功：刷新映射 epoch 并恢复全局绑定
-            sessionMapRef.current.set(cid, { sid: entry.sid, epoch: useHermesStore.getState().gatewayEpoch })
+            sessionMapRef.current.set(cid, { sid: entry.sid, epoch: useGatewayStore.getState().gatewayEpoch })
             persistSessionMap(sessionMapRef.current)
-            useHermesStore.getState().setHermesSessionId(entry.sid)
+            useGatewayStore.getState().setHelixSessionId(entry.sid)
           })
           .catch(() => {
             // 会话确实已死（如后端回收/真重启误判）：静默，handleRun 的
@@ -1829,7 +1829,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   useEffect(() => {
     let unsubFn: (() => void) | undefined
     try {
-      unsubFn = hermesApi()!.onEvent((method: string, params: any) => {
+      unsubFn = helixApi()!.onEvent((method: string, params: any) => {
         if (method !== 'background.complete') return
         const parentSid = params?.session_id
         const text = typeof params?.text === 'string' ? params.text : ''
@@ -1868,9 +1868,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   useEffect(() => {
     if (!isElectron() || !window.electron?.external?.onSshConnected) return
     const unsubSsh = window.electron.external.onSshConnected(() => {
-      const sid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || hermesSessionIdRef.current
+      const sid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || helixSessionIdRef.current
       if (!sid) return
-      hermesApi()!.send('reload.mcp', { session_id: sid, confirm: true }).catch((e: any) => {
+      helixApi()!.send('reload.mcp', { session_id: sid, confirm: true }).catch((e: any) => {
         console.warn('[Helix] reload.mcp after SSH connect failed:', e)
       })
     })
@@ -2012,13 +2012,13 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   const syncConfigToBackend = useCallback(async () => {
     // 1) Cancel any in-flight session FIRST (while the id is still valid).
     // Use the per-conversation session from sessionMapRef — NOT the global
-    // hermesSessionIdRef, which may have been overwritten by another run.
+    // helixSessionIdRef, which may have been overwritten by another run.
     const currentSid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || null
     if (isElectron() && currentSid) {
-      try { electronHermes.notify('session/cancel', { session_id: currentSid }) } catch {}
+      try { electronHelix.notify('session/cancel', { session_id: currentSid }) } catch {}
     }
     // 2) Invalidate the session so the next prompt rebuilds it from config.yaml.
-    useHermesStore.getState().setHermesSessionId(null)
+    useGatewayStore.getState().setHelixSessionId(null)
     if (currentSessionId) {
       sessionMapRef.current.delete(currentSessionId)
       persistSessionMap(sessionMapRef.current)
@@ -2060,7 +2060,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // session from config.yaml — never a stale key.
   const handleModelSelect = useCallback(async (model: string) => {
     useHelixStore.getState().setActiveModel(model)
-    // Keep the hermes-ui provider store in sync too. It persists its own
+    // Keep the provider store in sync too. It persists its own
     // activeModel separately, and helix-layout.tsx bridges THAT store into the
     // Helix store on launch — so if we don't update it here, a restart would
     // re-read the stale value (e.g. the previously-selected pro) and the bridge
@@ -2190,8 +2190,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // Fetch file-based skills on mount (via Hermes skills bridge — no backend)
   useEffect(() => {
     if (fileSkills.length > 0) return
-    if (typeof window === 'undefined' || !window.electron?.hermesSkills) return
-    window.electron.hermesSkills.listSkills()
+    if (typeof window === 'undefined' || !window.electron?.helixSkills) return
+    window.electron.helixSkills.listSkills()
       .then((list: any) => {
         if (Array.isArray(list)) {
           setFileSkills(list.map((s: any) => ({ name: s.name, description: s.description || '' })))
@@ -2244,15 +2244,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         action: c.action,
       }))
     })
-    const hermesCmds = (availableCommands || []).map(cmd => ({
-      name: cmd.name,
-      description: cmd.description || '',
-      id: '/' + cmd.name,
-      icon: undefined as string | undefined,
-      isHermesCommand: true,
-    }))
-    return [...builtinCmds, ...allSkills, ...hermesCmds]
-  }, [allSkills, availableCommands, BUILTIN_COMMANDS])
+    return [...builtinCmds, ...allSkills]
+  }, [allSkills, BUILTIN_COMMANDS])
 
   const slashCmd = input.startsWith('/') ? input.slice(1).split(' ')[0].toLowerCase() : ''
   const matchedQuickCmds = input.startsWith('/') ? QUICK_COMMANDS.filter(c => !slashCmd || c.cmd.slice(1).startsWith(slashCmd)) : []
@@ -2533,10 +2526,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         // listener (registered at the run site) also fires this on abort; keep an
         // explicit send here as a safety net. (interrupt === notify('session/cancel')
         // in main.js, so one call suffices.)
-        electronHermes.notify('session/cancel', { session_id: sessionId })
+        electronHelix.notify('session/cancel', { session_id: sessionId })
       }
     } catch (e) {
-      console.error('[handleStop] Failed to interrupt Hermes:', e)
+      console.error('[handleStop] Failed to interrupt:', e)
     }
   }, [setStreamingDraft, currentSessionId, isBusy, isRunning])
 
@@ -2571,7 +2564,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       }
 
       // ② 后端同步（后台、尽力而为，不阻塞 UI）。
-      const liveEpoch = useHermesStore.getState().gatewayEpoch
+      const liveEpoch = useGatewayStore.getState().gatewayEpoch
       const entry = cid ? sessionMapRef.current.get(cid) : null
       if (entry && (entry.epoch !== liveEpoch || !entry.sid)) {
         // epoch 过期 = 网关已重启，后端会话必死：直接删条目（省一次注定
@@ -2579,9 +2572,9 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         sessionMapRef.current.delete(cid!)
         persistSessionMap(sessionMapRef.current)
       }
-      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || helixSessionIdRef.current
       if (sid) {
-        hermesApi()!.send('session.undo', { session_id: sid })
+        helixApi()!.send('session.undo', { session_id: sid })
           .then((r: any) => {
             debug('[HelixTrace] 撤回后端截断完成', { removed: r?.removed ?? 0 })
           })
@@ -2740,12 +2733,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               // found"。与 context-usage 的自动压缩路径保持一致：先解析映射拿 sid。
               // 2026-08-31 对齐官方语义：resolveBackendSid 不再按 epoch 丢弃持久化
               // sid——网关重启后后端会从 state.db 透明恢复该会话（get_session→_restore）。
-              const sid = (await resolveBackendSid(currentSessionId)) || useHermesStore.getState().hermesSessionId
+              const sid = (await resolveBackendSid(currentSessionId)) || useGatewayStore.getState().helixSessionId
               if (!sid) {
                 storeActions.showToast({ type: 'warning', title: '当前会话还没有后端会话', description: '先发送一条消息建立会话后再压缩' })
                 break
               }
-              let result = await hermesApi()?.send('session.compress', { session_id: sid })
+              let result = await helixApi()?.send('session.compress', { session_id: sid })
               // 会话不在内存（网关重启/空闲回收后）：与 prompt 路径一致，先
               // session.resume 从 state.db 捞回原会话再重试压缩，避免"压缩失败"。
               // resume 用 storedId（DB 主键）才能跨重启恢复；ui_session 查不到 DB 行。
@@ -2755,21 +2748,21 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
                   const entry = currentSessionId ? sessionMapRef.current.get(currentSessionId) : null
                   const resumeId = entry?.storedId || sid
                   debug('[Helix] /compact: session not in memory, trying resume →', resumeId)
-                  const resumeRes = await hermesApi()?.send('session.resume', { session_id: resumeId }).catch(() => null)
+                  const resumeRes = await helixApi()?.send('session.resume', { session_id: resumeId }).catch(() => null)
                   if (resumeRes) {
                     const restoredId = resumeRes?.session_id || resumeId
                     debug('[Helix] /compact: resumed, retrying compress')
-                    result = await hermesApi()?.send('session.compress', { session_id: restoredId })
+                    result = await helixApi()?.send('session.compress', { session_id: restoredId })
                   }
                 }
               }
               // 压缩成功说明 sid 在后端活着（可能刚被透明恢复）：刷新映射 epoch 并
               // 恢复全局绑定，让 handleRun / context-usage 后续都命中同一会话。
               if (currentSessionId) {
-                sessionMapRef.current.set(currentSessionId, { sid, epoch: useHermesStore.getState().gatewayEpoch })
+                sessionMapRef.current.set(currentSessionId, { sid, epoch: useGatewayStore.getState().gatewayEpoch })
                 persistSessionMap(sessionMapRef.current)
-                hermesSessionIdRef.current = sid
-                try { useHermesStore.getState().setHermesSessionId(sid) } catch {}
+                helixSessionIdRef.current = sid
+                try { useGatewayStore.getState().setHelixSessionId(sid) } catch {}
               }
               if (result && typeof result === 'object') {
                 const r = result as any
@@ -2860,7 +2853,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             const imagePrompt = baseTrimmed.replace(/^\/(?:image)\s+/i, '').trim()
             if (!imagePrompt) { storeActions.showToast({ type: 'warning', title: '缺少参数', description: '/image <你的提示>' }); break }
             try {
-              const r = await hermesApi()!.send('image.generate', { prompt: imagePrompt, aspect_ratio: 'square' }) as any
+              const r = await helixApi()!.send('image.generate', { prompt: imagePrompt, aspect_ratio: 'square' }) as any
               if (r?.available === false) {
                 storeActions.showToast({ type: 'warning', title: '图片生成不可用', description: r?.error || '后端没有可用的图片生成能力' })
                 break
@@ -2902,7 +2895,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
 
     // Track skill invocation count
     if (cmd) {
-      window.electron?.hermesSkills?.trackSkillCall(cmd.name).catch?.(() => {})
+      window.electron?.helixSkills?.trackSkillCall(cmd.name).catch?.(() => {})
     }
 
     // If the CURRENT session is running AND receiving a new send, stop it first
@@ -3146,7 +3139,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
     usageReceivedRef.current = false
     // A fresh question starts a new todo scope — drop any stale list from the
     // previous run so the header button hides until Hermes streams a new one.
-    useHelixStore.getState().clearHermesTodos()
+    useHelixStore.getState().clearHelixTodos()
     // Add user message to store with images
     const imagesSnapshot = pendingImages.length > 0 ? [...pendingImages] : undefined
     const filesSnapshot = pendingFiles.length > 0 ? [...pendingFiles] : undefined
@@ -3180,7 +3173,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       const isElectron = typeof window !== 'undefined' && !!window.electron?.isElectron
 
       if (!isElectron) {
-        throw new Error('当前环境无法连接 Hermes，与 Electron 界面端通信失败')
+        throw new Error('当前环境无法连接后端，与 Electron 界面端通信失败')
       }
 
       // Config is synced by handleModelSelect (setConfig) and by handleProfileSelect
@@ -3194,23 +3187,23 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // change. Instead, invalidate stale sessions immediately and let
       // session/new attempt directly. If the backend is still recycling,
       // Hermes will return an error we can catch and retry.
-      const hermesStore = useHermesStore.getState()
-      const liveEpoch = hermesStore.gatewayEpoch
+      const helixStore = useGatewayStore.getState()
+      const liveEpoch = helixStore.gatewayEpoch
       const epochStale = liveEpoch > sessionEpochRef.current
-      if (!hermesStore.hermesConnected) {
+      if (!helixStore.helixConnected) {
         if (epochStale) {
           sessionMapRef.current.delete(useHelixStore.getState().currentSessionId || '')
           persistSessionMap(sessionMapRef.current)
         }
         await new Promise<boolean>((resolve) => {
-          const startEpoch = useHermesStore.getState().gatewayEpoch
+          const startEpoch = useGatewayStore.getState().gatewayEpoch
           const check = () => {
-            if (useHermesStore.getState().hermesConnected && useHermesStore.getState().gatewayEpoch > startEpoch) {
+            if (useGatewayStore.getState().helixConnected && useGatewayStore.getState().gatewayEpoch > startEpoch) {
               cleanup()
               resolve(true)
             }
           }
-          const unsub = hermesApi()!.onEvent((event: string) => {
+          const unsub = helixApi()!.onEvent((event: string) => {
             if (event === 'gateway.ready') {
               cleanup()
               resolve(true)
@@ -3220,8 +3213,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             try { unsub?.() } catch {}
           }
           check()
-          if (!(useHermesStore.getState().hermesConnected && useHermesStore.getState().gatewayEpoch > startEpoch)) {
-            setTimeout(() => { cleanup(); resolve(useHermesStore.getState().hermesConnected) }, 3000)
+          if (!(useGatewayStore.getState().helixConnected && useGatewayStore.getState().gatewayEpoch > startEpoch)) {
+            setTimeout(() => { cleanup(); resolve(useGatewayStore.getState().helixConnected) }, 3000)
           }
         })
       } else if (epochStale) {
@@ -3252,26 +3245,20 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         const seedHistory = useHelixStore.getState().chatMessages
           .filter(m => m.sessionId === activeSessionId && m.id !== newUserMsgId)
           .map(m => ({ role: m.role, content: m.content }))
-        const res = await hermesApi()!.send('session/new', {
+        const res = await helixApi()!.send('session/new', {
           mcpServers: buildAcpMcpServers(st0.mcpServers),
           messages: seedHistory,
           // 会话必须绑定当前对话所属项目，否则 serve 后端用配置/TERMINAL_CWD/
           // 启动目录，模型读到的目录和界面显示的项目脱节（"在 agentchat 对话，
           // 但模型读到之前选过的目录"）。
           cwd: st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined,
-          // 常规「增强 Find 和 Grep」：新建会话 / 应用重启后恢复的会话（走
-          // session/new 重建后端会话）带上 search_engine=rg；当前会话保持创建
-          // 时的设置，Windows 的 Find 后端不启用。
-          search_engine: st0.enhancedFindGrep ? 'rg' : '',
-          // 常规「集成终端 Shell」：仅新会话生效，Windows 下 Bash 工具用此 shell。
-          terminal_shell: st0.terminalShell,
         }) as any
-        sessionId = res?._meta?.hermes?.sessionProvenance?.acpSessionId
-          || res?.session_id
+        sessionId = res?.session_id
           || res?.sessionID
+          || res?.threadId
           || (typeof res === 'string' ? res : null)
         if (!sessionId) {
-          throw new Error('无法创建 Hermes 会话：session/new 缺少 session_id')
+          throw new Error('无法创建会话：session/new 缺少 session_id')
         }
         // storedId = state.db 持久化 key（serve 模式 session.create 返回
         // stored_session_id；ACP 模式无此字段）。重启后 resume 用它才能恢复。
@@ -3279,7 +3266,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         sessionMapRef.current.set(myCid, { sid: sessionId, epoch: liveEpoch, storedId })
         persistSessionMap(sessionMapRef.current)
         sessionEpochRef.current = liveEpoch
-        // 不要在这里无条件写全局 hermesSessionId：后台 run 建会话时会把全局
+        // 不要在这里无条件写全局 helixSessionId：后台 run 建会话时会把全局
         // 改成后台会话的 sid，让 ContextUsageIndicator（读全局）查错会话 → 空
         // 分类。全局只由「前台 run」（下方 isFrontRun 分支）和「切换对话时的
         // sync effect」写入。
@@ -3288,7 +3275,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         // waits for an approval response to a permission_request, so the only
         // way to skip manual approval is to set the session mode here.
         try {
-          await hermesApi()!.send('session/set_mode', {
+          await helixApi()!.send('session/set_mode', {
             session_id: sessionId,
             mode_id: approvalMode,
           })
@@ -3300,8 +3287,8 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // A background run must NOT overwrite the global — that would make Stop /
       // model-switch target the wrong session.
       if (isFrontRun()) {
-        hermesSessionIdRef.current = sessionId
-        try { useHermesStore.getState().setHermesSessionId(sessionId) } catch {}
+        helixSessionIdRef.current = sessionId
+        try { useGatewayStore.getState().setHelixSessionId(sessionId) } catch {}
       }
 
       // Stop button -> ask Hermes to cancel the current run.
@@ -3309,7 +3296,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // via notify (not send, which issues a request and gets "Method not found").
       controller.signal.addEventListener('abort', () => {
         if (sessionId) {
-          electronHermes.notify('session/cancel', { session_id: sessionId })
+          electronHelix.notify('session/cancel', { session_id: sessionId })
         }
         // 暂停/停止时绝不能让已流式输出的内容丢失。abort 不会让 ack-only 的
         // session/prompt 拒绝，下面的 AbortError catch 永远不会触发，循环只是
@@ -3331,7 +3318,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
       // trailing session_info_update can be dropped quietly instead of as text.
       let streamedContent = false
       // Translate Hermes ACP notifications into the UI event shape the parser expects.
-      const mapHermesEvent = (method: string, params: any): any => {
+      const mapHelixEvent = (method: string, params: any): any => {
         if (method === 'usage:prompt-complete') {
           return { type: 'usage_prompt_complete', usage: params?.usage || null }
         }
@@ -3421,18 +3408,10 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             case 'usage_update':
               return { type: 'usage_update', size: Number(u.size) || 0, used: Number(u.used) || 0 }
             case 'available_commands_update':
-              return { type: 'available_commands', commands: u.commands || u.availableCommands || u.available_commands || [] }
+              // 已废弃：codex 后端不再发送此事件
+              return null
             case 'session_info_update': {
-              // 自动压缩信号：压缩会轮换内部 Hermes session id，ACP server 随即
-              // 发出 session_info_update 并携带 field_meta.hermes.sessionProvenance
-              // （previous_hermes_session_id 非空即表示发生过轮转 = 压缩）。
-              // 普通标题/元数据更新该字段为 null，不会误触发。
-              {
-                const _prov = u?.field_meta?.hermes?.sessionProvenance
-                if (_prov && _prov.previous_hermes_session_id) {
-                  return { type: 'auto_compressed' }
-                }
-              }
+              // 普通标题/元数据更新
               // Backends sometimes carry errors, notices, or even the final
               // reply inside session_info_update. We used to silently drop it
               // (default: return null), which produced a blank UI with no clue.
@@ -3471,7 +3450,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           return { type: 'done', content: textBufferRef.current }
         }
         if (method === 'error') {
-          return { type: 'error', content: params?.message || 'Hermes 错误' }
+          return { type: 'error', content: params?.message || '后端错误' }
         }
         return null
       }
@@ -3566,7 +3545,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         canceled: 'cancelled',
         abandoned: 'cancelled',
       }
-      const parseTodoItem = (raw: any): HermesTodo | null => {
+      const parseTodoItem = (raw: any): HelixTodo | null => {
         if (!raw || typeof raw !== 'object') return null
         const content =
           raw.content ?? raw.title ?? raw.text ?? raw.label ?? raw.name ?? raw.task ?? ''
@@ -3580,7 +3559,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           activeForm: typeof raw.activeForm === 'string' ? raw.activeForm : undefined,
         }
       }
-      const extractTodoList = (payload: any): HermesTodo[] | null => {
+      const extractTodoList = (payload: any): HelixTodo[] | null => {
         if (!payload || typeof payload !== 'object') return null
         // session/update wraps the list in `.update` (or `.params.update`)
         const u = payload.update ?? payload.params?.update ?? payload
@@ -3592,7 +3571,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           u?.update?.entries ?? u?.update?.todos ?? u?.update?.items ??
           payload?.entries ?? payload?.todos ?? payload?.items
         if (Array.isArray(arr)) {
-          const items = arr.map(parseTodoItem).filter(Boolean) as HermesTodo[]
+          const items = arr.map(parseTodoItem).filter(Boolean) as HelixTodo[]
           return items.length ? items : null
         }
         // tool_call with name todo_write/TodoWrite may carry `todos` in rawInput
@@ -3607,17 +3586,17 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             : Array.isArray(parsedInput?.list) ? parsedInput.list
             : null
           if (Array.isArray(inner)) {
-            const items = inner.map(parseTodoItem).filter(Boolean) as HermesTodo[]
+            const items = inner.map(parseTodoItem).filter(Boolean) as HelixTodo[]
             return items.length ? items : null
           }
         }
         return null
       }
-      const pushTodos = (list: HermesTodo[] | null) => {
+      const pushTodos = (list: HelixTodo[] | null) => {
         if (list && list.length) {
           // 带上前端对话 id（myCid）：右上角按 currentSessionId 过滤，之前误用
           // 后端 sid 导致 todo 永远写不进当前会话的缓存（2026-08-18 修复）。
-          useHelixStore.getState().setHermesTodos(list, myCid ?? undefined)
+          useHelixStore.getState().setHelixTodos(list, myCid ?? undefined)
         }
       }
 
@@ -3721,12 +3700,12 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
         }, IDLE_TIMEOUT_MS)
       }
 
-      // IMPORTANT: subscribe through hermesApi() (the mode-aware facade), NOT
-      // window.electron.hermes. In serve mode agent stream events (session/update,
+      // IMPORTANT: subscribe through helixApi() (the mode-aware facade), NOT
+      // window.electron.helix. In serve mode agent stream events (session/update,
       // tool.*, message.*) arrive over the WS client inside serve-gateway.ts and
       // never hit the IPC bridge — subscribing to the raw IPC onEvent left the
       // run with "正在思考" forever (no tool cards, no text).
-      unsubscribe = hermesApi()!.onEvent(async (method: string, params: any) => {
+      unsubscribe = helixApi()!.onEvent(async (method: string, params: any) => {
         const mySid = sessionId
         // True-concurrency guard: this onEvent instance belongs to the run for
         // `mySid`. Ignore events from any OTHER session so parallel runs don't
@@ -3751,7 +3730,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           // 中的 run 砍掉）。run 的收尾交给真实完成事件或 resume 失败的 reject。
           if (method === 'gateway.disconnected') {
             scheduleSynthDone(300000)
-            useHelixStore.getState().setConnectionNotice({ phase: 'error', message: '与 Hermes 网关连接已断开，正在尝试恢复…', ts: Date.now() })
+            useHelixStore.getState().setConnectionNotice({ phase: 'error', message: '与 Helix 网关连接已断开，正在尝试恢复…', ts: Date.now() })
             return
           }
           // Reconnect completed (serve-gateway already re-ran session.resume).
@@ -3780,7 +3759,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
             if (params?.oldId === sessionId) {
               debug('[HelixTrace] 本 run 会话被替换 →', params.oldId, '→', params.newId)
               sessionId = params.newId
-              sessionMapRef.current.set(myCid, { sid: params.newId, epoch: useHermesStore.getState().gatewayEpoch })
+              sessionMapRef.current.set(myCid, { sid: params.newId, epoch: useGatewayStore.getState().gatewayEpoch })
               persistSessionMap(sessionMapRef.current)
             }
           }
@@ -3788,9 +3767,26 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
           // the ACP path clears the accumulated text/thinking buffers so the
           // retry response replaces (not appends to) the partial content from
           // the failed attempt. In serve mode this event originates from the
-          // hermes process's stderr (main.js), NOT a WS drop — the session is
+          // gateway process's stderr (main.js), NOT a WS drop — the session is
           // never rebuilt, so clearing buffers would discard already-streamed
           // thinking/text. Only update the notice there.
+          if (method === 'model/retry') {
+            const attempt = params?.attempt ?? 1
+            const total = params?.total ?? 5
+            const warningMessage = typeof params?.message === 'string' ? params.message : '上游连接不稳定，正在重连（第 ' + attempt + '/' + total + ' 次）…'
+            useHelixStore.getState().setConnectionNotice({ phase: 'retrying', attempt, total, message: warningMessage, ts: Date.now() })
+            setTimeout(() => {
+              const cur = useHelixStore.getState().connectionNotice
+              if (cur?.phase === 'retrying') {
+                useHelixStore.getState().setConnectionNotice(null)
+              }
+            }, 30000)
+            return
+          }
+          if (method === 'model/warning') {
+            debug('[Helix] model warning:', params?.message ?? params)
+            return
+          }
           if (method === 'gateway.retry') {
             const phase = params?.phase as string | undefined
             if (isServeActive()) {
@@ -3872,7 +3868,7 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
               }, 30000)
             }
           }
-          const parsed = mapHermesEvent(method, params)
+          const parsed = mapHelixEvent(method, params)
           // 抓取后端 message.complete 透传的 row_id，落库时盖到 ChatMessage 上，供撤回同步后端用。
           if (method === 'message.complete') {
             const rid = params?.row_id ?? params?.payload?.row_id
@@ -4028,12 +4024,12 @@ const promptText = (trimmed + fileContext).trim() || trimmed
       // Fire the prompt — events stream back via onEvent (don't await the promise itself).
       // ACP expects prompt as a list of content blocks, not a plain string
 promptSentAtRef.current = Date.now()
-      hermesApi()!.send('session/prompt', {
+      helixApi()!.send('session/prompt', {
         session_id: sessionId,
         prompt: [{ type: 'text', text: finalPromptText }],
       }).then((result: any) => {
         // session/prompt is now ack-only (official model): result == {status:'streaming'}.
-        // Completion + usage are driven by events — run_complete → done (mapHermesEvent
+        // Completion + usage are driven by events — run_complete → done (mapHelixEvent
         // :1848), usage:prompt-complete → addSessionUsageStats (run loop :2791). Nothing
         // to do on the ack itself except log it; do NOT synthesize `done` here.
         debug('[HelixTrace] session/prompt ack', {
@@ -4047,7 +4043,7 @@ promptSentAtRef.current = Date.now()
         if (result?.session_id && result.session_id !== sessionId) {
           debug('[HelixTrace] session/prompt 会话被替换 →', sessionId, '→', result.session_id)
           sessionId = result.session_id
-          sessionMapRef.current.set(myCid, { sid: result.session_id, epoch: useHermesStore.getState().gatewayEpoch })
+          sessionMapRef.current.set(myCid, { sid: result.session_id, epoch: useGatewayStore.getState().gatewayEpoch })
           persistSessionMap(sessionMapRef.current)
         }
       }).catch((err: any) => {
@@ -4587,10 +4583,10 @@ promptSentAtRef.current = Date.now()
                   planAutoExecutedRef.current = true
                   const cid = useHelixStore.getState().currentSessionId
                   setApprovalMode('accept_edits')
-                  const hermesSid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
-                  if (hermesSid) {
-                    hermesApi()!.send('session/set_mode', {
-                      session_id: hermesSid,
+                  const helixSid = (cid && sessionMapRef.current.get(cid)?.sid) || helixSessionIdRef.current
+                  if (helixSid) {
+                    helixApi()!.send('session/set_mode', {
+                      session_id: helixSid,
                       mode_id: 'accept_edits',
                     }).catch((e: any) => console.warn('[Helix] set_mode(accept_edits) failed:', e))
                   }
@@ -4755,11 +4751,11 @@ promptSentAtRef.current = Date.now()
               if (verdict === 'auto') {
                 const sid = (myCid && sessionMapRef.current.get(myCid)?.sid)
                   || (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid)
-                  || hermesSessionIdRef.current
+                  || helixSessionIdRef.current
                 if (sid) {
                   // 自动批准也走新 RPC（2026-08-17 起后端弃用 session/approve）：
                   // approval.respond + choice，无需再配对 toolCallId。
-                  hermesApi()!.send('approval.respond', {
+                  helixApi()!.send('approval.respond', {
                     session_id: sid,
                     choice: 'once',
                   }).catch((e: any) => console.warn('[Helix] auto-approve failed:', e))
@@ -5074,11 +5070,8 @@ promptSentAtRef.current = Date.now()
           }
             // Built-in commands are instant client-side operations — never gate
             // them on the run state (otherwise /compact & co. silently no-op
-            // while a task is running). Hermes commands still stop first.
+            // while a task is running).
             if (selected.isBuiltinCommand) {
-              setInputSynced(`/${selected.name}`)
-              setTimeout(() => handleRun(), 0)
-            } else if (selected.isHermesCommand) {
               setInputSynced(`/${selected.name}`)
               setTimeout(() => {
                 if (isBusy) {
@@ -5174,12 +5167,12 @@ promptSentAtRef.current = Date.now()
       // 用 getState() 拿当前会话，避免 useCallback([]) 闭包里的 currentSessionId
       // 因依赖变化而读到旧值（弹条常跨会话存活，出队必须删对的会话）。
       const cid = useHelixStore.getState().currentSessionId
-      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || helixSessionIdRef.current
       if (sid) {
         // 旧 RPC 是 WS 里非对称的一对一 approve/deny（session/approve 需要 toolCallId）。
         // 新 RPC 用 approval.respond + choice: once/session/always/deny，把决定写回
         // 后端状态机后由 agent 侧 resolve，无需前端再配对 request_id（2026-08-17 验证）。
-        await hermesApi()!.send('approval.respond', {
+        await helixApi()!.send('approval.respond', {
           session_id: sid,
           choice,
         })
@@ -5193,9 +5186,9 @@ promptSentAtRef.current = Date.now()
   // 回应模型的 clarify 反问：把选中项/输入文本发回 clarify/respond 解锁后端，然后出队。
   const handleClarifyRespond = useCallback(async (requestId: string, answer: string) => {
     try {
-      const sid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || hermesSessionIdRef.current
+      const sid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || helixSessionIdRef.current
       if (sid) {
-        await hermesApi()!.send('clarify/respond', {
+        await helixApi()!.send('clarify/respond', {
           session_id: sid,
           request_id: requestId,
           answer,
@@ -5217,10 +5210,10 @@ promptSentAtRef.current = Date.now()
     const cid = useHelixStore.getState().currentSessionId
     setApprovalMode('accept_edits')
     // 后端模式同步：让 yolo/只读模式下的 session 真正解锁到可写状态。
-    const hermesSid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
-    if (hermesSid) {
-      hermesApi()!.send('session/set_mode', {
-        session_id: hermesSid,
+    const helixSid = (cid && sessionMapRef.current.get(cid)?.sid) || helixSessionIdRef.current
+    if (helixSid) {
+      helixApi()!.send('session/set_mode', {
+        session_id: helixSid,
         mode_id: 'accept_edits',
       }).catch((e: any) => {
         console.warn('[Helix] set_mode(accept_edits) failed:', e)
@@ -5245,13 +5238,13 @@ promptSentAtRef.current = Date.now()
     setApprovalQueue([])
     try {
       const cid = useHelixStore.getState().currentSessionId
-      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || helixSessionIdRef.current
       if (sid) {
         for (const req of approvalQueue) {
           // 新 RPC（2026-08-17 起后端弃用 session/approve）：approval.respond +
           // choice: once/session/always/deny，由 agent 侧状态机 resolve，不再配对
           // toolCallId。once = 仅放行当前这步。
-          await hermesApi()!.send('approval.respond', {
+          await helixApi()!.send('approval.respond', {
             session_id: sid,
             choice: 'once',
           })
@@ -5269,10 +5262,10 @@ promptSentAtRef.current = Date.now()
     setApprovalQueue([])
     try {
       const cid = useHelixStore.getState().currentSessionId
-      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || hermesSessionIdRef.current
+      const sid = (cid && sessionMapRef.current.get(cid)?.sid) || helixSessionIdRef.current
       if (sid) {
         for (const req of approvalQueue) {
-          await hermesApi()!.send('approval.respond', {
+          await helixApi()!.send('approval.respond', {
             session_id: sid,
             choice: 'deny',
           })
@@ -5407,10 +5400,10 @@ promptSentAtRef.current = Date.now()
                     setApprovalMode(mode.id)
                     setShowApprovalModeDropdown(false)
                     // Immediately apply to current session if one exists
-                    const hermesSid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || hermesSessionIdRef.current
-                    if (hermesSid) {
-                      hermesApi()!.send('session/set_mode', {
-                        session_id: hermesSid,
+                    const helixSid = (currentSessionId && sessionMapRef.current.get(currentSessionId)?.sid) || helixSessionIdRef.current
+                    if (helixSid) {
+                      helixApi()!.send('session/set_mode', {
+                        session_id: helixSid,
                         mode_id: mode.id,
                       }).catch((e: any) => {
                         console.warn('[Helix] set_mode(' + mode.id + ') failed:', e)
@@ -5631,11 +5624,6 @@ promptSentAtRef.current = Date.now()
                           if ((skill as any).isBuiltinCommand) {
                             setInputSynced(`/${skill.name}`)
                             setTimeout(() => handleRun(), 0)
-                          } else if ((skill as any).isHermesCommand) {
-                            setInputSynced(`/${skill.name}`)
-                            if (!isBusy) {
-                              setTimeout(() => handleRun(), 0)
-                            }
                           } else {
                             handleSkillSelect(skill)
                           }
@@ -5657,9 +5645,6 @@ promptSentAtRef.current = Date.now()
                         </div>
                         {(skill as any).isBuiltinCommand && (
                           <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-amber-500/70 shrink-0">CMD</span>
-                        )}
-                        {(skill as any).isHermesCommand && (
-                          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 shrink-0">Hermes</span>
                         )}
                       </button>
                     ))}

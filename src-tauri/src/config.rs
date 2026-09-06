@@ -1,14 +1,17 @@
-//! Hermes config.yaml / .env read-write helpers.
+//! Helix config.yaml / .env read-write helpers.
 //! Port of `electron/lib/config.js` (pure string manipulation) plus the
-//! getConfig / writeHermesConfig / setModel logic from `electron/main.js`.
+//! getConfig / writeHelixConfig / setModel logic from `electron/main.js`.
 //!
-//! Hermes YAML is edited line-by-line (2-space indentation) so the rest of the
+//! Helix YAML is edited line-by-line (2-space indentation) so the rest of the
 //! file — including comments and ordering — is preserved byte-for-byte.
 
-use crate::paths::hermes_data_dir;
+use crate::paths::helix_data_dir;
 use std::path::PathBuf;
 
-pub const BUILTIN_PROVIDER_ENV: &[(&str, &str)] = &[("stepfun", "STEPFUN_API_KEY"), ("deepseek", "DEEPSEEK_API_KEY")];
+pub const BUILTIN_PROVIDER_ENV: &[(&str, &str)] = &[
+    ("stepfun", "STEPFUN_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),
+];
 
 /// Known-good fallback endpoint used when the frontend supplies a dead/bad
 /// config (mirror of electron/lib/security.js APIHUB_DEFAULT).
@@ -28,21 +31,41 @@ pub const APIHUB_DEFAULT: ApiHubDefault = ApiHubDefault {
 };
 
 const KNOWN_BASE_PROVIDERS: &[&str] = &[
-    "openai", "anthropic", "openrouter", "agnes-ai", "nous", "moa", "vllm", "llamacpp",
-    "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "bedrock", "gemini",
-    "deepseek", "qwen", "grok", "xai", "antling",
+    "openai",
+    "anthropic",
+    "openrouter",
+    "agnes-ai",
+    "nous",
+    "moa",
+    "vllm",
+    "llamacpp",
+    "zai",
+    "kimi-coding",
+    "kimi-coding-cn",
+    "minimax",
+    "minimax-cn",
+    "bedrock",
+    "gemini",
+    "deepseek",
+    "qwen",
+    "grok",
+    "xai",
+    "antling",
 ];
 
 pub fn config_yaml_path() -> PathBuf {
-    hermes_data_dir().join("config.yaml")
+    helix_data_dir().join("config.yaml")
 }
 
 pub fn env_path() -> PathBuf {
-    hermes_data_dir().join(".env")
+    helix_data_dir().join(".env")
 }
 
 fn norm_lines(yaml: &str) -> Vec<String> {
-    yaml.replace("\r\n", "\n").split('\n').map(|s| s.to_string()).collect()
+    yaml.replace("\r\n", "\n")
+        .split('\n')
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn is_scalar_bool(v: &serde_json::Value) -> bool {
@@ -57,7 +80,11 @@ pub fn set_yaml_key(yaml: &str, dotted: &str, value: &serde_json::Value) -> Stri
     }
     let (top, sub) = (parts[0], parts[1]);
     let value_str = if is_scalar_bool(value) {
-        if value.as_bool().unwrap_or(false) { "true".to_string() } else { "false".to_string() }
+        if value.as_bool().unwrap_or(false) {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }
     } else {
         value.to_string()
     };
@@ -110,125 +137,6 @@ pub fn set_yaml_key(yaml: &str, dotted: &str, value: &serde_json::Value) -> Stri
     lines.join("\n")
 }
 
-/// Like `set_yaml_key` but supports arbitrarily-deep dotted keys
-/// (e.g. `auxiliary.vision.model`). `set_yaml_key` (2-level only) silently
-/// drops deeper keys, which is exactly why the vision config command needs
-/// this variant to write the `auxiliary.vision.*` block.
-pub fn set_yaml_key_deep(yaml: &str, dotted: &str, value: &serde_json::Value) -> String {
-    let parts: Vec<&str> = dotted.split('.').collect();
-    if parts.is_empty() {
-        return yaml.to_string();
-    }
-    let value_str = yaml_scalar_string(value);
-    let mut lines: Vec<String> = norm_lines(yaml);
-    set_deep(&mut lines, &parts, &value_str, 0, 0);
-    lines.join("\n")
-}
-
-/// Remove a `key:` line at a dotted path (used to strip legacy inline secrets
-/// that are now stored in `.env`, e.g. `auxiliary.vision.api_key`).
-pub fn remove_yaml_key_deep(yaml: &str, dotted: &str) -> String {
-    let parts: Vec<&str> = dotted.split('.').collect();
-    if parts.is_empty() {
-        return yaml.to_string();
-    }
-    let mut lines: Vec<String> = norm_lines(yaml);
-    remove_deep(&mut lines, &parts, 0, 0);
-    lines.join("\n")
-}
-
-fn yaml_scalar_string(value: &serde_json::Value) -> String {
-    if let Some(b) = value.as_bool() {
-        if b { "true".to_string() } else { "false".to_string() }
-    } else if let Some(s) = value.as_str() {
-        let needs_quote = s.is_empty()
-            || s.chars().any(|c| {
-                c == ':' || c == '#' || c == '"' || c == '\'' || c == '%' || c.is_whitespace()
-            });
-        if needs_quote {
-            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-        } else {
-            s.to_string()
-        }
-    } else if value.is_null() {
-        "\"\"".to_string()
-    } else {
-        value.to_string()
-    }
-}
-
-/// Find the index of a `key:` header at exactly `indent` spaces, scoped to the
-/// block that starts at `start`. A deeper-indented line (more spaces) is
-/// intentionally not matched so we don't confuse a child block with a sibling.
-/// The search stops at the first non-blank, non-comment line shallower than
-/// `indent`, so a same-indent key in an unrelated section (e.g. a
-/// `custom_providers` field) can never shadow a nested key like
-/// `auxiliary.vision.base_url`.
-fn find_at_indent(lines: &[String], key: &str, indent: usize, start: usize) -> Option<usize> {
-    let prefix = " ".repeat(indent);
-    for (i, l) in lines.iter().enumerate().skip(start) {
-        if indent > 0 {
-            let trimmed = l.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            if leading_spaces(l) < indent {
-                break;
-            }
-        }
-        if l.len() >= indent && l.starts_with(&prefix) {
-            let rest = &l[indent..];
-            if !rest.starts_with(' ') {
-                if rest == format!("{key}:") || rest.starts_with(&format!("{key}:")) {
-                    return Some(i);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Recursively locate/create the nested block for `parts[depth..]` and set its
-/// leaf to `value_str`. When a parent header exists but the child is missing,
-/// the child header is inserted right after the parent header (keeps the block
-/// cohesive). When the top-level key is absent it is appended at EOF (the only
-/// caller writes `auxiliary.*`, so this stays correct). `start` anchors every
-/// lookup to the parent block so nested keys can't leak into sibling sections.
-fn set_deep(lines: &mut Vec<String>, parts: &[&str], value_str: &str, indent: usize, start: usize) {
-    let key = parts[0];
-    let idx = find_at_indent(lines, key, indent, start);
-    match idx {
-        None => {
-            lines.push(format!("{}{}:", " ".repeat(indent), key));
-            set_deep(lines, &parts[1..], value_str, indent + 2, lines.len() - 1);
-        }
-        Some(i) => {
-            if parts.len() == 1 {
-                lines[i] = format!("{}{}: {}", " ".repeat(indent), key, value_str);
-                return;
-            }
-            let child = parts[1];
-            if find_at_indent(lines, child, indent + 2, i + 1).is_none() {
-                lines.insert(i + 1, format!("{}{}:", " ".repeat(indent + 2), child));
-            }
-            set_deep(lines, &parts[1..], value_str, indent + 2, i + 1);
-        }
-    }
-}
-
-/// Recursively remove the leaf `key` line at `parts[0]..`, scoped like
-/// `set_deep`. Leaves parent headers (and sibling keys) intact.
-fn remove_deep(lines: &mut Vec<String>, parts: &[&str], indent: usize, start: usize) {
-    let Some(i) = find_at_indent(lines, parts[0], indent, start) else {
-        return;
-    };
-    if parts.len() == 1 {
-        lines.remove(i);
-    } else {
-        remove_deep(lines, &parts[1..], indent + 2, i + 1);
-    }
-}
-
 #[derive(Debug)]
 struct CustomProviderEntry {
     end: usize,
@@ -251,10 +159,7 @@ fn leading_spaces(s: &str) -> usize {
 }
 
 fn yaml_scalar(raw: &str) -> String {
-    raw.trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .to_string()
+    raw.trim().trim_matches('"').trim_matches('\'').to_string()
 }
 
 fn parse_custom_provider_entries(yaml: &str) -> Vec<CustomProviderEntry> {
@@ -346,7 +251,11 @@ fn custom_provider_base_url(yaml: &str, name: &str) -> String {
     parse_custom_provider_entries(yaml)
         .into_iter()
         .find(|entry| entry.name == name)
-        .and_then(|entry| entry.field("base_url").map(|v| v.trim_end_matches('/').to_string()))
+        .and_then(|entry| {
+            entry
+                .field("base_url")
+                .map(|v| v.trim_end_matches('/').to_string())
+        })
         .unwrap_or_default()
 }
 
@@ -431,7 +340,10 @@ pub fn set_custom_provider_field(yaml: &str, name: &str, field: &str, value: &st
             let existing = &lines[*idx];
             let mut lead = existing[..existing.len() - existing.trim_start().len()].to_string();
             if let Some(rest) = existing.trim_start().strip_prefix("- ") {
-                if rest.strip_prefix(field).is_some_and(|tail| tail.starts_with(':')) {
+                if rest
+                    .strip_prefix(field)
+                    .is_some_and(|tail| tail.starts_with(':'))
+                {
                     lead.push_str("- ");
                 }
             }
@@ -450,8 +362,16 @@ pub fn set_custom_provider_field(yaml: &str, name: &str, field: &str, value: &st
     let field_pad = " ".repeat(field_indent);
     let default_base_url = "https://api.openai.com/v1";
     let default_model = "gpt-4o";
-    let fld = if field == "base_url" { value } else { default_base_url };
-    let mdl = if field == "model" { value } else { default_model };
+    let fld = if field == "base_url" {
+        value
+    } else {
+        default_base_url
+    };
+    let mdl = if field == "model" {
+        value
+    } else {
+        default_model
+    };
     let new_lines = vec![
         format!("{dash_pad}- name: {name}"),
         format!("{field_pad}base_url: {fld}"),
@@ -459,7 +379,10 @@ pub fn set_custom_provider_field(yaml: &str, name: &str, field: &str, value: &st
         format!("{field_pad}model: {mdl}"),
     ];
 
-    let Some(block_start) = lines.iter().position(|l| l.starts_with("custom_providers:")) else {
+    let Some(block_start) = lines
+        .iter()
+        .position(|l| l.starts_with("custom_providers:"))
+    else {
         let mut block = vec!["custom_providers:".to_string()];
         block.extend(new_lines);
         block.push(String::new());
@@ -481,84 +404,9 @@ pub fn set_custom_provider_field(yaml: &str, name: &str, field: &str, value: &st
     lines.join("\n")
 }
 
-/// Write `delegation.identities` as a JSON-on-one-line YAML flow value.
-pub fn set_delegation_identities(yaml: &str, identities: &serde_json::Value) -> String {
-    let arr = if identities.is_array() { identities.clone() } else { serde_json::json!([]) };
-    let value_str = arr.to_string();
-    let line = format!("  identities: {value_str}");
-    let mut lines = norm_lines(yaml);
-    let mut top_idx = -1i64;
-    for (i, l) in lines.iter().enumerate() {
-        if !l.starts_with(' ') && l.starts_with("delegation:") {
-            top_idx = i as i64;
-            break;
-        }
-    }
-    if top_idx == -1 {
-        lines.push("delegation:".to_string());
-        lines.push(line);
-        return lines.join("\n");
-    }
-    // find block extent
-    let mut block_end = top_idx;
-    for i in (top_idx + 1)..lines.len() as i64 {
-        if !lines[i as usize].starts_with(' ') {
-            break;
-        }
-        block_end = i;
-    }
-    let mut i = block_end;
-    while i > top_idx {
-        if lines[i as usize].trim_start().starts_with("identities:") {
-            lines.remove(i as usize);
-        }
-        i -= 1;
-    }
-    lines.insert((top_idx + 1) as usize, line);
-    lines.join("\n")
-}
-
-/// Parse the `agent:` block into a flat map of personality fields.
-pub fn parse_hermes_personalities(yaml: &str) -> serde_json::Map<String, serde_json::Value> {
-    let mut out = serde_json::Map::new();
-    let lines = norm_lines(yaml);
-    let mut start = -1i64;
-    for (i, l) in lines.iter().enumerate() {
-        if l.starts_with("agent:") {
-            start = i as i64;
-            break;
-        }
-    }
-    if start == -1 {
-        return out;
-    }
-    for i in (start + 1)..lines.len() as i64 {
-        let l = &lines[i as usize];
-        if !l.starts_with(' ') {
-            break;
-        }
-        if let Some(rest) = l.strip_prefix("    ") {
-            if let Some(colon) = rest.find(':') {
-                let key = &rest[..colon];
-                if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                    let val = rest[colon + 1..].trim().trim_matches('"').trim_matches('\'').to_string();
-                    out.insert(key.to_string(), serde_json::Value::String(val));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Set `agent.system_prompt` (quoted YAML scalar).
-pub fn set_agent_system_prompt(yaml: &str, value: &str) -> String {
-    let safe = format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
-    set_yaml_key(yaml, "agent.system_prompt", &serde_json::Value::String(safe))
-}
-
-/// Read the effective Hermes config (mirror of main.js `hermes:getConfig`).
+/// Read the effective config (mirror of main.js `helix:getConfig`).
 #[derive(Serialize, Default)]
-pub struct HermesConfig {
+pub struct HelixConfig {
     pub provider: String,
     pub model: String,
     pub base_url: String,
@@ -571,8 +419,8 @@ pub struct HermesConfig {
 
 use serde::Serialize;
 
-pub fn read_hermes_config() -> HermesConfig {
-    let mut res = HermesConfig::default();
+pub fn read_helix_config() -> HelixConfig {
+    let mut res = HelixConfig::default();
     let yaml_path = config_yaml_path();
     let env_path = env_path();
     let yaml = match std::fs::read_to_string(&yaml_path) {
@@ -682,7 +530,16 @@ pub fn read_hermes_config() -> HermesConfig {
             if let Some(colon) = t.find(':') {
                 let key = t[..colon].trim();
                 if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                    delegation.insert(key.to_string(), serde_json::Value::String(t[colon + 1..].trim().trim_matches('"').trim_matches('\'').to_string()));
+                    delegation.insert(
+                        key.to_string(),
+                        serde_json::Value::String(
+                            t[colon + 1..]
+                                .trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                .to_string(),
+                        ),
+                    );
                 }
             }
         }
@@ -697,7 +554,10 @@ pub fn read_hermes_config() -> HermesConfig {
 }
 
 fn provider_env_var(name: &str) -> Option<&'static str> {
-    BUILTIN_PROVIDER_ENV.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+    BUILTIN_PROVIDER_ENV
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, v)| *v)
 }
 
 /// Sync `.env` — the OPENAI_BASE_URL / OPENAI_API_KEY / provider-specific keys.
@@ -764,9 +624,16 @@ fn is_search_env_key(l: &str) -> bool {
         || l.starts_with("BRAVE_SEARCH_API_KEY=")
 }
 
-/// Write model/provider/baseUrl/apiKey into config.yaml + .env.
-/// Mirrors `writeHermesConfig` in main.js.
-pub fn write_hermes_config(model: Option<&str>, provider: Option<&str>, base_url: Option<&str>, api_key: Option<&str>) {
+/// Write model/provider/baseUrl/apiKey into config.yaml + .env,
+/// then mirror the same settings into the codex app-server's
+/// `CODEX_HOME/config.toml` (codex ignores config.yaml entirely).
+/// Mirrors `writeHelixConfig` in main.js.
+pub fn write_helix_config(
+    model: Option<&str>,
+    provider: Option<&str>,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+) {
     let yaml_path = config_yaml_path();
     let mut yaml = String::new();
     if let Ok(c) = std::fs::read_to_string(&yaml_path) {
@@ -787,7 +654,11 @@ pub fn write_hermes_config(model: Option<&str>, provider: Option<&str>, base_url
         Some(p) if !p.is_empty() && p != "__custom__" && p != "custom" => p.to_string(),
         _ => "custom".to_string(),
     };
-    let resolved = resolve_provider(&yaml, Some(&req_provider), base_url.filter(|b| !b.trim().is_empty()));
+    let resolved = resolve_provider(
+        &yaml,
+        Some(&req_provider),
+        base_url.filter(|b| !b.trim().is_empty()),
+    );
     let target_cp_key = custom_provider_api_key(&yaml, &resolved);
     let effective_key = if !incoming_key.is_empty() {
         incoming_key.clone()
@@ -802,12 +673,24 @@ pub fn write_hermes_config(model: Option<&str>, provider: Option<&str>, base_url
     if model.is_some() || provider.is_some() || base_url.is_some() {
         let mut updated = yaml.clone();
         if let Some(m) = model {
-            updated = set_yaml_key(&updated, "model.default", &serde_json::Value::String(m.trim().to_string()));
+            updated = set_yaml_key(
+                &updated,
+                "model.default",
+                &serde_json::Value::String(m.trim().to_string()),
+            );
         }
         let yaml_provider = disambiguate_custom_provider(&updated, &resolved);
-        updated = set_yaml_key(&updated, "model.provider", &serde_json::Value::String(yaml_provider));
+        updated = set_yaml_key(
+            &updated,
+            "model.provider",
+            &serde_json::Value::String(yaml_provider),
+        );
         if let Some(b) = base_url {
-            updated = set_yaml_key(&updated, "model.base_url", &serde_json::Value::String(b.trim().to_string()));
+            updated = set_yaml_key(
+                &updated,
+                "model.base_url",
+                &serde_json::Value::String(b.trim().to_string()),
+            );
         }
         if let Some(m) = model {
             updated = set_custom_provider_field(&updated, &resolved, "model", m.trim());
@@ -817,35 +700,143 @@ pub fn write_hermes_config(model: Option<&str>, provider: Option<&str>, base_url
         }
         if !effective_key.is_empty() {
             updated = set_custom_provider_field(&updated, &resolved, "api_key", &effective_key);
-            updated = set_yaml_key(&updated, "model.api_key", &serde_json::Value::String(effective_key));
+            // Borrow instead of move so effective_key stays usable for sync_codex_config below.
+            updated = set_yaml_key(
+                &updated,
+                "model.api_key",
+                &serde_json::Value::from(effective_key.as_str()),
+            );
         }
         if let Some(dir) = yaml_path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         let _ = std::fs::write(&yaml_path, updated);
     }
+
+    sync_codex_config(
+        model,
+        base_url,
+        Some(effective_key.as_str()).filter(|k| !k.is_empty()),
+    );
 }
 
-/// Mirrors the `hermes:setModel` handler. Returns (changed, key_changed).
-pub fn set_model(model: &str, base_url: Option<&str>, api_key: Option<&str>, provider: Option<&str>) -> (bool, bool) {
-    let hermes_dir = hermes_data_dir();
+/// Path of the codex app-server config: `CODEX_HOME/config.toml`.
+/// The backend spawns with CODEX_HOME = ~/.helix (see codex_gateway::codex_home).
+fn codex_config_toml_path() -> PathBuf {
+    crate::codex_gateway::codex_home().join("config.toml")
+}
+
+/// Mirror UI model settings into the codex app-server's config.toml.
+///
+/// codex only reads `CODEX_HOME/config.toml` — the helix-format config.yaml
+/// is invisible to it. Without this sync the UI model/provider settings have
+/// no effect and codex falls back to whatever provider entry config.toml
+/// already contains (or the built-in OpenAI default).
+///
+/// Strategy: never touch unrelated sections (marketplaces, mcp_servers, …).
+/// Only update the top-level `model` key, and — when a base_url is supplied —
+/// point `model_provider` at a dedicated `[model_providers.helix]` entry that
+/// we own and rewrite wholesale, leaving desktop-managed providers intact.
+pub fn sync_codex_config(model: Option<&str>, base_url: Option<&str>, api_key: Option<&str>) {
+    let model = model.map(str::trim).filter(|m| !m.is_empty());
+    let base_url = base_url.map(str::trim).filter(|b| !b.is_empty());
+    let api_key = api_key.map(str::trim).filter(|k| !k.is_empty());
+    if model.is_none() && base_url.is_none() {
+        return;
+    }
+
+    let path = codex_config_toml_path();
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    // NOTE: `raw.parse::<toml::Value>()` does NOT parse a whole document in
+    // toml 0.9 (`Value`'s FromStr only accepts a single value) — it fails on
+    // any real config.toml and the sync silently no-ops. Parse as Table.
+    let mut table: toml::Table = match raw.parse::<toml::Table>() {
+        Ok(t) => t,
+        // Unparseable: leave the file alone rather than clobbering
+        // desktop-managed sections with a minimal rewrite.
+        Err(e) => {
+            eprintln!("[helix] config.toml unparseable, skipping codex config sync: {e}");
+            return;
+        }
+    };
+
+    if let Some(m) = model {
+        table.insert("model".into(), toml::Value::String(m.to_string()));
+    }
+    if let Some(b) = base_url {
+        table.insert("model_provider".into(), toml::Value::String("helix".into()));
+        let mut prov = toml::map::Map::new();
+        prov.insert("name".into(), toml::Value::String("helix".into()));
+        prov.insert("base_url".into(), toml::Value::String(b.to_string()));
+        // codex removed the chat wire API (v0.5x+, discussion #7782) — it now
+        // only accepts "responses"; most OpenAI-compatible aggregators expose
+        // a responses-compatible endpoint at /v1.
+        prov.insert("wire_api".into(), toml::Value::String("responses".into()));
+        if let Some(k) = api_key {
+            prov.insert(
+                "experimental_bearer_token".into(),
+                toml::Value::String(k.to_string()),
+            );
+        }
+        let providers = table
+            .entry("model_providers")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        if let Some(pt) = providers.as_table_mut() {
+            pt.insert("helix".into(), toml::Value::Table(prov));
+        }
+    }
+
+    // codex 0.153 sends `multi_agent_v1` as a `namespace`-type tool, the
+    // `get/create/update_goal` trio, and a `web_search`-type tool; third-party
+    // responses endpoints reject `namespace`/`web_search` tool types with a
+    // 400 json_parse_error. Disable all three so the tool list only contains
+    // types aggregators understand.
+    table.insert("web_search".into(), toml::Value::String("disabled".into()));
+    {
+        let features = table
+            .entry("features")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        if let Some(ft) = features.as_table_mut() {
+            ft.insert("multi_agent".into(), toml::Value::Boolean(false));
+            ft.insert("goals".into(), toml::Value::Boolean(false));
+        }
+    }
+
+    let out = match toml::to_string_pretty(&table) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, out);
+}
+
+/// Mirrors the `helix:setModel` handler. Returns (changed, key_changed).
+pub fn set_model(
+    model: &str,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+    provider: Option<&str>,
+) -> (bool, bool) {
+    let helix_dir = helix_data_dir();
     let requested = provider
         .filter(|p| !p.trim().is_empty() && p.trim() != "custom")
         .map(|p| p.trim().to_string())
         .unwrap_or_default();
-    let mut hermes_key = api_key.map(|k| k.trim().to_string()).unwrap_or_default();
-    if hermes_key.is_empty() && base_url.map_or(true, |b| b.trim().is_empty()) {
-        if let Ok(env) = std::fs::read_to_string(hermes_dir.join(".env")) {
+    let mut helix_key = api_key.map(|k| k.trim().to_string()).unwrap_or_default();
+    if helix_key.is_empty() && base_url.map_or(true, |b| b.trim().is_empty()) {
+        if let Ok(env) = std::fs::read_to_string(helix_dir.join(".env")) {
             for l in env.lines() {
                 if let Some(rest) = l.strip_prefix("OPENAI_API_KEY=") {
-                    hermes_key = rest.trim().to_string();
+                    helix_key = rest.trim().to_string();
                     break;
                 }
             }
         }
     }
     let mut old_env_key = String::new();
-    if let Ok(env) = std::fs::read_to_string(hermes_dir.join(".env")) {
+    if let Ok(env) = std::fs::read_to_string(helix_dir.join(".env")) {
         for l in env.lines() {
             if let Some(rest) = l.strip_prefix("OPENAI_API_KEY=") {
                 old_env_key = rest.trim().to_string();
@@ -859,41 +850,83 @@ pub fn set_model(model: &str, base_url: Option<&str>, api_key: Option<&str>, pro
     let mut prev_provider = String::new();
     let mut prev_base = String::new();
 
-    let dirs: Vec<PathBuf> = vec![hermes_dir.clone(), dirs::home_dir().unwrap_or_default().join(".hermes")];
-    for config_dir in dirs {
-        let yaml_path = config_dir.join("config.yaml");
-        let Ok(yaml) = std::fs::read_to_string(&yaml_path) else { continue };
-        if config_dir == hermes_dir {
-            prev_default = extract_after(&yaml, "model.default:");
-            prev_yaml_has_provider = yaml.contains("model.provider");
-            prev_provider = extract_after(&yaml, "model.provider:");
-            prev_base = extract_after(&yaml, "model.base_url:");
-        }
-        let eff_provider = resolve_provider(&yaml, if requested.is_empty() { None } else { Some(&requested) }, if base_url_s.trim().is_empty() { None } else { Some(&base_url_s) });
-        let mut updated = set_yaml_key(&yaml, "model.default", &serde_json::Value::String(model.trim().to_string()));
-        updated = set_yaml_key(&updated, "model.base_url", &serde_json::Value::String(base_url_s.trim().to_string()));
+    let yaml_path = helix_dir.join("config.yaml");
+    if let Ok(yaml) = std::fs::read_to_string(&yaml_path) {
+        prev_default = extract_after(&yaml, "model.default:");
+        prev_yaml_has_provider = yaml.contains("model.provider");
+        prev_provider = extract_after(&yaml, "model.provider:");
+        prev_base = extract_after(&yaml, "model.base_url:");
+        let eff_provider = resolve_provider(
+            &yaml,
+            if requested.is_empty() {
+                None
+            } else {
+                Some(&requested)
+            },
+            if base_url_s.trim().is_empty() {
+                None
+            } else {
+                Some(&base_url_s)
+            },
+        );
+        let mut updated = set_yaml_key(
+            &yaml,
+            "model.default",
+            &serde_json::Value::String(model.trim().to_string()),
+        );
+        updated = set_yaml_key(
+            &updated,
+            "model.base_url",
+            &serde_json::Value::String(base_url_s.trim().to_string()),
+        );
         let yaml_provider = disambiguate_custom_provider(&updated, &eff_provider);
-        updated = set_yaml_key(&updated, "model.provider", &serde_json::Value::String(yaml_provider));
-        if !hermes_key.is_empty() {
-            updated = set_yaml_key(&updated, "model.api_key", &serde_json::Value::String(hermes_key.clone()));
+        updated = set_yaml_key(
+            &updated,
+            "model.provider",
+            &serde_json::Value::String(yaml_provider),
+        );
+        if !helix_key.is_empty() {
+            updated = set_yaml_key(
+                &updated,
+                "model.api_key",
+                &serde_json::Value::String(helix_key.clone()),
+            );
         }
         updated = set_custom_provider_field(&updated, &eff_provider, "model", model.trim());
-        if !hermes_key.is_empty() && !eff_provider.is_empty() {
-            updated = set_custom_provider_field(&updated, &eff_provider, "api_key", &hermes_key);
+        if !helix_key.is_empty() && !eff_provider.is_empty() {
+            updated = set_custom_provider_field(&updated, &eff_provider, "api_key", &helix_key);
         }
-        let _ = std::fs::create_dir_all(&config_dir);
+        let _ = std::fs::create_dir_all(&helix_dir);
         let _ = std::fs::write(&yaml_path, updated);
-        if config_dir == hermes_dir {
-            if !base_url_s.trim().is_empty() || !hermes_key.is_empty() {
-                let key_for_env = if hermes_key.is_empty() { None } else { Some(hermes_key.as_str()) };
-                sync_env(if base_url_s.trim().is_empty() { None } else { Some(base_url_s.trim()) }, key_for_env, &eff_provider);
-            }
+        if !base_url_s.trim().is_empty() || !helix_key.is_empty() {
+            let key_for_env = if helix_key.is_empty() {
+                None
+            } else {
+                Some(helix_key.as_str())
+            };
+            sync_env(
+                if base_url_s.trim().is_empty() {
+                    None
+                } else {
+                    Some(base_url_s.trim())
+                },
+                key_for_env,
+                &eff_provider,
+            );
         }
     }
+    // Mirror into the codex app-server's config.toml (it never reads config.yaml).
+    sync_codex_config(
+        Some(model),
+        Some(base_url_s.trim()).filter(|b| !b.is_empty()),
+        Some(helix_key.as_str()).filter(|k| !k.is_empty()),
+    );
     let model_changed = prev_default.trim() != model.trim();
     let changed = prev_yaml_has_provider
-        && (prev_provider.trim() != requested || prev_base.trim() != base_url_s.trim() || model_changed);
-    let key_changed = old_env_key != hermes_key;
+        && (prev_provider.trim() != requested
+            || prev_base.trim() != base_url_s.trim()
+            || model_changed);
+    let key_changed = old_env_key != helix_key;
     (changed, key_changed)
 }
 
@@ -903,54 +936,7 @@ fn extract_after(yaml: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Write `agent:` block settings (reasoning_effort, system_prompt).
-pub fn write_agent_config(reasoning_effort: Option<&str>, personality: Option<&str>) {
-    let yaml_path = config_yaml_path();
-    let Ok(mut yaml) = std::fs::read_to_string(&yaml_path) else { return };
-    if let Some(re) = reasoning_effort {
-        yaml = set_yaml_key(&yaml, "agent.reasoning_effort", &serde_json::Value::String(re.to_string()));
-    }
-    if let Some(p) = personality {
-        if !p.trim().is_empty() {
-            let safe = format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\""));
-            yaml = set_yaml_key(&yaml, "agent.system_prompt", &serde_json::Value::String(safe));
-        }
-    }
-    let _ = std::fs::write(&yaml_path, yaml);
-}
-
-/// Pin `coding_context: off` into config.yaml so a Windows git subprocess
-/// deadlock can never hang model output (mirror ensureCodingContextOff in
-/// electron/main.js). Survives Hermes config rewrites.
-pub fn ensure_coding_context_off() {
-    let yaml_path = config_yaml_path();
-    let Ok(yaml) = std::fs::read_to_string(&yaml_path) else { return };
-    // fix any legacy broken inline-merge (e.g. "max_turns: 150  coding_context: off")
-    let mut yaml = yaml;
-    let lines: Vec<String> = yaml.split('\n').map(|s| s.to_string()).collect();
-    let fixed: Vec<String> = lines
-        .into_iter()
-        .map(|l| {
-            let t = l.trim_start();
-            if let Some(rest) = t.strip_prefix("max_turns:") {
-                if let Some(num_end) = rest.trim_start().find(|c: char| !c.is_ascii_digit()) {
-                    let num = &rest.trim_start()[..num_end];
-                    let lead = &l[..l.len() - l.trim_start().len()];
-                    let _ = num;
-                    return format!("{lead}max_turns: {num}");
-                }
-            }
-            l
-        })
-        .collect();
-    yaml = fixed.join("\n");
-    let updated = set_yaml_key(&yaml, "agent.coding_context", &serde_json::Value::String("off".into()));
-    if updated != yaml {
-        let _ = std::fs::write(&yaml_path, updated);
-    }
-}
-
-/// Read a key from the hermes .env (OPENAI_API_KEY / OPENAI_BASE_URL / …).
+/// Read a key from the helix .env (OPENAI_API_KEY / OPENAI_BASE_URL / …).
 #[allow(dead_code)]
 pub fn read_env_key(key: &str) -> String {
     let Ok(env) = std::fs::read_to_string(env_path()) else {
@@ -961,6 +947,11 @@ pub fn read_env_key(key: &str) -> String {
         .find(|l| l.starts_with(&needle))
         .map(|l| l[needle.len()..].trim().to_string())
         .unwrap_or_default()
+}
+
+/// Set `delegation_identities` in config.yaml, returning the updated YAML.
+pub fn set_delegation_identities(yaml: &str, identities: &serde_json::Value) -> String {
+    set_yaml_key(yaml, "delegation_identities", identities)
 }
 
 #[cfg(test)]
@@ -993,11 +984,17 @@ dashboard:
     #[test]
     fn parses_both_custom_provider_styles() {
         assert_eq!(custom_provider_names(FIRST_STYLE), vec!["a", "b"]);
-        assert_eq!(custom_provider_base_url(FIRST_STYLE, "a"), "https://a.com/v1");
+        assert_eq!(
+            custom_provider_base_url(FIRST_STYLE, "a"),
+            "https://a.com/v1"
+        );
         assert_eq!(custom_provider_api_key(FIRST_STYLE, "b"), "sk-b");
 
         assert_eq!(custom_provider_names(INDENTED_STYLE), vec!["x"]);
-        assert_eq!(custom_provider_base_url(INDENTED_STYLE, "x"), "https://x.com/v1");
+        assert_eq!(
+            custom_provider_base_url(INDENTED_STYLE, "x"),
+            "https://x.com/v1"
+        );
     }
 
     #[test]
@@ -1022,7 +1019,8 @@ dashboard:
         assert!(updated.contains("  base_url: https://c.com/v1"));
         assert!(!updated.contains("    base_url: https://c.com/v1"));
 
-        let updated = set_custom_provider_field(INDENTED_STYLE, "y", "base_url", "https://y.com/v1");
+        let updated =
+            set_custom_provider_field(INDENTED_STYLE, "y", "base_url", "https://y.com/v1");
         assert!(updated.contains("  - name: y"));
         assert!(updated.contains("    base_url: https://y.com/v1"));
     }

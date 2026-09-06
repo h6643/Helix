@@ -68,9 +68,9 @@ export interface ApiConfigSlice {
   removeProvider: (id: string) => void
   /**
    * Unified handler invoked by the model selector on switch.
-   * 1) sets activeModel (which re-resolves apiConfig so Hermes uses the new key);
+   * 1) sets activeModel (which re-resolves apiConfig so Helix uses the new key);
    * 2) interrupts any in-flight session via session/cancel so the next prompt
-   *    is built on a fresh session (use-hermes detects the apiConfig hash change
+   *    is built on a fresh session (use-helix detects the apiConfig hash change
    *    and repushes config + recreates the session).
    */
   onModelSwitched: (model: string) => void
@@ -319,7 +319,7 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
         })
         // Record the activation into apiHistory so the settings model list can
         // highlight it. Without this, models activated through paths that bypass
-        // the chat dropdown (bridge / hermes-ui onModelSwitched / fallback
+        // the chat dropdown (bridge / helix-ui onModelSwitched / fallback
         // resolution) never appear in the history list — the active model is
         // selected but no entry matches it, so nothing highlights.
         get().addApiHistory({ ...get().apiConfig, model })
@@ -340,7 +340,7 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
       warn('[api-config-slice] setActiveModel: 找不到包含模型', model, '的 Provider')
       return
     }
-    // Mirror the resolved provider config into apiConfig (what Hermes backend reads).
+    // Mirror the resolved provider config into apiConfig (what Helix backend reads).
     // Keep activeProviderId in sync so the dropdown stays scoped to this provider.
     set({
       activeModel: model,
@@ -388,8 +388,8 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
     }
     fetchingProviderModels.add(providerId)
     try {
-      if (typeof window === 'undefined' || !(window as any).electron?.hermes?.fetchModels) return []
-      const result = await (window as any).electron.hermes.fetchModels({
+      if (typeof window === 'undefined' || !(window as any).electron?.helix?.fetchModels) return []
+      const result = await (window as any).electron.helix.fetchModels({
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
       })
@@ -492,12 +492,12 @@ export const createApiConfigSlice: StateCreator<ApiConfigSlice, [], [], ApiConfi
   },
 
   onModelSwitched: (model) => {
-    // 1) Re-resolve apiConfig for the new model (Hermes will use the new key).
+    // 1) Re-resolve apiConfig for the new model (Helix will use the new key).
     get().setActiveModel(model)
     // 2) Interrupt any in-flight session so the next prompt is built fresh.
-    //    (use-hermes detects the apiConfig hash change on next send → invalidate + repush.)
+    //    (use-helix detects the apiConfig hash change on next send → invalidate + repush.)
     // 3) Persist the switch (apiConfig + apiHistory + activeModel). This path is
-    //    reached by the helix-layout bridge for OUT-OF-BAND switches (hermes-ui
+    //    reached by the helix-layout bridge for OUT-OF-BAND switches (helix-ui
     //    ModelSelector), which otherwise never call persistToStorage — leaving a
     //    restart with an apiHistory that doesn't contain the newly-selected model.
     import('@/lib/persist').then(({ persistence }) => {

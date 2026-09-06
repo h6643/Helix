@@ -2,7 +2,7 @@
 
 import { X, ShieldCheck, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Download } from 'lucide-react'
 import React, { useState, useEffect, useCallback } from 'react'
-import { isElectron, electronHermes } from '@/lib/electron-bridge'
+import { isElectron, electronHelix } from '@/lib/electron-bridge'
 import { useHelixStore } from '@/stores/helix-store'
 
 interface DiagStatus {
@@ -45,7 +45,7 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
     if (!isElectron()) return
     setUpdating(true)
     try {
-      const r = await electronHermes.update()
+      const r = await electronHelix.update()
       useHelixStore.getState().showToast({
         type: r.ok ? 'success' : 'error',
         title: r.ok ? '已启动更新' : '更新失败',

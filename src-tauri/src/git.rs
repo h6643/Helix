@@ -27,7 +27,11 @@ fn git_cwd(state: &AppState, target_cwd: Option<&str>) -> std::path::PathBuf {
     }
 }
 
-fn git_exec<S: AsRef<str>>(state: &AppState, args: &[S], target_cwd: Option<&str>) -> Result<(String, String), String> {
+fn git_exec<S: AsRef<str>>(
+    state: &AppState,
+    args: &[S],
+    target_cwd: Option<&str>,
+) -> Result<(String, String), String> {
     let cwd = git_cwd(state, target_cwd);
     let mut git_cmd = Command::new("git");
     git_cmd.args(args.iter().map(|a| a.as_ref()));
@@ -60,7 +64,11 @@ fn git_exec<S: AsRef<str>>(state: &AppState, args: &[S], target_cwd: Option<&str
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !output.status.success() {
-        let msg = if !stderr.trim().is_empty() { stderr.trim().to_string() } else { "git command failed".into() };
+        let msg = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else {
+            "git command failed".into()
+        };
         return Err(msg);
     }
     Ok((stdout, stderr))
@@ -68,14 +76,22 @@ fn git_exec<S: AsRef<str>>(state: &AppState, args: &[S], target_cwd: Option<&str
 
 #[tauri::command]
 pub fn status(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
-    match git_exec(&state, &["status", "--porcelain=v2", "--branch"], target_cwd.as_deref()) {
+    match git_exec(
+        &state,
+        &["status", "--porcelain=v2", "--branch"],
+        target_cwd.as_deref(),
+    ) {
         Ok((stdout, _)) => json!({ "ok": true, "output": stdout.trim() }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
 #[tauri::command]
-pub fn diff(state: State<'_, Arc<AppState>>, file_path: Option<String>, staged: Option<bool>) -> Value {
+pub fn diff(
+    state: State<'_, Arc<AppState>>,
+    file_path: Option<String>,
+    staged: Option<bool>,
+) -> Value {
     let mut args: Vec<String> = vec!["diff".to_string()];
     if staged.unwrap_or(false) {
         args.push("--cached".to_string());
@@ -165,9 +181,17 @@ pub fn diff_numstat(state: State<'_, Arc<AppState>>, target_cwd: Option<String>)
 
 #[tauri::command]
 pub fn branch_list(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
-    match git_exec(&state, &["for-each-ref", "--format=%(refname:short)", "refs/heads"], target_cwd.as_deref()) {
+    match git_exec(
+        &state,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        target_cwd.as_deref(),
+    ) {
         Ok((stdout, _)) => {
-            let branches: Vec<&str> = stdout.split('\n').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let branches: Vec<&str> = stdout
+                .split('\n')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             json!({ "ok": true, "branches": branches })
         }
         Err(e) => json!({ "ok": false, "error": e }),
@@ -175,7 +199,11 @@ pub fn branch_list(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) 
 }
 
 #[tauri::command]
-pub fn branch_switch(state: State<'_, Arc<AppState>>, branch: String, target_cwd: Option<String>) -> Value {
+pub fn branch_switch(
+    state: State<'_, Arc<AppState>>,
+    branch: String,
+    target_cwd: Option<String>,
+) -> Value {
     match git_exec(&state, &["switch", branch.as_str()], target_cwd.as_deref()) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
@@ -183,8 +211,16 @@ pub fn branch_switch(state: State<'_, Arc<AppState>>, branch: String, target_cwd
 }
 
 #[tauri::command]
-pub fn branch_create(state: State<'_, Arc<AppState>>, branch: String, target_cwd: Option<String>) -> Value {
-    match git_exec(&state, &["checkout", "-b", branch.as_str()], target_cwd.as_deref()) {
+pub fn branch_create(
+    state: State<'_, Arc<AppState>>,
+    branch: String,
+    target_cwd: Option<String>,
+) -> Value {
+    match git_exec(
+        &state,
+        &["checkout", "-b", branch.as_str()],
+        target_cwd.as_deref(),
+    ) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
@@ -192,7 +228,11 @@ pub fn branch_create(state: State<'_, Arc<AppState>>, branch: String, target_cwd
 
 #[tauri::command]
 pub fn current_branch(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {
-    match git_exec(&state, &["rev-parse", "--abbrev-ref", "HEAD"], target_cwd.as_deref()) {
+    match git_exec(
+        &state,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        target_cwd.as_deref(),
+    ) {
         Ok((stdout, _)) => {
             let b = stdout.trim();
             json!({ "ok": true, "branch": if b.is_empty() { "HEAD" } else { b } })
@@ -224,14 +264,20 @@ pub fn worktree_list(state: State<'_, Arc<AppState>>) -> Value {
                         entries.push(Value::Object(cur));
                     }
                     current = Some(serde_json::Map::new());
-                    current.as_mut().unwrap().insert("path".into(), json!(rest.trim()));
+                    current
+                        .as_mut()
+                        .unwrap()
+                        .insert("path".into(), json!(rest.trim()));
                 } else if let Some(rest) = line.strip_prefix("HEAD ") {
                     if let Some(cur) = current.as_mut() {
                         cur.insert("head".into(), json!(rest.trim()));
                     }
                 } else if let Some(rest) = line.strip_prefix("branch ") {
                     if let Some(cur) = current.as_mut() {
-                        cur.insert("branch".into(), json!(rest.trim().trim_start_matches("refs/heads/")));
+                        cur.insert(
+                            "branch".into(),
+                            json!(rest.trim().trim_start_matches("refs/heads/")),
+                        );
                     }
                 } else if line.trim() == "bare" {
                     if let Some(cur) = current.as_mut() {
@@ -265,9 +311,19 @@ pub fn worktree_list(state: State<'_, Arc<AppState>>) -> Value {
 
 #[tauri::command]
 pub fn worktree_add(state: State<'_, Arc<AppState>>, opts: Value) -> Value {
-    let wt_path = opts.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let branch = opts.get("branch").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let new_branch = opts.get("newBranch").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let wt_path = opts
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let branch = opts
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let new_branch = opts
+        .get("newBranch")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let mut args: Vec<String> = vec!["worktree".to_string(), "add".to_string()];
     if let Some(nb) = new_branch {
         args.push("-b".to_string());
@@ -290,7 +346,11 @@ pub fn worktree_add(state: State<'_, Arc<AppState>>, opts: Value) -> Value {
 
 #[tauri::command]
 pub fn worktree_remove(state: State<'_, Arc<AppState>>, wt_path: String) -> Value {
-    match git_exec(&state, &["worktree", "remove", wt_path.as_str(), "--force"], None) {
+    match git_exec(
+        &state,
+        &["worktree", "remove", wt_path.as_str(), "--force"],
+        None,
+    ) {
         Ok(_) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e }),
     }

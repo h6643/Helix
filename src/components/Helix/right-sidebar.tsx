@@ -36,7 +36,6 @@ export function RightSidebar() {
   const tab = useHelixStore(s => s.rightSidebarTab)
   const setTab = useHelixStore(s => s.setRightSidebarTab)
   const previewRailUrl = useHelixStore(s => s.previewRailUrl)
-  const browserBookmarks = useHelixStore(s => s.browserBookmarks)
   const codeFullscreen = useHelixStore(s => s.codeFullscreen)
   const toggleCodeFullscreen = useHelixStore(s => s.toggleCodeFullscreen)
   const toggleTerminal = useHelixStore(s => s.toggleTerminal)
@@ -387,7 +386,6 @@ export function RightSidebar() {
                   <BrowserView
                     url={p.url}
                     onUrlChange={(u) => updatePageUrl(p.id, u)}
-                    browserBookmarks={browserBookmarks}
                     onPageTitle={(t) => updatePageTitle(p.id, t)}
                   />
                 )}

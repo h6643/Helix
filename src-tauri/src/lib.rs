@@ -1,31 +1,27 @@
 //! Helix Tauri backend crate.
 
 mod app;
-mod bootstrap;
-mod channels;
+mod codex_gateway;
 mod config;
 mod delegations;
-mod diagnostics;
-mod external;
 mod fs;
 mod gateway;
 mod git;
-mod hermes;
+mod helix;
 mod hooks;
-mod env;
-mod kernel;
+mod mcp;
 mod memory;
+mod page_fetch;
 mod paths;
 mod profile;
 mod proxy;
 mod scheduled_tasks;
 mod security;
+mod skills;
 mod state;
 mod terminal;
-mod web_search;
 mod vision;
-mod mcp;
-mod page_fetch;
+mod web_search;
 mod window;
 
 use crate::state::{AppState, APP_HANDLE};
@@ -39,22 +35,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-.plugin(
-    tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-        // A second Helix process was launched. Instead of opening another
-        // window, focus the already-running one (mirror tray "show").
-        use tauri::Manager;
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.unminimize();
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
-    }),
-)
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // A second Helix process was launched. Instead of opening another
+            // window, focus the already-running one (mirror tray "show").
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(app_state.clone())
         .setup(move |app| {
             // Expose the AppHandle globally so background gateway threads can
-            // emit `hermes:event` without threading a handle through every call.
+            // emit `helix:event` without threading a handle through every call.
             let _ = APP_HANDLE.set(app.handle().clone());
 
             // Main window is created manually here (config has "create": false)
@@ -83,22 +77,17 @@ pub fn run() {
             // user's last saved model choice.
             crate::profile::apply_active_profile_cache();
 
-            // Boot the Hermes gateway (serve mode by default).
-            // First-run bootstrap: extract hermes-agent from resources if needed.
-            if let Err(e) = bootstrap::ensure_hermes_agent(app.handle()) {
-                eprintln!("[Helix] bootstrap failed: {e}");
-            }
             // Apply the HTTP proxy to the renderer (WebKitGTK default context)
             // BEFORE the gateway spawns so the webview fetches already honor it.
             crate::proxy::apply_webview_proxy();
-            if let Err(e) = gateway::spawn_gateway(&app_state) {
-                eprintln!("[Helix] gateway failed to start: {e}");
+            if let Err(e) = codex_gateway::spawn(&app_state) {
+                eprintln!("[Helix] Codex app-server failed to start: {e}");
             }
 
             // ── System tray ──────────────────────────────────────────────
-            use tauri::Manager;
             use tauri::menu::{MenuBuilder, MenuItemBuilder};
             use tauri::tray::TrayIconBuilder;
+            use tauri::Manager;
 
             let show_item = MenuItemBuilder::with_id("show", "显示窗口").build(app)?;
             let new_item = MenuItemBuilder::with_id("new", "新建对话").build(app)?;
@@ -112,39 +101,39 @@ pub fn run() {
                 .icon(app.default_window_icon().cloned().unwrap())
                 .menu(&menu)
                 .tooltip("Helix")
-                .on_menu_event(move |app, event| {
-                    match event.id().as_ref() {
-                        "quit" => {
-                            if let Some(state) = app.try_state::<std::sync::Arc<crate::state::AppState>>() {
-                                crate::gateway::shutdown(&state);
-                            }
-                            app.exit(0);
+                .on_menu_event(move |app, event| match event.id().as_ref() {
+                    "quit" => {
+                        if let Some(state) =
+                            app.try_state::<std::sync::Arc<crate::state::AppState>>()
+                        {
+                            crate::gateway::shutdown(&state);
                         }
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        "new" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = app.emit("tray:new-conversation", ());
-                            }
-                        }
-                        "recent" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = app.emit("tray:show-recent", ());
-                            }
-                        }
-                        _ => {}
+                        app.exit(0);
                     }
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "new" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                            let _ = app.emit("tray:new-conversation", ());
+                        }
+                    }
+                    "recent" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                            let _ = app.emit("tray:show-recent", ());
+                        }
+                    }
+                    _ => {}
                 })
                 .build(app)?;
 
@@ -166,48 +155,25 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            // hermes gateway
-            hermes::hermes_send,
-            hermes::hermes_notify,
-            hermes::hermes_interrupt,
-            hermes::hermes_status,
-            hermes::hermes_get_gateway_info,
-            hermes::hermes_set_gateway_mode,
-            hermes::hermes_fetch_models,
-            hermes::hermes_get_raw_config,
-            hermes::hermes_set_raw_config,
-            hermes::hermes_get_memory_status,
-            hermes::hermes_get_memory_provider_config,
-            hermes::hermes_set_memory_provider_config,
-            hermes::hermes_memory_provider_setup,
-            hermes::hermes_get_config,
-            hermes::hermes_set_config,
-            hermes::hermes_set_yaml_key,
-            hermes::hermes_set_delegation_identities,
-            hermes::hermes_set_agent_config,
-            hermes::hermes_set_reasoning_effort,
-            hermes::hermes_set_config_key_value,
-            hermes::hermes_approval_respond,
-            hermes::hermes_list_personalities,
-            hermes::hermes_update,
-            hermes::hermes_install_plugin,
-            hermes::hermes_set_personality,
-            hermes::hermes_set_model,
-            hermes::hermes_get_skills_dir,
-            hermes::hermes_get_plugins_dir,
-            hermes::hermes_read_dir,
-            hermes::hermes_read_file,
-            hermes::hermes_list_memories,
-            hermes::hermes_add_memory_entry,
-            hermes::hermes_remove_memory_entry,
-            hermes::hermes_list_skills,
-            hermes::hermes_track_skill_call,
-            hermes::hermes_delete_dir,
-            hermes::hermes_cron_list,
-            hermes::hermes_cron_create,
-            hermes::hermes_cron_delete,
-            hermes::hermes_cron_run,
-            hermes::hermes_doctor,
+            // agent backend (helix:* protocol → codex adapter)
+            helix::helix_send,
+            helix::helix_notify,
+            helix::helix_interrupt,
+            helix::helix_status,
+            helix::helix_get_gateway_info,
+            helix::helix_fetch_models,
+            helix::helix_get_config,
+            helix::helix_set_config,
+            helix::helix_set_yaml_key,
+            helix::helix_set_delegation_identities,
+            helix::helix_set_config_key_value,
+            helix::helix_set_reasoning_effort,
+            helix::helix_approval_respond,
+            helix::helix_set_model,
+            helix::helix_set_agent_config,
+            helix::helix_list_memories,
+            helix::helix_add_memory_entry,
+            helix::helix_remove_memory_entry,
             // fs
             fs::read,
             fs::write,
@@ -217,8 +183,29 @@ pub fn run() {
             fs::rename,
             fs::delete,
             fs::scan_tree,
-            fs::hermes_memory_dir,
             fs::allow_root,
+            fs::helix_memory_dir,
+            // file-based skills (slash-command picker / skill panel)
+            skills::helix_get_skills_dir,
+            skills::helix_get_plugins_dir,
+            skills::helix_read_dir,
+            skills::helix_read_file,
+            skills::helix_delete_dir,
+            skills::helix_list_skills,
+            skills::helix_track_skill_call,
+            // auxiliary vision model (image → description)
+            vision::vision_config_list,
+            vision::vision_config_save,
+            vision::vision_describe,
+            // hooks (hooks: block in config.yaml)
+            hooks::hooks_list,
+            hooks::hooks_save,
+            // web search (web: block + provider API keys in .env)
+            web_search::web_search_list,
+            web_search::web_search_save,
+            // delegations (subagent live transcript browser)
+            delegations::delegations_list,
+            delegations::delegations_read_log,
             // window
             window::minimize,
             window::maximize,
@@ -246,8 +233,6 @@ pub fn run() {
             terminal::terminal_kill,
             // page fetch (browser pick-element)
             page_fetch::page_fetch,
-            // TEMP DIAG: 前端诊断日志通道
-            diagnostics::dbg_log,
             // git
             git::status,
             git::diff,
@@ -273,8 +258,8 @@ pub fn run() {
             git::fetch,
             // app
             app::get_info,
+            app::read_env_key,
             app::sync_work_dir,
-            app::get_hermes_version,
             app::set_work_dir,
             app::get_data_root,
             app::set_data_root,
@@ -287,33 +272,14 @@ pub fn run() {
             profile::cache_config,
             profile::activate_profile,
             profile::profile_list,
-            // external
-            external::test_connection,
             // scheduled tasks
             scheduled_tasks::scheduled_tasks_list,
             scheduled_tasks::create,
             scheduled_tasks::update,
             scheduled_tasks::remove,
-            // hooks
-            hooks::hooks_list,
-            hooks::hooks_save,
-            // web search
-            web_search::web_search_list,
-            web_search::web_search_save,
-            // vision model
-            vision::vision_config_list,
-            vision::vision_config_save,
             // gateway MCP servers (config.yaml mcp_servers, read/write)
             mcp::mcp_config_list,
             mcp::mcp_config_save,
-            // channels
-            channels::channels_list,
-            channels::channels_save,
-            // delegations
-            delegations::delegations_list,
-            delegations::delegations_read_log,
-            // diagnostics
-            diagnostics::get_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { hermesApi } from '@/lib/electron-bridge'
+import { helixApi } from '@/lib/electron-bridge'
 import { captureContextBreakdown } from '@/lib/context-capture'
 import { formatTokens } from '@/lib/format'
 import { debug } from '@/lib/logger'
@@ -50,7 +50,7 @@ interface ContextUsageData {
 // estimate. Compression decisions use the real usage figure, not this display
 // normalization.
 
-// ---- ContextUsageBar (segmented horizontal bar — Hermes Desktop style) ----
+// ---- ContextUsageBar (segmented horizontal bar — Helix Desktop style) ----
 
 function ContextUsageBar({ used, total, categories }: { used: number; total: number; categories: ContextBreakdown[] }) {
   const percentage = Math.min(Math.max((used / total) * 100, 0), 100)
@@ -183,7 +183,7 @@ export function ContextUsageIndicator() {
     try {
       const currentSessionId = useHelixStore.getState().currentSessionId
       // Only the backend sid mapped to THIS conversation — never fall back to
-      // the global hermesSessionId: that is whichever conversation ran LAST,
+      // the global helixSessionId: that is whichever conversation ran LAST,
       // and querying it would write the GLOBAL session's usage/categories into
       // this conversation's snapshot (contextUsage), making the ring track
       // another conversation. Unmapped → render the persisted local snapshot.
@@ -192,7 +192,7 @@ export function ContextUsageIndicator() {
         setBackendData(null)
         return
       }
-      const result = await hermesApi()?.send('session.context_breakdown', { session_id: sessionId })
+      const result = await helixApi()?.send('session.context_breakdown', { session_id: sessionId })
       if (result && typeof result === 'object') {
         const data = result as ContextUsageData
         setBackendData(data)
@@ -202,7 +202,7 @@ export function ContextUsageIndicator() {
         // - 分类数据只要有就持久化（唯一来源，不写重启后必显示"暂无上下文分类数据"）。
         await captureContextBreakdown(currentSessionId, sessionId)
 
-        // Auto-compaction check (Hermes Desktop style)
+        // Auto-compaction check (Helix Desktop style)
         if (data.context_percent >= 80 && !autoCompactCooldownRef.current) {
           const { autoCompactContext, compressionBusy, showToast, streamingDrafts, isChatLoading } = useHelixStore.getState()
           // Agent run-in-flight guard: the backend rejects session.compress with
@@ -219,7 +219,7 @@ export function ContextUsageIndicator() {
             // 与手动 /compact 共用 busy 标记：避免后端压缩锁冲突
             useHelixStore.getState().setCompressionBusy(true)
             try {
-              const result = await hermesApi()?.send('session.compress', { session_id: sessionId })
+              const result = await helixApi()?.send('session.compress', { session_id: sessionId })
               if (result && typeof result === 'object') {
                 const r = result as any
                 if (r.status === 'compressed' && Array.isArray(r.messages)) {
@@ -288,11 +288,11 @@ export function ContextUsageIndicator() {
     return () => clearInterval(timer)
   }, [open, fetchContextData])
 
-  // Quietly capture the category breakdown once per new live Hermes session and
+  // Quietly capture the category breakdown once per new live Helix session and
   // persist it into the local snapshot — WITHOUT overriding the displayed ring
   // data (which reflects THIS conversation's persisted usage). Previously the
   // breakdown was only saved when the popover was opened mid-session, so a cold
-  // restart always fell back to the "需要正在运行的 Hermes 会话" empty state
+  // restart always fell back to the "需要正在运行的 Helix 会话" empty state
   // even though the total percentage had been persisted.
   const currentSessionId = useHelixStore((s) => s.currentSessionId)
   // 防重位只在成功写入后才置：会话创建瞬间 agent 尚未构建，后端返回空分类，
@@ -304,7 +304,7 @@ export function ContextUsageIndicator() {
     let cancelled = false
     const capture = async () => {
       // 与 fetchContextData 同口径：只认本对话映射到的 sid，绝不兜底全局
-      // hermesSessionId（跨会话污染）。
+      // helixSessionId（跨会话污染）。
       const sid = await resolveBackendSid(currentSessionId)
       const key = `${currentSessionId ?? ''}:${sid ?? ''}`
       if (!sid || quietFetchedSidRef.current === key || cancelled) return
@@ -315,7 +315,7 @@ export function ContextUsageIndicator() {
     return () => { cancelled = true }
   }, [currentSessionId])
 
-  // Prefer live backend RPC data. When there is no live Hermes session
+  // Prefer live backend RPC data. When there is no live Helix session
   // (app/gateway restarted, or the conversation was never run this session) fall
   // fallback to the locally persisted per-conversation store
   // (contextUsage[currentSessionId]) so the ring does NOT reset to 0 after a
@@ -336,9 +336,10 @@ export function ContextUsageIndicator() {
   // 如果请求正在进行中（isChatLoading），且有估算值，显示估算值（带 ~ 前缀）。
   // 请求完成后，显示真实的 context_used 值。
   const total = localCtx?.size || 0
-  const used = isChatLoading && estimatedTokens !== undefined
+  const estimated = isChatLoading && estimatedTokens !== undefined && estimatedTokens > 0
     ? estimatedTokens
-    : (localCtx?.used || 0)
+    : undefined
+  const used = estimated ?? (localCtx?.used || 0)
 
   const categories: ContextBreakdown[] = backendData?.categories?.length
     ? backendData.categories.map(c => ({ ...c }))
@@ -361,7 +362,7 @@ export function ContextUsageIndicator() {
         type="button"
         onClick={() => setOpen(!open)}
         className="size-10 rounded-lg flex items-center justify-center text-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors"
-        data-tip={`上下文使用情况${isChatLoading && estimatedTokens !== undefined ? '（' + formatTokens(estimatedTokens) + ' 估算）' : ''}`}
+        data-tip={`上下文使用情况${estimated ? `（${formatTokens(estimated)} 估算）` : ''}`}
       >
         <ContextUsageRing used={used} total={total} />
       </button>

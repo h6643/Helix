@@ -6,7 +6,7 @@ import { useHelixStore } from '@/stores/helix-store'
 
 const STEPS = [
   { icon: Settings2, title: '配置提供方与模型', desc: '在设置中选择你的 AI 提供方（OpenAI / Anthropic / 本地模型等）并填入 API Key。' },
-  { icon: MessageSquare, title: '开始对话', desc: '回到主界面，直接输入任务，Hermes 会调用工具、读写文件、运行命令。' },
+  { icon: MessageSquare, title: '开始对话', desc: '回到主界面，直接输入任务，Helix 会调用工具、读写文件、运行命令。' },
   { icon: Sparkles, title: '探索能力', desc: '试试计划任务、技能面板、终端、Git worktree 与文件预览。' },
 ]
 

@@ -1,4 +1,4 @@
-import type { McpServerConfig } from '@/stores/hermes-store'
+﻿import type { McpServerConfig } from '@/stores/helix-types'
 
 interface AcpEnvVar {
   name: string
@@ -22,7 +22,7 @@ export type AcpMcpServer =
 
 /**
  * Convert the store's MCP server map into the ACP `session/new` mcpServers
- * payload. Hermes registers these servers per-session (acp_adapter.session /
+ * payload. Helix registers these servers per-session (acp_adapter.session /
  * gateway session/new), so MCP config must be passed here — writing a
  * camelCase `mcpServers:` key into config.yaml was never read by the backend.
  */

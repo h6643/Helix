@@ -1,27 +1,32 @@
-//! Web Search IPC — read/write `web:` block in Hermes config.yaml.
+//! Web Search IPC — read/write `web:` block in Helix config.yaml.
 //! Also syncs API keys to .env for runtime access.
 
 use crate::config::{config_yaml_path, env_path, set_yaml_key};
-use crate::gateway::{env_gateway_mode, kill_current, spawn_gateway};
-use crate::paths::{hermes_agent_dir, hermes_data_dir, standalone_python};
+use crate::gateway::{kill_current, spawn_gateway};
+use crate::paths::{helix_data_dir, standalone_python};
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
-/// Find every directory that may contain Hermes web-search provider plugins.
-/// Hermes loads built-in providers from its runtime's `site-packages/plugins/web`
-/// and user providers from `~/.hermes/plugins/web`. We scan all known locations
+/// Find every directory that may contain Helix web-search provider plugins.
+/// Helix loads built-in providers from its runtime's `site-packages/plugins/web`
+/// and user providers from `~/.helix/plugins/web`. We scan all known locations
 /// and merge, so the UI can show exactly what is actually installed.
 fn web_provider_search_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
 
-    // 1) Runtime hermes (standalone_python → lib/python3.x/site-packages/plugins/web).
+    // 1) Runtime helix (standalone_python → lib/python3.x/site-packages/plugins/web).
     let py = standalone_python();
     if let Some(lib) = py.parent().map(|p| p.join("lib")) {
         // Hard-coded python3.12 fallback (Helix pins this — see paths.rs).
-        dirs.push(lib.join("python3.12").join("site-packages").join("plugins").join("web"));
+        dirs.push(
+            lib.join("python3.12")
+                .join("site-packages")
+                .join("plugins")
+                .join("web"),
+        );
         // Be resilient to version bumps: also walk any lib/python3.x.
         if let Ok(entries) = std::fs::read_dir(&lib) {
             for e in entries.flatten() {
@@ -33,14 +38,12 @@ fn web_provider_search_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
         }
     }
 
-    // 2) User plugins: ~/.hermes/plugins/web
-    dirs.push(hermes_data_dir().join("plugins").join("web"));
-    // 3) Agent checkout: ~/.hermes/hermes-agent/plugins/web
-    dirs.push(hermes_agent_dir().join("plugins").join("web"));
-    // 4) Bundled resources: <resource_dir>/hermes-runtime/python/lib/python3.12/site-packages/plugins/web
+    // 2) User plugins: ~/.helix/plugins/web
+    dirs.push(helix_data_dir().join("plugins").join("web"));
+    // 3) Bundled resources: <resource_dir>/helix-runtime/python/lib/python3.12/site-packages/plugins/web
     if let Ok(res) = app.path().resource_dir() {
         dirs.push(
-            res.join("hermes-runtime")
+            res.join("helix-runtime")
                 .join("python")
                 .join("lib")
                 .join("python3.12")
@@ -80,7 +83,9 @@ pub fn web_search_list(app: AppHandle, _state: State<'_, Arc<AppState>>) -> Valu
     let yaml_path = config_yaml_path();
     let text = match std::fs::read_to_string(&yaml_path) {
         Ok(t) => t,
-        Err(_) => return json!({ "ok": true, "config": { "backend": "", "search_backend": "", "apiKeys": {} } }),
+        Err(_) => {
+            return json!({ "ok": true, "config": { "backend": "", "search_backend": "", "apiKeys": {} } })
+        }
     };
 
     let mut backend = String::new();
@@ -145,15 +150,25 @@ pub fn web_search_save(state: State<'_, Arc<AppState>>, config: Value) -> Value 
     }
 
     let backend = config.get("backend").and_then(|v| v.as_str()).unwrap_or("");
-    let search_backend = config.get("search_backend").and_then(|v| v.as_str()).unwrap_or("");
-    let api_keys = config.get("apiKeys").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+    let search_backend = config
+        .get("search_backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let api_keys = config
+        .get("apiKeys")
+        .cloned()
+        .unwrap_or(Value::Object(serde_json::Map::new()));
 
     let yaml_path = config_yaml_path();
     let mut yaml = std::fs::read_to_string(&yaml_path).unwrap_or_default();
 
     // Update web: block in config.yaml
     yaml = set_yaml_key(&yaml, "web.backend", &Value::String(backend.to_string()));
-    yaml = set_yaml_key(&yaml, "web.search_backend", &Value::String(search_backend.to_string()));
+    yaml = set_yaml_key(
+        &yaml,
+        "web.search_backend",
+        &Value::String(search_backend.to_string()),
+    );
 
     if let Some(dir) = yaml_path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -197,12 +212,10 @@ pub fn web_search_save(state: State<'_, Arc<AppState>>, config: Value) -> Value 
     }
     let _ = std::fs::write(&env_path, env_lines.join("\n"));
 
-    // Restart gateway in acp mode
-    if env_gateway_mode() != "serve" {
-        kill_current(&state);
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let _ = spawn_gateway(&state);
-    }
+    // Restart gateway so the new keys take effect.
+    kill_current(&state);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = spawn_gateway(&state);
 
     json!({ "ok": true })
 }

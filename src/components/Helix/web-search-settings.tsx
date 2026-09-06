@@ -7,7 +7,7 @@ import { isElectron } from '@/lib/electron-bridge'
 
 type SearchProvider = {
   id: string
-  // 对应 hermes 插件目录名（plugins/web/<pluginName>），用于和实际安装的插件对齐
+  // 对应 helix 插件目录名（plugins/web/<pluginName>），用于和实际安装的插件对齐
   pluginName: string
   name: string
   envKey: string
@@ -92,7 +92,7 @@ export function WebSearchSettings() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
-  // Load current config from hermes config.yaml via Tauri
+  // Load current config from helix config.yaml via Tauri
   useEffect(() => {
     const loadConfig = async () => {
       if (!isElectron()) {
@@ -203,7 +203,7 @@ export function WebSearchSettings() {
 
       {availableProviders !== null && displayProviders.length === 0 ? (
         <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
-          暂无后端搜索插件，请在 hermes 中安装 plugins/web/&lt;name&gt; 后再来此处配置。
+          暂无后端搜索插件，请在 helix 中安装 plugins/web/&lt;name&gt; 后再来此处配置。
         </p>
       ) : (
         <div className="border border-border/50 rounded-xl overflow-hidden divide-y divide-border/50">

@@ -1,9 +1,9 @@
 'use client'
 
-import { X, Folder, ChevronLeft, ChevronRight, RotateCw, ExternalLink, MousePointer2, Globe } from 'lucide-react'
+import { X, ChevronLeft, ChevronRight, RotateCw, ExternalLink, MousePointer2, Globe } from 'lucide-react'
 import React, { useEffect, useRef, useState } from 'react'
 import { isRealElectron } from '@/lib/electron-bridge'
-import { useHelixStore, type BrowserBookmark } from '@/stores/helix-store'
+import { useHelixStore } from '@/stores/helix-store'
 import { createPortal } from 'react-dom'
 import { cleanUrl } from '@/lib/url-utils'
 
@@ -82,117 +82,13 @@ export function summarizeUrl(url: string): string {
   } catch { return url }
 }
 
-/**
- * A single bookmark entry. URL entries open in the active tab; folder entries
- * pop a fixed-position portal menu (so it is never clipped by an overflowing
- * bookmark bar) that recurses for nested folders.
- */
-function BookmarkMenu({ node, onOpen, onDelete, path = [], nested }: {
-  node: BrowserBookmark
-  onOpen: (url: string) => void
-  onDelete?: (path: number[]) => void
-  path?: number[]
-  nested?: boolean
-}) {
-  const ref = useRef<HTMLButtonElement>(null)
-  const [open, setOpen] = useState(false)
-  const [pos, setPos] = useState({ left: 0, top: 0 })
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = () => setOpen(false)
-    // Defer so the toggling click doesn't immediately close the menu.
-    const id = window.setTimeout(() => document.addEventListener('mousedown', onDown), 0)
-    return () => { window.clearTimeout(id); document.removeEventListener('mousedown', onDown) }
-  }, [open])
-
-  if (node.type === 'url') {
-    return (
-      <div className="group flex items-center gap-0.5 rounded text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 hover:bg-accent/60 whitespace-nowrap max-w-[220px]">
-        <button
-          onClick={() => node.url && onOpen(node.url)}
-          data-tip={node.url}
-          className="flex items-center gap-1 px-2 py-1 min-w-0"
-        >
-          <span className="truncate">{node.name || node.url}</span>
-        </button>
-        {onDelete && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onDelete(path) }}
-            data-tip="删除书签"
-            className="shrink-0 px-1 py-1 rounded opacity-0 group-hover:opacity-100 text-muted-foreground/60 hover:text-red-500 transition-opacity"
-          >
-            <X className="size-3" />
-          </button>
-        )}
-      </div>
-    )
-  }
-
-  const toggle = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    const r = ref.current?.getBoundingClientRect()
-    if (r) setPos(nested ? { left: r.right + 2, top: r.top } : { left: r.left, top: r.bottom + 4 })
-    setOpen(o => !o)
-  }
-
-  return (
-    <>
-      <button
-        ref={ref}
-        onClick={toggle}
-        className="flex items-center gap-1 px-2 py-1 rounded text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 hover:bg-accent/60 whitespace-nowrap"
-      >
-        <Folder className="size-3 shrink-0" />
-        <span className="truncate max-w-[160px]">{node.name}</span>
-      </button>
-      {open && typeof document !== 'undefined' && createPortal(
-        <div
-          style={{ position: 'fixed', left: pos.left, top: pos.top, zIndex: 300 }}
-          onMouseDown={(e) => e.stopPropagation()}
-          className="min-w-[200px] max-h-[60vh] overflow-auto rounded-md border border-border/70 bg-popover p-1 shadow-xl"
-        >
-          {(node.children ?? []).map((c, i) => (
-            <BookmarkMenu
-              key={i}
-              node={c}
-              onOpen={(u) => { setOpen(false); onOpen(u) }}
-              onDelete={onDelete}
-              path={[...path, i]}
-              nested
-            />
-          ))}
-        </div>,
-        document.body,
-      )}
-    </>
-  )
-}
-
-/** Delete a bookmark (by path) and persist the result. */
-function deleteBookmarkAt(path: number[]) {
-  if (path.length === 0) return
-  const prev = useHelixStore.getState().browserBookmarks
-  const next = [...prev]
-  let cur = next
-  for (let i = 0; i < path.length - 1; i++) {
-    const node = cur[path[i]]
-    if (!node || node.type !== 'folder' || !node.children) return
-    cur = node.children
-  }
-  cur.splice(path[path.length - 1], 1)
-  useHelixStore.getState().setBrowserBookmarks(next)
-}
-
 export function BrowserView({
   url,
   onUrlChange,
-  browserBookmarks,
   onPageTitle,
 }: {
   url: string
   onUrlChange: (url: string) => void
-  browserBookmarks: BrowserBookmark[]
   onPageTitle?: (title: string) => void
 }) {
   const [loaded, setLoaded] = useState(cleanUrl(url))
@@ -223,15 +119,6 @@ export function BrowserView({
     setLoaded(u)
     setError('')
     onUrlChange(u)
-  }
-
-  const openBookmark = (u: string) => {
-    const target = cleanUrl(normalizeUrl(u))
-    if (!target) return
-    exitPick()
-    setLoaded(target)
-    setError('')
-    onUrlChange(target)
   }
 
   const [editingUrl, setEditingUrl] = useState(false)
@@ -393,15 +280,6 @@ export function BrowserView({
           <ExternalLink className="size-3.5" />
         </button>
       </div>
-
-      {/* Bookmark bar (imported from Chrome etc.) */}
-      {browserBookmarks.length > 0 && (
-        <div className="flex items-center gap-1 px-2.5 py-1 border-b border-border/20 shrink-0 bg-card overflow-x-auto scrollbar-hide">
-          {browserBookmarks.map((b, i) => (
-            <BookmarkMenu key={i} node={b} onOpen={openBookmark} onDelete={deleteBookmarkAt} path={[i]} />
-          ))}
-        </div>
-      )}
 
       {/* Content */}
       <div className="flex-1 min-h-0 bg-card relative">

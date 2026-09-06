@@ -1,11 +1,14 @@
 //! Delegations IPC — list and read subagent live transcripts.
 
-use crate::paths::hermes_data_dir;
+use crate::paths::helix_data_dir;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
 fn delegation_live_root() -> PathBuf {
-    hermes_data_dir().join("cache").join("delegation").join("live")
+    helix_data_dir()
+        .join("cache")
+        .join("delegation")
+        .join("live")
 }
 
 /// Read the manifest.json for a delegation directory, returning the
@@ -59,7 +62,11 @@ pub fn delegations_list(session_id: Option<String>) -> Value {
                 }
             }
 
-            let dir_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let dir_name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
 
             // Read manifest.json tasks (goal/status per task, by index)
             let manifest_tasks = read_manifest_tasks(&path);
@@ -70,7 +77,11 @@ pub fn delegations_list(session_id: Option<String>) -> Value {
                 for te in task_entries.flatten() {
                     let tp = te.path();
                     if tp.extension().map_or(false, |e| e == "log") {
-                        let task_name = tp.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                        let task_name = tp
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
                         let meta = std::fs::metadata(&tp).ok();
                         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                         let modified = meta
@@ -92,8 +103,12 @@ pub fn delegations_list(session_id: Option<String>) -> Value {
                             .and_then(|i| manifest_tasks.get(i))
                             .map(|t| {
                                 (
-                                    t.get("goal").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                    t.get("status").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    t.get("goal")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
+                                    t.get("status")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
                                 )
                             })
                             .unwrap_or((None, None));

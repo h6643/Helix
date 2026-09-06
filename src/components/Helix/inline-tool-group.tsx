@@ -17,7 +17,7 @@ function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
 
-// Hermes 的 mktemp 包装（cache/terminal/hermes-snap-*.sh.tmp.XXXX）若
+// Helix 的 mktemp 包装（cache/terminal/helix-snap-*.sh.tmp.XXXX）若
 // cache/terminal 目录缺失就会刷一行 mktemp: failed to create...。这是环境噪音
 // 不是工具执行失败，从渲染内容里整行剥掉。
 function stripMktempNoise(s: string): string {
@@ -49,6 +49,15 @@ function extractResultCount(content: string, toolName: string, params?: Record<s
 }
 
 // ── Diff stats extraction ────────────────────────────────────────────────
+
+// 只对真正的 diff 类工具有意义。Read/grep 等工具输出的文件正文里，以 +/-
+// 开头的普通行（markdown 列表、YAML frontmatter 等）会被误数成增删行，
+// 在标题上挂出莫名其妙的绿色 +N / 红色 −N。
+function isDiffTool(toolName: string): boolean {
+  const name = (toolName || '').toLowerCase()
+  return name.includes('diff') || name.includes('patch') || name.includes('apply')
+    || name.includes('edit') || name.includes('write')
+}
 
 function extractDiffStats(content: string): string {
   let added = 0, removed = 0
@@ -243,9 +252,20 @@ function ToolCard({
         ) : (
           getToolIcon(step.toolName || '')
         )}
-        <span className={`font-medium truncate ${running ? 'flowing-text' : ''}`} title={fullTitle}>
-          {verbText} {titleLabel}
-        </span>
+        {action ? (
+          <>
+            <span className={`font-medium shrink-0 ${running ? 'flowing-text' : ''}`}>{verbText}</span>
+            <code
+              className={`flex-1 min-w-0 truncate font-mono font-normal text-[0.86em] px-1 py-px rounded bg-transparent text-foreground/70 ${running ? 'flowing-text' : ''}`}
+            >
+              {titleLabel}
+            </code>
+          </>
+        ) : (
+          <span className={`font-medium truncate ${running ? 'flowing-text' : ''}`} title={fullTitle}>
+            {verbText} {titleLabel}
+          </span>
+        )}
         {step.duration_s != null && step.duration_s > 0 && (
           <span className="text-[0.72em] text-muted-foreground shrink-0">{formatDurationSeconds(step.duration_s)}</span>
         )}
@@ -254,7 +274,7 @@ function ToolCard({
           return count ? <span className="text-[0.72em] text-muted-foreground/50 shrink-0">{count}</span> : null
         })()}
         {(() => {
-          const diff = step.content ? extractDiffStats(step.content) : ''
+          const diff = step.content && isDiffTool(step.toolName || '') ? extractDiffStats(step.content) : ''
           return diff ? <span className="text-[0.72em] text-emerald-500/60 shrink-0">{diff}</span> : null
         })()}
         {canExpand && <ChevronRight className={`size-3.5 shrink-0 text-foreground/30 transition-all ${open ? 'rotate-90' : ''}`} />}

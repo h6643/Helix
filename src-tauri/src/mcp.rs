@@ -1,8 +1,8 @@
 //! Gateway MCP servers — read/write view of the `mcp_servers:` block in
-//! Hermes config.yaml.
+//! Helix config.yaml.
 //!
 //! The desktop app manages its OWN MCP list in the store (localStorage,
-//! sent per-session via ACP `session/new`). Separately, the Hermes gateway
+//! sent per-session via ACP `session/new`). Separately, the Helix gateway
 //! loads `mcp_servers` from config.yaml at startup. This module exposes
 //! the latter so the settings page can show AND edit what the gateway
 //! actually runs (e.g. `ssh-bridge`), which the store-based list never
@@ -222,7 +222,10 @@ fn yaml_scalar(v: &Value) -> String {
             }
             let safe = s.chars().all(|c| {
                 c.is_ascii_alphanumeric()
-                    || matches!(c, '_' | '.' | '/' | '\\' | '-' | ':' | '@' | '+' | '%' | '~')
+                    || matches!(
+                        c,
+                        '_' | '.' | '/' | '\\' | '-' | ':' | '@' | '+' | '%' | '~'
+                    )
             }) && !s.ends_with(':');
             if safe {
                 s.clone()
@@ -273,25 +276,33 @@ fn push_yaml_field(out: &mut String, indent: &str, key: &str, value: &Value) {
 /// `old_servers` is the pre-edit parse (with env) so that any server whose
 /// incoming config omits `env` keeps its previous env block — protects
 /// secrets from being dropped by a display-only round trip.
-fn serialize_mcp_servers(
-    servers: &Map<String, Value>,
-    old_servers: &Map<String, Value>,
-) -> String {
+fn serialize_mcp_servers(servers: &Map<String, Value>, old_servers: &Map<String, Value>) -> String {
     let mut out = String::from("mcp_servers:\n");
     for (name, cfg) in servers {
         out.push_str(&format!("  {}:\n", name));
         let obj = cfg.as_object().cloned().unwrap_or_default();
 
         // Transport: url (remote) vs command+args (stdio).
-        if let Some(url) = obj.get("url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(url) = obj
+            .get("url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             out.push_str(&format!("    url: {}\n", yaml_scalar(&json!(url))));
         } else {
-            let cmd_str = obj.get("command").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+            let cmd_str = obj
+                .get("command")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
             let cmd_arr = obj.get("command").and_then(|v| v.as_array());
             if let Some(cmd) = cmd_str {
                 out.push_str(&format!("    command: {}\n", yaml_scalar(&json!(cmd))));
             } else if let Some(arr) = cmd_arr {
-                if let Some(first) = arr.first().and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                if let Some(first) = arr
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
                     out.push_str(&format!("    command: {}\n", yaml_scalar(&json!(first))));
                     let rest: Vec<&Value> = arr.iter().skip(1).collect();
                     if !rest.is_empty() {

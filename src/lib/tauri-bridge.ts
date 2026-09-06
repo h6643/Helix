@@ -8,8 +8,8 @@ import type { ElectronAPI } from '@/types/electron'
  * Tauri v2 的 `invoke` 通道。Rust 命令默认用函数名（snake_case），参数键默认
  * camelCase——本桥统一转译，让前端代码完全无感。
  *
- * 事件：Rust 端统一 `app.emit("hermes:event", { method, params })`，本桥订阅一次
- * 后按 method 原样分发给所有 `hermes.onEvent` 回调（与 Electron 的推送一致）。
+ * 事件：Rust 端统一 `app.emit("helix:event", { method, params })`，本桥订阅一次
+ * 后按 method 原样分发给所有 `helix.onEvent` 回调（与 Electron 的推送一致）。
  */
 
 let installed = false
@@ -88,11 +88,11 @@ export async function openTauriBrowser(url: string): Promise<void> {
   })
 }
 
-async function subscribeHermesEvents(): Promise<void> {
+async function subscribeHelixEvents(): Promise<void> {
   if (unlistenPromise) return
   unlistenPromise = (async () => {
     try {
-      return await listen('hermes:event', (event) => {
+      return await listen('helix:event', (event) => {
         const payload = event.payload as { method?: string; params?: unknown }
         if (typeof payload?.method !== 'string') return
         const params = payload.params
@@ -105,7 +105,7 @@ async function subscribeHermesEvents(): Promise<void> {
         }
       })
     } catch (e) {
-      console.error('[tauri-bridge] 订阅 hermes:event 失败:', e)
+      console.error('[tauri-bridge] 订阅 helix:event 失败:', e)
       return () => {}
     }
   })()
@@ -152,9 +152,9 @@ function onTerminalData(callback: (payload: { id: number; data: string }) => voi
 }
 
 /** 返回取消订阅函数（同步，符合 Electron onEvent 的形状）。 */
-function onHermesEvent(callback: (method: string, params?: unknown) => void): () => void {
+function onHelixEvent(callback: (method: string, params?: unknown) => void): () => void {
   eventListeners.add(callback)
-  void subscribeHermesEvents()
+  void subscribeHelixEvents()
   return () => {
     eventListeners.delete(callback)
   }
@@ -206,7 +206,7 @@ function buildTauriAPI(): ElectronAPI {
     write: (filePath: string, content: string) => invoke('write', { filePath, content }),
     edit: (filePath: string, oldString: string, newString: string) => invoke('edit', { filePath, oldString, newString }),
     readdir: (dirPath: string) => invoke('readdir', { dirPath }),
-    hermesMemoryDir: () => invoke('hermes_memory_dir'),
+    helixMemoryDir: () => invoke('helix_memory_dir'),
     stat: (filePath: string) => invoke('stat', { filePath }),
     rename: (oldPath: string, newPath: string) => invoke('rename', { oldPath, newPath }),
     delete: (filePath: string) => invoke('delete', { filePath }),
@@ -214,15 +214,15 @@ function buildTauriAPI(): ElectronAPI {
     allowRoot: (dirPath: string) => invoke('allow_root', { dir: dirPath }),
   }
 
-  // ── hermesSkills ────────────────────────────────────────────────────────
-  api.hermesSkills = {
-    getDir: () => invoke('hermes_get_skills_dir'),
-    getPluginsDir: () => invoke('hermes_get_plugins_dir'),
-    readdir: (dirPath: string) => invoke('hermes_read_dir', { dirPath }),
-    readFile: (filePath: string) => invoke('hermes_read_file', { filePath }),
-    deleteDir: (dirPath: string) => invoke('hermes_delete_dir', { dirPath }),
-    listSkills: () => invoke('hermes_list_skills'),
-    trackSkillCall: (skillName: string) => invoke('hermes_track_skill_call', { skillName }),
+  // ── helixSkills ────────────────────────────────────────────────────────
+  api.helixSkills = {
+    getDir: () => invoke('helix_get_skills_dir'),
+    getPluginsDir: () => invoke('helix_get_plugins_dir'),
+    readdir: (dirPath: string) => invoke('helix_read_dir', { dirPath }),
+    readFile: (filePath: string) => invoke('helix_read_file', { filePath }),
+    deleteDir: (dirPath: string) => invoke('helix_delete_dir', { dirPath }),
+    listSkills: () => invoke('helix_list_skills'),
+    trackSkillCall: (skillName: string) => invoke('helix_track_skill_call', { skillName }),
   }
 
   // ── shell ───────────────────────────────────────────────────────────────
@@ -280,9 +280,10 @@ function buildTauriAPI(): ElectronAPI {
   // ── app ─────────────────────────────────────────────────────────────────
   api.app = {
     getInfo: () => invoke('get_info'),
+    readEnvKey: (key: string) => invoke('read_env_key', { key }),
     setWorkDir: (dir: string) => invoke('set_work_dir', { dir }),
     syncWorkDir: (dir: string) => invoke('sync_work_dir', { dir }),
-    getHermesVersion: () => invoke('get_hermes_version'),
+    getHelixVersion: () => invoke('get_helix_version'),
     getDataRoot: () => invoke('get_data_root'),
     setDataRoot: (path: string) => invoke('set_data_root', { path }),
     // HTTP 代理（修改后需重启应用生效）
@@ -290,48 +291,48 @@ function buildTauriAPI(): ElectronAPI {
     proxySet: (url: string) => invoke('proxy_set', { url }),
   }
 
-  // ── hermes ──────────────────────────────────────────────────────────────
-  api.hermes = {
-    send: (method: string, params?: unknown) => invoke('hermes_send', { method, params: params ?? null }),
+  // ── helix ──────────────────────────────────────────────────────────────
+  api.helix = {
+    send: (method: string, params?: unknown) => invoke('helix_send', { method, params: params ?? null }),
     notify: (method: string, params?: unknown) => {
-      void invoke('hermes_notify', { method, params: params ?? null })
+      void invoke('helix_notify', { method, params: params ?? null })
     },
-    interrupt: (sessionId: string) => invoke('hermes_interrupt', { sessionId }),
-    status: () => invoke('hermes_status'),
-    getGatewayInfo: () => invoke('hermes_get_gateway_info'),
-    setConfig: (config: unknown) => invoke('hermes_set_config', { config }),
-    getConfig: () => invoke('hermes_get_config'),
-    getRawConfig: () => invoke('hermes_get_raw_config'),
-    setRawConfig: (patch: unknown) => invoke('hermes_set_raw_config', { patch }),
-    getMemoryStatus: () => invoke('hermes_get_memory_status'),
-    getMemoryProviderConfig: (name: string) => invoke('hermes_get_memory_provider_config', { name }),
+    interrupt: (sessionId: string) => invoke('helix_interrupt', { sessionId }),
+    status: () => invoke('helix_status'),
+    getGatewayInfo: () => invoke('helix_get_gateway_info'),
+    setConfig: (config: unknown) => invoke('helix_set_config', { config }),
+    getConfig: () => invoke('helix_get_config'),
+    getRawConfig: () => invoke('helix_get_raw_config'),
+    setRawConfig: (patch: unknown) => invoke('helix_set_raw_config', { patch }),
+    getMemoryStatus: () => invoke('helix_get_memory_status'),
+    getMemoryProviderConfig: (name: string) => invoke('helix_get_memory_provider_config', { name }),
     setMemoryProviderConfig: (name: string, values: Record<string, unknown>) =>
-      invoke('hermes_set_memory_provider_config', { name, values }),
-    memoryProviderSetup: (name: string) => invoke('hermes_memory_provider_setup', { name }),
-    setYamlKey: (key: string, value: unknown) => invoke('hermes_set_yaml_key', { key, value }),
-    setDelegationIdentities: (identities: unknown) => invoke('hermes_set_delegation_identities', { identities }),
-    listPersonalities: () => invoke('hermes_list_personalities'),
-    setPersonality: (params: unknown) => invoke('hermes_set_personality', { params }),
-    setModel: (params: unknown) => invoke('hermes_set_model', { params }),
-    setAgentConfig: (params: unknown) => invoke('hermes_set_agent_config', { params }),
-    setReasoningEffort: (params: unknown) => invoke('hermes_set_reasoning_effort', { params }),
+      invoke('helix_set_memory_provider_config', { name, values }),
+    memoryProviderSetup: (name: string) => invoke('helix_memory_provider_setup', { name }),
+    setYamlKey: (key: string, value: unknown) => invoke('helix_set_yaml_key', { key, value }),
+    setDelegationIdentities: (identities: unknown) => invoke('helix_set_delegation_identities', { identities }),
+    listPersonalities: () => invoke('helix_list_personalities'),
+    setPersonality: (params: unknown) => invoke('helix_set_personality', { params }),
+    setModel: (params: unknown) => invoke('helix_set_model', { params }),
+    setAgentConfig: (params: unknown) => invoke('helix_set_agent_config', { params }),
+    setReasoningEffort: (params: unknown) => invoke('helix_set_reasoning_effort', { params }),
     fetchModels: (params: { baseUrl: string; apiKey: string }) =>
-      invoke('hermes_fetch_models', { baseUrl: params.baseUrl, apiKey: params.apiKey }),
-    onEvent: onHermesEvent,
-    listMemories: () => invoke('hermes_list_memories'),
-    addMemoryEntry: (target: 'memory' | 'user', text: string) => invoke('hermes_add_memory_entry', { target, text }),
-    removeMemoryEntry: (target: 'memory' | 'user', text: string) => invoke('hermes_remove_memory_entry', { target, text }),
-    setConfigKeyValue: (params: unknown) => invoke('hermes_set_config_key_value', { params }),
-    approvalRespond: (params: unknown) => invoke('hermes_approval_respond', { params }),
-    update: () => invoke('hermes_update'),
+      invoke('helix_fetch_models', { baseUrl: params.baseUrl, apiKey: params.apiKey }),
+    onEvent: onHelixEvent,
+    listMemories: () => invoke('helix_list_memories'),
+    addMemoryEntry: (target: 'memory' | 'user', text: string) => invoke('helix_add_memory_entry', { target, text }),
+    removeMemoryEntry: (target: 'memory' | 'user', text: string) => invoke('helix_remove_memory_entry', { target, text }),
+    setConfigKeyValue: (params: unknown) => invoke('helix_set_config_key_value', { params }),
+    approvalRespond: (params: unknown) => invoke('helix_approval_respond', { params }),
+    update: () => invoke('helix_update'),
     installPlugin: (identifier: string, force?: boolean) =>
-      invoke('hermes_install_plugin', { identifier, force: force ?? false }),
-    cronList: () => invoke('hermes_cron_list'),
+      invoke('helix_install_plugin', { identifier, force: force ?? false }),
+    cronList: () => invoke('helix_cron_list'),
     cronCreate: (schedule: string, command: string, name?: string) =>
-      invoke('hermes_cron_create', { schedule, command, name: name ?? null }),
-    cronDelete: (jobId: string) => invoke('hermes_cron_delete', { jobId }),
-    cronRun: (jobId: string) => invoke('hermes_cron_run', { jobId }),
-    doctor: () => invoke('hermes_doctor'),
+      invoke('helix_cron_create', { schedule, command, name: name ?? null }),
+    cronDelete: (jobId: string) => invoke('helix_cron_delete', { jobId }),
+    cronRun: (jobId: string) => invoke('helix_cron_run', { jobId }),
+    doctor: () => invoke('helix_doctor'),
   }
 
   // ── profile ─────────────────────────────────────────────────────────────
@@ -411,18 +412,14 @@ function buildTauriAPI(): ElectronAPI {
   api.vision = {
     getConfig: () => invoke('vision_config_list'),
     setConfig: (config: unknown) => invoke('vision_config_save', { config }),
+    describe: (image: string, prompt?: string) =>
+      invoke<string>('vision_describe', { image, prompt: prompt ?? null }),
   }
 
   // ── gateway MCP servers (config.yaml mcp_servers, read/write) ────────
   api.mcpConfig = {
     list: () => invoke('mcp_config_list'),
     save: (servers: unknown) => invoke('mcp_config_save', { servers }),
-  }
-
-  // ── channels ───────────────────────────────────────────────────────────
-  api.channels = {
-    list: () => invoke('channels_list'),
-    save: (channels: unknown) => invoke('channels_save', { channels }),
   }
 
   // ── delegations ─────────────────────────────────────────────────────────
@@ -465,5 +462,5 @@ export function installTauriBridge(): void {
   if (!isTauri()) return
   installed = true
   ;(window as unknown as { electron: ElectronAPI }).electron = buildTauriAPI()
-  void subscribeHermesEvents()
+  void subscribeHelixEvents()
 }

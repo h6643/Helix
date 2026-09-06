@@ -1,151 +1,133 @@
-//! Vision model IPC — read/write the `auxiliary.vision:` block in Hermes
-//! config.yaml. The vision API key is synced to `.env` (HELIX_VISION_API_KEY)
-//! and referenced from YAML via `key_env`, mirroring how web_search handles
-//! search keys (keeps secrets out of the committed yaml).
+//! Vision model IPC — read/write `~/.helix/vision.json` and call the model.
+//!
+//! The vision model is invoked directly (OpenAI-compatible `/chat/completions`)
+//! to turn an image into a text description before it reaches the main model
+//! (mirrors the helix-era behaviour, saving the main model's multimodal tokens).
+//! It is persisted in its own JSON file rather than config.yaml so it never
+//! collides with the codex app-server's config and needs no YAML deep-merge.
 
-use crate::config::{config_yaml_path, env_path, remove_yaml_key_deep, set_yaml_key_deep};
-use crate::gateway::{env_gateway_mode, kill_current, spawn_gateway};
-use crate::state::AppState;
+use crate::paths::helix_data_dir;
 use serde_json::{json, Value};
-use std::sync::Arc;
-use tauri::State;
+use std::path::PathBuf;
+
+fn vision_json_path() -> PathBuf {
+    helix_data_dir().join("vision.json")
+}
+
+fn read_config() -> Value {
+    match std::fs::read_to_string(vision_json_path()) {
+        Ok(t) => serde_json::from_str(&t).unwrap_or(json!({})),
+        Err(_) => json!({}),
+    }
+}
 
 #[tauri::command]
-pub fn vision_config_list(_state: State<'_, Arc<AppState>>) -> Value {
-    let yaml_path = config_yaml_path();
-    let text = match std::fs::read_to_string(&yaml_path) {
-        Ok(t) => t,
-        Err(_) => {
-            return json!({ "ok": true, "config": { "provider": "", "model": "", "baseUrl": "", "apiKey": "" } })
-        }
-    };
-
-    let mut provider = String::new();
-    let mut model = String::new();
-    let mut base_url = String::new();
-    let mut inline_api_key = String::new();
-    let mut in_aux = false;
-    let mut in_vision = false;
-
-    for line in text.split('\n') {
-        if !line.starts_with(' ') && line.starts_with("auxiliary:") {
-            in_aux = true;
-            continue;
-        }
-        if in_aux {
-            if !line.starts_with(' ') {
-                in_aux = false;
-                in_vision = false;
-                continue;
-            }
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("vision:") {
-                in_vision = true;
-                continue;
-            }
-            if in_vision {
-                // vision children are indented 4 spaces deeper than top level
-                if !line.starts_with("    ") {
-                    in_vision = false;
-                    continue;
-                }
-                if let Some(rest) = trimmed.strip_prefix("provider:") {
-                    provider = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                } else if let Some(rest) = trimmed.strip_prefix("model:") {
-                    model = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                } else if let Some(rest) = trimmed.strip_prefix("base_url:") {
-                    base_url = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                } else if let Some(rest) = trimmed.strip_prefix("api_key:") {
-                    // Legacy configs stored the key inline. Keep it as a fallback
-                    // so the UI isn't wiped on restart; saves migrate it to .env.
-                    inline_api_key = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                }
-            }
-        }
-    }
-
-    // Read the vision API key from .env (written under HELIX_VISION_API_KEY),
-    // falling back to a legacy inline api_key in config.yaml.
-    let mut env_api_key = String::new();
-    if let Ok(env) = std::fs::read_to_string(env_path()) {
-        for line in env.lines() {
-            if let Some(rest) = line.strip_prefix("HELIX_VISION_API_KEY=") {
-                env_api_key = rest.trim().to_string();
-            }
-        }
-    }
-    let api_key = if !env_api_key.is_empty() {
-        env_api_key
-    } else {
-        inline_api_key
-    };
-
+pub fn vision_config_list() -> Value {
+    let c = read_config();
     json!({
         "ok": true,
         "config": {
-            "provider": provider,
-            "model": model,
-            "baseUrl": base_url,
-            "apiKey": api_key,
+            "provider": c.get("provider").and_then(|v| v.as_str()).unwrap_or(""),
+            "model": c.get("model").and_then(|v| v.as_str()).unwrap_or(""),
+            "baseUrl": c.get("baseUrl").and_then(|v| v.as_str()).unwrap_or(""),
+            "apiKey": c.get("apiKey").and_then(|v| v.as_str()).unwrap_or(""),
         }
     })
 }
 
 #[tauri::command]
-pub fn vision_config_save(state: State<'_, Arc<AppState>>, config: Value) -> Value {
+pub fn vision_config_save(config: Value) -> Value {
     if !config.is_object() {
         return json!({ "ok": false, "error": "invalid config" });
     }
-
-    let provider = config.get("provider").and_then(|v| v.as_str()).unwrap_or("");
-    let model = config.get("model").and_then(|v| v.as_str()).unwrap_or("");
-    let base_url = config.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("");
-    let api_key = config.get("apiKey").and_then(|v| v.as_str()).unwrap_or("");
-
-    let yaml_path = config_yaml_path();
-    let mut yaml = std::fs::read_to_string(&yaml_path).unwrap_or_default();
-
-    yaml = set_yaml_key_deep(&yaml, "auxiliary.vision.provider", &json!(provider));
-    yaml = set_yaml_key_deep(&yaml, "auxiliary.vision.model", &json!(model));
-    yaml = set_yaml_key_deep(&yaml, "auxiliary.vision.base_url", &json!(base_url));
-    // Point hermes at the env var that holds the key (auxiliary_client reads
-    // `key_env` / `api_key_env`).
-    yaml = set_yaml_key_deep(
-        &yaml,
-        "auxiliary.vision.key_env",
-        &json!(if api_key.is_empty() { "" } else { "HELIX_VISION_API_KEY" }),
-    );
-    // Move the secret out of config.yaml: drop any legacy inline api_key now
-    // that it lives in .env under HELIX_VISION_API_KEY (referenced via key_env).
-    yaml = remove_yaml_key_deep(&yaml, "auxiliary.vision.api_key");
-
-    if let Some(dir) = yaml_path.parent() {
+    let out = json!({
+        "provider": config.get("provider").and_then(|v| v.as_str()).unwrap_or(""),
+        "model": config.get("model").and_then(|v| v.as_str()).unwrap_or(""),
+        "baseUrl": config.get("baseUrl").and_then(|v| v.as_str()).unwrap_or(""),
+        "apiKey": config.get("apiKey").and_then(|v| v.as_str()).unwrap_or(""),
+    });
+    let path = vision_json_path();
+    if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&yaml_path, &yaml);
+    match std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&out).unwrap_or_default(),
+    ) {
+        Ok(_) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
+}
 
-    // Sync the vision API key to .env
-    let env_path = env_path();
-    let mut env_lines: Vec<String> = if let Ok(env) = std::fs::read_to_string(&env_path) {
-        env.lines().map(|s| s.to_string()).collect()
+/// Turn an image (data URL) into a text description using the configured
+/// vision model. Returns the description string, or an error the frontend
+/// treats as "fall back to native image_url".
+#[tauri::command]
+pub async fn vision_describe(image: String, prompt: Option<String>) -> Result<String, String> {
+    let c = read_config();
+    let base_url = c
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let api_key = c
+        .get("apiKey")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let model = c
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if base_url.is_empty() || model.is_empty() {
+        return Err("vision model not configured".into());
+    }
+
+    let prompt = prompt.filter(|p| !p.is_empty()).unwrap_or_else(|| {
+        "Describe this image in detail, including any text, code, tables, and key data. \
+             Output for an assistant that cannot see the image."
+            .into()
+    });
+
+    let url = if base_url.ends_with('/') {
+        format!("{base_url}chat/completions")
     } else {
-        Vec::new()
+        format!("{base_url}/chat/completions")
     };
-    env_lines.retain(|l| !l.starts_with("HELIX_VISION_API_KEY="));
+
+    let body = json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": prompt },
+                { "type": "image_url", "image_url": { "url": image } }
+            ]
+        }],
+        "max_tokens": 1024
+    });
+
+    let client = reqwest::Client::new();
+    let mut req = client.post(&url).json(&body);
     if !api_key.is_empty() {
-        env_lines.push(format!("HELIX_VISION_API_KEY={api_key}"));
+        req = req.bearer_auth(api_key);
     }
-    if let Some(dir) = env_path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&env_path, env_lines.join("\n"));
-
-    // Restart the gateway in non-serve modes so hermes picks up the new config.
-    if env_gateway_mode() != "serve" {
-        kill_current(&state);
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let _ = spawn_gateway(&state);
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("vision API {status}: {text}"));
     }
 
-    json!({ "ok": true })
+    // OpenAI-shaped response: choices[0].message.content
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let content = v["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .trim();
+    if content.is_empty() {
+        return Err("vision API returned empty content".into());
+    }
+    Ok(content.to_string())
 }

@@ -1,13 +1,13 @@
 //! Scheduled tasks (cron jobs.json) IPC.
 //! Port of `electron/ipc/scheduled-tasks.js`.
 
-use crate::paths::hermes_data_dir;
+use crate::paths::helix_data_dir;
 use chrono::{SecondsFormat, Utc};
 use rand::Rng;
 use serde_json::{json, Value};
 
 fn cron_jobs_path() -> std::path::PathBuf {
-    hermes_data_dir().join("cron").join("jobs.json")
+    helix_data_dir().join("cron").join("jobs.json")
 }
 
 fn atomic_write_jobs(data: &Value) -> Result<(), String> {
@@ -44,7 +44,9 @@ fn load_jobs() -> Value {
 
 fn parse_ts(v: Option<&Value>) -> Option<i64> {
     let s = v?.as_str()?;
-    chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis())
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.timestamp_millis())
 }
 
 fn task_from_job(job: &Value, updated_at: Option<&Value>) -> Value {
@@ -59,7 +61,10 @@ fn task_from_job(job: &Value, updated_at: Option<&Value>) -> Value {
     if schedule_text.is_empty() {
         schedule_text = match kind {
             "once" => {
-                let run_at = schedule.get("run_at").and_then(|v| v.as_str()).unwrap_or("");
+                let run_at = schedule
+                    .get("run_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if run_at.is_empty() {
                     "unknown".to_string()
                 } else {
@@ -78,7 +83,10 @@ fn task_from_job(job: &Value, updated_at: Option<&Value>) -> Value {
         };
     }
     let cron_expr = if kind == "cron" {
-        schedule.get("expr").and_then(|v| v.as_str()).map(|s| s.to_string())
+        schedule
+            .get("expr")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     } else {
         None
     };
@@ -108,7 +116,11 @@ fn now_ms() -> i64 {
 #[tauri::command]
 pub fn scheduled_tasks_list() -> Value {
     let data = load_jobs();
-    let jobs = data.get("jobs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let jobs = data
+        .get("jobs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let updated_at = data.get("updated_at");
     let tasks: Vec<Value> = jobs.iter().map(|j| task_from_job(j, updated_at)).collect();
     json!({ "ok": true, "tasks": tasks })
@@ -117,9 +129,20 @@ pub fn scheduled_tasks_list() -> Value {
 #[tauri::command]
 pub fn create(params: Option<Value>) -> Value {
     let p = params.unwrap_or(json!({}));
-    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let prompt = p.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let cron_expression = p.get("cronExpression").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let name = p
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let prompt = p
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let cron_expression = p
+        .get("cronExpression")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let next_run_at = p.get("nextRunAt").and_then(|v| v.as_i64());
 
     let mut data = load_jobs();
@@ -130,16 +153,32 @@ pub fn create(params: Option<Value>) -> Value {
     };
 
     let id = gen_job_id();
-    let (schedule, schedule_display, next_run_at_str): (Value, String, Option<String>) = if let Some(expr) = cron_expression {
-        (json!({ "kind": "cron", "expr": expr, "display": expr }), expr.clone(), None)
-    } else if let Some(ts) = next_run_at {
-        let iso = format_iso(ts);
-        let disp = format!("once at {}", iso.replace('T', " ").chars().take(16).collect::<String>());
-        (json!({ "kind": "once", "run_at": iso, "display": disp }), disp, Some(iso))
-    } else {
-        let fallback = format_iso(now_ms() + 86_400_000);
-        (json!({ "kind": "once", "run_at": fallback, "display": "once (fallback)" }), "unknown".to_string(), Some(fallback))
-    };
+    let (schedule, schedule_display, next_run_at_str): (Value, String, Option<String>) =
+        if let Some(expr) = cron_expression {
+            (
+                json!({ "kind": "cron", "expr": expr, "display": expr }),
+                expr.clone(),
+                None,
+            )
+        } else if let Some(ts) = next_run_at {
+            let iso = format_iso(ts);
+            let disp = format!(
+                "once at {}",
+                iso.replace('T', " ").chars().take(16).collect::<String>()
+            );
+            (
+                json!({ "kind": "once", "run_at": iso, "display": disp }),
+                disp,
+                Some(iso),
+            )
+        } else {
+            let fallback = format_iso(now_ms() + 86_400_000);
+            (
+                json!({ "kind": "once", "run_at": fallback, "display": "once (fallback)" }),
+                "unknown".to_string(),
+                Some(fallback),
+            )
+        };
     let next_run_at_str_clone = next_run_at_str.clone();
 
     let job = json!({
@@ -191,7 +230,11 @@ pub fn create(params: Option<Value>) -> Value {
 #[tauri::command]
 pub fn update(params: Option<Value>) -> Value {
     let p = params.unwrap_or(json!({}));
-    let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = p
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let enabled = p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
     let mut data = load_jobs();
     let jobs = data.get_mut("jobs");
@@ -231,7 +274,11 @@ pub fn update(params: Option<Value>) -> Value {
 #[tauri::command]
 pub fn remove(params: Option<Value>) -> Value {
     let p = params.unwrap_or(json!({}));
-    let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = p
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let mut data = load_jobs();
     let jobs = data.get_mut("jobs");
     let jobs = match jobs {

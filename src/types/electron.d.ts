@@ -29,7 +29,7 @@ export interface ElectronAPI {
     write: (filePath: string, content: string) => Promise<{ success: boolean }>
     edit: (filePath: string, oldString: string, newString: string) => Promise<{ success: boolean }>
     readdir: (dirPath: string) => Promise<Array<{ name: string; isDirectory: boolean }>>
-    hermesMemoryDir: () => Promise<string>
+    helixMemoryDir: () => Promise<string>
     stat: (filePath: string) => Promise<{
       isFile: boolean
       isDirectory: boolean
@@ -42,7 +42,7 @@ export interface ElectronAPI {
     allowRoot: (dirPath: string) => Promise<{ success: boolean }>
   }
 
-  hermesSkills: {
+  helixSkills: {
     getDir: () => Promise<string | null>
     getPluginsDir: () => Promise<string | null>
     readdir: (dirPath: string) => Promise<Array<{ name: string; isDirectory: boolean }>>
@@ -91,14 +91,15 @@ export interface ElectronAPI {
     getInfo: () => Promise<{ version: string; platform: string; workDir: string }>
     setWorkDir: (dir: string) => Promise<{ success: boolean; workDir: string }>
     syncWorkDir: (dir: string) => Promise<{ success: boolean; workDir: string }>
-    getHermesVersion: () => Promise<string | null>;
+    getHelixVersion: () => Promise<string | null>;
     getDataRoot: () => Promise<{ dataRoot: string; dataRootDefault: string; dataRootCustom: boolean }>;
     setDataRoot: (path: string) => Promise<{ success: boolean; dataRoot: string; dataRootDefault: string; dataRootCustom: boolean; copied: boolean; bytes?: number }>;
     proxyGet: () => Promise<{ url: string }>;
     proxySet: (url: string) => Promise<{ success: boolean; url: string }>;
+    readEnvKey: (key: string) => Promise<string>;
   }
 
-  hermes: {
+  helix: {
     send: (method: string, params?: any) => Promise<any>
     notify: (method: string, params?: any) => void
     interrupt: (sessionId: string) => Promise<any>
@@ -147,11 +148,11 @@ export interface ElectronAPI {
     setReasoningEffort: (params: { reasoningEffort: string }) => Promise<any>
     fetchModels: (params: any) => Promise<any>
     onEvent: (callback: (method: any, params: any) => void) => () => void
-    // ── Memory sync (Hermes backend memory_manager: MEMORY.md / USER.md) ──
+    // ── Memory sync (Helix backend memory_manager: MEMORY.md / USER.md) ──
     listMemories: () => Promise<{ memory: string[]; user: string[]; manual: string[] }>
     addMemoryEntry: (target: 'memory' | 'user', text: string) => Promise<{ ok: boolean; entries?: string[]; error?: string }>
     removeMemoryEntry: (target: 'memory' | 'user', text: string) => Promise<{ ok: boolean; entries?: string[] }>
-    // External memory provider auto-install (spawns `hermes plugins install`).
+    // External memory provider auto-install (spawns `helix plugins install`).
     installPlugin: (identifier: string, force?: boolean) => Promise<{
       ok: boolean
       message?: string
@@ -258,7 +259,7 @@ export interface ElectronAPI {
     test: () => Promise<{ ok: boolean; imap: { ok: boolean; message: string }; smtp: { ok: boolean; message: string }; debug: { user: string; authCodeLength: number } }>
   }
 
-  // ── Hooks (written into Hermes' config.yaml `hooks:` block; backend fires them) ──
+  // ── Hooks (written into Helix' config.yaml `hooks:` block; backend fires them) ──
   hooks: {
     getConfig: () => Promise<{ ok: boolean; config?: HooksConfig; error?: string }>
     setConfig: (config: HooksConfig) => Promise<{ ok: boolean; error?: string }>

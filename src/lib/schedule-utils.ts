@@ -80,7 +80,7 @@ export interface DetectedTask {
 }
 
 /**
- * Fire-and-forget sync of a created scheduled task to Hermes backend jobs.json.
+ * Fire-and-forget sync of a created scheduled task to Helix backend jobs.json.
  */
 export function syncTaskToBackend(label: string, prompt: string, scheduleText: string, nextRunAt: number | null) {
   try {
