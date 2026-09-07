@@ -6314,21 +6314,6 @@ const renderEmptyBreadcrumb = () => {
 
       {/* API key warning */}
 
-      {/* Connection notice */}
-      {connectionNotice && (
-        <div className="mx-4 mb-2 px-3 py-2.5 rounded-xl text-[calc(var(--helix-transcript-size)*0.8571)] flex items-center gap-2 border cursor-pointer hover:opacity-80 transition-all duration-200 shadow-sm" style={{
-          backgroundColor: connectionNotice.phase === 'recovered' ? 'oklch(0.65 0.15 145 / 0.1)' : 'oklch(0.70 0.15 65 / 0.1)',
-          borderColor: connectionNotice.phase === 'recovered' ? 'oklch(0.65 0.15 145 / 0.25)' : 'oklch(0.70 0.15 65 / 0.25)',
-          color: connectionNotice.phase === 'recovered' ? 'oklch(0.65 0.15 145)' : 'oklch(0.70 0.15 65)',
-        }} onClick={() => useHelixStore.getState().setConnectionNotice(null)}>
-          {connectionNotice.phase !== 'recovered' && (
-            <div className="animate-spin size-3 border-2 border-current border-t-transparent rounded-full shrink-0" />
-          )}
-          <span className="flex-1">{connectionNotice.message}</span>
-          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] opacity-60">点击关闭</span>
-        </div>
-      )}
-
       {/* New project form */}
       {showNewProjectForm && (
         <div className="max-w-[700px] mx-auto mb-2 p-3 bg-card/30 rounded-xl border border-border/30 shadow-sm">
