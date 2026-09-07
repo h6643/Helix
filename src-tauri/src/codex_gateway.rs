@@ -251,10 +251,13 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
             let context_used = last_usage
-                .get("totalTokens")
+                .get("inputTokens")
                 .and_then(Value::as_i64)
-                .or_else(|| total_usage.get("totalTokens").and_then(Value::as_i64))
-                .unwrap_or(0);
+                .unwrap_or(0)
+                + last_usage
+                    .get("outputTokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
             let input_tokens = last_usage
                 .get("inputTokens")
                 .and_then(Value::as_i64)
@@ -991,6 +994,19 @@ fn emit_codex_event(method: &str, params: &Value) {
             .get("modelContextWindow")
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        // `last.totalTokens` is THIS TURN's consumption (prompt+completion for the
+        // current request) — not the occupied context. The model's next-turn
+        // context is exactly what this turn sent as input plus what it produced:
+        // inputTokens (includes cached reads/writes already) + outputTokens.
+        // `total.*` is the cumulative sum across turns and feeds the token stats.
+        let last_input = last_usage
+            .get("inputTokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let last_output = last_usage
+            .get("outputTokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         json!({
             "usage": {
                 "totalTokens": total_usage.get("totalTokens").and_then(Value::as_i64),
@@ -1000,7 +1016,7 @@ fn emit_codex_event(method: &str, params: &Value) {
                 "cachedReadTokens": total_usage.get("cachedInputTokens").and_then(Value::as_i64),
                 "cachedWriteTokens": total_usage.get("cacheWriteInputTokens").and_then(Value::as_i64),
                 "context_max": model_context_window,
-                "context_used": last_usage.get("totalTokens").and_then(Value::as_i64),
+                "context_used": last_input + last_output,
             },
             "session_id": params.get("threadId").cloned().unwrap_or(Value::Null),
             "raw": params,
