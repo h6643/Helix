@@ -1673,7 +1673,6 @@ const clearTabInput = useHelixStore(s => s.clearTabInput)
   // When false, the branch picker button is hidden (no git → nothing to show).
   const [gitAvailable, setGitAvailable] = useState<boolean | null>(null)
   // Stable action references — these never change so getState() is safe
-  const connectionNotice = useHelixStore(s => s.connectionNotice)
   const storeActions = useMemo(() => useHelixStore.getState(), [])
 
   // （撤回统一走 handleUndoChat / /undo：后端 session.undo 截断 + 前端本地删除，
