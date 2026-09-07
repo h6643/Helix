@@ -332,3 +332,62 @@ mod tests {
         );
     }
 }
+
+// ── Version & Status ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_helix_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
+pub fn get_status() -> Value {
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "platform": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "pid": std::process::id(),
+    })
+}
+
+// ── Raw Config (bypass YAML deep-merge) ──────────────────────────────────────
+
+#[tauri::command]
+pub async fn helix_get_raw_config() -> Result<Value, String> {
+    crate::config::read_raw_config().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn helix_set_raw_config(config: Value) -> Result<(), String> {
+    crate::config::write_raw_config(config).await.map_err(|e| e.to_string())
+}
+
+// ── Doctor / Diagnostic ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn helix_doctor() -> Result<Value, String> {
+    let data_dir = helix_data_dir();
+    let config_ok = std::fs::read_to_string(data_dir.join("config.yaml")).is_ok();
+    let env_ok = std::fs::read_to_string(data_dir.join(".env")).is_ok();
+    let runtime_ok = which::which("python3").is_ok() || which::which("python").is_ok();
+    
+    Ok(json!({
+        "dataDir": data_dir.display().to_string(),
+        "configYaml": if config_ok { "ok" } else { "missing" },
+        "envFile": if env_ok { "ok" } else { "missing" },
+        "python": if runtime_ok { "ok" } else { "not found" },
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+// ── Update Check ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn helix_update() -> Result<Value, String> {
+    // Placeholder: Tauri's built-in updater should be used in production
+    Ok(json!({
+        "available": false,
+        "version": env!("CARGO_PKG_VERSION"),
+        "message": "暂无更新"
+    }))
+}

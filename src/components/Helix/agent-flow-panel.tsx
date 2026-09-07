@@ -1195,6 +1195,9 @@ const EMPTY_LINKS: LinkAttachment[] = []
 
 export function AgentFlowPanel() {
   const currentSessionId = useHelixStore(s => s.currentSessionId)
+  const connectionNotice = useHelixStore(s => s.connectionNotice)
+  // 重连中（连接断开 / 重试中）：思考标签统一显示「重连」，代替「思考中」
+  const isReconnecting = connectionNotice?.phase === 'error' || connectionNotice?.phase === 'retrying'
   const [steps, setSteps] = useState<ExecutionStep[]>([])
   useEffect(() => { stepsRef.current = steps }, [steps])
   const [input, setInput] = useState('')
@@ -6109,7 +6112,7 @@ const renderEmptyBreadcrumb = () => {
                       <div className="my-2">
                         <details className="group/details">
                           <summary className="text-muted-foreground cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
-                            <span>{thinkingStatus || '思考中...'}</span>
+                            <span>{isReconnecting ? '重连' : (thinkingStatus || '思考中...')}</span>
                             <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                           </summary>
                           <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/60 break-all leading-relaxed thinking-cap-tall thinking-scroll" style={{ fontSize: transcriptFontSize }}>
@@ -6177,7 +6180,7 @@ const renderEmptyBreadcrumb = () => {
                             return (
                               <details key={si} className="mb-2 mt-3 group/details">
                                 <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
-                                  <span>{thinkingDone ? '思考完成' : (extractKaomojiStatus(firstContent).status || '思考中')}</span>
+                                  <span>{thinkingDone ? '思考完成' : (isReconnecting ? '重连' : (extractKaomojiStatus(firstContent).status || '思考中'))}</span>
                                   <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                                 </summary>
                                 <div className="mt-1 pl-3 border-l-2 border-border/60 space-y-1">
@@ -6249,7 +6252,7 @@ const renderEmptyBreadcrumb = () => {
                             return (
                               <details key={si} className="mb-2 mt-3 group/details">
                                 <summary className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors" style={{ fontSize: transcriptFontSize }}>
-                                  <span>{thinkingDone ? '思考完成' : (extractKaomojiStatus(firstContent).status || '思考中')}</span>
+                                  <span>{thinkingDone ? '思考完成' : (isReconnecting ? '重连' : (extractKaomojiStatus(firstContent).status || '思考中'))}</span>
                                   <svg className="size-3.5 transition-transform group-open/details:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m9 18 6-6-6-6"/></svg>
                                 </summary>
                                 <div className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll" style={{ fontSize: transcriptFontSize }}>

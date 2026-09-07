@@ -38,7 +38,6 @@ import { useHelixStore } from '@/stores/helix-store'
 import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
 import { applyHelixPalette } from '@/lib/themes'
 import { AgentFlowPanel } from './agent-flow-panel'
-import { ConnectionNotice } from './connection-notice'
 import { GlobalTooltip } from './global-tooltip'
 import { CommandPalette } from './command-palette'
 import { Sidebar } from './sidebar'
@@ -1043,7 +1042,6 @@ export function HelixLayout() {
       <CommandPalette />
       <ContextMenuProvider />
       <ToastContainer />
-      <ConnectionNotice />
 
       {/* Title bar — part of the background */}
       <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 shrink-0 select-none">

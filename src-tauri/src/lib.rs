@@ -4,6 +4,7 @@ mod app;
 mod codex_gateway;
 mod config;
 mod delegations;
+mod external;
 mod fs;
 mod gateway;
 mod git;
@@ -175,6 +176,15 @@ pub fn run() {
             helix::helix_list_memories,
             helix::helix_add_memory_entry,
             helix::helix_remove_memory_entry,
+            // Memory status & provider config
+            helix::helix_get_memory_status,
+            helix::helix_get_memory_provider_config,
+            helix::helix_set_memory_provider_config,
+            // Personality management
+            helix::helix_list_personalities,
+            helix::helix_set_personality,
+            // Plugin installation
+            helix::helix_install_plugin,
             // fs
             fs::read,
             fs::write,
@@ -265,6 +275,14 @@ pub fn run() {
             // app
             app::get_info,
             app::read_env_key,
+            app::get_helix_version,
+            app::get_status,
+            app::helix_get_raw_config,
+            app::helix_set_raw_config,
+            app::helix_doctor,
+            app::helix_update,
+            // external (TCP probe, SSH)
+            external::test_connection,
             app::sync_work_dir,
             app::set_work_dir,
             app::get_data_root,
@@ -283,6 +301,11 @@ pub fn run() {
             scheduled_tasks::create,
             scheduled_tasks::update,
             scheduled_tasks::remove,
+            // cron aliases
+            scheduled_tasks::helix_cron_list,
+            scheduled_tasks::helix_cron_create,
+            scheduled_tasks::helix_cron_delete,
+            scheduled_tasks::helix_cron_run,
             // gateway MCP servers (config.yaml mcp_servers, read/write)
             mcp::mcp_config_list,
             mcp::mcp_config_save,

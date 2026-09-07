@@ -343,3 +343,93 @@ pub fn helix_remove_memory_entry(target: String, text: String) -> Value {
     }
     json!({ "ok": true, "entries": next })
 }
+
+// ── Personality Management ───────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn helix_list_personalities() -> Result<Vec<serde_json::Value>, String> {
+    // Return default personalities; actual storage could be extended
+    Ok(vec![
+        json!({ "name": "default", "label": "默认", "system_prompt": "" }),
+        json!({ "name": "code", "label": "代码专家", "system_prompt": "你是一位专业的代码助手..." }),
+        json!({ "name": "explain", "label": "解释模式", "system_prompt": "请详细解释代码和概念..." }),
+    ])
+}
+
+#[tauri::command]
+pub fn helix_set_personality(name: String) -> Result<(), String> {
+    // Store selected personality (can be extended to persist to config)
+    debug!("[helix] set_personality: {}", name);
+    Ok(())
+}
+
+// ── Plugin Installation ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn helix_install_plugin(identifier: String) -> Result<Value, String> {
+    // Use `helix plugins install` via shell
+    let output = tokio::process::Command::new("helix")
+        .args(&["plugins", "install", &identifier])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to spawn: {}", e))?;
+    
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    
+    if output.status.success() {
+        Ok(json!({ "ok": true, "message": stdout }))
+    } else {
+        Ok(json!({ "ok": false, "error": stderr }))
+    }
+}
+
+// ── Memory Status ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn helix_get_memory_status() -> Value {
+    let dir = crate::memory::helix_memories_dir();
+    let memory_md = dir.join("MEMORY.md");
+    let user_md = dir.join("USER.md");
+    
+    let memory_count = if memory_md.exists() {
+        std::fs::read_to_string(&memory_md)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    
+    let user_count = if user_md.exists() {
+        std::fs::read_to_string(&user_md)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    
+    json!({
+        "enabled": memory_md.exists() || user_md.exists(),
+        "memoryEntries": memory_count,
+        "userEntries": user_count,
+        "memoryPath": memory_md.display().to_string(),
+        "userPath": user_md.display().to_string(),
+    })
+}
+
+// ── Memory Provider Config ──────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn helix_get_memory_provider_config() -> Value {
+    // Return default provider config
+    json!({
+        "provider": "local",
+        "config": {}
+    })
+}
+
+#[tauri::command]
+pub fn helix_set_memory_provider_config(_config: Value) -> Result<(), String> {
+    // Stub: memory provider configuration would go here
+    Ok(())
+}

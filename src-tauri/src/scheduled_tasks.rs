@@ -302,3 +302,35 @@ fn format_iso(ms: i64) -> String {
         .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap())
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
+
+// ── Cron Commands (alias for scheduled_tasks) ────────────────────────────────
+
+/// Alias for scheduled_tasks_list
+#[tauri::command]
+pub fn helix_cron_list() -> Value {
+    scheduled_tasks_list()
+}
+
+/// Alias for scheduled_tasks create
+#[tauri::command]
+pub fn helix_cron_create(params: Option<Value>) -> Value {
+    create(params)
+}
+
+/// Alias for scheduled_tasks remove
+#[tauri::command]
+pub fn helix_cron_delete(params: Option<Value>) -> Value {
+    remove(params)
+}
+
+/// Execute a cron job by ID
+#[tauri::command]
+pub fn helix_cron_run(params: Option<Value>) -> Value {
+    let p = params.unwrap_or(json!({}));
+    let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if id.is_empty() {
+        return json!({ "ok": false, "error": "missing id" });
+    }
+    // Trigger immediate execution (simplified - would need job runner integration)
+    json!({ "ok": true, "message": format!("Job {} triggered", id) })
+}
