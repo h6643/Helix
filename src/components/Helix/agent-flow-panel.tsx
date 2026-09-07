@@ -9,6 +9,7 @@ import {
   ChevronDown,
   Search,
   Folder,
+  Server,
   ArrowDown,
   ArrowUp,
   X,
@@ -4766,10 +4767,11 @@ promptSentAtRef.current = Date.now()
                   || helixSessionIdRef.current
                 if (sid) {
                   // 自动批准也走新 RPC（2026-08-17 起后端弃用 session/approve）：
-                  // approval.respond + choice，无需再配对 toolCallId。
+                  // approval.respond + choice: once/session/always/deny。
                   helixApi()!.send('approval.respond', {
                     session_id: sid,
                     choice: 'once',
+                    request_id: parsed.approvalId || '',
                   }).catch((e: any) => console.warn('[Helix] auto-approve failed:', e))
                 }
               } else {
@@ -5255,11 +5257,11 @@ promptSentAtRef.current = Date.now()
       if (sid) {
         for (const req of approvalQueue) {
           // 新 RPC（2026-08-17 起后端弃用 session/approve）：approval.respond +
-          // choice: once/session/always/deny，由 agent 侧状态机 resolve，不再配对
-          // toolCallId。once = 仅放行当前这步。
+          // choice: once/session/always/deny，由 agent 侧状态机 resolve。
           await helixApi()!.send('approval.respond', {
             session_id: sid,
             choice: 'once',
+            request_id: req.id,
           })
         }
       }
@@ -5281,6 +5283,7 @@ promptSentAtRef.current = Date.now()
           await helixApi()!.send('approval.respond', {
             session_id: sid,
             choice: 'deny',
+            request_id: req.id,
           })
         }
       }
