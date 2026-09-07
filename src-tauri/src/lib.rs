@@ -23,6 +23,7 @@ mod terminal;
 mod vision;
 mod web_search;
 mod window;
+pub mod ssh;
 
 use crate::state::{AppState, APP_HANDLE};
 use std::sync::Arc;
@@ -197,6 +198,11 @@ pub fn run() {
             vision::vision_config_list,
             vision::vision_config_save,
             vision::vision_describe,
+            // SSH connections
+            ssh::ssh_connect,
+            ssh::ssh_exec,
+            ssh::ssh_status,
+            ssh::ssh_disconnect,
             // hooks (hooks: block in config.yaml)
             hooks::hooks_list,
             hooks::hooks_save,

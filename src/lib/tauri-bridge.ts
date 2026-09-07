@@ -366,14 +366,18 @@ function buildTauriAPI(): ElectronAPI {
     fetch: (opts?: unknown) => invoke('fetch', { opts: opts ?? null }),
   }
 
-  // ── external (TCP probe implemented; SSH not ported to Tauri yet) ──────
+  // ── external (TCP probe + SSH implemented) ──────────────────────────────
   api.external = {
     testConnection: (host: string, port: number | string, timeoutMs?: number) =>
       invoke('test_connection', { host, port, timeoutMs: timeoutMs ?? null }),
-    sshConnect: () => Promise.resolve(stubError('SSH 会话在 Linux Tauri 版暂不可用')),
-    sshExec: () => Promise.resolve(stubError('SSH 会话在 Linux Tauri 版暂不可用')),
-    sshStatus: () => Promise.resolve({ connected: false }),
-    sshDisconnect: () => Promise.resolve({ ok: true }),
+    sshConnect: (params: { host: string; port: number; username: string; authType: string; secret: string }) =>
+      invoke('ssh_connect', params),
+    sshExec: (params: { conn_id: string; command: string }) =>
+      invoke('ssh_exec', params),
+    sshStatus: (conn_id: string) =>
+      invoke('ssh_status', { conn_id }),
+    sshDisconnect: (conn_id: string) =>
+      invoke('ssh_disconnect', { conn_id }),
     onSshConnected: () => () => {},
     onSshList: () => () => {},
   }
