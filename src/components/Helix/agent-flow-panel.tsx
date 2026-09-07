@@ -5868,8 +5868,8 @@ const renderEmptyBreadcrumb = () => {
                 <img src="/kirin.png" alt="Helix" className="w-14 h-14 opacity-70 mx-auto mb-4" />
                 <p className="text-[calc(var(--helix-transcript-size)*1.0714)] font-normal text-foreground/50 text-center mb-6 tracking-tight">{startupGreeting}</p>
                 
-                {/* 项目选择器 — 在输入框上方 */}
-                <div className="flex items-center gap-1.5 mb-3">
+                {/* 项目选择器 — 在输入框上方，左对齐 */}
+                <div className="flex items-center gap-1.5 mb-3 justify-start">
                   <div className="relative" ref={folderDropdownRef}>
                     <button
                       type="button"
@@ -5926,7 +5926,7 @@ const renderEmptyBreadcrumb = () => {
                               </div>
                             ) : externalServices.length === 0 ? (
                               <div className="px-3 py-6">
-                                <button type="button" onClick={() => setShowAddServerForm(true)} className="w-full flex items-center gap-2 px-3 py-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:bg-accent hover:text-foreground rounded-lg transition-colors border border-dashed border-border">
+                                <button type="button" onClick={() => setShowAddServerForm(true)} className="w-full flex items-center gap-2 px-3 py-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:bg-accent hover:text-foreground rounded-lg transition-colors">
                                   <span className="size-5 flex items-center justify-center border border-current rounded text-sm leading-none">+</span>
                                   <span>添加远程服务器</span>
                                 </button>
