@@ -250,7 +250,7 @@ pub fn log(state: State<'_, Arc<AppState>>, count: Option<u32>) -> Value {
     }
 }
 
-// ── worktree ───────────────────────────────────────────────────────────────
+// ── worktree ───────────────────────────
 
 #[tauri::command]
 pub fn worktree_list(state: State<'_, Arc<AppState>>) -> Value {
@@ -380,7 +380,7 @@ pub fn worktree_prune(state: State<'_, Arc<AppState>>) -> Value {
     }
 }
 
-// ── remote ops ─────────────────────────────────────────────────────────────
+// ── remote ops ──────────────────────────
 
 #[tauri::command]
 pub fn push(state: State<'_, Arc<AppState>>, opts: Option<Value>) -> Value {

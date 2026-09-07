@@ -1,8 +1,8 @@
 //! SSH connection management using system SSH client.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::process::Command;
+use std::sync::Mutex;
 
 static SSH_CONNECTIONS: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
 
@@ -24,12 +24,17 @@ pub fn connect(
 
     let output = Command::new("ssh")
         .args(&[
-            "-o", "ConnectTimeout=10",
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no",
-            "-p", &port.to_string(),
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-p",
+            &port.to_string(),
             &format!("{}@{}", username, host),
-            "echo", "connection_test",
+            "echo",
+            "connection_test",
         ])
         .output();
 
@@ -67,7 +72,7 @@ pub fn exec(conn_id: &str, command: &str) -> Result<String, String> {
     let host_port = parts[1];
 
     let (host, port) = if let Some(idx) = host_port.rfind(':') {
-        (&host_port[..idx], &host_port[idx+1..])
+        (&host_port[..idx], &host_port[idx + 1..])
     } else {
         (host_port, "22")
     };
@@ -80,10 +85,14 @@ pub fn exec(conn_id: &str, command: &str) -> Result<String, String> {
 
     let output = Command::new("ssh")
         .args(&[
-            "-o", "ConnectTimeout=30",
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no",
-            "-p", port,
+            "-o",
+            "ConnectTimeout=30",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-p",
+            port,
             &format!("{}@{}", username, host),
             command,
         ])
@@ -104,7 +113,10 @@ pub fn exec(conn_id: &str, command: &str) -> Result<String, String> {
 
 pub fn status(conn_id: &str) -> bool {
     let conns = SSH_CONNECTIONS.lock().unwrap();
-    conns.as_ref().map(|m| m.get(conn_id).copied().unwrap_or(false)).unwrap_or(false)
+    conns
+        .as_ref()
+        .map(|m| m.get(conn_id).copied().unwrap_or(false))
+        .unwrap_or(false)
 }
 
 pub fn disconnect(conn_id: &str) -> Result<(), String> {
@@ -116,7 +128,13 @@ pub fn disconnect(conn_id: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn ssh_connect(host: String, port: u32, username: String, auth_type: String, secret: String) -> Result<String, String> {
+pub fn ssh_connect(
+    host: String,
+    port: u32,
+    username: String,
+    auth_type: String,
+    secret: String,
+) -> Result<String, String> {
     connect(&host, port, &username, &auth_type, &secret)
 }
 

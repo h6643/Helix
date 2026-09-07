@@ -1,24 +1,30 @@
-﻿import type { McpServerConfig } from '@/stores/helix-types'
+﻿import type { McpServerConfig } from "@/stores/helix-types";
 
 interface AcpEnvVar {
-  name: string
-  value: string
+  name: string;
+  value: string;
 }
 
 interface AcpHttpHeader {
-  name: string
-  value: string
+  name: string;
+  value: string;
 }
 
 interface AcpMeta {
-  cwd?: string
-  timeout?: number
-  envPassthrough?: boolean
+  cwd?: string;
+  timeout?: number;
+  envPassthrough?: boolean;
 }
 
 export type AcpMcpServer =
-  | { name: string; command: string; args: string[]; env: AcpEnvVar[]; _meta?: AcpMeta }
-  | { name: string; url: string; headers: AcpHttpHeader[]; _meta?: AcpMeta }
+  | {
+      name: string;
+      command: string;
+      args: string[];
+      env: AcpEnvVar[];
+      _meta?: AcpMeta;
+    }
+  | { name: string; url: string; headers: AcpHttpHeader[]; _meta?: AcpMeta };
 
 /**
  * Convert the store's MCP server map into the ACP `session/new` mcpServers
@@ -29,31 +35,39 @@ export type AcpMcpServer =
 export function buildAcpMcpServers(
   servers: Record<string, McpServerConfig> | null | undefined,
 ): AcpMcpServer[] {
-  const out: AcpMcpServer[] = []
+  const out: AcpMcpServer[] = [];
   for (const [name, cfg] of Object.entries(servers || {})) {
-    if (!cfg || cfg.enabled === false) continue
+    if (!cfg || cfg.enabled === false) continue;
     const meta: AcpMeta = {
       ...(cfg.cwd ? { cwd: cfg.cwd } : {}),
-      ...(typeof cfg.timeout === 'number' ? { timeout: cfg.timeout } : {}),
+      ...(typeof cfg.timeout === "number" ? { timeout: cfg.timeout } : {}),
       ...(cfg.envPassthrough ? { envPassthrough: true } : {}),
-    }
-    if (cfg.type === 'remote' && cfg.url) {
+    };
+    if (cfg.type === "remote" && cfg.url) {
       out.push({
         name,
         url: cfg.url,
-        headers: Object.entries(cfg.headers || {}).map(([n, v]) => ({ name: n, value: String(v) })),
+        headers: Object.entries(cfg.headers || {}).map(([n, v]) => ({
+          name: n,
+          value: String(v),
+        })),
         ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
-      })
-    } else if (cfg.type === 'local' && cfg.command?.length) {
-      const cmd = Array.isArray(cfg.command) ? cfg.command : [String(cfg.command)]
+      });
+    } else if (cfg.type === "local" && cfg.command?.length) {
+      const cmd = Array.isArray(cfg.command)
+        ? cfg.command
+        : [String(cfg.command)];
       out.push({
         name,
         command: cmd[0],
         args: cmd.slice(1),
-        env: Object.entries(cfg.environment || {}).map(([n, v]) => ({ name: n, value: String(v) })),
+        env: Object.entries(cfg.environment || {}).map(([n, v]) => ({
+          name: n,
+          value: String(v),
+        })),
         ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
-      })
+      });
     }
   }
-  return out
+  return out;
 }

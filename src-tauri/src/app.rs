@@ -14,7 +14,7 @@ use tauri::State;
 
 pub const WORKDIR_FILE: &str = "workdir.json";
 
-// ── work-dir persistence (userData/workdir.json) ───────────────────────────
+// ── work-dir persistence ───────────────────────
 
 pub fn persisted_work_dir() -> Option<PathBuf> {
     let dir = user_data_dir()?;
@@ -75,7 +75,7 @@ fn platform() -> String {
     }
 }
 
-// ── commands ───────────────────────────────────────────────────────────────
+// ── commands ───────────────────────────
 
 #[tauri::command]
 pub fn get_info(state: State<'_, Arc<AppState>>) -> Value {
@@ -333,7 +333,7 @@ mod tests {
     }
 }
 
-// ── Version & Status ─────────────────────────────────────────────────────────
+// ── Version & Status ────────────────────────
 
 #[tauri::command]
 pub fn get_helix_version() -> String {
@@ -350,19 +350,23 @@ pub fn get_status() -> Value {
     })
 }
 
-// ── Raw Config (bypass YAML deep-merge) ──────────────────────────────────────
+// ── Raw Config ──────────────────────────
 
 #[tauri::command]
 pub async fn helix_get_raw_config() -> Result<Value, String> {
-    crate::config::read_raw_config().await.map_err(|e| e.to_string())
+    crate::config::read_raw_config()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn helix_set_raw_config(config: Value) -> Result<(), String> {
-    crate::config::write_raw_config(config).await.map_err(|e| e.to_string())
+    crate::config::write_raw_config(config)
+        .await
+        .map_err(|e| e.to_string())
 }
 
-// ── Doctor / Diagnostic ─────────────────────────────────────────────────────
+// ── Doctor / Diagnostic ───────────────────────
 
 #[tauri::command]
 pub async fn helix_doctor() -> Result<Value, String> {
@@ -370,7 +374,7 @@ pub async fn helix_doctor() -> Result<Value, String> {
     let config_ok = std::fs::read_to_string(data_dir.join("config.yaml")).is_ok();
     let env_ok = std::fs::read_to_string(data_dir.join(".env")).is_ok();
     let runtime_ok = which::which("python3").is_ok() || which::which("python").is_ok();
-    
+
     Ok(json!({
         "dataDir": data_dir.display().to_string(),
         "configYaml": if config_ok { "ok" } else { "missing" },
@@ -380,7 +384,7 @@ pub async fn helix_doctor() -> Result<Value, String> {
     }))
 }
 
-// ── Update Check ─────────────────────────────────────────────────────────────
+// ── Update Check ─────────────────────────
 
 #[tauri::command]
 pub async fn helix_update() -> Result<Value, String> {

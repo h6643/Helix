@@ -11,17 +11,26 @@
  * 重启后分类数据必丢（"重启后有的会消失"根因）。
  */
 
-import { helixApi } from '@/lib/electron-bridge'
-import { resolveBackendSid } from '@/lib/session-map'
-import { useHelixStore } from '@/stores/helix-store'
+import { helixApi } from "@/lib/electron-bridge";
+import { resolveBackendSid } from "@/lib/session-map";
+import { useHelixStore } from "@/stores/helix-store";
 
 interface ContextBreakdownData {
-  context_max: number
-  context_used: number
-  context_percent: number
-  estimated_total?: number
-  categories: Array<{ id: string; label: string; tokens: number; color: string }>
-  toolsets?: Array<{ toolset: string; tool_count: number; schema_tokens: number }>
+  context_max: number;
+  context_used: number;
+  context_percent: number;
+  estimated_total?: number;
+  categories: Array<{
+    id: string;
+    label: string;
+    tokens: number;
+    color: string;
+  }>;
+  toolsets?: Array<{
+    toolset: string;
+    tool_count: number;
+    schema_tokens: number;
+  }>;
 }
 
 /**
@@ -48,17 +57,20 @@ export async function captureContextBreakdown(
   backendSid?: string | null,
 ): Promise<boolean> {
   // 绝不兜底到全局 helixSessionId（跨会话污染，见 doc 注释）。
-  const sid = backendSid || (await resolveBackendSid(conversationId || null))
-  if (!sid) return false
+  const sid = backendSid || (await resolveBackendSid(conversationId || null));
+  if (!sid) return false;
   try {
-    const result = await helixApi()?.send('session.context_breakdown', { session_id: sid })
-    if (!result || typeof result !== 'object') return false
-    const data = result as ContextBreakdownData
-    const hasBreakdown = (data.categories?.length ?? 0) > 0
-      || ((data.context_used ?? 0) > 0 && (data.context_max ?? 0) > 0)
-    if (!hasBreakdown) return false
-    const key = conversationId || sid
-    const localPrev = useHelixStore.getState().contextUsage[key]
+    const result = await helixApi()?.send("session.context_breakdown", {
+      session_id: sid,
+    });
+    if (!result || typeof result !== "object") return false;
+    const data = result as ContextBreakdownData;
+    const hasBreakdown =
+      (data.categories?.length ?? 0) > 0 ||
+      ((data.context_used ?? 0) > 0 && (data.context_max ?? 0) > 0);
+    if (!hasBreakdown) return false;
+    const key = conversationId || sid;
+    const localPrev = useHelixStore.getState().contextUsage[key];
     // 只写分类/工具集明细，不改 size/used：环的 used/size 由 run 结束的
     // usage_prompt_complete 实测值落盘（agent-flow-panel），是唯一写入口径。
     // 此处是 breakdown RPC（anchored 口径，语义不同），若做 max() 合并会让
@@ -69,12 +81,21 @@ export async function captureContextBreakdown(
       key,
       localPrev?.size || data.context_max || 0,
       localPrev?.used || data.context_used || 0,
-      data.categories.map((c) => ({ id: c.id, label: c.label, tokens: c.tokens, color: c.color })),
-      data.toolsets?.map((t) => ({ toolset: t.toolset, tool_count: t.tool_count, schema_tokens: t.schema_tokens })),
-    )
-    return true
+      data.categories.map((c) => ({
+        id: c.id,
+        label: c.label,
+        tokens: c.tokens,
+        color: c.color,
+      })),
+      data.toolsets?.map((t) => ({
+        toolset: t.toolset,
+        tool_count: t.tool_count,
+        schema_tokens: t.schema_tokens,
+      })),
+    );
+    return true;
   } catch {
     // Backend may not support this — degrade gracefully
-    return false
+    return false;
   }
 }

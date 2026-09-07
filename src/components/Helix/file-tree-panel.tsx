@@ -1,4 +1,4 @@
-'use client'
+"use client";
 
 import {
   FolderOpen,
@@ -11,456 +11,630 @@ import {
   ArrowLeft,
   RefreshCw,
   Terminal,
-} from 'lucide-react'
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { createPortal } from 'react-dom'
-import { isElectron, electronGit, electronFS, electronShell } from '@/lib/electron-bridge'
-import { useHelixStore } from '@/stores/helix-store'
+} from "lucide-react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+} from "react";
+import { createPortal } from "react-dom";
+import {
+  isElectron,
+  electronGit,
+  electronFS,
+  electronShell,
+} from "@/lib/electron-bridge";
+import { useHelixStore } from "@/stores/helix-store";
 
 interface FileTreeItem {
-  name: string
-  path: string
-  isDirectory: boolean
-  children?: FileTreeItem[]
-  expanded?: boolean
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  children?: FileTreeItem[];
+  expanded?: boolean;
 }
 
 interface FileTreePanelProps {
   /** Called after a file's content has been loaded into the editor store, so
    *  the parent can surface the code page (the pages model, not rightSidebarTab,
    *  drives which view is visible). */
-  onOpenFile?: () => void
+  onOpenFile?: () => void;
   /** Bump this key (e.g. from the parent's refresh button) to reload the tree. */
-  reloadKey?: number
+  reloadKey?: number;
   /** Explicit root directory to display. When omitted, falls back to the store's
    *  `selectedWorkDir` (so the panel can be reused in the left sidebar to show an
    *  arbitrary project's tree, not just the currently-selected one). */
-  rootDir?: string
+  rootDir?: string;
   /** Directory-view header: close the explorer and return to the sidebar list. */
-  onBack?: () => void
+  onBack?: () => void;
   /** Directory-view header: manual refresh of the tree. */
-  onRefresh?: () => void
+  onRefresh?: () => void;
 }
 
 function parsePorcelainV2(output: string): Map<string, string> {
-  const map = new Map<string, string>()
-  for (const line of output.split('\n')) {
-    if (!line || line.startsWith('#')) continue
+  const map = new Map<string, string>();
+  for (const line of output.split("\n")) {
+    if (!line || line.startsWith("#")) continue;
     // Rename/copy:  2 XY ... <X?> <score?> path
-    if (line.startsWith('2 ')) {
-      const parts = line.split(/\s+/)
-      const path = parts[parts.length - 1]
-      let st = ''
+    if (line.startsWith("2 ")) {
+      const parts = line.split(/\s+/);
+      const path = parts[parts.length - 1];
+      let st = "";
       if (parts[1] && parts[1].length >= 2) {
-        const idx = parts[1].indexOf('.')
-        if (idx <= 0) st = parts[1][0]
-        else st = parts[1].slice(0, idx)
+        const idx = parts[1].indexOf(".");
+        if (idx <= 0) st = parts[1][0];
+        else st = parts[1].slice(0, idx);
       }
-      map.set(path, st || 'R')
-      continue
+      map.set(path, st || "R");
+      continue;
     }
     // Unmerged:      u XY ...
-    if (line.startsWith('u ')) {
-      const parts = line.split(/\s+/)
-      const path = parts[parts.length - 1]
-      map.set(path, 'U')
-      continue
+    if (line.startsWith("u ")) {
+      const parts = line.split(/\s+/);
+      const path = parts[parts.length - 1];
+      map.set(path, "U");
+      continue;
     }
     // Regular:       1 XY ...
-    if (line.startsWith('1 ')) {
-      const parts = line.split(/\s+/)
-      const path = parts[parts.length - 1]
-      if (!parts[1]) continue
-      const staged = parts[1][0]
-      const unstaged = parts[1][1]
-      let label = ''
-      if (staged !== '.') label += staged
-      if (unstaged !== '.') label += unstaged
-      map.set(path, label || 'M')
-      continue
+    if (line.startsWith("1 ")) {
+      const parts = line.split(/\s+/);
+      const path = parts[parts.length - 1];
+      if (!parts[1]) continue;
+      const staged = parts[1][0];
+      const unstaged = parts[1][1];
+      let label = "";
+      if (staged !== ".") label += staged;
+      if (unstaged !== ".") label += unstaged;
+      map.set(path, label || "M");
+      continue;
     }
     // Untracked:     ? path
-    if (line.startsWith('? ')) {
-      const path = line.slice(2).trim()
-      if (path) map.set(path, '?')
-      continue
+    if (line.startsWith("? ")) {
+      const path = line.slice(2).trim();
+      if (path) map.set(path, "?");
+      continue;
     }
     // Ignored:       ! path
-    if (line.startsWith('! ')) {
-      const path = line.slice(2).trim()
-      if (path) map.set(path, '!')
-      continue
+    if (line.startsWith("! ")) {
+      const path = line.slice(2).trim();
+      if (path) map.set(path, "!");
+      continue;
     }
   }
-  return map
+  return map;
 }
 
-const STATUS_STYLES: Record<string, { label: string; color: string; bg: string }> = {
-  M: { label: 'M', color: 'text-amber-400', bg: 'bg-amber-400/10' },
-  A: { label: 'A', color: 'text-emerald-400', bg: 'bg-emerald-400/10' },
-  D: { label: 'D', color: 'text-red-400', bg: 'bg-red-400/10' },
-  '?': { label: '?', color: 'text-blue-400', bg: 'bg-blue-400/10' },
-  R: { label: 'R', color: 'text-purple-400', bg: 'bg-purple-400/10' },
-  C: { label: 'C', color: 'text-purple-400', bg: 'bg-purple-400/10' },
-  U: { label: 'U', color: 'text-orange-400', bg: 'bg-orange-400/10' },
-  '!': { label: '!', color: 'text-muted-foreground/30', bg: 'bg-muted-foreground/5' },
-}
+const STATUS_STYLES: Record<
+  string,
+  { label: string; color: string; bg: string }
+> = {
+  M: { label: "M", color: "text-amber-400", bg: "bg-amber-400/10" },
+  A: { label: "A", color: "text-emerald-400", bg: "bg-emerald-400/10" },
+  D: { label: "D", color: "text-red-400", bg: "bg-red-400/10" },
+  "?": { label: "?", color: "text-blue-400", bg: "bg-blue-400/10" },
+  R: { label: "R", color: "text-purple-400", bg: "bg-purple-400/10" },
+  C: { label: "C", color: "text-purple-400", bg: "bg-purple-400/10" },
+  U: { label: "U", color: "text-orange-400", bg: "bg-orange-400/10" },
+  "!": {
+    label: "!",
+    color: "text-muted-foreground/30",
+    bg: "bg-muted-foreground/5",
+  },
+};
 
 function getStatusStyle(code: string) {
-  if (code === '?') return STATUS_STYLES['?']
-  if (code.startsWith('M') || code.endsWith('M')) return STATUS_STYLES.M
-  if (code.startsWith('A') || code.endsWith('A')) return STATUS_STYLES.A
-  if (code.startsWith('D') || code.endsWith('D')) return STATUS_STYLES.D
-  if (code.startsWith('R') || code.endsWith('R')) return STATUS_STYLES.R
-  if (code.startsWith('C') || code.endsWith('C')) return STATUS_STYLES.C
-  if (code.startsWith('U') || code.endsWith('U')) return STATUS_STYLES.U
-  if (code === '!') return STATUS_STYLES['!']
-  return null
+  if (code === "?") return STATUS_STYLES["?"];
+  if (code.startsWith("M") || code.endsWith("M")) return STATUS_STYLES.M;
+  if (code.startsWith("A") || code.endsWith("A")) return STATUS_STYLES.A;
+  if (code.startsWith("D") || code.endsWith("D")) return STATUS_STYLES.D;
+  if (code.startsWith("R") || code.endsWith("R")) return STATUS_STYLES.R;
+  if (code.startsWith("C") || code.endsWith("C")) return STATUS_STYLES.C;
+  if (code.startsWith("U") || code.endsWith("U")) return STATUS_STYLES.U;
+  if (code === "!") return STATUS_STYLES["!"];
+  return null;
 }
 
 // Filter the (already fully-loaded) tree by a case-insensitive substring match
 // on node names. A folder is kept if its own name matches OR any descendant
 // matches; matched folders are force-expanded so the hits are visible.
 function filterTree(nodes: FileTreeItem[], rawQuery: string): FileTreeItem[] {
-  const q = rawQuery.toLowerCase()
-  const out: FileTreeItem[] = []
+  const q = rawQuery.toLowerCase();
+  const out: FileTreeItem[] = [];
   for (const n of nodes) {
     if (n.isDirectory) {
-      const kids = n.children ? filterTree(n.children, rawQuery) : []
-      const selfMatch = n.name.toLowerCase().includes(q)
+      const kids = n.children ? filterTree(n.children, rawQuery) : [];
+      const selfMatch = n.name.toLowerCase().includes(q);
       if (selfMatch || kids.length > 0) {
         out.push({
           ...n,
           children: kids.length > 0 ? kids : n.children,
           expanded: kids.length > 0 ? true : n.expanded,
-        })
+        });
       }
     } else if (n.name.toLowerCase().includes(q)) {
-      out.push(n)
+      out.push(n);
     }
   }
-  return out
+  return out;
 }
 
 // In-place helpers for rename / delete without collapsing the whole tree.
 
-function renameChildrenPaths(nodes: FileTreeItem[], oldPrefix: string, newPrefix: string): FileTreeItem[] {
-  return nodes.map(n => {
-    const rest = n.path.startsWith(oldPrefix) ? n.path.slice(oldPrefix.length) : n.path
-    const updated = { ...n, path: newPrefix + rest }
+function renameChildrenPaths(
+  nodes: FileTreeItem[],
+  oldPrefix: string,
+  newPrefix: string,
+): FileTreeItem[] {
+  return nodes.map((n) => {
+    const rest = n.path.startsWith(oldPrefix)
+      ? n.path.slice(oldPrefix.length)
+      : n.path;
+    const updated = { ...n, path: newPrefix + rest };
     if (updated.isDirectory && updated.children) {
-      updated.children = renameChildrenPaths(updated.children, oldPrefix, newPrefix)
+      updated.children = renameChildrenPaths(
+        updated.children,
+        oldPrefix,
+        newPrefix,
+      );
     }
-    return updated
-  })
+    return updated;
+  });
 }
 
-function applyRename(nodes: FileTreeItem[], oldPath: string, newName: string, newPath: string): FileTreeItem[] {
-  return nodes.map(n => {
+function applyRename(
+  nodes: FileTreeItem[],
+  oldPath: string,
+  newName: string,
+  newPath: string,
+): FileTreeItem[] {
+  return nodes.map((n) => {
     if (n.path === oldPath) {
-      const updated = { ...n, name: newName, path: newPath }
+      const updated = { ...n, name: newName, path: newPath };
       if (updated.isDirectory && updated.children) {
-        updated.children = renameChildrenPaths(updated.children, oldPath, newPath)
+        updated.children = renameChildrenPaths(
+          updated.children,
+          oldPath,
+          newPath,
+        );
       }
-      return updated
+      return updated;
     }
-    return n
-  })
+    return n;
+  });
 }
 
 function removeFromTree(nodes: FileTreeItem[], path: string): FileTreeItem[] {
-  const result: FileTreeItem[] = []
+  const result: FileTreeItem[] = [];
   for (const n of nodes) {
-    if (n.path === path) continue
+    if (n.path === path) continue;
     if (n.isDirectory && n.children) {
-      const children = removeFromTree(n.children, path)
-      result.push(children.length === n.children.length ? n : { ...n, children })
+      const children = removeFromTree(n.children, path);
+      result.push(
+        children.length === n.children.length ? n : { ...n, children },
+      );
     } else {
-      result.push(n)
+      result.push(n);
     }
   }
-  return result
+  return result;
 }
 
-export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefresh }: FileTreePanelProps) {
-  const selectedWorkDir = useHelixStore(s => s.selectedWorkDir)
-  const showToast = useHelixStore(s => s.showToast)
-  const openFileInEditor = useHelixStore(s => s.openFileInEditor)
-  const isTerminalOpen = useHelixStore(s => s.isTerminalOpen)
-  const toggleTerminal = useHelixStore(s => s.toggleTerminal)
-  const [items, setItems] = useState<FileTreeItem[]>([])
-  const [gitStatus, setGitStatus] = useState<Map<string, string>>(new Map())
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [query, setQuery] = useState('')
-  const showHidden = false
+export function FileTreePanel({
+  onOpenFile,
+  reloadKey,
+  rootDir,
+  onBack,
+  onRefresh,
+}: FileTreePanelProps) {
+  const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
+  const showToast = useHelixStore((s) => s.showToast);
+  const openFileInEditor = useHelixStore((s) => s.openFileInEditor);
+  const isTerminalOpen = useHelixStore((s) => s.isTerminalOpen);
+  const toggleTerminal = useHelixStore((s) => s.toggleTerminal);
+  const [items, setItems] = useState<FileTreeItem[]>([]);
+  const [gitStatus, setGitStatus] = useState<Map<string, string>>(new Map());
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const showHidden = false;
   // The directory this panel scans. A passed `rootDir` wins (used when the panel
   // lives in the left sidebar to show a specific project); otherwise it follows
   // the globally-selected working directory.
-  const root = rootDir ?? selectedWorkDir
+  const root = rootDir ?? selectedWorkDir;
 
   // VS Code-style right-click context menu.
-  const [menu, setMenu] = useState<{ x: number; y: number; item: FileTreeItem } | null>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    item: FileTreeItem;
+  } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   // VS Code-style inline rename box on the tree node itself.
-  const [renaming, setRenaming] = useState<FileTreeItem | null>(null)
-  const [renameValue, setRenameValue] = useState('')
-  const renameInputRef = useRef<HTMLInputElement>(null)
+  const [renaming, setRenaming] = useState<FileTreeItem | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const renameInputRef = useRef<HTMLInputElement>(null);
 
   const loadTree = useCallback(async () => {
     if (!isElectron() || !root) {
-      setLoading(false)
-      setError(!root ? 'No directory selected' : 'File tree is only available in desktop mode')
-      return
+      setLoading(false);
+      setError(
+        !root
+          ? "No directory selected"
+          : "File tree is only available in desktop mode",
+      );
+      return;
     }
-    setLoading(true)
-    setError(null)
+    setLoading(true);
+    setError(null);
     // Load git status
     try {
-      const gitResult = await electronGit.status(root)
+      const gitResult = await electronGit.status(root);
       if (gitResult.ok && gitResult.output) {
-        setGitStatus(parsePorcelainV2(gitResult.output))
+        setGitStatus(parsePorcelainV2(gitResult.output));
       }
     } catch {}
     // Load directory listing — recursive via scanTree
     try {
-      const api = (window as any).electron
-      let tree: FileTreeItem[] = []
+      const api = (window as any).electron;
+      let tree: FileTreeItem[] = [];
       // 登记当前根目录为合法根：点历史对话等路径会直接改 selectedWorkDir 而不走
       // app:setWorkDir，主进程不知道这个根 → 单根校验判越界。扫描前 ensure 一次最稳。
-      try { await api?.fs?.allowRoot?.(root) } catch { /* best-effort */ }
+      try {
+        await api?.fs?.allowRoot?.(root);
+      } catch {
+        /* best-effort */
+      }
       if (api?.fs?.scanTree) {
         // 显式传当前选中的绝对路径扫描。无参 scanTree() 扫的是主进程模块级 workDir，
         // 切项目时若它还没更新（或主进程未重启），safePath 的 startsWith(workDir) 会
         // 判越界 → 扫描被静默吞 → 目录面板“固定”在旧项目。传绝对路径则 safePath 放行。
-        const raw = (await api.fs.scanTree(root)) as Array<{ id: string; name: string; type: 'file' | 'folder'; children?: any[] }>
+        const raw = (await api.fs.scanTree(root)) as Array<{
+          id: string;
+          name: string;
+          type: "file" | "folder";
+          children?: any[];
+        }>;
         // scanTree returns paths RELATIVE to the scanned root (e.g.
         // "src/components/Helix/x.tsx"); readFile/rename/delete/showInFolder all
         // require an ABSOLUTE path (Rust `safe_path` only admits absolute paths).
         // So join the relative segment onto root here so every node carries a
         // real filesystem path.
-        const baseDir = root.replace(/[/\\]+$/, '')
-        function convert(rawList: Array<{ name: string; type: string; children?: any[] }>, prefix: string): FileTreeItem[] {
-          const result: FileTreeItem[] = []
+        const baseDir = root.replace(/[/\\]+$/, "");
+        function convert(
+          rawList: Array<{ name: string; type: string; children?: any[] }>,
+          prefix: string,
+        ): FileTreeItem[] {
+          const result: FileTreeItem[] = [];
           for (const item of rawList) {
-            if (item.name.startsWith('.') && !showHidden) continue
-            const rel = prefix ? `${prefix}/${item.name}` : item.name
-            const path = `${baseDir}/${rel}`
-            if (item.type === 'folder' && item.children) {
-              const children = convert(item.children, rel)
-              result.push({ name: item.name, path, isDirectory: true, children, expanded: false })
+            if (item.name.startsWith(".") && !showHidden) continue;
+            const rel = prefix ? `${prefix}/${item.name}` : item.name;
+            const path = `${baseDir}/${rel}`;
+            if (item.type === "folder" && item.children) {
+              const children = convert(item.children, rel);
+              result.push({
+                name: item.name,
+                path,
+                isDirectory: true,
+                children,
+                expanded: false,
+              });
             } else {
-              result.push({ name: item.name, path, isDirectory: false })
+              result.push({ name: item.name, path, isDirectory: false });
             }
           }
           result.sort((a, b) => {
-            if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-            return a.name.localeCompare(b.name)
-          })
-          return result
+            if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+            return a.name.localeCompare(b.name);
+          });
+          return result;
         }
-        tree = convert(raw, '')
+        tree = convert(raw, "");
       } else {
         // Fallback: load only root
-        const entries = await api.fs.readdir(selectedWorkDir) as Array<{ name: string; isDirectory: boolean }>
-        const baseDir = (selectedWorkDir || root || '').replace(/[/\\]+$/, '')
+        const entries = (await api.fs.readdir(selectedWorkDir)) as Array<{
+          name: string;
+          isDirectory: boolean;
+        }>;
+        const baseDir = (selectedWorkDir || root || "").replace(/[/\\]+$/, "");
         for (const e of entries) {
-          if (e.name.startsWith('.') && !showHidden) continue
-          tree.push({ name: e.name, path: `${baseDir}/${e.name}`, isDirectory: e.isDirectory })
+          if (e.name.startsWith(".") && !showHidden) continue;
+          tree.push({
+            name: e.name,
+            path: `${baseDir}/${e.name}`,
+            isDirectory: e.isDirectory,
+          });
         }
         tree.sort((a, b) => {
-          if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-          return a.name.localeCompare(b.name)
-        })
+          if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
       }
-      setItems(tree)
+      setItems(tree);
     } catch (e: any) {
-      setError(e.message || 'Failed to load file tree')
+      setError(e.message || "Failed to load file tree");
     }
-    setLoading(false)
-  }, [root, showHidden])
+    setLoading(false);
+  }, [root, showHidden]);
 
-  useEffect(() => { loadTree() }, [loadTree])
+  useEffect(() => {
+    loadTree();
+  }, [loadTree]);
 
   // External refresh trigger: when the parent bumps reloadKey, reload the tree.
-  const firstReloadKey = useRef(reloadKey)
+  const firstReloadKey = useRef(reloadKey);
   useEffect(() => {
-    if (reloadKey === firstReloadKey.current) return
-    firstReloadKey.current = reloadKey
-    loadTree()
-  }, [reloadKey, loadTree])
+    if (reloadKey === firstReloadKey.current) return;
+    firstReloadKey.current = reloadKey;
+    loadTree();
+  }, [reloadKey, loadTree]);
 
   // Close the context menu on outside click / Escape.
   useEffect(() => {
-    if (!menu) return
+    if (!menu) return;
     const onDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(null)
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(null) }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
+      if (menuRef.current && !menuRef.current.contains(e.target as Node))
+        setMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [menu])
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
 
   // VS Code-style rename box: pre-fill the name and select the basename
   // (without extension) once the input mounts.
   useEffect(() => {
-    if (!renaming) return
-    setRenameValue(renaming.name)
+    if (!renaming) return;
+    setRenameValue(renaming.name);
     requestAnimationFrame(() => {
-      const input = renameInputRef.current
-      if (!input) return
-      input.focus()
-      const dot = renaming.name.lastIndexOf('.')
-      if (renaming.isDirectory || dot <= 0) input.select()
-      else input.setSelectionRange(0, dot)
-    })
-  }, [renaming])
+      const input = renameInputRef.current;
+      if (!input) return;
+      input.focus();
+      const dot = renaming.name.lastIndexOf(".");
+      if (renaming.isDirectory || dot <= 0) input.select();
+      else input.setSelectionRange(0, dot);
+    });
+  }, [renaming]);
 
   const openMenu = (e: React.MouseEvent, item: FileTreeItem) => {
-    e.preventDefault()
-    setMenu({ x: e.clientX, y: e.clientY, item })
-  }
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY, item });
+  };
 
   const startRename = (item: FileTreeItem) => {
-    setMenu(null)
-    setRenaming(item)
-  }
+    setMenu(null);
+    setRenaming(item);
+  };
 
   const commitRename = async (item: FileTreeItem) => {
-    const newName = renameValue.trim()
-    setRenaming(null)
-    if (!newName || newName === item.name) return
-    const slash = item.path.lastIndexOf('/')
-    const newPath = slash >= 0 ? item.path.slice(0, slash + 1) + newName : newName
+    const newName = renameValue.trim();
+    setRenaming(null);
+    if (!newName || newName === item.name) return;
+    const slash = item.path.lastIndexOf("/");
+    const newPath =
+      slash >= 0 ? item.path.slice(0, slash + 1) + newName : newName;
     try {
-      await electronFS.rename(item.path, newPath)
-      setItems(prev => applyRename(prev, item.path, newName, newPath))
-      showToast({ type: 'success', title: '已重命名', description: newName })
+      await electronFS.rename(item.path, newPath);
+      setItems((prev) => applyRename(prev, item.path, newName, newPath));
+      showToast({ type: "success", title: "已重命名", description: newName });
     } catch (err: any) {
-      showToast({ type: 'error', title: '重命名失败', description: err?.message || '重命名出错' })
+      showToast({
+        type: "error",
+        title: "重命名失败",
+        description: err?.message || "重命名出错",
+      });
     }
-  }
+  };
 
   const handleDelete = async (item: FileTreeItem) => {
-    setMenu(null)
+    setMenu(null);
     try {
-      await electronFS.deleteFile(item.path)
-      const st = useHelixStore.getState()
-      if (st.editorTabs.some(t => t.path === item.path)) st.closeEditorTab(item.path)
-      setItems(prev => removeFromTree(prev, item.path))
-      showToast({ type: 'success', title: '已移动到回收站', description: item.name })
+      await electronFS.deleteFile(item.path);
+      const st = useHelixStore.getState();
+      if (st.editorTabs.some((t) => t.path === item.path))
+        st.closeEditorTab(item.path);
+      setItems((prev) => removeFromTree(prev, item.path));
+      showToast({
+        type: "success",
+        title: "已移动到回收站",
+        description: item.name,
+      });
     } catch (err: any) {
-      showToast({ type: 'error', title: '删除失败', description: err?.message || '删除出错' })
+      showToast({
+        type: "error",
+        title: "删除失败",
+        description: err?.message || "删除出错",
+      });
     }
-  }
+  };
 
   const toggleExpand = async (item: FileTreeItem) => {
-    if (!item.isDirectory) return
+    if (!item.isDirectory) return;
     if (item.expanded) {
-      item.expanded = false
-      setItems([...items])
-      return
+      item.expanded = false;
+      setItems([...items]);
+      return;
     }
-    item.expanded = true
+    item.expanded = true;
     // If children not loaded (fallback path), load them
     if (!item.children || item.children.length === 0) {
       try {
-        const api = (window as any).electron
-        const entries = await api.fs.readdir(item.path) as Array<{ name: string; isDirectory: boolean }>
-        const children: FileTreeItem[] = []
+        const api = (window as any).electron;
+        const entries = (await api.fs.readdir(item.path)) as Array<{
+          name: string;
+          isDirectory: boolean;
+        }>;
+        const children: FileTreeItem[] = [];
         for (const e of entries) {
-          if (e.name.startsWith('.') && !showHidden) continue
-          children.push({ name: e.name, path: `${item.path}/${e.name}`, isDirectory: e.isDirectory })
+          if (e.name.startsWith(".") && !showHidden) continue;
+          children.push({
+            name: e.name,
+            path: `${item.path}/${e.name}`,
+            isDirectory: e.isDirectory,
+          });
         }
         children.sort((a, b) => {
-          if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-          return a.name.localeCompare(b.name)
-        })
-        item.children = children
+          if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        item.children = children;
       } catch {}
     }
-    setItems([...items])
-  }
+    setItems([...items]);
+  };
 
   const handleFileClick = (item: FileTreeItem) => {
     if (item.isDirectory) {
-      toggleExpand(item)
+      toggleExpand(item);
     } else {
       // Open the editor panel synchronously on click so the user ALWAYS gets a
       // visible response — the read/checks below run async and may fail, but the
       // panel must not stay hidden (previously onOpenFile ran only after a
       // successful read, so any read error left the sidebar closed = "no response").
-      onOpenFile?.()
-      openFileInEditorAction(item)
+      onOpenFile?.();
+      openFileInEditorAction(item);
     }
-  }
+  };
 
   // Known non-text (binary) extensions — opened in the editor would be garbage.
   const BINARY_EXT = new Set([
-    'png', 'jpg', 'jpeg', 'gif', 'bmp', 'ico', 'webp', 'avif', 'pdf', 'zip',
-    'tar', 'gz', 'tgz', 'rar', '7z', 'exe', 'dll', 'so', 'dylib', 'bin',
-    'woff', 'woff2', 'ttf', 'eot', 'otf', 'mp3', 'mp4', 'mov', 'avi', 'mkv',
-    'webm', 'wav', 'flac', 'class', 'pyc', 'o', 'obj', 'a', 'lib', 'db',
-  ])
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "bmp",
+    "ico",
+    "webp",
+    "avif",
+    "pdf",
+    "zip",
+    "tar",
+    "gz",
+    "tgz",
+    "rar",
+    "7z",
+    "exe",
+    "dll",
+    "so",
+    "dylib",
+    "bin",
+    "woff",
+    "woff2",
+    "ttf",
+    "eot",
+    "otf",
+    "mp3",
+    "mp4",
+    "mov",
+    "avi",
+    "mkv",
+    "webm",
+    "wav",
+    "flac",
+    "class",
+    "pyc",
+    "o",
+    "obj",
+    "a",
+    "lib",
+    "db",
+  ]);
 
   const openFileInEditorAction = async (item: FileTreeItem) => {
-    const ext = item.name.includes('.') ? item.name.split('.').pop()!.toLowerCase() : ''
+    const ext = item.name.includes(".")
+      ? item.name.split(".").pop()!.toLowerCase()
+      : "";
     if (BINARY_EXT.has(ext)) {
-      showToast({ type: 'error', title: '无法编辑', description: `${item.name} 是二进制文件` })
-      return
+      showToast({
+        type: "error",
+        title: "无法编辑",
+        description: `${item.name} 是二进制文件`,
+      });
+      return;
     }
     // Open / activate the editor tab synchronously (carrying only the file NAME)
     // BEFORE the async disk read, so the right-sidebar page strip shows the file
     // name immediately — instead of flashing the generic "代码" placeholder and
     // only revealing the name (inside the editor's own file tab) after loading.
-    const createdEmpty = useHelixStore.getState().ensureEditorTab(item.path, item.name)
+    const createdEmpty = useHelixStore
+      .getState()
+      .ensureEditorTab(item.path, item.name);
     try {
-      const content = await electronFS.readFile(item.path)
-      if (content == null) throw new Error('读取为空')
+      const content = await electronFS.readFile(item.path);
+      if (content == null) throw new Error("读取为空");
       if (content.length > 1_000_000) {
-        showToast({ type: 'error', title: '文件过大', description: `${item.name} 超过 1MB，暂不支持在编辑器打开` })
-        if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path)
-        return
+        showToast({
+          type: "error",
+          title: "文件过大",
+          description: `${item.name} 超过 1MB，暂不支持在编辑器打开`,
+        });
+        if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path);
+        return;
       }
       // Reject files that look binary (null bytes in the first 4KB).
       if (/[\u0000-\u0008]/.test(content.slice(0, 4096))) {
-        showToast({ type: 'error', title: '无法编辑', description: `${item.name} 不是文本文件` })
-        if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path)
-        return
+        showToast({
+          type: "error",
+          title: "无法编辑",
+          description: `${item.name} 不是文本文件`,
+        });
+        if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path);
+        return;
       }
       // Only fill the empty optimistic tab we just created. An already-open tab
       // is left untouched (re-click just activates it, preserving any edits).
-      if (createdEmpty) useHelixStore.getState().fillEditorTabContent(item.path, content)
+      if (createdEmpty)
+        useHelixStore.getState().fillEditorTabContent(item.path, content);
     } catch (e: any) {
-      showToast({ type: 'error', title: '打开失败', description: e?.message || '读取文件出错' })
-      if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path)
+      showToast({
+        type: "error",
+        title: "打开失败",
+        description: e?.message || "读取文件出错",
+      });
+      if (createdEmpty) useHelixStore.getState().closeEditorTab(item.path);
     }
-  }
+  };
 
   const handleOpenInFolder = async (item: FileTreeItem) => {
     try {
-      const res = await electronShell.showItemInFolder(item.path) as unknown as { ok?: boolean; error?: string } | undefined
+      const res = (await electronShell.showItemInFolder(
+        item.path,
+      )) as unknown as { ok?: boolean; error?: string } | undefined;
       if (res && res.ok === false) {
-        showToast({ type: 'error', title: '打开失败', description: res.error || '无法在文件夹中显示' })
+        showToast({
+          type: "error",
+          title: "打开失败",
+          description: res.error || "无法在文件夹中显示",
+        });
       }
     } catch (e: any) {
-      showToast({ type: 'error', title: '打开失败', description: e?.message || '无法在文件夹中显示' })
+      showToast({
+        type: "error",
+        title: "打开失败",
+        description: e?.message || "无法在文件夹中显示",
+      });
     }
-  }
+  };
 
-  function renderTree(items: FileTreeItem[], depth: number = 0): React.ReactNode {
+  function renderTree(
+    items: FileTreeItem[],
+    depth: number = 0,
+  ): React.ReactNode {
     return items.map((item) => {
-      const status = gitStatus.get(item.path)
-      const style = status ? getStatusStyle(status) : null
+      const status = gitStatus.get(item.path);
+      const style = status ? getStatusStyle(status) : null;
       return (
         <div key={item.path}>
           <div
             className={`flex items-center gap-1 px-2 py-0.5 cursor-pointer rounded-md group text-[calc(var(--helix-transcript-size)*0.9286)] transition-colors ${
-              item.isDirectory ? 'hover:brightness-95' : 'hover:bg-accent/40'
+              item.isDirectory ? "hover:brightness-95" : "hover:bg-accent/40"
             }`}
             style={{
               paddingLeft: `${depth * 16 + 8}px`,
@@ -471,7 +645,7 @@ export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefres
             {item.isDirectory ? (
               <ChevronRight
                 className={`size-3.5 shrink-0 transition-transform duration-150 text-muted-foreground/40 ${
-                  item.expanded ? 'rotate-90' : ''
+                  item.expanded ? "rotate-90" : ""
                 }`}
               />
             ) : (
@@ -483,9 +657,14 @@ export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefres
                 value={renameValue}
                 onChange={(e) => setRenameValue(e.target.value)}
                 onKeyDown={(e) => {
-                  e.stopPropagation()
-                  if (e.key === 'Enter') { e.preventDefault(); commitRename(item) }
-                  else if (e.key === 'Escape') { e.stopPropagation(); setRenaming(null) }
+                  e.stopPropagation();
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitRename(item);
+                  } else if (e.key === "Escape") {
+                    e.stopPropagation();
+                    setRenaming(null);
+                  }
                 }}
                 onBlur={() => setRenaming(null)}
                 onClick={(e) => e.stopPropagation()}
@@ -493,23 +672,26 @@ export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefres
                 className="flex-1 min-w-0 bg-accent/40 text-sidebar-foreground text-[calc(var(--helix-transcript-size)*0.9286)] px-1 py-0 rounded outline-none border border-primary/60"
               />
             ) : (
-              <span className="truncate flex-1 text-sidebar-foreground/80">{item.name}</span>
+              <span className="truncate flex-1 text-sidebar-foreground/80">
+                {item.name}
+              </span>
             )}
             {style && (
               <span
                 className={`shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] font-bold w-4 h-4 flex items-center justify-center rounded ${style.color} ${style.bg}`}
-                data-tip={status || ''}
+                data-tip={status || ""}
               >
                 {style.label}
               </span>
             )}
           </div>
-          {item.isDirectory && item.expanded && item.children && (
-            renderTree(item.children, depth + 1)
-          )}
+          {item.isDirectory &&
+            item.expanded &&
+            item.children &&
+            renderTree(item.children, depth + 1)}
         </div>
-      )
-    })
+      );
+    });
   }
 
   // Filtered view: when a search query is active, derive a name-matched tree
@@ -517,7 +699,7 @@ export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefres
   const displayItems = useMemo(
     () => (query.trim() ? filterTree(items, query.trim()) : items),
     [items, query],
-  )
+  );
 
   return (
     <div className="h-full w-full flex flex-col overflow-hidden">
@@ -529,7 +711,9 @@ export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefres
             className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/40 transition-colors"
           >
             <ArrowLeft className="size-4 shrink-0" />
-            <span className="text-[calc(var(--helix-transcript-size)*0.9286)]">返回对话</span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.9286)]">
+              返回对话
+            </span>
           </button>
         </div>
       )}
@@ -546,7 +730,7 @@ export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefres
           />
           {query && (
             <button
-              onClick={() => setQuery('')}
+              onClick={() => setQuery("")}
               className="text-sidebar-foreground/40 hover:text-sidebar-foreground shrink-0 transition-colors"
               data-tip="清除"
             >
@@ -563,12 +747,15 @@ export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefres
             className="pl-2 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium truncate flex-1"
             title={root}
           >
-            {(() => { const n = root.split(/[/\\]/).pop() || root; return n.length > 12 ? n.slice(0, 12) + '…' : n })()}
+            {(() => {
+              const n = root.split(/[/\\]/).pop() || root;
+              return n.length > 12 ? n.slice(0, 12) + "…" : n;
+            })()}
           </span>
           <button
             onClick={toggleTerminal}
-            className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? 'text-primary bg-sidebar-accent/50' : 'text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40'}`}
-            data-tip={isTerminalOpen ? '关闭终端' : '终端'}
+            className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? "text-primary bg-sidebar-accent/50" : "text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40"}`}
+            data-tip={isTerminalOpen ? "关闭终端" : "终端"}
           >
             <Terminal className="size-4" />
           </button>
@@ -586,53 +773,62 @@ export function FileTreePanel({ onOpenFile, reloadKey, rootDir, onBack, onRefres
         {loading && items.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-8 text-muted-foreground/40">
             <Loader2 className="size-4 animate-spin" />
-            <span className="text-[calc(var(--helix-transcript-size)*0.8571)]">Loading...</span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)]">
+              Loading...
+            </span>
           </div>
         ) : error ? (
-          <div className="px-3 py-4 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50">{error}</div>
+          <div className="px-3 py-4 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50">
+            {error}
+          </div>
         ) : displayItems.length === 0 ? (
           <div className="px-3 py-4 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/30">
-            {query.trim() ? '无匹配文件' : 'Empty directory'}
+            {query.trim() ? "无匹配文件" : "Empty directory"}
           </div>
         ) : (
           renderTree(displayItems)
         )}
       </div>
 
-      {menu && typeof window !== 'undefined' && createPortal(
-        <div
-          ref={menuRef}
-          className="fixed z-[500] min-w-[180px] bg-card border border-border/80 rounded-lg shadow-xl py-1"
-          style={{
-            left: Math.min(menu.x, window.innerWidth - 200),
-            top: Math.min(menu.y, window.innerHeight - 140),
-          }}
-        >
-          <button
-            onClick={() => startRename(menu.item)}
-            className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
+      {menu &&
+        typeof window !== "undefined" &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="fixed z-[500] min-w-[180px] bg-card border border-border/80 rounded-lg shadow-xl py-1"
+            style={{
+              left: Math.min(menu.x, window.innerWidth - 200),
+              top: Math.min(menu.y, window.innerHeight - 140),
+            }}
           >
-            <Pencil className="size-3.5" />
-            <span className="flex-1 text-left">重命名</span>
-          </button>
-          <button
-            onClick={() => handleDelete(menu.item)}
-            className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-destructive hover:bg-accent/60 transition-colors"
-          >
-            <Trash2 className="size-3.5" />
-            <span className="flex-1 text-left">删除</span>
-          </button>
-          <div className="h-px my-1 bg-border/60" />
-          <button
-            onClick={() => { handleOpenInFolder(menu.item); setMenu(null) }}
-            className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
-          >
-            <FolderOpen className="size-3.5" />
-            <span className="flex-1 text-left">在文件夹中显示</span>
-          </button>
-        </div>,
-        document.body,
-      )}
+            <button
+              onClick={() => startRename(menu.item)}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
+            >
+              <Pencil className="size-3.5" />
+              <span className="flex-1 text-left">重命名</span>
+            </button>
+            <button
+              onClick={() => handleDelete(menu.item)}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-destructive hover:bg-accent/60 transition-colors"
+            >
+              <Trash2 className="size-3.5" />
+              <span className="flex-1 text-left">删除</span>
+            </button>
+            <div className="h-px my-1 bg-border/60" />
+            <button
+              onClick={() => {
+                handleOpenInFolder(menu.item);
+                setMenu(null);
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
+            >
+              <FolderOpen className="size-3.5" />
+              <span className="flex-1 text-left">在文件夹中显示</span>
+            </button>
+          </div>,
+          document.body,
+        )}
     </div>
-  )
+  );
 }

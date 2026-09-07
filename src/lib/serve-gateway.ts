@@ -1,4 +1,4 @@
-'use client'
+"use client";
 
 /**
  * serve-gateway.ts — helix serve 网关适配器（阶段2，任务64）
@@ -20,23 +20,23 @@
  * - 文本增量字段是 payload.text；工具唯一 id 字段是 payload.tool_id。
  */
 
-import { warn, error as logError, debug } from '@/lib/logger'
-import { buildAcpMcpServers } from '@/lib/mcp'
-import { installTauriBridge } from '@/lib/tauri-bridge'
-import { useBackgroundTasksStore } from '@/stores/background-tasks-store'
+import { warn, error as logError, debug } from "@/lib/logger";
+import { buildAcpMcpServers } from "@/lib/mcp";
+import { installTauriBridge } from "@/lib/tauri-bridge";
+import { useBackgroundTasksStore } from "@/stores/background-tasks-store";
 
 // ── 类型 ────────────────────────────────────────────────────────────────
 
 export interface ServeGatewayInfo {
-  mode: 'serve'
-  pending?: boolean
-  port?: number
-  token?: string
-  baseUrl?: string
-  wsUrl?: string
+  mode: "serve";
+  pending?: boolean;
+  port?: number;
+  token?: string;
+  baseUrl?: string;
+  wsUrl?: string;
 }
 
-type EventCallback = (event: string, params?: any) => void
+type EventCallback = (event: string, params?: any) => void;
 
 // ── gateway 身份记忆 ────────────────────────────────────────────────────
 // 前端 WebView2 崩溃/整页重载后 React 重挂载，会新建 ServeGatewayClient，
@@ -46,72 +46,113 @@ type EventCallback = (event: string, params?: any) => void
 // 换端口+token，地址不同即新进程。sameGateway=true 时前端不得 bump
 // epoch，否则缓存的会话绑定全部作废 → 用户下一条消息被当成新会话
 // （2026-08-19 历史对话分裂 bug 的根因）。
-const GATEWAY_IDENTITY_KEY = 'helix.lastGatewayWsUrl'
+const GATEWAY_IDENTITY_KEY = "helix.lastGatewayWsUrl";
 function rememberGatewayWsUrl(url: string): void {
-  try { localStorage.setItem(GATEWAY_IDENTITY_KEY, url) } catch { /* noop */ }
+  try {
+    localStorage.setItem(GATEWAY_IDENTITY_KEY, url);
+  } catch {
+    /* noop */
+  }
 }
 function lastGatewayWsUrl(): string | null {
-  try { return localStorage.getItem(GATEWAY_IDENTITY_KEY) } catch { return null }
+  try {
+    return localStorage.getItem(GATEWAY_IDENTITY_KEY);
+  } catch {
+    return null;
+  }
 }
 
 interface PendingRpc {
-  resolve: (v: any) => void
-  reject: (e: Error) => void
-  timer: ReturnType<typeof setTimeout>
+  resolve: (v: any) => void;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 // ── usage 映射（serve payload → Helix 期望的驼峰字段）──────────────────
 
 function num(u: any, ...keys: string[]): number | undefined {
   for (const k of keys) {
-    const v = Number(u?.[k])
-    if (Number.isFinite(v) && v >= 0) return v
+    const v = Number(u?.[k]);
+    if (Number.isFinite(v) && v >= 0) return v;
   }
-  return undefined
+  return undefined;
 }
 
 function mapUsage(u: any): any {
-  if (!u || typeof u !== 'object') return null
-  const totalUsage = u.total && typeof u.total === 'object' ? u.total : u
-  const lastUsage = u.last && typeof u.last === 'object' ? u.last : undefined
-  const contextWindow = num(u, 'modelContextWindow', 'model_context_window')
-  const totalTokens = num(totalUsage, 'totalTokens', 'total_tokens', 'total')
+  if (!u || typeof u !== "object") return null;
+  const totalUsage = u.total && typeof u.total === "object" ? u.total : u;
+  const lastUsage = u.last && typeof u.last === "object" ? u.last : undefined;
+  const contextWindow = num(u, "modelContextWindow", "model_context_window");
+  const totalTokens = num(totalUsage, "totalTokens", "total_tokens", "total");
   return {
     totalTokens,
-    inputTokens: num(totalUsage, 'inputTokens', 'input_tokens', 'prompt_tokens', 'input', 'prompt'),
-    outputTokens: num(totalUsage, 'outputTokens', 'output_tokens', 'completion_tokens', 'output', 'completion'),
-    thoughtTokens: num(totalUsage, 'thoughtTokens', 'thought_tokens', 'reasoningOutputTokens', 'reasoning_output_tokens', 'reasoning'),
-    cachedReadTokens: num(totalUsage, 'cachedReadTokens', 'cachedInputTokens', 'cache_read_tokens', 'cache_read_input_tokens'),
-    cachedWriteTokens: num(totalUsage, 'cachedWriteTokens', 'cacheWriteInputTokens', 'cache_write_tokens', 'cache_creation_input_tokens'),
+    inputTokens: num(
+      totalUsage,
+      "inputTokens",
+      "input_tokens",
+      "prompt_tokens",
+      "input",
+      "prompt",
+    ),
+    outputTokens: num(
+      totalUsage,
+      "outputTokens",
+      "output_tokens",
+      "completion_tokens",
+      "output",
+      "completion",
+    ),
+    thoughtTokens: num(
+      totalUsage,
+      "thoughtTokens",
+      "thought_tokens",
+      "reasoningOutputTokens",
+      "reasoning_output_tokens",
+      "reasoning",
+    ),
+    cachedReadTokens: num(
+      totalUsage,
+      "cachedReadTokens",
+      "cachedInputTokens",
+      "cache_read_tokens",
+      "cache_read_input_tokens",
+    ),
+    cachedWriteTokens: num(
+      totalUsage,
+      "cachedWriteTokens",
+      "cacheWriteInputTokens",
+      "cache_write_tokens",
+      "cache_creation_input_tokens",
+    ),
     context_max: contextWindow,
     context_used: totalTokens,
     ...(lastUsage ? { lastUsage } : {}),
     ...u,
-  }
+  };
 }
 
 function promptBlocksToText(prompt: any): string {
-  if (typeof prompt === 'string') return prompt
+  if (typeof prompt === "string") return prompt;
   if (Array.isArray(prompt)) {
     return prompt
-      .map((b: any) => (typeof b === 'string' ? b : (b?.text ?? '')))
+      .map((b: any) => (typeof b === "string" ? b : (b?.text ?? "")))
       .filter(Boolean)
-      .join('\n')
+      .join("\n");
   }
-  return String(prompt ?? '')
+  return String(prompt ?? "");
 }
 
 /** 从 session.resume 返回的 messages（{role, text, ...}）提取最后一条可见正文 */
 function lastAssistantText(messages: any): string {
-  if (!Array.isArray(messages)) return ''
+  if (!Array.isArray(messages)) return "";
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]
-    if (m?.role === 'assistant') {
-      const text = typeof m?.text === 'string' ? m.text : ''
-      if (text.trim()) return text
+    const m = messages[i];
+    if (m?.role === "assistant") {
+      const text = typeof m?.text === "string" ? m.text : "";
+      if (text.trim()) return text;
     }
   }
-  return ''
+  return "";
 }
 
 /**
@@ -119,7 +160,7 @@ function lastAssistantText(messages: any): string {
  * Helix 全文重发时经常带微小差异（"CLI和配置" vs "CLI 和配置"），不归一化直接比会判为不同。
  */
 function normText(s: string): string {
-  return s.replace(/[\s\p{P}]/gu, '').toLowerCase()
+  return s.replace(/[\s\p{P}]/gu, "").toLowerCase();
 }
 
 /**
@@ -129,12 +170,15 @@ function normText(s: string): string {
  * 截断/中断版则明显短（≥10%），拒绝覆盖防截断吞全文。仅替换为原文，不猜补空格，
  * 绝不会改坏正常文本。
  */
-function authoritativeOverrides(authoritative: string, eventText: string): boolean {
-  const na = normText(authoritative)
-  const ne = normText(eventText)
-  if (!na || !ne) return false
-  if (!(na === ne || na.includes(ne) || ne.includes(na))) return false
-  return authoritative.length >= eventText.length * 0.9
+function authoritativeOverrides(
+  authoritative: string,
+  eventText: string,
+): boolean {
+  const na = normText(authoritative);
+  const ne = normText(eventText);
+  if (!na || !ne) return false;
+  if (!(na === ne || na.includes(ne) || ne.includes(na))) return false;
+  return authoritative.length >= eventText.length * 0.9;
 }
 
 /**
@@ -144,50 +188,78 @@ function authoritativeOverrides(authoritative: string, eventText: string): boole
  * preview. serve events don't carry a `kind`, so reconstruct it from the name.
  */
 function toolKindFromName(name: string): string {
-  const n = (name || '').toLowerCase()
-  if (n.includes('write') || n.includes('edit') || n.includes('patch') || n.includes('str_replace') || n.includes('create_file')) return 'edit'
-  if (n.includes('read') || n.includes('list') || n.includes('glob') || n.includes('grep') || n.includes('search') || n.includes('find')) return 'read'
-  if (n.includes('bash') || n.includes('execute') || n.includes('terminal') || n.includes('shell') || n.includes('run')) return 'execute'
-  return ''
+  const n = (name || "").toLowerCase();
+  if (
+    n.includes("write") ||
+    n.includes("edit") ||
+    n.includes("patch") ||
+    n.includes("str_replace") ||
+    n.includes("create_file")
+  )
+    return "edit";
+  if (
+    n.includes("read") ||
+    n.includes("list") ||
+    n.includes("glob") ||
+    n.includes("grep") ||
+    n.includes("search") ||
+    n.includes("find")
+  )
+    return "read";
+  if (
+    n.includes("bash") ||
+    n.includes("execute") ||
+    n.includes("terminal") ||
+    n.includes("shell") ||
+    n.includes("run")
+  )
+    return "execute";
+  return "";
 }
 
 // Helix ships the terminal-styled inline diff with ANSI SGR codes around every
 // line (see agent/display.py _render_inline_unified_diff). Strip them so the
 // renderer can consume plain text.
 function stripAnsi(s: unknown): string {
-  if (typeof s !== 'string') return ''
-  return s.replace(/\u001b\[[0-9;]*m/g, '')
+  if (typeof s !== "string") return "";
+  return s.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
 // ── 网关客户端 ──────────────────────────────────────────────────────────
 
-const RPC_TIMEOUT_MS = 60_000
-const RECONNECT_DELAYS = [1000, 2000, 5000, 10_000]
+const RPC_TIMEOUT_MS = 60_000;
+const RECONNECT_DELAYS = [1000, 2000, 5000, 10_000];
 
 export class ServeGatewayClient {
-  private ws: WebSocket | null = null
-  private nextId = 1
-  private pending = new Map<string | number, PendingRpc>()
+  private ws: WebSocket | null = null;
+  private nextId = 1;
+  private pending = new Map<string | number, PendingRpc>();
   /** Sessions with an in-flight prompt (ack-only model): tracked solely so a WS
    *  reconnect can session.resume them to restore the event stream. */
-  private inflightSessions = new Set<string>()
+  private inflightSessions = new Set<string>();
   /** ui_session → 持久化 DB key（session.create 返回的 stored_session_id）。
    *  重启后 ui_session 一定失效，而 stored_session_id 是 state.db 的主键——
    *  resume 用它能从磁盘透明恢复同一会话（2026-08-31）。 */
-  private storedSessionIds = new Map<string, string>()
-  private listeners = new Set<EventCallback>()
-  private reconnectAttempt = 0
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  private disposed = false
-  private approvalSeq = 0
+  private storedSessionIds = new Map<string, string>();
+  private listeners = new Set<EventCallback>();
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
+  private approvalSeq = 0;
   /** 等待 WS 首次 OPEN 的挂起者（修 CONNECTING 窗口内 rpc 被误拒的竞态） */
-  private openWaiters: Array<() => void> = []
+  private openWaiters: Array<() => void> = [];
   /** 已把哪个阻塞式输入请求（clarify/sudo/secret）映射为 clarify_request 浮条。
    *  值为此请求解锁后端需调用的 RPC 方法名（clarify.respond / sudo.respond /
    *  secret.respond）。前端回应经 clarify/respond 到达时据此路由。 */
-  private inputRoutes = new Map<string, 'clarify.respond' | 'sudo.respond' | 'secret.respond'>()
+  private inputRoutes = new Map<
+    string,
+    "clarify.respond" | "sudo.respond" | "secret.respond"
+  >();
 
-  constructor(public info: Required<Pick<ServeGatewayInfo, 'baseUrl' | 'wsUrl'>> & ServeGatewayInfo) {}
+  constructor(
+    public info: Required<Pick<ServeGatewayInfo, "baseUrl" | "wsUrl">> &
+      ServeGatewayInfo,
+  ) {}
 
   // ── 连接管理 ──────────────────────────────────────────────
 
@@ -197,78 +269,116 @@ export class ServeGatewayClient {
    * serve，`--port 0` 下新实例端口必变；旧 wsUrl 会永久 ERR_CONNECTION_REFUSED。
    */
   updateInfo(next: ServeGatewayInfo): void {
-    if (!next?.wsUrl || !next?.baseUrl) return
-    const changed = next.wsUrl !== this.info.wsUrl || next.baseUrl !== this.info.baseUrl
-    this.info = { ...this.info, ...next } as any
-    debug('[ServeGateway] ⟳ serveInfo received port=', next.port, 'changed=', changed)
-    if (!changed || this.disposed) return
+    if (!next?.wsUrl || !next?.baseUrl) return;
+    const changed =
+      next.wsUrl !== this.info.wsUrl || next.baseUrl !== this.info.baseUrl;
+    this.info = { ...this.info, ...next } as any;
+    debug(
+      "[ServeGateway] ⟳ serveInfo received port=",
+      next.port,
+      "changed=",
+      changed,
+    );
+    if (!changed || this.disposed) return;
     // 地址变了 = 网关是全新进程：旧实例上做过的模型同步对它无效，
     // 必须重置标志，让下一次 session/new 重新走 ensureModelSynced。
     // （否则 respawn 后的新实例会拿 ~/.helix 里可能陈旧的配置建 agent → 30s 超时）
-    this.modelSynced = false
-    this.modelSyncPromise = null
-    debug('[ServeGateway] 网关地址变更 → port=', next.port, '，重连')
-    const old = this.ws
-    this.ws = null // 先置空：旧 socket 的 onclose 会被陈旧检查忽略
-    try { old?.close() } catch { /* noop */ }
-    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null }
-    this.reconnectAttempt = 0
-    this.connect()
+    this.modelSynced = false;
+    this.modelSyncPromise = null;
+    debug("[ServeGateway] 网关地址变更 → port=", next.port, "，重连");
+    const old = this.ws;
+    this.ws = null; // 先置空：旧 socket 的 onclose 会被陈旧检查忽略
+    try {
+      old?.close();
+    } catch {
+      /* noop */
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempt = 0;
+    this.connect();
   }
 
   /** 重连前向主进程拉最新网关信息，防止对已死端口无限重试 */
   private async refreshInfoFromMain(): Promise<void> {
     try {
-      const ipc = (window as any).electron?.helix
-      const info = await ipc?.getGatewayInfo?.()
-      if (info?.mode === 'serve' && !info.pending && info.wsUrl && info.baseUrl) {
+      const ipc = (window as any).electron?.helix;
+      const info = await ipc?.getGatewayInfo?.();
+      if (
+        info?.mode === "serve" &&
+        !info.pending &&
+        info.wsUrl &&
+        info.baseUrl
+      ) {
         if (info.wsUrl !== this.info.wsUrl) {
-          debug('[ServeGateway] 重连前发现端口变更 →', info.port)
+          debug("[ServeGateway] 重连前发现端口变更 →", info.port);
         }
-        this.info = { ...this.info, ...info }
+        this.info = { ...this.info, ...info };
       }
-    } catch { /* noop */ }
+    } catch {
+      /* noop */
+    }
   }
 
   connect(): void {
-    if (this.disposed || (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING))) return
+    if (
+      this.disposed ||
+      (this.ws &&
+        (this.ws.readyState === WebSocket.OPEN ||
+          this.ws.readyState === WebSocket.CONNECTING))
+    )
+      return;
     try {
-      const ws = new WebSocket(this.info.wsUrl)
-      this.ws = ws
-      debug('[ServeGateway] ▶ connect →', String(this.info.wsUrl).replace(/token=[^&]+/, 'token=***'))
+      const ws = new WebSocket(this.info.wsUrl);
+      this.ws = ws;
+      debug(
+        "[ServeGateway] ▶ connect →",
+        String(this.info.wsUrl).replace(/token=[^&]+/, "token=***"),
+      );
 
       ws.onopen = () => {
-        this.reconnectAttempt = 0
-        debug('[ServeGateway] WS connected:', this.info.wsUrl.replace(/token=[^&]+/, 'token=***'))
+        this.reconnectAttempt = 0;
+        debug(
+          "[ServeGateway] WS connected:",
+          this.info.wsUrl.replace(/token=[^&]+/, "token=***"),
+        );
         // 唤醒 CONNECTING 窗口内挂起的 rpc 调用
-        const waiters = this.openWaiters.splice(0)
-        for (const w of waiters) { try { w() } catch { /* noop */ } }
+        const waiters = this.openWaiters.splice(0);
+        for (const w of waiters) {
+          try {
+            w();
+          } catch {
+            /* noop */
+          }
+        }
         // 对齐官方桌面端：WS 断开时 Helix 会把运行中的会话 detach 到 drop
         // sentinel 继续执行，客户端重连后必须调用 session.resume 把 transport
         // 重绑回会话（server.py _live_session_payload 里 session["transport"]=
         // transport），事件流才会恢复。不 resume 的话，断连期间产生的事件永久丢失。
-        this.resumeInflightSessions()
-        this.emit('gateway.reconnected', {})
+        this.resumeInflightSessions();
+        this.emit("gateway.reconnected", {});
         // gateway.ready 由服务端主动推，不在这里合成
-      }
+      };
 
       ws.onmessage = (ev) => {
-        const data = typeof ev.data === 'string' ? ev.data : ''
+        const data = typeof ev.data === "string" ? ev.data : "";
         // 换行分隔：一帧可能含多行 JSON
-        for (const line of data.split('\n')) {
-          const trimmed = line.trim()
-          if (!trimmed) continue
+        for (const line of data.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
           try {
-            this.handleFrame(JSON.parse(trimmed))
+            this.handleFrame(JSON.parse(trimmed));
           } catch (e) {
-            warn('[ServeGateway] 无法解析帧:', trimmed.slice(0, 200), e)
+            warn("[ServeGateway] 无法解析帧:", trimmed.slice(0, 200), e);
           }
         }
-      }
+      };
 
       ws.onclose = (ev) => {
-        if (this.ws !== ws) return
-        this.ws = null
+        if (this.ws !== ws) return;
+        this.ws = null;
         // 只失败普通 RPC（session/list、tools/list 等），**保留** in-flight 的
         // session/prompt。官方行为：WS 断开只是客户端掉线，Helix 会把运行中
         // 的会话 detach 继续跑；重连后 session.resume 重绑 transport 恢复事件流，
@@ -276,64 +386,71 @@ export class ServeGatewayClient {
         // 前端会把一次瞬时断连当成 run 失败 → 丢失整个回复（显示"停止思考"）。
         // 连接彻底无法恢复时（网关重启/进程死亡），resumePendingPrompts 的
         // session.resume 会失败并 reject 这些 prompt，由前端收尾。
-        this.failPendingRpcs(new Error(`网关连接断开 (code=${ev.code})`))
-        if (this.disposed) return
-        this.emit('gateway.disconnected', { code: ev.code })
+        this.failPendingRpcs(new Error(`网关连接断开 (code=${ev.code})`));
+        if (this.disposed) return;
+        this.emit("gateway.disconnected", { code: ev.code });
         if (ev.code === 4401) {
-          logError('[ServeGateway] token 鉴权失败 (4401)，停止重连')
-          return
+          logError("[ServeGateway] token 鉴权失败 (4401)，停止重连");
+          return;
         }
-        this.scheduleReconnect()
-      }
+        this.scheduleReconnect();
+      };
 
       ws.onerror = () => {
         // onclose 会跟着触发，重连逻辑在那里
-      }
+      };
     } catch (e) {
-      logError('[ServeGateway] WS 创建失败:', e)
-      this.scheduleReconnect()
+      logError("[ServeGateway] WS 创建失败:", e);
+      this.scheduleReconnect();
     }
   }
 
   dispose(): void {
-    this.disposed = true
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
-    this.reconnectTimer = null
-    try { this.ws?.close() } catch { /* noop */ }
-    this.ws = null
-    this.failAllPending(new Error('网关客户端已销毁'))
-    this.listeners.clear()
+    this.disposed = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    try {
+      this.ws?.close();
+    } catch {
+      /* noop */
+    }
+    this.ws = null;
+    this.failAllPending(new Error("网关客户端已销毁"));
+    this.listeners.clear();
   }
 
   get connected(): boolean {
-    return !!this.ws && this.ws.readyState === WebSocket.OPEN
+    return !!this.ws && this.ws.readyState === WebSocket.OPEN;
   }
 
   private scheduleReconnect(): void {
-    if (this.disposed || this.reconnectTimer) return
-    const delay = RECONNECT_DELAYS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS.length - 1)]
-    this.reconnectAttempt++
-    this.emit('gateway.retry', { attempt: this.reconnectAttempt, delay })
+    if (this.disposed || this.reconnectTimer) return;
+    const delay =
+      RECONNECT_DELAYS[
+        Math.min(this.reconnectAttempt, RECONNECT_DELAYS.length - 1)
+      ];
+    this.reconnectAttempt++;
+    this.emit("gateway.retry", { attempt: this.reconnectAttempt, delay });
     this.reconnectTimer = setTimeout(async () => {
-      this.reconnectTimer = null
-      await this.refreshInfoFromMain() // 网关可能已重启换端口
-      this.connect()
-    }, delay)
+      this.reconnectTimer = null;
+      await this.refreshInfoFromMain(); // 网关可能已重启换端口
+      this.connect();
+    }, delay);
   }
 
   private failPendingRpcs(err: Error): void {
     for (const [, p] of this.pending) {
-      clearTimeout(p.timer)
-      p.reject(err)
+      clearTimeout(p.timer);
+      p.reject(err);
     }
-    this.pending.clear()
+    this.pending.clear();
   }
 
   /** 全部失败（客户端销毁等确定性终止路径）。ack-only 模型下 prompt 已即时 ack，
    *  无挂起 Promise 可 reject；只需清掉 in-flight 追踪。监听者已随销毁移除，无需 emit。 */
   private failAllPending(err: Error): void {
-    this.failPendingRpcs(err)
-    this.inflightSessions.clear()
+    this.failPendingRpcs(err);
+    this.inflightSessions.clear();
   }
 
   /**
@@ -347,30 +464,34 @@ export class ServeGatewayClient {
    *                   否则前端循环会挂起（ack-only 下没有挂起 Promise 可 reject）
    */
   private resumeInflightSessions(): void {
-    const sessionIds = [...this.inflightSessions]
-    if (sessionIds.length === 0) return
-    debug('[ServeGateway] 重连成功，resume 断连前在跑的会话:', sessionIds)
+    const sessionIds = [...this.inflightSessions];
+    if (sessionIds.length === 0) return;
+    debug("[ServeGateway] 重连成功，resume 断连前在跑的会话:", sessionIds);
     const finish = (sessionId: string, text: string) => {
-      this.inflightSessions.delete(sessionId)
-      this.emit('session/update', {
+      this.inflightSessions.delete(sessionId);
+      this.emit("session/update", {
         session_id: sessionId,
-        update: { sessionUpdate: 'run_complete', content: text },
-      })
-    }
+        update: { sessionUpdate: "run_complete", content: text },
+      });
+    };
     for (const sessionId of sessionIds) {
-      this.rpc('session.resume', { session_id: sessionId }, 20_000)
+      this.rpc("session.resume", { session_id: sessionId }, 20_000)
         .then((res: any) => {
-          if (!this.inflightSessions.has(sessionId)) return
+          if (!this.inflightSessions.has(sessionId)) return;
           if (res?.running) {
-            debug('[ServeGateway] 会话仍在运行，等待事件流恢复:', sessionId)
-            return
+            debug("[ServeGateway] 会话仍在运行，等待事件流恢复:", sessionId);
+            return;
           }
-          finish(sessionId, lastAssistantText(res?.messages))
+          finish(sessionId, lastAssistantText(res?.messages));
         })
         .catch((e: Error) => {
-          debug('[ServeGateway] 会话恢复失败，合成结束事件:', sessionId, e?.message)
-          finish(sessionId, '')
-        })
+          debug(
+            "[ServeGateway] 会话恢复失败，合成结束事件:",
+            sessionId,
+            e?.message,
+          );
+          finish(sessionId, "");
+        });
     }
   }
 
@@ -378,78 +499,102 @@ export class ServeGatewayClient {
 
   /** 等待 WS 进入 OPEN（连接中/重连中最多等 waitMs），已连返回 true */
   private waitOpen(waitMs = 15_000): Promise<boolean> {
-    if (this.connected) return Promise.resolve(true)
-    if (this.disposed) return Promise.resolve(false)
+    if (this.connected) return Promise.resolve(true);
+    if (this.disposed) return Promise.resolve(false);
     return new Promise((resolve) => {
-      let done = false
-      const finish = (ok: boolean) => { if (!done) { done = true; resolve(ok) } }
-      this.openWaiters.push(() => finish(true))
-      setTimeout(() => finish(this.connected), waitMs)
-    })
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (!done) {
+          done = true;
+          resolve(ok);
+        }
+      };
+      this.openWaiters.push(() => finish(true));
+      setTimeout(() => finish(this.connected), waitMs);
+    });
   }
 
-  async rpc(method: string, params?: any, timeoutMs = RPC_TIMEOUT_MS): Promise<any> {
+  async rpc(
+    method: string,
+    params?: any,
+    timeoutMs = RPC_TIMEOUT_MS,
+  ): Promise<any> {
     // 修竞态：initServeGateway 在 connect() 发起后立即返回 client，此时 WS
     // 还在 CONNECTING；启动后第一批调用（session/new 等）若直接拒绝，会表现为
     // "模型不输出"。这里等 OPEN（含重连窗口）再发。
     if (!this.connected) {
-      const ok = await this.waitOpen()
-      if (!ok) throw new Error(`网关未连接，无法调用 ${method}`)
+      const ok = await this.waitOpen();
+      if (!ok) throw new Error(`网关未连接，无法调用 ${method}`);
     }
     return new Promise((resolve, reject) => {
       if (!this.connected) {
-        reject(new Error(`网关未连接，无法调用 ${method}`))
-        return
+        reject(new Error(`网关未连接，无法调用 ${method}`));
+        return;
       }
-      const id = this.nextId++
+      const id = this.nextId++;
       const timer = setTimeout(() => {
-        this.pending.delete(id)
-        logError('[ServeGateway] ✗ rpc timeout', method, 'id=', id, `(${timeoutMs}ms)`)
-        reject(new Error(`${method} 超时 (${timeoutMs}ms)`))
-      }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer })
-      debug('[ServeGateway] → rpc', method, 'id=', id)
-      this.ws!.send(JSON.stringify({ jsonrpc: '2.0', id, method, params: params ?? {} }) + '\n')
-    })
+        this.pending.delete(id);
+        logError(
+          "[ServeGateway] ✗ rpc timeout",
+          method,
+          "id=",
+          id,
+          `(${timeoutMs}ms)`,
+        );
+        reject(new Error(`${method} 超时 (${timeoutMs}ms)`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      debug("[ServeGateway] → rpc", method, "id=", id);
+      this.ws!.send(
+        JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }) +
+          "\n",
+      );
+    });
   }
 
   onEvent(cb: EventCallback): () => void {
-    this.listeners.add(cb)
-    return () => { this.listeners.delete(cb) }
+    this.listeners.add(cb);
+    return () => {
+      this.listeners.delete(cb);
+    };
   }
 
   private emit(event: string, params?: any): void {
     for (const cb of this.listeners) {
-      try { cb(event, params) } catch (e) { warn('[ServeGateway] 事件回调异常:', event, e) }
+      try {
+        cb(event, params);
+      } catch (e) {
+        warn("[ServeGateway] 事件回调异常:", event, e);
+      }
     }
   }
 
   private handleFrame(msg: any): void {
     // 响应帧
     if (msg && msg.id !== undefined && msg.id !== null && !msg.method) {
-      const p = this.pending.get(msg.id)
+      const p = this.pending.get(msg.id);
       if (p) {
-        this.pending.delete(msg.id)
-        clearTimeout(p.timer)
+        this.pending.delete(msg.id);
+        clearTimeout(p.timer);
         if (msg.error) {
           // "session not found" 等 RPC 错误：防御性兜底。正常并发下后端不挤
           // 会话，但网关重启/会话被回收时旧 id 会失效，这里 warn 后正常 reject，
           // 调用方（session/prompt 的 catch）会自动重建会话并重放 prompt。
-          const errMsg = msg.error.message || 'RPC 错误'
+          const errMsg = msg.error.message || "RPC 错误";
           if (/session.*not.*found|not found/i.test(errMsg)) {
-            warn('[ServeGateway] RPC session 错误:', errMsg)
+            warn("[ServeGateway] RPC session 错误:", errMsg);
           }
-          p.reject(new Error(errMsg))
+          p.reject(new Error(errMsg));
         } else {
-          p.resolve(msg.result)
+          p.resolve(msg.result);
         }
       }
-      return
+      return;
     }
     // 事件帧
-    if (msg && msg.method === 'event' && msg.params) {
-      const { type, session_id: sessionId, payload } = msg.params
-      this.translateEvent(String(type || ''), sessionId, payload ?? {})
+    if (msg && msg.method === "event" && msg.params) {
+      const { type, session_id: sessionId, payload } = msg.params;
+      this.translateEvent(String(type || ""), sessionId, payload ?? {});
     }
   }
 
@@ -457,34 +602,38 @@ export class ServeGatewayClient {
    *  in-flight 集合移除。ack-only 模型下完成由 translateEvent 发出的 run_complete 事件
    *  驱动，这里只做清理——不再有挂起 Promise 要 resolve。 */
   private resolvePending(sessionId: string | undefined, _result?: any): void {
-    if (sessionId) this.inflightSessions.delete(sessionId)
+    if (sessionId) this.inflightSessions.delete(sessionId);
   }
 
   // ── 事件翻译：serve 原生 → 原生直通 + ACP 合成双发 ─────────
 
-  private translateEvent(type: string, sessionId: string | undefined, payload: any): void {
-    const base = { session_id: sessionId, ...payload }
+  private translateEvent(
+    type: string,
+    sessionId: string | undefined,
+    payload: any,
+  ): void {
+    const base = { session_id: sessionId, ...payload };
 
     switch (type) {
-      case 'gateway.ready': {
+      case "gateway.ready": {
         // sameGateway：与上次成功连接的网关是否为同一进程。serve 网关
         // `--port 0` 下重启必换端口（wsUrl 含端口+token），所以地址相同
         // = 后端进程没死，只是前端侧重连/整页重载。前端据此决定是否
         // bump gateway epoch：误 bump 会让所有缓存的会话绑定作废，用户
         // 下一条消息被当成新会话（历史会话分裂 bug 的根因）。
-        const prev = lastGatewayWsUrl()
-        const sameGateway = prev !== null && prev === this.info.wsUrl
-        rememberGatewayWsUrl(this.info.wsUrl)
-        this.emit('gateway.ready', { ...base, sameGateway })
-        return
+        const prev = lastGatewayWsUrl();
+        const sameGateway = prev !== null && prev === this.info.wsUrl;
+        rememberGatewayWsUrl(this.info.wsUrl);
+        this.emit("gateway.ready", { ...base, sameGateway });
+        return;
       }
 
-      case 'message.start':
-        this.emit('message.start', base)
-        return
+      case "message.start":
+        this.emit("message.start", base);
+        return;
 
-      case 'message.delta':
-      case 'message.interim': {
+      case "message.delta":
+      case "message.interim": {
         // message.interim = the agent's interim commentary (text alongside tool
         // calls, or the attempted final answer before a verify-on-stop nudge).
         // The official gateway finalizes it as its own sealed bubble so
@@ -502,104 +651,121 @@ export class ServeGatewayClient {
         // "内容重复两次" bug. Skip the injection for already-streamed text;
         // only surface interim comments that never flowed through delta
         // (already_streamed=false).
-        const alreadyStreamed = payload?.already_streamed === true
-        this.emit(type, base)
-        const text = payload?.text ?? ''
+        const alreadyStreamed = payload?.already_streamed === true;
+        this.emit(type, base);
+        const text = payload?.text ?? "";
         if (text && !alreadyStreamed) {
-          this.emit('session/update', {
+          this.emit("session/update", {
             session_id: sessionId,
-            update: { sessionUpdate: 'agent_message_chunk', content: text },
-          })
+            update: { sessionUpdate: "agent_message_chunk", content: text },
+          });
         }
-        return
+        return;
       }
 
-      case 'reasoning.delta': {
-        const text = payload?.text ?? ''
-        this.emit('reasoning.delta', base)
+      case "reasoning.delta": {
+        const text = payload?.text ?? "";
+        this.emit("reasoning.delta", base);
         if (text) {
-          this.emit('session/update', {
+          this.emit("session/update", {
             session_id: sessionId,
-            update: { sessionUpdate: 'agent_thought_chunk', content: text },
-          })
+            update: { sessionUpdate: "agent_thought_chunk", content: text },
+          });
         }
-        return
+        return;
       }
 
-      case 'reasoning.available': {
+      case "reasoning.available": {
         // 官方语义：带 replace 的最终推理正文（一次性完整段，替换而非追加）。
         // 前端月面已有的 agent_thought_chunk 分支按 "完整文本是否为已缓冲超集"
         // 自动判别追加/替换（isCumulative），因此把完整富文本也注入该流即可，
         // 无需额外 replace 标记。此前只 emit 原生事件，前端 default 丢弃 → 最终推理丢失。
-        const text = payload?.text ?? ''
-        this.emit('reasoning.available', base)
+        const text = payload?.text ?? "";
+        this.emit("reasoning.available", base);
         if (text) {
-          this.emit('session/update', {
+          this.emit("session/update", {
             session_id: sessionId,
-            update: { sessionUpdate: 'agent_thought_chunk', content: text },
-          })
+            update: { sessionUpdate: "agent_thought_chunk", content: text },
+          });
         }
-        return
+        return;
       }
 
-      case 'thinking.delta':
+      case "thinking.delta":
         // 官方语义：thinking.delta 携带的是 kawaii 旋转指示状态（face + verb），
         // 并非真实推理。官方桌面端明确忽略它，避免在推理折页上方出现重复的
         // "Thinking" 指示器。Helix 与官方对齐——只透传原生产，不再把它当作
         // 思考内容注入 agent_thought_chunk 流（否则会把 spinner 文案当文本渲染）。
-        this.emit('thinking.delta', base)
-        return
+        this.emit("thinking.delta", base);
+        return;
 
-      case 'message.complete': {
-        const usage = mapUsage(payload?.usage)
+      case "message.complete": {
+        const usage = mapUsage(payload?.usage);
         // Official protocol carries the final text in payload.text with
         // payload.rendered as a rendered-fallback — accept both like the
         // official frontend (coerceGatewayText(payload.text) || rendered).
-        const text = payload?.text ?? payload?.rendered ?? ''
+        const text = payload?.text ?? payload?.rendered ?? "";
         // 先发原生 + usage 事件，再 resolve pending prompt（顺序与 ACP 主进程一致）
-        this.emit('message.complete', base)
-        if (usage) this.emit('usage:prompt-complete', { session_id: sessionId, usage })
+        this.emit("message.complete", base);
+        if (usage)
+          this.emit("usage:prompt-complete", { session_id: sessionId, usage });
         // 权威全文自愈（与 run.completed 同模式）：事件正文可能携带流式链损坏，
         // 用 session.resume 拉权威正文（state.db 同源）归一化判定后覆盖。
         const emitComplete = (content: string) => {
-          this.emit('session/update', {
+          this.emit("session/update", {
             session_id: sessionId,
-            update: { sessionUpdate: 'run_complete', content },
-          })
+            update: { sessionUpdate: "run_complete", content },
+          });
           this.resolvePending(sessionId, {
-            status: payload?.status ?? 'complete',
+            status: payload?.status ?? "complete",
             usage,
             text: content,
-            stopReason: payload?.status === 'interrupted' ? 'cancelled' : 'end_turn',
-          })
-        }
+            stopReason:
+              payload?.status === "interrupted" ? "cancelled" : "end_turn",
+          });
+        };
         if (sessionId && text) {
-          this.rpc('session.resume', { session_id: sessionId }, 5_000)
+          this.rpc("session.resume", { session_id: sessionId }, 5_000)
             .then((res: any) => {
-              const authoritative = lastAssistantText(res?.messages)
-              if (authoritative && authoritative.trim() && authoritativeOverrides(authoritative, text)) {
-                debug('[ServeGateway] message.complete 权威全文覆盖事件文本:', text.length, '→', authoritative.length)
-                emitComplete(authoritative)
+              const authoritative = lastAssistantText(res?.messages);
+              if (
+                authoritative &&
+                authoritative.trim() &&
+                authoritativeOverrides(authoritative, text)
+              ) {
+                debug(
+                  "[ServeGateway] message.complete 权威全文覆盖事件文本:",
+                  text.length,
+                  "→",
+                  authoritative.length,
+                );
+                emitComplete(authoritative);
               } else {
-                emitComplete(text)
+                emitComplete(text);
               }
             })
-            .catch(() => emitComplete(text))
+            .catch(() => emitComplete(text));
         } else {
-          emitComplete(text)
+          emitComplete(text);
         }
-        return
+        return;
       }
 
       // ── serve 模式结束事件 ─────────────────────────────────────
       // Helix 的 serve 运行以 run.completed / run.cancelled / run.failed 收尾，
       // 而非 ACP 的 message.complete。原先这里没有对应 case，结束事件被直接丢弃，
       // 前端永远收不到 run_complete，只能等 90s 兜底才结束（表现为"思考完还转 1 分多钟"）。
-      case 'run.completed': {
+      case "run.completed": {
         const text =
-          payload?.output ?? payload?.text ?? payload?.final_response ?? payload?.delta ?? payload?.content ?? ''
-        const usage = mapUsage(payload?.usage)
-        if (usage) this.emit('usage:prompt-complete', { session_id: sessionId, usage })
+          payload?.output ??
+          payload?.text ??
+          payload?.final_response ??
+          payload?.delta ??
+          payload?.content ??
+          "";
+        const usage = mapUsage(payload?.usage);
+        if (usage)
+          this.emit("usage:prompt-complete", { session_id: sessionId, usage });
         // 权威全文自愈（观测案例 absent/corrupt）：事件 payload 的最终文本可能携带
         // 流式链损坏（"##当前实时验证\n\n" 黏成 "##当前实时验证"），而前端 done 分支的
         // 归一化覆盖依赖 done 事件自带正文——它没到/也坏时自愈不触发。这里用
@@ -608,214 +774,284 @@ export class ServeGatewayClient {
         // 操作（同 resumeInflightSessions 模式）；本地网关 RPC 通常 <50ms，前端有
         // 90s 兜底不受延迟影响，失败时回退事件版。
         const emitComplete = (content: string) => {
-          this.emit('session/update', {
+          this.emit("session/update", {
             session_id: sessionId,
-            update: { sessionUpdate: 'run_complete', content },
-          })
-          this.resolvePending(sessionId, { status: 'complete', usage, text: content, stopReason: 'end_turn' })
-        }
+            update: { sessionUpdate: "run_complete", content },
+          });
+          this.resolvePending(sessionId, {
+            status: "complete",
+            usage,
+            text: content,
+            stopReason: "end_turn",
+          });
+        };
         if (sessionId && text) {
-          this.rpc('session.resume', { session_id: sessionId }, 5_000)
+          this.rpc("session.resume", { session_id: sessionId }, 5_000)
             .then((res: any) => {
-              const authoritative = lastAssistantText(res?.messages)
-              if (authoritative && authoritative.trim() && authoritativeOverrides(authoritative, text)) {
-                debug('[ServeGateway] run.completed 权威全文覆盖事件文本:', text.length, '→', authoritative.length)
-                emitComplete(authoritative)
+              const authoritative = lastAssistantText(res?.messages);
+              if (
+                authoritative &&
+                authoritative.trim() &&
+                authoritativeOverrides(authoritative, text)
+              ) {
+                debug(
+                  "[ServeGateway] run.completed 权威全文覆盖事件文本:",
+                  text.length,
+                  "→",
+                  authoritative.length,
+                );
+                emitComplete(authoritative);
               } else {
-                emitComplete(text)
+                emitComplete(text);
               }
             })
-            .catch(() => emitComplete(text))
+            .catch(() => emitComplete(text));
         } else {
-          emitComplete(text)
+          emitComplete(text);
         }
-        return
+        return;
       }
-      case 'run.cancelled': {
-        const text = payload?.output ?? payload?.text ?? payload?.final_response ?? ''
-        this.emit('session/update', {
+      case "run.cancelled": {
+        const text =
+          payload?.output ?? payload?.text ?? payload?.final_response ?? "";
+        this.emit("session/update", {
           session_id: sessionId,
-          update: { sessionUpdate: 'run_complete', content: text },
-        })
-        this.resolvePending(sessionId, { status: 'interrupted', text, stopReason: 'cancelled' })
-        return
+          update: { sessionUpdate: "run_complete", content: text },
+        });
+        this.resolvePending(sessionId, {
+          status: "interrupted",
+          text,
+          stopReason: "cancelled",
+        });
+        return;
       }
-      case 'run.failed': {
-        const err = payload?.error ?? payload?.message ?? '运行失败'
-        this.emit('session/update', {
+      case "run.failed": {
+        const err = payload?.error ?? payload?.message ?? "运行失败";
+        this.emit("session/update", {
           session_id: sessionId,
-          update: { sessionUpdate: 'run_complete', content: '' },
-        })
-        this.resolvePending(sessionId, { status: 'interrupted', text: '', stopReason: 'cancelled' })
-        return
+          update: { sessionUpdate: "run_complete", content: "" },
+        });
+        this.resolvePending(sessionId, {
+          status: "interrupted",
+          text: "",
+          stopReason: "cancelled",
+        });
+        return;
       }
 
-      case 'tool.start':
-      case 'tool.generating': {
-        const toolId = payload?.tool_id ?? ''
-        const name = payload?.name ?? ''
-        this.emit(type, { ...base, tool_call_id: toolId, tool_name: name })
-        if (type === 'tool.start') {
+      case "tool.start":
+      case "tool.generating": {
+        const toolId = payload?.tool_id ?? "";
+        const name = payload?.name ?? "";
+        this.emit(type, { ...base, tool_call_id: toolId, tool_name: name });
+        if (type === "tool.start") {
           // 后台任务登记已移至 agent-flow-panel 的 tool_call 处理处——那里拿得到
           // 前端对话 id（myCid）；此处只有后端会话 id，与顶栏过滤口径不一致
           // （2026-08-18 bug：任务恒被过滤，右上角按钮从不显示）。终态 finishTask
           // 仍在本文件按 toolId 匹配（process.exit / tool.complete），与 id 口径无关。
-          this.emit('session/update', {
+          this.emit("session/update", {
             session_id: sessionId,
             update: {
-              sessionUpdate: 'tool_call',
+              sessionUpdate: "tool_call",
               toolCallId: toolId,
-              title: name || 'tool',
+              title: name || "tool",
               kind: toolKindFromName(name),
               // Helix `tool.start` never carries raw `args` — only a
               // display `context` preview (e.g. "foo.ts 1-50" for read_file,
               // a summarized command for terminal). Fall back to it so the
               // frontend can show what the tool actually operated on.
-              rawInput: payload?.args ?? payload?.args_text ?? (payload?.context ? { context: payload.context } : {}),
+              rawInput:
+                payload?.args ??
+                payload?.args_text ??
+                (payload?.context ? { context: payload.context } : {}),
             },
-          })
+          });
         }
-        return
+        return;
       }
 
-      case 'tool.progress': {
-        const toolId = payload?.tool_id ?? ''
-        const name = payload?.name ?? ''
-        this.emit('tool.progress', { ...base, tool_call_id: toolId, tool_name: name })
+      case "tool.progress": {
+        const toolId = payload?.tool_id ?? "";
+        const name = payload?.name ?? "";
+        this.emit("tool.progress", {
+          ...base,
+          tool_call_id: toolId,
+          tool_name: name,
+        });
         // 后台终端/进程任务的实时输出块 → 复用 tool_output_delta 流式追加，
         // 让工具卡片在运行中就能看到 docker pull / npm install 等输出。
-        const text = payload?.text ?? ''
+        const text = payload?.text ?? "";
         if (text) {
-          this.emit('session/update', {
+          this.emit("session/update", {
             session_id: sessionId,
             update: {
-              sessionUpdate: 'tool_call_update',
+              sessionUpdate: "tool_call_update",
               toolCallId: toolId,
-              status: 'in_progress',
+              status: "in_progress",
               content: text,
             },
-          })
+          });
         }
-        return
+        return;
       }
 
-      case 'process.exit': {
+      case "process.exit": {
         // 后台进程真正退出（process_registry on_exit）→ 任务终态。
         // 与 tool.complete 不同：background=true 的工具 spawn 即 complete，
         // 进程可能还在跑；只有这里才是真实生命周期终点。
-        const toolId = payload?.tool_id ?? ''
-        const exitCode = payload?.exit_code
-        const status = typeof exitCode === 'number' && exitCode === 0 ? ('completed' as const) : ('failed' as const)
-        useBackgroundTasksStore.getState().finishTask(toolId, status)
-        this.emit('process.exit', { ...base, tool_call_id: toolId, exit_code: exitCode })
-        return
+        const toolId = payload?.tool_id ?? "";
+        const exitCode = payload?.exit_code;
+        const status =
+          typeof exitCode === "number" && exitCode === 0
+            ? ("completed" as const)
+            : ("failed" as const);
+        useBackgroundTasksStore.getState().finishTask(toolId, status);
+        this.emit("process.exit", {
+          ...base,
+          tool_call_id: toolId,
+          exit_code: exitCode,
+        });
+        return;
       }
 
-      case 'tool.complete': {
-        const toolId = payload?.tool_id ?? ''
-        const name = payload?.name ?? ''
-        let resultText = typeof payload?.result_text === 'string' ? payload.result_text
-          : typeof payload?.result === 'string' ? payload.result
-          : payload?.summary ?? ''
+      case "tool.complete": {
+        const toolId = payload?.tool_id ?? "";
+        const name = payload?.name ?? "";
+        let resultText =
+          typeof payload?.result_text === "string"
+            ? payload.result_text
+            : typeof payload?.result === "string"
+              ? payload.result
+              : (payload?.summary ?? "");
         // terminal 等工具的 result 是 JSON 对象（{output, exit_code, error}），
         // 默认非 verbose 模式下后端不附 result_text 且 terminal 无 summary →
         // 前端工具卡片完成后 content 恒为空（表现：状态条「工作中」→「已执行」，
         // 卡片里什么输出都没有）。这里从 result 对象提取 output/error，让卡片
         // 完成态能看到真实输出（后端 bounded_capture 已对输出做 head/tail 截断）。
-        if (!resultText && payload?.result && typeof payload.result === 'object') {
-          const r = payload.result as Record<string, unknown>
-          const out = typeof r.output === 'string' ? r.output : ''
-          const err = typeof r.error === 'string' ? r.error : ''
-          resultText = err ? (out ? `${out}\n⚠️ ${err}` : `⚠️ ${err}`) : out
+        if (
+          !resultText &&
+          payload?.result &&
+          typeof payload.result === "object"
+        ) {
+          const r = payload.result as Record<string, unknown>;
+          const out = typeof r.output === "string" ? r.output : "";
+          const err = typeof r.error === "string" ? r.error : "";
+          resultText = err ? (out ? `${out}\n⚠️ ${err}` : `⚠️ ${err}`) : out;
         }
-        const inlineDiff = stripAnsi(payload?.inline_diff)
+        const inlineDiff = stripAnsi(payload?.inline_diff);
         // background=true 工具 spawn 即返回 "Background process started"——
         // 这不是进程结束，任务终态由后续 process.exit 决定，这里不标完成。
-        const isBackgroundSpawn = resultText.includes('Background process started')
+        const isBackgroundSpawn = resultText.includes(
+          "Background process started",
+        );
         // 后台任务暂停/恢复：把 process_registry 会话 id（proc_xxx）从工具结果
         // 带回任务记录，作为 process.pause / process.resume RPC 的直查凭据。
         // （后端 tool_commands 的 command→tool_call_id 映射在 tool.complete
         // 时即被删除，靠它反查不可靠——proc id 是唯一稳定句柄。）
-        if (isBackgroundSpawn && payload?.result && typeof payload.result === 'object') {
-          const procSid = (payload.result as Record<string, unknown>).session_id
-          if (typeof procSid === 'string' && procSid) {
-            useBackgroundTasksStore.getState().setTaskProcId(toolId, procSid)
+        if (
+          isBackgroundSpawn &&
+          payload?.result &&
+          typeof payload.result === "object"
+        ) {
+          const procSid = (payload.result as Record<string, unknown>)
+            .session_id;
+          if (typeof procSid === "string" && procSid) {
+            useBackgroundTasksStore.getState().setTaskProcId(toolId, procSid);
           }
         }
         if (!isBackgroundSpawn) {
           // 前台命令在这里收尾（后台进程的终态另有 process.exit，但 spawn 那次
           // tool.complete 已被 isBackgroundSpawn 跳过）。无条件调用 finishTask，
           // 未登记的任务只是 no-op。
-          const taskStatus = payload?.is_error ? ('failed' as const) : ('completed' as const)
-          useBackgroundTasksStore.getState().finishTask(toolId, taskStatus)
+          const taskStatus = payload?.is_error
+            ? ("failed" as const)
+            : ("completed" as const);
+          useBackgroundTasksStore.getState().finishTask(toolId, taskStatus);
         }
-        this.emit('tool.complete', { ...base, tool_call_id: toolId, tool_name: name, inline_diff: inlineDiff })
+        this.emit("tool.complete", {
+          ...base,
+          tool_call_id: toolId,
+          tool_name: name,
+          inline_diff: inlineDiff,
+        });
         // Helix `todo` 工具：后端 tool.complete 在 payload.todos 附带全量列表，
         // 转成专门的 todo_update 事件喂给 extractTodoList，驱动右上角任务面板
         // （否则 todo 只作为工具卡片出现在对话流里，面板永远为空）。
         if (Array.isArray(payload?.todos) && payload.todos.length) {
-          this.emit('session/update', {
+          this.emit("session/update", {
             session_id: sessionId,
-            update: { sessionUpdate: 'todo_update', todos: payload.todos },
-          })
+            update: { sessionUpdate: "todo_update", todos: payload.todos },
+          });
         }
-        this.emit('session/update', {
+        this.emit("session/update", {
           session_id: sessionId,
           update: {
-            sessionUpdate: 'tool_call_update',
+            sessionUpdate: "tool_call_update",
             toolCallId: toolId,
-            status: payload?.is_error ? 'failed' : 'completed',
+            status: payload?.is_error ? "failed" : "completed",
             content: resultText,
             inlineDiff,
           },
-        })
-        return
+        });
+        return;
       }
 
-      case 'approval.request': {
-        const approvalId = `gw-appr-${++this.approvalSeq}`
-        this.emit('approval.request', { ...base, tool_name: payload?.pattern_key ?? '', request_id: approvalId })
-        this.emit('session/update', {
+      case "approval.request": {
+        const approvalId = `gw-appr-${++this.approvalSeq}`;
+        this.emit("approval.request", {
+          ...base,
+          tool_name: payload?.pattern_key ?? "",
+          request_id: approvalId,
+        });
+        this.emit("session/update", {
           session_id: sessionId,
           update: {
-            sessionUpdate: 'permission_request',
+            sessionUpdate: "permission_request",
             toolCallId: approvalId,
-            toolName: payload?.pattern_key || payload?.command || 'terminal',
+            toolName: payload?.pattern_key || payload?.command || "terminal",
             toolParams: {
-              command: payload?.command ?? '',
-              description: payload?.description ?? '',
+              command: payload?.command ?? "",
+              description: payload?.description ?? "",
               // 前端审批分流用：pattern_key 区分危险命令/插件规则，reason 是后端解释，
               // choices/smart_denied 供审批条渲染可选项（once/session/always/deny）。
-              pattern_key: payload?.pattern_key ?? '',
-              reason: payload?.reason ?? payload?.description ?? '',
+              pattern_key: payload?.pattern_key ?? "",
+              reason: payload?.reason ?? payload?.description ?? "",
               choices: Array.isArray(payload?.choices) ? payload.choices : null,
               smart_denied: !!payload?.smart_denied,
             },
           },
-        })
-        return
+        });
+        return;
       }
 
-      case 'clarify.request': {
+      case "clarify.request": {
         // Helix 的 clarify 工具阻塞等待用户输入。官方桌面端收到后渲染
         // ClarifyTool 浮动条，用户回应后发 `clarify.respond` 解锁后端。
         // 之前 Helix 没有此映射 → clarify.request 被静默丢弃 → run 永久挂起
         // （表现为"无浮动条却一直转"）。这里翻译成 ACP session/update，
         // 前端据此弹出 ClarifyDialog 并支持回应。
-        const requestId = typeof payload?.request_id === 'string' && payload.request_id
-          ? payload.request_id
-          : `gw-clarify-${Date.now()}`
-        this.inputRoutes.set(requestId, 'clarify.respond')
-        this.emit('session/update', {
+        const requestId =
+          typeof payload?.request_id === "string" && payload.request_id
+            ? payload.request_id
+            : `gw-clarify-${Date.now()}`;
+        this.inputRoutes.set(requestId, "clarify.respond");
+        this.emit("session/update", {
           session_id: sessionId,
           update: {
-            sessionUpdate: 'clarify_request',
+            sessionUpdate: "clarify_request",
             requestId,
-            question: typeof payload?.question === 'string' ? payload.question : (typeof payload?.text === 'string' ? payload.text : ''),
-            choices: Array.isArray(payload?.choices) ? payload.choices.filter((c: unknown) => typeof c === 'string') : null,
+            question:
+              typeof payload?.question === "string"
+                ? payload.question
+                : typeof payload?.text === "string"
+                  ? payload.text
+                  : "",
+            choices: Array.isArray(payload?.choices)
+              ? payload.choices.filter((c: unknown) => typeof c === "string")
+              : null,
           },
-        })
-        return
+        });
+        return;
       }
 
       // sudo.request / secret.request — 模型阻塞等待密码/密钥输入（terminal
@@ -823,61 +1059,74 @@ export class ServeGatewayClient {
       // /secret.respond）。Helix 无专用输入框，复用 clarify_request 浮条
       // （可自由文本/选择 + 回应），问题文案带上上下文；respond 时按
       // respondMethod 路由到 sudo.respond / secret.respond 解锁后端。
-      case 'sudo.request':
-      case 'secret.request': {
-        const requestId = typeof payload?.request_id === 'string' && payload.request_id
-          ? payload.request_id
-          : `gw-${type}-${Date.now()}`
-        const isSudo = type === 'sudo.request'
-        const envVar = typeof payload?.env_var === 'string' ? payload.env_var : ''
-        const promptText = typeof payload?.prompt === 'string' ? payload.prompt : ''
+      case "sudo.request":
+      case "secret.request": {
+        const requestId =
+          typeof payload?.request_id === "string" && payload.request_id
+            ? payload.request_id
+            : `gw-${type}-${Date.now()}`;
+        const isSudo = type === "sudo.request";
+        const envVar =
+          typeof payload?.env_var === "string" ? payload.env_var : "";
+        const promptText =
+          typeof payload?.prompt === "string" ? payload.prompt : "";
         const question = isSudo
-          ? '需要 sudo 密码才能继续执行该命令，请在下方输入密码。'
-          : (promptText || `需要 ${envVar || '环境变量'} 密钥才能继续执行技能，请在下方输入。`)
-        this.emit(type, base)
-        this.inputRoutes.set(requestId, isSudo ? 'sudo.respond' : 'secret.respond')
-        this.emit('session/update', {
+          ? "需要 sudo 密码才能继续执行该命令，请在下方输入密码。"
+          : promptText ||
+            `需要 ${envVar || "环境变量"} 密钥才能继续执行技能，请在下方输入。`;
+        this.emit(type, base);
+        this.inputRoutes.set(
+          requestId,
+          isSudo ? "sudo.respond" : "secret.respond",
+        );
+        this.emit("session/update", {
           session_id: sessionId,
           update: {
-            sessionUpdate: 'clarify_request',
+            sessionUpdate: "clarify_request",
             requestId,
-            respondMethod: isSudo ? 'sudo/' : 'secret/',
+            respondMethod: isSudo ? "sudo/" : "secret/",
             question,
             choices: null,
           },
-        })
-        return
+        });
+        return;
       }
 
-      case 'background.complete':
+      case "background.complete":
         // Informational: 后台（非活跃）会话的远端 turn 已结束。Helix 前端
         // 只渲染活跃会话流，此事件原样透传（default 分支兜底），不注入正文。
-        this.emit(type, base)
-        return
+        this.emit(type, base);
+        return;
 
-      case 'session.info':
-        this.emit('session.info', base)
-        this.emit('session/info', base)
-        return
+      case "session.info":
+        this.emit("session.info", base);
+        this.emit("session/info", base);
+        return;
 
-      case 'session.title':
-        this.emit('session/title', { session_id: sessionId, title: payload?.title ?? payload?.text ?? '' })
-        return
+      case "session.title":
+        this.emit("session/title", {
+          session_id: sessionId,
+          title: payload?.title ?? payload?.text ?? "",
+        });
+        return;
 
-      case 'status.update':
-        this.emit('status.update', base)
-        return
+      case "status.update":
+        this.emit("status.update", base);
+        return;
 
-      case 'error': {
-        this.emit('error', { session_id: sessionId, message: payload?.message ?? '未知网关错误' })
+      case "error": {
+        this.emit("error", {
+          session_id: sessionId,
+          message: payload?.message ?? "未知网关错误",
+        });
         // error 事件本身已 emit（前端 error→queueDone 收尾）。ack-only 下无挂起 Promise，只清理 in-flight。
-        if (sessionId) this.inflightSessions.delete(sessionId)
-        return
+        if (sessionId) this.inflightSessions.delete(sessionId);
+        return;
       }
 
       default:
         // 其余事件（moa.* / subagent.* / skin.changed / review.summary ...）原样直通
-        this.emit(type, base)
+        this.emit(type, base);
     }
   }
 
@@ -893,19 +1142,21 @@ export class ServeGatewayClient {
    * 恢复所有 in-flight 会话的事件流。
    */
   private async createSession(params?: any): Promise<any> {
-    await this.ensureModelSynced()
+    await this.ensureModelSynced();
     // 会话自动重建（session not found）等路径可能没带 mcpServers，此时回退到
     // 应用当前保存的 MCP 列表，避免重建后的会话丢失工具。
-    let mcpServers = params?.mcpServers
+    let mcpServers = params?.mcpServers;
     if (!Array.isArray(mcpServers)) {
-      const { useHelixStore } = await import('@/stores/helix-store')
-      mcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers)
+      const { useHelixStore } = await import("@/stores/helix-store");
+      mcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers);
     }
-    const res = await this.rpc('session.create', {
-      source: 'helix',
+    const res = await this.rpc("session.create", {
+      source: "helix",
       // 会话重建/恢复时必须把前端保存的本对话历史带回去，否则后端会话像是
       // 新建的一样，模型读不到之前的对话内容。
-      ...(Array.isArray(params?.messages) && params.messages.length > 0 ? { messages: params.messages } : {}),
+      ...(Array.isArray(params?.messages) && params.messages.length > 0
+        ? { messages: params.messages }
+        : {}),
       // 应用内维护的 MCP 服务器列表随会话一起注册；serve 模式下后端不会
       // 像 ACP 模式那样自动收到 session/new 的 mcpServers，必须在这里带上。
       ...(Array.isArray(mcpServers) ? { mcpServers } : {}),
@@ -914,48 +1165,54 @@ export class ServeGatewayClient {
       // 必须随 session.create 传给后端，否则会话 cwd 落到配置/TERMINAL_CWD/
       // 启动目录，模型读到的目录和界面显示的项目脱节。
       ...(params?.cwd ? { cwd: params.cwd } : {}),
-    })
+    });
     // 记住持久化 DB key：后端 session.create 同时返回 session_id（内存态
     // ui_session，进程重启即失效）和 stored_session_id（state.db 主键，跨
     // 重启存活）。prompt 遇 not-found 时 resume 用后者才能从磁盘恢复。
     if (res?.session_id && res?.stored_session_id) {
-      this.storedSessionIds.set(res.session_id, res.stored_session_id)
+      this.storedSessionIds.set(res.session_id, res.stored_session_id);
     }
-    return res
+    return res;
   }
 
   /** ACP send(method, params) → serve RPC 翻译 */
   async send(method: string, params?: any): Promise<any> {
     switch (method) {
-      case 'session/new': {
-        debug('[ServeGateway] send session/new (modelSynced=', this.modelSynced, ', connected=', this.connected, ')')
+      case "session/new": {
+        debug(
+          "[ServeGateway] send session/new (modelSynced=",
+          this.modelSynced,
+          ", connected=",
+          this.connected,
+          ")",
+        );
         // 建会话前强制同步一次前端模型配置（本客户端生命周期内一次）。
         // 原因：聊天主路径（agent-flow-panel）直接 session/new，不经过
         // use-helix 的 setHelixModel；而 ~/.helix 下 config.yaml 里
         // 可能残留旧 IPC 直写的 provider（如 'agnes-ai'），serve 的模型解析
         // 不认识 → base_url 被丢弃 → agent 构建 30s 超时 → error 事件。
-        const res = await this.createSession(params)
-        debug('[ServeGateway] ✓ session/new OK →', res?.session_id)
-        return res // 已含 session_id，调用点的提取链兼容
+        const res = await this.createSession(params);
+        debug("[ServeGateway] ✓ session/new OK →", res?.session_id);
+        return res; // 已含 session_id，调用点的提取链兼容
       }
 
-      case 'session/resume':
-        return this.rpc('session.resume', { session_id: params?.session_id })
+      case "session/resume":
+        return this.rpc("session.resume", { session_id: params?.session_id });
 
-      case 'session/list':
-        return this.rpc('session.list', { limit: params?.limit ?? 200 })
+      case "session/list":
+        return this.rpc("session.list", { limit: params?.limit ?? 200 });
 
-      case 'session/prompt': {
-        const sessionId = String(params?.session_id ?? '')
-        if (!sessionId) throw new Error('session/prompt 缺少 session_id')
-        const text = promptBlocksToText(params?.prompt)
+      case "session/prompt": {
+        const sessionId = String(params?.session_id ?? "");
+        if (!sessionId) throw new Error("session/prompt 缺少 session_id");
+        const text = promptBlocksToText(params?.prompt);
         // 官方语义：prompt.submit 只回 ack（{"status":"streaming"}），真正的回复走事件流
         // （message.delta → … → run.completed）。这里不再挂起 Promise、不再设超时——完成
         // 由 run.completed/cancelled/failed 事件驱动（translateEvent 发 run_complete 事件，
         // agent-flow-panel 据此收尾）。只把 session 记为 in-flight，供 WS 断连重连后
         // session.resume 恢复事件流（见 resumeInflightSessions）。
         try {
-          await this.rpc('prompt.submit', { session_id: sessionId, text })
+          await this.rpc("prompt.submit", { session_id: sessionId, text });
         } catch (err) {
           // "session not found" 的自动恢复兜底（对齐官方桌面版语义）。后端
           // tui_gateway 的会话是持久化的（state.db）：网关重启 / 空闲回收
@@ -964,64 +1221,97 @@ export class ServeGatewayClient {
           // session.resume on the STORED session id）是先 session.resume 把
           // 原会话从 DB 捞回来 —— 同一 sid 复活，不新建 id、不丢上下文。
           // 只有 resume 也失败（会话真的被删/从未建过）才退回 createSession。
-          const msg = (err as Error)?.message || ''
-          if (/session.*not.*found|not found|no such session|unknown session/i.test(msg)) {
+          const msg = (err as Error)?.message || "";
+          if (
+            /session.*not.*found|not found|no such session|unknown session/i.test(
+              msg,
+            )
+          ) {
             try {
               // resume 用 DB 持久化 key（stored_session_id）才能从 state.db 恢复
               // 同一会话（ui_session 在进程重启后必然不在内存、也查不到 DB 行）。
               // 只对"能从 DB 快速恢复"的场景有价值；给 8s 上限，慢就放弃走
               // createSession（重建 agent 的路径更可靠，事件流正常）。
-              const resumeId = this.storedSessionIds.get(sessionId) || sessionId
-              debug('[ServeGateway] session not found on prompt — trying resume restore:', sessionId, '→', resumeId)
-              const resumeRes = await this.rpc('session.resume', { session_id: resumeId }, 8_000)
+              const resumeId =
+                this.storedSessionIds.get(sessionId) || sessionId;
+              debug(
+                "[ServeGateway] session not found on prompt — trying resume restore:",
+                sessionId,
+                "→",
+                resumeId,
+              );
+              const resumeRes = await this.rpc(
+                "session.resume",
+                { session_id: resumeId },
+                8_000,
+              );
               if (resumeRes) {
                 // resume 成功后会话注册在 resumeId 名下，事件也以它发出：
                 // 若与原 sid 不同，发 sessionReplaced 让前端改绑；prompt 用恢复后的 id 重发。
-                const restoredId = resumeRes?.session_id || resumeId
-                debug('[ServeGateway] resumed session, retrying prompt with sid:', restoredId)
+                const restoredId = resumeRes?.session_id || resumeId;
+                debug(
+                  "[ServeGateway] resumed session, retrying prompt with sid:",
+                  restoredId,
+                );
                 if (restoredId !== sessionId) {
-                  this.storedSessionIds.set(restoredId, restoredId)
-                  this.emit('gateway.sessionReplaced', { oldId: sessionId, newId: restoredId })
+                  this.storedSessionIds.set(restoredId, restoredId);
+                  this.emit("gateway.sessionReplaced", {
+                    oldId: sessionId,
+                    newId: restoredId,
+                  });
                 }
-                await this.rpc('prompt.submit', { session_id: restoredId, text })
-                this.inflightSessions.add(restoredId)
-                return { status: 'streaming' }
+                await this.rpc("prompt.submit", {
+                  session_id: restoredId,
+                  text,
+                });
+                this.inflightSessions.add(restoredId);
+                return { status: "streaming" };
               }
             } catch (resumeErr) {
-              debug('[ServeGateway] session.resume failed — falling back to recreate:', String(resumeErr))
+              debug(
+                "[ServeGateway] session.resume failed — falling back to recreate:",
+                String(resumeErr),
+              );
             }
-            warn('[ServeGateway] session not found + resume failed — recreating session and retrying')
-            const { useHelixStore } = await import('@/stores/helix-store')
-            const st = useHelixStore.getState()
+            warn(
+              "[ServeGateway] session not found + resume failed — recreating session and retrying",
+            );
+            const { useHelixStore } = await import("@/stores/helix-store");
+            const st = useHelixStore.getState();
             const history = st.chatMessages
-              .filter(m => m.sessionId === st.currentSessionId)
-              .map(m => ({ role: m.role, content: m.content }))
-            const res = await this.createSession({ messages: history })
-            const newId = res?.session_id
+              .filter((m) => m.sessionId === st.currentSessionId)
+              .map((m) => ({ role: m.role, content: m.content }));
+            const res = await this.createSession({ messages: history });
+            const newId = res?.session_id;
             if (newId) {
-              debug('[ServeGateway] recreated session for retry:', newId)
-              this.emit('gateway.sessionReplaced', { oldId: sessionId, newId })
-              await this.rpc('prompt.submit', { session_id: newId, text })
-              this.inflightSessions.add(newId)
-              return { status: 'streaming', session_id: newId }
+              debug("[ServeGateway] recreated session for retry:", newId);
+              this.emit("gateway.sessionReplaced", { oldId: sessionId, newId });
+              await this.rpc("prompt.submit", { session_id: newId, text });
+              this.inflightSessions.add(newId);
+              return { status: "streaming", session_id: newId };
             }
           }
-          throw err
+          throw err;
         }
-        this.inflightSessions.add(sessionId)
-        return { status: 'streaming' }
+        this.inflightSessions.add(sessionId);
+        return { status: "streaming" };
       }
 
-      case 'session/cancel':
-      case 'session/interrupt': {
-        const sessionId = params?.session_id
-        const res = await this.rpc('session.interrupt', { session_id: sessionId })
+      case "session/cancel":
+      case "session/interrupt": {
+        const sessionId = params?.session_id;
+        const res = await this.rpc("session.interrupt", {
+          session_id: sessionId,
+        });
         // 中断后立刻 resolve pending prompt，避免调用点悬挂
-        this.resolvePending(sessionId, { status: 'interrupted', stopReason: 'cancelled' })
-        return res
+        this.resolvePending(sessionId, {
+          status: "interrupted",
+          stopReason: "cancelled",
+        });
+        return res;
       }
 
-      case 'session/set_mode': {
+      case "session/set_mode": {
         // serve 无 set_mode；审批策略拆成 config.set yolo。
         // 语义（审批分流版）：
         // - dont_ask（完全访问权限）→ yolo on：后端不发 approval.request，全部自动批。
@@ -1030,91 +1320,137 @@ export class ServeGatewayClient {
         //   上传外发弹窗。分流只在 yolo off 时才有物可分。
         // - plan（计划/只读）→ yolo off：后端照常发审批，前端 classifyApproval 对
         //   所有操作（含项目内文件修改）一律弹窗，用户不批 = 只读探索。
-        const mode = params?.mode_id ?? params?.mode
+        const mode = params?.mode_id ?? params?.mode;
         // 把 UI 审批模式同步到后端（config.set ui_approval_mode）：后端据此决定
         // 项目内写文件是否也要发审批（default/plan 全拦，accept_edits/dont_ask
         // 只拦敏感路径），使前后端审批行为对齐。
-        if (mode === 'default' || mode === 'accept_edits' || mode === 'plan' || mode === 'dont_ask') {
-          this.rpc('config.set', { key: 'ui_approval_mode', value: mode, scope: 'session', session_id: params?.session_id })
-            .catch((e) => { warn('[ServeGateway] config.set ui_approval_mode 失败:', e) })
+        if (
+          mode === "default" ||
+          mode === "accept_edits" ||
+          mode === "plan" ||
+          mode === "dont_ask"
+        ) {
+          this.rpc("config.set", {
+            key: "ui_approval_mode",
+            value: mode,
+            scope: "session",
+            session_id: params?.session_id,
+          }).catch((e) => {
+            warn("[ServeGateway] config.set ui_approval_mode 失败:", e);
+          });
         }
-        if (mode === 'dont_ask') {
-          return this.rpc('config.set', { key: 'yolo', value: 'on', scope: 'session', session_id: params?.session_id })
-            .catch((e) => { warn('[ServeGateway] config.set yolo 失败:', e); return {} })
+        if (mode === "dont_ask") {
+          return this.rpc("config.set", {
+            key: "yolo",
+            value: "on",
+            scope: "session",
+            session_id: params?.session_id,
+          }).catch((e) => {
+            warn("[ServeGateway] config.set yolo 失败:", e);
+            return {};
+          });
         }
         // yolo off：确保默认/替我审批/计划模式下后端会发审批请求。
-        return this.rpc('config.set', { key: 'yolo', value: 'off', scope: 'session', session_id: params?.session_id })
-          .catch((e) => { warn('[ServeGateway] config.set yolo(off) 失败:', e); return {} })
-      }
-
-      case 'session/approve': {
-        // FIFO 语义：忽略 toolCallId，按最旧一条解决
-        return this.rpc('approval.respond', {
+        return this.rpc("config.set", {
+          key: "yolo",
+          value: "off",
+          scope: "session",
           session_id: params?.session_id,
-          choice: params?.approve === false ? 'deny' : 'approve',
-        })
+        }).catch((e) => {
+          warn("[ServeGateway] config.set yolo(off) 失败:", e);
+          return {};
+        });
       }
 
-      case 'approval/respond': {
+      case "session/approve": {
+        // FIFO 语义：忽略 toolCallId，按最旧一条解决
+        return this.rpc("approval.respond", {
+          session_id: params?.session_id,
+          choice: params?.approve === false ? "deny" : "approve",
+        });
+      }
+
+      case "approval/respond": {
         const choice = ((): string => {
           switch (params?.choice) {
-            case 'deny': return 'deny'
-            case 'always': return 'always'
-            case 'session': return 'approve'
-            case 'once': default: return 'approve'
+            case "deny":
+              return "deny";
+            case "always":
+              return "always";
+            case "session":
+              return "approve";
+            case "once":
+            default:
+              return "approve";
           }
-        })()
-        return this.rpc('approval.respond', { session_id: params?.session_id, choice })
+        })();
+        return this.rpc("approval.respond", {
+          session_id: params?.session_id,
+          choice,
+        });
       }
 
-      case 'clarify/respond': {
+      case "clarify/respond": {
         // 用户的澄清回答 → 解锁后端阻塞在 clarify.respond 上的 Python 侧。
         // 参数对齐官方桌面端（clarify-tool.tsx:344）：{ request_id, answer }。
         // sudo.request / secret.request 也复用该浮条；其 request_id 已登记在
         // inputRoutes，此处路由到 sudo.respond / secret.respond 解锁对应端点。
-        const rid = params?.request_id
-        const route = typeof rid === 'string' ? this.inputRoutes.get(rid) : undefined
-        if (route && route !== 'clarify.respond') {
-          this.inputRoutes.delete(rid)
+        const rid = params?.request_id;
+        const route =
+          typeof rid === "string" ? this.inputRoutes.get(rid) : undefined;
+        if (route && route !== "clarify.respond") {
+          this.inputRoutes.delete(rid);
           return this.rpc(route, {
             session_id: params?.session_id,
             request_id: rid,
-            ...(route === 'sudo.respond' ? { password: params?.answer ?? '' } : { value: params?.answer ?? '' }),
-          })
+            ...(route === "sudo.respond"
+              ? { password: params?.answer ?? "" }
+              : { value: params?.answer ?? "" }),
+          });
         }
-        if (typeof rid === 'string') this.inputRoutes.delete(rid)
-        return this.rpc('clarify.respond', {
+        if (typeof rid === "string") this.inputRoutes.delete(rid);
+        return this.rpc("clarify.respond", {
           session_id: params?.session_id,
           request_id: params?.request_id,
-          answer: params?.answer ?? '',
-        })
+          answer: params?.answer ?? "",
+        });
       }
 
-      case 'command/dispatch': {
-        const raw = String(params?.command ?? '').replace(/^[\\/]/, '')
-        const sp = raw.indexOf(' ')
-        const name = sp === -1 ? raw : raw.slice(0, sp)
-        const arg = sp === -1 ? '' : raw.slice(sp + 1)
-        return this.rpc('command.dispatch', { name, arg, session_id: params?.session_id })
+      case "command/dispatch": {
+        const raw = String(params?.command ?? "").replace(/^[\\/]/, "");
+        const sp = raw.indexOf(" ");
+        const name = sp === -1 ? raw : raw.slice(0, sp);
+        const arg = sp === -1 ? "" : raw.slice(sp + 1);
+        return this.rpc("command.dispatch", {
+          name,
+          arg,
+          session_id: params?.session_id,
+        });
       }
 
-      case 'tools/list': {
-        const res = await this.rpc('tools.list', { session_id: params?.session_id })
+      case "tools/list": {
+        const res = await this.rpc("tools.list", {
+          session_id: params?.session_id,
+        });
         // toolsets → 拍平成 ACP 期望的 { tools: [] }
-        const tools: any[] = []
+        const tools: any[] = [];
         for (const ts of res?.toolsets ?? []) {
           for (const t of ts?.tools ?? []) {
-            tools.push(typeof t === 'string' ? { name: t, toolset: ts.name } : { ...t, toolset: ts.name })
+            tools.push(
+              typeof t === "string"
+                ? { name: t, toolset: ts.name }
+                : { ...t, toolset: ts.name },
+            );
           }
         }
-        return { tools, toolsets: res?.toolsets ?? [] }
+        return { tools, toolsets: res?.toolsets ?? [] };
       }
 
       default:
         // 未映射方法：透传（serve 侧同名注册的直接可用）。
         // session.context_breakdown 由 tui_gateway/methods_session.py 实现，
         // 不再短路，直接透传给后端取真实分类占比。
-        return this.rpc(method.replace(/\//g, '.'), params)
+        return this.rpc(method.replace(/\//g, "."), params);
     }
   }
 
@@ -1123,25 +1459,25 @@ export class ServeGatewayClient {
     this.send(method, params).catch((e) => {
       // session/cancel on a run that already finished is a benign race (the
       // session is gone server-side); don't log it as a scary failure.
-      const msg = String((e as Error)?.message ?? e)
-      if (method === 'session/cancel' && /not found/i.test(msg)) return
-      warn('[ServeGateway] notify 失败:', method, e)
-    })
+      const msg = String((e as Error)?.message ?? e);
+      if (method === "session/cancel" && /not found/i.test(msg)) return;
+      warn("[ServeGateway] notify 失败:", method, e);
+    });
   }
 
   async interrupt(sessionId: string): Promise<any> {
-    return this.send('session/interrupt', { session_id: sessionId })
+    return this.send("session/interrupt", { session_id: sessionId });
   }
 
   async status(): Promise<{ connected: boolean }> {
-    return { connected: this.connected }
+    return { connected: this.connected };
   }
 
   // ── 模型同步 ──────────────────────────────────────────────
 
   /** 本客户端实例是否已向后端同步过前端模型配置 */
-  private modelSynced = false
-  private modelSyncPromise: Promise<void> | null = null
+  private modelSynced = false;
+  private modelSyncPromise: Promise<void> | null = null;
 
   /**
    * 确保后端模型配置与前端一致（每次 session/new 前都同步）。
@@ -1160,34 +1496,43 @@ export class ServeGatewayClient {
       return Promise.race([
         this.modelSyncPromise,
         new Promise<void>((resolve) => {
-          setTimeout(() => { warn('[ServeGateway] ensureModelSynced 超时(10s)，跳过模型预同步'); resolve() }, 10000)
+          setTimeout(() => {
+            warn("[ServeGateway] ensureModelSynced 超时(10s)，跳过模型预同步");
+            resolve();
+          }, 10000);
         }),
-      ])
+      ]);
     }
     this.modelSyncPromise = (async () => {
       try {
         // serve 模式不再有默认端点兜底：只有用户在 UI 里配了有效的 baseUrl+model，
         // 才把模型同步给网关；否则尊重网关自身的 config（不强制任何端点）。
-        const { useHelixStore } = await import('@/stores/helix-store')
-        const cfg = useHelixStore.getState().apiConfig
+        const { useHelixStore } = await import("@/stores/helix-store");
+        const cfg = useHelixStore.getState().apiConfig;
         if (cfg?.baseUrl && cfg.model) {
           await this.setModel({
-            provider: cfg.provider || 'custom',
+            provider: cfg.provider || "custom",
             baseUrl: cfg.baseUrl,
             apiKey: cfg.apiKey,
             model: cfg.model,
-          })
-          debug('[ServeGateway] 建会话前模型预同步完成:', cfg.model, cfg.baseUrl)
+          });
+          debug(
+            "[ServeGateway] 建会话前模型预同步完成:",
+            cfg.model,
+            cfg.baseUrl,
+          );
         } else {
-          debug('[ServeGateway] 无有效模型配置，跳过预同步（尊重网关现有 config）')
+          debug(
+            "[ServeGateway] 无有效模型配置，跳过预同步（尊重网关现有 config）",
+          );
         }
       } catch (e) {
-        warn('[ServeGateway] 模型预同步失败（不阻塞建会话）:', e)
+        warn("[ServeGateway] 模型预同步失败（不阻塞建会话）:", e);
       } finally {
-        this.modelSyncPromise = null
+        this.modelSyncPromise = null;
       }
-    })()
-    return this.modelSyncPromise
+    })();
+    return this.modelSyncPromise;
   }
 
   /**
@@ -1199,39 +1544,48 @@ export class ServeGatewayClient {
    * serve 模式下 restartGatewayDebounced 已被守卫短路，写盘后网关在下次
    * session.create 重读 config.yaml，无需重启。
    */
-  async setModel(params: { model: string; baseUrl?: string; apiKey?: string; provider?: string }): Promise<any> {
+  async setModel(params: {
+    model: string;
+    baseUrl?: string;
+    apiKey?: string;
+    provider?: string;
+  }): Promise<any> {
     // 必须直取原始 IPC 桥（window.electron.helix），绝不能经 getElectronAPI()：
     // serve 模式下它返回门面 Proxy，`.helix` 会被分流回 routerFacade.setModel →
     // 再次调用本方法 → 无限递归（modelSynced 永不置位，首次 session/new 永久
     // 挂起在 ensureModelSynced，WS 零消息）。这里只需要主进程写 config.yaml
     // （helix:setModel），serve 模式 restartGatewayDebounced 是 no-op，不会重启网关。
-    const helix = (typeof window !== 'undefined' ? (window as any).electron?.helix : null) as any
+    const helix = (
+      typeof window !== "undefined" ? (window as any).electron?.helix : null
+    ) as any;
     if (!helix?.setModel) {
       // 纯浏览器（无 Electron 桥）：没有本地网关可写，静默跳过。
-      debug('[ServeGateway] 无 Electron 桥，跳过 setModel（纯浏览器环境）')
-      return { skipped: true }
+      debug("[ServeGateway] 无 Electron 桥，跳过 setModel（纯浏览器环境）");
+      return { skipped: true };
     }
     const res = await helix.setModel({
       model: params.model,
       baseUrl: params.baseUrl,
       apiKey: params.apiKey,
       provider: params.baseUrl
-        ? (params.provider && params.provider !== 'custom' ? params.provider : 'custom')
-        : (params.provider || 'openai'),
-    })
-    this.modelSynced = true // 显式 setModel 成功后无需再预同步
-    return res
+        ? params.provider && params.provider !== "custom"
+          ? params.provider
+          : "custom"
+        : params.provider || "openai",
+    });
+    this.modelSynced = true; // 显式 setModel 成功后无需再预同步
+    return res;
   }
 }
 
 // ── 单例 + 门面 ────────────────────────────────────────────────────────
 
-let client: ServeGatewayClient | null = null
-let initPromise: Promise<ServeGatewayClient | null> | null = null
-let routerFacade: any | null = null
+let client: ServeGatewayClient | null = null;
+let initPromise: Promise<ServeGatewayClient | null> | null = null;
+let routerFacade: any | null = null;
 
 export function isServeActive(): boolean {
-  return !!client
+  return !!client;
 }
 
 /**
@@ -1241,26 +1595,26 @@ export function isServeActive(): boolean {
  * 需要"按模式分流、而不是按连接状态分流"的调用方（如 pushModelConfig）用这个，
  * 避免启动期误落 IPC 链路（IPC setConfig 会直写 config.yaml + 重启网关）。
  */
-let modePromise: Promise<'acp' | 'serve'> | null = null
-export function getGatewayMode(): Promise<'acp' | 'serve'> {
-  if (modePromise) return modePromise
+let modePromise: Promise<"acp" | "serve"> | null = null;
+export function getGatewayMode(): Promise<"acp" | "serve"> {
+  if (modePromise) return modePromise;
   modePromise = (async () => {
     try {
-      if (typeof window === 'undefined') return 'acp'
-      installTauriBridge() // 惰性桥：先装再读，避免误判 acp
-      const ipc = (window as any).electron?.helix
-      if (!ipc?.getGatewayInfo) return 'acp'
-      const info = await ipc.getGatewayInfo()
-      return info?.mode === 'serve' ? 'serve' : 'acp'
+      if (typeof window === "undefined") return "acp";
+      installTauriBridge(); // 惰性桥：先装再读，避免误判 acp
+      const ipc = (window as any).electron?.helix;
+      if (!ipc?.getGatewayInfo) return "acp";
+      const info = await ipc.getGatewayInfo();
+      return info?.mode === "serve" ? "serve" : "acp";
     } catch {
-      return 'acp'
+      return "acp";
     }
-  })()
-  return modePromise
+  })();
+  return modePromise;
 }
 
 export function getServeClient(): ServeGatewayClient | null {
-  return client
+  return client;
 }
 
 /**
@@ -1276,63 +1630,82 @@ export function getServeClient(): ServeGatewayClient | null {
  *   透传原 IPC（渐进迁移，任务65 处理）
  */
 function buildRouterFacade(ipc: any): any {
-  const ensure = () => initServeGateway()
+  const ensure = () => initServeGateway();
   const overrides: Record<string, any> = {
     send: async (m: string, p?: any) => {
-      const c = await ensure()
-      return c ? c.send(m, p) : ipc.send(m, p)
+      const c = await ensure();
+      return c ? c.send(m, p) : ipc.send(m, p);
     },
     notify: (m: string, p?: any) => {
       ensure()
-        .then((c) => { if (c) c.notify(m, p); else ipc.notify?.(m, p) })
-        .catch((e) => warn('[ServeGateway] notify 路由失败:', m, e))
+        .then((c) => {
+          if (c) c.notify(m, p);
+          else ipc.notify?.(m, p);
+        })
+        .catch((e) => warn("[ServeGateway] notify 路由失败:", m, e));
     },
     interrupt: async (sid: string) => {
-      const c = await ensure()
-      return c ? c.interrupt(sid) : ipc.interrupt?.(sid)
+      const c = await ensure();
+      return c ? c.interrupt(sid) : ipc.interrupt?.(sid);
     },
     status: async () => {
-      const c = await ensure()
-      return c ? c.status() : ipc.status()
+      const c = await ensure();
+      return c ? c.status() : ipc.status();
     },
     setModel: async (p: any) => {
-      const c = await ensure()
+      const c = await ensure();
       if (c) {
         try {
-          return await c.setModel(p)
+          return await c.setModel(p);
         } catch (e) {
           // 千万不能回落 IPC：IPC setModel 会 restartGatewayDebounced 杀掉
           // 当前 serve 实例（WS 断、端口变、内存会话全灭）——比设置失败破坏大。
-          logError('[ServeGateway] REST setModel 失败（不回落 IPC）:', e)
-          return { success: false, error: String((e as Error)?.message ?? e) }
+          logError("[ServeGateway] REST setModel 失败（不回落 IPC）:", e);
+          return { success: false, error: String((e as Error)?.message ?? e) };
         }
       }
-      return ipc.setModel?.(p)
+      return ipc.setModel?.(p);
     },
     onEvent: (cb: EventCallback) => {
-      let cancelled = false
-      let unWs: (() => void) | null = null
-      let unIpc: (() => void) | null = null
-      try { unIpc = ipc.onEvent?.(cb) ?? null } catch { /* noop */ }
-      ensure()
-        .then((c) => { if (c && !cancelled) unWs = c.onEvent(cb) })
-        .catch(() => { /* noop */ })
-      return () => {
-        cancelled = true
-        try { unIpc?.() } catch { /* noop */ }
-        try { unWs?.() } catch { /* noop */ }
+      let cancelled = false;
+      let unWs: (() => void) | null = null;
+      let unIpc: (() => void) | null = null;
+      try {
+        unIpc = ipc.onEvent?.(cb) ?? null;
+      } catch {
+        /* noop */
       }
+      ensure()
+        .then((c) => {
+          if (c && !cancelled) unWs = c.onEvent(cb);
+        })
+        .catch(() => {
+          /* noop */
+        });
+      return () => {
+        cancelled = true;
+        try {
+          unIpc?.();
+        } catch {
+          /* noop */
+        }
+        try {
+          unWs?.();
+        } catch {
+          /* noop */
+        }
+      };
     },
-  }
+  };
   return new Proxy(overrides, {
     get(target, prop: string) {
-      if (prop in target) return target[prop]
-      return ipc?.[prop]
+      if (prop in target) return target[prop];
+      return ipc?.[prop];
     },
     has(target, prop: string) {
-      return prop in target || (ipc && prop in ipc)
+      return prop in target || (ipc && prop in ipc);
     },
-  })
+  });
 }
 
 /**
@@ -1340,15 +1713,15 @@ function buildRouterFacade(ipc: any): any {
  * 路由器（acp 模式内部自动落回 IPC）；旧 preload / 浏览器返回 null。
  */
 export function getServeHelixFacade(): any | null {
-  if (typeof window === 'undefined') return null
+  if (typeof window === "undefined") return null;
   // 确保 Tauri invoke 桥已装好（window.electron 是惰性安装的）。若模块加载
   // 顺序导致本函数先于任何 isElectron()/installTauriBridge() 执行，直接读
   // window.electron 会拿到 undefined → 错误地走 acp/null 分支。
-  installTauriBridge()
-  const ipc = (window as any).electron?.helix
-  if (!ipc?.getGatewayInfo) return null
-  if (!routerFacade) routerFacade = buildRouterFacade(ipc)
-  return routerFacade
+  installTauriBridge();
+  const ipc = (window as any).electron?.helix;
+  if (!ipc?.getGatewayInfo) return null;
+  if (!routerFacade) routerFacade = buildRouterFacade(ipc);
+  return routerFacade;
 }
 
 /**
@@ -1356,45 +1729,48 @@ export function getServeHelixFacade(): any | null {
  * acp 模式立即 resolve null；serve 模式轮询 getGatewayInfo 直到握手完成，然后连 WS。
  */
 export function initServeGateway(): Promise<ServeGatewayClient | null> {
-  if (initPromise) return initPromise
+  if (initPromise) return initPromise;
   initPromise = (async () => {
-    if (typeof window === 'undefined') return null
+    if (typeof window === "undefined") return null;
     // 惰性桥竞态修复：window.electron 由 installTauriBridge() 惰性安装。
     // 若 use-helix 的 useEffect 先于任何 isElectron() 触发 initServeGateway，
     // 直接读 window.electron 会得到 undefined → 提前 return null 且被
     // initPromise 永久缓存 → 之后桥装好也不重试 → serve 网关永不连接。
     // 这里先强制装桥（幂等），保证下面能读到 getGatewayInfo。
-    installTauriBridge()
-    const ipc = (window as any).electron?.helix
-    if (!ipc?.getGatewayInfo) return null
+    installTauriBridge();
+    const ipc = (window as any).electron?.helix;
+    if (!ipc?.getGatewayInfo) return null;
     try {
       // serve 冷启动最长 90s：pending 时以 2s 间隔轮询
       for (let i = 0; i < 60; i++) {
-        const info = await ipc.getGatewayInfo()
-        if (!info || info.mode !== 'serve') {
-          return null // acp 模式
+        const info = await ipc.getGatewayInfo();
+        if (!info || info.mode !== "serve") {
+          return null; // acp 模式
         }
         if (!info.pending && info.wsUrl && info.baseUrl) {
-          client = new ServeGatewayClient(info as any)
-          client.connect()
+          client = new ServeGatewayClient(info as any);
+          client.connect();
           // 主进程每次 respawn serve 都会推 gateway.serveInfo（新端口）——
           // 订阅它保证网关重启后 WS 自动切到新地址，而不是死磕旧端口
           try {
             ipc.onEvent?.((event: string, params?: any) => {
-              if (event === 'gateway.serveInfo' && params) client?.updateInfo(params)
-            })
-          } catch { /* noop */ }
-          debug('[ServeGateway] serve 模式已激活, port=', info.port)
-          return client
+              if (event === "gateway.serveInfo" && params)
+                client?.updateInfo(params);
+            });
+          } catch {
+            /* noop */
+          }
+          debug("[ServeGateway] serve 模式已激活, port=", info.port);
+          return client;
         }
-        await new Promise((r) => setTimeout(r, 2000))
+        await new Promise((r) => setTimeout(r, 2000));
       }
-      warn('[ServeGateway] 等待 serve 握手超时（120s），保持 acp 回落')
-      return null
+      warn("[ServeGateway] 等待 serve 握手超时（120s），保持 acp 回落");
+      return null;
     } catch (e) {
-      logError('[ServeGateway] 初始化失败:', e)
-      return null
+      logError("[ServeGateway] 初始化失败:", e);
+      return null;
     }
-  })()
-  return initPromise
+  })();
+  return initPromise;
 }

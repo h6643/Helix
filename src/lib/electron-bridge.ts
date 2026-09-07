@@ -1,21 +1,21 @@
-import { getServeHelixFacade } from '@/lib/serve-gateway'
-import { installTauriBridge, isTauri } from '@/lib/tauri-bridge'
-import type { ElectronAPI } from '@/types/electron'
+import { getServeHelixFacade } from "@/lib/serve-gateway";
+import { installTauriBridge, isTauri } from "@/lib/tauri-bridge";
+import type { ElectronAPI } from "@/types/electron";
 
 /**
  * Check if running in Electron (or the Tauri build, which shims the same
  * `window.electron` surface).
  */
 export function isElectron(): boolean {
-  if (typeof window === 'undefined') return false
-  if (!!window.electron?.isElectron) return true
+  if (typeof window === "undefined") return false;
+  if (!!window.electron?.isElectron) return true;
   // Tauri: install the invoke-backed bridge lazily so any consumer (even one
   // that only checks `isElectron()` first) sees a consistent environment.
   if (isTauri()) {
-    installTauriBridge()
-    return true
+    installTauriBridge();
+    return true;
   }
-  return false
+  return false;
 }
 
 /**
@@ -27,11 +27,11 @@ export function isElectron(): boolean {
  * this guard and fall back to `<iframe>` in Tauri.
  */
 export function isRealElectron(): boolean {
-  if (typeof window === 'undefined') return false
+  if (typeof window === "undefined") return false;
   // The Tauri bridge also sets window.electron.isElectron = true (shim), so the
   // flag alone can't distinguish runtimes — must exclude Tauri explicitly.
-  if (isTauri()) return false
-  return !!window.electron?.isElectron
+  if (isTauri()) return false;
+  return !!window.electron?.isElectron;
 }
 
 // serve 模式下包裹 window.electron 的 Proxy 缓存：
@@ -43,23 +43,23 @@ export function isRealElectron(): boolean {
 // 直接以 window.electron 为 target 并对 `helix` 返回门面会抛
 // "property 'helix' is a read-only and non-configurable data property..."。
 // 解法：以空对象为 target（无自有属性 → 不受不变量约束），闭包转发到真实 api。
-let serveProxyCache: ElectronAPI | null = null
+let serveProxyCache: ElectronAPI | null = null;
 
 function wrapWithServeProxy(api: ElectronAPI): ElectronAPI {
-  if (serveProxyCache) return serveProxyCache
+  if (serveProxyCache) return serveProxyCache;
   serveProxyCache = new Proxy({} as Record<string | symbol, unknown>, {
     get(_target, prop: string | symbol) {
-      if (prop === 'helix') {
-        const facade = getServeHelixFacade()
-        if (facade) return facade
+      if (prop === "helix") {
+        const facade = getServeHelixFacade();
+        if (facade) return facade;
       }
-      return (api as any)[prop as any]
+      return (api as any)[prop as any];
     },
     has(_target, prop: string | symbol) {
-      return prop in (api as any)
+      return prop in (api as any);
     },
-  }) as unknown as ElectronAPI
-  return serveProxyCache
+  }) as unknown as ElectronAPI;
+  return serveProxyCache;
 }
 
 /**
@@ -68,10 +68,10 @@ function wrapWithServeProxy(api: ElectronAPI): ElectronAPI {
  */
 export function getElectronAPI(): ElectronAPI | null {
   if (isElectron()) {
-    if (getServeHelixFacade()) return wrapWithServeProxy(window.electron!)
-    return window.electron!
+    if (getServeHelixFacade()) return wrapWithServeProxy(window.electron!);
+    return window.electron!;
   }
-  return null
+  return null;
 }
 
 /**
@@ -79,10 +79,12 @@ export function getElectronAPI(): ElectronAPI | null {
  * serve 模式 → 网关门面（WS/REST 直连）；acp 模式 → 原 IPC 桥。
  * 渲染层所有直摸 `window.electron.helix` 的调用点应改用本函数。
  */
-export function helixApi(): ElectronAPI['helix'] | null {
-  const facade = getServeHelixFacade()
-  if (facade) return facade
-  return (typeof window !== 'undefined' ? window.electron?.helix : null) ?? null
+export function helixApi(): ElectronAPI["helix"] | null {
+  const facade = getServeHelixFacade();
+  if (facade) return facade;
+  return (
+    (typeof window !== "undefined" ? window.electron?.helix : null) ?? null
+  );
 }
 
 /**
@@ -92,117 +94,127 @@ export function helixApi(): ElectronAPI['helix'] | null {
  */
 export const electronFS = {
   async readFile(filePath: string): Promise<string> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      return api.fs.read(filePath)
+      return api.fs.read(filePath);
     }
-    throw new Error('File system not available in browser mode')
+    throw new Error("File system not available in browser mode");
   },
 
   async writeFile(filePath: string, content: string): Promise<void> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      await api.fs.write(filePath, content)
-      return
+      await api.fs.write(filePath, content);
+      return;
     }
-    throw new Error('File system not available in browser mode')
+    throw new Error("File system not available in browser mode");
   },
 
-  async editFile(filePath: string, oldString: string, newString: string): Promise<void> {
-    const api = getElectronAPI()
+  async editFile(
+    filePath: string,
+    oldString: string,
+    newString: string,
+  ): Promise<void> {
+    const api = getElectronAPI();
     if (api) {
-      await api.fs.edit(filePath, oldString, newString)
-      return
+      await api.fs.edit(filePath, oldString, newString);
+      return;
     }
-    throw new Error('File system not available in browser mode')
+    throw new Error("File system not available in browser mode");
   },
 
-  async readDir(dirPath: string): Promise<Array<{ name: string; isDirectory: boolean }>> {
-    const api = getElectronAPI()
+  async readDir(
+    dirPath: string,
+  ): Promise<Array<{ name: string; isDirectory: boolean }>> {
+    const api = getElectronAPI();
     if (api) {
-      return api.fs.readdir(dirPath)
+      return api.fs.readdir(dirPath);
     }
-    throw new Error('File system not available in browser mode')
+    throw new Error("File system not available in browser mode");
   },
 
   // Absolute Helix memory directory, computed in the main process.
   // Use this instead of deriving the path from process.env in the renderer
   // (which is undefined in a Next.js client bundle).
   async memoryDir(): Promise<string | null> {
-    const api = getElectronAPI()
-    if (api && typeof api.fs.helixMemoryDir === 'function') {
-      return api.fs.helixMemoryDir()
+    const api = getElectronAPI();
+    if (api && typeof api.fs.helixMemoryDir === "function") {
+      return api.fs.helixMemoryDir();
     }
-    return null
+    return null;
   },
 
   async stat(filePath: string) {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      return api.fs.stat(filePath)
+      return api.fs.stat(filePath);
     }
-    throw new Error('File system not available in browser mode')
+    throw new Error("File system not available in browser mode");
   },
 
   async rename(oldPath: string, newPath: string): Promise<void> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      await api.fs.rename(oldPath, newPath)
-      return
+      await api.fs.rename(oldPath, newPath);
+      return;
     }
-    throw new Error('File system not available in browser mode')
+    throw new Error("File system not available in browser mode");
   },
 
   async deleteFile(filePath: string): Promise<void> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      await api.fs.delete(filePath)
-      return
+      await api.fs.delete(filePath);
+      return;
     }
-    throw new Error('File system not available in browser mode')
+    throw new Error("File system not available in browser mode");
   },
 
-  async scanTree(dirPath?: string): Promise<Array<{ id: string; name: string; type: string; children?: any[] }>> {
-    const api = getElectronAPI()
-    if (api && typeof api.fs.scanTree === 'function') {
-      return api.fs.scanTree(dirPath)
+  async scanTree(
+    dirPath?: string,
+  ): Promise<
+    Array<{ id: string; name: string; type: string; children?: any[] }>
+  > {
+    const api = getElectronAPI();
+    if (api && typeof api.fs.scanTree === "function") {
+      return api.fs.scanTree(dirPath);
     }
     // 旧 preload 可能未暴露 scanTree：返回空树，避免 setWorkDir 抛错。
-    return []
+    return [];
   },
-}
+};
 
 /**
  * Shell operations (Electron only)
  */
 export const electronShell = {
   async open(target: string): Promise<void> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      await api.shell.open(target)
-      return
+      await api.shell.open(target);
+      return;
     }
-    window.open(target, '_blank')
+    window.open(target, "_blank");
   },
 
   async showItemInFolder(relativePath: string): Promise<void> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      await api.shell.showItemInFolder(relativePath)
-      return
+      await api.shell.showItemInFolder(relativePath);
+      return;
     }
-    throw new Error('showItemInFolder not available in browser mode')
+    throw new Error("showItemInFolder not available in browser mode");
   },
 
   async openPath(dir: string): Promise<void> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      await api.shell.openPath(dir)
-      return
+      await api.shell.openPath(dir);
+      return;
     }
-    throw new Error('openPath not available in browser mode')
+    throw new Error("openPath not available in browser mode");
   },
-}
+};
 
 /**
  * Interactive terminal (Electron only) — persistent PowerShell session.
@@ -210,138 +222,160 @@ export const electronShell = {
  * run side-by-side (VS Code style).
  */
 export const electronTerminal = {
-  async start(id: number, cols?: number, rows?: number, cwd?: string): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
+  async start(
+    id: number,
+    cols?: number,
+    rows?: number,
+    cwd?: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const api = getElectronAPI();
     if (api?.terminal) {
-      return api.terminal.start(id, cols, rows, cwd)
+      return api.terminal.start(id, cols, rows, cwd);
     }
-    return { ok: false, error: 'Terminal not available in browser mode' }
+    return { ok: false, error: "Terminal not available in browser mode" };
   },
 
   write(id: number, command: string): void {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api?.terminal) {
-      api.terminal.write(id, command)
+      api.terminal.write(id, command);
     }
   },
 
   resize(id: number, cols: number, rows: number): void {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api?.terminal) {
-      api.terminal.resize(id, cols, rows)
+      api.terminal.resize(id, cols, rows);
     }
   },
 
   async kill(id: number): Promise<void> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api?.terminal) {
-      await api.terminal.kill(id)
+      await api.terminal.kill(id);
     }
   },
 
-  onData(callback: (payload: { id: number; data: string }) => void): () => void {
-    const api = getElectronAPI()
+  onData(
+    callback: (payload: { id: number; data: string }) => void,
+  ): () => void {
+    const api = getElectronAPI();
     if (api?.terminal) {
-      return api.terminal.onData(callback)
+      return api.terminal.onData(callback);
     }
-    return () => {}
+    return () => {};
   },
-}
+};
 
 /**
  * Dialog operations (Electron only)
  */
 export const electronDialog = {
   async openDirectory(defaultPath?: string): Promise<string | null> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      return api.dialog.openDirectory(defaultPath)
+      return api.dialog.openDirectory(defaultPath);
     }
-    throw new Error('Dialog not available in browser mode')
+    throw new Error("Dialog not available in browser mode");
   },
 
-  async openFile(options?: { filters?: Array<{ name: string; extensions: string[] }> }): Promise<string | null> {
-    const api = getElectronAPI()
+  async openFile(options?: {
+    filters?: Array<{ name: string; extensions: string[] }>;
+  }): Promise<string | null> {
+    const api = getElectronAPI();
     if (api) {
-      return api.dialog.openFile(options)
+      return api.dialog.openFile(options);
     }
-    throw new Error('Dialog not available in browser mode')
+    throw new Error("Dialog not available in browser mode");
   },
 
-  async saveFile(options?: { filters?: Array<{ name: string; extensions: string[] }> }): Promise<string | null> {
-    const api = getElectronAPI()
+  async saveFile(options?: {
+    filters?: Array<{ name: string; extensions: string[] }>;
+  }): Promise<string | null> {
+    const api = getElectronAPI();
     if (api) {
-      return api.dialog.saveFile(options)
+      return api.dialog.saveFile(options);
     }
-    throw new Error('Dialog not available in browser mode')
+    throw new Error("Dialog not available in browser mode");
   },
-}
+};
 
 /**
  * App info (Electron only)
  */
 export const electronApp = {
   async getInfo() {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      return api.app.getInfo()
+      return api.app.getInfo();
     }
     return {
-      version: '0.2.0',
-      platform: 'browser',
-      workDir: '',
-    }
+      version: "0.2.0",
+      platform: "browser",
+      workDir: "",
+    };
   },
 
   async setWorkDir(dir: string): Promise<void> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      await api.app.setWorkDir(dir)
-      return
+      await api.app.setWorkDir(dir);
+      return;
     }
-    throw new Error('App not available in browser mode')
+    throw new Error("App not available in browser mode");
   },
 
-  async getDataRoot(): Promise<{ dataRoot: string; dataRootDefault: string; dataRootCustom: boolean }> {
-    const api = getElectronAPI()
+  async getDataRoot(): Promise<{
+    dataRoot: string;
+    dataRootDefault: string;
+    dataRootCustom: boolean;
+  }> {
+    const api = getElectronAPI();
     if (api) {
-      return api.app.getDataRoot()
+      return api.app.getDataRoot();
     }
-    return { dataRoot: '', dataRootDefault: '', dataRootCustom: false }
+    return { dataRoot: "", dataRootDefault: "", dataRootCustom: false };
   },
 
-  async setDataRoot(path: string): Promise<{ success: boolean; dataRoot: string; dataRootDefault: string; dataRootCustom: boolean; copied: boolean; bytes?: number }> {
-    const api = getElectronAPI()
+  async setDataRoot(path: string): Promise<{
+    success: boolean;
+    dataRoot: string;
+    dataRootDefault: string;
+    dataRootCustom: boolean;
+    copied: boolean;
+    bytes?: number;
+  }> {
+    const api = getElectronAPI();
     if (api) {
-      return api.app.setDataRoot(path)
+      return api.app.setDataRoot(path);
     }
-    throw new Error('App not available in browser mode')
+    throw new Error("App not available in browser mode");
   },
 
   async proxyGet(): Promise<{ url: string }> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      return api.app.proxyGet()
+      return api.app.proxyGet();
     }
-    return { url: '' }
+    return { url: "" };
   },
 
   async proxySet(url: string): Promise<{ success: boolean; url: string }> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      return api.app.proxySet(url)
+      return api.app.proxySet(url);
     }
-    throw new Error('App not available in browser mode')
+    throw new Error("App not available in browser mode");
   },
 
   async readEnvKey(key: string): Promise<string> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api) {
-      return api.app.readEnvKey(key)
+      return api.app.readEnvKey(key);
     }
-    return ''
+    return "";
   },
-}
+};
 
 /**
  * Helix bridge (Electron only) — JSON-RPC send / notify.
@@ -355,195 +389,248 @@ export const electronApp = {
  */
 export const electronHelix = {
   async send(method: string, params?: any): Promise<any> {
-    const api = getElectronAPI()
+    const api = getElectronAPI();
     if (api?.helix) {
-      return api.helix.send(method, params)
+      return api.helix.send(method, params);
     }
-    return null
+    return null;
   },
 
   notify(method: string, params?: any): void {
-    const api = getElectronAPI()
-    const h = api?.helix as any
+    const api = getElectronAPI();
+    const h = api?.helix as any;
     if (h?.notify) {
-      h.notify(method, params)
-      return
+      h.notify(method, params);
+      return;
     }
-    console.warn(`[electron-bridge] helix.notify unavailable; skipped "${method}". Restart Helix to enable.`)
+    console.warn(
+      `[electron-bridge] helix.notify unavailable; skipped "${method}". Restart Helix to enable.`,
+    );
   },
 
   async interrupt(sessionId: string): Promise<void> {
-    const api = getElectronAPI()
-    const h = api?.helix as any
+    const api = getElectronAPI();
+    const h = api?.helix as any;
     if (h?.interrupt) {
-      await h.interrupt(sessionId)
+      await h.interrupt(sessionId);
     }
   },
 
   async update(): Promise<{ ok: boolean; message: string }> {
-    const api = getElectronAPI()
-    const h = api?.helix as any
+    const api = getElectronAPI();
+    const h = api?.helix as any;
     if (h?.update) {
-      return h.update()
+      return h.update();
     }
-    return { ok: false, message: '更新通道不可用' }
+    return { ok: false, message: "更新通道不可用" };
   },
 
   /** Live config push: set a single key/value pair without gateway restart */
-  async setConfigKeyValue(key: string, value: any, sessionId?: string): Promise<void> {
-    const api = getElectronAPI()
-    const h = api?.helix as any
+  async setConfigKeyValue(
+    key: string,
+    value: any,
+    sessionId?: string,
+  ): Promise<void> {
+    const api = getElectronAPI();
+    const h = api?.helix as any;
     if (h?.setConfigKeyValue) {
-      await h.setConfigKeyValue({ key, value, session_id: sessionId })
+      await h.setConfigKeyValue({ key, value, session_id: sessionId });
     }
   },
 
   /** Respond to an approval request from the backend */
-  async approvalRespond(params: { session_id?: string; tool_call_id?: string; choice: string }): Promise<void> {
-    const api = getElectronAPI()
-    const h = api?.helix as any
+  async approvalRespond(params: {
+    session_id?: string;
+    tool_call_id?: string;
+    choice: string;
+  }): Promise<void> {
+    const api = getElectronAPI();
+    const h = api?.helix as any;
     if (h?.approvalRespond) {
-      await h.approvalRespond(params)
+      await h.approvalRespond(params);
     }
   },
-}
+};
 
 /**
  * Git operations (Electron only)
  */
 export const electronGit = {
-  async status(cwd?: string | null): Promise<{ ok: boolean; output?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.status(cwd)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async status(
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.status(cwd);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async diff(filePath?: string, staged?: boolean): Promise<{ ok: boolean; diff?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.diff(filePath, staged)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async diff(
+    filePath?: string,
+    staged?: boolean,
+  ): Promise<{ ok: boolean; diff?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.diff(filePath, staged);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async diffHead(filePath?: string): Promise<{ ok: boolean; diff?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.diffHead(filePath)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async diffHead(
+    filePath?: string,
+  ): Promise<{ ok: boolean; diff?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.diffHead(filePath);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async diffNumstat(cwd?: string | null): Promise<{ ok: boolean; output?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.diffNumstat(cwd)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async diffNumstat(
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.diffNumstat(cwd);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
   async revert(filePath?: string): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.revert(filePath)
-    return { ok: false, error: 'Git not available in browser mode' }
+    const api = getElectronAPI();
+    if (api?.git) return api.git.revert(filePath);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
   async stage(filePath?: string): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.stage(filePath)
-    return { ok: false, error: 'Git not available in browser mode' }
+    const api = getElectronAPI();
+    if (api?.git) return api.git.stage(filePath);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
   async unstage(filePath?: string): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.unstage(filePath)
-    return { ok: false, error: 'Git not available in browser mode' }
+    const api = getElectronAPI();
+    if (api?.git) return api.git.unstage(filePath);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async commit(message?: string): Promise<{ ok: boolean; output?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.commit(message)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async commit(
+    message?: string,
+  ): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.commit(message);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async branchList(cwd?: string | null): Promise<{ ok: boolean; branches?: string[]; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.branchList(cwd)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async branchList(
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; branches?: string[]; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.branchList(cwd);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async branchSwitch(branch: string, cwd?: string | null): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.branchSwitch(branch, cwd)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async branchSwitch(
+    branch: string,
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.branchSwitch(branch, cwd);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async branchCreate(branch: string, cwd?: string | null): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.branchCreate(branch, cwd)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async branchCreate(
+    branch: string,
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.branchCreate(branch, cwd);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async currentBranch(cwd?: string | null): Promise<{ ok: boolean; branch?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.currentBranch(cwd)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async currentBranch(
+    cwd?: string | null,
+  ): Promise<{ ok: boolean; branch?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.currentBranch(cwd);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async log(count?: number): Promise<{ ok: boolean; output?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.log(count)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async log(
+    count?: number,
+  ): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.log(count);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
   // Worktree operations
-  async worktreeList(): Promise<{ ok: boolean; worktrees?: any[]; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.worktreeList()
-    return { ok: false, error: 'Git not available in browser mode' }
+  async worktreeList(): Promise<{
+    ok: boolean;
+    worktrees?: any[];
+    error?: string;
+  }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.worktreeList();
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async worktreeAdd(opts: { path: string; branch?: string; newBranch?: string }): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.worktreeAdd(opts)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async worktreeAdd(opts: {
+    path: string;
+    branch?: string;
+    newBranch?: string;
+  }): Promise<{ ok: boolean; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.worktreeAdd(opts);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async worktreeRemove(wtPath: string): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.worktreeRemove(wtPath)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async worktreeRemove(
+    wtPath: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.worktreeRemove(wtPath);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
   async worktreeLock(wtPath: string): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.worktreeLock(wtPath)
-    return { ok: false, error: 'Git not available in browser mode' }
+    const api = getElectronAPI();
+    if (api?.git) return api.git.worktreeLock(wtPath);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async worktreeUnlock(wtPath: string): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.worktreeUnlock(wtPath)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async worktreeUnlock(
+    wtPath: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.worktreeUnlock(wtPath);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
   async worktreePrune(): Promise<{ ok: boolean; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.worktreePrune()
-    return { ok: false, error: 'Git not available in browser mode' }
+    const api = getElectronAPI();
+    if (api?.git) return api.git.worktreePrune();
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
   // Remote operations
-  async push(opts?: { remote?: string; branch?: string; force?: boolean }): Promise<{ ok: boolean; output?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.push(opts)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async push(opts?: {
+    remote?: string;
+    branch?: string;
+    force?: boolean;
+  }): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.push(opts);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async pull(opts?: { remote?: string; branch?: string }): Promise<{ ok: boolean; output?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.pull(opts)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async pull(opts?: {
+    remote?: string;
+    branch?: string;
+  }): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.pull(opts);
+    return { ok: false, error: "Git not available in browser mode" };
   },
 
-  async fetch(opts?: { remote?: string }): Promise<{ ok: boolean; output?: string; error?: string }> {
-    const api = getElectronAPI()
-    if (api?.git) return api.git.fetch(opts)
-    return { ok: false, error: 'Git not available in browser mode' }
+  async fetch(opts?: {
+    remote?: string;
+  }): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.fetch(opts);
+    return { ok: false, error: "Git not available in browser mode" };
   },
-}
-
+};

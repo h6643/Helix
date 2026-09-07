@@ -8,204 +8,228 @@
  */
 
 export interface FileNode {
-  id: string
-  name: string
-  type: 'file' | 'folder'
-  children?: FileNode[]
-  content?: string
-  language?: string
+  id: string;
+  name: string;
+  type: "file" | "folder";
+  children?: FileNode[];
+  content?: string;
+  language?: string;
 }
 
 export interface ImageAttachment {
-  id: string
-  dataUrl: string      // "data:image/png;base64,..."
-  mediaType: string     // "image/png", "image/jpeg", "image/webp"
-  width?: number
-  height?: number
-  name?: string
+  id: string;
+  dataUrl: string; // "data:image/png;base64,..."
+  mediaType: string; // "image/png", "image/jpeg", "image/webp"
+  width?: number;
+  height?: number;
+  name?: string;
 }
 
 // A file dropped/picked into the conversation (images, text, or binary).
 export interface FileAttachment {
-  id: string
-  name: string
-  size: number
-  mime: string
-  kind: 'image' | 'text' | 'file'
-  dataUrl?: string     // image preview (data: URL), only for kind === 'image'
-  base64?: string      // raw base64 payload (without data: prefix), for sending to Helix
-  path?: string        // Electron: absolute file path for binary files
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+  kind: "image" | "text" | "file";
+  dataUrl?: string; // image preview (data: URL), only for kind === 'image'
+  base64?: string; // raw base64 payload (without data: prefix), for sending to Helix
+  path?: string; // Electron: absolute file path for binary files
 }
 
 // A web link picked from the in-app browser ("选取网页元素加入聊天") and shown
 // as a compact card in the composer instead of a long raw URL in the input.
 export interface LinkAttachment {
-  id: string
-  url: string
-  title?: string       // optional display label (e.g. the picked element's text)
+  id: string;
+  url: string;
+  title?: string; // optional display label (e.g. the picked element's text)
 }
 
 export interface ExecutionStep {
-  id: string
-  type: 'task' | 'thinking' | 'reasoning' | 'tool_call' | 'tool_result' | 'text' | 'error' | 'done' | 'plan' | 'usage' | 'compact' | 'file_change'
-  content: string
-  toolName?: string
-  toolKind?: string
-  toolParams?: Record<string, unknown>
-  fileChanges?: Array<{ path: string; type: 'add' | 'modify' | 'delete'; diff: string }>
-  timestamp: number
-  expanded?: boolean
-  planText?: string
-  taskLabel?: string
-  taskId?: string
-  finishReason?: string
-  status?: 'running' | 'completed' | 'failed' | 'waiting'
-  startedAt?: number
-  finishedAt?: number
-  duration_s?: number
-  logs?: string[]
-  agentName?: string
-  subSteps?: ExecutionStep[]
-  delegationId?: string
-  inlineDiff?: string
-  summary?: string
-  output?: string
+  id: string;
+  type:
+    | "task"
+    | "thinking"
+    | "reasoning"
+    | "tool_call"
+    | "tool_result"
+    | "text"
+    | "error"
+    | "done"
+    | "plan"
+    | "usage"
+    | "compact"
+    | "file_change";
+  content: string;
+  toolName?: string;
+  toolKind?: string;
+  toolParams?: Record<string, unknown>;
+  fileChanges?: Array<{
+    path: string;
+    type: "add" | "modify" | "delete";
+    diff: string;
+  }>;
+  timestamp: number;
+  expanded?: boolean;
+  planText?: string;
+  taskLabel?: string;
+  taskId?: string;
+  finishReason?: string;
+  status?: "running" | "completed" | "failed" | "waiting";
+  startedAt?: number;
+  finishedAt?: number;
+  duration_s?: number;
+  logs?: string[];
+  agentName?: string;
+  subSteps?: ExecutionStep[];
+  delegationId?: string;
+  inlineDiff?: string;
+  summary?: string;
+  output?: string;
 }
 
 // Streaming response blocks for the currently-running assistant reply.
 export type StreamingResponseBlock =
-  | { type: 'text'; content: string }
-  | { type: 'thinking'; content: string }
-  | { type: 'tool_group'; steps: ExecutionStep[] }
-  | { type: 'file_change'; changes: PendingChange[] }
+  | { type: "text"; content: string }
+  | { type: "thinking"; content: string }
+  | { type: "tool_group"; steps: ExecutionStep[] }
+  | { type: "file_change"; changes: PendingChange[] };
 
 // Per-session streaming draft: survives conversation switches.
 export interface StreamingDraft {
-  responseBlocks: StreamingResponseBlock[]
-  streamThinking: string
-  steps: ExecutionStep[]
-  isAgentRunning: boolean
-  textBuffer?: string
-  thoughtBuffer?: string
-  helixSessionId?: string | null
+  responseBlocks: StreamingResponseBlock[];
+  streamThinking: string;
+  steps: ExecutionStep[];
+  isAgentRunning: boolean;
+  textBuffer?: string;
+  thoughtBuffer?: string;
+  helixSessionId?: string | null;
   // When this run started (ms epoch). Per-session so each conversation's live
   // timer keeps its own elapsed time instead of sharing one global timestamp.
-  startedAt?: number
+  startedAt?: number;
   // Backend-reported total token count after usage:prompt-complete.
-  totalTokens?: number
+  totalTokens?: number;
 }
 
 // Transient notice about the Helix gateway connection (e.g. upstream dropped the
 // stream and is retrying). Shown in the execution status box; not persisted.
 export interface ConnectionNotice {
-  phase: 'error' | 'retrying' | 'recovered'
-  attempt?: number
-  total?: number
-  message: string
-  ts: number
+  phase: "error" | "retrying" | "recovered";
+  attempt?: number;
+  total?: number;
+  message: string;
+  ts: number;
 }
 
 export interface ChatMessage {
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  content: string
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
   /** Durable backend message row id (state.db messages.id), surfaced by the
    *  gateway's message.complete frame. Used to sync local withdraw/delete with
    *  the backend session history via the message.delete RPC. Absent on messages
    *  produced before this field existed or for local-only messages. */
-  rowId?: number
-  sessionId?: string
-  images?: ImageAttachment[]
-  files?: FileAttachment[]
-  timestamp: number
-  isStreaming?: boolean
-  duration?: number
-  thinkingTime?: number
-  tokenCount?: number
-  thoughtTokens?: number
-  outputTokens?: number
-  totalTokens?: number
-  reasoning?: string
-  steps?: ExecutionStep[]
-  fileChanges?: PendingChange[]
-  blocks?: Array<{ type: 'text'; content: string } | { type: 'thinking'; content: string } | { type: 'tool_group'; steps: ExecutionStep[] } | { type: 'file_change'; changes: PendingChange[] }>
+  rowId?: number;
+  sessionId?: string;
+  images?: ImageAttachment[];
+  files?: FileAttachment[];
+  timestamp: number;
+  isStreaming?: boolean;
+  duration?: number;
+  thinkingTime?: number;
+  tokenCount?: number;
+  thoughtTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  reasoning?: string;
+  steps?: ExecutionStep[];
+  fileChanges?: PendingChange[];
+  blocks?: Array<
+    | { type: "text"; content: string }
+    | { type: "thinking"; content: string }
+    | { type: "tool_group"; steps: ExecutionStep[] }
+    | { type: "file_change"; changes: PendingChange[] }
+  >;
 }
 
 export interface EditorTab {
-  id: string
-  fileId: string
-  name: string
-  language: string
-  isDirty: boolean
+  id: string;
+  fileId: string;
+  name: string;
+  language: string;
+  isDirty: boolean;
 }
 
 export interface CursorPosition {
-  line: number
-  column: number
+  line: number;
+  column: number;
 }
 
 export interface ToastMessage {
-  id: string
-  type: 'success' | 'error' | 'info' | 'warning'
-  title: string
-  description?: string
-  duration?: number
-  onClick?: () => void
+  id: string;
+  type: "success" | "error" | "info" | "warning";
+  title: string;
+  description?: string;
+  duration?: number;
+  onClick?: () => void;
 }
 
 export interface PendingChange {
-  id: string
-  fileId: string
-  fileName: string
-  filePath: string
+  id: string;
+  fileId: string;
+  fileName: string;
+  filePath: string;
   /** 捕获该变更时所属的项目工作目录（绝对路径）。diff 面板按当前项目过滤；
    *  对话内联 file_change 块（非聚合列表）可以没有该字段。 */
-  workDir?: string
-  oldContent: string
-  newContent: string
-  language: string
+  workDir?: string;
+  oldContent: string;
+  newContent: string;
+  language: string;
   /** Backend-rendered unified diff (from Helix tool.complete inline_diff),
    *  ANSI-stripped. When present, DiffPreview renders it directly instead of
    *  recomputing a diff from old/new content. */
-  unifiedDiff?: string
+  unifiedDiff?: string;
 }
 
-export type ApiProvider = string
-export type AgentEngine = 'helix'
+export type ApiProvider = string;
+export type AgentEngine = "helix";
 
 // Helix native reasoning scale (none/minimal/low/medium/high/xhigh/max/ultra).
-export type ReasoningEffortLevel = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+export type ReasoningEffortLevel =
+  "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+
+export type ApprovalMode = "default" | "accept_edits" | "dont_ask" | "plan";
 
 // Tool approval choices written back to the backend approval state machine.
-export type ApprovalLevel = 'once' | 'session' | 'always' | 'deny'
+export type ApprovalLevel = "once" | "session" | "always" | "deny";
 
 export interface McpServerConfig {
-  name?: string
-  type: 'local' | 'remote'
-  command?: string[]
-  url?: string
-  environment?: Record<string, string>
-  enabled?: boolean
-  cwd?: string
-  timeout?: number
-  headers?: Record<string, string>
-  envPassthrough?: boolean
+  name?: string;
+  type: "local" | "remote";
+  command?: string[];
+  url?: string;
+  environment?: Record<string, string>;
+  enabled?: boolean;
+  cwd?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  envPassthrough?: boolean;
 }
 
 export interface ApiConfig {
-  provider: ApiProvider
-  apiKey: string
-  baseUrl: string
-  model: string
-  engine?: AgentEngine
+  provider: ApiProvider;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  engine?: AgentEngine;
 }
 
 export interface ApiProfile {
-  id: string
-  name: string
-  config: ApiConfig
+  id: string;
+  name: string;
+  config: ApiConfig;
   /** All models available under this provider. The first entry is the default. */
-  models?: string[]
+  models?: string[];
 }
 
 /**
@@ -214,96 +238,105 @@ export interface ApiProfile {
  * either the main store or the standalone helix-ui store.
  */
 export interface ProviderConfig {
-  id: string
+  id: string;
   /** Display name, e.g. "Ling" */
-  name: string
+  name: string;
   /** Base URL, e.g. "https://api.ant-ling.com/v1" */
-  baseUrl: string
-  apiKey: string
+  baseUrl: string;
+  apiKey: string;
   /** Models offered by this provider, e.g. ["Ling-2.6-1T", "Ling-2.6-Pro"] */
-  models: string[]
+  models: string[];
   /** Default model for this provider (falls back to models[0]). */
-  defaultModel?: string
+  defaultModel?: string;
   /** Marks the provider used when nothing is selected. */
-  isDefault?: boolean
+  isDefault?: boolean;
 }
 
 export interface Skill {
-  id: string
-  name: string
-  description: string
-  prompt: string
-  icon?: string
-  isBuiltin?: boolean
-  createdAt: number
+  id: string;
+  name: string;
+  description: string;
+  prompt: string;
+  icon?: string;
+  isBuiltin?: boolean;
+  createdAt: number;
 }
 
-export type MemoryCategory = 'user' | 'feedback' | 'project' | 'reference' | 'architecture' | 'rule' | 'decision' | 'pattern' | 'gotcha'
+export type MemoryCategory =
+  | "user"
+  | "feedback"
+  | "project"
+  | "reference"
+  | "architecture"
+  | "rule"
+  | "decision"
+  | "pattern"
+  | "gotcha";
 
 export interface MemoryEntry {
-  id: string
-  content: string
-  category: MemoryCategory
-  createdAt: number
+  id: string;
+  content: string;
+  category: MemoryCategory;
+  createdAt: number;
   /** Origin of a MEMORY.md entry: 'manual' (added via Helix UI) vs 'auto'
    * (appended by Helix self-evolution). Undefined for user-profile entries. */
-  source?: 'manual' | 'auto'
+  source?: "manual" | "auto";
 }
 
 export interface AvailableCommand {
-  name: string
-  description?: string
+  name: string;
+  description?: string;
 }
 
 // A plugin managed by the Helix backend (serve gateway `plugins.manage` /
 // `helix plugins` / Plugins Hub). Mirrors the backend row shape.
 export interface BackendPlugin {
-  name: string
-  key?: string
-  version: string
-  description: string
-  source: 'bundled' | 'user'
-  status: 'enabled' | 'disabled' | 'not enabled'
+  name: string;
+  key?: string;
+  version: string;
+  description: string;
+  source: "bundled" | "user";
+  status: "enabled" | "disabled" | "not enabled";
 }
 
 export interface TaskNode {
-  id: string
-  label: string
-  status: 'pending' | 'in_progress' | 'done' | 'blocked'
-  children?: TaskNode[]
-  parentId: string | null
-  depth: number
+  id: string;
+  label: string;
+  status: "pending" | "in_progress" | "done" | "blocked";
+  children?: TaskNode[];
+  parentId: string | null;
+  depth: number;
 }
 
 export interface SessionCheckpoint {
-  id: string
-  label: string
-  timestamp: number
-  taskIds: string[]
-  memorySnapshot: string
+  id: string;
+  label: string;
+  timestamp: number;
+  taskIds: string[];
+  memorySnapshot: string;
   /** Full task-tree snapshot so restoreCheckpoint can rebuild tasks faithfully.
    *  Absent on checkpoints saved by older builds — those fall back to taskIds. */
-  tasks?: TaskNode[]
+  tasks?: TaskNode[];
 }
 
 export interface ScheduledTask {
-  id: string
-  label: string
-  prompt: string
-  scheduleText: string       // e.g. "every day at 9am" or "cron: 0 9 * * *"
-  cronExpression?: string    // parsed cron expression
-  enabled: boolean
-  lastRunAt: number | null
-  nextRunAt: number | null
-  createdAt: number
-  updatedAt: number
+  id: string;
+  label: string;
+  prompt: string;
+  scheduleText: string; // e.g. "every day at 9am" or "cron: 0 9 * * *"
+  cronExpression?: string; // parsed cron expression
+  enabled: boolean;
+  lastRunAt: number | null;
+  nextRunAt: number | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface ToolCallEntry {
-  toolName: string
-  params: string
-  status: 'running' | 'success' | 'error'
-  timestamp: number
+  toolName: string;
+  params: string;
+  status: "running" | "success" | "error";
+  timestamp: number;
 }
 
 /**
@@ -312,56 +345,140 @@ export interface ToolCallEntry {
  * `todo_write` tool result). `status` mirrors Helix's own states.
  */
 export interface HelixTodo {
-  id: string
-  content: string
-  status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
-  activeForm?: string
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+  activeForm?: string;
 }
 
 export interface SubAgent {
-  id: string
-  name: string
-  description: string
-  status: 'running' | 'completed' | 'failed' | 'cancelled'
-  parentId: string | null
-  chatMessageId: string | null
-  createdAt: number
-  completedAt?: number
-  result?: string
-  filesModified?: string[]
-  toolCalls?: ToolCallEntry[]
+  id: string;
+  name: string;
+  description: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  parentId: string | null;
+  chatMessageId: string | null;
+  createdAt: number;
+  completedAt?: number;
+  result?: string;
+  filesModified?: string[];
+  toolCalls?: ToolCallEntry[];
 }
 
 // Used as the `customShortcuts` value shape across the app.
 export interface CustomShortcutEntry {
-  keys: string[]
-  action: string
-  description: string
+  keys: string[];
+  action: string;
+  description: string;
 }
 
 export const DEFAULT_SHORTCUTS: Record<string, CustomShortcutEntry> = {
-  'archive-chat': { keys: ['Ctrl', 'Shift', 'A'], action: 'archive-chat', description: '归档聊天' },
-  'new-chat': { keys: ['Ctrl', 'N'], action: 'new-chat', description: '新对话' },
-  'quick-chat': { keys: ['Ctrl', 'Alt', 'N'], action: 'quick-chat', description: '新建快速对话' },
-  'search-chat': { keys: ['Ctrl', 'F'], action: 'search-chat', description: '搜索对话内容' },
-  'go-back': { keys: ['Ctrl', '['], action: 'go-back', description: '返回' },
-  'go-forward': { keys: ['Ctrl', ']'], action: 'go-forward', description: '前进' },
-  'next-recent-chat': { keys: ['Ctrl', 'Tab'], action: 'next-recent-chat', description: '下一个最近查看的聊天' },
-  'prev-recent-chat': { keys: ['Ctrl', 'Shift', 'Tab'], action: 'prev-recent-chat', description: '上一个最近查看的聊天' },
-  'prev-chat': { keys: ['Ctrl', 'Shift', '['], action: 'prev-chat', description: '上一个聊天' },
-  'open-review': { keys: ['Ctrl', 'Shift', 'G'], action: 'open-review', description: '打开审查选项卡' },
-  'toggle-sidebar': { keys: ['Ctrl', 'B'], action: 'toggle-sidebar', description: '切换边栏' },
-  'toggle-sidebar-full': { keys: ['Ctrl', 'L'], action: 'toggle-sidebar-full', description: '完全显示/隐藏边栏' },
-  'toggle-terminal': { keys: ['Ctrl', 'J'], action: 'toggle-terminal', description: '打开终端' },
-  'force-reload': { keys: ['Ctrl', 'Shift', 'R'], action: 'force-reload', description: '刷新界面' },
+  "archive-chat": {
+    keys: ["Ctrl", "Shift", "A"],
+    action: "archive-chat",
+    description: "归档聊天",
+  },
+  "new-chat": {
+    keys: ["Ctrl", "N"],
+    action: "new-chat",
+    description: "新对话",
+  },
+  "quick-chat": {
+    keys: ["Ctrl", "Alt", "N"],
+    action: "quick-chat",
+    description: "新建快速对话",
+  },
+  "search-chat": {
+    keys: ["Ctrl", "F"],
+    action: "search-chat",
+    description: "搜索对话内容",
+  },
+  "go-back": { keys: ["Ctrl", "["], action: "go-back", description: "返回" },
+  "go-forward": {
+    keys: ["Ctrl", "]"],
+    action: "go-forward",
+    description: "前进",
+  },
+  "next-recent-chat": {
+    keys: ["Ctrl", "Tab"],
+    action: "next-recent-chat",
+    description: "下一个最近查看的聊天",
+  },
+  "prev-recent-chat": {
+    keys: ["Ctrl", "Shift", "Tab"],
+    action: "prev-recent-chat",
+    description: "上一个最近查看的聊天",
+  },
+  "prev-chat": {
+    keys: ["Ctrl", "Shift", "["],
+    action: "prev-chat",
+    description: "上一个聊天",
+  },
+  "open-review": {
+    keys: ["Ctrl", "Shift", "G"],
+    action: "open-review",
+    description: "打开审查选项卡",
+  },
+  "toggle-sidebar": {
+    keys: ["Ctrl", "B"],
+    action: "toggle-sidebar",
+    description: "切换边栏",
+  },
+  "toggle-sidebar-full": {
+    keys: ["Ctrl", "L"],
+    action: "toggle-sidebar-full",
+    description: "完全显示/隐藏边栏",
+  },
+  "toggle-terminal": {
+    keys: ["Ctrl", "J"],
+    action: "toggle-terminal",
+    description: "打开终端",
+  },
+  "force-reload": {
+    keys: ["Ctrl", "Shift", "R"],
+    action: "force-reload",
+    description: "刷新界面",
+  },
 
-  'new-window': { keys: ['Ctrl', 'Shift', 'N'], action: 'new-window', description: '新建窗口' },
-  'rename-chat': { keys: ['Ctrl', 'Alt', 'R'], action: 'rename-chat', description: '重命名聊天' },
-  'search-chats': { keys: ['Ctrl', 'G'], action: 'search-chats', description: '搜索聊天' },
-  'show-shortcuts': { keys: ['Ctrl', 'Shift', '/'], action: 'show-shortcuts', description: '显示键盘快捷键' },
-  'settings': { keys: ['Ctrl', ','], action: 'settings', description: '设置' },
-  'approve-request': { keys: ['Enter'], action: 'approve-request', description: '批准请求' },
-  'decline-request': { keys: ['Escape'], action: 'decline-request', description: '拒绝请求' },
-  'model-picker': { keys: ['Ctrl', 'Shift', 'M'], action: 'model-picker', description: '打开模型选择器' },
-  'toggle-file-tree': { keys: ['Ctrl', 'Shift', 'E'], action: 'toggle-file-tree', description: '切换文件树' },
-}
+  "new-window": {
+    keys: ["Ctrl", "Shift", "N"],
+    action: "new-window",
+    description: "新建窗口",
+  },
+  "rename-chat": {
+    keys: ["Ctrl", "Alt", "R"],
+    action: "rename-chat",
+    description: "重命名聊天",
+  },
+  "search-chats": {
+    keys: ["Ctrl", "G"],
+    action: "search-chats",
+    description: "搜索聊天",
+  },
+  "show-shortcuts": {
+    keys: ["Ctrl", "Shift", "/"],
+    action: "show-shortcuts",
+    description: "显示键盘快捷键",
+  },
+  settings: { keys: ["Ctrl", ","], action: "settings", description: "设置" },
+  "approve-request": {
+    keys: ["Enter"],
+    action: "approve-request",
+    description: "批准请求",
+  },
+  "decline-request": {
+    keys: ["Escape"],
+    action: "decline-request",
+    description: "拒绝请求",
+  },
+  "model-picker": {
+    keys: ["Ctrl", "Shift", "M"],
+    action: "model-picker",
+    description: "打开模型选择器",
+  },
+  "toggle-file-tree": {
+    keys: ["Ctrl", "Shift", "E"],
+    action: "toggle-file-tree",
+    description: "切换文件树",
+  },
+};

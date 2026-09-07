@@ -1,95 +1,109 @@
-'use client'
+"use client";
 
-import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
-import { ChevronDown, ChevronUp } from 'lucide-react'
-import { useHelixStore } from '@/stores/helix-store'
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useRef,
+} from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
+import { useHelixStore } from "@/stores/helix-store";
 
-const PAGE_SIZE = 20
+const PAGE_SIZE = 20;
 
 export function HistoryStrip() {
-  const chatMessages = useHelixStore((s) => s.chatMessages)
-  const currentSessionId = useHelixStore((s) => s.currentSessionId)
-  const [hovered, setHovered] = useState<string | null>(null)
-  const [activeId, setActiveId] = useState<string | null>(null)
-  const [pageOffset, setPageOffset] = useState(0)
-  const containerRef = useRef<HTMLDivElement>(null)
+  const chatMessages = useHelixStore((s) => s.chatMessages);
+  const currentSessionId = useHelixStore((s) => s.currentSessionId);
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [pageOffset, setPageOffset] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const messages = useMemo(
     () =>
       chatMessages.filter(
-        (m) => (!m.sessionId || m.sessionId === currentSessionId) && m.role === 'user',
+        (m) =>
+          (!m.sessionId || m.sessionId === currentSessionId) &&
+          m.role === "user",
       ),
     [chatMessages, currentSessionId],
-  )
+  );
 
-  const totalPages = Math.max(1, Math.ceil(messages.length / PAGE_SIZE))
+  const totalPages = Math.max(1, Math.ceil(messages.length / PAGE_SIZE));
   useEffect(() => {
-    setPageOffset(0)
-  }, [currentSessionId])
-  const safeOffset = Math.min(pageOffset, totalPages - 1)
-  const pageStart = Math.max(0, messages.length - (safeOffset + 1) * PAGE_SIZE)
-  const pageMessages = messages.slice(pageStart, pageStart + PAGE_SIZE)
-  const curPage = safeOffset + 1
+    setPageOffset(0);
+  }, [currentSessionId]);
+  const safeOffset = Math.min(pageOffset, totalPages - 1);
+  const pageStart = Math.max(0, messages.length - (safeOffset + 1) * PAGE_SIZE);
+  const pageMessages = messages.slice(pageStart, pageStart + PAGE_SIZE);
+  const curPage = safeOffset + 1;
 
   const locate = useCallback((id: string) => {
-    const viewport = document.querySelector('.msg-scroll-viewport') as HTMLElement | null
-    const root = viewport ?? document
-    const el = root.querySelector(`[data-message-id="${CSS.escape(id)}"]`)
-    el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  }, [])
+    const viewport = document.querySelector(
+      ".msg-scroll-viewport",
+    ) as HTMLElement | null;
+    const root = viewport ?? document;
+    const el = root.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
+    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, []);
 
   const onWheel = useCallback(
     (e: React.WheelEvent<HTMLDivElement>) => {
-      if (totalPages <= 1) return
+      if (totalPages <= 1) return;
       // Need passive: false to allow preventDefault
-      e.preventDefault()
+      e.preventDefault();
       if (e.deltaY < 0) {
-        setPageOffset((p) => Math.min(p + 1, totalPages - 1))
+        setPageOffset((p) => Math.min(p + 1, totalPages - 1));
       } else if (e.deltaY > 0) {
-        setPageOffset((p) => Math.max(p - 1, 0))
+        setPageOffset((p) => Math.max(p - 1, 0));
       }
     },
     [totalPages],
-  )
+  );
 
   useEffect(() => {
-    const viewport = document.querySelector('.msg-scroll-viewport') as HTMLElement | null
-    if (!viewport || messages.length === 0) return
+    const viewport = document.querySelector(
+      ".msg-scroll-viewport",
+    ) as HTMLElement | null;
+    if (!viewport || messages.length === 0) return;
 
-    let raf = 0
+    let raf = 0;
     const update = () => {
-      const vTop = viewport.scrollTop
-      const vCenter = vTop + viewport.clientHeight / 2
-      let best: string | null = null
-      let bestDist = Infinity
+      const vTop = viewport.scrollTop;
+      const vCenter = vTop + viewport.clientHeight / 2;
+      let best: string | null = null;
+      let bestDist = Infinity;
       for (const m of messages) {
-        const el = viewport.querySelector(`[data-message-id="${CSS.escape(m.id)}"]`) as HTMLElement | null
-        if (!el) continue
-        const elCenter = el.offsetTop + el.offsetHeight / 2
-        const dist = Math.abs(elCenter - vCenter)
+        const el = viewport.querySelector(
+          `[data-message-id="${CSS.escape(m.id)}"]`,
+        ) as HTMLElement | null;
+        if (!el) continue;
+        const elCenter = el.offsetTop + el.offsetHeight / 2;
+        const dist = Math.abs(elCenter - vCenter);
         if (dist < bestDist) {
-          bestDist = dist
-          best = m.id
+          bestDist = dist;
+          best = m.id;
         }
       }
-      setActiveId(best)
-    }
+      setActiveId(best);
+    };
 
-    update()
+    update();
     const onScroll = () => {
-      cancelAnimationFrame(raf)
-      raf = requestAnimationFrame(update)
-    }
-    viewport.addEventListener('scroll', onScroll, { passive: false })
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(update);
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: false });
     return () => {
-      viewport.removeEventListener('scroll', onScroll)
-      cancelAnimationFrame(raf)
-    }
-  }, [messages])
+      viewport.removeEventListener("scroll", onScroll);
+      cancelAnimationFrame(raf);
+    };
+  }, [messages]);
 
-  if (messages.length === 0) return null
+  if (messages.length === 0) return null;
 
-  const isAnyHovered = hovered !== null
+  const isAnyHovered = hovered !== null;
 
   return (
     // 命中范围恒为 28px 条带：外层盒与文字层均 pointer-events-none，
@@ -105,8 +119,8 @@ export function HistoryStrip() {
         onWheel={onWheel}
       >
         {pageMessages.map((m) => {
-          const isActive = activeId === m.id
-          const isHovered = hovered === m.id
+          const isActive = activeId === m.id;
+          const isHovered = hovered === m.id;
 
           return (
             <button
@@ -117,25 +131,27 @@ export function HistoryStrip() {
               className={`
                 flex items-center h-2.5 w-7 shrink-0 px-1 rounded-md
                 transition-colors duration-150
-                ${isHovered ? 'bg-muted/60' : ''}
+                ${isHovered ? "bg-muted/60" : ""}
               `}
             >
               {/* 细线 */}
               <span
                 className={`
                   w-5 h-1 rounded-full shrink-0 transition-colors duration-200
-                  ${isActive ? 'bg-primary' : 'bg-primary/30'}
+                  ${isActive ? "bg-primary" : "bg-primary/30"}
                 `}
               />
             </button>
-          )
+          );
         })}
 
         {totalPages > 1 && (
           <div className="flex items-center gap-0.5 pt-1 mt-0.5 border-t border-border/40">
             <button
               type="button"
-              onClick={() => setPageOffset((p) => Math.min(p + 1, totalPages - 1))}
+              onClick={() =>
+                setPageOffset((p) => Math.min(p + 1, totalPages - 1))
+              }
               disabled={safeOffset >= totalPages - 1}
               className="p-0.5 rounded text-sidebar-foreground/40 hover:text-sidebar-foreground disabled:opacity-25 transition-colors"
             >
@@ -163,8 +179,8 @@ export function HistoryStrip() {
           pointer-events-none —— 悬停时全部标题一起显示，但不占命中区。 */}
       <div className="absolute left-8 top-1 flex flex-col gap-1.5 pointer-events-none">
         {pageMessages.map((m) => {
-          const raw = (m.content ?? '').trim() || '(空消息)'
-          const text = raw.replace(/\s+/g, ' ').slice(0, 10)
+          const raw = (m.content ?? "").trim() || "(空消息)";
+          const text = raw.replace(/\s+/g, " ").slice(0, 10);
           return (
             <span
               key={m.id}
@@ -172,14 +188,14 @@ export function HistoryStrip() {
                 flex h-2.5 items-center whitespace-nowrap text-foreground/75
                 transition-opacity duration-200
                 text-[calc(var(--helix-transcript-size)*0.8571)]
-                ${isAnyHovered ? 'opacity-100' : 'opacity-0'}
+                ${isAnyHovered ? "opacity-100" : "opacity-0"}
               `}
             >
               {text}
             </span>
-          )
+          );
         })}
       </div>
     </div>
-  )
+  );
 }

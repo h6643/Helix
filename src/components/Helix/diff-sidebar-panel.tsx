@@ -1,10 +1,10 @@
-'use client'
+"use client";
 
-import { FileDiff } from 'lucide-react'
-import { useMemo } from 'react'
-import { useHelixStore } from '@/stores/helix-store'
-import { countDiffLines } from './diff-preview'
-import { FileChangeSummary } from './file-change-summary'
+import { FileDiff } from "lucide-react";
+import { useMemo } from "react";
+import { useHelixStore } from "@/stores/helix-store";
+import { countDiffLines } from "./diff-preview";
+import { FileChangeSummary } from "./file-change-summary";
 
 /**
  * Right-sidebar "变更" tab: a read-only file-change comparison surfaced by the
@@ -13,25 +13,32 @@ import { FileChangeSummary } from './file-change-summary'
  * apply/reject actions (file modifications are applied by the agent itself).
  */
 export function DiffSidebarPanel() {
-  const pendingChanges = useHelixStore(s => s.pendingChanges)
-  const currentWorkDir = useHelixStore(s => s.selectedWorkDir)
+  const pendingChanges = useHelixStore((s) => s.pendingChanges);
+  const currentWorkDir = useHelixStore((s) => s.selectedWorkDir);
 
   // 只展示当前项目（工作目录）的变更，不同项目各自独立。
   const projectChanges = useMemo(
-    () => pendingChanges.filter(c => (c.workDir ?? '') === (currentWorkDir ?? '')),
+    () =>
+      pendingChanges.filter(
+        (c) => (c.workDir ?? "") === (currentWorkDir ?? ""),
+      ),
     [pendingChanges, currentWorkDir],
-  )
+  );
 
   const totalStats = useMemo(
-    () => projectChanges.reduce(
-      (sum, c) => {
-        const s = countDiffLines(c)
-        return { added: sum.added + s.added, removed: sum.removed + s.removed }
-      },
-      { added: 0, removed: 0 },
-    ),
+    () =>
+      projectChanges.reduce(
+        (sum, c) => {
+          const s = countDiffLines(c);
+          return {
+            added: sum.added + s.added,
+            removed: sum.removed + s.removed,
+          };
+        },
+        { added: 0, removed: 0 },
+      ),
     [projectChanges],
-  )
+  );
 
   return (
     <div className="h-full w-full flex flex-col min-h-0 bg-card">
@@ -55,13 +62,17 @@ export function DiffSidebarPanel() {
         {projectChanges.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-12 text-muted-foreground/70">
             <FileDiff className="size-9" strokeWidth={1.5} />
-            <span className="text-[length:var(--helix-transcript-size)]">暂无变更</span>
-            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">当前项目对话中的文件修改会自动收集到这里</span>
+            <span className="text-[length:var(--helix-transcript-size)]">
+              暂无变更
+            </span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
+              当前项目对话中的文件修改会自动收集到这里
+            </span>
           </div>
         ) : (
           <FileChangeSummary changes={projectChanges} hideHeader />
         )}
       </div>
     </div>
-  )
+  );
 }

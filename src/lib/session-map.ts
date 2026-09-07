@@ -6,23 +6,27 @@
  * 压缩自愈）通过 resolveBackendSid 读取映射。
  */
 
-export type SessionMapEntry = { sid: string; epoch: number; storedId?: string }
+export type SessionMapEntry = { sid: string; epoch: number; storedId?: string };
 
-export const SESSION_MAP_KEY = 'conversationSessions'
+export const SESSION_MAP_KEY = "conversationSessions";
 
 export async function loadSessionMap(): Promise<Map<string, SessionMapEntry>> {
   try {
-    const { persistence } = await import('@/lib/persist')
-    const raw = await persistence.loadSetting<Record<string, SessionMapEntry>>(SESSION_MAP_KEY)
-    const map = new Map<string, SessionMapEntry>()
-    if (raw && typeof raw === 'object') {
+    const { persistence } = await import("@/lib/persist");
+    const raw =
+      await persistence.loadSetting<Record<string, SessionMapEntry>>(
+        SESSION_MAP_KEY,
+      );
+    const map = new Map<string, SessionMapEntry>();
+    if (raw && typeof raw === "object") {
       for (const [k, v] of Object.entries(raw)) {
-        if (v && typeof v.sid === 'string' && typeof v.epoch === 'number') map.set(k, v)
+        if (v && typeof v.sid === "string" && typeof v.epoch === "number")
+          map.set(k, v);
       }
     }
-    return map
+    return map;
   } catch {
-    return new Map()
+    return new Map();
   }
 }
 
@@ -33,8 +37,10 @@ export async function loadSessionMap(): Promise<Map<string, SessionMapEntry>> {
  *  + 历史）。因此 epoch 不匹配（网关重启）不再视为会话死亡——直接把
  *  持久化 sid 交给调用方，由后端判定死活（恢复成功 or 真正 not found），
  *  调用方各自兜底。 */
-export async function resolveBackendSid(conversationId: string | null | undefined): Promise<string | null> {
-  if (!conversationId) return null
-  const map = await loadSessionMap()
-  return map.get(conversationId)?.sid ?? null
+export async function resolveBackendSid(
+  conversationId: string | null | undefined,
+): Promise<string | null> {
+  if (!conversationId) return null;
+  const map = await loadSessionMap();
+  return map.get(conversationId)?.sid ?? null;
 }

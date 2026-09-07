@@ -9,57 +9,62 @@
  * manages in-memory tab state; the component performs the IO and then calls
  * markEditorTabSaved() once the write succeeds.
  */
-import type { StateCreator } from 'zustand'
+import type { StateCreator } from "zustand";
 
 interface EditorTab {
   /** Stable id — equals the file path relative to the working directory. */
-  id: string
+  id: string;
   /** Path relative to the working directory (what fs:read/write expect). */
-  path: string
-  name: string
+  path: string;
+  name: string;
   /** Editor content (live, editable). */
-  content: string
+  content: string;
   /** Content as last loaded from / saved to disk — used to compute dirty. */
-  originalContent: string
-  dirty: boolean
+  originalContent: string;
+  dirty: boolean;
 }
 
 export interface EditorSlice {
-  editorOpen: boolean
-  editorTabs: EditorTab[]
-  activeEditorTabId: string | null
+  editorOpen: boolean;
+  editorTabs: EditorTab[];
+  activeEditorTabId: string | null;
   /** Editor tab awaiting an unsaved-changes confirmation before it closes. */
-  pendingCloseId: string | null
+  pendingCloseId: string | null;
 
-  openFileInEditor: (path: string, name: string, content: string) => void
+  openFileInEditor: (path: string, name: string, content: string) => void;
   /** Synchronously create / activate a tab carrying only the file NAME (empty
    *  content) so the right-sidebar page strip can show the name immediately,
    *  before the (async) disk read finishes. Returns true if a new empty tab was
    *  created (so the caller can close it again on a read failure). */
-  ensureEditorTab: (path: string, name: string) => boolean
+  ensureEditorTab: (path: string, name: string) => boolean;
   /** Fill the content of a previously-created empty (optimistic) tab. */
-  fillEditorTabContent: (path: string, content: string) => void
-  closeEditorTab: (id: string) => void
-  closeAllEditorTabs: () => void
-  setActiveEditorTab: (id: string) => void
-  setPendingCloseId: (id: string | null) => void
-  updateEditorTabContent: (id: string, content: string) => void
-  markEditorTabSaved: (id: string) => void
-  toggleCodeEditor: () => void
-  closeCodeEditor: () => void
+  fillEditorTabContent: (path: string, content: string) => void;
+  closeEditorTab: (id: string) => void;
+  closeAllEditorTabs: () => void;
+  setActiveEditorTab: (id: string) => void;
+  setPendingCloseId: (id: string | null) => void;
+  updateEditorTabContent: (id: string, content: string) => void;
+  markEditorTabSaved: (id: string) => void;
+  toggleCodeEditor: () => void;
+  closeCodeEditor: () => void;
 }
 
-export const createEditorSlice: StateCreator<EditorSlice, [], [], EditorSlice> = (set, get) => ({
+export const createEditorSlice: StateCreator<
+  EditorSlice,
+  [],
+  [],
+  EditorSlice
+> = (set, get) => ({
   editorOpen: false,
   editorTabs: [],
   activeEditorTabId: null,
   pendingCloseId: null,
 
   openFileInEditor: (path, name, content) => {
-    const existing = get().editorTabs.find((t) => t.id === path)
+    const existing = get().editorTabs.find((t) => t.id === path);
     if (existing) {
-      set({ activeEditorTabId: path, editorOpen: true })
-      return
+      set({ activeEditorTabId: path, editorOpen: true });
+      return;
     }
     const tab: EditorTab = {
       id: path,
@@ -68,58 +73,65 @@ export const createEditorSlice: StateCreator<EditorSlice, [], [], EditorSlice> =
       content,
       originalContent: content,
       dirty: false,
-    }
+    };
     set((s) => ({
       editorTabs: [...s.editorTabs, tab],
       activeEditorTabId: path,
       editorOpen: true,
-    }))
+    }));
   },
 
   ensureEditorTab: (path, name) => {
-    const existing = get().editorTabs.find((t) => t.id === path)
+    const existing = get().editorTabs.find((t) => t.id === path);
     if (existing) {
-      set({ activeEditorTabId: path, editorOpen: true })
-      return false
+      set({ activeEditorTabId: path, editorOpen: true });
+      return false;
     }
     const tab: EditorTab = {
       id: path,
       path,
       name,
-      content: '',
-      originalContent: '',
+      content: "",
+      originalContent: "",
       dirty: false,
-    }
+    };
     set((s) => ({
       editorTabs: [...s.editorTabs, tab],
       activeEditorTabId: path,
       editorOpen: true,
-    }))
-    return true
+    }));
+    return true;
   },
 
   fillEditorTabContent: (path, content) => {
     set((s) => ({
       editorTabs: s.editorTabs.map((t) =>
-        t.id === path ? { ...t, content, originalContent: content, dirty: false } : t,
+        t.id === path
+          ? { ...t, content, originalContent: content, dirty: false }
+          : t,
       ),
-    }))
+    }));
   },
 
   closeEditorTab: (id) => {
     set((s) => {
-      const idx = s.editorTabs.findIndex((t) => t.id === id)
-      const tabs = s.editorTabs.filter((t) => t.id !== id)
-      let active = s.activeEditorTabId
+      const idx = s.editorTabs.findIndex((t) => t.id === id);
+      const tabs = s.editorTabs.filter((t) => t.id !== id);
+      let active = s.activeEditorTabId;
       if (active === id) {
-        if (tabs.length === 0) active = null
-        else active = tabs[Math.min(idx, tabs.length - 1)].id
+        if (tabs.length === 0) active = null;
+        else active = tabs[Math.min(idx, tabs.length - 1)].id;
       }
-      return { editorTabs: tabs, activeEditorTabId: active, editorOpen: tabs.length > 0 ? s.editorOpen : false }
-    })
+      return {
+        editorTabs: tabs,
+        activeEditorTabId: active,
+        editorOpen: tabs.length > 0 ? s.editorOpen : false,
+      };
+    });
   },
 
-  closeAllEditorTabs: () => set({ editorTabs: [], activeEditorTabId: null, editorOpen: false }),
+  closeAllEditorTabs: () =>
+    set({ editorTabs: [], activeEditorTabId: null, editorOpen: false }),
 
   setActiveEditorTab: (id) => set({ activeEditorTabId: id, editorOpen: true }),
 
@@ -128,9 +140,11 @@ export const createEditorSlice: StateCreator<EditorSlice, [], [], EditorSlice> =
   updateEditorTabContent: (id, content) => {
     set((s) => ({
       editorTabs: s.editorTabs.map((t) =>
-        t.id === id ? { ...t, content, dirty: content !== t.originalContent } : t,
+        t.id === id
+          ? { ...t, content, dirty: content !== t.originalContent }
+          : t,
       ),
-    }))
+    }));
   },
 
   markEditorTabSaved: (id) => {
@@ -138,9 +152,9 @@ export const createEditorSlice: StateCreator<EditorSlice, [], [], EditorSlice> =
       editorTabs: s.editorTabs.map((t) =>
         t.id === id ? { ...t, originalContent: t.content, dirty: false } : t,
       ),
-    }))
+    }));
   },
 
   toggleCodeEditor: () => set((s) => ({ editorOpen: !s.editorOpen })),
   closeCodeEditor: () => set({ editorOpen: false }),
-})
+});

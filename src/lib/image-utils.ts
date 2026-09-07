@@ -2,78 +2,87 @@
  * Image processing utilities for clipboard paste support
  */
 
-import type { ImageAttachment } from '@/stores/helix-store'
+import type { ImageAttachment } from "@/stores/helix-store";
 
-const MAX_IMAGE_SIZE = 2048 // Maximum dimension in pixels
-const MAX_IMAGES_PER_MESSAGE = 5
-const SUPPORTED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+const MAX_IMAGE_SIZE = 2048; // Maximum dimension in pixels
+const MAX_IMAGES_PER_MESSAGE = 5;
+const SUPPORTED_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 function validateImageType(type: string): boolean {
-  return SUPPORTED_TYPES.includes(type)
+  return SUPPORTED_TYPES.includes(type);
 }
 
 function generateImageId(): string {
-  return `img-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+  return `img-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-async function getImageDimensions(dataUrl: string): Promise<{ width: number; height: number }> {
+async function getImageDimensions(
+  dataUrl: string,
+): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
-    img.onerror = reject
-    img.src = dataUrl
-  })
+    const img = new Image();
+    img.onload = () =>
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
 }
 
-export async function compressImage(dataUrl: string, maxWidth: number = MAX_IMAGE_SIZE, quality: number = 0.85): Promise<string> {
-  const { width, height } = await getImageDimensions(dataUrl)
+export async function compressImage(
+  dataUrl: string,
+  maxWidth: number = MAX_IMAGE_SIZE,
+  quality: number = 0.85,
+): Promise<string> {
+  const { width, height } = await getImageDimensions(dataUrl);
 
   // No compression needed if already within limits
   if (width <= maxWidth && height <= maxWidth) {
-    return dataUrl
+    return dataUrl;
   }
 
-  const canvas = document.createElement('canvas')
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return dataUrl
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return dataUrl;
 
   // Calculate new dimensions maintaining aspect ratio
-  let newWidth = width
-  let newHeight = height
+  let newWidth = width;
+  let newHeight = height;
   if (width > height) {
-    newWidth = Math.min(width, maxWidth)
-    newHeight = Math.round((height / width) * newWidth)
+    newWidth = Math.min(width, maxWidth);
+    newHeight = Math.round((height / width) * newWidth);
   } else {
-    newHeight = Math.min(height, maxWidth)
-    newWidth = Math.round((width / height) * newHeight)
+    newHeight = Math.min(height, maxWidth);
+    newWidth = Math.round((width / height) * newHeight);
   }
 
-  canvas.width = newWidth
-  canvas.height = newHeight
+  canvas.width = newWidth;
+  canvas.height = newHeight;
 
-  const img = await loadImage(dataUrl)
-  ctx.drawImage(img, 0, 0, newWidth, newHeight)
+  const img = await loadImage(dataUrl);
+  ctx.drawImage(img, 0, 0, newWidth, newHeight);
 
-  return canvas.toDataURL('image/jpeg', quality)
+  return canvas.toDataURL("image/jpeg", quality);
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => resolve(img)
-    img.onerror = reject
-    img.src = src
-  })
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
 }
 
-export async function processClipboardImage(blob: Blob): Promise<ImageAttachment | null> {
+export async function processClipboardImage(
+  blob: Blob,
+): Promise<ImageAttachment | null> {
   if (!validateImageType(blob.type)) {
-    return null
+    return null;
   }
 
-  const dataUrl = await blobToDataUrl(blob)
-  const compressed = await compressImage(dataUrl)
-  const { width, height } = await getImageDimensions(compressed)
+  const dataUrl = await blobToDataUrl(blob);
+  const compressed = await compressImage(dataUrl);
+  const { width, height } = await getImageDimensions(compressed);
 
   return {
     id: generateImageId(),
@@ -81,19 +90,22 @@ export async function processClipboardImage(blob: Blob): Promise<ImageAttachment
     mediaType: blob.type,
     width,
     height,
-    name: `clipboard-image-${Date.now()}.${blob.type.split('/')[1] || 'png'}`,
-  }
+    name: `clipboard-image-${Date.now()}.${blob.type.split("/")[1] || "png"}`,
+  };
 }
 
 export function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onloadend = () => resolve(reader.result as string)
-    reader.onerror = reject
-    reader.readAsDataURL(blob)
-  })
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }
 
-export function canAddMoreImages(currentCount: number, newCount: number): boolean {
-  return currentCount + newCount <= MAX_IMAGES_PER_MESSAGE
+export function canAddMoreImages(
+  currentCount: number,
+  newCount: number,
+): boolean {
+  return currentCount + newCount <= MAX_IMAGES_PER_MESSAGE;
 }

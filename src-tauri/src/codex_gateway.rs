@@ -363,7 +363,10 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .or_else(|| CURRENT_THREAD.lock().unwrap().clone())
                 .ok_or_else(|| "No active Codex thread".to_string())?;
             let prompt = prompt_input_items(&params)
-                .or_else(|| non_empty_prompt(&params).map(|text| json!([{ "type": "text", "text": text }])))
+                .or_else(|| {
+                    non_empty_prompt(&params)
+                        .map(|text| json!([{ "type": "text", "text": text }]))
+                })
                 .ok_or("session/prompt is missing text")?;
             let (tx, rx) = tokio::sync::oneshot::channel();
             TURN_WAITERS
@@ -930,7 +933,10 @@ fn emit_codex_event(method: &str, params: &Value) {
             },
             "raw": params,
         })
-    } else if method == "warning" || (method == "error" && params.get("willRetry").and_then(Value::as_bool) == Some(true)) {
+    } else if method == "warning"
+        || (method == "error"
+            && params.get("willRetry").and_then(Value::as_bool) == Some(true))
+    {
         let message = params
             .get("message")
             .or_else(|| params.pointer("/error/message"))
@@ -958,7 +964,10 @@ fn emit_codex_event(method: &str, params: &Value) {
                 "raw": params,
             }),
             _ => {
-                json!({ "session_id": params.get("threadId").cloned().unwrap_or(Value::Null), "raw": params })
+                json!({
+                    "session_id": params.get("threadId").cloned().unwrap_or(Value::Null),
+                    "raw": params,
+                })
             }
         }
     } else if method == "item/completed" {
@@ -983,7 +992,10 @@ fn emit_codex_event(method: &str, params: &Value) {
                 })
             }
             _ => {
-                json!({ "session_id": params.get("threadId").cloned().unwrap_or(Value::Null), "raw": params })
+                json!({
+                    "session_id": params.get("threadId").cloned().unwrap_or(Value::Null),
+                    "raw": params,
+                })
             }
         }
     } else if method == "thread/tokenUsage/updated" {
@@ -1014,7 +1026,9 @@ fn emit_codex_event(method: &str, params: &Value) {
                 "outputTokens": total_usage.get("outputTokens").and_then(Value::as_i64),
                 "thoughtTokens": total_usage.get("reasoningOutputTokens").and_then(Value::as_i64),
                 "cachedReadTokens": total_usage.get("cachedInputTokens").and_then(Value::as_i64),
-                "cachedWriteTokens": total_usage.get("cacheWriteInputTokens").and_then(Value::as_i64),
+                "cachedWriteTokens": total_usage
+                    .get("cacheWriteInputTokens")
+                    .and_then(Value::as_i64),
                 "context_max": model_context_window,
                 "context_used": last_input + last_output,
             },

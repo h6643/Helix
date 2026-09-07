@@ -1,71 +1,84 @@
-'use client'
+"use client";
 
-import { X, ShieldCheck, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Download } from 'lucide-react'
-import React, { useState, useEffect, useCallback } from 'react'
-import { isElectron, electronHelix } from '@/lib/electron-bridge'
-import { useHelixStore } from '@/stores/helix-store'
+import {
+  X,
+  ShieldCheck,
+  Server,
+  RefreshCw,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  Download,
+} from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { isElectron, electronHelix } from "@/lib/electron-bridge";
+import { useHelixStore } from "@/stores/helix-store";
 
 interface DiagStatus {
-  gatewayRunning: boolean
-  gatewayStartedAt: number
-  runtimeVersion: string
-  signatureStatus: string
-  signatureDetail: string
-  platform: string
-  electronVersion: string
-  nodeVersion: string
-  uptime: number
+  gatewayRunning: boolean;
+  gatewayStartedAt: number;
+  runtimeVersion: string;
+  signatureStatus: string;
+  signatureDetail: string;
+  platform: string;
+  electronVersion: string;
+  nodeVersion: string;
+  uptime: number;
 }
 
 export function RuntimePanel({ onClose }: { onClose: () => void }) {
-  const [status, setStatus] = useState<DiagStatus | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [status, setStatus] = useState<DiagStatus | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
-    if (!isElectron() || !(window as any).electron?.diagnostics) return
+    if (!isElectron() || !(window as any).electron?.diagnostics) return;
     try {
-      const s = await (window as any).electron.diagnostics.getStatus()
-      setStatus(s)
+      const s = await (window as any).electron.diagnostics.getStatus();
+      setStatus(s);
     } catch (e) {
       // ignore
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }, [])
+  }, []);
 
   useEffect(() => {
-    refresh()
-    const id = setInterval(refresh, 2000)
-    return () => clearInterval(id)
-  }, [refresh])
+    refresh();
+    const id = setInterval(refresh, 2000);
+    return () => clearInterval(id);
+  }, [refresh]);
 
-  const [updating, setUpdating] = useState(false)
+  const [updating, setUpdating] = useState(false);
 
   const doUpdate = async () => {
-    if (!isElectron()) return
-    setUpdating(true)
+    if (!isElectron()) return;
+    setUpdating(true);
     try {
-      const r = await electronHelix.update()
+      const r = await electronHelix.update();
       useHelixStore.getState().showToast({
-        type: r.ok ? 'success' : 'error',
-        title: r.ok ? '已启动更新' : '更新失败',
+        type: r.ok ? "success" : "error",
+        title: r.ok ? "已启动更新" : "更新失败",
         description: r.message,
         duration: 6000,
-      })
+      });
     } catch (e: any) {
-      useHelixStore.getState().showToast({ type: 'error', title: '更新失败', description: String(e?.message || e) })
+      useHelixStore.getState().showToast({
+        type: "error",
+        title: "更新失败",
+        description: String(e?.message || e),
+      });
     } finally {
-      setUpdating(false)
+      setUpdating(false);
     }
-  }
+  };
 
   const fmtUptime = (ms: number) => {
-    if (!ms || ms < 0) return '—'
-    const s = Math.floor(ms / 1000)
-    const m = Math.floor(s / 60)
-    const h = Math.floor(m / 60)
-    return h > 0 ? `${h}h ${m % 60}m` : m > 0 ? `${m}m ${s % 60}s` : `${s}s`
-  }
+    if (!ms || ms < 0) return "—";
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    const h = Math.floor(m / 60);
+    return h > 0 ? `${h}h ${m % 60}m` : m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+  };
 
   return (
     <div className="h-full w-full flex flex-col bg-background">
@@ -73,7 +86,9 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
       <div className="flex items-center justify-between px-6 py-4 border-b border-border/40 shrink-0">
         <div className="flex items-center gap-2">
           <ShieldCheck className="size-5 text-primary" />
-          <h1 className="text-[calc(var(--helix-transcript-size)*1.4286)] font-semibold text-foreground">运行时与安全</h1>
+          <h1 className="text-[calc(var(--helix-transcript-size)*1.4286)] font-semibold text-foreground">
+            运行时与安全
+          </h1>
         </div>
         <button
           onClick={onClose}
@@ -105,10 +120,12 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
                       <XCircle className="size-4 text-muted-foreground" />
                     )}
                     <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
-                      {status?.gatewayRunning ? '运行中' : '未连接'}
+                      {status?.gatewayRunning ? "运行中" : "未连接"}
                     </span>
                   </div>
-                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">运行时长 {fmtUptime(status?.uptime || 0)}</p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">
+                    运行时长 {fmtUptime(status?.uptime || 0)}
+                  </p>
                 </div>
 
                 <div className="rounded-xl border border-border/50 bg-card/50 p-4">
@@ -116,28 +133,45 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
                     <ShieldCheck className="size-3.5" /> 内核签名校验
                   </div>
                   <div className="flex items-center gap-2">
-                    {status?.signatureStatus === 'verified' ? (
+                    {status?.signatureStatus === "verified" ? (
                       <CheckCircle2 className="size-4 text-emerald-500" />
                     ) : (
                       <XCircle className="size-4 text-amber-500" />
                     )}
                     <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
-                      {status?.signatureStatus === 'verified' ? '已校验' : '未校验'}
+                      {status?.signatureStatus === "verified"
+                        ? "已校验"
+                        : "未校验"}
                     </span>
                   </div>
-                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1 truncate">{status?.signatureDetail}</p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1 truncate">
+                    {status?.signatureDetail}
+                  </p>
                 </div>
 
                 <div className="rounded-xl border border-border/50 bg-card/50 p-4">
-                  <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">运行时版本</div>
-                  <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">{status?.runtimeVersion || '—'}</p>
-                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">Electron {status?.electronVersion} · Node {status?.nodeVersion}</p>
+                  <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">
+                    运行时版本
+                  </div>
+                  <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
+                    {status?.runtimeVersion || "—"}
+                  </p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">
+                    Electron {status?.electronVersion} · Node{" "}
+                    {status?.nodeVersion}
+                  </p>
                 </div>
 
                 <div className="rounded-xl border border-border/50 bg-card/50 p-4">
-                  <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">平台</div>
-                  <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground capitalize">{status?.platform || '—'}</p>
-                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">托管运行时通道</p>
+                  <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground mb-1">
+                    平台
+                  </div>
+                  <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground capitalize">
+                    {status?.platform || "—"}
+                  </p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 mt-1">
+                    托管运行时通道
+                  </p>
                 </div>
               </div>
 
@@ -154,7 +188,11 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
                   disabled={updating}
                   className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] rounded-lg border border-border/50 hover:bg-muted/50 transition-colors flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  {updating ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                  {updating ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Download className="size-3.5" />
+                  )}
                   检查并更新
                 </button>
               </div>
@@ -163,5 +201,5 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
         </div>
       </div>
     </div>
-  )
+  );
 }

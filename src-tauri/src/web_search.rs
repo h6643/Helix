@@ -40,7 +40,8 @@ fn web_provider_search_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
 
     // 2) User plugins: ~/.helix/plugins/web
     dirs.push(helix_data_dir().join("plugins").join("web"));
-    // 3) Bundled resources: <resource_dir>/helix-runtime/python/lib/python3.12/site-packages/plugins/web
+    // 3) Bundled resources:
+    //    <resource_dir>/helix-runtime/python/lib/python3.12/site-packages/plugins/web
     if let Ok(res) = app.path().resource_dir() {
         dirs.push(
             res.join("helix-runtime")
@@ -84,7 +85,14 @@ pub fn web_search_list(app: AppHandle, _state: State<'_, Arc<AppState>>) -> Valu
     let text = match std::fs::read_to_string(&yaml_path) {
         Ok(t) => t,
         Err(_) => {
-            return json!({ "ok": true, "config": { "backend": "", "search_backend": "", "apiKeys": {} } })
+            return json!({
+                "ok": true,
+                "config": {
+                    "backend": "",
+                    "search_backend": "",
+                    "apiKeys": {},
+                },
+            })
         }
     };
 

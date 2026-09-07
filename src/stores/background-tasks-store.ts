@@ -1,4 +1,4 @@
-import { create } from 'zustand'
+import { create } from "zustand";
 
 /**
  * background-tasks-store.ts — 后台任务状态（真实后台任务，不做普通命令面板）。
@@ -14,89 +14,87 @@ import { create } from 'zustand'
 
 export interface BackgroundTask {
   /** 工具调用的唯一 id（tool_call_id），也是任务的 key */
-  id: string
+  id: string;
   /** 命令原文（tool.start 的 context/command） */
-  command: string
-  status: 'running' | 'completed' | 'failed'
+  command: string;
+  status: "running" | "completed" | "failed";
   /** 用户暂停标记：进程树已被后端挂起（process.pause） */
-  paused?: boolean
+  paused?: boolean;
   /** process_registry 会话 id（proc_xxx），tool.complete 结果里带回，
    *  pause/resume RPC 的直查凭据 */
-  procSessionId?: string
-  startedAt: number
-  finishedAt?: number
+  procSessionId?: string;
+  startedAt: number;
+  finishedAt?: number;
   /** 所属会话 id —— 顶栏/面板按它过滤，各对话只见自己的任务 */
-  sessionId: string
+  sessionId: string;
 }
 
 interface BackgroundTasksState {
-  tasks: BackgroundTask[]
+  tasks: BackgroundTask[];
   /** 工具启动时登记任务（terminal/process/bash/docker）；已存在则忽略 */
-  startTask: (id: string, command: string, sessionId: string) => void
+  startTask: (id: string, command: string, sessionId: string) => void;
   /** 标记任务完成/失败（仅 running → 终态，避免重复标记） */
-  finishTask: (id: string, status: 'completed' | 'failed') => void
+  finishTask: (id: string, status: "completed" | "failed") => void;
   /** 记录暂停/恢复状态（本地乐观更新，由面板 RPC 成功后调用） */
-  setTaskPaused: (id: string, paused: boolean) => void
+  setTaskPaused: (id: string, paused: boolean) => void;
   /** 记录 process_registry 会话 id（tool.complete 结果带回） */
-  setTaskProcId: (id: string, procSessionId: string) => void
+  setTaskProcId: (id: string, procSessionId: string) => void;
   /** 清空已完成/失败的任务（保留运行中的） */
-  clearFinished: () => void
+  clearFinished: () => void;
   /** 移除单个任务 */
-  removeTask: (id: string) => void
+  removeTask: (id: string) => void;
 }
 
 export const useBackgroundTasksStore = create<BackgroundTasksState>((set) => ({
   tasks: [],
 
   startTask: (id, command, sessionId) => {
-    if (!id) return
+    if (!id) return;
     set((s) => {
-      if (s.tasks.some((t) => t.id === id)) return s
+      if (s.tasks.some((t) => t.id === id)) return s;
       const task: BackgroundTask = {
         id,
-        command: command || '…',
-        status: 'running',
+        command: command || "…",
+        status: "running",
         startedAt: Date.now(),
         sessionId,
-      }
-      return { tasks: [...s.tasks, task] }
-    })
+      };
+      return { tasks: [...s.tasks, task] };
+    });
   },
 
   finishTask: (id, status) => {
-    if (!id) return
+    if (!id) return;
     set((s) => ({
       tasks: s.tasks.map((t) =>
-        t.id === id && t.status === 'running'
+        t.id === id && t.status === "running"
           ? { ...t, status, finishedAt: Date.now(), paused: false }
-          : t
+          : t,
       ),
-    }))
+    }));
   },
 
   setTaskPaused: (id, paused) => {
-    if (!id) return
+    if (!id) return;
     set((s) => ({
       tasks: s.tasks.map((t) =>
-        t.id === id && t.status === 'running' ? { ...t, paused } : t
+        t.id === id && t.status === "running" ? { ...t, paused } : t,
       ),
-    }))
+    }));
   },
 
   setTaskProcId: (id, procSessionId) => {
-    if (!id || !procSessionId) return
+    if (!id || !procSessionId) return;
     set((s) => ({
-      tasks: s.tasks.map((t) =>
-        t.id === id ? { ...t, procSessionId } : t
-      ),
-    }))
+      tasks: s.tasks.map((t) => (t.id === id ? { ...t, procSessionId } : t)),
+    }));
   },
 
   clearFinished: () => {
-    set((s) => ({ tasks: s.tasks.filter((t) => t.status === 'running') }))
+    set((s) => ({ tasks: s.tasks.filter((t) => t.status === "running") }));
   },
 
   removeTask: (id) => {
-    set((s) => ({ tasks: s.tasks.filter((t) => t.id !== id) }))
+    set((s) => ({ tasks: s.tasks.filter((t) => t.id !== id) }));
   },
-}))
+}));

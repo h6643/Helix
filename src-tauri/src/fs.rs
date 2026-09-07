@@ -146,7 +146,12 @@ pub fn stat(state: State<'_, Arc<AppState>>, file_path: String) -> Result<Value,
         "isFile": m.is_file(),
         "isDirectory": m.is_dir(),
         "size": m.len(),
-        "mtime": m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as f64).unwrap_or(0.0),
+        "mtime": m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as f64)
+            .unwrap_or(0.0),
     }))
 }
 

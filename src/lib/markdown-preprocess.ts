@@ -13,17 +13,22 @@
  * render correctly through remark-math / rehype-katex.
  */
 
-import { isLikelyProseFence, sanitizeLanguageTag } from '@/lib/markdown-code'
+import { isLikelyProseFence, sanitizeLanguageTag } from "@/lib/markdown-code";
 
-const REASONING_BLOCK_RE = /<(think|thinking|reasoning|scratchpad|analysis)>[\s\S]*?<\/\1>\s*/gi
+const REASONING_BLOCK_RE =
+  /<(think|thinking|reasoning|scratchpad|analysis)>[\s\S]*?<\/\1>\s*/gi;
 
-const FENCE_LINE_RE = /^([ \t]*)(`{3,}|~{3,})([^\n]*)$/
-const EMPTY_FENCE_BLOCK_RE = /(^|\n)[ \t]*(?:`{3,}|~{3,})[^\n]*\n[ \t]*(?:`{3,}|~{3,})[ \t]*(?=\n|$)/g
-const CODE_FENCE_SPLIT_RE = /((?:```|~~~)[\s\S]*?(?:```|~~~))/g
-const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g
-const LATEX_DISPLAY_OPEN_LINE_RE = /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\\{1,2}\[[ \t]*\r?$/
-const LATEX_DISPLAY_CLOSE_LINE_RE = /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\\{1,2}\][ \t]*\r?$/
-const CUSTOM_DISPLAY_MATH_LINE_RE = /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\[\/math\][ \t]*\r?$/
+const FENCE_LINE_RE = /^([ \t]*)(`{3,}|~{3,})([^\n]*)$/;
+const EMPTY_FENCE_BLOCK_RE =
+  /(^|\n)[ \t]*(?:`{3,}|~{3,})[^\n]*\n[ \t]*(?:`{3,}|~{3,})[ \t]*(?=\n|$)/g;
+const CODE_FENCE_SPLIT_RE = /((?:```|~~~)[\s\S]*?(?:```|~~~))/g;
+const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g;
+const LATEX_DISPLAY_OPEN_LINE_RE =
+  /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\\{1,2}\[[ \t]*\r?$/;
+const LATEX_DISPLAY_CLOSE_LINE_RE =
+  /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\\{1,2}\][ \t]*\r?$/;
+const CUSTOM_DISPLAY_MATH_LINE_RE =
+  /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?[ \t]*)\[\/math\][ \t]*\r?$/;
 // Bare-URL autolink matcher. The character classes EXCLUDE `*` (so a URL that
 // abuts markdown emphasis like `**label: https://x**` doesn't swallow the
 // trailing `**`) AND exclude every non-ASCII code point (`\u0080-\uFFFF`, which
@@ -34,8 +39,10 @@ const CUSTOM_DISPLAY_MATH_LINE_RE = /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \
 // (non-ASCII must be percent-encoded), so stopping at the first non-ASCII char
 // is safe. Other trailing ASCII punctuation is still peeled off by the final
 // `[^\s<>"'`*.,;:!?\u0080-\uFFFF]` class.
-const RAW_URL_RE = /https?:\/\/[^\s<>"'`*\u0080-\uFFFF]+[^\s<>"'`*.,;:!?\u0080-\uFFFF]/g
-const CITATION_MARKER_RE = /(?<=[\p{L}\p{N})\].,!?:;"'”’])\[(?:\d+(?:\s*,\s*\d+)*)\](?!\()/gu
+const RAW_URL_RE =
+  /https?:\/\/[^\s<>"'`*\u0080-\uFFFF]+[^\s<>"'`*.,;:!?\u0080-\uFFFF]/g;
+const CITATION_MARKER_RE =
+  /(?<=[\p{L}\p{N})\].,!?:;"'”’])\[(?:\d+(?:\s*,\s*\d+)*)\](?!\()/gu;
 
 /**
  * Returns true when `body` contains a line that's exactly `marker` (modulo
@@ -43,52 +50,58 @@ const CITATION_MARKER_RE = /(?<=[\p{L}\p{N})\].,!?:;"'”’])\[(?:\d+(?:\s*,\s*
  * for an opening fence with the same marker.
  */
 function hasCloseFenceLine(body: string, marker: string): boolean {
-  const lines = body.split('\n')
+  const lines = body.split("\n");
 
   for (let i = 1; i < lines.length; i += 1) {
-    const line = lines[i]
-    let lo = 0
-    let hi = line.length
+    const line = lines[i];
+    let lo = 0;
+    let hi = line.length;
 
-    while (lo < hi && (line[lo] === ' ' || line[lo] === '\t')) {
-      lo += 1
+    while (lo < hi && (line[lo] === " " || line[lo] === "\t")) {
+      lo += 1;
     }
 
-    while (hi > lo && (line[hi - 1] === ' ' || line[hi - 1] === '\t')) {
-      hi -= 1
+    while (hi > lo && (line[hi - 1] === " " || line[hi - 1] === "\t")) {
+      hi -= 1;
     }
 
     if (line.slice(lo, hi) === marker) {
-      return true
+      return true;
     }
   }
 
-  return false
+  return false;
 }
 
 function scrubBacktickNoise(text: string): string {
-  const balancedFenceRe = /(^|\n)([ \t]*)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g
-  const protectedRanges: { end: number; start: number }[] = []
-  let match: RegExpExecArray | null
+  const balancedFenceRe =
+    /(^|\n)([ \t]*)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g;
+  const protectedRanges: { end: number; start: number }[] = [];
+  let match: RegExpExecArray | null;
 
   while ((match = balancedFenceRe.exec(text)) !== null) {
-    const start = match.index + match[1].length
+    const start = match.index + match[1].length;
 
-    protectedRanges.push({ end: balancedFenceRe.lastIndex, start })
+    protectedRanges.push({ end: balancedFenceRe.lastIndex, start });
   }
 
-  const danglingCodeFenceRe = /(^|\n)[ \t]*(`{3,}|~{3,})([a-z0-9][a-z0-9+#-]{0,15})[ \t]*\n([\s\S]*)$/gi
+  const danglingCodeFenceRe =
+    /(^|\n)[ \t]*(`{3,}|~{3,})([a-z0-9][a-z0-9+#-]{0,15})[ \t]*\n([\s\S]*)$/gi;
 
   while ((match = danglingCodeFenceRe.exec(text)) !== null) {
-    const start = match.index + match[1].length
-    const marker = match[2] || '```'
-    const info = match[3] || ''
-    const body = match[4] || ''
+    const start = match.index + match[1].length;
+    const marker = match[2] || "```";
+    const info = match[3] || "";
+    const body = match[4] || "";
 
-    if (!hasCloseFenceLine(body, marker) && sanitizeLanguageTag(info) && !isLikelyProseFence(info, body)) {
-      protectedRanges.push({ end: text.length, start })
+    if (
+      !hasCloseFenceLine(body, marker) &&
+      sanitizeLanguageTag(info) &&
+      !isLikelyProseFence(info, body)
+    ) {
+      protectedRanges.push({ end: text.length, start });
 
-      break
+      break;
     }
   }
 
@@ -97,34 +110,34 @@ function scrubBacktickNoise(text: string): string {
   // 这里保留围栏标记（到文本末尾），交给 normalizeFenceBlocks 拆分语言与正文。
   // 语言以拉丁/数字开头才保护——中文式的散文围栏（```总结要点）不在此列。
   // 正文允许含反引号（JSX 模板串），所以匹配到行尾任意字符。
-  const mergedFenceRe = /(^|\n)[ \t]*(`{3,}|~{3,})[A-Za-z0-9][^\n]*(?=\n|$)/g
+  const mergedFenceRe = /(^|\n)[ \t]*(`{3,}|~{3,})[A-Za-z0-9][^\n]*(?=\n|$)/g;
 
   while ((match = mergedFenceRe.exec(text)) !== null) {
-    const start = match.index + match[1].length
+    const start = match.index + match[1].length;
 
-    protectedRanges.push({ end: text.length, start })
+    protectedRanges.push({ end: text.length, start });
 
-    break
+    break;
   }
 
-  protectedRanges.sort((a, b) => a.start - b.start)
+  protectedRanges.sort((a, b) => a.start - b.start);
 
-  const fenceNoiseRe = /`{3,}/g
-  let out = ''
-  let cursor = 0
+  const fenceNoiseRe = /`{3,}/g;
+  let out = "";
+  let cursor = 0;
 
   for (const range of protectedRanges) {
     // 区间可能重叠（merged 保护到末尾、会包住更早的平衡围栏区间）：跳过已被
     // 覆盖的部分，避免重复切片导致围栏内容被复制两份。
-    const sliceStart = Math.max(cursor, range.start)
+    const sliceStart = Math.max(cursor, range.start);
 
-    if (sliceStart >= range.end) continue
-    out += text.slice(cursor, sliceStart).replace(fenceNoiseRe, '')
-    out += text.slice(sliceStart, range.end)
-    cursor = range.end
+    if (sliceStart >= range.end) continue;
+    out += text.slice(cursor, sliceStart).replace(fenceNoiseRe, "");
+    out += text.slice(sliceStart, range.end);
+    cursor = range.end;
   }
 
-  out += text.slice(cursor).replace(fenceNoiseRe, '')
+  out += text.slice(cursor).replace(fenceNoiseRe, "");
 
   for (let pass = 0; pass < 2; pass += 1) {
     // Match EXACTLY 2 backticks (not part of a longer run) on each side.
@@ -134,105 +147,120 @@ function scrubBacktickNoise(text: string): string {
     // last-2-of-bash-close + \n\n + first-2-of-latex-open and the
     // surrounding fence markers collapse into a single longer block,
     // which the markdown parser then treats as ONE giant code block.
-    out = out.replace(/(?<!`)``(?!`)\s*(?<!`)``(?!`)/g, '')
-    out = out.replace(/(^|[^`])``(?=\s|[.,;:!?)\]'"\u2014\u2013-]|$)/g, '$1')
+    out = out.replace(/(?<!`)``(?!`)\s*(?<!`)``(?!`)/g, "");
+    out = out.replace(/(^|[^`])``(?=\s|[.,;:!?)\]'"\u2014\u2013-]|$)/g, "$1");
   }
 
-  return out
+  return out;
 }
 
 function stripEmptyFenceBlocks(text: string): string {
-  return text.replace(EMPTY_FENCE_BLOCK_RE, '$1')
+  return text.replace(EMPTY_FENCE_BLOCK_RE, "$1");
 }
 
 function autoLinkRawUrls(text: string): string {
   return text.replace(RAW_URL_RE, (url: string, index: number) => {
-    const previous = text[index - 1] || ''
-    const beforePrevious = text[index - 2] || ''
+    const previous = text[index - 1] || "";
+    const beforePrevious = text[index - 2] || "";
 
-    if (previous === '<' || (beforePrevious === ']' && previous === '(')) {
-      return url
+    if (previous === "<" || (beforePrevious === "]" && previous === "(")) {
+      return url;
     }
 
-    return `<${url}>`
-  })
+    return `<${url}>`;
+  });
 }
 
 function normalizeVisibleProse(text: string): string {
   return text
     .split(INLINE_CODE_SPLIT_RE)
-    .map(part => (part.startsWith('`') ? part : autoLinkRawUrls(part.replace(CITATION_MARKER_RE, ''))))
-    .join('')
+    .map((part) =>
+      part.startsWith("`")
+        ? part
+        : autoLinkRawUrls(part.replace(CITATION_MARKER_RE, "")),
+    )
+    .join("");
 }
 
 function isEscapedAt(text: string, index: number): boolean {
-  let slashCount = 0
+  let slashCount = 0;
 
-  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor -= 1) {
-    slashCount += 1
+  for (
+    let cursor = index - 1;
+    cursor >= 0 && text[cursor] === "\\";
+    cursor -= 1
+  ) {
+    slashCount += 1;
   }
 
-  return slashCount % 2 === 1
+  return slashCount % 2 === 1;
 }
 
 function findClosingSingleDollar(text: string, openingIndex: number): number {
-  for (let cursor = openingIndex + 1; cursor < text.length && text[cursor] !== '\n'; cursor += 1) {
-    if (text[cursor] !== '$' || isEscapedAt(text, cursor)) {
-      continue
+  for (
+    let cursor = openingIndex + 1;
+    cursor < text.length && text[cursor] !== "\n";
+    cursor += 1
+  ) {
+    if (text[cursor] !== "$" || isEscapedAt(text, cursor)) {
+      continue;
     }
 
     // A `$$` run belongs to display math, not to this inline candidate.
-    if (text[cursor - 1] === '$' || text[cursor + 1] === '$') {
-      continue
+    if (text[cursor - 1] === "$" || text[cursor + 1] === "$") {
+      continue;
     }
 
-    return cursor
+    return cursor;
   }
 
-  return -1
+  return -1;
 }
 
-function isLikelyNumericInlineMath(body: string, followingCharacter: string): boolean {
-  const value = body.trim()
+function isLikelyNumericInlineMath(
+  body: string,
+  followingCharacter: string,
+): boolean {
+  const value = body.trim();
 
   if (!/^\d/u.test(value)) {
-    return false
+    return false;
   }
 
   // Currency ranges and prose fragments can sit between two price openers,
   // e.g. `$5-$10` or `$5, then $10`. They are not balanced math spans.
   if (/[+\-*/=<>^_,;:(]$/u.test(value)) {
-    return false
+    return false;
   }
 
   if (/https?:\/\//iu.test(value)) {
-    return false
+    return false;
   }
 
   // A dollar immediately followed by a letter/number is more likely the next
   // opener in prose such as `$5 and $10` or `$5 and $x$`. Preserve it only
   // when the candidate body itself carries an unambiguous math signal.
   if (/^\p{N}/u.test(followingCharacter)) {
-    return false
+    return false;
   }
 
   if (/^[\p{L}\\]/u.test(followingCharacter)) {
-    return /\\[A-Za-z]+|[+*/=<>^_{}]/u.test(value)
+    return /\\[A-Za-z]+|[+*/=<>^_{}]/u.test(value);
   }
 
-  return true
+  return true;
 }
 
 function opensCompleteInlineMath(text: string, openingIndex: number): boolean {
-  const closingIndex = findClosingSingleDollar(text, openingIndex)
+  const closingIndex = findClosingSingleDollar(text, openingIndex);
 
   if (closingIndex === -1) {
-    return false
+    return false;
   }
 
-  const body = text.slice(openingIndex + 1, closingIndex)
+  const body = text.slice(openingIndex + 1, closingIndex);
 
-  return /^[\p{L}\p{N}\\{([|+\-=_^]/u.test(body)
+  return /^[\p{L}\p{N}\\{([|+\-=_^]/u.test(body);
 }
 
 /**
@@ -242,184 +270,217 @@ function opensCompleteInlineMath(text: string, openingIndex: number): boolean {
  * rendering prose as math. The escape keeps `$5` literal.
  */
 function escapeCurrencyDollarsPreservingMath(text: string): string {
-  let out = ''
-  let copiedThrough = 0
+  let out = "";
+  let copiedThrough = 0;
 
   for (let cursor = 0; cursor < text.length; cursor += 1) {
     if (
-      text[cursor] !== '$' ||
-      !/\d/u.test(text[cursor + 1] || '') ||
-      text[cursor - 1] === '$' ||
+      text[cursor] !== "$" ||
+      !/\d/u.test(text[cursor + 1] || "") ||
+      text[cursor - 1] === "$" ||
       isEscapedAt(text, cursor)
     ) {
-      continue
+      continue;
     }
 
-    const closingIndex = findClosingSingleDollar(text, cursor)
+    const closingIndex = findClosingSingleDollar(text, cursor);
 
     if (
       closingIndex !== -1 &&
       !opensCompleteInlineMath(text, closingIndex) &&
-      isLikelyNumericInlineMath(text.slice(cursor + 1, closingIndex), text[closingIndex + 1] || '')
+      isLikelyNumericInlineMath(
+        text.slice(cursor + 1, closingIndex),
+        text[closingIndex + 1] || "",
+      )
     ) {
-      cursor = closingIndex
+      cursor = closingIndex;
 
-      continue
+      continue;
     }
 
-    out += `${text.slice(copiedThrough, cursor)}\\$`
-    copiedThrough = cursor + 1
+    out += `${text.slice(copiedThrough, cursor)}\\$`;
+    copiedThrough = cursor + 1;
   }
 
-  return out + text.slice(copiedThrough)
+  return out + text.slice(copiedThrough);
 }
 
 function normalizeDisplayMathForMarkdown(text: string): string {
-  const lines = text.split('\n')
+  const lines = text.split("\n");
 
   for (let index = 0; index < lines.length; index += 1) {
-    const latexMatch = lines[index].match(LATEX_DISPLAY_OPEN_LINE_RE)
-    const customMatch = lines[index].match(CUSTOM_DISPLAY_MATH_LINE_RE)
-    const openingMatch = latexMatch || customMatch
+    const latexMatch = lines[index].match(LATEX_DISPLAY_OPEN_LINE_RE);
+    const customMatch = lines[index].match(CUSTOM_DISPLAY_MATH_LINE_RE);
+    const openingMatch = latexMatch || customMatch;
 
     if (!openingMatch) {
-      continue
+      continue;
     }
 
-    const prefix = openingMatch[1] || ''
-    const closingPattern = latexMatch ? LATEX_DISPLAY_CLOSE_LINE_RE : CUSTOM_DISPLAY_MATH_LINE_RE
+    const prefix = openingMatch[1] || "";
+    const closingPattern = latexMatch
+      ? LATEX_DISPLAY_CLOSE_LINE_RE
+      : CUSTOM_DISPLAY_MATH_LINE_RE;
 
-    for (let closingIndex = index + 1; closingIndex < lines.length; closingIndex += 1) {
-      const closingMatch = lines[closingIndex].match(closingPattern)
+    for (
+      let closingIndex = index + 1;
+      closingIndex < lines.length;
+      closingIndex += 1
+    ) {
+      const closingMatch = lines[closingIndex].match(closingPattern);
 
       if (!closingMatch) {
-        continue
+        continue;
       }
 
-      const openingCarriageReturn = lines[index].endsWith('\r') ? '\r' : ''
-      const closingCarriageReturn = lines[closingIndex].endsWith('\r') ? '\r' : ''
-      const closingPrefix = closingMatch[1] || ''
+      const openingCarriageReturn = lines[index].endsWith("\r") ? "\r" : "";
+      const closingCarriageReturn = lines[closingIndex].endsWith("\r")
+        ? "\r"
+        : "";
+      const closingPrefix = closingMatch[1] || "";
 
-      lines[index] = `${prefix}$$${openingCarriageReturn}`
-      lines[closingIndex] = `${closingPrefix}$$${closingCarriageReturn}`
-      index = closingIndex
+      lines[index] = `${prefix}$$${openingCarriageReturn}`;
+      lines[closingIndex] = `${closingPrefix}$$${closingCarriageReturn}`;
+      index = closingIndex;
 
-      break
+      break;
     }
   }
 
-  return lines.join('\n')
+  return lines.join("\n");
 }
 
 function normalizeProseMath(text: string): string {
-  return escapeCurrencyDollarsPreservingMath(normalizeDisplayMathForMarkdown(text))
+  return escapeCurrencyDollarsPreservingMath(
+    normalizeDisplayMathForMarkdown(text),
+  );
 }
 
 function extend(out: string[], lines: string[]) {
   for (const line of lines) {
-    out.push(line)
+    out.push(line);
   }
 }
 
-function pushProseFence(out: string[], indent: string, info: string, lines: string[]) {
+function pushProseFence(
+  out: string[],
+  indent: string,
+  info: string,
+  lines: string[],
+) {
   if (info) {
-    out.push(`${indent}${info}`.trimEnd())
+    out.push(`${indent}${info}`.trimEnd());
   }
 
-  extend(out, lines)
+  extend(out, lines);
 }
 
-function findClosingFence(lines: string[], start: number, marker: string): number {
+function findClosingFence(
+  lines: string[],
+  start: number,
+  marker: string,
+): number {
   for (let cursor = start + 1; cursor < lines.length; cursor += 1) {
-    const closeMatch = (lines[cursor] || '').match(FENCE_LINE_RE)
+    const closeMatch = (lines[cursor] || "").match(FENCE_LINE_RE);
 
     if (!closeMatch) {
-      continue
+      continue;
     }
 
-    const closeMarker = closeMatch[2] || ''
-    const closeInfo = (closeMatch[3] || '').trim()
+    const closeMarker = closeMatch[2] || "";
+    const closeInfo = (closeMatch[3] || "").trim();
 
-    if (!closeInfo && closeMarker[0] === marker[0] && closeMarker.length >= marker.length) {
-      return cursor
+    if (
+      !closeInfo &&
+      closeMarker[0] === marker[0] &&
+      closeMarker.length >= marker.length
+    ) {
+      return cursor;
     }
   }
 
-  return -1
+  return -1;
 }
 
 function normalizeFenceBlocks(text: string): string {
-  const sourceLines = text.split('\n')
-  const out: string[] = []
-  let index = 0
+  const sourceLines = text.split("\n");
+  const out: string[] = [];
+  let index = 0;
 
   while (index < sourceLines.length) {
-    const line = sourceLines[index] || ''
-    const match = line.match(FENCE_LINE_RE)
+    const line = sourceLines[index] || "";
+    const match = line.match(FENCE_LINE_RE);
 
     if (!match) {
-      out.push(line)
-      index += 1
+      out.push(line);
+      index += 1;
 
-      continue
+      continue;
     }
 
-    const indent = match[1] || ''
-    const marker = match[2] || '```'
-    const infoRaw = (match[3] || '').trim()
-    const languageToken = infoRaw.split(/\s+/, 1)[0] || ''
-    const language = sanitizeLanguageTag(languageToken)
+    const indent = match[1] || "";
+    const marker = match[2] || "```";
+    const infoRaw = (match[3] || "").trim();
+    const languageToken = infoRaw.split(/\s+/, 1)[0] || "";
+    const language = sanitizeLanguageTag(languageToken);
     // 模型常把正文第一行拼到围栏语言后面（```tsxul: (...) => ...）。语言 token
     // 之后的剩余内容拆出来当正文首行，别让它在 info 串里丢失。
-    const infoTail = infoRaw.slice(languageToken.length).trim()
+    const infoTail = infoRaw.slice(languageToken.length).trim();
     // 语言不在严格白名单（如 tsx.js、拼了正文的 tsxul:...）不等于散文——只要语言
     // token 以拉丁/数字开头就当代码围栏，由 isLikelyProseFence 判断正文是代码还是
     // 散文；中文式 info（```总结要点）仍按散文拆开，保持原行为。
-    const openerValid = !infoRaw || Boolean(language) || Boolean(infoTail) || /^[A-Za-z0-9]/.test(languageToken)
+    const openerValid =
+      !infoRaw ||
+      Boolean(language) ||
+      Boolean(infoTail) ||
+      /^[A-Za-z0-9]/.test(languageToken);
 
     if (!openerValid) {
-      out.push(`${indent}${infoRaw}`.trimEnd())
-      index += 1
+      out.push(`${indent}${infoRaw}`.trimEnd());
+      index += 1;
 
-      continue
+      continue;
     }
 
-    const closeIndex = findClosingFence(sourceLines, index, marker)
-    const rawBodyLines = sourceLines.slice(index + 1, closeIndex === -1 ? sourceLines.length : closeIndex)
-    const bodyLines = infoTail ? [infoTail, ...rawBodyLines] : rawBodyLines
-    const body = bodyLines.join('\n')
+    const closeIndex = findClosingFence(sourceLines, index, marker);
+    const rawBodyLines = sourceLines.slice(
+      index + 1,
+      closeIndex === -1 ? sourceLines.length : closeIndex,
+    );
+    const bodyLines = infoTail ? [infoTail, ...rawBodyLines] : rawBodyLines;
+    const body = bodyLines.join("\n");
 
     if (closeIndex === -1) {
       if (!body.trim()) {
-        index += 1
+        index += 1;
 
-        continue
+        continue;
       }
 
       if (isLikelyProseFence(infoRaw, body)) {
-        pushProseFence(out, indent, infoRaw, bodyLines)
+        pushProseFence(out, indent, infoRaw, bodyLines);
       } else {
-        out.push(`${indent}${marker}${language}`)
-        extend(out, bodyLines)
+        out.push(`${indent}${marker}${language}`);
+        extend(out, bodyLines);
       }
 
-      break
+      break;
     }
 
     if (isLikelyProseFence(infoRaw, body)) {
-      pushProseFence(out, indent, infoRaw, bodyLines)
-      index = closeIndex + 1
+      pushProseFence(out, indent, infoRaw, bodyLines);
+      index = closeIndex + 1;
 
-      continue
+      continue;
     }
 
-    out.push(`${indent}${marker}${language}`)
-    extend(out, bodyLines)
-    out.push(`${indent}${marker}`)
-    index = closeIndex + 1
+    out.push(`${indent}${marker}${language}`);
+    extend(out, bodyLines);
+    out.push(`${indent}${marker}`);
+    index = closeIndex + 1;
   }
 
-  return out.join('\n')
+  return out.join("\n");
 }
 
 // A full line of `-` or `=` immediately after a content line. Without a blank
@@ -427,7 +488,8 @@ function normalizeFenceBlocks(text: string): string {
 // promotes the previous line to an <h2> (`---`) or <h1> (`===`). LLMs end
 // answers with bare `---` dividers all the time, so plain prose suddenly
 // renders as a heading.
-const SETEXT_UNDERLINE_LINE_RE = /(?<=[^\n])\n(?!\n)([ \t]*(?:>[ \t]*)*)(-+|=+)[ \t]*(?=\n|$)/g
+const SETEXT_UNDERLINE_LINE_RE =
+  /(?<=[^\n])\n(?!\n)([ \t]*(?:>[ \t]*)*)(-+|=+)[ \t]*(?=\n|$)/g;
 
 /**
  * Neutralize accidental setext heading underlines. Escaping the first marker
@@ -439,8 +501,8 @@ const SETEXT_UNDERLINE_LINE_RE = /(?<=[^\n])\n(?!\n)([ \t]*(?:>[ \t]*)*)(-+|=+)[
 function neutralizeSetextUnderlines(text: string): string {
   return text.replace(
     SETEXT_UNDERLINE_LINE_RE,
-    (_match, prefix: string, markers: string) => `\n${prefix}\\${markers}`
-  )
+    (_match, prefix: string, markers: string) => `\n${prefix}\\${markers}`,
+  );
 }
 
 // LLMs often write ATX headings with a full-width space after the marker:
@@ -449,7 +511,8 @@ function neutralizeSetextUnderlines(text: string): string {
 // repaired — a space-like separator is unambiguous heading intent. A lone `#`
 // is always left alone (ambiguous with hashtags like `#话题`). Fenced code is
 // excluded upstream, so only prose lines are touched.
-const ATX_HEADING_BROKEN_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^\n]*)$/gm
+const ATX_HEADING_BROKEN_RE =
+  /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^\n]*)$/gm;
 
 // LLMs also glue the heading text straight onto the marker with no space at
 // all: `##自包含工具卡`, `##页面结构单页`, `##查询配置（：…）`. CommonMark
@@ -460,7 +523,7 @@ const ATX_HEADING_BROKEN_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^\n]*)$/
 // and markers already followed by whitespace are skipped by the `[^\s#]`
 // guard. A `- ##xxx` list item is not matched (leading `- ` breaks the
 // `^ {0,3}` prefix).
-const ATX_HEADING_GLUED_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})([^\s#][^\n]*)$/gm
+const ATX_HEADING_GLUED_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})([^\s#][^\n]*)$/gm;
 
 // LLMs sometimes flatten the whole newline away, leaving the heading glued
 // MID-LINE: `…归因分解##数据智能细节-打开页面自动查询`. ATX markers are only
@@ -469,7 +532,7 @@ const ATX_HEADING_GLUED_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})([^\s#][^\n]*)$/gm
 // text, punctuation, digits); lookahead = a letter (heading text). Mid-line
 // `##` before a letter is essentially never legit prose — `C## ` (C#) has a
 // space/EOL after, and `###` runs fail the `\p{L}` lookahead.
-const ATX_HEADING_MIDLINE_RE = /(?<=[^\n\s#])##(?=\p{L})/gu
+const ATX_HEADING_MIDLINE_RE = /(?<=[^\n\s#])##(?=\p{L})/gu;
 
 // LLMs sometimes glue a table header straight onto an ATX heading with no
 // newline: `##　做了什么|步骤 |结果 |`. The plain broken-heading fix above
@@ -479,7 +542,8 @@ const ATX_HEADING_MIDLINE_RE = /(?<=[^\n\s#])##(?=\p{L})/gu
 // form) whose remainder contains a `|...|...` table-header shape (≥2 pipes)
 // and split it into heading + table row instead. A single pipe
 // (`##　标题|a`) is left alone — could be a legit pipe inside heading text.
-const ATX_HEADING_GLUED_TABLE_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^|\n]*)(\|[^|\n]*\|[^\n]*)$/gm
+const ATX_HEADING_GLUED_TABLE_RE =
+  /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^|\n]*)(\|[^|\n]*\|[^\n]*)$/gm;
 
 /**
  * Repair ATX headings: replace a full-width space after a `##`+ marker with
@@ -494,23 +558,36 @@ const ATX_HEADING_GLUED_TABLE_RE = /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^|\
 function normalizeAtxHeadings(text: string): string {
   const unglued = text.replace(
     ATX_HEADING_GLUED_TABLE_RE,
-    (_match, _indent: string, prefix: string, hashes: string, _fwSpace: string, rest: string, tablePart: string) =>
-      `${prefix}${hashes} ${rest}\n${tablePart}`
-  )
+    (
+      _match,
+      _indent: string,
+      prefix: string,
+      hashes: string,
+      _fwSpace: string,
+      rest: string,
+      tablePart: string,
+    ) => `${prefix}${hashes} ${rest}\n${tablePart}`,
+  );
 
   const fixedBroken = unglued.replace(
     ATX_HEADING_BROKEN_RE,
-    (_match, _indent: string, prefix: string, hashes: string, _fwSpace: string, rest: string) =>
-      `${prefix}${hashes} ${rest}`
-  )
+    (
+      _match,
+      _indent: string,
+      prefix: string,
+      hashes: string,
+      _fwSpace: string,
+      rest: string,
+    ) => `${prefix}${hashes} ${rest}`,
+  );
 
   return fixedBroken
     .replace(
       ATX_HEADING_GLUED_RE,
       (_match, _indent: string, prefix: string, hashes: string, rest: string) =>
-        `${prefix}${hashes} ${rest}`
+        `${prefix}${hashes} ${rest}`,
     )
-    .replace(ATX_HEADING_MIDLINE_RE, '\n## ')
+    .replace(ATX_HEADING_MIDLINE_RE, "\n## ");
 }
 
 // LLMs pad emphasis with spaces/full-width spaces around the `**` markers —
@@ -527,14 +604,17 @@ function normalizeAtxHeadings(text: string): string {
 // text (legal after a strong closer), no other `**` may remain on the line —
 // so `**加粗** 之后 ** 再来 **` fixes the broken pair without letting the
 // first pair's closer get captured as an opener.
-const STRONG_PADDED_DOUBLE_RE = /\*\*[ \t\u3000]+([^\n*][^*\n]*?)[ \t\u3000]+\*\*(?=[\s。，、；：！？）》」』….!?;:)\]}]|$|(?=[^\s])(?![^\n]*\*\*))/g
-const STRONG_PADDED_OPEN_RE = /\*\*[ \t\u3000]+([^\n*][^*\n]*?[^\s*])\*\*(?=[\s。，、；：！？）》」』….!?;:)\]}]|$|(?=[^\s])(?![^\n]*\*\*))/g
-const STRONG_PADDED_CLOSE_RE = /\*\*([^\n*][^*\n]*?[^\s*])[ \t\u3000]+\*\*(?=[\s。，、；：！？）》」』….!?;:)\]}]|$|(?=[^\s])(?![^\n]*\*\*))/g
+const STRONG_PADDED_DOUBLE_RE =
+  /\*\*[ \t\u3000]+([^\n*][^*\n]*?)[ \t\u3000]+\*\*(?=[\s。，、；：！？）》」』….!?;:)\]}]|$|(?=[^\s])(?![^\n]*\*\*))/g;
+const STRONG_PADDED_OPEN_RE =
+  /\*\*[ \t\u3000]+([^\n*][^*\n]*?[^\s*])\*\*(?=[\s。，、；：！？）》」』….!?;:)\]}]|$|(?=[^\s])(?![^\n]*\*\*))/g;
+const STRONG_PADDED_CLOSE_RE =
+  /\*\*([^\n*][^*\n]*?[^\s*])[ \t\u3000]+\*\*(?=[\s。，、；：！？）》」』….!?;:)\]}]|$|(?=[^\s])(?![^\n]*\*\*))/g;
 
 function normalizeSpacedEmphasis(text: string): string {
-  let out = text.replace(STRONG_PADDED_DOUBLE_RE, '**$1**')
-  out = out.replace(STRONG_PADDED_OPEN_RE, '**$1**')
-  return out.replace(STRONG_PADDED_CLOSE_RE, '**$1**')
+  let out = text.replace(STRONG_PADDED_DOUBLE_RE, "**$1**");
+  out = out.replace(STRONG_PADDED_OPEN_RE, "**$1**");
+  return out.replace(STRONG_PADDED_CLOSE_RE, "**$1**");
 }
 
 // LLMs sometimes drop the closing `**`: `**不能。这台是 VMware NAT模式虚拟机`
@@ -543,15 +623,18 @@ function normalizeSpacedEmphasis(text: string): string {
 // is unambiguous dangling-strong intent — close it at the end of the line.
 // `***` (em-strong mix) is excluded via `(?!\*)`, and already-closed pairs
 // (`**a** …`) contain a second `**` so they're untouched.
-const DANGLING_STRONG_RE = /^( {0,3})\*\*(?!\*)([^\n]*)$/gm
+const DANGLING_STRONG_RE = /^( {0,3})\*\*(?!\*)([^\n]*)$/gm;
 
 function closeDanglingStrongEmphasis(text: string): string {
-  return text.replace(DANGLING_STRONG_RE, (whole, indent: string, rest: string) => {
-    if (!rest.includes('**') && rest.trim()) {
-      return `${indent}**${rest}**`
-    }
-    return whole
-  })
+  return text.replace(
+    DANGLING_STRONG_RE,
+    (whole, indent: string, rest: string) => {
+      if (!rest.includes("**") && rest.trim()) {
+        return `${indent}**${rest}**`;
+      }
+      return whole;
+    },
+  );
 }
 
 // LLMs emit GFM tables whose header row has MORE columns than the separator
@@ -563,54 +646,58 @@ function closeDanglingStrongEmphasis(text: string): string {
 //
 // Models also sometimes put a BLANK LINE between the header and the dash row
 // — GFM requires them adjacent, so the blank line is removed too.
-const TABLE_DASH_LINE_RE = /^\s*\|?[\t ]*:?-+:?[\t ]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?\s*$/
+const TABLE_DASH_LINE_RE =
+  /^\s*\|?[\t ]*:?-+:?[\t ]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?\s*$/;
 
 function cellCount(line: string): number {
   return line
     .trim()
-    .split('|')
-    .filter((segment) => segment.trim().length > 0).length
+    .split("|")
+    .filter((segment) => segment.trim().length > 0).length;
 }
 
 function padTableDelimiterRows(text: string): string {
-  const lines = text.split('\n')
+  const lines = text.split("\n");
 
   for (let index = 0; index + 1 < lines.length; index += 1) {
-    const headerCells = cellCount(lines[index])
-    if (headerCells < 2) continue
+    const headerCells = cellCount(lines[index]);
+    if (headerCells < 2) continue;
 
     // The dash row may sit 1 line below (normal) or 2 lines below with a blank
     // line in between — GFM needs the header immediately followed by it.
-    let delimIndex = index + 1
+    let delimIndex = index + 1;
     if (delimIndex < lines.length && !lines[delimIndex].trim()) {
-      delimIndex += 1
+      delimIndex += 1;
     }
-    if (delimIndex >= lines.length || !TABLE_DASH_LINE_RE.test(lines[delimIndex])) {
-      continue
+    if (
+      delimIndex >= lines.length ||
+      !TABLE_DASH_LINE_RE.test(lines[delimIndex])
+    ) {
+      continue;
     }
     // A bare `---` thematic break matches TABLE_DASH_LINE_RE too (the pipes are
     // optional in that regex) but carries no cells. Accepting it as a delimiter
     // would splice away the blank line above it and drag the rule into the
     // table, where it renders as a bogus `---` row. Require a real table row.
     if (cellCount(lines[delimIndex]) < 2) {
-      continue
+      continue;
     }
 
-    const dashCells = cellCount(lines[delimIndex])
+    const dashCells = cellCount(lines[delimIndex]);
     if (dashCells > 0 && dashCells < headerCells) {
-      lines[delimIndex] = `|${'---|'.repeat(headerCells)}`
+      lines[delimIndex] = `|${"---|".repeat(headerCells)}`;
     }
 
     if (delimIndex === index + 2) {
       // Remove the blank line so the header + dash row form one table block.
-      lines.splice(index + 1, 1)
-      delimIndex -= 1
+      lines.splice(index + 1, 1);
+      delimIndex -= 1;
     }
 
-    index = delimIndex
+    index = delimIndex;
   }
 
-  return lines.join('\n')
+  return lines.join("\n");
 }
 
 /**
@@ -628,48 +715,48 @@ function padTableDelimiterRows(text: string): string {
  *   - A blank line ends the table, matching GFM (tables can't contain one).
  */
 function dropDuplicateTableDelimiterRows(text: string): string {
-  const lines = text.split('\n')
-  const drop = new Set<number>()
-  let index = 0
+  const lines = text.split("\n");
+  const drop = new Set<number>();
+  let index = 0;
 
   while (index < lines.length) {
     // Same recognition as padTableDelimiterRows: header + (optionally one blank
     // line) + separator row.
-    let delimIndex = index + 1
+    let delimIndex = index + 1;
     if (delimIndex < lines.length && !lines[delimIndex].trim()) {
-      delimIndex += 1
+      delimIndex += 1;
     }
     const isTableStart =
       cellCount(lines[index]) >= 2 &&
       delimIndex < lines.length &&
-      TABLE_DASH_LINE_RE.test(lines[delimIndex])
+      TABLE_DASH_LINE_RE.test(lines[delimIndex]);
 
     if (!isTableStart) {
-      index += 1
-      continue
+      index += 1;
+      continue;
     }
 
     // The first separator row is legitimate — walk the body and drop repeats.
-    let cursor = delimIndex + 1
+    let cursor = delimIndex + 1;
     while (cursor < lines.length) {
-      const row = lines[cursor]
+      const row = lines[cursor];
 
-      if (!row.trim()) break
-      if (cellCount(row) < 2) break
+      if (!row.trim()) break;
+      if (cellCount(row) < 2) break;
       if (TABLE_DASH_LINE_RE.test(row)) {
-        drop.add(cursor)
+        drop.add(cursor);
       }
-      cursor += 1
+      cursor += 1;
     }
 
-    index = cursor
+    index = cursor;
   }
 
   if (drop.size === 0) {
-    return text
+    return text;
   }
 
-  return lines.filter((_, i) => !drop.has(i)).join('\n')
+  return lines.filter((_, i) => !drop.has(i)).join("\n");
 }
 
 // LLMs glue consecutive ordered-list items onto one line — item 4's `4. `
@@ -686,7 +773,8 @@ function dropDuplicateTableDelimiterRows(text: string): string {
 //   - `(?![ \t\u3000]*\d)` — not a version/decimal like `2. 0` / `3. 5元`.
 //   - `\d{1,2}` — ordered-list numbers are 1–2 digits; 3-digit runs (years,
 //     IDs) are left alone.
-const GLUED_LIST_ITEM_RE = /(?<=[^\n\s*，。、；：！？）】》])(\d{1,2}[.、])(?=[ \t\u3000]+\S)(?![ \t\u3000]*\d)/g
+const GLUED_LIST_ITEM_RE =
+  /(?<=[^\n\s*，。、；：！？）】》])(\d{1,2}[.、])(?=[ \t\u3000]+\S)(?![ \t\u3000]*\d)/g;
 
 // Same gluing bug for bullet lists: `- **月收益率明细表**：- **动态回撤图**`
 // — the second `- ` runs straight into the first item's text after the `：`.
@@ -697,7 +785,8 @@ const GLUED_LIST_ITEM_RE = /(?<=[^\n\s*，。、；：！？）】》])(\d{1,2}[
 //   - `(?=[^\s-])` — the `- ` must be followed by non-space, non-`-` content.
 //   - `(?<![A-Za-z0-9] - [A-Za-z0-9])` — not an English dash or minus like
 //     `A - B` / `5 - 3` (letter/digit on both sides with surrounding spaces).
-const GLUED_BULLET_ITEM_RE = /(?<=[^\n\s*-])(- )(?=[^\s-])(?<![A-Za-z0-9] - [A-Za-z0-9])/g
+const GLUED_BULLET_ITEM_RE =
+  /(?<=[^\n\s*-])(- )(?=[^\s-])(?<![A-Za-z0-9] - [A-Za-z0-9])/g;
 
 // `-` glued directly to the item text with NO space: `-打开页面自动查询`,
 // and mid-line `…细节-打开…` after the model flattened the newline.
@@ -714,8 +803,9 @@ const GLUED_BULLET_ITEM_RE = /(?<=[^\n\s*-])(- )(?=[^\s-])(?<![A-Za-z0-9] - [A-Z
 // hyphenated pair like `中-美`, `港-澳`, `人-机交互` (following side is
 // 1–3 chars). English hyphens (`foo-bar`) and `T-恤` are excluded by the Han
 // lookbehind; `5-3` by the letter lookahead.
-const GLUED_BULLET_NOSPACE_LINE_START_RE = /^( {0,3})-(?=[*_\p{L}])/gmu
-const GLUED_BULLET_NOSPACE_MIDLINE_RE = /(?<=\p{Script=Han})-(?=\p{Script=Han}{4})/gu
+const GLUED_BULLET_NOSPACE_LINE_START_RE = /^( {0,3})-(?=[*_\p{L}])/gmu;
+const GLUED_BULLET_NOSPACE_MIDLINE_RE =
+  /(?<=\p{Script=Han})-(?=\p{Script=Han}{4})/gu;
 
 // Glued-list repair must NOT touch inline code spans: `` `- helix-cli` `` —
 // `- ` inside backticks is a literal dash, not a bullet. Without the
@@ -727,73 +817,83 @@ const GLUED_BULLET_NOSPACE_MIDLINE_RE = /(?<=\p{Script=Han})-(?=\p{Script=Han}{4
 function normalizeGluedListItems(text: string): string {
   return text
     .split(INLINE_CODE_SPLIT_RE)
-    .map(part => {
-      if (part.startsWith('`')) return part
-      const numbered = part.replace(GLUED_LIST_ITEM_RE, '\n$1')
-      const withSpacedBullets = numbered.replace(GLUED_BULLET_ITEM_RE, '\n$1')
-      const withNospaceLineStart = withSpacedBullets.replace(GLUED_BULLET_NOSPACE_LINE_START_RE, '$1- ')
-      return withNospaceLineStart.replace(GLUED_BULLET_NOSPACE_MIDLINE_RE, '\n- ')
+    .map((part) => {
+      if (part.startsWith("`")) return part;
+      const numbered = part.replace(GLUED_LIST_ITEM_RE, "\n$1");
+      const withSpacedBullets = numbered.replace(GLUED_BULLET_ITEM_RE, "\n$1");
+      const withNospaceLineStart = withSpacedBullets.replace(
+        GLUED_BULLET_NOSPACE_LINE_START_RE,
+        "$1- ",
+      );
+      return withNospaceLineStart.replace(
+        GLUED_BULLET_NOSPACE_MIDLINE_RE,
+        "\n- ",
+      );
     })
-    .join('')
+    .join("");
 }
 
-const processCache = new Map<string, string>()
+const processCache = new Map<string, string>();
 
 /**
  * Preprocess LLM-authored markdown before react-markdown parses it.
  * Cached: streaming grows the text monotonically, and the regex pass is pure.
  */
 export function preprocessMarkdown(text: string): string {
-  const cached = processCache.get(text)
+  const cached = processCache.get(text);
 
   if (cached !== undefined) {
-    return cached
+    return cached;
   }
 
-  const cleaned = text.replace(REASONING_BLOCK_RE, '')
-  const scrubbed = scrubBacktickNoise(cleaned)
-  const normalizedFences = normalizeFenceBlocks(scrubbed)
-  const strippedEmptyFences = stripEmptyFenceBlocks(normalizedFences)
+  const cleaned = text.replace(REASONING_BLOCK_RE, "");
+  const scrubbed = scrubBacktickNoise(cleaned);
+  const normalizedFences = normalizeFenceBlocks(scrubbed);
+  const strippedEmptyFences = stripEmptyFenceBlocks(normalizedFences);
 
   const result = strippedEmptyFences
     .split(CODE_FENCE_SPLIT_RE)
-    .map(part => {
+    .map((part) => {
       // Fence blocks pass through untouched.
       if (/^(?:```|~~~)/.test(part)) {
-        return part
+        return part;
       }
 
       // Whitespace-only segments must NOT be run through the prose transform —
       // trimming would glue surrounding fences together.
       if (!part.trim()) {
-        return part
+        return part;
       }
 
-      const leading = part.match(/^\s*/)?.[0] ?? ''
-      const trailing = part.match(/\s*$/)?.[0] ?? ''
+      const leading = part.match(/^\s*/)?.[0] ?? "";
+      const trailing = part.match(/\s*$/)?.[0] ?? "";
 
       const transformed = normalizeGluedListItems(
         normalizeSpacedEmphasis(
           closeDanglingStrongEmphasis(
             dropDuplicateTableDelimiterRows(
               padTableDelimiterRows(
-                normalizeAtxHeadings(normalizeVisibleProse(normalizeProseMath(neutralizeSetextUnderlines(part))))
-              )
-            )
-          )
-        )
-      )
+                normalizeAtxHeadings(
+                  normalizeVisibleProse(
+                    normalizeProseMath(neutralizeSetextUnderlines(part)),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
 
-      return leading + transformed + trailing
+      return leading + transformed + trailing;
     })
-    .join('')
-    .replace(/[ \t]+\n/g, '\n')
+    .join("")
+    .replace(/[ \t]+\n/g, "\n");
 
   if (processCache.size > 600) {
-    processCache.clear()
+    processCache.clear();
   }
 
-  processCache.set(text, result)
+  processCache.set(text, result);
 
-  return result
+  return result;
 }

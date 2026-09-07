@@ -197,7 +197,10 @@ pub fn create(params: Option<Value>) -> Value {
         "context_from": null,
         "schedule": schedule,
         "schedule_display": schedule_display,
-        "repeat": json!({ "times": if next_run_at_str.is_some() { json!(1) } else { Value::Null }, "completed": 0 }),
+        "repeat": json!({
+            "times": if next_run_at_str.is_some() { json!(1) } else { Value::Null },
+            "completed": 0,
+        }),
         "enabled": true,
         "state": "scheduled",
         "paused_at": null,
@@ -303,7 +306,7 @@ fn format_iso(ms: i64) -> String {
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-// ── Cron Commands (alias for scheduled_tasks) ────────────────────────────────
+// ── Cron Commands (alias for scheduled_tasks) ────────────────
 
 /// Alias for scheduled_tasks_list
 #[tauri::command]
@@ -327,7 +330,11 @@ pub fn helix_cron_delete(params: Option<Value>) -> Value {
 #[tauri::command]
 pub fn helix_cron_run(params: Option<Value>) -> Value {
     let p = params.unwrap_or(json!({}));
-    let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = p
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if id.is_empty() {
         return json!({ "ok": false, "error": "missing id" });
     }

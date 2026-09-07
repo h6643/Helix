@@ -10,11 +10,11 @@
  * *throw* ("process.cwd is not a function"), aborting the send before any
  * session is created → model never replies.
  */
-;(globalThis as any).process = {
+(globalThis as any).process = {
   env: {
     NODE_ENV: import.meta.env.MODE,
   },
-  cwd: () => '',
-}
+  cwd: () => "",
+};
 
-export {}
+export {};

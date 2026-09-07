@@ -2,230 +2,234 @@
  * IndexedDB persistence layer for Helix
  * Stores: memories, tasks, notes, checkpoints, chat history, file snapshots
  */
-import { encryptApiKey, decryptApiKey } from './crypto'
-import type { PendingChange } from '@/stores/helix-types'
+import { encryptApiKey, decryptApiKey } from "./crypto";
+import type { PendingChange } from "@/stores/helix-types";
 
-const DB_NAME = 'helix-db'
-const DB_VERSION = 5
+const DB_NAME = "helix-db";
+const DB_VERSION = 5;
 
 interface PersistedMemory {
-  id: string
-  content: string
-  category: string
-  createdAt: number
+  id: string;
+  content: string;
+  category: string;
+  createdAt: number;
 }
 
 interface PersistedTask {
-  id: string
-  label: string
-  status: string
-  children?: PersistedTask[]
-  parentId: string | null
-  depth: number
+  id: string;
+  label: string;
+  status: string;
+  children?: PersistedTask[];
+  parentId: string | null;
+  depth: number;
 }
 
 interface PersistedCheckpoint {
-  id: string
-  label: string
-  timestamp: number
-  taskIds: string[]
-  memorySnapshot: string
-  tasks?: PersistedTask[]
+  id: string;
+  label: string;
+  timestamp: number;
+  taskIds: string[];
+  memorySnapshot: string;
+  tasks?: PersistedTask[];
 }
 
 export interface PersistedChatMessage {
-  id: string
-  sessionId?: string
-  role: string
-  content: string
-  reasoning?: string
-  duration?: number
-  thinkingTime?: number
-  totalTokens?: number
-  thoughtTokens?: number
-  outputTokens?: number
-  steps?: import('@/stores/helix-store').ExecutionStep[]
-  fileChanges?: PendingChange[]
+  id: string;
+  sessionId?: string;
+  role: string;
+  content: string;
+  reasoning?: string;
+  duration?: number;
+  thinkingTime?: number;
+  totalTokens?: number;
+  thoughtTokens?: number;
+  outputTokens?: number;
+  steps?: import("@/stores/helix-store").ExecutionStep[];
+  fileChanges?: PendingChange[];
   /** Interleaved thinking/text/tool_group/file_change blocks. Was dropped from
    *  persistence for a long time, so reloaded messages lost their thinking
    *  cards and tool cards ("重启后思考卡片不能展开"). */
-  blocks?: import('@/stores/helix-store').ChatMessage['blocks']
+  blocks?: import("@/stores/helix-store").ChatMessage["blocks"];
   images?: Array<{
-    id: string
-    dataUrl: string
-    mediaType: string
-    width?: number
-    height?: number
-    name?: string
-  }>
-  timestamp: number
-  isStreaming: boolean
+    id: string;
+    dataUrl: string;
+    mediaType: string;
+    width?: number;
+    height?: number;
+    name?: string;
+  }>;
+  timestamp: number;
+  isStreaming: boolean;
 }
 
 interface PersistedNote {
-  content: string
+  content: string;
 }
 
 interface PersistedFileSnapshot {
-  id: string
-  name: string
-  type: string
-  content?: string
-  language?: string
-  children?: PersistedFileSnapshot[]
+  id: string;
+  name: string;
+  type: string;
+  content?: string;
+  language?: string;
+  children?: PersistedFileSnapshot[];
 }
 
 export interface PersistedProject {
-  id: string
-  name: string
-  folder: string
-  createdAt: number
-  updatedAt: number
-  chatMessages: PersistedChatMessage[]
-  files: PersistedFileSnapshot[]
+  id: string;
+  name: string;
+  folder: string;
+  createdAt: number;
+  updatedAt: number;
+  chatMessages: PersistedChatMessage[];
+  files: PersistedFileSnapshot[];
 }
 
 export interface PersistedOpenTab {
-  id: string
-  fileId?: string
-  name: string
-  language?: string
-  isDirty?: boolean
+  id: string;
+  fileId?: string;
+  name: string;
+  language?: string;
+  isDirty?: boolean;
 }
 
-export type PersistedEditorTab = PersistedOpenTab
+export type PersistedEditorTab = PersistedOpenTab;
 
 export interface PersistedScheduledTask {
-  id: string
-  label: string
-  prompt: string
-  scheduleText: string
-  cronExpression?: string
-  enabled: boolean
-  lastRunAt: number | null
-  nextRunAt: number | null
-  createdAt: number
-  updatedAt: number
+  id: string;
+  label: string;
+  prompt: string;
+  scheduleText: string;
+  cronExpression?: string;
+  enabled: boolean;
+  lastRunAt: number | null;
+  nextRunAt: number | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface PersistedSession {
-  id: string
-  label: string
-  savedAt: number
+  id: string;
+  label: string;
+  savedAt: number;
   /** Stable creation time. Never changed by load/switch/save, so the sidebar
    *  can sort by this for a fixed order that doesn't reshuffle on click. */
-  createdAt?: number
-  isArchived?: boolean
-  isPinned?: boolean
-  workDir: string | null
-  goal: string | null
-  memories: PersistedMemory[]
-  tasks: PersistedTask[]
-  notes: string
-  checkpoints: PersistedCheckpoint[]
-  chatMessages: PersistedChatMessage[]
-  files: PersistedFileSnapshot[]
-  openTabs: PersistedOpenTab[]
+  createdAt?: number;
+  isArchived?: boolean;
+  isPinned?: boolean;
+  workDir: string | null;
+  goal: string | null;
+  memories: PersistedMemory[];
+  tasks: PersistedTask[];
+  notes: string;
+  checkpoints: PersistedCheckpoint[];
+  chatMessages: PersistedChatMessage[];
+  files: PersistedFileSnapshot[];
+  openTabs: PersistedOpenTab[];
   /** Fork: the session this branch was forked from */
-  parentSessionId?: string
+  parentSessionId?: string;
   /** Fork: the message ID at which this branch was forked */
-  forkedFromMessageId?: string
+  forkedFromMessageId?: string;
   /** Fork: human-readable branch name (e.g. "分支 A", "分支 B") */
-  branchName?: string
+  branchName?: string;
 }
 
-let dbInstance: IDBDatabase | null = null
-let dbPromise: Promise<IDBDatabase> | null = null
+let dbInstance: IDBDatabase | null = null;
+let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDB(): Promise<IDBDatabase> {
-  if (dbInstance) return Promise.resolve(dbInstance)
-  if (dbPromise) return dbPromise
+  if (dbInstance) return Promise.resolve(dbInstance);
+  if (dbPromise) return dbPromise;
 
   dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION)
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
 
     request.onupgradeneeded = (event) => {
-      const db = request.result
-      if (!db.objectStoreNames.contains('memories')) {
-        db.createObjectStore('memories', { keyPath: 'id' })
+      const db = request.result;
+      if (!db.objectStoreNames.contains("memories")) {
+        db.createObjectStore("memories", { keyPath: "id" });
       }
-      if (!db.objectStoreNames.contains('tasks')) {
-        db.createObjectStore('tasks', { keyPath: 'id' })
+      if (!db.objectStoreNames.contains("tasks")) {
+        db.createObjectStore("tasks", { keyPath: "id" });
       }
-      if (!db.objectStoreNames.contains('checkpoints')) {
-        db.createObjectStore('checkpoints', { keyPath: 'id' })
+      if (!db.objectStoreNames.contains("checkpoints")) {
+        db.createObjectStore("checkpoints", { keyPath: "id" });
       }
-      if (!db.objectStoreNames.contains('chatMessages')) {
-        const store = db.createObjectStore('chatMessages', { keyPath: 'id' })
-        store.createIndex('sessionId', 'sessionId', { unique: false })
+      if (!db.objectStoreNames.contains("chatMessages")) {
+        const store = db.createObjectStore("chatMessages", { keyPath: "id" });
+        store.createIndex("sessionId", "sessionId", { unique: false });
       }
-      if (!db.objectStoreNames.contains('sessions')) {
-        db.createObjectStore('sessions', { keyPath: 'id' })
+      if (!db.objectStoreNames.contains("sessions")) {
+        db.createObjectStore("sessions", { keyPath: "id" });
       }
-      if (!db.objectStoreNames.contains('projects')) {
-        db.createObjectStore('projects', { keyPath: 'id' })
+      if (!db.objectStoreNames.contains("projects")) {
+        db.createObjectStore("projects", { keyPath: "id" });
       }
-      if (!db.objectStoreNames.contains('settings')) {
-        db.createObjectStore('settings', { keyPath: 'key' })
+      if (!db.objectStoreNames.contains("settings")) {
+        db.createObjectStore("settings", { keyPath: "key" });
       }
       // Migration: add sessionId index to existing chatMessages store
-      if (db.objectStoreNames.contains('chatMessages')) {
-        const upgradeTx = (event.target as IDBOpenDBRequest | null)?.transaction ?? null
+      if (db.objectStoreNames.contains("chatMessages")) {
+        const upgradeTx =
+          (event.target as IDBOpenDBRequest | null)?.transaction ?? null;
         if (upgradeTx) {
-          const store = upgradeTx.objectStore('chatMessages')
-          if (!store.indexNames.contains('sessionId')) {
-            store.createIndex('sessionId', 'sessionId', { unique: false })
+          const store = upgradeTx.objectStore("chatMessages");
+          if (!store.indexNames.contains("sessionId")) {
+            store.createIndex("sessionId", "sessionId", { unique: false });
           }
         }
       }
-    }
+    };
 
     request.onsuccess = () => {
-      dbInstance = request.result
-      dbInstance.onclose = () => { dbInstance = null; dbPromise = null }
-      resolve(request.result)
-    }
+      dbInstance = request.result;
+      dbInstance.onclose = () => {
+        dbInstance = null;
+        dbPromise = null;
+      };
+      resolve(request.result);
+    };
     request.onerror = () => {
-      dbPromise = null
-      reject(request.error)
-    }
-  })
+      dbPromise = null;
+      reject(request.error);
+    };
+  });
 
-  return dbPromise
+  return dbPromise;
 }
 
 function tx<T>(
   db: IDBDatabase,
   storeName: string,
   mode: IDBTransactionMode,
-  fn: (store: IDBObjectStore) => IDBRequest<T>
+  fn: (store: IDBObjectStore) => IDBRequest<T>,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(storeName, mode)
-    const store = transaction.objectStore(storeName)
-    const request = fn(store)
+    const transaction = db.transaction(storeName, mode);
+    const store = transaction.objectStore(storeName);
+    const request = fn(store);
     request.onsuccess = () => {
-      transaction.oncomplete = () => resolve(request.result)
-      transaction.onerror = () => reject(transaction.error)
-    }
-    request.onerror = () => reject(request.error)
-  })
+      transaction.oncomplete = () => resolve(request.result);
+      transaction.onerror = () => reject(transaction.error);
+    };
+    request.onerror = () => reject(request.error);
+  });
 }
 
 function txAll<T>(
   db: IDBDatabase,
   storeName: string,
   mode: IDBTransactionMode,
-  fn: (store: IDBObjectStore) => void
+  fn: (store: IDBObjectStore) => void,
 ): Promise<T[]> {
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(storeName, mode)
-    const store = transaction.objectStore(storeName)
-    const request = store.getAll()
-    fn(store)
-    request.onsuccess = () => resolve(request.result as T[])
-    request.onerror = () => reject(request.error)
-  })
+    const transaction = db.transaction(storeName, mode);
+    const store = transaction.objectStore(storeName);
+    const request = store.getAll();
+    fn(store);
+    request.onsuccess = () => resolve(request.result as T[]);
+    request.onerror = () => reject(request.error);
+  });
 }
 
 // ============ Public API ============
@@ -233,255 +237,318 @@ function txAll<T>(
 export const persistence = {
   // --- Memories ---
   async saveMemories(memories: PersistedMemory[]): Promise<void> {
-    const db = await openDB()
-    const transaction = db.transaction('memories', 'readwrite')
-    const store = transaction.objectStore('memories')
-    store.clear()
-    for (const m of memories) store.put(m)
+    const db = await openDB();
+    const transaction = db.transaction("memories", "readwrite");
+    const store = transaction.objectStore("memories");
+    store.clear();
+    for (const m of memories) store.put(m);
     await new Promise<void>((resolve, reject) => {
-      transaction.oncomplete = () => resolve()
-      transaction.onerror = () => reject(transaction.error)
-    })
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
   },
 
   async loadMemories(): Promise<PersistedMemory[]> {
-    const db = await openDB()
-    return txAll<PersistedMemory>(db, 'memories', 'readonly', () => {})
+    const db = await openDB();
+    return txAll<PersistedMemory>(db, "memories", "readonly", () => {});
   },
 
   // --- Tasks ---
   async saveTasks(tasks: PersistedTask[]): Promise<void> {
-    const db = await openDB()
-    const transaction = db.transaction('tasks', 'readwrite')
-    const store = transaction.objectStore('tasks')
-    store.clear()
+    const db = await openDB();
+    const transaction = db.transaction("tasks", "readwrite");
+    const store = transaction.objectStore("tasks");
+    store.clear();
     // Flatten task tree for storage
     const flatten = (nodes: PersistedTask[]): PersistedTask[] => {
-      const result: PersistedTask[] = []
+      const result: PersistedTask[] = [];
       for (const t of nodes) {
-        result.push({ ...t, children: undefined })
-        if (t.children) result.push(...flatten(t.children))
+        result.push({ ...t, children: undefined });
+        if (t.children) result.push(...flatten(t.children));
       }
-      return result
-    }
-    const flat = flatten(tasks)
-    for (const t of flat) store.put(t)
+      return result;
+    };
+    const flat = flatten(tasks);
+    for (const t of flat) store.put(t);
     await new Promise<void>((resolve, reject) => {
-      transaction.oncomplete = () => resolve()
-      transaction.onerror = () => reject(transaction.error)
-    })
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
   },
 
   async loadTasks(): Promise<PersistedTask[]> {
-    const db = await openDB()
-    const flat = await txAll<PersistedTask>(db, 'tasks', 'readonly', () => {})
+    const db = await openDB();
+    const flat = await txAll<PersistedTask>(db, "tasks", "readonly", () => {});
     // Rebuild tree
-    const map = new Map<string, PersistedTask>()
-    const roots: PersistedTask[] = []
+    const map = new Map<string, PersistedTask>();
+    const roots: PersistedTask[] = [];
     for (const t of flat) {
-      map.set(t.id, { ...t, children: [] })
+      map.set(t.id, { ...t, children: [] });
     }
     for (const t of flat) {
-      const node = map.get(t.id)!
+      const node = map.get(t.id)!;
       if (t.parentId && map.has(t.parentId)) {
-        map.get(t.parentId)!.children!.push(node)
+        map.get(t.parentId)!.children!.push(node);
       } else {
-        roots.push(node)
+        roots.push(node);
       }
     }
-    return roots
+    return roots;
   },
 
   // --- Checkpoints ---
   async saveCheckpoints(checkpoints: PersistedCheckpoint[]): Promise<void> {
-    const db = await openDB()
-    const transaction = db.transaction('checkpoints', 'readwrite')
-    const store = transaction.objectStore('checkpoints')
-    store.clear()
-    for (const cp of checkpoints) store.put(cp)
+    const db = await openDB();
+    const transaction = db.transaction("checkpoints", "readwrite");
+    const store = transaction.objectStore("checkpoints");
+    store.clear();
+    for (const cp of checkpoints) store.put(cp);
     await new Promise<void>((resolve, reject) => {
-      transaction.oncomplete = () => resolve()
-      transaction.onerror = () => reject(transaction.error)
-    })
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
   },
 
   async loadCheckpoints(): Promise<PersistedCheckpoint[]> {
-    const db = await openDB()
-    return txAll<PersistedCheckpoint>(db, 'checkpoints', 'readonly', () => {})
+    const db = await openDB();
+    return txAll<PersistedCheckpoint>(db, "checkpoints", "readonly", () => {});
   },
 
   // --- Chat Messages ---
-  async saveChatMessages(messages: PersistedChatMessage[], sessionId?: string): Promise<void> {
-    const db = await openDB()
-    const transaction = db.transaction('chatMessages', 'readwrite')
-    const store = transaction.objectStore('chatMessages')
-    store.clear()
+  async saveChatMessages(
+    messages: PersistedChatMessage[],
+    sessionId?: string,
+  ): Promise<void> {
+    const db = await openDB();
+    const transaction = db.transaction("chatMessages", "readwrite");
+    const store = transaction.objectStore("chatMessages");
+    store.clear();
     // Assign sessionId to all messages if provided
-    const enriched = messages.map(m => ({ ...m, sessionId: sessionId || m.sessionId || 'default' }))
+    const enriched = messages.map((m) => ({
+      ...m,
+      sessionId: sessionId || m.sessionId || "default",
+    }));
     // Save last 200 messages max to avoid bloating
-    const recent = enriched.slice(-200)
-    for (const m of recent) store.put(m)
+    const recent = enriched.slice(-200);
+    for (const m of recent) store.put(m);
     await new Promise<void>((resolve, reject) => {
-      transaction.oncomplete = () => resolve()
-      transaction.onerror = () => reject(transaction.error)
-    })
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
   },
 
   // Delete all chat messages for a specific session
   async deleteChatMessagesBySession(sessionId: string): Promise<void> {
-    const db = await openDB()
-    const transaction = db.transaction('chatMessages', 'readwrite')
-    const store = transaction.objectStore('chatMessages')
-    let request: IDBRequest<PersistedChatMessage[]>
+    const db = await openDB();
+    const transaction = db.transaction("chatMessages", "readwrite");
+    const store = transaction.objectStore("chatMessages");
+    let request: IDBRequest<PersistedChatMessage[]>;
 
     try {
-      const index = store.index('sessionId')
-      request = index.getAll(sessionId)
+      const index = store.index("sessionId");
+      request = index.getAll(sessionId);
     } catch {
-      request = store.getAll()
+      request = store.getAll();
     }
 
     await new Promise<void>((resolve, reject) => {
       request.onsuccess = () => {
-        const all = request.result as PersistedChatMessage[]
-        const messages = all.filter(m => m.sessionId === sessionId)
-        for (const m of messages) store.delete(m.id)
-        transaction.oncomplete = () => resolve()
-        transaction.onerror = () => reject(transaction.error)
-      }
-      request.onerror = () => reject(request.error)
-    })
+        const all = request.result as PersistedChatMessage[];
+        const messages = all.filter((m) => m.sessionId === sessionId);
+        for (const m of messages) store.delete(m.id);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
   },
 
   // Load chat messages for a specific session
-  async loadChatMessagesBySession(sessionId: string): Promise<PersistedChatMessage[]> {
-    const db = await openDB()
+  async loadChatMessagesBySession(
+    sessionId: string,
+  ): Promise<PersistedChatMessage[]> {
+    const db = await openDB();
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction('chatMessages', 'readonly')
-      const store = transaction.objectStore('chatMessages')
-      let request: IDBRequest<PersistedChatMessage[]>
+      const transaction = db.transaction("chatMessages", "readonly");
+      const store = transaction.objectStore("chatMessages");
+      let request: IDBRequest<PersistedChatMessage[]>;
 
       try {
-        const index = store.index('sessionId')
-        request = index.getAll(sessionId)
+        const index = store.index("sessionId");
+        request = index.getAll(sessionId);
       } catch {
         // Index doesn't exist yet (migration pending) — fall back to getAll + filter
-        request = store.getAll()
+        request = store.getAll();
       }
 
       request.onsuccess = () => {
-        const all = request.result as PersistedChatMessage[]
+        const all = request.result as PersistedChatMessage[];
         const filtered = all
-          .filter(m => m.sessionId === sessionId)
-          .sort((a, b) => a.timestamp - b.timestamp)
-        resolve(filtered)
-      }
-      request.onerror = () => reject(request.error)
-    })
+          .filter((m) => m.sessionId === sessionId)
+          .sort((a, b) => a.timestamp - b.timestamp);
+        resolve(filtered);
+      };
+      request.onerror = () => reject(request.error);
+    });
   },
 
   async loadChatMessages(): Promise<PersistedChatMessage[]> {
-    const db = await openDB()
-    return txAll<PersistedChatMessage>(db, 'chatMessages', 'readonly', () => {})
+    const db = await openDB();
+    return txAll<PersistedChatMessage>(
+      db,
+      "chatMessages",
+      "readonly",
+      () => {},
+    );
   },
 
   // --- Settings ---
   async saveSetting(key: string, value: unknown): Promise<void> {
-    let toStore = value
-    if (key === 'apiConfig' && value && typeof value === 'object' && 'apiKey' in (value as Record<string, unknown>)) {
-      const config = { ...(value as Record<string, unknown>) }
-      if (typeof config.apiKey === 'string' && config.apiKey) {
-        config.apiKey = await encryptApiKey(config.apiKey)
+    let toStore = value;
+    if (
+      key === "apiConfig" &&
+      value &&
+      typeof value === "object" &&
+      "apiKey" in (value as Record<string, unknown>)
+    ) {
+      const config = { ...(value as Record<string, unknown>) };
+      if (typeof config.apiKey === "string" && config.apiKey) {
+        config.apiKey = await encryptApiKey(config.apiKey);
       }
-      toStore = config
+      toStore = config;
     }
-    if (key === 'apiHistory' && Array.isArray(value)) {
-      toStore = await Promise.all((value as Array<Record<string, unknown>>).map(async (h) => {
-        if (typeof h.apiKey === 'string' && h.apiKey) {
-          return { ...h, apiKey: await encryptApiKey(h.apiKey) }
-        }
-        return h
-      }))
+    if (key === "apiHistory" && Array.isArray(value)) {
+      toStore = await Promise.all(
+        (value as Array<Record<string, unknown>>).map(async (h) => {
+          if (typeof h.apiKey === "string" && h.apiKey) {
+            return { ...h, apiKey: await encryptApiKey(h.apiKey) };
+          }
+          return h;
+        }),
+      );
     }
-    if (key === 'apiProfiles' && Array.isArray(value)) {
-      toStore = await Promise.all((value as Array<{ config?: Record<string, unknown> }>).map(async (p) => {
-        if (p.config && typeof p.config.apiKey === 'string' && p.config.apiKey) {
-          return { ...p, config: { ...p.config, apiKey: await encryptApiKey(p.config.apiKey) } }
-        }
-        return p
-      }))
+    if (key === "apiProfiles" && Array.isArray(value)) {
+      toStore = await Promise.all(
+        (value as Array<{ config?: Record<string, unknown> }>).map(
+          async (p) => {
+            if (
+              p.config &&
+              typeof p.config.apiKey === "string" &&
+              p.config.apiKey
+            ) {
+              return {
+                ...p,
+                config: {
+                  ...p.config,
+                  apiKey: await encryptApiKey(p.config.apiKey),
+                },
+              };
+            }
+            return p;
+          },
+        ),
+      );
     }
-    const db = await openDB()
-    await tx(db, 'settings', 'readwrite', (store) => store.put({ key, value: toStore }))
+    const db = await openDB();
+    await tx(db, "settings", "readwrite", (store) =>
+      store.put({ key, value: toStore }),
+    );
   },
 
   async loadSetting<T = unknown>(key: string): Promise<T | null> {
-    const db = await openDB()
-    const result = await tx<{ key: string; value: T } | undefined>(db, 'settings', 'readonly', (store) => store.get(key))
-    let value: T | null = result?.value ?? null
-    if (key === 'apiConfig' && value && typeof value === 'object' && 'apiKey' in (value as Record<string, unknown>)) {
-      const config = { ...(value as Record<string, unknown>) }
-      if (typeof config.apiKey === 'string' && config.apiKey) {
-        config.apiKey = await decryptApiKey(config.apiKey)
+    const db = await openDB();
+    const result = await tx<{ key: string; value: T } | undefined>(
+      db,
+      "settings",
+      "readonly",
+      (store) => store.get(key),
+    );
+    let value: T | null = result?.value ?? null;
+    if (
+      key === "apiConfig" &&
+      value &&
+      typeof value === "object" &&
+      "apiKey" in (value as Record<string, unknown>)
+    ) {
+      const config = { ...(value as Record<string, unknown>) };
+      if (typeof config.apiKey === "string" && config.apiKey) {
+        config.apiKey = await decryptApiKey(config.apiKey);
       }
-      value = config as T
+      value = config as T;
     }
-    if (key === 'apiHistory' && Array.isArray(value)) {
-      value = await Promise.all((value as Array<Record<string, unknown>>).map(async (h) => {
-        if (typeof h.apiKey === 'string' && h.apiKey) {
-          return { ...h, apiKey: await decryptApiKey(h.apiKey) }
-        }
-        return h
-      })) as T
+    if (key === "apiHistory" && Array.isArray(value)) {
+      value = (await Promise.all(
+        (value as Array<Record<string, unknown>>).map(async (h) => {
+          if (typeof h.apiKey === "string" && h.apiKey) {
+            return { ...h, apiKey: await decryptApiKey(h.apiKey) };
+          }
+          return h;
+        }),
+      )) as T;
     }
-    if (key === 'apiProfiles' && Array.isArray(value)) {
-      value = await Promise.all((value as Array<{ config?: Record<string, unknown> }>).map(async (p) => {
-        if (p.config && typeof p.config.apiKey === 'string' && p.config.apiKey) {
-          return { ...p, config: { ...p.config, apiKey: await decryptApiKey(p.config.apiKey) } }
-        }
-        return p
-      })) as T
+    if (key === "apiProfiles" && Array.isArray(value)) {
+      value = (await Promise.all(
+        (value as Array<{ config?: Record<string, unknown> }>).map(
+          async (p) => {
+            if (
+              p.config &&
+              typeof p.config.apiKey === "string" &&
+              p.config.apiKey
+            ) {
+              return {
+                ...p,
+                config: {
+                  ...p.config,
+                  apiKey: await decryptApiKey(p.config.apiKey),
+                },
+              };
+            }
+            return p;
+          },
+        ),
+      )) as T;
     }
-    return value
+    return value;
   },
 
   // --- Full Session Save/Restore ---
   async saveSession(data: {
-    goal: string | null
-    memories: PersistedMemory[]
-    tasks: PersistedTask[]
-    notes: string
-    checkpoints: PersistedCheckpoint[]
-    chatMessages: PersistedChatMessage[]
-    files: PersistedFileSnapshot[]
-    openTabs: PersistedOpenTab[]
-    id?: string
-    savedAt?: number
-    createdAt?: number
-    label?: string
-    workDir?: string | null
-    isArchived?: boolean
-    parentSessionId?: string
-    forkedFromMessageId?: string
-    branchName?: string
+    goal: string | null;
+    memories: PersistedMemory[];
+    tasks: PersistedTask[];
+    notes: string;
+    checkpoints: PersistedCheckpoint[];
+    chatMessages: PersistedChatMessage[];
+    files: PersistedFileSnapshot[];
+    openTabs: PersistedOpenTab[];
+    id?: string;
+    savedAt?: number;
+    createdAt?: number;
+    label?: string;
+    workDir?: string | null;
+    isArchived?: boolean;
+    parentSessionId?: string;
+    forkedFromMessageId?: string;
+    branchName?: string;
   }): Promise<string> {
-    const db = await openDB()
-    const now = Date.now()
-    const id = data.id || 'session-' + now
-    const { label: dataLabel, ...rest } = data
+    const db = await openDB();
+    const now = Date.now();
+    const id = data.id || "session-" + now;
+    const { label: dataLabel, ...rest } = data;
     // Preserve createdAt / isArchived for existing sessions (so switching/
     // loading/re-saving never reshuffles the sidebar nor resurrects an
     // archived conversation); assign them only when first created.
     const existing = await tx<PersistedSession | undefined>(
       db,
-      'sessions',
-      'readonly',
-      (store) => store.get(id)
-    )
-    const createdAt = data.createdAt ?? existing?.createdAt ?? existing?.savedAt ?? now
+      "sessions",
+      "readonly",
+      (store) => store.get(id),
+    );
+    const createdAt =
+      data.createdAt ?? existing?.createdAt ?? existing?.savedAt ?? now;
     const session: PersistedSession = {
       id,
-      label: dataLabel || new Date().toLocaleString('zh-CN'),
+      label: dataLabel || new Date().toLocaleString("zh-CN"),
       savedAt: data.savedAt || now,
       createdAt,
       workDir: data.workDir ?? null,
@@ -490,230 +557,254 @@ export const persistence = {
       // 归档的会话覆盖回未归档，导致归档对话「过后又自动恢复」。
       isArchived: data.isArchived ?? existing?.isArchived ?? false,
       ...rest,
-      chatMessages: rest.chatMessages.map(m => ({ ...m, sessionId: m.sessionId || 'session-default' })),
-    }
-    await tx(db, 'sessions', 'readwrite', (store) => store.put(session))
-    return id
+      chatMessages: rest.chatMessages.map((m) => ({
+        ...m,
+        sessionId: m.sessionId || "session-default",
+      })),
+    };
+    await tx(db, "sessions", "readwrite", (store) => store.put(session));
+    return id;
   },
 
   async loadSessions(): Promise<PersistedSession[]> {
-    const db = await openDB()
-    return txAll<PersistedSession>(db, 'sessions', 'readonly', () => {})
+    const db = await openDB();
+    return txAll<PersistedSession>(db, "sessions", "readonly", () => {});
   },
 
   async loadSession(id: string): Promise<PersistedSession | undefined> {
-    const db = await openDB()
+    const db = await openDB();
     return tx<PersistedSession | undefined>(
       db,
-      'sessions',
-      'readonly',
-      (store) => store.get(id)
-    )
+      "sessions",
+      "readonly",
+      (store) => store.get(id),
+    );
   },
 
   async deleteSession(id: string): Promise<void> {
-    const db = await openDB()
-    await tx(db, 'sessions', 'readwrite', (store) => store.delete(id))
+    const db = await openDB();
+    await tx(db, "sessions", "readwrite", (store) => store.delete(id));
   },
 
   async updateSessionLabel(id: string, label: string): Promise<void> {
-    const db = await openDB()
-    const session = await tx<PersistedSession | undefined>(db, 'sessions', 'readonly', (store) => store.get(id))
+    const db = await openDB();
+    const session = await tx<PersistedSession | undefined>(
+      db,
+      "sessions",
+      "readonly",
+      (store) => store.get(id),
+    );
     if (session) {
-      session.label = label
-      session.savedAt = Date.now()
-      await tx(db, 'sessions', 'readwrite', (store) => store.put(session))
+      session.label = label;
+      session.savedAt = Date.now();
+      await tx(db, "sessions", "readwrite", (store) => store.put(session));
     }
   },
 
-  
   async reorderSessions(workDir: string, orderedIds: string[]): Promise<void> {
     // Re-save sessions with adjusted createdAt to match new order
-    const all = await this.loadSessions()
-    const sessions = all.filter(s => s.workDir === workDir)
-    const now = Date.now()
+    const all = await this.loadSessions();
+    const sessions = all.filter((s) => s.workDir === workDir);
+    const now = Date.now();
     for (let i = 0; i < orderedIds.length; i++) {
-      const s = sessions.find(x => x.id === orderedIds[i])
+      const s = sessions.find((x) => x.id === orderedIds[i]);
       if (s && s.createdAt !== now - i * 1000) {
-        s.createdAt = now - i * 1000
-        s.savedAt = now
-        const db = await openDB()
-        await tx(db, 'sessions', 'readwrite', (store) => store.put(s))
+        s.createdAt = now - i * 1000;
+        s.savedAt = now;
+        const db = await openDB();
+        await tx(db, "sessions", "readwrite", (store) => store.put(s));
       }
     }
   },
 
   async toggleSessionArchived(id: string): Promise<boolean> {
-    const db = await openDB()
-    const session = await tx<PersistedSession | undefined>(db, 'sessions', 'readonly', (store) => store.get(id))
+    const db = await openDB();
+    const session = await tx<PersistedSession | undefined>(
+      db,
+      "sessions",
+      "readonly",
+      (store) => store.get(id),
+    );
     if (session) {
-      session.isArchived = !session.isArchived
-      session.savedAt = Date.now()
-      await tx(db, 'sessions', 'readwrite', (store) => store.put(session))
-      return session.isArchived
+      session.isArchived = !session.isArchived;
+      session.savedAt = Date.now();
+      await tx(db, "sessions", "readwrite", (store) => store.put(session));
+      return session.isArchived;
     }
-    return false
+    return false;
   },
 
   async toggleSessionPinned(id: string): Promise<boolean> {
-    const db = await openDB()
-    const session = await tx<PersistedSession | undefined>(db, 'sessions', 'readonly', (store) => store.get(id))
+    const db = await openDB();
+    const session = await tx<PersistedSession | undefined>(
+      db,
+      "sessions",
+      "readonly",
+      (store) => store.get(id),
+    );
     if (session) {
-      session.isPinned = !session.isPinned
-      session.savedAt = Date.now()
-      await tx(db, 'sessions', 'readwrite', (store) => store.put(session))
-      return session.isPinned
+      session.isPinned = !session.isPinned;
+      session.savedAt = Date.now();
+      await tx(db, "sessions", "readwrite", (store) => store.put(session));
+      return session.isPinned;
     }
-    return false
+    return false;
   },
 
   // --- Projects ---
   async saveProject(data: {
-    name: string
-    folder: string
-    chatMessages: PersistedChatMessage[]
-    files: PersistedFileSnapshot[]
-    id?: string
+    name: string;
+    folder: string;
+    chatMessages: PersistedChatMessage[];
+    files: PersistedFileSnapshot[];
+    id?: string;
   }): Promise<string> {
-    const db = await openDB()
-    const id = data.id || 'project-' + Date.now()
-    const now = Date.now()
+    const db = await openDB();
+    const id = data.id || "project-" + Date.now();
+    const now = Date.now();
     const project: PersistedProject = {
       id,
       name: data.name,
       folder: data.folder,
       createdAt: now,
       updatedAt: now,
-      chatMessages: data.chatMessages.map(m => ({ ...m, sessionId: m.sessionId || 'project-default' })),
+      chatMessages: data.chatMessages.map((m) => ({
+        ...m,
+        sessionId: m.sessionId || "project-default",
+      })),
       files: data.files,
-    }
-    await tx(db, 'projects', 'readwrite', (store) => store.put(project))
-    return id
+    };
+    await tx(db, "projects", "readwrite", (store) => store.put(project));
+    return id;
   },
 
   async loadProjects(): Promise<PersistedProject[]> {
-    const db = await openDB()
-    return txAll<PersistedProject>(db, 'projects', 'readonly', () => {})
+    const db = await openDB();
+    return txAll<PersistedProject>(db, "projects", "readonly", () => {});
   },
 
   async getProjectFolders(): Promise<string[]> {
     // Load from the dedicated settings key for project folders
-    const folders = await this.loadSetting<string[]>('projectFolders')
-    if (folders && Array.isArray(folders)) return folders
+    const folders = await this.loadSetting<string[]>("projectFolders");
+    if (folders && Array.isArray(folders)) return folders;
     // Fallback: extract from projects store
-    const projects = await this.loadProjects()
-    const folderSet = new Set<string>()
+    const projects = await this.loadProjects();
+    const folderSet = new Set<string>();
     for (const p of projects) {
-      if (p.folder) folderSet.add(p.folder)
+      if (p.folder) folderSet.add(p.folder);
     }
-    return Array.from(folderSet).sort()
+    return Array.from(folderSet).sort();
   },
 
   async saveProjectFolder(folder: string): Promise<void> {
-    const folders = await this.getProjectFolders()
+    const folders = await this.getProjectFolders();
     if (!folders.includes(folder)) {
-      folders.push(folder)
-      folders.sort()
-      await this.saveSetting('projectFolders', folders)
+      folders.push(folder);
+      folders.sort();
+      await this.saveSetting("projectFolders", folders);
     }
   },
 
   async deleteProjectFolder(folder: string): Promise<void> {
-    const folders = await this.getProjectFolders()
-    const idx = folders.indexOf(folder)
+    const folders = await this.getProjectFolders();
+    const idx = folders.indexOf(folder);
     if (idx !== -1) {
-      folders.splice(idx, 1)
-      await this.saveSetting('projectFolders', folders)
+      folders.splice(idx, 1);
+      await this.saveSetting("projectFolders", folders);
     }
   },
 
   async getPinnedProjectFolders(): Promise<string[]> {
-    return (await this.loadSetting<string[]>('pinnedProjectFolders')) ?? []
+    return (await this.loadSetting<string[]>("pinnedProjectFolders")) ?? [];
   },
 
   async savePinnedProjectFolders(folders: string[]): Promise<void> {
-    await this.saveSetting('pinnedProjectFolders', folders)
+    await this.saveSetting("pinnedProjectFolders", folders);
   },
 
   async togglePinnedProjectFolder(folder: string): Promise<boolean> {
-    const folders = await this.getPinnedProjectFolders()
-    const idx = folders.indexOf(folder)
+    const folders = await this.getPinnedProjectFolders();
+    const idx = folders.indexOf(folder);
     if (idx === -1) {
-      folders.push(folder)
+      folders.push(folder);
     } else {
-      folders.splice(idx, 1)
+      folders.splice(idx, 1);
     }
-    folders.sort()
-    await this.savePinnedProjectFolders(folders)
-    return idx === -1
+    folders.sort();
+    await this.savePinnedProjectFolders(folders);
+    return idx === -1;
   },
 
   async deleteProject(id: string): Promise<void> {
-    const db = await openDB()
-    await tx(db, 'projects', 'readwrite', (store) => store.delete(id))
+    const db = await openDB();
+    await tx(db, "projects", "readwrite", (store) => store.delete(id));
   },
 
   async deleteSessionsByWorkDir(workDir: string): Promise<number> {
-    const sessions = await this.loadSessions()
-    const toDelete = sessions.filter(s => s.workDir === workDir)
-    const db = await openDB()
+    const sessions = await this.loadSessions();
+    const toDelete = sessions.filter((s) => s.workDir === workDir);
+    const db = await openDB();
     for (const s of toDelete) {
-      await tx(db, 'sessions', 'readwrite', (store) => store.delete(s.id))
+      await tx(db, "sessions", "readwrite", (store) => store.delete(s.id));
     }
-    return toDelete.length
+    return toDelete.length;
   },
 
   async archiveSessionsByWorkDir(workDir: string): Promise<number> {
-    const sessions = await this.loadSessions()
-    const toArchive = sessions.filter(s => s.workDir === workDir && !s.isArchived)
-    const db = await openDB()
+    const sessions = await this.loadSessions();
+    const toArchive = sessions.filter(
+      (s) => s.workDir === workDir && !s.isArchived,
+    );
+    const db = await openDB();
     for (const s of toArchive) {
-      s.isArchived = true
-      s.savedAt = Date.now()
-      await tx(db, 'sessions', 'readwrite', (store) => store.put(s))
+      s.isArchived = true;
+      s.savedAt = Date.now();
+      await tx(db, "sessions", "readwrite", (store) => store.put(s));
     }
-    return toArchive.length
+    return toArchive.length;
   },
 
   // --- Notes ---
   async saveNotes(content: string): Promise<void> {
-    await this.saveSetting('notes', content)
+    await this.saveSetting("notes", content);
   },
 
   async loadNotes(): Promise<string> {
-    return (await this.loadSetting<string>('notes')) ?? ''
+    return (await this.loadSetting<string>("notes")) ?? "";
   },
 
   // --- Scheduled Tasks ---
   async saveScheduledTasks(tasks: PersistedScheduledTask[]): Promise<void> {
-    await this.saveSetting('scheduledTasks', tasks)
+    await this.saveSetting("scheduledTasks", tasks);
   },
 
   async loadScheduledTasks(): Promise<PersistedScheduledTask[]> {
-    return (await this.loadSetting<PersistedScheduledTask[]>('scheduledTasks')) ?? []
+    return (
+      (await this.loadSetting<PersistedScheduledTask[]>("scheduledTasks")) ?? []
+    );
   },
 
   // --- Editor Theme ---
   async saveEditorTheme(theme: string): Promise<void> {
-    await this.saveSetting('editorTheme', theme)
+    await this.saveSetting("editorTheme", theme);
   },
 
   async loadEditorTheme(): Promise<string | null> {
-    return this.loadSetting<string>('editorTheme')
+    return this.loadSetting<string>("editorTheme");
   },
 
   // --- Session Export/Import ---
   async exportSessionAsJson(session: PersistedSession): Promise<string> {
     const exportData = {
-      version: '1.0',
+      version: "1.0",
       exportedAt: Date.now(),
-      type: 'helix-session',
+      type: "helix-session",
       session: {
         label: session.label,
         savedAt: session.savedAt,
         workDir: session.workDir,
         goal: session.goal,
-        chatMessages: session.chatMessages.map(m => ({
+        chatMessages: session.chatMessages.map((m) => ({
           role: m.role,
           content: m.content,
           timestamp: m.timestamp,
@@ -724,61 +815,65 @@ export const persistence = {
         memories: session.memories,
         notes: session.notes,
       },
-    }
-    return JSON.stringify(exportData, null, 2)
+    };
+    return JSON.stringify(exportData, null, 2);
   },
 
   async exportSessionAsMarkdown(session: PersistedSession): Promise<string> {
-    const lines: string[] = []
-    lines.push(`# ${session.label}`)
-    lines.push(`> 导出时间: ${new Date(session.savedAt).toLocaleString('zh-CN')}`)
-    if (session.goal) lines.push(`> 目标: ${session.goal}`)
-    if (session.workDir) lines.push(`> 工作目录: ${session.workDir}`)
-    lines.push('')
+    const lines: string[] = [];
+    lines.push(`# ${session.label}`);
+    lines.push(
+      `> 导出时间: ${new Date(session.savedAt).toLocaleString("zh-CN")}`,
+    );
+    if (session.goal) lines.push(`> 目标: ${session.goal}`);
+    if (session.workDir) lines.push(`> 工作目录: ${session.workDir}`);
+    lines.push("");
 
-    const fileList = session.files || []
+    const fileList = session.files || [];
     if (fileList.length > 0) {
-      lines.push('## 文件结构')
+      lines.push("## 文件结构");
       for (const f of fileList) {
-        lines.push(`- ${f.name}${f.type === 'folder' ? '/' : ''}`)
+        lines.push(`- ${f.name}${f.type === "folder" ? "/" : ""}`);
       }
-      lines.push('')
+      lines.push("");
     }
 
-    const messages = session.chatMessages || []
+    const messages = session.chatMessages || [];
     if (messages.length > 0) {
-      lines.push('## 对话记录')
-      lines.push('')
+      lines.push("## 对话记录");
+      lines.push("");
       for (const msg of messages) {
-        const role = msg.role === 'user' ? '🧑 用户' : '🤖 AI'
-        lines.push(`### ${role} (${new Date(msg.timestamp).toLocaleString('zh-CN')})`)
-        lines.push('')
-        lines.push(msg.content)
-        lines.push('')
-        lines.push('---')
-        lines.push('')
+        const role = msg.role === "user" ? "🧑 用户" : "🤖 AI";
+        lines.push(
+          `### ${role} (${new Date(msg.timestamp).toLocaleString("zh-CN")})`,
+        );
+        lines.push("");
+        lines.push(msg.content);
+        lines.push("");
+        lines.push("---");
+        lines.push("");
       }
     }
 
-    return lines.join('\n')
+    return lines.join("\n");
   },
 
   async importSessionFromJson(json: string): Promise<PersistedSession | null> {
     try {
-      const data = JSON.parse(json)
-      if (data.type !== 'helix-session' && !data.session) return null
-      const s = data.session || data
-      const now = Date.now()
+      const data = JSON.parse(json);
+      if (data.type !== "helix-session" && !data.session) return null;
+      const s = data.session || data;
+      const now = Date.now();
       const session: PersistedSession = {
         id: `imported-${now}`,
-        label: s.label || `导入会话 ${new Date(now).toLocaleString('zh-CN')}`,
+        label: s.label || `导入会话 ${new Date(now).toLocaleString("zh-CN")}`,
         savedAt: s.savedAt || now,
         workDir: s.workDir || null,
         goal: s.goal || null,
         chatMessages: (s.chatMessages || []).map((m: any) => ({
           id: `msg-${now}-${Math.random().toString(36).slice(2, 8)}`,
           role: m.role,
-          content: m.content || '',
+          content: m.content || "",
           timestamp: m.timestamp || now,
           isStreaming: false,
         })),
@@ -786,73 +881,93 @@ export const persistence = {
         openTabs: s.openTabs || [],
         tasks: s.tasks || [],
         memories: s.memories || [],
-        notes: s.notes || '',
+        notes: s.notes || "",
         checkpoints: [],
-      }
-      await this.saveSession(session)
-      return session
+      };
+      await this.saveSession(session);
+      return session;
     } catch {
-      return null
+      return null;
     }
   },
 
-  async importSessionFromMarkdown(md: string): Promise<PersistedSession | null> {
+  async importSessionFromMarkdown(
+    md: string,
+  ): Promise<PersistedSession | null> {
     try {
-      const lines = md.split('\n')
-      let label = ''
-      let goal: string | null = null
-      let workDir: string | null = null
-      let exportedAt: number = Date.now()
-      const messages: Array<{ role: string; content: string; timestamp: number }> = []
+      const lines = md.split("\n");
+      let label = "";
+      let goal: string | null = null;
+      let workDir: string | null = null;
+      let exportedAt: number = Date.now();
+      const messages: Array<{
+        role: string;
+        content: string;
+        timestamp: number;
+      }> = [];
 
       for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]
+        const line = lines[i];
 
-        const titleMatch = line.match(/^# (.+)$/)
-        if (titleMatch) { label = titleMatch[1]; continue }
-
-        const metaMatch = line.match(/^> (\S+):\s*(.+)$/)
-        if (metaMatch) {
-          const key = metaMatch[1]
-          const val = metaMatch[2].trim()
-          if (key === '目标') goal = val
-          else if (key === '工作目录') workDir = val
-          else if (key === '导出时间') {
-            const d = new Date(val)
-            if (!isNaN(d.getTime())) exportedAt = d.getTime()
-          }
-          continue
+        const titleMatch = line.match(/^# (.+)$/);
+        if (titleMatch) {
+          label = titleMatch[1];
+          continue;
         }
 
-        const msgMatch = line.match(/^### (\S+\s+\S+)\s*\((.+)\)$/)
-        if (msgMatch) {
-          const roleLabel = msgMatch[1]
-          const timeStr = msgMatch[2]
-          const ts = new Date(timeStr).getTime() || exportedAt
-          const role = roleLabel.includes('用户') ? 'user' : 'assistant'
-          const contentLines: string[] = []
-          i++
-          while (i + 1 < lines.length && lines[i + 1] !== '---' && !lines[i + 1].match(/^### /) && !lines[i + 1].match(/^## /) && !lines[i + 1].match(/^# /)) {
-            i++
-            contentLines.push(lines[i])
+        const metaMatch = line.match(/^> (\S+):\s*(.+)$/);
+        if (metaMatch) {
+          const key = metaMatch[1];
+          const val = metaMatch[2].trim();
+          if (key === "目标") goal = val;
+          else if (key === "工作目录") workDir = val;
+          else if (key === "导出时间") {
+            const d = new Date(val);
+            if (!isNaN(d.getTime())) exportedAt = d.getTime();
           }
-          if (i + 1 < lines.length && lines[i + 1].trim() === '---') i++
-          messages.push({ role, content: contentLines.join('\n').trim(), timestamp: ts })
-          continue
+          continue;
+        }
+
+        const msgMatch = line.match(/^### (\S+\s+\S+)\s*\((.+)\)$/);
+        if (msgMatch) {
+          const roleLabel = msgMatch[1];
+          const timeStr = msgMatch[2];
+          const ts = new Date(timeStr).getTime() || exportedAt;
+          const role = roleLabel.includes("用户") ? "user" : "assistant";
+          const contentLines: string[] = [];
+          i++;
+          while (
+            i + 1 < lines.length &&
+            lines[i + 1] !== "---" &&
+            !lines[i + 1].match(/^### /) &&
+            !lines[i + 1].match(/^## /) &&
+            !lines[i + 1].match(/^# /)
+          ) {
+            i++;
+            contentLines.push(lines[i]);
+          }
+          if (i + 1 < lines.length && lines[i + 1].trim() === "---") i++;
+          messages.push({
+            role,
+            content: contentLines.join("\n").trim(),
+            timestamp: ts,
+          });
+          continue;
         }
       }
 
-      if (!label && messages.length === 0) return null
+      if (!label && messages.length === 0) return null;
 
-      const now = Date.now()
+      const now = Date.now();
       const session: PersistedSession = {
-        id: 'imported-md-' + now,
-        label: label || '导入 Markdown ' + new Date(now).toLocaleString('zh-CN'),
+        id: "imported-md-" + now,
+        label:
+          label || "导入 Markdown " + new Date(now).toLocaleString("zh-CN"),
         savedAt: exportedAt,
         workDir,
         goal,
         chatMessages: messages.map((m, idx) => ({
-          id: 'msg-' + now + '-' + idx,
+          id: "msg-" + now + "-" + idx,
           role: m.role,
           content: m.content,
           timestamp: m.timestamp,
@@ -862,14 +977,13 @@ export const persistence = {
         openTabs: [],
         tasks: [],
         memories: [],
-        notes: '',
+        notes: "",
         checkpoints: [],
-      }
-      await this.saveSession(session)
-      return session
+      };
+      await this.saveSession(session);
+      return session;
     } catch {
-      return null
+      return null;
     }
-  }
-
-}
+  },
+};

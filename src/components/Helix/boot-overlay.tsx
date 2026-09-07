@@ -1,15 +1,22 @@
-'use client'
+"use client";
 
-import { Loader2, WifiOff, RefreshCw, Package, X, CheckCircle2 } from 'lucide-react'
-import React, { useEffect, useState, useRef } from 'react'
-import { useHelixStore } from '@/stores/helix-store'
+import {
+  Loader2,
+  WifiOff,
+  RefreshCw,
+  Package,
+  X,
+  CheckCircle2,
+} from "lucide-react";
+import React, { useEffect, useState, useRef } from "react";
+import { useHelixStore } from "@/stores/helix-store";
 
 /** Bootstrap stage reported by the Rust backend. */
-type BootstrapStage = 'preparing' | 'done' | null
+type BootstrapStage = "preparing" | "done" | null;
 
 const STAGE_LABELS: Record<string, string> = {
-  preparing: '正在准备 Helix 运行环境...',
-}
+  preparing: "正在准备 Helix 运行环境...",
+};
 
 /**
  * BootOverlay — shown over the app while the Helix gateway is connecting or
@@ -19,84 +26,87 @@ const STAGE_LABELS: Record<string, string> = {
  * Also handles first-run bootstrap progress (extracting the bundled agent runtime).
  */
 export function BootOverlay() {
-  const status = useHelixStore((s) => s.gatewayStatus)
-  const setGatewayStatus = useHelixStore((s) => s.setGatewayStatus)
-  const [bootstrapStage, setBootstrapStage] = useState<BootstrapStage>(null)
-  const [bootstrapMessage, setBootstrapMessage] = useState('')
-  const [isReady, setIsReady] = useState(false)
-  const [isFadingOut, setIsFadingOut] = useState(false)
-  const [showSuccess, setShowSuccess] = useState(false)
+  const status = useHelixStore((s) => s.gatewayStatus);
+  const setGatewayStatus = useHelixStore((s) => s.setGatewayStatus);
+  const [bootstrapStage, setBootstrapStage] = useState<BootstrapStage>(null);
+  const [bootstrapMessage, setBootstrapMessage] = useState("");
+  const [isReady, setIsReady] = useState(false);
+  const [isFadingOut, setIsFadingOut] = useState(false);
+  const [showSuccess, setShowSuccess] = useState(false);
 
   // Handle fade-out animation when ready
   useEffect(() => {
-    if (status === 'ready' && !isFadingOut) {
-      setShowSuccess(true)
-      setIsFadingOut(true)
+    if (status === "ready" && !isFadingOut) {
+      setShowSuccess(true);
+      setIsFadingOut(true);
       const timer = setTimeout(() => {
-        setIsReady(true)
-      }, 800) // Fade out duration
-      return () => clearTimeout(timer)
+        setIsReady(true);
+      }, 800); // Fade out duration
+      return () => clearTimeout(timer);
     }
-  }, [status, isFadingOut])
+  }, [status, isFadingOut]);
 
   // Listen for bootstrap progress events from the Rust backend.
   useEffect(() => {
-    let unlisten: (() => void) | undefined
+    let unlisten: (() => void) | undefined;
     const setup = async () => {
       try {
-        const { listen } = await import('@tauri-apps/api/event')
-        unlisten = await listen<{ method: string; params: { stage: string; message: string } }>(
-          'helix:event',
-          (event) => {
-            if (event.payload.method === 'bootstrap:progress') {
-              const { stage, message } = event.payload.params
-              if (stage === 'done') {
-                setBootstrapStage('done')
-                setBootstrapMessage('')
-              } else {
-                setBootstrapStage(stage as BootstrapStage)
-                setBootstrapMessage(message)
-              }
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<{
+          method: string;
+          params: { stage: string; message: string };
+        }>("helix:event", (event) => {
+          if (event.payload.method === "bootstrap:progress") {
+            const { stage, message } = event.payload.params;
+            if (stage === "done") {
+              setBootstrapStage("done");
+              setBootstrapMessage("");
+            } else {
+              setBootstrapStage(stage as BootstrapStage);
+              setBootstrapMessage(message);
             }
-          },
-        )
+          }
+        });
       } catch {
         // Non-Tauri environment (dev server without backend) — silently ignore.
       }
-    }
-    void setup()
+    };
+    void setup();
     return () => {
-      unlisten?.()
-    }
-  }, [])
+      unlisten?.();
+    };
+  }, []);
 
-  const [dismissed, setDismissed] = useState(false)
+  const [dismissed, setDismissed] = useState(false);
 
-  if (isReady || dismissed) return null
+  if (isReady || dismissed) return null;
 
-  const isConnecting = status === 'connecting'
-  const isBootstrapping = bootstrapStage !== null && bootstrapStage !== 'done' && isConnecting
+  const isConnecting = status === "connecting";
+  const isBootstrapping =
+    bootstrapStage !== null && bootstrapStage !== "done" && isConnecting;
 
   const retry = () => {
-    setGatewayStatus('connecting')
-    const helix = (window as any).electron?.helix
+    setGatewayStatus("connecting");
+    const helix = (window as any).electron?.helix;
     const probe = async (n = 0) => {
       try {
-        const st = await helix?.status?.()
+        const st = await helix?.status?.();
         if (st?.connected) {
-          useHelixStore.getState().setGatewayStatus('ready')
-          return
+          useHelixStore.getState().setGatewayStatus("ready");
+          return;
         }
       } catch {}
-      if (n < 20) setTimeout(() => probe(n + 1), 1500)
-    }
-    probe()
-  }
+      if (n < 20) setTimeout(() => probe(n + 1), 1500);
+    };
+    probe();
+  };
 
   return (
     <div
       className={`fixed bottom-4 right-4 z-[10000] w-80 rounded-xl border bg-card shadow-lg transition-all duration-500 ${
-        isFadingOut ? 'opacity-0 translate-y-2 pointer-events-none' : 'opacity-100'
+        isFadingOut
+          ? "opacity-0 translate-y-2 pointer-events-none"
+          : "opacity-100"
       }`}
     >
       <div className="p-4 text-center relative">
@@ -123,15 +133,15 @@ export function BootOverlay() {
           {isBootstrapping
             ? (STAGE_LABELS[bootstrapStage!] ?? bootstrapMessage)
             : isConnecting
-              ? '正在连接 Helix 网关…'
-              : '无法连接到 Helix 网关'}
+              ? "正在连接 Helix 网关…"
+              : "无法连接到 Helix 网关"}
         </h1>
         <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground leading-relaxed">
           {isBootstrapping
-            ? '首次启动需要安装运行环境，请耐心等待。'
+            ? "首次启动需要安装运行环境，请耐心等待。"
             : isConnecting
-              ? '正在启动 Helix Agent，请稍候。'
-              : '网关未运行或已断开。'}
+              ? "正在启动 Helix Agent，请稍候。"
+              : "网关未运行或已断开。"}
         </p>
 
         {!isConnecting && (
@@ -150,7 +160,7 @@ export function BootOverlay() {
             <div
               className="h-full bg-primary rounded-full transition-all duration-700"
               style={{
-                width: bootstrapStage === 'preparing' ? '50%' : '100%',
+                width: bootstrapStage === "preparing" ? "50%" : "100%",
               }}
             />
           </div>
@@ -165,5 +175,5 @@ export function BootOverlay() {
         )}
       </div>
     </div>
-  )
+  );
 }

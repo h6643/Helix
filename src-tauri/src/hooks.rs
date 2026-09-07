@@ -180,7 +180,10 @@ pub fn hooks_list() -> Value {
     let text = match std::fs::read_to_string(&yaml_path) {
         Ok(t) => t,
         Err(_) => {
-            return json!({ "ok": true, "config": { "enabled": false, "autoAccept": false, "hooks": {} } })
+            return json!({
+                "ok": true,
+                "config": { "enabled": false, "autoAccept": false, "hooks": {} },
+            })
         }
     };
     let hooks = parse_hooks(&text);
@@ -191,7 +194,14 @@ pub fn hooks_list() -> Value {
             auto_accept = rest.trim() == "true";
         }
     }
-    json!({ "ok": true, "config": { "enabled": enabled, "autoAccept": auto_accept, "hooks": hooks } })
+    json!({
+        "ok": true,
+        "config": {
+            "enabled": enabled,
+            "autoAccept": auto_accept,
+            "hooks": hooks,
+        },
+    })
 }
 
 #[tauri::command]

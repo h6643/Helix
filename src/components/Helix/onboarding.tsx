@@ -1,23 +1,35 @@
-'use client'
+"use client";
 
-import { Sparkles, Settings2, MessageSquare, Check, X } from 'lucide-react'
-import React, { useState } from 'react'
-import { useHelixStore } from '@/stores/helix-store'
+import { Sparkles, Settings2, MessageSquare, Check, X } from "lucide-react";
+import React, { useState } from "react";
+import { useHelixStore } from "@/stores/helix-store";
 
 const STEPS = [
-  { icon: Settings2, title: '配置提供方与模型', desc: '在设置中选择你的 AI 提供方（OpenAI / Anthropic / 本地模型等）并填入 API Key。' },
-  { icon: MessageSquare, title: '开始对话', desc: '回到主界面，直接输入任务，Helix 会调用工具、读写文件、运行命令。' },
-  { icon: Sparkles, title: '探索能力', desc: '试试计划任务、技能面板、终端、Git worktree 与文件预览。' },
-]
+  {
+    icon: Settings2,
+    title: "配置提供方与模型",
+    desc: "在设置中选择你的 AI 提供方（OpenAI / Anthropic / 本地模型等）并填入 API Key。",
+  },
+  {
+    icon: MessageSquare,
+    title: "开始对话",
+    desc: "回到主界面，直接输入任务，Helix 会调用工具、读写文件、运行命令。",
+  },
+  {
+    icon: Sparkles,
+    title: "探索能力",
+    desc: "试试计划任务、技能面板、终端、Git worktree 与文件预览。",
+  },
+];
 
 export function Onboarding() {
-  const hasOnboarded = useHelixStore((s) => s.hasOnboarded)
-  const setHasOnboarded = useHelixStore((s) => s.setHasOnboarded)
-  const [step, setStep] = useState(0)
+  const hasOnboarded = useHelixStore((s) => s.hasOnboarded);
+  const setHasOnboarded = useHelixStore((s) => s.setHasOnboarded);
+  const [step, setStep] = useState(0);
 
-  if (hasOnboarded) return null
+  if (hasOnboarded) return null;
 
-  const finish = () => setHasOnboarded(true)
+  const finish = () => setHasOnboarded(true);
 
   return (
     <div className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/70 backdrop-blur-sm p-6">
@@ -34,7 +46,9 @@ export function Onboarding() {
           <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center">
             <Sparkles className="size-5 text-primary" />
           </div>
-          <h1 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold">欢迎使用 Helix</h1>
+          <h1 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold">
+            欢迎使用 Helix
+          </h1>
         </div>
 
         {/* progress */}
@@ -43,7 +57,7 @@ export function Onboarding() {
             <div
               key={i}
               className={`h-1 flex-1 rounded-full transition-colors ${
-                i <= step ? 'bg-primary' : 'bg-muted'
+                i <= step ? "bg-primary" : "bg-muted"
               }`}
             />
           ))}
@@ -51,18 +65,22 @@ export function Onboarding() {
 
         <div className="min-h-[96px]">
           {STEPS.map((s, i) => {
-            const Icon = s.icon
+            const Icon = s.icon;
             return (
-              <div key={i} className={i === step ? 'block' : 'hidden'}>
+              <div key={i} className={i === step ? "block" : "hidden"}>
                 <div className="flex items-center gap-3 mb-2">
                   <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
                     <Icon className="size-5 text-primary" />
                   </div>
-                  <h2 className="text-[length:var(--helix-transcript-size)] font-semibold">{s.title}</h2>
+                  <h2 className="text-[length:var(--helix-transcript-size)] font-semibold">
+                    {s.title}
+                  </h2>
                 </div>
-                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground leading-relaxed">{s.desc}</p>
+                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground leading-relaxed">
+                  {s.desc}
+                </p>
               </div>
-            )
+            );
           })}
         </div>
 
@@ -102,5 +120,5 @@ export function Onboarding() {
         </div>
       </div>
     </div>
-  )
+  );
 }

@@ -1,4 +1,4 @@
-'use client'
+"use client";
 
 /**
  * Syntax-highlighted code body — ported from the upstream agent
@@ -14,50 +14,53 @@
  * through `dangerouslySetInnerHTML`; no per-token React elements are needed.
  */
 
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useState } from "react";
 
 // GitHub's lower-contrast dark palette — the vivid `github-dark-default`
 // tokens read harsh at small code size. Shared by the diff renderer. The
 // light-mode comment remap bumps `#6e7781` (borderline unreadable for shell
 // comments) to GitHub's darker muted gray `#57606a`. Keyed per theme so the
 // bump only applies in light.
-const SHIKI_THEMES = { dark: 'github-dark-dimmed', light: 'github-light-default' } as const
+const SHIKI_THEMES = {
+  dark: "github-dark-dimmed",
+  light: "github-light-default",
+} as const;
 const SHIKI_COLOR_REPLACEMENTS: Record<string, Record<string, string>> = {
-  'github-light-default': { '#6e7781': '#57606a' }
-}
+  "github-light-default": { "#6e7781": "#57606a" },
+};
 
-const MAX_HIGHLIGHT_CHARS = 150_000
-const MAX_HIGHLIGHT_LINES = 3_000
+const MAX_HIGHLIGHT_CHARS = 150_000;
+const MAX_HIGHLIGHT_LINES = 3_000;
 
 export function exceedsHighlightBudget(code: string): boolean {
   if (code.length > MAX_HIGHLIGHT_CHARS) {
-    return true
+    return true;
   }
 
-  let lines = 1
-  let index = code.indexOf('\n')
+  let lines = 1;
+  let index = code.indexOf("\n");
 
   while (index !== -1) {
     if ((lines += 1) > MAX_HIGHLIGHT_LINES) {
-      return true
+      return true;
     }
 
-    index = code.indexOf('\n', index + 1)
+    index = code.indexOf("\n", index + 1);
   }
 
-  return false
+  return false;
 }
 
-type ShikiModule = typeof import('shiki')
+type ShikiModule = typeof import("shiki");
 
-let shikiPromise: Promise<ShikiModule> | null = null
+let shikiPromise: Promise<ShikiModule> | null = null;
 
 function loadShiki(): Promise<ShikiModule> {
   if (!shikiPromise) {
-    shikiPromise = import('shiki')
+    shikiPromise = import("shiki");
   }
 
-  return shikiPromise
+  return shikiPromise;
 }
 
 // ── Highlight cache ─────────────────────────────────────────────────────────
@@ -68,85 +71,111 @@ function loadShiki(): Promise<ShikiModule> {
 // promise instead of re-highlighting. Values are promises so concurrent mounts
 // of the same block share one highlight; bounded LRU-style so long sessions
 // can't grow it without limit.
-const HIGHLIGHT_CACHE_MAX = 200
-const highlightCache = new Map<string, Promise<string>>()
+const HIGHLIGHT_CACHE_MAX = 200;
+const highlightCache = new Map<string, Promise<string>>();
 
 function cacheHighlight(key: string, p: Promise<string>): Promise<string> {
-  highlightCache.delete(key) // refresh insertion order (LRU)
-  highlightCache.set(key, p)
+  highlightCache.delete(key); // refresh insertion order (LRU)
+  highlightCache.set(key, p);
   if (highlightCache.size > HIGHLIGHT_CACHE_MAX) {
-    const oldest = highlightCache.keys().next().value
-    if (oldest !== undefined && oldest !== key) highlightCache.delete(oldest)
+    const oldest = highlightCache.keys().next().value;
+    if (oldest !== undefined && oldest !== key) highlightCache.delete(oldest);
   }
-  return p
+  return p;
 }
 
 /** Pull just the `<code>…</code>` token markup out of shiki's full `<pre>` output. */
 function codeInnerHtml(html: string): string {
-  const codeOpen = html.indexOf('<code')
-  const codeStart = html.indexOf('>', codeOpen) + 1
-  const codeEnd = html.lastIndexOf('</code>')
+  const codeOpen = html.indexOf("<code");
+  const codeStart = html.indexOf(">", codeOpen) + 1;
+  const codeEnd = html.lastIndexOf("</code>");
 
-  if (codeOpen === -1 || codeStart === -1 || codeEnd === -1 || codeEnd < codeStart) {
-    return html
+  if (
+    codeOpen === -1 ||
+    codeStart === -1 ||
+    codeEnd === -1 ||
+    codeEnd < codeStart
+  ) {
+    return html;
   }
 
-  return html.slice(codeStart, codeEnd)
+  return html.slice(codeStart, codeEnd);
 }
 
 interface HighlightedCodeProps {
-  code: string
-  language: string
+  code: string;
+  language: string;
 }
 
-export const HighlightedCode = memo(function HighlightedCode({ code, language }: HighlightedCodeProps) {
-  const [html, setHtml] = useState<string | null>(null)
+export const HighlightedCode = memo(function HighlightedCode({
+  code,
+  language,
+}: HighlightedCodeProps) {
+  const [html, setHtml] = useState<string | null>(null);
 
-  const trimmed = code.replace(/^\n+/, '').trimEnd()
+  const trimmed = code.replace(/^\n+/, "").trimEnd();
 
   useEffect(() => {
-    if (!trimmed || !language || language === 'text' || exceedsHighlightBudget(trimmed)) {
-      setHtml(null)
+    if (
+      !trimmed ||
+      !language ||
+      language === "text" ||
+      exceedsHighlightBudget(trimmed)
+    ) {
+      setHtml(null);
 
-      return
+      return;
     }
 
-    let cancelled = false
-    const key = `${language}\u0000${trimmed}`
+    let cancelled = false;
+    const key = `${language}\u0000${trimmed}`;
     const apply = (rendered: string) => {
-      if (!cancelled) setHtml(codeInnerHtml(rendered))
-    }
+      if (!cancelled) setHtml(codeInnerHtml(rendered));
+    };
     const fail = () => {
-      if (!cancelled) setHtml(null)
-    }
+      if (!cancelled) setHtml(null);
+    };
 
-    let highlight: Promise<string> | undefined = highlightCache.get(key)
+    let highlight: Promise<string> | undefined = highlightCache.get(key);
     if (!highlight) {
       // Miss → run codeToHtml once, share the promise with any concurrent
       // mount of the same block, and drop the entry on failure so a later
       // mount can retry instead of pinning a dead promise.
       highlight = cacheHighlight(
         key,
-        loadShiki()
-          .then(shiki => shiki.codeToHtml(trimmed, {
+        loadShiki().then((shiki) =>
+          shiki.codeToHtml(trimmed, {
             lang: language,
             themes: SHIKI_THEMES,
-            defaultColor: 'light-dark()',
+            defaultColor: "light-dark()",
             colorReplacements: SHIKI_COLOR_REPLACEMENTS,
-          })),
-      )
-      highlight.catch(() => { highlightCache.delete(key) })
+          }),
+        ),
+      );
+      highlight.catch(() => {
+        highlightCache.delete(key);
+      });
     }
-    highlight.then(apply).catch(fail)
+    highlight.then(apply).catch(fail);
 
     return () => {
-      cancelled = true
-    }
-  }, [language, trimmed])
+      cancelled = true;
+    };
+  }, [language, trimmed]);
 
   if (html) {
-    return <code dir="ltr" className="block whitespace-pre-wrap break-words" dangerouslySetInnerHTML={{ __html: html }} />
+    return (
+      <code
+        dir="ltr"
+        className="block whitespace-pre-wrap break-words"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
   }
 
-  return <code dir="ltr" className="block whitespace-pre-wrap break-words">{trimmed}</code>
-})
+  return (
+    <code dir="ltr" className="block whitespace-pre-wrap break-words">
+      {trimmed}
+    </code>
+  );
+});

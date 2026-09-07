@@ -11,48 +11,55 @@
  * - Added fastMode (service tier)
  * - Personality is now named preset (not free text)
  */
-import type { StateCreator } from 'zustand'
-import type { ReasoningEffortLevel } from '@/stores/helix-types'
-import { loadModelPresets, saveModelPreset } from '@/stores/agent-presets'
+import type { StateCreator } from "zustand";
+import type { ReasoningEffortLevel } from "@/stores/helix-types";
+import { loadModelPresets, saveModelPreset } from "@/stores/agent-presets";
 
 export interface AgentSettingsSlice {
-  agentMaxIterations: number
-  autoCompactContext: boolean
-  autoSaveSession: boolean
-  reasoningEffort: ReasoningEffortLevel
-  personality: string
-  fastMode: boolean
+  agentMaxIterations: number;
+  autoCompactContext: boolean;
+  autoSaveSession: boolean;
+  reasoningEffort: ReasoningEffortLevel;
+  personality: string;
+  fastMode: boolean;
   // 集成终端 Shell（仅新会话生效）：Windows 下 Bash 工具用此 shell。
   // 'auto' = 自动优先 Git Bash，找不到回退 cmd.exe；'cmd' = 始终用 cmd.exe；
   // 'pwsh' = PowerShell 7；'powershell' = PowerShell 5。
-  terminalShell: 'auto' | 'cmd' | 'pwsh' | 'powershell'
+  terminalShell: "auto" | "cmd" | "pwsh" | "powershell";
   // Agent presets (custom system prompts)
-  agentPresets: Record<string, { name: string; systemPrompt: string }>
-  activePreset: string | null
+  agentPresets: Record<string, { name: string; systemPrompt: string }>;
+  activePreset: string | null;
 
-  setAgentMaxIterations: (n: number) => void
-  setAutoCompactContext: (v: boolean) => void
-  setAutoSaveSession: (v: boolean) => void
-  setReasoningEffort: (v: ReasoningEffortLevel) => void
-  setPersonality: (v: string) => void
-  setFastMode: (v: boolean) => void
-  setTerminalShell: (v: 'auto' | 'cmd' | 'pwsh' | 'powershell') => void
-  setAgentPresets: (presets: Record<string, { name: string; systemPrompt: string }>) => void
-  setActivePreset: (preset: string | null) => void
+  setAgentMaxIterations: (n: number) => void;
+  setAutoCompactContext: (v: boolean) => void;
+  setAutoSaveSession: (v: boolean) => void;
+  setReasoningEffort: (v: ReasoningEffortLevel) => void;
+  setPersonality: (v: string) => void;
+  setFastMode: (v: boolean) => void;
+  setTerminalShell: (v: "auto" | "cmd" | "pwsh" | "powershell") => void;
+  setAgentPresets: (
+    presets: Record<string, { name: string; systemPrompt: string }>,
+  ) => void;
+  setActivePreset: (preset: string | null) => void;
 
   // Per-model presets (Helix Desktop style)
-  applyModelPreset: (providerModelKey: string) => void
-  saveCurrentAsModelPreset: (providerModelKey: string) => void
+  applyModelPreset: (providerModelKey: string) => void;
+  saveCurrentAsModelPreset: (providerModelKey: string) => void;
 }
 
-export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], AgentSettingsSlice> = (set, get) => ({
+export const createAgentSettingsSlice: StateCreator<
+  AgentSettingsSlice,
+  [],
+  [],
+  AgentSettingsSlice
+> = (set, get) => ({
   agentMaxIterations: 90,
   autoCompactContext: true,
   autoSaveSession: false,
-  reasoningEffort: 'medium',
-  personality: 'helpful',
+  reasoningEffort: "medium",
+  personality: "helpful",
   fastMode: false,
-  terminalShell: 'auto', // 自动：优先 Git Bash，找不到回退 cmd.exe
+  terminalShell: "auto", // 自动：优先 Git Bash，找不到回退 cmd.exe
   // Agent presets defaults
   agentPresets: {},
   activePreset: null,
@@ -68,19 +75,20 @@ export const createAgentSettingsSlice: StateCreator<AgentSettingsSlice, [], [], 
   setActivePreset: (preset) => set({ activePreset: preset }),
 
   applyModelPreset: (providerModelKey: string) => {
-    const preset = loadModelPresets()[providerModelKey]
-    if (!preset) return
+    const preset = loadModelPresets()[providerModelKey];
+    if (!preset) return;
     set({
-      reasoningEffort: (preset.reasoningEffort as ReasoningEffortLevel) || 'medium',
+      reasoningEffort:
+        (preset.reasoningEffort as ReasoningEffortLevel) || "medium",
       fastMode: preset.fast ?? false,
-    })
+    });
   },
 
   saveCurrentAsModelPreset: (providerModelKey: string) => {
-    const state = get()
+    const state = get();
     saveModelPreset(providerModelKey, {
       reasoningEffort: state.reasoningEffort,
       fast: state.fastMode,
-    })
+    });
   },
-})
+});

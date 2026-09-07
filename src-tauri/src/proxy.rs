@@ -51,7 +51,7 @@ fn save_proxy_url(url: &str) -> Result<(), String> {
 }
 
 /// 渲染层（WebKitGTK 主窗口）代理。仅 Linux 生效；Windows/macOS 的 WebView2 /
-/// WKWebView 无对应 API，渲染层出口流量不走此代理（模型/工具等其余层不受影响）。
+/// WKWebView 无对应 API，渲染层出口流量不走此代理。
 pub fn apply_webview_proxy() {
     #[cfg(target_os = "linux")]
     {

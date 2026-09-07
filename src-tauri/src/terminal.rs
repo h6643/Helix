@@ -484,8 +484,8 @@ pub fn terminal_start(
             let _ = CloseHandle(h_in_write);
             return Err("failed to create output pipe".to_string());
         }
-        // 我们保留的端（写输入 / 读输出）设为不可继承：否则 bInheritHandles=TRUE
-        // 会让子进程也持有 h_out_read，子进程退出后输出管道读端仍开着，读循环
+        // 保留的端（写输入/读输出）设为不可继承
+        // 子进程退出后管道读端仍开着，收不到 EOF
         // 收不到 EOF。
         let _ = SetHandleInformation(h_in_write, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0));
         let _ = SetHandleInformation(h_out_read, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0));
@@ -749,7 +749,7 @@ mod windows_tests {
             );
             assert!(
                 text.contains("HELLO_PLAIN"),
-                "plain pipe redirection produced nothing — CreatePipe/CreateProcessW broken, got: {text:?}"
+                "pipe redirection failed — CreatePipe/CreateProcessW broken, got: {text:?}"
             );
 
             let _ = TerminateProcess(pi.hProcess, 0);

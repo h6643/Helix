@@ -1026,7 +1026,7 @@ dashboard:
     }
 }
 
-// ── Raw Config (full YAML/JSON read-write, bypassing set_yaml_key) ───────────
+// ── Raw Config (full YAML/JSON read-write) ───────────
 
 /// Read the raw config.yaml as a JSON Value.
 pub async fn read_raw_config() -> Result<serde_json::Value, String> {
@@ -1038,17 +1038,17 @@ pub async fn read_raw_config() -> Result<serde_json::Value, String> {
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    
-    let value: serde_json::Value = yaml::from_str(&yaml)
-        .map_err(|e| format!("YAML parse error: {}", e))?;
+
+    let value: serde_json::Value =
+        serde_yaml::from_str(&yaml).map_err(|e| format!("YAML parse error: {}", e))?;
     Ok(value)
 }
 
 /// Write a JSON Value back to config.yaml.
 pub async fn write_raw_config(config: serde_json::Value) -> Result<(), String> {
-    let yaml = yaml::to_string(&config)
-        .map_err(|e| format!("YAML serialize error: {}", e))?;
-    
+    let yaml =
+        serde_yaml::to_string(&config).map_err(|e| format!("YAML serialize error: {}", e))?;
+
     tokio::task::spawn_blocking(move || {
         let path = config_yaml_path();
         if let Some(parent) = path.parent() {
@@ -1059,6 +1059,6 @@ pub async fn write_raw_config(config: serde_json::Value) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())??;
-    
+
     Ok(())
 }

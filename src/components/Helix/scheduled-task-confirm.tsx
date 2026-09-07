@@ -1,14 +1,14 @@
-'use client'
+"use client";
 
-import React, { useState } from 'react'
-import { Clock, Check, X } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import type { DetectedTask } from '@/lib/schedule-utils'
+import React, { useState } from "react";
+import { Clock, Check, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import type { DetectedTask } from "@/lib/schedule-utils";
 
 interface Props {
-  tasks: DetectedTask[]
-  onConfirm: (tasks: DetectedTask[]) => void
-  onDismiss: () => void
+  tasks: DetectedTask[];
+  onConfirm: (tasks: DetectedTask[]) => void;
+  onDismiss: () => void;
 }
 
 /**
@@ -17,19 +17,21 @@ interface Props {
  * Mirrors the approval-dialog style (centered inline card at the bottom of the panel).
  */
 export function ScheduledTaskConfirm({ tasks, onConfirm, onDismiss }: Props) {
-  const [selected, setSelected] = useState<Set<number>>(() => new Set(tasks.map((_, i) => i)))
+  const [selected, setSelected] = useState<Set<number>>(
+    () => new Set(tasks.map((_, i) => i)),
+  );
 
   const toggle = (i: number) => {
     setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(i)) next.delete(i)
-      else next.add(i)
-      return next
-    })
-  }
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+  };
 
-  const chosen = tasks.filter((_, i) => selected.has(i))
-  const allSelected = chosen.length === tasks.length
+  const chosen = tasks.filter((_, i) => selected.has(i));
+  const allSelected = chosen.length === tasks.length;
 
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
@@ -55,20 +57,26 @@ export function ScheduledTaskConfirm({ tasks, onConfirm, onDismiss }: Props) {
               onClick={() => toggle(i)}
               className={`flex items-start gap-2.5 text-left w-full rounded-lg border px-3 py-2.5 transition-colors ${
                 selected.has(i)
-                  ? 'border-primary/50 bg-primary/5'
-                  : 'border-border/40 bg-muted/20 opacity-60'
+                  ? "border-primary/50 bg-primary/5"
+                  : "border-border/40 bg-muted/20 opacity-60"
               }`}
             >
               <span
                 className={`mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border ${
-                  selected.has(i) ? 'bg-primary border-primary text-primary-foreground' : 'border-border'
+                  selected.has(i)
+                    ? "bg-primary border-primary text-primary-foreground"
+                    : "border-border"
                 }`}
               >
                 {selected.has(i) && <Check className="size-3" />}
               </span>
               <span className="min-w-0 flex-1">
-                <span className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground truncate">{t.label}</span>
-                <span className="block text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground truncate">{t.scheduleText}</span>
+                <span className="block text-[length:var(--helix-transcript-size)] font-medium text-foreground truncate">
+                  {t.label}
+                </span>
+                <span className="block text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground truncate">
+                  {t.scheduleText}
+                </span>
               </span>
             </button>
           ))}
@@ -82,12 +90,18 @@ export function ScheduledTaskConfirm({ tasks, onConfirm, onDismiss }: Props) {
             <Button variant="ghost" size="sm" onClick={onDismiss}>
               忽略
             </Button>
-            <Button size="sm" disabled={chosen.length === 0} onClick={() => onConfirm(chosen)}>
-              {allSelected ? `创建 ${chosen.length} 个` : `创建选中 (${chosen.length})`}
+            <Button
+              size="sm"
+              disabled={chosen.length === 0}
+              onClick={() => onConfirm(chosen)}
+            >
+              {allSelected
+                ? `创建 ${chosen.length} 个`
+                : `创建选中 (${chosen.length})`}
             </Button>
           </div>
         </div>
       </div>
     </div>
-  )
+  );
 }

@@ -99,7 +99,7 @@ pub fn secure_decrypt(blob: String) -> Option<String> {
     }
 }
 
-// ── shell ─────────────────────────────────────────────────────────────────
+// ── shell ────────────────────────────
 
 #[tauri::command]
 pub fn open(target: String) {
@@ -119,7 +119,10 @@ pub fn show_item_in_folder(state: State<'_, Arc<AppState>>, relative_path: Strin
             if candidate.starts_with(&mem_dir) {
                 candidate
             } else {
-                return json!({ "ok": false, "error": "路径不安全或超出工作目录范围" });
+                return json!({
+                    "ok": false,
+                    "error": "路径不安全或超出工作目录范围",
+                });
             }
         }
     };
@@ -138,9 +141,9 @@ pub fn exec() -> Result<(), String> {
     Err("shell:exec is disabled for security".into())
 }
 
-// ── dialogs ────────────────────────────────────────────────────────────────
+// ── dialogs ───────────────────────────
 
-// ── 注意：三个对话框命令必须是 async 且用回调式 API ──────────────────────────
+// ── 注意：三个对话框命令必须是 async 且用回调式 API ──
 // Linux 上 `blocking_pick_folder()` 从同步命令（主线程）调用时，对话框不会
 // 显示、应用卡住（tauri-apps/plugins-workspace#956）。这里改用回调式
 // pick_folder / pick_file / save_file + oneshot channel，让主线程保持事件循环。
@@ -218,7 +221,7 @@ pub async fn save_file(app: AppHandle, options: Option<Value>) -> Option<String>
     rx.await.unwrap_or(None)
 }
 
-// ── diagnostics helper ─────────────────────────────────────────────────────
+// ── diagnostics helper ───────────────────────
 
 #[allow(dead_code)]
 pub fn sha256_hex(data: &[u8]) -> String {

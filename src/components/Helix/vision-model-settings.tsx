@@ -1,89 +1,89 @@
-'use client'
+"use client";
 
-import React, { useState, useEffect } from 'react'
-import { Button } from '@/components/ui/button'
-import { useHelixStore } from '@/stores/helix-store'
-import { PopupSelect, SettingGroup } from './settings-ui'
-import { isElectron } from '@/lib/electron-bridge'
+import React, { useState, useEffect } from "react";
+import { Button } from "@/components/ui/button";
+import { useHelixStore } from "@/stores/helix-store";
+import { PopupSelect, SettingGroup } from "./settings-ui";
+import { isElectron } from "@/lib/electron-bridge";
 
 const VISION_PROVIDERS = [
-  { id: 'gemini', name: 'Gemini' },
-  { id: 'zai', name: 'Zhipu AI (z.ai) / GLM' },
-  { id: '__custom__', name: '自定义' },
-]
+  { id: "gemini", name: "Gemini" },
+  { id: "zai", name: "Zhipu AI (z.ai) / GLM" },
+  { id: "__custom__", name: "自定义" },
+];
 
 // 已知 endpoint 的 provider：自动填好 base_url，用户只需填 API Key
 const PROVIDER_BASE_URLS: Record<string, string> = {
-  gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-  zai: 'https://open.bigmodel.cn/api/paas/v4',
-}
+  gemini: "https://generativelanguage.googleapis.com/v1beta/openai/",
+  zai: "https://open.bigmodel.cn/api/paas/v4",
+};
 
 export function VisionModelSettings() {
-  const showToast = useHelixStore((s) => s.showToast)
-  const [provider, setProvider] = useState('gemini')
-  const [model, setModel] = useState('')
-  const [baseUrl, setBaseUrl] = useState('')
-  const [apiKey, setApiKey] = useState('')
-  const [saving, setSaving] = useState(false)
+  const showToast = useHelixStore((s) => s.showToast);
+  const [provider, setProvider] = useState("gemini");
+  const [model, setModel] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     const load = async () => {
       if (!isElectron()) {
-        const saved = localStorage.getItem('helix-vision-model')
+        const saved = localStorage.getItem("helix-vision-model");
         if (saved) {
           try {
-            const d = JSON.parse(saved)
-            setProvider(d.provider || 'gemini')
-            setModel(d.model || '')
-            setBaseUrl(d.baseUrl || '')
-            setApiKey(d.apiKey || '')
+            const d = JSON.parse(saved);
+            setProvider(d.provider || "gemini");
+            setModel(d.model || "");
+            setBaseUrl(d.baseUrl || "");
+            setApiKey(d.apiKey || "");
           } catch {}
         }
-        return
+        return;
       }
       try {
-        const api = (window as any).electron?.vision
-        if (!api?.getConfig) return
-        const r = await api.getConfig()
+        const api = (window as any).electron?.vision;
+        if (!api?.getConfig) return;
+        const r = await api.getConfig();
         if (r?.ok && r.config) {
-          setProvider(r.config.provider || 'gemini')
-          setModel(r.config.model || '')
-          setBaseUrl(r.config.baseUrl || '')
-          setApiKey(r.config.apiKey || '')
+          setProvider(r.config.provider || "gemini");
+          setModel(r.config.model || "");
+          setBaseUrl(r.config.baseUrl || "");
+          setApiKey(r.config.apiKey || "");
         }
       } catch (e) {
-        console.error('[VisionModelSettings] load failed:', e)
+        console.error("[VisionModelSettings] load failed:", e);
       }
-    }
-    load()
-  }, [])
+    };
+    load();
+  }, []);
 
-  const knownBaseUrl = PROVIDER_BASE_URLS[provider]
-  const showApiKey = provider !== 'auto'
-  const showBaseUrl = !knownBaseUrl && provider !== 'auto'
+  const knownBaseUrl = PROVIDER_BASE_URLS[provider];
+  const showApiKey = provider !== "auto";
+  const showBaseUrl = !knownBaseUrl && provider !== "auto";
 
   const save = async () => {
-    setSaving(true)
+    setSaving(true);
     try {
       const config = {
-        provider: provider === '__custom__' ? 'custom' : provider,
+        provider: provider === "__custom__" ? "custom" : provider,
         model,
-        baseUrl: knownBaseUrl ? knownBaseUrl : (showBaseUrl ? baseUrl : ''),
-        apiKey: showApiKey ? apiKey : '',
-      }
+        baseUrl: knownBaseUrl ? knownBaseUrl : showBaseUrl ? baseUrl : "",
+        apiKey: showApiKey ? apiKey : "",
+      };
       if (isElectron()) {
-        const api = (window as any).electron?.vision
-        if (api?.setConfig) await api.setConfig(config)
+        const api = (window as any).electron?.vision;
+        if (api?.setConfig) await api.setConfig(config);
       } else {
-        localStorage.setItem('helix-vision-model', JSON.stringify(config))
+        localStorage.setItem("helix-vision-model", JSON.stringify(config));
       }
-      showToast({ type: 'success', title: '视觉模型配置已保存' })
+      showToast({ type: "success", title: "视觉模型配置已保存" });
     } catch (e) {
-      showToast({ type: 'error', title: '保存失败' })
+      showToast({ type: "error", title: "保存失败" });
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
-  }
+  };
 
   return (
     <div className="space-y-4">
@@ -91,19 +91,26 @@ export function VisionModelSettings() {
         <div className="p-4 space-y-3">
           {/* Provider */}
           <div>
-            <label className="block ui-text font-medium text-foreground mb-1.5">Provider</label>
+            <label className="block ui-text font-medium text-foreground mb-1.5">
+              Provider
+            </label>
             <PopupSelect
               value={provider}
               onChange={setProvider}
               placeholder="选择视觉 Provider"
               className="w-full ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2"
-              options={VISION_PROVIDERS.map((p) => ({ label: p.name, value: p.id }))}
+              options={VISION_PROVIDERS.map((p) => ({
+                label: p.name,
+                value: p.id,
+              }))}
             />
           </div>
 
           {/* Model：纯文本输入，不限制预设列表 */}
           <div>
-            <label className="block ui-text font-medium text-foreground mb-1.5">模型名称</label>
+            <label className="block ui-text font-medium text-foreground mb-1.5">
+              模型名称
+            </label>
             <input
               type="text"
               value={model}
@@ -116,7 +123,9 @@ export function VisionModelSettings() {
           {/* Base URL：已知 endpoint 自动填充（只读）；未知则手填 */}
           {knownBaseUrl ? (
             <div>
-              <label className="block ui-text font-medium text-foreground mb-1.5">Base URL</label>
+              <label className="block ui-text font-medium text-foreground mb-1.5">
+                Base URL
+              </label>
               <input
                 type="text"
                 value={knownBaseUrl}
@@ -128,7 +137,9 @@ export function VisionModelSettings() {
           ) : (
             showBaseUrl && (
               <div>
-                <label className="block ui-text font-medium text-foreground mb-1.5">Base URL</label>
+                <label className="block ui-text font-medium text-foreground mb-1.5">
+                  Base URL
+                </label>
                 <input
                   type="text"
                   value={baseUrl}
@@ -143,7 +154,9 @@ export function VisionModelSettings() {
           {/* API Key：除 auto 外都显示 */}
           {showApiKey && (
             <div>
-              <label className="block ui-text font-medium text-foreground mb-1.5">API Key</label>
+              <label className="block ui-text font-medium text-foreground mb-1.5">
+                API Key
+              </label>
               <input
                 type="password"
                 value={apiKey}
@@ -158,9 +171,9 @@ export function VisionModelSettings() {
 
       <div className="flex justify-end pt-2">
         <Button size="sm" variant="outline" onClick={save} disabled={saving}>
-          {saving ? '保存中...' : '保存'}
+          {saving ? "保存中..." : "保存"}
         </Button>
       </div>
     </div>
-  )
+  );
 }

@@ -19,12 +19,12 @@ mod proxy;
 mod scheduled_tasks;
 mod security;
 mod skills;
+pub mod ssh;
 mod state;
 mod terminal;
 mod vision;
 mod web_search;
 mod window;
-pub mod ssh;
 
 use crate::state::{AppState, APP_HANDLE};
 use std::sync::Arc;
@@ -86,7 +86,7 @@ pub fn run() {
                 eprintln!("[Helix] Codex app-server failed to start: {e}");
             }
 
-            // ── System tray ──────────────────────────────────────────────
+            // ── System tray ──────────────────────
             use tauri::menu::{MenuBuilder, MenuItemBuilder};
             use tauri::tray::TrayIconBuilder;
             use tauri::Manager;

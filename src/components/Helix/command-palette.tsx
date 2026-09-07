@@ -1,4 +1,4 @@
-'use client'
+"use client";
 
 import {
   Search,
@@ -15,25 +15,34 @@ import {
   Copy,
   Settings,
   Sparkles,
-} from 'lucide-react'
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import { useHelixStore, type FileNode } from '@/stores/helix-store'
-import { DEFAULT_SHORTCUTS } from '@/stores/helix-types'
+} from "lucide-react";
+import React, {
+  useState,
+  useEffect,
+  useRef,
+  useMemo,
+  useCallback,
+} from "react";
+import { useHelixStore, type FileNode } from "@/stores/helix-store";
+import { DEFAULT_SHORTCUTS } from "@/stores/helix-types";
 
-function getShortcutLabel(id: string, customShortcuts: Record<string, { keys: string[] }>): string {
-  const entry = customShortcuts[id] || DEFAULT_SHORTCUTS[id]
-  return entry?.keys?.join('+') || ''
+function getShortcutLabel(
+  id: string,
+  customShortcuts: Record<string, { keys: string[] }>,
+): string {
+  const entry = customShortcuts[id] || DEFAULT_SHORTCUTS[id];
+  return entry?.keys?.join("+") || "";
 }
 
 interface CommandItem {
-  id: string
-  label: string
-  description?: string
-  icon: React.ReactNode
-  action: () => void
-  category: 'file' | 'action'
-  shortcut?: string
-  disabled?: boolean
+  id: string;
+  label: string;
+  description?: string;
+  icon: React.ReactNode;
+  action: () => void;
+  category: "file" | "action";
+  shortcut?: string;
+  disabled?: boolean;
 }
 
 export function CommandPalette() {
@@ -54,23 +63,23 @@ export function CommandPalette() {
     getAllFiles,
     getFilePath,
     customShortcuts,
-  } = useHelixStore()
+  } = useHelixStore();
 
-  const [query, setQuery] = useState('')
-  const inputRef = useRef<HTMLInputElement>(null)
-  const selectedIndexRef = useRef(0)
+  const [query, setQuery] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const selectedIndexRef = useRef(0);
 
   const allFiles = useMemo(() => {
-    const result: FileNode[] = []
+    const result: FileNode[] = [];
     const collect = (nodes: FileNode[]) => {
       for (const n of nodes) {
-        if (n.type === 'file') result.push(n)
-        if (n.children) collect(n.children)
+        if (n.type === "file") result.push(n);
+        if (n.children) collect(n.children);
       }
-    }
-    collect(files)
-    return result
-  }, [files])
+    };
+    collect(files);
+    return result;
+  }, [files]);
 
   const commands = useMemo<CommandItem[]>(() => {
     const fileItems: CommandItem[] = allFiles.map((f) => ({
@@ -79,215 +88,256 @@ export function CommandPalette() {
       description: useHelixStore.getState().getFilePath(f.id),
       icon: <FileCode className="size-4 text-muted-foreground" />,
       action: () => {
-        openFile(f.id)
-        const expandParents = (nodes: FileNode[], targetId: string, parents: string[]) => {
+        openFile(f.id);
+        const expandParents = (
+          nodes: FileNode[],
+          targetId: string,
+          parents: string[],
+        ) => {
           for (const n of nodes) {
             if (n.id === targetId) {
-              parents.forEach(pid => {
-                const s = useHelixStore.getState()
-                if (!s.expandedFolders.has(pid)) s.toggleFolder(pid)
-              })
-              return true
+              parents.forEach((pid) => {
+                const s = useHelixStore.getState();
+                if (!s.expandedFolders.has(pid)) s.toggleFolder(pid);
+              });
+              return true;
             }
-            if (n.children && expandParents(n.children, targetId, [...parents, n.id])) return true
+            if (
+              n.children &&
+              expandParents(n.children, targetId, [...parents, n.id])
+            )
+              return true;
           }
-          return false
-        }
-        expandParents(useHelixStore.getState().files, f.id, [])
+          return false;
+        };
+        expandParents(useHelixStore.getState().files, f.id, []);
       },
-      category: 'file' as const,
-    }))
+      category: "file" as const,
+    }));
 
     const actionItems: CommandItem[] = [
       {
-        id: 'action-new-file',
-        label: '新建文件',
-        description: '在根目录创建新文件',
+        id: "action-new-file",
+        label: "新建文件",
+        description: "在根目录创建新文件",
         icon: <Plus className="size-4 text-emerald-400" />,
         action: () => {
-          const name = prompt('输入文件名：')
+          const name = prompt("输入文件名：");
           if (name?.trim()) {
-            createFile(null, name.trim(), 'file')
+            createFile(null, name.trim(), "file");
           }
         },
-        category: 'action',
-        shortcut: 'Ctrl+Shift+N',
+        category: "action",
+        shortcut: "Ctrl+Shift+N",
       },
       {
-        id: 'action-new-folder',
-        label: '新建文件夹',
-        description: '在根目录创建新文件夹',
+        id: "action-new-folder",
+        label: "新建文件夹",
+        description: "在根目录创建新文件夹",
         icon: <FolderPlus className="size-4 text-amber-400" />,
         action: () => {
-          const name = prompt('输入文件夹名：')
-          if (name?.trim()) createFile(null, name.trim(), 'folder')
+          const name = prompt("输入文件夹名：");
+          if (name?.trim()) createFile(null, name.trim(), "folder");
         },
-        category: 'action',
+        category: "action",
       },
       {
-        id: 'action-toggle-terminal',
-        label: '切换终端',
-        description: '显示或隐藏终端面板',
+        id: "action-toggle-terminal",
+        label: "切换终端",
+        description: "显示或隐藏终端面板",
         icon: <Terminal className="size-4 text-amber-400" />,
         action: toggleTerminal,
-        category: 'action',
-        shortcut: getShortcutLabel('toggle-terminal', customShortcuts),
+        category: "action",
+        shortcut: getShortcutLabel("toggle-terminal", customShortcuts),
       },
       {
-        id: 'action-clear-chat',
-        label: '清空对话',
-        description: '清空 AI 对话历史',
+        id: "action-clear-chat",
+        label: "清空对话",
+        description: "清空 AI 对话历史",
         icon: <MessageSquare className="size-4 text-blue-400" />,
         action: clearChat,
-        category: 'action',
+        category: "action",
       },
       {
-        id: 'action-save',
-        label: '保存当前文件',
-        description: activeTabId ? `保存 ${openTabs.find(t => t.id === activeTabId)?.name || ''}` : '没有打开的文件',
+        id: "action-save",
+        label: "保存当前文件",
+        description: activeTabId
+          ? `保存 ${openTabs.find((t) => t.id === activeTabId)?.name || ""}`
+          : "没有打开的文件",
         icon: <Save className="size-4 text-blue-400" />,
         action: () => {
           if (activeTabId) {
-            markTabSaved(activeTabId)
+            markTabSaved(activeTabId);
           }
         },
-        category: 'action',
-        shortcut: 'Ctrl+S',
+        category: "action",
+        shortcut: "Ctrl+S",
         disabled: !activeTabId,
       },
       {
-        id: 'action-copy-path',
-        label: '复制文件路径',
-        description: activeTabId ? getFilePath(openTabs.find(t => t.id === activeTabId)?.fileId || '') : '没有打开的文件',
+        id: "action-copy-path",
+        label: "复制文件路径",
+        description: activeTabId
+          ? getFilePath(
+              openTabs.find((t) => t.id === activeTabId)?.fileId || "",
+            )
+          : "没有打开的文件",
         icon: <Copy className="size-4 text-blue-400" />,
         action: () => {
           if (activeTabId) {
-            const tab = openTabs.find(t => t.id === activeTabId)
+            const tab = openTabs.find((t) => t.id === activeTabId);
             if (tab) {
-              const path = getFilePath(tab.fileId)
-              navigator.clipboard.writeText(path)
+              const path = getFilePath(tab.fileId);
+              navigator.clipboard.writeText(path);
             }
           }
         },
-        category: 'action',
-        shortcut: 'Ctrl+Shift+C',
+        category: "action",
+        shortcut: "Ctrl+Shift+C",
         disabled: !activeTabId,
       },
       {
-        id: 'action-toggle-theme',
-        label: '切换编辑器主题',
-        description: `当前: ${editorTheme === 'vs-dark' ? '深色' : '浅色'}`,
-        icon: editorTheme === 'vs-dark' ? <Moon className="size-4 text-blue-400" /> : <Sun className="size-4 text-yellow-400" />,
+        id: "action-toggle-theme",
+        label: "切换编辑器主题",
+        description: `当前: ${editorTheme === "vs-dark" ? "深色" : "浅色"}`,
+        icon:
+          editorTheme === "vs-dark" ? (
+            <Moon className="size-4 text-blue-400" />
+          ) : (
+            <Sun className="size-4 text-yellow-400" />
+          ),
         action: () => {
-          const next = editorTheme === 'vs-dark' ? 'light' : 'vs-dark'
-          setEditorTheme(next)
+          const next = editorTheme === "vs-dark" ? "light" : "vs-dark";
+          setEditorTheme(next);
         },
-        category: 'action',
+        category: "action",
       },
       {
-        id: 'action-shortcuts',
-        label: '键盘快捷键',
-        description: '查看所有可用的快捷键',
+        id: "action-shortcuts",
+        label: "键盘快捷键",
+        description: "查看所有可用的快捷键",
         icon: <Keyboard className="size-4 text-cyan-400" />,
         action: () => {},
-        category: 'action',
+        category: "action",
       },
-    ]
+    ];
 
-    return [...fileItems, ...actionItems]
-  }, [allFiles, openFile, toggleTerminal, clearChat, createFile, files, showToast, markTabSaved, activeTabId, openTabs, editorTheme, setEditorTheme, getFilePath, customShortcuts])
+    return [...fileItems, ...actionItems];
+  }, [
+    allFiles,
+    openFile,
+    toggleTerminal,
+    clearChat,
+    createFile,
+    files,
+    showToast,
+    markTabSaved,
+    activeTabId,
+    openTabs,
+    editorTheme,
+    setEditorTheme,
+    getFilePath,
+    customShortcuts,
+  ]);
 
   // Fuzzy match
   const filtered = useMemo(() => {
-    if (!query.trim()) return commands
-    const q = query.toLowerCase()
+    if (!query.trim()) return commands;
+    const q = query.toLowerCase();
 
     return commands
-      .map(item => {
-        const label = item.label.toLowerCase()
-        const desc = (item.description || '').toLowerCase()
-        const labelIdx = label.indexOf(q)
-        const descIdx = desc.indexOf(q)
+      .map((item) => {
+        const label = item.label.toLowerCase();
+        const desc = (item.description || "").toLowerCase();
+        const labelIdx = label.indexOf(q);
+        const descIdx = desc.indexOf(q);
 
         // Fuzzy match for label
-        let fuzzyScore = 0
-        let qi = 0
+        let fuzzyScore = 0;
+        let qi = 0;
         for (let i = 0; i < label.length && qi < q.length; i++) {
           if (label[i] === q[qi]) {
-            fuzzyScore += (qi === 0 ? 10 : 1) + (i === qi ? 5 : 0)
-            qi++
+            fuzzyScore += (qi === 0 ? 10 : 1) + (i === qi ? 5 : 0);
+            qi++;
           }
         }
-        const fuzzyMatch = qi === q.length
+        const fuzzyMatch = qi === q.length;
 
-        if (labelIdx >= 0) return { item, score: 100 - labelIdx }
-        if (descIdx >= 0) return { item, score: 50 - descIdx }
-        if (fuzzyMatch) return { item, score: fuzzyScore }
-        return null
+        if (labelIdx >= 0) return { item, score: 100 - labelIdx };
+        if (descIdx >= 0) return { item, score: 50 - descIdx };
+        if (fuzzyMatch) return { item, score: fuzzyScore };
+        return null;
       })
       .filter(Boolean)
       .sort((a, b) => (b?.score || 0) - (a?.score || 0))
-      .map(r => r!.item)
-  }, [query, commands])
+      .map((r) => r!.item);
+  }, [query, commands]);
 
   // Reset selection when query changes
-  const prevQueryRef = useRef(query)
-  let effectiveIndex = selectedIndexRef.current
+  const prevQueryRef = useRef(query);
+  let effectiveIndex = selectedIndexRef.current;
   if (query !== prevQueryRef.current) {
-    prevQueryRef.current = query
-    selectedIndexRef.current = 0
-    effectiveIndex = 0
+    prevQueryRef.current = query;
+    selectedIndexRef.current = 0;
+    effectiveIndex = 0;
   }
 
   useEffect(() => {
     if (showCommandPalette) {
-      setQuery('')
-      selectedIndexRef.current = 0
+      setQuery("");
+      selectedIndexRef.current = 0;
       // Delay focus to allow React to render the input
-      setTimeout(() => inputRef.current?.focus(), 0)
+      setTimeout(() => inputRef.current?.focus(), 0);
     }
-  }, [showCommandPalette])
+  }, [showCommandPalette]);
 
   const handleSelect = useCallback(
     (item?: CommandItem) => {
-      const target = item || filtered[effectiveIndex]
-      if (target && !('disabled' in target)) {
-        target.action()
-        setCommandPaletteOpen(false)
+      const target = item || filtered[effectiveIndex];
+      if (target && !("disabled" in target)) {
+        target.action();
+        setCommandPaletteOpen(false);
       }
     },
-    [filtered, effectiveIndex, setCommandPaletteOpen]
-  )
+    [filtered, effectiveIndex, setCommandPaletteOpen],
+  );
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        selectedIndexRef.current = Math.min(selectedIndexRef.current + 1, filtered.length - 1)
-        setQuery(q => q)
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        selectedIndexRef.current = Math.max(selectedIndexRef.current - 1, 0)
-        setQuery(q => q)
-      } else if (e.key === 'Enter') {
-        e.preventDefault()
-        handleSelect()
-      } else if (e.key === 'Escape') {
-        e.preventDefault()
-        setCommandPaletteOpen(false)
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        selectedIndexRef.current = Math.min(
+          selectedIndexRef.current + 1,
+          filtered.length - 1,
+        );
+        setQuery((q) => q);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        selectedIndexRef.current = Math.max(selectedIndexRef.current - 1, 0);
+        setQuery((q) => q);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        handleSelect();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setCommandPaletteOpen(false);
       }
     },
-    [filtered, handleSelect, setCommandPaletteOpen]
-  )
+    [filtered, handleSelect, setCommandPaletteOpen],
+  );
 
-  if (!showCommandPalette) return null
+  if (!showCommandPalette) return null;
 
   // Separate files and actions for grouped display
-  const fileResults = filtered.filter(c => c.category === 'file')
-  const actionResults = filtered.filter(c => c.category === 'action')
+  const fileResults = filtered.filter((c) => c.category === "file");
+  const actionResults = filtered.filter((c) => c.category === "action");
 
-  const renderSection = (title: string, items: CommandItem[], offset: number) => {
-    if (items.length === 0) return null
+  const renderSection = (
+    title: string,
+    items: CommandItem[],
+    offset: number,
+  ) => {
+    if (items.length === 0) return null;
     return (
       <div>
         {title && (
@@ -296,29 +346,34 @@ export function CommandPalette() {
           </div>
         )}
         {items.map((item, idx) => {
-          const globalIdx = offset + idx
-          const isActive = globalIdx === effectiveIndex
+          const globalIdx = offset + idx;
+          const isActive = globalIdx === effectiveIndex;
           return (
             <div
               key={item.id}
               className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors ${
                 isActive
-                  ? 'bg-accent text-accent-foreground'
-                  : 'text-foreground hover:bg-accent/50'
+                  ? "bg-accent text-accent-foreground"
+                  : "text-foreground hover:bg-accent/50"
               }`}
               onClick={() => handleSelect(item)}
-              onMouseEnter={() => { selectedIndexRef.current = globalIdx; setQuery(q => q) }}
+              onMouseEnter={() => {
+                selectedIndexRef.current = globalIdx;
+                setQuery((q) => q);
+              }}
             >
               {item.icon}
               <div className="flex-1 min-w-0">
-                <p className="text-[length:var(--helix-transcript-size)] font-medium truncate">{item.label}</p>
+                <p className="text-[length:var(--helix-transcript-size)] font-medium truncate">
+                  {item.label}
+                </p>
                 {item.description && (
                   <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground truncate">
                     {item.description}
                   </p>
                 )}
               </div>
-              {item.category === 'file' && (
+              {item.category === "file" && (
                 <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-muted/50 px-2 py-0.5 rounded">
                   文件
                 </span>
@@ -329,11 +384,11 @@ export function CommandPalette() {
                 </span>
               )}
             </div>
-          )
+          );
         })}
       </div>
-    )
-  }
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh]">
@@ -366,11 +421,11 @@ export function CommandPalette() {
               没有找到匹配的结果
             </div>
           )}
-          {renderSection('', fileResults, 0)}
+          {renderSection("", fileResults, 0)}
           {fileResults.length > 0 && actionResults.length > 0 && (
             <div className="my-1 border-t border-border/30" />
           )}
-          {renderSection('操作', actionResults, fileResults.length)}
+          {renderSection("操作", actionResults, fileResults.length)}
         </div>
         {/* Footer */}
         <div className="flex items-center gap-4 px-4 py-2 border-t border-border/60 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
@@ -389,5 +444,5 @@ export function CommandPalette() {
         </div>
       </div>
     </div>
-  )
+  );
 }

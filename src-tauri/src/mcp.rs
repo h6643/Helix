@@ -276,7 +276,10 @@ fn push_yaml_field(out: &mut String, indent: &str, key: &str, value: &Value) {
 /// `old_servers` is the pre-edit parse (with env) so that any server whose
 /// incoming config omits `env` keeps its previous env block — protects
 /// secrets from being dropped by a display-only round trip.
-fn serialize_mcp_servers(servers: &Map<String, Value>, old_servers: &Map<String, Value>) -> String {
+fn serialize_mcp_servers(
+    servers: &Map<String, Value>,
+    old_servers: &Map<String, Value>,
+) -> String {
     let mut out = String::from("mcp_servers:\n");
     for (name, cfg) in servers {
         out.push_str(&format!("  {}:\n", name));
@@ -524,7 +527,11 @@ mod tests {
 
     #[test]
     fn mcp_parse_keeps_windows_path_args_as_strings() {
-        let yaml = "mcp_servers:\n  demo:\n    command: D:\\nodejs\\node.EXE\n    args:\n      - D:\\MCP\\demo\\server.js\n";
+        let yaml = "mcp_servers:\n"
+            + "  demo:\n"
+            + "    command: D:\\nodejs\\node.EXE\n"
+            + "    args:\n"
+            + "      - D:\\MCP\\demo\\server.js\n";
         let parsed = parse_mcp_servers(yaml, true);
         let cfg = parsed["demo"].as_object().unwrap();
         assert_eq!(cfg["command"], json!("D:\\nodejs\\node.EXE"));
