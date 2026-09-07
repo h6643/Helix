@@ -5932,7 +5932,7 @@ const renderEmptyBreadcrumb = () => {
                               <div className="px-3 py-6">
                                 <button type="button" onClick={() => setShowAddServerForm(true)} className="w-full flex items-center gap-2 px-3 py-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:bg-accent hover:text-foreground rounded-lg transition-colors">
                                   <span className="size-5 flex items-center justify-center border border-current rounded text-sm leading-none">+</span>
-                                  <span>添加远程服务器</span>
+                                  <span>添加服务器</span>
                                 </button>
                               </div>
                             ) : (
