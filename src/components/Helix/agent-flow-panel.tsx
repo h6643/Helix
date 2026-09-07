@@ -5992,13 +5992,13 @@ const renderEmptyBreadcrumb = () => {
                                   console.error('[selectWorkDir] openDirectory failed:', e)
                                 }
                               }} className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors">
-                                <Folder className="size-4 text-amber-500 shrink-0" />
+                                <Folder className="size-4 text-muted-foreground shrink-0" />
                                 <span>选择本地目录…</span>
                               </button>
                             </div>
                             <div className="border-t border-border/30">
                               <button type="button" onClick={() => setShowRemoteServers(true)} className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors">
-                                <svg className="size-4 text-blue-500 shrink-0" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="m7 9 5-5 5 5"/><path d="m7 15 5 5 5-5"/></svg>
+                                <Server className="size-4 text-muted-foreground shrink-0" />
                                 <span>{externalServices.length > 0 ? `远程服务器 (${externalServices.length})` : '远程服务器'}</span>
                               </button>
                             </div>
