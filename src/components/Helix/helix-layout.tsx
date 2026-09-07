@@ -1043,6 +1043,7 @@ export function HelixLayout() {
       <CommandPalette />
       <ContextMenuProvider />
       <ToastContainer />
+      <ConnectionNotice />
 
       {/* Title bar — part of the background */}
       <div id="helix-titlebar" className="flex items-center justify-between h-10 px-3 shrink-0 select-none">
