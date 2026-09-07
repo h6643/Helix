@@ -5996,7 +5996,7 @@ const renderEmptyBreadcrumb = () => {
                                 <span>选择本地目录…</span>
                               </button>
                             </div>
-                            <div className="border-t border-border/30">
+                            <div className="px-3 py-2 border-t border-border/30">
                               <button type="button" onClick={() => setShowRemoteServers(true)} className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors">
                                 <Server className="size-4 text-muted-foreground shrink-0" />
                                 <span>{externalServices.length > 0 ? `远程服务器 (${externalServices.length})` : '远程服务器'}</span>
