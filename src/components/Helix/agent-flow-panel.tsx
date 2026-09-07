@@ -5869,7 +5869,7 @@ const renderEmptyBreadcrumb = () => {
                 <p className="text-[calc(var(--helix-transcript-size)*1.0714)] font-normal text-foreground/50 text-center mb-6 tracking-tight">{startupGreeting}</p>
                 
                 {/* 项目选择器 — 在输入框上方 */}
-                <div className="flex items-center gap-1.5 mb-3 justify-center">
+                <div className="flex items-center gap-1.5 mb-3">
                   <div className="relative" ref={folderDropdownRef}>
                     <button
                       type="button"
