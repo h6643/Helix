@@ -5904,7 +5904,7 @@ const renderEmptyBreadcrumb = () => {
                               <button type="button" onClick={() => { setShowRemoteServers(false); setShowAddServerForm(false) }} className="p-1 hover:bg-accent rounded transition-colors">
                                 <svg className="size-4" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
                               </button>
-                              <p className="text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/70 uppercase tracking-wider flex-1">远程服务器</p>
+                              <p className="text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/70 uppercase tracking-wider flex-1">远程项目</p>
                             </div>
                             {showAddServerForm ? (
                               <div className="px-3 py-3 space-y-2 bg-muted/20">
@@ -5993,13 +5993,13 @@ const renderEmptyBreadcrumb = () => {
                                 }
                               }} className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors">
                                 <Folder className="size-4 text-muted-foreground shrink-0" />
-                                <span>选择本地目录…</span>
+                                <span>本地项目</span>
                               </button>
                             </div>
                             <div className="px-3 py-2 border-t border-border/30">
                               <button type="button" onClick={() => setShowRemoteServers(true)} className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors">
                                 <Server className="size-4 text-muted-foreground shrink-0" />
-                                <span>{externalServices.length > 0 ? `远程服务器 (${externalServices.length})` : '远程服务器'}</span>
+                                <span>{externalServices.length > 0 ? `远程项目 (${externalServices.length})` : '远程项目'}</span>
                               </button>
                             </div>
                           </div>
