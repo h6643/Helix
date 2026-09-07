@@ -1218,6 +1218,7 @@ export function AgentFlowPanel() {
   // 项目选择器状态
   const [projectFolders, setProjectFolders] = useState<string[]>([])
   const [projectFoldersLoaded, setProjectFoldersLoaded] = useState(false)
+  const [showRemoteServers, setShowRemoteServers] = useState(false)
   const [showAddServerForm, setShowAddServerForm] = useState(false)
   const [newServerHost, setNewServerHost] = useState('')
   const [newServerPort, setNewServerPort] = useState('22')
@@ -5826,105 +5827,131 @@ promptSentAtRef.current = Date.now()
         </button>
         {showFolderDropdown && (
           <div className="absolute bottom-full left-0 mb-2 w-72 bg-popover border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in overflow-hidden">
-            {/* 本地项目 */}
-            <div className="px-3 py-2 border-b border-border/30">
-              <p className="text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/70 uppercase tracking-wider">本地项目</p>
-            </div>
-            <div className="px-3 py-2">
-              <button
-                type="button"
-                onClick={async () => {
-                  setShowFolderDropdown(false)
-                  if (!isElectron()) return
-                  try {
-                    const dir = await electronDialog.openDirectory()
-                    if (dir) await selectWorkDir(dir)
-                  } catch (e) {
-                    console.error('[selectWorkDir] openDirectory failed:', e)
-                  }
-                }}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
-              >
-                <Folder className="size-4 text-amber-500 shrink-0" />
-                <span>选择本地目录…</span>
-              </button>
-            </div>
+            {showRemoteServers ? (
+              /* 远程服务器视图 */
+              <div>
+                {/* 标题栏 */}
+                <div className="px-3 py-2 border-b border-border/30 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setShowRemoteServers(false); setShowAddServerForm(false) }}
+                    className="p-1 hover:bg-accent rounded transition-colors"
+                  >
+                    <svg className="size-4" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+                  </button>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/70 uppercase tracking-wider flex-1">远程服务器</p>
+                </div>
 
-            {/* 远程服务器 */}
-            <div className="border-t border-border/30">
-              <div className="px-3 py-2">
-                <p className="text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/70 uppercase tracking-wider">远程服务器</p>
-              </div>
-              {showAddServerForm ? (
-                <div className="px-3 py-3 space-y-2 bg-muted/20">
-                  <input type="text" value={newServerName} onChange={e => setNewServerName(e.target.value)} placeholder="名称（可选）" className="w-full px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40" />
-                  <input type="text" value={newServerHost} onChange={e => setNewServerHost(e.target.value)} placeholder="主机地址（必填）" className="w-full px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40" />
-                  <div className="flex gap-2">
-                    <input type="text" value={newServerUser} onChange={e => setNewServerUser(e.target.value)} placeholder="用户名" className="flex-1 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40" />
-                    <input type="text" value={newServerPort} onChange={e => setNewServerPort(e.target.value)} placeholder="端口" className="w-16 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40" />
+                {/* 添加服务器表单 */}
+                {showAddServerForm ? (
+                  <div className="px-3 py-3 space-y-2 bg-muted/20">
+                    <input type="text" value={newServerName} onChange={e => setNewServerName(e.target.value)} placeholder="名称（可选）" className="w-full px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40" />
+                    <input type="text" value={newServerHost} onChange={e => setNewServerHost(e.target.value)} placeholder="主机地址（必填）" className="w-full px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40" />
+                    <div className="flex gap-2">
+                      <input type="text" value={newServerUser} onChange={e => setNewServerUser(e.target.value)} placeholder="用户名" className="flex-1 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40" />
+                      <input type="text" value={newServerPort} onChange={e => setNewServerPort(e.target.value)} placeholder="端口" className="w-16 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40" />
+                    </div>
+                    <div className="flex gap-2 justify-end pt-1">
+                      <button type="button" onClick={() => { setShowAddServerForm(false); setNewServerHost(''); setNewServerPort('22'); setNewServerUser(''); setNewServerName('') }} className="px-3 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground rounded-md transition-colors">取消</button>
+                      <button type="button" onClick={async () => {
+                        if (!newServerHost.trim()) return
+                        setShowAddServerForm(false)
+                        const host = newServerHost.trim()
+                        const port = parseInt(newServerPort) || 22
+                        const username = newServerUser.trim() || 'user'
+                        const name = newServerName.trim() || `${username}@${host}`
+                        await addExternalService({ name, host, port, username, authType: 'key' })
+                        storeActions.showToast({ type: 'success', title: '服务器已添加' })
+                      }} className="px-3 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled={!newServerHost.trim()}>添加</button>
+                    </div>
                   </div>
-                  <div className="flex gap-2 justify-end pt-1">
-                    <button type="button" onClick={() => { setShowAddServerForm(false); setNewServerHost(''); setNewServerPort('22'); setNewServerUser(''); setNewServerName('') }} className="px-3 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground rounded-md transition-colors">取消</button>
-                    <button type="button" onClick={async () => {
-                      if (!newServerHost.trim()) return
-                      setShowAddServerForm(false)
-                      const host = newServerHost.trim()
-                      const port = parseInt(newServerPort) || 22
-                      const username = newServerUser.trim() || 'user'
-                      const name = newServerName.trim() || `${username}@${host}`
-                      await addExternalService({ name, host, port, username, authType: 'key' })
-                      storeActions.showToast({ type: 'success', title: '服务器已添加' })
-                    }} className="px-3 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled={!newServerHost.trim()}>添加</button>
+                ) : externalServices.length === 0 ? (
+                  <div className="px-3 py-6">
+                    <button type="button" onClick={() => setShowAddServerForm(true)} className="w-full flex items-center gap-2 px-3 py-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:bg-accent hover:text-foreground rounded-lg transition-colors border border-dashed border-border">
+                      <span className="size-5 flex items-center justify-center border border-current rounded text-sm leading-none">+</span>
+                      <span>添加远程服务器</span>
+                    </button>
                   </div>
-                </div>
-              ) : externalServices.length === 0 ? (
-                <div className="px-3 py-3">
-                  <button type="button" onClick={() => setShowAddServerForm(true)} className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:bg-accent hover:text-foreground rounded-lg transition-colors">
-                    <span className="size-4 flex items-center justify-center border border-dashed border-current rounded text-xs leading-none">+</span>
-                    <span>添加远程服务器</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="max-h-40 overflow-y-auto py-1">
-                  {externalServices.map(svc => {
-                    const displayName = svc.name || `${svc.username ?? ''}@${svc.host}`
-                    const isConnected = svc.connected
-                    return (
-                      <button key={svc.id} type="button" onClick={async () => {
-                        setShowFolderDropdown(false)
-                        if (!isConnected) {
-                          try {
-                            const sshApi = (window as any).electron?.external?.sshConnect
-                            if (sshApi) {
-                              const result = await sshApi({ host: svc.host, port: svc.port, username: svc.username, authType: svc.authType, secret: svc.secret ?? '' })
-                              if (result?.error) {
-                                storeActions.showToast({ type: 'error', title: 'SSH 连接失败', description: result.error })
-                                return
+                ) : (
+                  <div className="max-h-60 overflow-y-auto py-1">
+                    {externalServices.map(svc => {
+                      const displayName = svc.name || `${svc.username ?? ''}@${svc.host}`
+                      const isConnected = svc.connected
+                      return (
+                        <button key={svc.id} type="button" onClick={async () => {
+                          setShowFolderDropdown(false)
+                          if (!isConnected) {
+                            try {
+                              const sshApi = (window as any).electron?.external?.sshConnect
+                              if (sshApi) {
+                                const result = await sshApi({ host: svc.host, port: svc.port, username: svc.username, authType: svc.authType, secret: svc.secret ?? '' })
+                                if (result?.error) {
+                                  storeActions.showToast({ type: 'error', title: 'SSH 连接失败', description: result.error })
+                                  return
+                                }
+                                setExternalServiceConnected(svc.id, true)
                               }
-                              setExternalServiceConnected(svc.id, true)
+                            } catch (e) {
+                              storeActions.showToast({ type: 'error', title: 'SSH 连接失败', description: String(e) })
+                              return
                             }
-                          } catch (e) {
-                            storeActions.showToast({ type: 'error', title: 'SSH 连接失败', description: String(e) })
-                            return
                           }
-                        }
-                        const remotePath = selectedWorkDir?.startsWith('ssh://' + svc.host) ? selectedWorkDir : 'ssh://' + (svc.username ?? 'user') + '@' + svc.host + ':' + svc.port
-                        await selectWorkDir(remotePath)
-                      }} className={`w-full text-left px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent transition-colors flex items-center gap-2.5 ${(selectedWorkDir && selectedWorkDir.startsWith('ssh://' + svc.host)) ? 'bg-primary/10 text-primary font-medium' : 'text-foreground/80'}`}>
-                        {isConnected ? <span className="size-2 rounded-full bg-green-500 shrink-0" /> : <span className="size-2 rounded-full bg-amber-400 shrink-0" />}
-                        <span className="truncate flex-1">{displayName}</span>
-                        {!isConnected && <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 shrink-0">未连接</span>}
-                        {(selectedWorkDir && selectedWorkDir.startsWith('ssh://' + svc.host)) && <span className="text-xs text-primary shrink-0">✓</span>}
-                      </button>
-                    )
-                  })}
-                  <button type="button" onClick={() => setShowAddServerForm(true)} className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 hover:text-foreground/80 hover:bg-accent transition-colors border-t border-border/20">
-                    <span className="size-4 flex items-center justify-center border border-dashed border-current rounded text-xs leading-none">+</span>
-                    <span>添加服务器</span>
+                          const remotePath = 'ssh://' + (svc.username ?? 'user') + '@' + svc.host + ':' + svc.port
+                          await selectWorkDir(remotePath)
+                        }} className={`w-full text-left px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent transition-colors flex items-center gap-2.5 ${(selectedWorkDir && selectedWorkDir.startsWith('ssh://' + svc.host)) ? 'bg-primary/10 text-primary font-medium' : 'text-foreground/80'}`}>
+                          {isConnected ? <span className="size-2 rounded-full bg-green-500 shrink-0" /> : <span className="size-2 rounded-full bg-amber-400 shrink-0" />}
+                          <span className="truncate flex-1">{displayName}</span>
+                          {!isConnected && <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 shrink-0">未连接</span>}
+                          {(selectedWorkDir && selectedWorkDir.startsWith('ssh://' + svc.host)) && <span className="text-xs text-primary shrink-0">✓</span>}
+                        </button>
+                      )
+                    })}
+                    <button type="button" onClick={() => setShowAddServerForm(true)} className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 hover:text-foreground/80 hover:bg-accent transition-colors border-t border-border/20 mt-1">
+                      <span className="size-4 flex items-center justify-center border border-dashed border-current rounded text-xs leading-none">+</span>
+                      <span>添加服务器</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* 本地项目视图 */
+              <div>
+                <div className="px-3 py-2 border-b border-border/30">
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/70 uppercase tracking-wider">本地项目</p>
+                </div>
+                <div className="px-3 py-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setShowFolderDropdown(false)
+                      if (!isElectron()) return
+                      try {
+                        const dir = await electronDialog.openDirectory()
+                        if (dir) await selectWorkDir(dir)
+                      } catch (e) {
+                        console.error('[selectWorkDir] openDirectory failed:', e)
+                      }
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
+                  >
+                    <Folder className="size-4 text-amber-500 shrink-0" />
+                    <span>选择本地目录…</span>
                   </button>
                 </div>
-              )}
-            </div>
+                {externalServices.length > 0 && (
+                  <div className="border-t border-border/30">
+                    <button
+                      type="button"
+                      onClick={() => setShowRemoteServers(true)}
+                      className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
+                    >
+                      <svg className="size-4 text-blue-500 shrink-0" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="m7 9 5-5 5 5"/><path d="m7 15 5 5 5-5"/></svg>
+                      <span>远程服务器 ({externalServices.length})</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
         </div>
