@@ -312,7 +312,9 @@ function ToolCard({
   const visibleParamEntries = isCompactTool
     ? []
     : step.toolParams
-      ? Object.entries(step.toolParams)
+      ? Object.entries(step.toolParams).filter(
+          ([, v]) => v !== null && v !== undefined && v !== "",
+        )
       : [];
   const hasParams = !hasSubSteps && visibleParamEntries.length > 0;
   const stepStatus =

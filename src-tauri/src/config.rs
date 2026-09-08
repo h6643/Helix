@@ -721,7 +721,7 @@ pub fn write_helix_config(
 }
 
 /// Path of the codex app-server config: `CODEX_HOME/config.toml`.
-/// The backend spawns with CODEX_HOME = ~/.helix (see codex_gateway::codex_home).
+/// The backend spawns with CODEX_HOME = ~/.codex (see codex_gateway::codex_home).
 fn codex_config_toml_path() -> PathBuf {
     crate::codex_gateway::codex_home().join("config.toml")
 }

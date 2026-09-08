@@ -12,7 +12,7 @@ use tauri::{AppHandle, Manager, State};
 
 /// Find every directory that may contain Helix web-search provider plugins.
 /// Helix loads built-in providers from its runtime's `site-packages/plugins/web`
-/// and user providers from `~/.helix/plugins/web`. We scan all known locations
+/// and user providers from `~/.codex/plugins/web`. We scan all known locations
 /// and merge, so the UI can show exactly what is actually installed.
 fn web_provider_search_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
@@ -38,7 +38,7 @@ fn web_provider_search_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
         }
     }
 
-    // 2) User plugins: ~/.helix/plugins/web
+    // 2) User plugins: ~/.codex/plugins/web
     dirs.push(helix_data_dir().join("plugins").join("web"));
     // 3) Bundled resources:
     //    <resource_dir>/helix-runtime/python/lib/python3.12/site-packages/plugins/web

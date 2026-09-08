@@ -1,12 +1,14 @@
 //! Cross-platform path resolution for Helix backend data / runtime locations.
 //!
-//! Uses ~/.helix/ on all platforms — the same home the codex gateway
-//! (CODEX_HOME) already uses, so all backend data lives in one place.
+//! Uses ~/.codex/ on all platforms — the same home the codex gateway
+//! (CODEX_HOME) and the codex CLI / VS Code extension use, so config + auth +
+//! sessions + skills all live in one place. The separate ~/.helix mirror was
+//! retired (2026-09-08).
 
 use std::path::PathBuf;
 
 /// The backend data directory (config.yaml, state.db, skills, memories, logs…).
-/// Uses ~/.helix/ on all platforms, matching the codex gateway home so the
+/// Uses ~/.codex/ on all platforms, matching the codex gateway home so the
 /// whole backend lives in a single directory.
 ///
 /// The location can be overridden (Settings → 数据存储路径) via either an
@@ -38,7 +40,7 @@ pub fn helix_data_dir() -> PathBuf {
 pub fn default_helix_data_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".helix")
+        .join(".codex")
 }
 
 /// Pointer file (outside the data dir) that overrides `helix_data_dir()`.

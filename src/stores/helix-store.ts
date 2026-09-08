@@ -1643,7 +1643,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       currentSessionId: null,
       activeSessionWorkDir: null,
       selectedWorkDir: null,
-      contextUsage: {},
+      // Do NOT wipe contextUsage here. 新建对话/新标签页只是离开视图，旧对话
+      // 仍留在侧边栏，它的环读数必须保留。之前把整个 per-conversation 映射清成
+      // {}，下一次 persistToStorage 又把空映射落盘 → 重启后所有对话的用量全空
+      // （"每次重启后上下文清空"根因）。环在 currentSessionId=null 时自然显示空态。
     });
     // Reset the Helix backend session so a fresh ACP session is created on the
     // next prompt. Without this the UI clears but Helix keeps the full
@@ -1670,7 +1673,17 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     const snapshot = get();
     set({
       chatMessages: [],
-      contextUsage: {},
+      // /clear /reset 只是让当前对话"忘掉"历史：只删本对话的用量快照，保留
+      // 其他对话的（之前整表清空 + persistToStorage 落盘会连带抹掉所有对话
+      // 的环读数）。压缩轮换出的新 sid 也不在这里 —— compress 后 setContextUsage
+      // 会按新会话重新落值。
+      contextUsage: sessionId
+        ? Object.fromEntries(
+            Object.entries(snapshot.contextUsage).filter(
+              ([k]) => k !== sessionId,
+            ),
+          )
+        : snapshot.contextUsage,
     });
     import("@/stores/gateway-store").then(({ useGatewayStore }) => {
       useGatewayStore.getState().setHelixSessionId(null);
@@ -2091,7 +2104,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const { [sessionId]: _, ...rest } = s.estimatedTokens;
       return { estimatedTokens: rest };
     }),
-  addSessionUsageStats: (model, usage) =>
+  addSessionUsageStats: (model, usage) => {
     set((state) => {
       const input = usage.inputTokens || 0;
       const output = usage.outputTokens || 0;
@@ -2263,6 +2276,19 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         dailyUsage: prunedDaily,
       };
     }),
+    // Persist immediately: the settings usage panel (TokenUsagePanel) reads
+    // these two keys, and persistToStorage only fires on config changes /
+    // new-session creation — usage accumulated during normal conversation
+    // runs was never flushed to IndexedDB, so the panel showed stale values
+    // after a restart ("模型用量不会更新").
+    import("@/lib/persist").then(({ persistence }) => {
+      const s = get();
+      Promise.all([
+        persistence.saveSetting("sessionUsageStats", s.sessionUsageStats),
+        persistence.saveSetting("dailyUsage", s.dailyUsage),
+      ]).catch(() => {});
+    });
+  },
   setCurrentSessionId: (id) =>
     set((state) => {
       if (!id)

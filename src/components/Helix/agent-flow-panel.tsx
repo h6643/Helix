@@ -34,7 +34,7 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
-import type { ReasoningEffortLevel } from "@/stores/helix-types";
+import type { ApprovalMode, ReasoningEffortLevel } from "@/stores/helix-types";
 import { useProviderStore } from "@/stores/slices/provider-store";
 import { pushModelConfig } from "@/lib/config-sync";
 import {
@@ -525,7 +525,7 @@ function classifyApproval(
   toolName: string,
   params: Record<string, any>,
   workDir: string | null,
-  mode: "default" | "accept_edits" | "dont_ask" | "plan",
+  mode: ApprovalMode,
 ): "auto" | "ask" {
   const patternKey = String(params?.pattern_key || "");
   const command = String(params?.command || "");
@@ -1211,7 +1211,10 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                   ),
                 );
                 const lastTextIndex = normalizedBlocks.reduce(
-                  (acc, b, i) => (b.type === "text" ? i : acc),
+                  (acc, b, i) =>
+                    b.type === "text" && String(b.content || "").trim()
+                      ? i
+                      : acc,
                   -1,
                 );
                 const processBlocks =
@@ -1272,144 +1275,70 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                             </div>
                           </details>
                         )}
-                        <details className="my-2 group/details">
-                          <summary
-                            className="flex items-center gap-1.5 px-1 py-1 text-foreground/70 cursor-pointer hover:text-foreground/90 select-none list-none transition-colors"
-                            style={{ fontSize }}
-                          >
-                            <span className="font-medium">执行过程</span>
-                            <svg
-                              className="size-3.5 transition-transform group-open/details:rotate-90"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                            >
-                              <path d="m9 18 6-6-6-6" />
-                            </svg>
-                          </summary>
-                          <div className="p-2 space-y-1">
-                            {processSegments.map((seg, si) => {
-                              if (seg.kind === "text") {
-                                return (
-                                  <div key={si} className="space-y-1">
-                                    {seg.blocks.map((b, i) => {
-                                      if (b.type !== "text") return null;
-                                      return (
-                                        <div key={i} style={{ fontSize }}>
-                                          {searchOpen && searchQuery.trim() ? (
-                                            <div
-                                              className="whitespace-pre-wrap break-words"
-                                              style={{ fontSize }}
-                                            >
-                                              <HighlightText
-                                                text={normalizeAcpContentRaw(
-                                                  b.content,
-                                                )}
-                                                query={searchQuery}
-                                                active={isSearchActive}
-                                              />
-                                            </div>
-                                          ) : (
-                                            <HelixMarkdown
+                        <div className="my-2 space-y-2">
+                          {processSegments.map((seg, si) => {
+                            if (seg.kind === "text") {
+                              return (
+                                <div key={si} className="space-y-1">
+                                  {seg.blocks.map((b, i) => {
+                                    if (b.type !== "text") return null;
+                                    return (
+                                      <div key={i} style={{ fontSize }}>
+                                        {searchOpen && searchQuery.trim() ? (
+                                          <div
+                                            className="whitespace-pre-wrap break-words"
+                                            style={{ fontSize }}
+                                          >
+                                            <HighlightText
                                               text={normalizeAcpContentRaw(
                                                 b.content,
                                               )}
+                                              query={searchQuery}
+                                              active={isSearchActive}
                                             />
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                );
-                              }
-                              if (seg.kind === "thinking") {
-                                const firstBlock = seg.blocks[0];
-                                const firstContent =
-                                  firstBlock && "content" in firstBlock
-                                    ? String(firstBlock.content)
-                                    : "";
-                                // 完成后仍保留「思考完成」折叠卡。若按旧逻辑在 !isStreaming 时返回 null，
-                                // 纯「思考→回答」（无工具调用）的消息过程区只剩空壳——外层「执行过程」
-                                // 点开一片空白。仅当所有思考块内容为空时才跳过，避免出现空卡。
-                                if (
-                                  !seg.blocks.some(
-                                    (b) =>
-                                      "content" in b &&
-                                      String(b.content || "").trim(),
-                                  )
-                                )
-                                  return null;
-                                return (
-                                  <details
-                                    key={si}
-                                    className="mb-2 mt-3 group/details"
-                                  >
-                                    <summary
-                                      className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors"
-                                      style={{ fontSize }}
-                                    >
-                                      <span>
-                                        {isStreaming
-                                          ? extractKaomojiStatus(firstContent)
-                                              .status || "思考"
-                                          : "思考完成"}
-                                      </span>
-                                      <svg
-                                        className="size-3.5 transition-transform group-open/details:rotate-90"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        strokeWidth="2"
-                                      >
-                                        <path d="m9 18 6-6-6-6" />
-                                      </svg>
-                                    </summary>
-                                    <div className="mt-1 pl-3 border-l-2 border-border/60 space-y-1">
-                                      {seg.blocks.map((b, i) => {
-                                        const content =
-                                          "content" in b
-                                            ? String(b.content)
-                                            : "";
-                                        return (
-                                          <div
-                                            key={i}
-                                            className="text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll"
-                                            style={{ fontSize }}
-                                          >
-                                            {searchOpen &&
-                                            searchQuery.trim() ? (
-                                              <HighlightText
-                                                text={normalizeAcpContentRaw(
-                                                  content,
-                                                )}
-                                                query={searchQuery}
-                                                active={isSearchActive}
-                                              />
-                                            ) : (
-                                              <HelixMarkdown
-                                                text={normalizeAcpContentRaw(
-                                                  content,
-                                                )}
-                                              />
-                                            )}
                                           </div>
-                                        );
-                                      })}
-                                    </div>
-                                  </details>
-                                );
-                              }
+                                        ) : (
+                                          <HelixMarkdown
+                                            text={normalizeAcpContentRaw(
+                                              b.content,
+                                            )}
+                                          />
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            }
+                            if (seg.kind === "thinking") {
+                              const firstBlock = seg.blocks[0];
+                              const firstContent =
+                                firstBlock && "content" in firstBlock
+                                  ? String(firstBlock.content)
+                                  : "";
+                              if (
+                                !seg.blocks.some(
+                                  (b) =>
+                                    "content" in b &&
+                                    String(b.content || "").trim(),
+                                )
+                              )
+                                return null;
                               return (
                                 <details
                                   key={si}
-                                  className="mb-2 mt-3 group/details"
+                                  className="group/details"
                                 >
                                   <summary
-                                    className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors"
+                                    className="text-foreground/50 cursor-pointer hover:text-foreground/70 select-none flex items-center gap-1 list-none transition-colors"
                                     style={{ fontSize }}
                                   >
-                                    <span>任务执行</span>
+                                    <span>
+                                      {isStreaming
+                                        ? extractKaomojiStatus(firstContent)
+                                            .status || "思考"
+                                        : "思考完成"}
+                                    </span>
                                     <svg
                                       className="size-3.5 transition-transform group-open/details:rotate-90"
                                       viewBox="0 0 24 24"
@@ -1420,30 +1349,84 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                                       <path d="m9 18 6-6-6-6" />
                                     </svg>
                                   </summary>
-                                  <div className="mt-1 pl-3 space-y-1">
-                                    {seg.blocks.map((b, i) =>
-                                      b.type === "tool_group" ? (
-                                        <InlineToolGroup
+                                  <div className="mt-1 pl-3 border-l-2 border-border/60 space-y-1">
+                                    {seg.blocks.map((b, i) => {
+                                      const content =
+                                        "content" in b
+                                          ? String(b.content)
+                                          : "";
+                                      return (
+                                        <div
                                           key={i}
-                                          steps={b.steps}
-                                          isRunning={false}
-                                          fontSize={fontSize}
-                                        />
-                                      ) : b.type === "file_change" ? (
-                                        <FileChangeSummary
-                                          key={
-                                            b.changes?.[0]?.fileId || `fc-${i}`
-                                          }
-                                          changes={b.changes}
-                                        />
-                                      ) : null,
-                                    )}
+                                          className="text-foreground/60 break-all leading-relaxed thinking-cap thinking-scroll"
+                                          style={{ fontSize }}
+                                        >
+                                          {searchOpen &&
+                                          searchQuery.trim() ? (
+                                            <HighlightText
+                                              text={normalizeAcpContentRaw(
+                                                content,
+                                              )}
+                                              query={searchQuery}
+                                              active={isSearchActive}
+                                            />
+                                          ) : (
+                                            <HelixMarkdown
+                                              text={normalizeAcpContentRaw(
+                                                content,
+                                              )}
+                                            />
+                                          )}
+                                        </div>
+                                      );
+                                    })}
                                   </div>
                                 </details>
                               );
-                            })}
-                          </div>
-                        </details>
+                            }
+                            return (
+                              <details
+                                key={si}
+                                className="group/details"
+                              >
+                                <summary
+                                  className="text-foreground/50 cursor-pointer hover:text-foreground/70 select-none flex items-center gap-1 list-none transition-colors"
+                                  style={{ fontSize }}
+                                >
+                                  <span>任务执行</span>
+                                  <svg
+                                    className="size-3.5 transition-transform group-open/details:rotate-90"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                  >
+                                    <path d="m9 18 6-6-6-6" />
+                                  </svg>
+                                </summary>
+                                <div className="mt-1 pl-3 space-y-1">
+                                  {seg.blocks.map((b, i) =>
+                                    b.type === "tool_group" ? (
+                                      <InlineToolGroup
+                                        key={i}
+                                        steps={b.steps}
+                                        isRunning={false}
+                                        fontSize={fontSize}
+                                      />
+                                    ) : b.type === "file_change" ? (
+                                      <FileChangeSummary
+                                        key={
+                                          b.changes?.[0]?.fileId || `fc-${i}`
+                                        }
+                                        changes={b.changes}
+                                      />
+                                    ) : null,
+                                  )}
+                                </div>
+                              </details>
+                            );
+                          })}
+                        </div>
                       </>
                     )}
                     {answerBlocks.length > 0 && (
@@ -1850,7 +1833,6 @@ export function AgentFlowPanel() {
   // aborts a parallel run in another conversation.
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const doneProcessedRef = useRef(false);
-  const planAutoExecutedRef = useRef(false); // 防 plan 模式自动执行循环
   const synthDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forceDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedSessionRef = useRef(false);
@@ -2586,6 +2568,51 @@ export function AgentFlowPanel() {
     return () => {
       try {
         unsubFn?.();
+      } catch {}
+    };
+  }, []);
+  // 孤儿 usage 事件兜底：usage:prompt-complete 是上下文环（contextUsage）的唯一
+  // 写入来源，正常由 handleRun 的 per-run onEvent 消费。整页重载（Vite HMR /
+  // WebView2 崩溃恢复）会销毁 per-run 订阅，但主进程与 codex 子进程不受影响，
+  // 执行中的 turn 仍会继续推送用量事件——没有持久监听器时这些事件无人消费，
+  // 环读数永远停留在重载前的旧快照（"前端重载后上下文数量出错"根因）。
+  // 这里持久订阅：仅当没有任何活跃 run 消费该会话时才兜底写入，避免与
+  // per-run 路径（它还负责 estimated 清理/压缩提示等联动）双重处理。
+  useEffect(() => {
+    let unsubUsage: (() => void) | undefined;
+    try {
+      unsubUsage = helixApi()!.onEvent((method: string, params: any) => {
+        if (method !== "usage:prompt-complete") return;
+        const sid = params?.session_id;
+        const u = params?.usage;
+        if (!sid || !u || typeof u !== "object") return;
+        // 反查该后端 sid 属于哪个对话；有活跃 run 的对话由 per-run 路径负责。
+        let cid: string | null = null;
+        for (const [c, entry] of sessionMapRef.current.entries()) {
+          if (entry.sid === sid) {
+            cid = c;
+            break;
+          }
+        }
+        if (!cid) return;
+        // 活跃 run 判定：该对话有未结束的 handleRun（AbortController 已注册
+        // 且事件由 per-run 订阅过滤该 sid）→ 跳过，避免 double-write。
+        if (abortControllersRef.current.has(cid)) return;
+        const ctxMax = Number(u.context_max) || 0;
+        const ctxUsed = Number(u.context_used) || 0;
+        if (!ctxMax || !ctxUsed) return;
+        const prev = useHelixStore.getState().contextUsage[cid];
+        // 幂等：与已落盘快照相同则跳过（重载瞬间可能重放最后一条事件）。
+        if (prev && prev.size === ctxMax && prev.used === ctxUsed) return;
+        useHelixStore.getState().setContextUsage(cid, ctxMax, ctxUsed);
+        useHelixStore.getState().clearEstimatedTokens(cid);
+      });
+    } catch (e) {
+      console.warn("[Helix] orphan usage listener setup failed:", e);
+    }
+    return () => {
+      try {
+        unsubUsage?.();
       } catch {}
     };
   }, []);
@@ -4396,6 +4423,7 @@ export function AgentFlowPanel() {
         const res = (await helixApi()!.send("session/new", {
           mcpServers: buildAcpMcpServers(st0.mcpServers),
           messages: seedHistory,
+          mode_id: st0.approvalMode,
           // 会话必须绑定当前对话所属项目，否则 serve 后端用配置/TERMINAL_CWD/
           // 启动目录，模型读到的目录和界面显示的项目脱节（"在 agentchat 对话，
           // 但模型读到之前选过的目录"）。
@@ -6234,39 +6262,16 @@ export function AgentFlowPanel() {
                 thinkingStartTimeRef.current = 0;
                 thinkingDurationRef.current = 0;
                 curState.setChatMessageStreaming(msgId, false);
-                // 计划模式（plan）：自动执行计划，无需用户审批
-                // 旧逻辑是先弹审批浮条让用户确认，现在改为自动切换到 accept_edits 并执行
-                // 防循环 guard：用 ref 标记是否已触发过自动执行，避免同一轮 run 内反复触发
-                if (
-                  content &&
-                  useHelixStore.getState().approvalMode === "plan" &&
-                  !planAutoExecutedRef.current
-                ) {
-                  planAutoExecutedRef.current = true;
+                // 计划模式产出方案后必须停在人工审查；只有用户点击批准才切换执行模式。
+                // 计划模式产出方案后停在人工审查；弹出 PlanReviewBar，
+                // 用户点批准才切换到 accept_edits 并执行。
+                if (content && useHelixStore.getState().approvalMode === "plan") {
                   const cid = useHelixStore.getState().currentSessionId;
-                  setApprovalMode("accept_edits");
-                  const helixSid =
-                    (cid && sessionMapRef.current.get(cid)?.sid) ||
-                    helixSessionIdRef.current;
-                  if (helixSid) {
-                    helixApi()!
-                      .send("session/set_mode", {
-                        session_id: helixSid,
-                        mode_id: "accept_edits",
-                      })
-                      .catch((e: any) =>
-                        console.warn(
-                          "[Helix] set_mode(accept_edits) failed:",
-                          e,
-                        ),
-                      );
-                  }
-                  setInputSynced(
-                    "[计划已获批准] 请按你刚才给出的计划开始执行。",
-                  );
-                  setTimeout(() => handleRun(), 0);
+                  setPendingPlanReview({
+                    sessionId: cid ?? DRAFT_SESSION_KEY,
+                    content,
+                  });
                 }
-              } else {
                 // 防御性兜底：run 结束但无任何可见内容（根因已修复，极少触发）。
                 const st = useHelixStore.getState();
                 const mid = st.addChatMessage({
@@ -6710,8 +6715,6 @@ export function AgentFlowPanel() {
       // streaming buffers, steps, and response blocks are no longer needed.
       // Without this, long conversations accumulate multi-MB of stale refs
       // across turns, eventually blowing the V8 heap past 3 GB.
-      // Reset plan auto-execution guard for next turn.
-      planAutoExecutedRef.current = false;
       setTimeout(() => {
         // Large text / reasoning buffers (can be multi-MB with tool output).
         if (textBufferRef.current) textBufferRef.current = "";
@@ -8349,7 +8352,11 @@ export function AgentFlowPanel() {
                           normalizeTextBlocks(displayResponseBlocks),
                         );
                         const lastTextIndex = normalizedBlocks.reduce(
-                          (acc, b, i) => (b.type === "text" ? i : acc),
+                          (acc, b, i) =>
+                            b.type === "text" &&
+                            String(b.content || "").trim()
+                              ? i
+                              : acc,
                           -1,
                         );
                         const processBlocks =
@@ -8366,163 +8373,86 @@ export function AgentFlowPanel() {
                           buildProcessSegments(answerBlocks);
                         return (
                           <>
-                            <details className="my-2 group/details">
-                              <summary
-                                className="flex items-center gap-1.5 px-1 py-1 text-foreground/70 cursor-pointer hover:text-foreground/90 select-none list-none transition-colors"
-                                style={{ fontSize: transcriptFontSize }}
-                              >
-                                <span className="font-medium">执行过程</span>
-                                <svg
-                                  className="size-3.5 transition-transform group-open/details:rotate-90"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2"
-                                >
-                                  <path d="m9 18 6-6-6-6" />
-                                </svg>
-                              </summary>
-                              <div className="p-2 space-y-1">
-                                {processSegments.map((seg, si) => {
-                                  if (seg.kind === "text") {
-                                    return (
-                                      <div key={si} className="space-y-1">
-                                        {seg.blocks.map((b, i) => {
-                                          if (b.type !== "text") return null;
-                                          return (
-                                            <div
-                                              key={i}
-                                              style={{
-                                                fontSize: transcriptFontSize,
-                                              }}
-                                            >
-                                              {conversationSearchOpen &&
-                                              conversationSearchQuery.trim() ? (
-                                                <div className="whitespace-pre-wrap break-words">
-                                                  <HighlightText
-                                                    text={normalizeAcpContentRaw(
-                                                      b.content,
-                                                    )}
-                                                    query={
-                                                      conversationSearchQuery
-                                                    }
-                                                    active={false}
-                                                  />
-                                                </div>
-                                              ) : (
-                                                <HelixMarkdown
+                            <div className="my-2 space-y-2">
+                              {processSegments.map((seg, si) => {
+                                if (seg.kind === "text") {
+                                  return (
+                                    <div key={si} className="space-y-1">
+                                      {seg.blocks.map((b, i) => {
+                                        if (b.type !== "text") return null;
+                                        return (
+                                          <div
+                                            key={i}
+                                            style={{
+                                              fontSize: transcriptFontSize,
+                                            }}
+                                          >
+                                            {conversationSearchOpen &&
+                                            conversationSearchQuery.trim() ? (
+                                              <div className="whitespace-pre-wrap break-words">
+                                                <HighlightText
                                                   text={normalizeAcpContentRaw(
                                                     b.content,
                                                   )}
+                                                  query={
+                                                    conversationSearchQuery
+                                                  }
+                                                  active={false}
                                                 />
-                                              )}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    );
-                                  }
-                                  if (seg.kind === "thinking") {
-                                    const firstBlock = seg.blocks[0];
-                                    const firstContent =
-                                      firstBlock && "content" in firstBlock
-                                        ? String(firstBlock.content)
-                                        : "";
-                                    const thinkingDone =
-                                      !streamingActive ||
-                                      si < processSegments.length - 1 ||
-                                      answerBlocks.length > 0;
-                                    // 思考完成后保留「思考完成」折叠卡（与已完成消息的渲染一致），
-                                    // 避免「执行过程」点开后空白；仅内容全空时才跳过。
-                                    if (
-                                      thinkingDone &&
-                                      !seg.blocks.some(
-                                        (b) =>
-                                          "content" in b &&
-                                          String(b.content || "").trim(),
-                                      )
-                                    ) {
-                                      return null;
-                                    }
-                                    return (
-                                      <details
-                                        key={si}
-                                        className="mb-2 mt-3 group/details"
-                                      >
-                                        <summary
-                                          className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors"
-                                          style={{
-                                            fontSize: transcriptFontSize,
-                                          }}
-                                        >
-                                          <span>
-                                            {thinkingDone
-                                              ? "思考完成"
-                                              : isReconnecting
-                                                ? "重连"
-                                                : extractKaomojiStatus(
-                                                    firstContent,
-                                                  ).status || "思考中"}
-                                          </span>
-                                          <svg
-                                            className="size-3.5 transition-transform group-open/details:rotate-90"
-                                            viewBox="0 0 24 24"
-                                            fill="none"
-                                            stroke="currentColor"
-                                            strokeWidth="2"
-                                          >
-                                            <path d="m9 18 6-6-6-6" />
-                                          </svg>
-                                        </summary>
-                                        <div className="mt-1 pl-3 border-l-2 border-border/60 space-y-1">
-                                          {seg.blocks.map((b, i) => {
-                                            const content =
-                                              "content" in b
-                                                ? String(b.content)
-                                                : "";
-                                            return (
-                                              <div
-                                                key={i}
-                                                className="text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll"
-                                                style={{
-                                                  fontSize: transcriptFontSize,
-                                                }}
-                                              >
-                                                {conversationSearchOpen &&
-                                                conversationSearchQuery.trim() ? (
-                                                  <HighlightText
-                                                    text={normalizeAcpContentRaw(
-                                                      content,
-                                                    )}
-                                                    query={
-                                                      conversationSearchQuery
-                                                    }
-                                                    active={false}
-                                                  />
-                                                ) : (
-                                                  <HelixMarkdown
-                                                    text={normalizeAcpContentRaw(
-                                                      content,
-                                                    )}
-                                                  />
-                                                )}
                                               </div>
-                                            );
-                                          })}
-                                        </div>
-                                      </details>
-                                    );
+                                            ) : (
+                                              <HelixMarkdown
+                                                text={normalizeAcpContentRaw(
+                                                  b.content,
+                                                )}
+                                              />
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  );
+                                }
+                                if (seg.kind === "thinking") {
+                                  const firstBlock = seg.blocks[0];
+                                  const firstContent =
+                                    firstBlock && "content" in firstBlock
+                                      ? String(firstBlock.content)
+                                      : "";
+                                  const thinkingDone =
+                                    !streamingActive ||
+                                    si < processSegments.length - 1 ||
+                                    answerBlocks.length > 0;
+                                  if (
+                                    thinkingDone &&
+                                    !seg.blocks.some(
+                                      (b) =>
+                                        "content" in b &&
+                                        String(b.content || "").trim(),
+                                    )
+                                  ) {
+                                    return null;
                                   }
                                   return (
                                     <details
                                       key={si}
-                                      className="mb-2 mt-3 group/details"
+                                      className="group/details"
                                     >
                                       <summary
-                                        className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors"
-                                        style={{ fontSize: transcriptFontSize }}
+                                        className="text-foreground/50 cursor-pointer hover:text-foreground/70 select-none flex items-center gap-1 list-none transition-colors"
+                                        style={{
+                                          fontSize: transcriptFontSize,
+                                        }}
                                       >
-                                        <span>任务执行</span>
+                                        <span>
+                                          {thinkingDone
+                                            ? "思考完成"
+                                            : isReconnecting
+                                              ? "重连"
+                                              : extractKaomojiStatus(
+                                                  firstContent,
+                                                ).status || "思考中"}
+                                        </span>
                                         <svg
                                           className="size-3.5 transition-transform group-open/details:rotate-90"
                                           viewBox="0 0 24 24"
@@ -8533,28 +8463,86 @@ export function AgentFlowPanel() {
                                           <path d="m9 18 6-6-6-6" />
                                         </svg>
                                       </summary>
-                                      <div className="mt-1 pl-3 space-y-1">
-                                        {seg.blocks.map((b, i) =>
-                                          b.type === "tool_group" ? (
-                                            <InlineToolGroup
+                                      <div className="mt-1 pl-3 border-l-2 border-border/60 space-y-1">
+                                        {seg.blocks.map((b, i) => {
+                                          const content =
+                                            "content" in b
+                                              ? String(b.content)
+                                              : "";
+                                          return (
+                                            <div
                                               key={i}
-                                              steps={b.steps}
-                                              isRunning={isRunning}
-                                              fontSize={transcriptFontSize}
-                                            />
-                                          ) : b.type === "file_change" ? (
-                                            <FileChangeSummary
-                                              key={i}
-                                              changes={b.changes}
-                                            />
-                                          ) : null,
-                                        )}
+                                              className="text-foreground/60 break-all leading-relaxed thinking-cap thinking-scroll"
+                                              style={{
+                                                fontSize: transcriptFontSize,
+                                              }}
+                                            >
+                                              {conversationSearchOpen &&
+                                              conversationSearchQuery.trim() ? (
+                                                <HighlightText
+                                                  text={normalizeAcpContentRaw(
+                                                    content,
+                                                  )}
+                                                  query={
+                                                    conversationSearchQuery
+                                                  }
+                                                  active={false}
+                                                />
+                                              ) : (
+                                                <HelixMarkdown
+                                                  text={normalizeAcpContentRaw(
+                                                    content,
+                                                  )}
+                                                />
+                                              )}
+                                            </div>
+                                          );
+                                        })}
                                       </div>
                                     </details>
                                   );
-                                })}
-                              </div>
-                            </details>
+                                }
+                                return (
+                                  <details
+                                    key={si}
+                                    className="group/details"
+                                  >
+                                    <summary
+                                      className="text-foreground/50 cursor-pointer hover:text-foreground/70 select-none flex items-center gap-1 list-none transition-colors"
+                                      style={{ fontSize: transcriptFontSize }}
+                                    >
+                                      <span>任务执行</span>
+                                      <svg
+                                        className="size-3.5 transition-transform group-open/details:rotate-90"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="2"
+                                      >
+                                        <path d="m9 18 6-6-6-6" />
+                                      </svg>
+                                    </summary>
+                                    <div className="mt-1 pl-3 space-y-1">
+                                      {seg.blocks.map((b, i) =>
+                                        b.type === "tool_group" ? (
+                                          <InlineToolGroup
+                                            key={i}
+                                            steps={b.steps}
+                                            isRunning={isRunning}
+                                            fontSize={transcriptFontSize}
+                                          />
+                                        ) : b.type === "file_change" ? (
+                                          <FileChangeSummary
+                                            key={i}
+                                            changes={b.changes}
+                                          />
+                                        ) : null,
+                                      )}
+                                    </div>
+                                  </details>
+                                );
+                              })}
+                            </div>
                             <div className="mt-2 pt-2 border-t border-border/20">
                               {answerSegments.map((seg, si) => {
                                 if (seg.kind === "text") {

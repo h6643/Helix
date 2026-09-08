@@ -1,4 +1,4 @@
-//! Vision model IPC — read/write `~/.helix/vision.json` and call the model.
+//! Vision model IPC — read/write `~/.codex/vision.json` and call the model.
 //!
 //! The vision model is invoked directly (OpenAI-compatible `/chat/completions`)
 //! to turn an image into a text description before it reaches the main model

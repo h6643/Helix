@@ -32,6 +32,8 @@ static CONTEXT_USAGE: std::sync::LazyLock<Mutex<HashMap<String, Value>>> =
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static CURRENT_THREAD: Mutex<Option<String>> = Mutex::new(None);
+static SESSION_MODES: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 static CHILD_GENERATION: AtomicU64 = AtomicU64::new(0);
 static APPROVALS: std::sync::LazyLock<Mutex<HashMap<String, PendingApproval>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -61,6 +63,7 @@ fn reset_transport() {
     TURN_WAITERS.lock().unwrap().clear();
     CONTEXT_USAGE.lock().unwrap().clear();
     *CURRENT_THREAD.lock().unwrap() = None;
+    SESSION_MODES.lock().unwrap().clear();
     APPROVALS.lock().unwrap().clear();
     INITIALIZED.store(false, Ordering::SeqCst);
 }
@@ -121,6 +124,58 @@ fn non_empty_prompt(params: &Value) -> Option<String> {
     prompt_text(params).filter(|prompt| !prompt.trim().is_empty())
 }
 
+const MODE_DEFAULT: &str = "default";
+const MODE_ACCEPT_EDITS: &str = "accept_edits";
+const MODE_DONT_ASK: &str = "dont_ask";
+const MODE_PLAN: &str = "plan";
+const APPROVAL_UNTRUSTED: &str = "untrusted";
+const APPROVAL_ON_REQUEST: &str = "on-request";
+const APPROVAL_NEVER: &str = "never";
+
+fn sandbox_policy(mode: &str) -> Value {
+    if mode == MODE_PLAN {
+        json!({ "type": "readOnly", "networkAccess": false })
+    } else if mode == MODE_DONT_ASK {
+        // "完全访问" must actually unlock the sandbox — plain workspaceWrite
+        // keeps codex sandboxed, making the Never policy nonsensical.
+        json!({ "type": "dangerFullAccess" })
+    } else {
+        json!({ "type": "workspaceWrite", "networkAccess": false })
+    }
+}
+
+fn approval_policies(mode: &str) -> Result<(Value, Value), String> {
+    match mode {
+        MODE_DEFAULT => Ok((
+            Value::String(APPROVAL_UNTRUSTED.into()),
+            sandbox_policy(mode),
+        )),
+        MODE_ACCEPT_EDITS | MODE_DONT_ASK => {
+            Ok((Value::String(APPROVAL_NEVER.into()), sandbox_policy(mode)))
+        }
+        MODE_PLAN => Ok((
+            Value::String(APPROVAL_ON_REQUEST.into()),
+            sandbox_policy(mode),
+        )),
+        _ => return Err(format!("Unsupported Codex approval mode: {mode}")),
+    }
+}
+
+fn session_approval_policies(session_id: &str) -> (Value, Value) {
+    let mode = SESSION_MODES
+        .lock()
+        .unwrap()
+        .get(session_id)
+        .cloned()
+        .unwrap_or_else(|| MODE_ACCEPT_EDITS.to_string());
+    approval_policies(&mode).unwrap_or_else(|_| {
+        (
+            Value::String(APPROVAL_NEVER.into()),
+            sandbox_policy(MODE_ACCEPT_EDITS),
+        )
+    })
+}
+
 /// Map Helix prompt content blocks to codex `turn/start` UserInput items.
 /// Text blocks pass through; `image_url` blocks (OpenAI shape) become codex
 /// `{type:"image", url}` items. Returns None when nothing usable is present.
@@ -166,6 +221,12 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
         return Err("Codex app-server not initialized".into());
     }
 
+    // The renderer sends dot-separated names (session.context_breakdown), the
+    // legacy Hermes surface used slashes (session/context_breakdown) — accept
+    // both by normalizing dots to slashes before dispatch.
+    let method = method.replace('.', "/");
+    let method = method.as_str();
+
     match method {
         "session/new" => {
             let cwd = params
@@ -173,11 +234,14 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+            let mode = params.get("mode_id").and_then(Value::as_str).unwrap_or(MODE_ACCEPT_EDITS);
+            let (approval_policy, sandbox_policy) = approval_policies(mode)?;
             let result = request(
                 "thread/start",
                 json!({
                     "cwd": cwd,
-                    "sandbox": "workspace-write"
+                    "approvalPolicy": approval_policy,
+                    "sandboxPolicy": sandbox_policy,
                 }),
                 RPC_TIMEOUT,
             )
@@ -204,20 +268,14 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             let mode = params
                 .get("mode_id")
                 .and_then(Value::as_str)
-                .unwrap_or_default();
-            let (approval_policy, sandbox_policy) = match mode {
-                "default" | "accept_edits" => (
-                    "on-request",
-                    json!({ "type": "workspaceWrite", "networkAccess": false }),
-                ),
-                "dont_ask" => ("never", json!({ "type": "dangerFullAccess" })),
-                "plan" => (
-                    "on-request",
-                    json!({ "type": "readOnly", "networkAccess": false }),
-                ),
-                _ => return Err(format!("Unsupported Codex approval mode: {mode}")),
-            };
-            let result = request(
+                .unwrap_or_default()
+                .to_string();
+            let (approval_policy, sandbox_policy) = approval_policies(&mode)?;
+            SESSION_MODES
+                .lock()
+                .unwrap()
+                .insert(session_id.clone(), mode.clone());
+            request(
                 "thread/settings/update",
                 json!({
                     "threadId": session_id,
@@ -228,7 +286,7 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             )
             .await?;
             *CURRENT_THREAD.lock().unwrap() = Some(session_id.clone());
-            Ok(result)
+            Ok(json!({ "status": "mode-applied", "mode_id": mode }))
         }
         "session/context_breakdown" => {
             let session_id = params
@@ -244,7 +302,6 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .cloned()
                 .unwrap_or(Value::Null);
             let token_usage = usage.get("tokenUsage").cloned().unwrap_or(Value::Null);
-            let total_usage = token_usage.get("total").cloned().unwrap_or(Value::Null);
             let last_usage = token_usage.get("last").cloned().unwrap_or(Value::Null);
             let context_max = token_usage
                 .get("modelContextWindow")
@@ -368,6 +425,12 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                         .map(|text| json!([{ "type": "text", "text": text }]))
                 })
                 .ok_or("session/prompt is missing text")?;
+            let mode = params.get("mode_id").and_then(Value::as_str).map(str::to_string);
+            if let Some(mode) = mode {
+                approval_policies(&mode)?;
+                SESSION_MODES.lock().unwrap().insert(session_id.clone(), mode);
+            }
+            let (approval_policy, sandbox_policy) = session_approval_policies(&session_id);
             let (tx, rx) = tokio::sync::oneshot::channel();
             TURN_WAITERS
                 .lock()
@@ -378,6 +441,8 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 json!({
                     "threadId": session_id,
                     "input": prompt,
+                    "approvalPolicy": approval_policy,
+                    "sandboxPolicy": sandbox_policy,
                 }),
                 RPC_TIMEOUT,
             )
@@ -482,9 +547,23 @@ pub fn spawn(state: &Arc<AppState>) -> Result<(), String> {
         .map_err(|e| format!("Failed to create Codex home {}: {e}", home.display()))?;
 
     let mut command = codex_command();
+    // A stale persisted workDir (folder deleted/moved since last run) makes
+    // spawning with it as cwd fail on Windows with os error 267 "目录名称无效".
+    // Fall back to the home dir — the backend still starts, and the UI's
+    // project picker re-stamps a valid one on next save.
+    let cwd = state.work_dir.read().unwrap().clone();
+    let cwd = if cwd.is_dir() {
+        cwd
+    } else {
+        eprintln!(
+            "[Helix] work dir missing, falling back to home: {}",
+            cwd.display()
+        );
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    };
     command
         .args(["app-server", "--stdio"])
-        .current_dir(state.work_dir.read().unwrap().clone())
+        .current_dir(cwd)
         .env("CODEX_HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -557,6 +636,14 @@ fn initialize() {
                 "name": "helix",
                 "title": "Helix",
                 "version": env!("CARGO_PKG_VERSION")
+            },
+            // `thread/settings/update` (session/set_mode) is gated behind the
+            // experimentalApi capability — without this declaration codex
+            // rejects every approval-mode switch with a capability error that
+            // the frontend only console.warns away (mode UI changes, backend
+            // policy silently stays put).
+            "capabilities": {
+                "experimentalApi": true
             }
         }),
     ) {
@@ -1068,11 +1155,13 @@ fn emit_codex_event(method: &str, params: &Value) {
     emit_helix_event(translated, &payload);
 }
 
-/// Codex home — same directory the backend resolves all its state from.
-/// All backends share ~/.helix so config + auth live in one place.
+/// Codex home — the standard `~/.codex` directory shared with the codex CLI /
+/// VS Code extension, so config + auth + sessions live in ONE place. The user
+/// explicitly unifies Helix onto this home (2026-09-08); the separate
+/// `~/.helix` mirror was retired.
 pub(crate) fn codex_home() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".helix")
+    home.join(".codex")
 }
 
 #[cfg(windows)]

@@ -33,7 +33,12 @@ pub fn persisted_work_dir() -> Option<PathBuf> {
 pub fn persist_work_dir(dir: &str) {
     if let Some(d) = user_data_dir() {
         let _ = std::fs::create_dir_all(&d);
-        let _ = std::fs::write(d.join(WORKDIR_FILE), json!({ "workDir": dir }).to_string());
+        // Strip the verbatim `\\?\` prefix std::fs::canonicalize adds on Windows.
+        // Storing it verbatim is harmless while the dir exists, but the raw form
+        // is what later spawn() calls use as child cwd — and it also leaks into
+        // the renderer, where path joins compare against non-verbatim paths.
+        let clean = dir.trim_start_matches(r"\\?\\");
+        let _ = std::fs::write(d.join(WORKDIR_FILE), json!({ "workDir": clean }).to_string());
     }
 }
 

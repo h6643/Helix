@@ -400,7 +400,7 @@ export function CodeCard({
     <pre className={className} data-code-card-header="true">
       {/* 头部：不透明背景，显示语言类型和操作按钮（helix-code-card-header 由
           globals.css 以 !important 压制 .helix-md pre > div 的通用透明规则） */}
-      <div className="flex items-center justify-between px-3 py-2 helix-code-card-header border-b border-border rounded-t-md">
+      <div className="flex items-center justify-between px-2 py-1 helix-code-card-header border-b border-border rounded-t-md">
         <span className="text-[calc(var(--helix-transcript-size)*0.7143)] uppercase tracking-wider text-foreground/40 select-none font-medium">
           {isDiff ? "diff" : language || (boxDiagram ? "text" : "code")}
         </span>
