@@ -129,3 +129,4 @@ KaTeX_*
 
 # codex CLI temp dir
 .codex-tmp/
+*.log
