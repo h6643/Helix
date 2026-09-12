@@ -1,0 +1,61 @@
+{
+  "providers": {
+    "agnes": {
+      "api": "openai-completions",
+      "apiKey": "sk-dhTEVk7sC8QiBYzsZh95ttOCDKi6TIgqN1vOsd2zTvRHpVxy",
+      "baseUrl": "https://apihub.agnes-ai.com/v1",
+      "models": [
+        {
+          "contextWindow": 512000,
+          "id": "agnes-3.0-flash",
+          "maxTokens": 65536,
+          "name": "agnes-3.0-flash"
+        }
+      ]
+    },
+    "agnes-ai": {
+      "api": "openai-completions",
+      "apiKey": "sk-dhTEVk7sC8QiBYzsZh95ttOCDKi6TIgqN1vOsd2zTvRHpVxy",
+      "baseUrl": "https://apihub.agnes-ai.com/v1",
+      "models": [
+        {
+          "contextWindow": 524288,
+          "id": "agnes-3.0-flash",
+          "maxTokens": 65536,
+          "name": "agnes-3.0-flash"
+        }
+      ]
+    },
+    "api.tokenrouter.com": {
+      "api": "openai-completions",
+      "apiKey": "sk-MGLGPt7clLpb7cK6rOH44B9XHsK4M8kZMAY3uJjIAMGwVcDK",
+      "baseUrl": "https://api.tokenrouter.com/v1",
+      "models": [
+        {
+          "contextWindow": 1000000,
+          "id": "z-ai/glm-5.3-free",
+          "maxTokens": 65536,
+          "name": "z-ai/glm-5.3-free"
+        }
+      ]
+    },
+    "zhipu": {
+      "api": "openai-completions",
+      "apiKey": "$ZHIPU_API_KEY",
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+      "models": [
+        {
+          "contextWindow": 128000,
+          "id": "glm-4v-flash",
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxTokens": 65536,
+          "name": "GLM-4V Flash (识图-快速)",
+          "reasoning": false
+        }
+      ]
+    }
+  }
+}

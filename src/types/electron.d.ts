@@ -9,20 +9,6 @@ export interface MemoryProviderInfo {
   status: "missing" | "unavailable" | "needs_config" | "ready";
 }
 
-export interface MemoryProviderField {
-  key: string;
-  label: string;
-  kind: "text" | "secret" | "select" | "bool" | "number" | "json";
-  description: string;
-  placeholder: string;
-  required: boolean;
-  value: string | number | boolean;
-  is_set: boolean;
-  options?: Array<{ value: string; label: string; description?: string }>;
-  url?: string;
-  when?: unknown;
-}
-
 export interface ElectronAPI {
   fs: {
     read: (filePath: string) => Promise<string>;
@@ -202,29 +188,6 @@ export interface ElectronAPI {
       };
       error?: string;
     }>;
-    getMemoryProviderConfig: (name: string) => Promise<{
-      ok: boolean;
-      config?: {
-        name: string;
-        label?: string;
-        fields: MemoryProviderField[];
-        setup?: any;
-      };
-      error?: string;
-    }>;
-    setMemoryProviderConfig: (
-      name: string,
-      values: Record<string, any>,
-    ) => Promise<{
-      ok: boolean;
-      result?: any;
-      error?: string;
-    }>;
-    memoryProviderSetup: (name: string) => Promise<{
-      ok: boolean;
-      result?: any;
-      error?: string;
-    }>;
     setYamlKey: (key: string, value: any) => Promise<any>;
     setDelegationIdentities: (
       identities: Array<{ name: string; system_prompt: string }>,
@@ -269,6 +232,131 @@ export interface ElectronAPI {
       message?: string;
       error?: string;
     }>;
+    // Pi agent commands (extensions / skills / prompts / models)
+    piGetCommands: () => Promise<{
+      commands: Array<{
+        name: string;
+        description?: string;
+        source: "extension" | "prompt" | "skill";
+        location?: "user" | "project" | "path";
+        path?: string;
+      }>;
+    }>;
+    piListInstalled: () => Promise<{
+      items: Array<{
+        name: string;
+        type: "extension" | "skill" | "prompt";
+        source: "pi" | "pi-rpc" | "pi-package" | "pi-npm" | "helix";
+        description?: string;
+        version?: string;
+        path?: string;
+        location?: string;
+        /** npm: package id ("npm:<name>") for toggling via settings.json. */
+        packageId?: string;
+        /** Whether the plugin's resources are currently loaded. */
+        enabled?: boolean;
+      }>;
+    }>;
+    piSetPackageEnabled: (
+      pkg: string,
+      enabled: boolean,
+    ) => Promise<{ success: boolean; package: string; enabled: boolean }>;
+    piGetAvailableModels: () => Promise<{
+      // Pi's Model objects. Everything except `id`/`provider` is optional here:
+      // custom-providers.json entries routinely omit cost/contextWindow, and a
+      // hard-required shape would make the settings dropdown throw on them.
+      models: Array<{
+        id: string;
+        provider: string;
+        name?: string;
+        /** Endpoint the model resolves to — lets the settings panel auto-fill
+         *  Base URL when the user picks a Pi-configured provider. */
+        baseUrl?: string;
+        /** Wire format, e.g. "openai-completions" | "anthropic-messages". */
+        api?: string;
+        reasoning?: boolean;
+        input?: string[];
+        contextWindow?: number;
+        maxTokens?: number;
+        cost?: {
+          input: number;
+          output: number;
+          cacheRead: number;
+          cacheWrite: number;
+        };
+      }>;
+    }>;
+    piGetState: () => Promise<{
+      model: {
+        id: string;
+        name: string;
+        provider: string;
+        contextWindow: number;
+      } | null;
+      thinkingLevel: string;
+      isStreaming: boolean;
+      sessionFile: string | null;
+      sessionId: string | null;
+    }>;
+    piSetModel: (
+      provider: string,
+      modelId: string,
+    ) => Promise<{ model: unknown }>;
+    piSetThinkingLevel: (level: string) => Promise<{ success: boolean }>;
+    piSetThinkingLevelAll: (level: string) => Promise<{ success: boolean }>;
+    piCompact: () => Promise<{
+      summary: string;
+      tokensBefore: number;
+      estimatedTokensAfter: number;
+    }>;
+    piGetSessionStats: () => Promise<{
+      tokens: {
+        input: number;
+        output: number;
+        cacheRead: number;
+        cacheWrite: number;
+        totalTokens: number;
+      };
+      cost: number;
+      contextUsage: {
+        tokens: number;
+        contextWindow: number;
+        percent: number;
+      };
+    }>;
+    piSearchPackages: (query: string) => Promise<{
+      packages: Array<{
+        name: string;
+        description: string;
+        version: string;
+        type: "extension" | "skill" | "theme" | "prompt" | "package";
+        author: string;
+        npmUrl: string;
+        installCmd: string;
+        downloads: number;
+        date: string;
+      }>;
+    }>;
+    piInstallPackage: (pkg: string) => Promise<{
+      success: boolean;
+      message: string;
+      output?: string;
+    }>;
+    piUninstallPackage: (pkg: string) => Promise<{
+      success: boolean;
+      message: string;
+      output?: string;
+    }>;
+    piCheckUpdates: () => Promise<{
+      pi: { installed: string | null; latest: string | null; hasUpdate?: boolean };
+      packages: Array<{
+        name: string;
+        installed: string;
+        latest: string | null;
+        hasUpdate?: boolean;
+      }>;
+    }>;
+    piPackageLatest: (name: string) => Promise<{ latest: string | null }>;
     cronList: () => Promise<{
       success: boolean;
       jobs?: unknown;

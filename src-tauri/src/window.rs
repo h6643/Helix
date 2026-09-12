@@ -60,11 +60,11 @@ pub fn new_window() {
     .decorations(false)
     .visible(false)
     .build()
-    .and_then(|win| {
+    .map(|win| {
         let _ = win.maximize();
         let _ = win.show();
         let _ = win.set_focus();
-        Ok(())
+        ()
     });
 }
 

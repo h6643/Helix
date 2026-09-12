@@ -103,7 +103,7 @@ function ApprovalBar({
   ];
 
   return (
-    <div className="w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-2.5">
+    <div className="w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-1.5">
       <div className="flex items-start justify-between gap-2 mb-2">
         <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
           {getApprovalTitle(request.toolName)}
@@ -267,7 +267,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
 
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
-      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-3">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-2">
         <div className="flex items-center justify-between gap-3 mb-1.5">
           <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
             需要你的确认
@@ -364,7 +364,8 @@ export interface PlanReviewRequest {
 interface PlanReviewBarProps {
   content: string;
   onApprove: () => void;
-  onAdjust: () => void;
+  /** 修改反馈：传字符串 → 自动作为 plan follow-up 重新规划；不传 → 仅关条。 */
+  onAdjust: (feedback?: string) => void;
 }
 
 export function PlanReviewBar({
@@ -382,11 +383,21 @@ export function PlanReviewBar({
     onApprove();
   }, [submitting, onApprove]);
 
-  const adjust = useCallback(() => {
-    if (submitting) return;
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedback, setFeedback] = useState("");
+
+  const submitFeedback = useCallback(() => {
+    const fb = feedback.trim();
+    if (!fb || submitting) return;
     setSubmitting("adjust");
+    onAdjust(fb);
+  }, [feedback, submitting, onAdjust]);
+
+  const closeAdjust = useCallback(() => {
+    setShowFeedback(false);
+    setFeedback("");
     onAdjust();
-  }, [submitting, onAdjust]);
+  }, [onAdjust]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -397,16 +408,16 @@ export function PlanReviewBar({
       } else if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        adjust();
+        onAdjust();
       }
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [approve, adjust]);
+  }, [approve, onAdjust]);
 
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
-      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-3">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-2">
         <div className="flex items-center justify-between gap-3 mb-1.5">
           <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
             计划已生成
@@ -438,20 +449,52 @@ export function PlanReviewBar({
             size="sm"
             variant="ghost"
             disabled={submitting !== null}
-            onClick={adjust}
+            onClick={() => setShowFeedback((v) => !v)}
             className="flex-1 h-8 text-[calc(var(--helix-transcript-size)*0.9286)]"
           >
-            {submitting === "adjust" ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Pencil className="size-3.5" />
-            )}
-            继续调整
+            <Pencil className="size-3.5" />
+            修改计划
           </Button>
         </div>
 
+        {showFeedback && (
+          <div className="space-y-2">
+            <textarea
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              placeholder="写修改意见，提交后 agent 基于意见重新规划…"
+              rows={2}
+              autoFocus
+              className="w-full rounded-lg border border-border/60 bg-background px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] resize-none focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                onClick={submitFeedback}
+                disabled={!feedback.trim() || submitting !== null}
+                className="flex-1 h-8 text-[calc(var(--helix-transcript-size)*0.8571)]"
+              >
+                {submitting === "adjust" ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Check className="size-3.5" />
+                )}
+                提交并重新规划
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={closeAdjust}
+                className="h-8 text-[calc(var(--helix-transcript-size)*0.8571)]"
+              >
+                取消
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-1">
-          批准后开始执行，危险操作仍需确认 · ⌘/Ctrl+Enter 批准 · Esc 继续调整
+          批准后开始执行，危险操作仍需确认 · ⌘/Ctrl+Enter 批准 · Esc 修改计划
         </div>
       </div>
     </div>

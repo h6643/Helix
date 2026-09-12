@@ -90,8 +90,8 @@ fn task_from_job(job: &Value, updated_at: Option<&Value>) -> Value {
     } else {
         None
     };
-    let created_at = parse_ts(job.get("created_at")).unwrap_or_else(|| now_ms());
-    let updated_at = parse_ts(updated_at).unwrap_or_else(|| now_ms());
+    let created_at = parse_ts(job.get("created_at")).unwrap_or_else(now_ms);
+    let updated_at = parse_ts(updated_at).unwrap_or_else(now_ms);
     json!({
         "id": job.get("id").and_then(|v| v.as_str()).unwrap_or(""),
         "label": job.get("name").and_then(|v| v.as_str()).unwrap_or("未命名任务"),

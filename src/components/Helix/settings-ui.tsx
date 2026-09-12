@@ -69,7 +69,7 @@ export const SettingGroup = ({
   className?: string;
 }) => (
   <div
-    className={`rounded-xl border-0 bg-card shadow-sm overflow-hidden ${className}`}
+    className={`rounded-xl border border-border bg-card overflow-hidden ${className}`}
   >
     {(title || action || description) && (
       <div
@@ -334,7 +334,7 @@ export function PopupSelect({
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed z-50 bg-popover border-0 rounded-xl shadow-xl py-1 overflow-y-auto overscroll-contain backdrop-blur-sm"
+          className="fixed z-50 bg-popover border border-border rounded-xl shadow-xl py-1 overflow-y-auto overscroll-contain"
           style={{
             left: pos.left,
             top: pos.top,

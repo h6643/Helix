@@ -1,39 +1,44 @@
-import { defineConfig, globalIgnores } from 'eslint/config'
-import js from '@eslint/js'
-import tsPlugin from '@typescript-eslint/eslint-plugin'
-import tsParser from '@typescript-eslint/parser'
-import importPlugin from 'eslint-plugin-import'
-import reactHooks from 'eslint-plugin-react-hooks'
-import reactRefresh from 'eslint-plugin-react-refresh'
-import reactPlugin from 'eslint-plugin-react'
+import { defineConfig, globalIgnores } from "eslint/config";
+import js from "@eslint/js";
+import tsPlugin from "@typescript-eslint/eslint-plugin";
+import tsParser from "@typescript-eslint/parser";
+import importPlugin from "eslint-plugin-import";
+import reactHooks from "eslint-plugin-react-hooks";
+import reactRefresh from "eslint-plugin-react-refresh";
+import reactPlugin from "eslint-plugin-react";
 
 // Flat config for ESLint 9. The old config inherited eslint-config-next; with
 // the Tauri/Vite migration the Next preset is gone, so we use the
 // typescript-eslint + react-hooks presets that covered the same surface.
+//
+// Note: core-js `no-undef` is meaningful for plain JS, but in TS files the
+// compiler already guarantees global refs (lib.dom / @types/node), so
+// eslint's core-js view of globals only produces false positives on
+// `window`/`setTimeout`/`console` etc. — it is re-disabled in helix/ts rules.
 export default defineConfig([
   globalIgnores([
-    'node_modules/**',
-    'dist/**',
-    'out/**',
-    'build/**',
-    'release/**',
-    'src-tauri/**',
-    'hermes-agent/**',
-    '*.config.js',
-    '*.config.mjs',
-    '*.config.ts',
-    'eslint.config.mjs',
+    "node_modules/**",
+    "dist/**",
+    "out/**",
+    "build/**",
+    "release/**",
+    "src-tauri/**",
+    "hermes-agent/**",
+    "*.config.js",
+    "*.config.mjs",
+    "*.config.ts",
+    "eslint.config.mjs",
   ]),
   {
-    name: 'helix/js',
-    files: ['**/*.{js,jsx,mjs,ts,tsx,mts,cts}'],
+    name: "helix/js",
+    files: ["**/*.{js,jsx,mjs,ts,tsx,mts,cts}"],
     ...js.configs.recommended,
   },
   {
-    name: 'helix/ts',
-    files: ['**/*.{ts,tsx,mts,cts}'],
+    name: "helix/ts",
+    files: ["**/*.{ts,tsx,mts,cts}"],
     plugins: {
-      '@typescript-eslint': tsPlugin,
+      "@typescript-eslint": tsPlugin,
     },
     languageOptions: {
       parser: tsParser,
@@ -43,16 +48,22 @@ export default defineConfig([
       },
     },
     rules: {
-      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
-      '@typescript-eslint/no-explicit-any': 'warn',
+      // tsc covers undefined-global refs for TS (see note at top of file);
+      // core-js no-undef only yields false positives here.
+      "no-undef": "off",
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
+      ],
+      "@typescript-eslint/no-explicit-any": "warn",
     },
   },
   {
-    name: 'helix/react',
-    files: ['**/*.{jsx,tsx}'],
+    name: "helix/react",
+    files: ["**/*.{jsx,tsx}"],
     plugins: {
-      'react-hooks': reactHooks,
-      'react-refresh': reactRefresh,
+      "react-hooks": reactHooks,
+      "react-refresh": reactRefresh,
       react: reactPlugin,
     },
     languageOptions: {
@@ -61,23 +72,26 @@ export default defineConfig([
       },
     },
     rules: {
-      'react-hooks/rules-of-hooks': 'error',
-      'react-hooks/exhaustive-deps': 'warn',
-      'react-refresh/only-export-components': 'warn',
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "warn",
+      "react-refresh/only-export-components": "warn",
     },
   },
   {
-    name: 'helix/import-order',
-    files: ['**/*.{js,jsx,mjs,ts,tsx,mts,cts}'],
+    name: "helix/import-order",
+    files: ["**/*.{js,jsx,mjs,ts,tsx,mts,cts}"],
     plugins: {
       import: importPlugin,
     },
     rules: {
-      'import/order': ['warn', {
-        groups: ['builtin', 'external', 'internal', 'parent', 'sibling'],
-        'newlines-between': 'ignore',
-        alphabetize: { order: 'asc' },
-      }],
+      "import/order": [
+        "warn",
+        {
+          groups: ["builtin", "external", "internal", "parent", "sibling"],
+          "newlines-between": "ignore",
+          alphabetize: { order: "asc" },
+        },
+      ],
     },
   },
-])
+]);

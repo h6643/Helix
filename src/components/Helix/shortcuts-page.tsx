@@ -113,8 +113,8 @@ export function ShortcutsPage() {
 
       {/* Recording overlay */}
       {recording && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-card/50 border border-border/50 rounded-xl p-6 shadow-xl max-w-sm w-full">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-card border border-border rounded-xl p-6 shadow-xl max-w-sm w-full">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse" />
               <span className="ui-text font-medium text-foreground">

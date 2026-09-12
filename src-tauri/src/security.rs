@@ -45,7 +45,7 @@ fn new_key(dir: &std::path::Path, path: &std::path::Path) -> [u8; 32] {
     }
     #[cfg(not(unix))]
     {
-        let _ = std::fs::write(path, &key);
+        let _ = std::fs::write(path, key);
     }
     key
 }

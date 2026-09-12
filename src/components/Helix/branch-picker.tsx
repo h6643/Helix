@@ -229,7 +229,7 @@ export function BranchPicker({
       </button>
       {open && (
         <div
-          className={`absolute ${popoverPosition} w-64 bg-background/95 backdrop-blur-sm rounded-xl border border-border/30 shadow-lg shadow-black/8 z-50 flex flex-col max-h-80`}
+          className={`absolute ${popoverPosition} w-64 bg-popover rounded-xl border border-border shadow-lg z-50 flex flex-col max-h-80`}
         >
           {/* Search */}
           <div className="px-3 pt-2.5 pb-1.5 border-b border-border/20">

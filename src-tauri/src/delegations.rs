@@ -76,7 +76,7 @@ pub fn delegations_list(session_id: Option<String>) -> Value {
             if let Ok(task_entries) = std::fs::read_dir(&path) {
                 for te in task_entries.flatten() {
                     let tp = te.path();
-                    if tp.extension().map_or(false, |e| e == "log") {
+                    if tp.extension().is_some_and(|e| e == "log") {
                         let task_name = tp
                             .file_stem()
                             .unwrap_or_default()

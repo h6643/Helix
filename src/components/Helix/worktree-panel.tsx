@@ -190,7 +190,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
   return (
     <div className="h-full flex flex-col bg-background select-none">
       {/* Header */}
-      <div className="shrink-0 px-4 py-3 border-b border-border/40 flex items-center justify-between">
+      <div className="shrink-0 px-4 pr-36 py-3 border-b border-border/40 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <GitBranch className="size-4 text-muted-foreground" />
           <h2 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">

@@ -2,16 +2,13 @@
 
 import {
   ChevronRight,
-  X,
   Copy,
   CheckCheck,
-  Image as ImageIcon,
 } from "lucide-react";
 import React, { useState } from "react";
 import { formatDurationSeconds } from "@/lib/format";
 import { normalizeAcpContent, stripEmoji } from "@/lib/text-utils";
 import {
-  getToolIcon,
   getToolDisplayLabel,
   extractCommandSnippet,
   extractToolPath,
@@ -331,9 +328,10 @@ function ToolCard({
   const running = stepStatus === "running" && isRunning;
   const failed = stepStatus === "failed";
   const action = toolActionText(step);
-  // 动词随状态变化:运行中"执行/搜索/读取",完成态加"已"前缀("已执行/已搜索/已读取")。
+  // 动词固定不随状态变化("搜索/读取/执行"),完成态不再加"已"前缀——
+  // 组折叠摘要已经表达完成语义,行内前缀"已/正在"切换只会让列宽抖动。
   const verb = toolVerb(step.toolName || "");
-  const verbText = stepStatus === "completed" && !failed ? `已${verb}` : verb;
+  const verbText = verb;
   // 完整标题（verb + action/label）：action 为空时回退到工具显示名。title 属性
   // 用于悬停查看全文——命令类标题可能被 CSS truncate 视觉截断。
   const titleLabel =
@@ -349,7 +347,7 @@ function ToolCard({
   return (
     <div className="group">
       {/* Tool title row — click to expand/collapse.
-          动作词(执行/搜索/读取) + 具体动作，完成态显示"已执行/已搜索/已读取"。 */}
+          固定宽动词列 + 动作列:动词承担动作分类,动作列显示命令/路径/工具名。 */}
       <button
         type="button"
         onClick={() => {
@@ -357,32 +355,17 @@ function ToolCard({
         }}
         className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${canExpand ? "" : "cursor-default"}`}
       >
+        {/* Claude Code 终端风工具符号：⏺（失败态 × 变红）替代彩色图标 */}
         {failed ? (
-          <X className="size-3.5 text-red-500 shrink-0" />
+          <span className="tool-glyph tool-glyph-failed" aria-hidden>✕</span>
         ) : (
-          getToolIcon(step.toolName || "")
+          <span className="tool-glyph" aria-hidden>⏺</span>
         )}
-        {action ? (
-          <>
-            <span
-              className={`font-medium shrink-0 ${running ? "flowing-text" : ""}`}
-            >
-              {verbText}
-            </span>
-            <code
-              className={`flex-1 min-w-0 truncate font-mono font-normal text-[0.86em] px-1 py-px rounded bg-transparent text-foreground/70 ${running ? "flowing-text" : ""}`}
-            >
-              {titleLabel}
-            </code>
-          </>
-        ) : (
-          <span
-            className={`font-medium truncate ${running ? "flowing-text" : ""}`}
-            title={fullTitle}
-          >
-            {verbText} {titleLabel}
-          </span>
-        )}
+        <span
+          className={`flex-1 min-w-0 truncate text-foreground/60 ${running ? "text-foreground/85" : ""}`}
+        >
+          {verbText} {titleLabel}
+        </span>
         {step.duration_s != null && step.duration_s > 0 && (
           <span className="text-[0.72em] text-muted-foreground shrink-0">
             {formatDurationSeconds(step.duration_s)}
@@ -443,7 +426,7 @@ function ToolCard({
       )}
 
       {canExpand && open && (
-        <div className="pb-1 pt-1 pl-3 border-l-2 border-border/60 space-y-1.5">
+        <div className="tool-result-panel space-y-1.5">
           {/* Streaming output preview — shown while tool is running.
               tool.progress → tool_call_update(in_progress) → tool_output_delta 把
               实时输出追加到 step.content（agent-flow-panel），这里显示它的末尾。 */}
@@ -454,16 +437,16 @@ function ToolCard({
           )}
           {/* Sub-agent sub-steps */}
           {hasSubSteps && (
-            <div className="space-y-1.5 pl-3">
+            <div className="space-y-1.5">
               {step.subSteps!.map((sub) => {
                 const subRunning = sub.status === "running";
                 const subFailed = sub.status === "failed";
                 return (
                   <div key={sub.id} className="flex items-center gap-1.5">
                     {subFailed ? (
-                      <X className="size-3 text-red-500 shrink-0" />
+                      <span className="tool-glyph tool-glyph-failed !text-[0.85em]" aria-hidden>✕</span>
                     ) : (
-                      getToolIcon(sub.toolName || "")
+                      <span className="tool-glyph !text-[0.85em]" aria-hidden>⏺</span>
                     )}
                     <span className="text-[0.85em] text-foreground/50">
                       {getToolDisplayLabel(
@@ -491,11 +474,12 @@ function ToolCard({
               })}
             </div>
           )}
-          {/* 内容单块 — 参数与结果合并展示，无单独标签分隔 */}
+          {/* 内容单块 — 参数与结果合并展示，无单独标签分隔。
+              外层 ⎿ 面板已带 bg-inset 底与折角线，内部不再套边框卡。 */}
           {(hasParams || results.length > 0) && (
-            <div className="rounded border border-border/20 divide-y divide-border/20">
+            <div className="space-y-1.5 divide-y divide-border/20">
               {hasParams && (
-                <div className="p-1.5 space-y-1.5">
+                <div className="space-y-1.5 pt-1.5">
                   {visibleParamEntries.map(([k, v]) => (
                     <div key={k} className="flex flex-col">
                       <span className="text-[0.72em] text-foreground/40 font-medium uppercase tracking-wide">
@@ -524,7 +508,7 @@ function ToolCard({
                   );
                   if (!errFiltered) return null;
                   return (
-                    <div key={r.id} className="flex items-start gap-1 p-1.5">
+                    <div key={r.id} className="flex items-start gap-1 pt-1.5">
                       <div className="flex-1 min-w-0 text-[0.85em] text-red-500/80 font-mono whitespace-pre-wrap break-all leading-relaxed">
                         {errFiltered}
                       </div>
@@ -548,7 +532,7 @@ function ToolCard({
                 // 图片结果不是代码块，保持原样渲染。
                 if (isImage) {
                   return (
-                    <div key={r.id} className="relative p-1.5">
+                    <div key={r.id} className="relative pt-1.5">
                       <div className="absolute top-2 right-2 z-10">
                         <CopyButton text={fullText} />
                       </div>
@@ -569,11 +553,9 @@ function ToolCard({
                     ? raw.slice(0, TOOL_RESULT_CLAMP) +
                       `\n\n… (${raw.length - TOOL_RESULT_CLAMP} 字符已截断)`
                     : raw;
-                const isLong =
-                  clamped.length > 500 || clamped.split("\n").length > 10;
 
                 return (
-                  <div key={r.id} className="p-1.5">
+                  <div key={r.id} className="pt-1.5">
                     <div className="helix-md">
                       <CodeCard
                         language={resultLang}

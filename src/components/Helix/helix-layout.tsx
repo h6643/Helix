@@ -14,7 +14,6 @@ import {
   ChevronDown,
   FileText,
   Keyboard,
-  Globe,
   ListTodo,
   CheckCircle2,
   Circle,
@@ -122,9 +121,6 @@ const TerminalPanel = lazy(() =>
 );
 const WorktreePanel = lazy(() =>
   import("./worktree-panel").then((m) => ({ default: m.WorktreePanel })),
-);
-const PluginManagerPanel = lazy(() =>
-  import("./plugin-manager").then((m) => ({ default: m.PluginManager })),
 );
 const DelegationsPanel = lazy(() =>
   import("./delegations-panel").then((m) => ({ default: m.DelegationsPanel })),
@@ -401,17 +397,13 @@ export function HelixLayout() {
   const showSubAgentPanel = useHelixStore((s) => s.showSubAgentPanel);
   const showActivityFeed = useHelixStore((s) => s.showActivityFeed);
   const showArtifactsBrowser = useHelixStore((s) => s.showArtifactsBrowser);
-  const showPluginManager = useHelixStore((s) => s.showPluginManager);
-  // 打开任一主区覆盖页（计划/插件管理/技能/运行时/工作树）时，聊天区用
+  // 打开任一主区覆盖页（计划/技能/运行时/工作树）时，聊天区用
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
   // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
   // 切页面时让模型继续在后台运行，返回后还能接着看。
-  // Only hide chat for overlay panels (delegations, runtime, worktree, plugin manager)
+  // Only hide chat for overlay panels (delegations, runtime, worktree)
   const sidePanelOpen =
-    showPluginManager ||
-    showRuntimePanel ||
-    showWorktreePanel ||
-    showSubAgentPanel;
+    showRuntimePanel || showWorktreePanel || showSubAgentPanel;
   const rightSidebarTab = useHelixStore((s) => s.rightSidebarTab);
   const codeFullscreen = useHelixStore((s) => s.codeFullscreen);
   const isTerminalOpen = useHelixStore((s) => s.isTerminalOpen);
@@ -443,7 +435,26 @@ export function HelixLayout() {
   const setThemeStyle = useHelixStore((s) => s.setThemeStyle);
   const chatMessages = useHelixStore((s) => s.chatMessages);
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
+  // 新对话 / 计划 / 插件 视图下隐藏标题栏的「终端 / 更多操作」——这两项是
+  // 对话区操作：空会话、或被任意全屏面板（计划/插件/运行时/工作树/子 Agent）
+  // 盖住聊天区时都没有意义。同时让面板头部只留窗口控制按钮那一段，避免互相压。
+  const hideConversationActions =
+    !currentSessionId ||
+    showScheduledTasksPanel ||
+    showSkillPanel ||
+    showRuntimePanel ||
+    showWorktreePanel ||
+    showSubAgentPanel;
   const activeSessionWorkDir = useHelixStore((s) => s.activeSessionWorkDir);
+  // Which workDir the branch picker operates on. An active session uses its
+  // own dir; a brand-new conversation has no session yet, so fall back to the
+  // selected project dir — otherwise the branch picker stays hidden until the
+  // first message is sent (gitBranch is already probed from selectedWorkDir).
+  // Project-outside conversations (loaded, activeSessionWorkDir empty) stay
+  // hidden, matching the project chip next to it.
+  const branchPickerWorkDir =
+    activeSessionWorkDir ??
+    (currentSessionId === null ? selectedWorkDir : null);
   const navigationHistory = useHelixStore((s) => s.navigationHistory);
   const navigationIndex = useHelixStore((s) => s.navigationIndex);
   const customShortcuts = useHelixStore((s) => s.customShortcuts);
@@ -660,28 +671,23 @@ export function HelixLayout() {
       reasoningFastTimer.current = setTimeout(() => {
         const effort = useHelixStore.getState().reasoningEffort;
         pushConfigKeyValue("agent.reasoning_effort", effort);
-        // Also live-update current session if idle
-        const gw = useGatewayStore.getState();
-        if (gw.helixSessionId && !useHelixStore.getState().isChatLoading) {
-          if (isServeActive()) {
-            // serve 网关没有 ACP 控制令牌语义：直接 config.set，避免被当成用户消息执行
-            getServeClient()
-              ?.rpc("config.set", {
-                key: "agent.reasoning_effort",
-                value: effort,
-                session_id: gw.helixSessionId,
-              })
-              .catch(() => {});
-          } else {
-            window.electron?.helix
-              ?.send?.("session/prompt", {
-                session_id: gw.helixSessionId,
-                prompt: [
-                  { type: "text", text: `__helix_set_reasoning__:${effort}` },
-                ],
-              })
-              .catch(() => {});
-          }
+        // Live-update thinking level. Pi has no persistent thinking-level
+        // config key, so we broadcast to every live instance; new sessions
+        // get it re-applied at spawn time in Rust (pi_gateway). serve mode
+        // honors agent.reasoning_effort via config.set instead.
+        if (isServeActive()) {
+          const gw = useGatewayStore.getState();
+          getServeClient()
+            ?.rpc("config.set", {
+              key: "agent.reasoning_effort",
+              value: effort,
+              session_id: gw.helixSessionId,
+            })
+            .catch(() => {});
+        } else {
+          window.electron?.helix
+            ?.piSetThinkingLevelAll?.(effort)
+            .catch?.(() => {});
         }
       }, 150);
     });
@@ -1316,53 +1322,67 @@ export function HelixLayout() {
   );
 
   const sidebarExpanded = showSidebar;
+  const sidebarPixelWidth =
+    sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth * (uiFontSize / 14);
+  const titlebarPixelWidth =
+    showSidebar && !showSettings ? sidebarPixelWidth : SIDEBAR_COLLAPSED;
 
   return (
     <div
-      className={`relative h-screen w-screen flex flex-col overflow-hidden ${"bg-gradient-to-br from-background via-background to-primary/5"}`}
+      className="helix-app-backdrop relative h-screen w-screen flex flex-row overflow-hidden"
     >
       <KeyboardShortcuts />
       <CommandPalette />
       <ContextMenuProvider />
       <ToastContainer />
 
-      {/* Title bar — part of the background */}
+      {/* Two-region layout: the titlebar and navigation sidebar form the left
+          region; the conversation/settings area owns the right region. */}
       <div
-        id="helix-titlebar"
-        className="flex items-center justify-between h-10 px-3 shrink-0 select-none"
+        className={`flex flex-col overflow-hidden bg-sidebar ${showSettings ? "hidden" : ""}`}
       >
+        {/* Title bar — head of the left sidebar region */}
+        <div
+          id="helix-titlebar"
+          className="helix-app-titlebar flex items-center justify-between h-10 px-3 shrink-0 select-none"
+          style={{ width: titlebarPixelWidth }}
+        >
         {/* Left: navigation buttons */}
         <div
           className="flex items-center gap-0.5"
           style={{ WebkitAppRegion: "no-drag" } as any}
         >
-          <button
-            onClick={() => setShowSidebar((v) => !v)}
-            className={`p-1.5 rounded-lg transition-colors ${showSidebar ? "text-primary bg-primary/10" : "text-foreground/40 hover:text-foreground/80 hover:bg-accent/50"}`}
-            data-tip="侧边栏"
-          >
-            <PanelLeft className="size-4" />
-          </button>
-          <button
-            onClick={() => {
-              const entry = storeActions.navigateBack();
-              if (!entry) return;
-              if (entry.type === "chat") {
-                // Load the chat session
-                if (showSettings) storeActions.toggleSettings();
-                storeActions.navigateSession("back");
-              } else {
-                // Open settings with the page
-                if (!showSettings) storeActions.toggleSettings(entry.page);
-                else storeActions.setSettingsPage(entry.page);
-              }
-            }}
-            disabled={!storeActions.canGoBack()}
-            className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-30"
-            data-tip="后退"
-          >
-            <ArrowLeft className="size-4" />
-          </button>
+          {!showSettings && (
+            <button
+              onClick={() => setShowSidebar((v) => !v)}
+              className={`p-1.5 rounded-lg transition-colors ${showSidebar ? "text-primary bg-primary/10" : "text-foreground/40 hover:text-foreground/80 hover:bg-accent/50"}`}
+              data-tip="侧边栏"
+            >
+              <PanelLeft className="size-4" />
+            </button>
+          )}
+          {!showSettings && (
+            <button
+              onClick={() => {
+                const entry = storeActions.navigateBack();
+                if (!entry) return;
+                if (entry.type === "chat") {
+                  // Load the chat session
+                  if (showSettings) storeActions.toggleSettings();
+                  storeActions.navigateSession("back");
+                } else {
+                  // Open settings with the page
+                  if (!showSettings) storeActions.toggleSettings(entry.page);
+                  else storeActions.setSettingsPage(entry.page);
+                }
+              }}
+              disabled={!storeActions.canGoBack()}
+              className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-30"
+              data-tip="后退"
+            >
+              <ArrowLeft className="size-4" />
+            </button>
+          )}
           <button
             onClick={() => {
               const entry = storeActions.navigateForward();
@@ -1425,84 +1445,82 @@ export function HelixLayout() {
                     onClick={async () => {
                       setHelpMenuOpen(false);
                       try {
-                        const res = await fetch(
-                          "https://api.github.com/repos/h6643/Helix/releases/latest",
-                          {
-                            signal: AbortSignal.timeout(8000),
-                          },
-                        );
-                        if (!res.ok) {
+                        // 检查 pi agent + npm 插件的更新（npm registry），
+                        // 不再查 Helix 应用自身——后端 agent 是外部 pi 包。
+                        const res = await (
+                          window as any
+                        ).electron?.helix?.piCheckUpdates?.();
+                        if (!res) {
                           useHelixStore.getState().showToast({
                             type: "error",
                             title: "检查更新失败",
-                            description: "无法连接 GitHub",
+                            description: "更新检查不可用",
                           });
                           return;
                         }
-                        const data = await res.json();
-                        const latest = (
-                          data.tag_name ||
-                          data.name ||
-                          ""
-                        ).replace(/^v/i, "");
-                        const current = (await getCurrentVersion()) || "0.1.2";
-                        const curParts = current.split(".").map(Number);
-                        const latParts = latest.split(".").map(Number);
-                        let isNewer = false;
-                        for (
-                          let i = 0;
-                          i < Math.max(curParts.length, latParts.length);
-                          i++
-                        ) {
-                          const a = curParts[i] || 0;
-                          const b = latParts[i] || 0;
-                          if (b > a) {
-                            isNewer = true;
-                            break;
-                          }
-                          if (b < a) break;
-                        }
-                        if (isNewer) {
+                        const pi = res.pi || {};
+                        const outdated = (res.packages || []).filter(
+                          (p: any) => p.hasUpdate,
+                        );
+                        if (pi.hasUpdate && pi.latest) {
                           useHelixStore.getState().showToast({
                             type: "info",
-                            title: "有新版本可用",
-                            description: "v" + latest + " 已发布",
+                            title: "pi 有新版本可用",
+                            description: `v${pi.installed} → v${pi.latest}${
+                              outdated.length > 0
+                                ? `，另有 ${outdated.length} 个插件可更新`
+                                : ""
+                            }`,
                             duration: 8000,
                             onClick: () =>
                               window.open(
-                                "https://github.com/h6643/Helix/releases/latest",
+                                "https://www.npmjs.com/package/@earendil-works/pi-coding-agent",
                                 "_blank",
                               ),
                           });
-                        } else {
+                        } else if (outdated.length > 0) {
+                          const names = outdated
+                            .slice(0, 3)
+                            .map(
+                              (p: any) =>
+                                `${p.name} v${p.installed} → v${p.latest}`,
+                            )
+                            .join("\n");
+                          useHelixStore.getState().showToast({
+                            type: "info",
+                            title: `有 ${outdated.length} 个插件可更新`,
+                            description:
+                              names +
+                              (outdated.length > 3
+                                ? `\n…等 ${outdated.length} 个`
+                                : ""),
+                            duration: 10000,
+                          });
+                        } else if (pi.installed) {
                           useHelixStore.getState().showToast({
                             type: "success",
                             title: "已是最新版本",
-                            description: "v" + current,
+                            description: `pi v${pi.installed}（含全部插件）`,
+                          });
+                        } else {
+                          useHelixStore.getState().showToast({
+                            type: "error",
+                            title: "检查更新失败",
+                            description: "未找到 pi 安装",
                           });
                         }
-                      } catch {
+                      } catch (e) {
                         useHelixStore.getState().showToast({
                           type: "error",
                           title: "检查更新失败",
-                          description: "网络异常",
+                          description:
+                            e instanceof Error ? e.message : "网络异常",
                         });
                       }
                     }}
                   >
                     <FileText className="size-4" />
                     检查更新
-                  </button>
-                  <div className="h-px bg-border/60 my-1" />
-                  <button
-                    className="w-full px-3 py-2 text-[length:var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
-                    onClick={() => {
-                      setHelpMenuOpen(false);
-                      window.open("https://github.com/h6643/Helix", "_blank");
-                    }}
-                  >
-                    <Globe className="size-4" />
-                    GitHub
                   </button>
                 </div>
               </div>,
@@ -1555,65 +1573,19 @@ export function HelixLayout() {
             undraggable) */}
         <div className="flex-1 self-stretch" data-tauri-drag-region="" />
 
-        {/* Right: window controls */}
-        <div
-          className="flex items-center"
-          style={{ WebkitAppRegion: "no-drag" } as any}
-        >
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => (window as any).electron?.window?.minimize()}
-              className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-              data-tip="最小化"
-            >
-              <Minus className="size-3.5" />
-            </button>
-            <button
-              onClick={handleMaximizeToggle}
-              className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-              data-tip={isMaximized ? "还原" : "最大化"}
-            >
-              {isMaximized ? (
-                <Copy className="size-3.5" />
-              ) : (
-                <Square className="size-3.5" />
-              )}
-            </button>
-            <button
-              onClick={() => (window as any).electron?.window?.close()}
-              className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg transition-colors"
-              data-tip="关闭"
-            >
-              <X className="size-3.5" />
-            </button>
-          </div>
         </div>
-      </div>
 
-      {/* Content area: sidebar + floating card */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar — part of the background */}
-        {showSidebar && (
+        {/* Sidebar — hidden in settings mode (owned by ApiSettings there). */}
+        {showSidebar && !showSettings && (
           <div
-            className={`shrink-0 overflow-hidden relative ${isDragging ? "" : "transition-[width] duration-200 ease-out"}`}
-            style={{
-              width: sidebarCollapsed
-                ? SIDEBAR_COLLAPSED
-                : sidebarWidth * (uiFontSize / 14),
-            }}
+            className={`flex-1 shrink-0 overflow-hidden relative ${isDragging ? "" : "transition-[width] duration-200 ease-out"}`}
+            style={{ width: sidebarPixelWidth }}
           >
             <div
               className="h-full overflow-hidden"
-              style={{
-                width: sidebarCollapsed
-                  ? SIDEBAR_COLLAPSED
-                  : sidebarWidth * (uiFontSize / 14),
-              }}
+              style={{ width: sidebarPixelWidth }}
             >
-              <Sidebar
-                collapsed={sidebarCollapsed}
-                onToggle={() => setSidebarCollapsed((v) => !v)}
-              />
+              <Sidebar collapsed={sidebarCollapsed} />
             </div>
 
             {/* Resize handle — only visible when sidebar is expanded */}
@@ -1627,9 +1599,7 @@ export function HelixLayout() {
                 {/* Visual grip line — hidden until hover */}
                 <div
                   className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${
-                    isDragging
-                      ? "bg-primary/40"
-                      : "bg-transparent group-hover:bg-border/40"
+                    isDragging ? "bg-primary/40" : "bg-transparent group-hover:bg-border/40"
                   }`}
                 />
                 <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -1639,14 +1609,90 @@ export function HelixLayout() {
             )}
           </div>
         )}
+      </div>
 
-        {/* Floating cards container */}
-        <div className="flex-1 flex flex-col mt-1 mr-px mb-1 ml-0 overflow-hidden">
+      {/* Window controls — hoisted to the root (outside the left titlebar
+          region) so the capsule stays visible in settings mode too, where the
+          whole left region above is hidden. Pinned to the window's top-right
+          corner via the relative `helix-app-backdrop` root. */}
+      <div className="absolute top-1 right-1 z-40 flex items-center gap-2">
+        {!showSettings && !hideConversationActions && (
+          <>
+            <button
+              onClick={() => storeActions.toggleTerminal()}
+              className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
+              data-tip="终端"
+            >
+              <Terminal className="size-3.5" />
+            </button>
+            <button
+              ref={browserMenuButtonRef}
+              onClick={() => setBrowserMenuOpen((v) => !v)}
+              className={`p-1.5 rounded-lg transition-colors ${browserMenuOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
+              data-tip="更多操作"
+            >
+              <MoreHorizontal className="size-3.5" />
+            </button>
+          </>
+        )}
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => (window as any).electron?.window?.minimize()}
+            className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+            data-tip="最小化"
+          >
+            <Minus className="size-3.5" />
+          </button>
+          <button
+            onClick={handleMaximizeToggle}
+            className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+            data-tip={isMaximized ? "还原" : "最大化"}
+          >
+            {isMaximized ? (
+              <Copy className="size-3.5" />
+            ) : (
+              <Square className="size-3.5" />
+            )}
+          </button>
+          <button
+            onClick={() => (window as any).electron?.window?.close()}
+            className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg transition-colors"
+            data-tip="关闭"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Right region: settings or conversation */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Floating cards container — settings mode owns its own sidebar +
+            card and is rendered full-height (no inset); the main chat branch
+            below applies its own mt/mb inset so the chat card floats. */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {showSettings ? (
+            <div className="helix-surface flex-1 flex flex-col overflow-hidden min-h-0">
+            <PanelSuspense>
+              <ApiSettings
+                themeStyle={themeStyle}
+                onSelectThemeStyle={setThemeStyle}
+                sidebarWidth={sidebarWidth}
+                setSidebarWidth={setSidebarWidth}
+                saveSidebarWidth={saveSidebarWidth}
+                showSidebar={showSidebar}
+                setShowSidebar={setShowSidebar}
+                sidebarCollapsed={sidebarCollapsed}
+                setSidebarCollapsed={setSidebarCollapsed}
+              />
+            </PanelSuspense>
+          </div>
+          ) : (
+          <div className="flex-1 min-h-0 flex flex-col mr-px ml-0 overflow-hidden">
           <div className="flex-1 min-h-0 flex flex-row relative">
             {/* Floating card — main content. Hidden when the code panel is in
             fullscreen (the right sidebar takes over the main area). */}
             <div
-              className={`flex-1 flex flex-col rounded-2xl border-0 bg-card shadow-2xl shadow-primary/5 overflow-hidden ${codeFullscreen ? "hidden" : ""}`}
+              className={`helix-surface flex-1 flex flex-col overflow-hidden ${codeFullscreen ? "hidden" : ""}`}
             >
               {/* Main area */}
               <div className="relative flex-1 h-full flex flex-col overflow-hidden">
@@ -1656,7 +1702,7 @@ export function HelixLayout() {
                   <div className="flex-1 flex flex-col overflow-hidden min-w-0">
                     {/* Conversation header — only visible when an active conversation has messages */}
                     {chatMessages.length > 0 && !!currentSessionId && (
-                      <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3">
+                      <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 pr-36">
                         <div className="flex items-center gap-1.5 min-w-0">
                           {/* 项目外对话（activeSessionWorkDir 为空）不显示项目目录与分支 */}
                           {activeSessionWorkDir && (
@@ -1684,9 +1730,9 @@ export function HelixLayout() {
                               </span>
                             </button>
                           )}
-                          {activeSessionWorkDir && gitBranch && (
+                          {branchPickerWorkDir && gitBranch && (
                             <BranchPicker
-                              workDir={activeSessionWorkDir}
+                              workDir={branchPickerWorkDir}
                               currentBranch={gitBranch}
                               onBranchChange={(b) => setGitBranch(b)}
                               drop="down"
@@ -1844,21 +1890,6 @@ export function HelixLayout() {
                               />
                             )}
                           </div>
-                          <button
-                            onClick={() => storeActions.toggleTerminal()}
-                            className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
-                            data-tip="终端"
-                          >
-                            <Terminal className="size-4" />
-                          </button>
-                          <button
-                            ref={browserMenuButtonRef}
-                            onClick={() => setBrowserMenuOpen((v) => !v)}
-                            className={`p-1.5 rounded-lg transition-colors ${browserMenuOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
-                            data-tip="更多操作"
-                          >
-                            <MoreHorizontal className="size-4" />
-                          </button>
                           {browserMenuOpen &&
                             typeof window !== "undefined" &&
                             createPortal(
@@ -1868,11 +1899,13 @@ export function HelixLayout() {
                                   top:
                                     (browserMenuButtonRef.current?.getBoundingClientRect()
                                       .bottom ?? 0) + 4,
-                                  left: browserMenuButtonRef.current?.getBoundingClientRect()
-                                    .right
-                                    ? browserMenuButtonRef.current!.getBoundingClientRect()
-                                        .right - 208
-                                    : 0,
+                  left: browserMenuButtonRef.current
+                    ? Math.max(
+                        8,
+                        browserMenuButtonRef.current.getBoundingClientRect()
+                          .right - 208,
+                      )
+                    : 0,
                                 }}
                               >
                                 <div ref={browserMenuRef}>
@@ -1901,20 +1934,16 @@ export function HelixLayout() {
                 </div>
               </div>
               {showScheduledTasksPanel && (
-                <div className="absolute inset-0 z-20 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden flex flex-col">
+                <div className="helix-surface helix-surface-overlay z-20 rounded-2xl overflow-hidden flex flex-col">
                   <PanelSuspense>
-                    <ScheduledTasksPanel
-                      onClose={() => storeActions.toggleScheduledTasksPanel()}
-                    />
+                    <ScheduledTasksPanel />
                   </PanelSuspense>
                 </div>
               )}
               {showSkillPanel && (
-                <div className="absolute inset-0 z-20 rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden flex flex-col">
+                <div className="helix-surface helix-surface-overlay z-20 rounded-2xl overflow-hidden flex flex-col">
                   <PanelSuspense>
-                    <SkillPanel
-                      onClose={() => storeActions.toggleSkillPanel()}
-                    />
+                    <SkillPanel />
                   </PanelSuspense>
                 </div>
               )}
@@ -1942,19 +1971,10 @@ export function HelixLayout() {
                   />
                 </div>
               )}
-              <div className="h-full rounded-2xl border border-border/50 bg-card shadow-2xl shadow-primary/5 overflow-hidden">
+              <div className="helix-surface h-full rounded-2xl overflow-hidden">
                 <RightSidebar />
               </div>
             </div>
-            {showPluginManager && (
-              <div className="absolute inset-0 z-20">
-                <PanelSuspense>
-                  <PluginManagerPanel
-                    onClose={() => storeActions.togglePluginManager()}
-                  />
-                </PanelSuspense>
-              </div>
-            )}
             {showRuntimePanel && (
               <div className="absolute inset-0 z-20">
                 <PanelSuspense>
@@ -1983,10 +2003,12 @@ export function HelixLayout() {
               </PanelSuspense>
             </div>
           </div>
-          {/* Terminal: a bottom panel of the whole main area (NOT inside the main
-            conversation card), so it stays visible when the code editor is in
-            fullscreen — which hides the conversation card. */}
-          <TerminalPanel onClose={storeActions.toggleTerminal} />
+            {/* Terminal: a bottom panel of the whole main area (NOT inside the main
+              conversation card), so it stays visible when the code editor is in
+              fullscreen — which hides the conversation card. */}
+            <TerminalPanel onClose={storeActions.toggleTerminal} />
+          </div>
+          )}
         </div>
       </div>
       {/* Overlay panels */}
@@ -1996,19 +2018,6 @@ export function HelixLayout() {
         )}
         {showCustomizePanel && (
           <CustomizePanel onClose={() => storeActions.toggleCustomizePanel()} />
-        )}
-        {showSettings && (
-          <ApiSettings
-            themeStyle={themeStyle}
-            onSelectThemeStyle={setThemeStyle}
-            sidebarWidth={sidebarWidth}
-            setSidebarWidth={setSidebarWidth}
-            saveSidebarWidth={saveSidebarWidth}
-            showSidebar={showSidebar}
-            setShowSidebar={setShowSidebar}
-            sidebarCollapsed={sidebarCollapsed}
-            setSidebarCollapsed={setSidebarCollapsed}
-          />
         )}
         {/* New surfaces */}
         {showActivityFeed && (

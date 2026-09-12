@@ -11,7 +11,7 @@ import {
   Download,
 } from "lucide-react";
 import React, { useState, useEffect, useCallback } from "react";
-import { isElectron, electronHelix } from "@/lib/electron-bridge";
+import { isElectron } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
 interface DiagStatus {
@@ -54,17 +54,62 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
     if (!isElectron()) return;
     setUpdating(true);
     try {
-      const r = await electronHelix.update();
-      useHelixStore.getState().showToast({
-        type: r.ok ? "success" : "error",
-        title: r.ok ? "已启动更新" : "更新失败",
-        description: r.message,
-        duration: 6000,
-      });
+      // 检查 pi agent + npm 插件的更新（npm registry）——与帮助菜单的
+      // “检查更新”同一后端命令；Helix 应用自身没有自动更新通道。
+      const res = await (window as any).electron?.helix?.piCheckUpdates?.();
+      if (!res) {
+        useHelixStore.getState().showToast({
+          type: "error",
+          title: "检查更新失败",
+          description: "更新检查不可用",
+        });
+        return;
+      }
+      const pi = res.pi || {};
+      const outdated = (res.packages || []).filter((p: any) => p.hasUpdate);
+      if (pi.hasUpdate && pi.latest) {
+        useHelixStore.getState().showToast({
+          type: "info",
+          title: "pi 有新版本可用",
+          description: `v${pi.installed} → v${pi.latest}${
+            outdated.length > 0 ? `，另有 ${outdated.length} 个插件可更新` : ""
+          }`,
+          duration: 8000,
+          onClick: () =>
+            window.open(
+              "https://www.npmjs.com/package/@earendil-works/pi-coding-agent",
+              "_blank",
+            ),
+        });
+      } else if (outdated.length > 0) {
+        const names = outdated
+          .slice(0, 3)
+          .map((p: any) => `${p.name} v${p.installed} → v${p.latest}`)
+          .join("\n");
+        useHelixStore.getState().showToast({
+          type: "info",
+          title: `有 ${outdated.length} 个插件可更新`,
+          description:
+            names + (outdated.length > 3 ? `\n…等 ${outdated.length} 个` : ""),
+          duration: 10000,
+        });
+      } else if (pi.installed) {
+        useHelixStore.getState().showToast({
+          type: "success",
+          title: "已是最新版本",
+          description: `pi v${pi.installed}（含全部插件）`,
+        });
+      } else {
+        useHelixStore.getState().showToast({
+          type: "error",
+          title: "检查更新失败",
+          description: "未找到 pi 安装",
+        });
+      }
     } catch (e: any) {
       useHelixStore.getState().showToast({
         type: "error",
-        title: "更新失败",
+        title: "检查更新失败",
         description: String(e?.message || e),
       });
     } finally {
@@ -83,7 +128,7 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
   return (
     <div className="h-full w-full flex flex-col bg-background">
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-border/40 shrink-0">
+      <div className="flex items-center justify-between px-6 pr-36 py-4 border-b border-border/40 shrink-0">
         <div className="flex items-center gap-2">
           <ShieldCheck className="size-5 text-primary" />
           <h1 className="text-[calc(var(--helix-transcript-size)*1.4286)] font-semibold text-foreground">

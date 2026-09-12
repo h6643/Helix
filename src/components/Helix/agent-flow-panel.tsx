@@ -100,10 +100,10 @@ import type {
 import { useBackgroundTasksStore } from "@/stores/background-tasks-store";
 import { HelixMarkdown } from "./helix-markdown";
 
-// ── Persisted per-conversation Hermes session map ──────────────────────────
+// ── Persisted per-conversation backend session map ──────────────────────────
 // `sessionMapRef` lives in component memory and is wiped on every app restart.
-// We persist it so a conversation keeps remembering its backend Hermes session
-// id across restarts. BUT backend Hermes sessions are ephemeral: the gateway
+// We persist it so a conversation keeps remembering its backend session
+// id across restarts. BUT backend sessions are ephemeral: the gateway
 // respawns on app launch and kills them all. So a restored id is only valid if
 // its recorded gateway `epoch` still matches the live epoch — otherwise it's a
 // dead id and must be treated as missing (the run path recreates it on demand,
@@ -168,31 +168,158 @@ type ProcessSegment<T extends { type: string }> = {
   blocks: T[];
 };
 
-// 按「正文 / 思考 / 任务」分段：连续的 tool_group + file_change 归为一组任务，
-// 中间出现 thinking 或 text 就断开，保证任务折叠卡只包连续任务。
+// 过程区折叠标题:轻量一行(chevron + 标题词),完成后不再是高权重大标题,
+// 正在进行时标题词略强以示意当前阶段。三处(thinking / 任务执行)共用。
+const FoldChevron = ({ className = "" }: { className?: string }) => (
+  <svg
+    className={`size-3.5 shrink-0 text-foreground/45 transition-transform group-open/details:rotate-90 ${className}`}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+  >
+    <path d="m9 18 6-6-6-6" />
+  </svg>
+);
+
+// Claude Code 终端风的思考符号：✻ 按扇区拆成同一个雪花的六个部分，
+// 激活时各部分向外散开，再同步聚拢回中心。
+const ThinkGlyph = ({ active = false }: { active?: boolean }) => (
+  <span
+    className={`think-glyph shrink-0${active ? " think-glyph-active" : ""}`}
+    aria-hidden
+  >
+    <span className="think-flake" />
+    <span className="think-flake" />
+    <span className="think-flake" />
+    <span className="think-flake" />
+    <span className="think-flake" />
+    <span className="think-flake" />
+  </span>
+);
+
+const ThinkingFold = React.memo(function ThinkingFold({
+  content,
+  fontSize,
+  active = false,
+  status,
+  duration,
+  searchOpen,
+  searchQuery,
+  isSearchActive,
+}: {
+  content: string;
+  fontSize: number;
+  active?: boolean;
+  status?: string;
+  duration?: number;
+  searchOpen: boolean;
+  searchQuery: string;
+  isSearchActive: boolean;
+}) {
+  const { status: kaomojiStatus, body } = extractKaomojiStatus(content);
+  const summary = useMemo(() => {
+    const firstLine = body
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+    return firstLine ? firstLine.slice(0, 56) : "";
+  }, [body]);
+
+  return (
+    <details className="thinking-fold group/details" open={active}>
+      <summary>
+        <ThinkGlyph active={active} />
+        <span className="think-title" style={{ fontSize }}>
+          {active ? status || kaomojiStatus || "思考中" : "思考"}
+        </span>
+        {!active && (duration || summary) ? (
+          <span className="think-time" style={{ fontSize }}>
+            {duration ? `· ${formatDuration(duration)}` : ""}
+            {duration && summary ? " · " : ""}
+            {summary}
+          </span>
+        ) : null}
+
+        <FoldChevron />
+      </summary>
+      <div
+        className="think-body thinking-scroll"
+        style={{ fontSize }}
+      >
+        {searchOpen && searchQuery.trim() ? (
+          <HighlightText text={body} query={searchQuery} active={isSearchActive} />
+        ) : (
+          <HelixMarkdown text={body} />
+        )}
+      </div>
+    </details>
+  );
+});
+
+// 已完成 / 进行中的视觉区分只做在标题词颜色上,不加动画不加图标。
+const FoldTitle = ({
+  label,
+  active,
+  fontSize,
+}: {
+  label: string;
+  active?: boolean;
+  fontSize: number;
+}) => (
+  <span
+    className={`select-none ${
+      active
+        ? "text-foreground/60 font-medium"
+        : "text-foreground/40 font-normal"
+    }`}
+    style={{ fontSize: fontSize + 2 }}
+  >
+    {label}
+  </span>
+);
+
+// 不再分段，所有 blocks 放在一个段落里
 function buildProcessSegments<T extends { type: string }>(
   blocks: T[],
 ): ProcessSegment<T>[] {
-  const out: ProcessSegment<T>[] = [];
-  for (const block of blocks) {
-    const kind: ProcessSegment<T>["kind"] =
-      block.type === "text"
-        ? "text"
-        : block.type === "thinking"
-          ? "thinking"
-          : "tasks";
-    const last = out[out.length - 1];
-    if (last && last.kind === kind) last.blocks.push(block);
-    else out.push({ kind, blocks: [block] });
+  if (blocks.length === 0) return [];
+  return [{ kind: "tasks", blocks }];
+}
+
+// 已完成 execution group 折叠态的摘要行:从 tasks 段里的 tool_call 提取
+// 「动词 · 动词 · 共 N 个操作」。动词直接复用 inline-tool-group 的 toolVerb
+// 逻辑(按工具名推断),不逐项展示参数,保持一行克制摘要。
+export function summarizeTaskBlocks(
+  blocks: Array<{ type: string; steps?: ExecutionStep[] }>,
+): { verbs: string[]; total: number } {
+  const verbs: string[] = [];
+  let total = 0;
+  for (const b of blocks) {
+    if (b.type !== "tool_group" || !b.steps) continue;
+    for (const s of b.steps) {
+      if (s.type !== "tool_call") continue;
+      total++;
+      const name = (s.toolName || "").toLowerCase();
+      let verb: string;
+      if (/(grep|search|glob|find)/.test(name)) verb = "搜索";
+      else if (/(read|view|list|directory)/.test(name)) verb = "读取";
+      else if (/(write|create|edit|patch)/.test(name)) verb = "编辑";
+      else if (/(fetch|web)/.test(name)) verb = "获取网页";
+      else if (/(bash|terminal|shell|run|execute|command)/.test(name))
+        verb = "执行";
+      else verb = "调用";
+      verbs.push(verb);
+    }
   }
-  return out;
+  return { verbs, total };
 }
 
 // Older streamed messages may store cumulative text per block. Convert those
 // to incremental text blocks so completed messages never render duplicates.
 function normalizeForCompare(s: string): string {
   // 归一化用于判重比较：去空白 + 去标点 + 小写。
-  // Hermes 全文重发时经常带微小差异（"CLI和配置" vs "CLI 和配置"、
+  // the backend 全文重发时经常带微小差异（"CLI和配置" vs "CLI 和配置"、
   // "File" vs "file"），不归一化直接比会判定为两段不同内容 → 拼接重复。
   return s.replace(/[\s\p{P}]/gu, "").toLowerCase();
 }
@@ -306,7 +433,7 @@ function reconcileBlocksWithContent(
 function normalizeTextBlocks(
   blocks: NonNullable<ChatMessage["blocks"]>,
 ): NonNullable<ChatMessage["blocks"]> {
-  // Hermes frequently RE-SENDS the full accumulated text as another
+  // The backend frequently RE-SENDS the full accumulated text as another
   // agent_message_chunk (update_agent_message_text). When such a resend lands
   // on its own text block (e.g. after a thinking/tool_group in between), naive
   // rendering shows the same paragraph twice — "完全重复紧挨着".
@@ -349,7 +476,7 @@ function normalizeTextBlocks(
       } else if (lastKept && lastKept.length > 0) {
         const lastN = normalizeForCompare(lastKept);
         // Tail/head overlap: the new chunk begins with the same words the
-        // previous chunk ended with (Hermes re-prefixes the sentence boundary
+        // previous chunk ended with (the backend re-prefixes the sentence boundary
         // on the next delta). Rendering both yields "文字叠在一起" — strip the
         // duplicated head.
         if (cur.length >= 8 && lastKept.length >= 8) {
@@ -428,8 +555,8 @@ function normalizeTextBlocks(
   return rendered.filter((b) => b.type !== "text" || b.content.length > 0);
 }
 
-// ── Diff capture from Hermes inline_diff ──────────────────────────────────
-// Hermes `tool.complete` ships a rendered unified diff (inline_diff) for
+// ── Diff capture from backend inline_diff ──────────────────────────────────
+// the backend `tool.complete` ships a rendered unified diff (inline_diff) for
 // write_file/patch. Parse enough structure out of it to feed DiffPreview:
 // file path comes from the `a/<path> → b/<path>` label line produced by
 // agent/display.py _render_inline_unified_diff.
@@ -884,7 +1011,7 @@ function ReasoningEffortControl({
         ref={triggerRef}
         type="button"
         onClick={toggle}
-        className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 hover:text-foreground px-2 py-1.5 h-7 rounded-lg border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors min-w-11 text-center chat-toolbar-label"
+        className="ui-text-sm2 font-medium text-foreground/70 hover:text-foreground px-2 py-1.5 h-7 rounded-lg border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors min-w-11 text-center chat-toolbar-label"
       >
         {current.label}
       </button>
@@ -896,10 +1023,10 @@ function ReasoningEffortControl({
             className="p-2 bg-popover border border-border/40 rounded-xl shadow-2xl flex flex-col gap-1 w-48 select-none animate-scale-in"
           >
             <div className="flex items-center justify-between">
-              <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/60">
+              <span className="ui-text-sm2 font-medium text-foreground/60">
                 推理强度
               </span>
-              <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-primary">
+              <span className="ui-text-sm2 font-medium text-primary">
                 {current.label}
               </span>
             </div>
@@ -939,7 +1066,7 @@ function ReasoningEffortControl({
 
 // ── 内存守卫：摘要化 + 截断 ──────────────────────────────────────────────
 // 长期会话把完整历史（含工具输出/思考/steps）堆在渲染进程，normalized +
-// markdown + DOM 多份副本最终会顶爆 V8 堆。策略与 Claude Code / 官方 Hermes
+// markdown + DOM 多份副本最终会顶爆 V8 堆。策略与 Claude Code / 官方 the backend
 // 一致：旧消息折叠为摘要、超长单条截断、流式缓冲设上限，把内存压成
 // 「近期限定」而不是「随时长无界增长」。持久化数据不受影响，搜索仍基于完整内容。
 const DISPLAY_LIMIT = 80; // 最近 N 条消息完整渲染
@@ -1092,7 +1219,7 @@ function SummarizedHistoryBlock({
           已压缩 {count} 条较早消息{range}，点击展开预览
         </span>
       </summary>
-      <div className="pl-4 pr-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/45  leading-relaxed mb-2">
+      <div className="pl-4 pr-2 ui-text-sm2 text-muted-foreground/45  leading-relaxed mb-2">
         {preview}
       </div>
     </details>
@@ -1191,7 +1318,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
     >
       {msg.role === "assistant" ? (
         <div
-          className={`group w-full rounded-xl transition-all duration-200 ${
+          className={`group w-full transition-all duration-200 ${
             isSearchMatch
               ? isSearchActive
                 ? "ring-2 ring-yellow-400/40"
@@ -1210,7 +1337,25 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                     reconcileBlocksWithContent(msg.blocks, msg.content),
                   ),
                 );
-                const lastTextIndex = normalizedBlocks.reduce(
+                // Fallback consolidation: merge all text blocks into a single
+                // block at the end, in case reconcileBlocksWithContent failed
+                // (e.g. normalization mismatch). Without this, interleaved
+                // text/tool blocks cause buildProcessSegments to split text
+                // with "任务执行" in between.
+                const nonTextBlocks = normalizedBlocks.filter(
+                  (b) => b.type !== "text",
+                );
+                const textContent = normalizedBlocks
+                  .filter((b) => b.type === "text")
+                  .map((b) => String(b.content || ""))
+                  .join("");
+                const consolidatedBlocks = textContent.trim()
+                  ? [
+                      ...nonTextBlocks,
+                      { type: "text" as const, content: textContent },
+                    ]
+                  : nonTextBlocks;
+                const lastTextIndex = consolidatedBlocks.reduce(
                   (acc, b, i) =>
                     b.type === "text" && String(b.content || "").trim()
                       ? i
@@ -1219,11 +1364,11 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 );
                 const processBlocks =
                   lastTextIndex >= 0
-                    ? normalizedBlocks.slice(0, lastTextIndex)
-                    : normalizedBlocks;
+                    ? consolidatedBlocks.slice(0, lastTextIndex)
+                    : consolidatedBlocks;
                 const answerBlocks =
                   lastTextIndex >= 0
-                    ? normalizedBlocks.slice(lastTextIndex)
+                    ? consolidatedBlocks.slice(lastTextIndex)
                     : [];
                 const showInlineReasoning = !!(
                   msg.reasoning &&
@@ -1236,52 +1381,41 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 return (
                   <>
                     {hasProcess && (
-                      <>
+                      // 二级折叠：外层「过程」把本轮所有中间产物（思考 + 任务执行）
+                      // 收成一行；展开后才是原来各自独立的思考/任务执行折叠。
+                      // 流式期间默认展开（能看进度），结束后自动收起。
+                      <details className="my-2 group/details" open={isStreaming}>
+                        <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
+                          <FoldTitle
+                            label={isStreaming ? "执行过程" : "已完成"}
+                            active={isStreaming}
+                            fontSize={fontSize}
+                          />
+                          {!isStreaming && (messageDuration ?? 0) > 0 ? (
+                            <span className="ml-auto tabular-nums text-foreground/25">
+                              {formatDuration(messageDuration ?? 0)}
+                            </span>
+                          ) : null}
+                          <FoldChevron />
+                        </summary>
+                        <div className="mt-1">
                         {showInlineReasoning && (
-                          <details className="mb-2 mt-3 group/details">
-                            <summary
-                              className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors"
-                              style={{ fontSize }}
-                            >
-                              <span>
-                                {isStreaming
-                                  ? extractKaomojiStatus(reasoning).status ||
-                                    "思考"
-                                  : "思考完成"}
-                              </span>
-                              <svg
-                                className="size-3.5 transition-transform group-open/details:rotate-90"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                              >
-                                <path d="m9 18 6-6-6-6" />
-                              </svg>
-                            </summary>
-                            <div
-                              className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll"
-                              style={{ fontSize }}
-                            >
-                              {searchOpen && searchQuery.trim() ? (
-                                <HighlightText
-                                  text={reasoning}
-                                  query={searchQuery}
-                                  active={isSearchActive}
-                                />
-                              ) : (
-                                <HelixMarkdown text={reasoning} />
-                              )}
-                            </div>
-                          </details>
+                          <ThinkingFold
+                            content={reasoning}
+                            fontSize={fontSize}
+                            active={isStreaming}
+                            duration={messageDuration}
+                            searchOpen={searchOpen}
+                            searchQuery={searchQuery}
+                            isSearchActive={isSearchActive}
+                          />
                         )}
                         <div className="my-2 space-y-2">
                           {processSegments.map((seg, si) => {
-                            if (seg.kind === "text") {
-                              return (
-                                <div key={si} className="space-y-1">
-                                  {seg.blocks.map((b, i) => {
-                                    if (b.type !== "text") return null;
+                            return (
+                              <div key={si} className="space-y-1">
+                                {seg.blocks.map((b, i) => {
+                                  if (b.type === "text") {
                                     return (
                                       <div key={i} style={{ fontSize }}>
                                         {searchOpen && searchQuery.trim() ? (
@@ -1306,140 +1440,59 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                                         )}
                                       </div>
                                     );
-                                  })}
-                                </div>
-                              );
-                            }
-                            if (seg.kind === "thinking") {
-                              const firstBlock = seg.blocks[0];
-                              const firstContent =
-                                firstBlock && "content" in firstBlock
-                                  ? String(firstBlock.content)
-                                  : "";
-                              if (
-                                !seg.blocks.some(
-                                  (b) =>
-                                    "content" in b &&
-                                    String(b.content || "").trim(),
-                                )
-                              )
-                                return null;
-                              return (
-                                <details
-                                  key={si}
-                                  className="group/details"
-                                >
-                                  <summary
-                                    className="text-foreground/50 cursor-pointer hover:text-foreground/70 select-none flex items-center gap-1 list-none transition-colors"
-                                    style={{ fontSize }}
-                                  >
-                                    <span>
-                                      {isStreaming
-                                        ? extractKaomojiStatus(firstContent)
-                                            .status || "思考"
-                                        : "思考完成"}
-                                    </span>
-                                    <svg
-                                      className="size-3.5 transition-transform group-open/details:rotate-90"
-                                      viewBox="0 0 24 24"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      strokeWidth="2"
-                                    >
-                                      <path d="m9 18 6-6-6-6" />
-                                    </svg>
-                                  </summary>
-                                  <div className="mt-1 pl-3 border-l-2 border-border/60 space-y-1">
-                                    {seg.blocks.map((b, i) => {
-                                      const content =
-                                        "content" in b
-                                          ? String(b.content)
-                                          : "";
-                                      return (
-                                        <div
-                                          key={i}
-                                          className="text-foreground/60 break-all leading-relaxed thinking-cap thinking-scroll"
-                                          style={{ fontSize }}
-                                        >
-                                          {searchOpen &&
-                                          searchQuery.trim() ? (
-                                            <HighlightText
-                                              text={normalizeAcpContentRaw(
-                                                content,
-                                              )}
-                                              query={searchQuery}
-                                              active={isSearchActive}
-                                            />
-                                          ) : (
-                                            <HelixMarkdown
-                                              text={normalizeAcpContentRaw(
-                                                content,
-                                              )}
-                                            />
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </details>
-                              );
-                            }
-                            return (
-                              <details
-                                key={si}
-                                className="group/details"
-                              >
-                                <summary
-                                  className="text-foreground/50 cursor-pointer hover:text-foreground/70 select-none flex items-center gap-1 list-none transition-colors"
-                                  style={{ fontSize }}
-                                >
-                                  <span>任务执行</span>
-                                  <svg
-                                    className="size-3.5 transition-transform group-open/details:rotate-90"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2"
-                                  >
-                                    <path d="m9 18 6-6-6-6" />
-                                  </svg>
-                                </summary>
-                                <div className="mt-1 pl-3 space-y-1">
-                                  {seg.blocks.map((b, i) =>
-                                    b.type === "tool_group" ? (
+                                  }
+                                  if (b.type === "thinking") {
+                                    const content =
+                                      "content" in b ? String(b.content) : "";
+                                    if (!content.trim()) return null;
+                                    return (
+                                      <ThinkingFold
+                                        key={i}
+                                        content={content}
+                                        fontSize={fontSize}
+                                        searchOpen={searchOpen}
+                                        searchQuery={searchQuery}
+                                        isSearchActive={isSearchActive}
+                                      />
+                                    );
+                                  }
+                                  if (b.type === "tool_group") {
+                                    return (
                                       <InlineToolGroup
                                         key={i}
                                         steps={b.steps}
                                         isRunning={false}
                                         fontSize={fontSize}
                                       />
-                                    ) : b.type === "file_change" ? (
+                                    );
+                                  }
+                                  if (b.type === "file_change") {
+                                    return (
                                       <FileChangeSummary
-                                        key={
-                                          b.changes?.[0]?.fileId || `fc-${i}`
-                                        }
+                                        key={b.changes?.[0]?.fileId || `fc-${i}`}
                                         changes={b.changes}
                                       />
-                                    ) : null,
-                                  )}
-                                </div>
-                              </details>
+                                    );
+                                  }
+                                  return null;
+                                })}
+                              </div>
                             );
                           })}
                         </div>
-                      </>
+                        </div>
+                      </details>
                     )}
                     {answerBlocks.length > 0 && (
                       <div
-                        className="helix-md mt-2 pt-2 border-t border-border/20"
+                        className="helix-md helix-answer mt-3"
                         style={{ fontSize }}
                       >
                         {buildProcessSegments(answerBlocks).map((seg, si) => {
-                          if (seg.kind === "text") {
-                            return (
-                              <div key={si} style={{ fontSize }}>
-                                {seg.blocks.map((b, i) => {
-                                  if (b.type !== "text") return null;
+                          return (
+                            <div key={si} className="space-y-1">
+                              {seg.blocks.map((b, i) => {
+                                if (b.type === "text") {
                                   return (
                                     <div key={i} style={{ fontSize }}>
                                       {searchOpen && searchQuery.trim() ? (
@@ -1464,110 +1517,43 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                                       )}
                                     </div>
                                   );
-                                })}
-                              </div>
-                            );
-                          }
-                          if (seg.kind === "thinking") {
-                            const firstBlock = seg.blocks[0];
-                            const firstContent =
-                              firstBlock && "content" in firstBlock
-                                ? String(firstBlock.content)
-                                : "";
-                            return isStreaming ? (
-                              <details
-                                key={si}
-                                className="mb-2 mt-3 group/details"
-                              >
-                                <summary
-                                  className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors"
-                                  style={{ fontSize }}
-                                >
-                                  <span>
-                                    {isStreaming
-                                      ? extractKaomojiStatus(firstContent)
-                                          .status || "思考"
-                                      : "思考完成"}
-                                  </span>
-                                  <svg
-                                    className="size-3.5 transition-transform group-open/details:rotate-90"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="2"
-                                  >
-                                    <path d="m9 18 6-6-6-6" />
-                                  </svg>
-                                </summary>
-                                <div
-                                  className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll"
-                                  style={{ fontSize }}
-                                >
-                                  {seg.blocks.map((b, i) => {
-                                    const content =
-                                      "content" in b ? String(b.content) : "";
-                                    return (
-                                      <div key={i}>
-                                        {searchOpen && searchQuery.trim() ? (
-                                          <HighlightText
-                                            text={normalizeAcpContentRaw(
-                                              content,
-                                            )}
-                                            query={searchQuery}
-                                            active={isSearchActive}
-                                          />
-                                        ) : (
-                                          <HelixMarkdown
-                                            text={normalizeAcpContentRaw(
-                                              content,
-                                            )}
-                                          />
-                                        )}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              </details>
-                            ) : null;
-                          }
-                          return (
-                            <details
-                              key={si}
-                              className="mb-2 mt-3 group/details"
-                            >
-                              <summary
-                                className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors"
-                                style={{ fontSize }}
-                              >
-                                <span>任务执行</span>
-                                <svg
-                                  className="size-3.5 transition-transform group-open/details:rotate-90"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2"
-                                >
-                                  <path d="m9 18 6-6-6-6" />
-                                </svg>
-                              </summary>
-                              <div className="mt-1 pl-3 space-y-1">
-                                {seg.blocks.map((b, i) =>
-                                  b.type === "tool_group" ? (
+                                }
+                                if (b.type === "thinking") {
+                                  const content =
+                                    "content" in b ? String(b.content) : "";
+                                  if (!content.trim()) return null;
+                                  return (
+                                    <ThinkingFold
+                                      key={i}
+                                      content={content}
+                                      fontSize={fontSize}
+                                      searchOpen={searchOpen}
+                                      searchQuery={searchQuery}
+                                      isSearchActive={isSearchActive}
+                                    />
+                                  );
+                                }
+                                if (b.type === "tool_group") {
+                                  return (
                                     <InlineToolGroup
                                       key={i}
                                       steps={b.steps}
                                       isRunning={false}
                                       fontSize={fontSize}
                                     />
-                                  ) : b.type === "file_change" ? (
+                                  );
+                                }
+                                if (b.type === "file_change") {
+                                  return (
                                     <FileChangeSummary
                                       key={b.changes?.[0]?.fileId || `fc-${i}`}
                                       changes={b.changes}
                                     />
-                                  ) : null,
-                                )}
-                              </div>
-                            </details>
+                                  );
+                                }
+                                return null;
+                              })}
+                            </div>
                           );
                         })}
                       </div>
@@ -1616,7 +1602,8 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
         </div>
       ) : (
         <div className="group max-w-[80%]">
-          <div className="px-4 py-2.5 rounded-2xl rounded-br-md bg-muted/30 text-foreground shadow-sm border border-border/20">
+          {/* Claude Code 终端风用户消息：扁平边框卡，无底色无阴影 */}
+          <div className="px-4 py-2.5 rounded-xl border border-border bg-transparent text-foreground">
             {msg.images && msg.images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2">
                 {msg.images.map((img) => (
@@ -1634,7 +1621,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 {msg.files.map((f) => (
                   <div
                     key={f.id}
-                    className="flex items-center gap-2 max-w-[240px] px-2.5 py-1.5 rounded-lg border border-border/30 bg-muted/20 hover:bg-muted/40 hover:border-border/30 transition-all duration-200"
+                    className="flex items-center gap-2 max-w-[240px] px-2.5 py-1.5 rounded-lg border border-border bg-transparent hover:bg-muted/60 transition-colors duration-200"
                   >
                     {f.kind === "image" && f.dataUrl ? (
                       <img
@@ -1646,7 +1633,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                       <FileText className="size-4 text-foreground/50 shrink-0" />
                     )}
                     <div className="min-w-0">
-                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground max-w-[8ch] truncate">
+                      <p className="ui-text-sm2 font-medium text-foreground max-w-[8ch] truncate">
                         {f.name.length > 8 ? f.name.slice(0, 8) + "…" : f.name}
                       </p>
                       <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70">
@@ -1850,11 +1837,21 @@ export function AgentFlowPanel() {
   // restarted since → the cached session is dead and must be recreated even
   // though helixConnected may already be true again.
   const sessionEpochRef = useRef<number>(0);
-  // Per-conversation Hermes ACP session ids. Each entry stores the backend
+  // Per-conversation backend session ids. Each entry stores the backend
   // session id AND the gateway epoch it was created under, so we can detect
   // dead sessions after a gateway restart (see loadSessionMap / persistSessionMap).
   const sessionMapRef = useRef<Map<string, SessionMapEntry>>(new Map());
   const runningSessionIdRef = useRef<string | null>(null);
+  // 待处理的用户应答（审批/clarify 反问）条数。clarifyQueue / approvalQueue 是
+  // useState，run 循环的闭包拿不到最新值——用 ref 镜像，让空闲兜底定时器能感知
+  // "模型正在等用户点击"，此时绝不合成 done（见 scheduleSynthDone / resetIdleTimer）。
+  const pendingUserRequestsRef = useRef(0);
+  const bumpPendingUserRequests = useCallback((delta: number) => {
+    pendingUserRequestsRef.current = Math.max(
+      0,
+      pendingUserRequestsRef.current + delta,
+    );
+  }, []);
   // Which session's data the shared live UI state (responseBlocks / steps /
   // streamThinking) currently belongs to. Lets the display layer keep
   // showing a promoted-but-not-yet-flushed run's own draft instead of another
@@ -2371,7 +2368,7 @@ export function AgentFlowPanel() {
       useHelixStore.getState().setConnectionNotice(null);
     }
   }, []);
-  // Drop the cached Hermes ACP session when the project directory changes so the
+  // Drop the cached backend session when the project directory changes so the
   // next prompt opens a fresh session rooted at the new cwd.
   // 例外：对话正在运行（有 streamingDraft）时绝不删——否则下次 session/prompt 会拿一个
   // 已从 sessionMapRef 移除的死会话去 prompt.submit → 后端 4001 "session not found" → 模型停止。
@@ -2444,7 +2441,7 @@ export function AgentFlowPanel() {
     };
   }, []);
 
-  // When the gateway restarts (e.g. provider switch), ALL Hermes ACP sessions
+  // When the gateway restarts (e.g. provider switch), ALL backend sessions
   // are destroyed server-side. Clear our cached session id DIRECTLY on the
   // event (not via a store-effect indirection) so the very next handleRun
   // unconditionally recreates a fresh session. The store-effect approach was
@@ -2573,7 +2570,7 @@ export function AgentFlowPanel() {
   }, []);
   // 孤儿 usage 事件兜底：usage:prompt-complete 是上下文环（contextUsage）的唯一
   // 写入来源，正常由 handleRun 的 per-run onEvent 消费。整页重载（Vite HMR /
-  // WebView2 崩溃恢复）会销毁 per-run 订阅，但主进程与 codex 子进程不受影响，
+  // WebView2 崩溃恢复）会销毁 per-run 订阅，但主进程与后端 agent 子进程不受影响，
   // 执行中的 turn 仍会继续推送用量事件——没有持久监听器时这些事件无人消费，
   // 环读数永远停留在重载前的旧快照（"前端重载后上下文数量出错"根因）。
   // 这里持久订阅：仅当没有任何活跃 run 消费该会话时才兜底写入，避免与
@@ -2792,7 +2789,7 @@ export function AgentFlowPanel() {
   // Shared tail for a model switch. Cancels the in-flight session, invalidates
   // the cached session id, then pushes the freshly-resolved config to the
   // backend. The ordering here is what prevents the swap-401: `cacheConfig`
-  // must run BEFORE `setConfig`, because on restart Hermes reads the cache via
+  // must run BEFORE `setConfig`, because on restart the backend reads the cache via
   // applyActiveProfileCache — so the cache must already hold the NEW key when
   // setConfig restarts the gateway.
   const syncConfigToBackend = useCallback(async () => {
@@ -2904,7 +2901,7 @@ export function AgentFlowPanel() {
   // layouts (empty-state and active-conversation) via this helper so the
   // markup isn't duplicated.
   //
-  // Display source of truth: `apiConfig.model`. This is what the Hermes backend
+  // Display source of truth: `apiConfig.model`. This is what the backend
   // reads and what every mutation path (click handler / applyProfile /
   // handleSaveApi / handleModelSelect) writes. Using `activeModel` as the
   // display source caused persistent drift because auto-correct effects and
@@ -3007,7 +3004,7 @@ export function AgentFlowPanel() {
     [setInputSynced],
   );
 
-  // Fetch file-based skills on mount (via Hermes skills bridge — no backend)
+  // Fetch file-based skills on mount (via the skills bridge — no backend)
   useEffect(() => {
     if (fileSkills.length > 0) return;
     if (typeof window === "undefined" || !window.electron?.helixSkills) return;
@@ -3032,9 +3029,17 @@ export function AgentFlowPanel() {
       setResponseBlocks([]);
       setSteps([]);
       setInputSynced("");
+      bumpPendingUserRequests(-approvalQueue.length - clarifyQueue.length);
       setApprovalQueue([]);
+      setClarifyQueue([]);
     }
-  }, [chatMessages.length, setInputSynced]);
+  }, [
+    chatMessages.length,
+    setInputSynced,
+    approvalQueue.length,
+    clarifyQueue.length,
+    bumpPendingUserRequests,
+  ]);
 
   // Filter skills based on input (exclude unwanted system/prompt skills)
   const SKILL_DENYLIST = useMemo(() => new Set(["项目里面有什么"]), []);
@@ -3060,9 +3065,9 @@ export function AgentFlowPanel() {
     [skills, fileSkills, SKILL_DENYLIST],
   );
 
-  // Built-in slash commands handled on the client side (not sent to Hermes as
+  // Built-in slash commands handled on the client side (not sent to the backend as
   // regular prompts).  These show up in the "/" autocomplete picker alongside
-  // skills, Hermes commands, and shell commands.
+  // skills, pi commands, and shell commands.
   const BUILTIN_COMMANDS = useMemo(
     () => [
       {
@@ -3108,7 +3113,7 @@ export function AgentFlowPanel() {
     [],
   );
 
-  // Merge local skills with Hermes slash commands
+  // Merge local skills with pi slash commands
   const allSlashItems = useMemo(() => {
     const builtinCmds = BUILTIN_COMMANDS.flatMap((c) => {
       const names = [c.name, ...(c.aliases ?? [])];
@@ -3389,8 +3394,8 @@ export function AgentFlowPanel() {
 
   // Select project directory. Must go through setWorkDir (not just
   // setSelectedWorkDir) so the Electron main process workDir is synced AND
-  // workDirEpoch bumps — otherwise useHermes keeps reusing the stale Hermes
-  // session rooted at the old cwd, so the UI shows the new dir while Hermes
+  // workDirEpoch bumps — otherwise the hook keeps reusing the stale
+  // session rooted at the old cwd, so the UI shows the new dir while the backend
   // actually operates in the old one.
   const selectWorkDir = useCallback(
     async (dir: string | null) => {
@@ -3433,6 +3438,11 @@ export function AgentFlowPanel() {
       if (cid) {
         setStreamingDraft(cid, { isAgentRunning: false });
       }
+      // 停止运行 = 用户放弃本回合：清掉该会话挂着的审批/clarify 卡片并同步计数，
+      // 否则 pendingUserRequestsRef 残留正值，下一个 run 的兜底定时器永不武装。
+      bumpPendingUserRequests(-approvalQueue.length - clarifyQueue.length);
+      setApprovalQueue([]);
+      setClarifyQueue([]);
       useHelixStore.setState({ isChatLoading: false });
       try {
         // 后端 session id = sessionMapRef[cid].sid（新建对话可能为 null，跳过取消）。
@@ -3449,7 +3459,15 @@ export function AgentFlowPanel() {
         console.error("[handleStop] Failed to interrupt:", e);
       }
     },
-    [setStreamingDraft, currentSessionId, isBusy, isRunning],
+    [
+      setStreamingDraft,
+      currentSessionId,
+      isBusy,
+      isRunning,
+      approvalQueue.length,
+      clarifyQueue.length,
+      bumpPendingUserRequests,
+    ],
   );
 
   // Undo last round (same semantics as the /undo builtin command, exposed as a
@@ -3709,7 +3727,7 @@ export function AgentFlowPanel() {
         .setEstimatedTokens(tempSessionId, estimatedTokens);
     }
 
-    // --- Built-in slash commands (handled client-side, never sent to Hermes) ---
+    // --- Built-in slash commands (handled client-side, never sent to the backend) ---
     const builtinMatch = baseTrimmed.match(/^\/(\S+)/);
     if (builtinMatch) {
       const builtin = BUILTIN_COMMANDS.find(
@@ -4014,7 +4032,7 @@ export function AgentFlowPanel() {
       return;
     }
 
-    // Check API key — serve 模式下密钥由 Hermes 托管，Helix 侧 apiConfig.apiKey
+    // Check API key — serve 模式下密钥由后端托管，Helix 侧 apiConfig.apiKey
     // 为空，跳过该门否则发送会被永久拦截（"发送按钮无效"）。
     if (!hasApiKey && !isServeActive()) {
       storeActions.toggleSettings("api");
@@ -4035,7 +4053,7 @@ export function AgentFlowPanel() {
     });
     let activeSessionId = currentSessionId;
     // ── Front-run guard for true concurrency ───────────────────────────────────
-    // Each concurrent run has its own Hermes session + queue, but the panel shares
+    // Each concurrent run has its own backend session + queue, but the panel shares
     // one set of UI states (responseBlocks/steps/streamThinking). Only the run
     // whose conversation is currently focused may write them; background runs
     // keep streaming to the backend without touching the shared UI. Declared here
@@ -4290,7 +4308,7 @@ export function AgentFlowPanel() {
     firstContentAtRef.current = 0;
     usageReceivedRef.current = false;
     // A fresh question starts a new todo scope — drop any stale list from the
-    // previous run so the header button hides until Hermes streams a new one.
+    // previous run so the header button hides until the backend streams a new one.
     useHelixStore.getState().clearHelixTodos();
     // Add user message to store with images
     const imagesSnapshot =
@@ -4333,7 +4351,7 @@ export function AgentFlowPanel() {
       }
 
       // Config is synced by handleModelSelect (setConfig) and by handleProfileSelect
-      // (profile:cacheConfig) — both already restart Hermes if needed.  Calling
+      // (profile:cacheConfig) — both already restart the gateway if needed.  Calling
       // setModel AGAIN here would race with those restarts and corrupt .env.
       // session/new will pick up whatever config.yaml has on disk, so skip it.
 
@@ -4342,7 +4360,7 @@ export function AgentFlowPanel() {
       // that produced a 10s blind hang on every new conversation after a config
       // change. Instead, invalidate stale sessions immediately and let
       // session/new attempt directly. If the backend is still recycling,
-      // Hermes will return an error we can catch and retry.
+      // the backend will return an error we can catch and retry.
       const helixStore = useGatewayStore.getState();
       const liveEpoch = helixStore.gatewayEpoch;
       const epochStale = liveEpoch > sessionEpochRef.current;
@@ -4393,7 +4411,7 @@ export function AgentFlowPanel() {
         persistSessionMap(sessionMapRef.current);
       }
 
-      // Create a Hermes ACP session if we don't already have one for THIS
+      // Create a backend session if we don't already have one for THIS
       // conversation. Sessions are keyed by conversationId so multiple
       // conversations can run in parallel (each keeps its own backend session).
       const myCid = activeSessionId;
@@ -4455,7 +4473,7 @@ export function AgentFlowPanel() {
         // 分类。全局只由「前台 run」（下方 isFrontRun 分支）和「切换对话时的
         // sync effect」写入。
         // Auto-approve edits for this session (no manual approval UI): switch
-        // Hermes into "don't ask" mode. Hermes has no `session/approve` RPC — it
+        // the backend into "don"t ask" mode. The backend has no `session/approve` RPC — it
         // waits for an approval response to a permission_request, so the only
         // way to skip manual approval is to set the session mode here.
         try {
@@ -4477,8 +4495,8 @@ export function AgentFlowPanel() {
         } catch {}
       }
 
-      // Stop button -> ask Hermes to cancel the current run.
-      // session/cancel is a Hermes *notification* (no response), so send it
+      // Stop button -> ask the backend to cancel the current run.
+      // session/cancel is a backend *notification* (no response), so send it
       // via notify (not send, which issues a request and gets "Method not found").
       controller.signal.addEventListener("abort", () => {
         if (sessionId) {
@@ -4514,7 +4532,7 @@ export function AgentFlowPanel() {
       // Tracks whether this run has already streamed real text/thinking, so a
       // trailing session_info_update can be dropped quietly instead of as text.
       let streamedContent = false;
-      // Translate Hermes ACP notifications into the UI event shape the parser expects.
+      // Translate backend notifications into the UI event shape the parser expects.
       const mapHelixEvent = (method: string, params: any): any => {
         if (method === "usage:prompt-complete") {
           return {
@@ -4646,7 +4664,7 @@ export function AgentFlowPanel() {
                 used: Number(u.used) || 0,
               };
             case "available_commands_update":
-              // 已废弃：codex 后端不再发送此事件
+              // 已废弃：后端不再发送此事件
               return null;
             case "session_info_update": {
               // 普通标题/元数据更新
@@ -4766,7 +4784,7 @@ export function AgentFlowPanel() {
               .getState()
               .spawnSubAgent(
                 model || "子代理",
-                goal || text || "思考中…",
+                goal || text || "思考中",
                 undefined,
                 subagentId,
               );
@@ -4813,8 +4831,8 @@ export function AgentFlowPanel() {
         // subagent.progress / subagent.text / 其它 → 忽略
       };
 
-      // ── Hermes todo-list extraction ──────────────────────────────────────
-      // Hermes carries an in-session todo list and streams it via session/update
+      // ── Backend todo-list extraction ──────────────────────────────────────
+      // The backend carries an in-session todo list and streams it via session/update
       // events whose sessionUpdate name includes "todo"/"task"/"plan" (per the
       // user: "独立 session/update 事件"). It may also surface the full list
       // inside a `todo_write` tool result. We try both, tolerate unknown field
@@ -4845,6 +4863,7 @@ export function AgentFlowPanel() {
         if (!raw || typeof raw !== "object") return null;
         const content =
           raw.content ??
+          raw.subject ??
           raw.title ??
           raw.text ??
           raw.label ??
@@ -4854,6 +4873,9 @@ export function AgentFlowPanel() {
         const statusRaw = String(
           raw.status ?? raw.state ?? "pending",
         ).toLowerCase();
+        // rpiv-todo tombstones (deleted tasks) never render — skip them
+        // instead of mapping to an unknown status.
+        if (statusRaw === "deleted") return null;
         const status = STATUS_MAP[statusRaw] || "pending";
         if (typeof content !== "string" || !content.trim()) return null;
         return {
@@ -4959,7 +4981,7 @@ export function AgentFlowPanel() {
         }
       }
 
-      // Disconnect recovery — aligned with official Hermes: on a WS drop the
+      // Disconnect recovery — aligned with the official client: on a WS drop the
       // run is NOT killed. The backend detaches the session (drop sentinel) and
       // keeps executing (running sessions are never reaped — server.py
       // _ws_session_is_orphaned returns False for running=True). serve-gateway
@@ -5013,6 +5035,15 @@ export function AgentFlowPanel() {
             textLen: textBufferRef.current?.length ?? 0,
             stepsLen: stepsRef.current.length,
           });
+          // 模型在等用户点审批/clarify 卡片（extension_ui_request 未回应）时，
+          // 事件流必然静默——不是终结帧丢失，是流程合法停在用户身上。合成 done
+          // 会杀掉 run 循环并退订事件流，用户回来点击时模型继续输出却无人接收
+          //（"等我点完模型就停了"的根因）。重新武装等量兜底继续等；用户回应后
+          // 模型恢复输出，内容事件会把定时器重置回正常节奏。
+          if (pendingUserRequestsRef.current > 0) {
+            scheduleSynthDone(window);
+            return;
+          }
           if (queueDone) return;
           enqueue(
             "data: " +
@@ -5038,6 +5069,12 @@ export function AgentFlowPanel() {
         if (hasRunningTools) return;
         idleTimerRef = setTimeout(() => {
           idleTimerRef = null;
+          // 审批/clarify 待回应 = 事件流合法静默（模型停在用户点击上），不算空闲
+          // ——重新武装继续等，不合成 done（同 scheduleSynthDone 的处理）。
+          if (pendingUserRequestsRef.current > 0) {
+            resetIdleTimer();
+            return;
+          }
           if (queueDone) return;
           debug(
             "[HelixTrace] idleDetector fired — no events for",
@@ -5087,7 +5124,7 @@ export function AgentFlowPanel() {
           }
         }
         try {
-          // WS 断连：对齐官方——run 不结束。Hermes 把运行中的会话 detach 继续
+          // WS 断连：对齐官方——run 不结束。后端把运行中的会话 detach 继续
           // 执行（running 会话不会被 reap），serve-gateway 会重连并 session.resume
           // 恢复事件流。这里只显示提示并重新武装超长兜底（断连/重连期间模型
           // 可能仍在思考、无 delta；兜底已是 5 分钟级，不会像旧 8s 那样把恢复
@@ -5150,7 +5187,7 @@ export function AgentFlowPanel() {
               persistSessionMap(sessionMapRef.current);
             }
           }
-          // When Hermes starts retrying after an UPSTREAM API connection error,
+          // When the backend starts retrying after an UPSTREAM API connection error,
           // the ACP path clears the accumulated text/thinking buffers so the
           // retry response replaces (not appends to) the partial content from
           // the failed attempt. In serve mode this event originates from the
@@ -5342,16 +5379,40 @@ export function AgentFlowPanel() {
               return [...prev, { id: generateId(), ts: Date.now(), text }];
             });
           }
-          // Capture Hermes's in-session todo list from dedicated todo/plan
+          // Capture the backend's in-session todo list from dedicated todo/plan
           // session/update events (or todo_write tool results) so the header
           // button can surface it. Silently ignored when no list is present.
           if (method === "session/update") {
             const su =
               params?.update?.sessionUpdate || params?.update?.type || "";
-            if (/todo|task|plan/i.test(String(su))) {
+            // pi 的 rpiv-todo 扩展：每次 todo 工具调用都会在
+            // result.details.tasks 里带回全量任务列表，网关转发为
+            // todo_list。空数组 = clear，需要收起面板。
+            if (su === "todo_list") {
+              const list = extractTodoList(params);
+              if (list && list.length) {
+                pushTodos(list);
+              } else if (Array.isArray(params?.update?.todos)) {
+                useHelixStore.getState().setHelixTodos([], myCid ?? undefined);
+              }
+            } else if (/todo|task|plan/i.test(String(su))) {
               pushTodos(extractTodoList(params));
             }
-            // Diff capture: Hermes tool.complete carries a rendered unified diff
+            // pi 计划模式扩展（@narumitw/pi-plan-mode）：模型调用
+            // plan_mode_complete 工具交出决策就绪的完整方案时，网关转发
+            // plan_complete。立刻弹“计划审批”浮条并展示真实 plan 工件，
+            // 不再等回合结束从聊天文本里猜。
+            if (su === "plan_complete") {
+              const planText = String(params?.update?.plan ?? "");
+              if (planText.trim()) {
+                const cid = useHelixStore.getState().currentSessionId;
+                setPendingPlanReview({
+                  sessionId: cid ?? DRAFT_SESSION_KEY,
+                  content: planText,
+                });
+              }
+            }
+            // Diff capture: tool.complete carries a rendered unified diff
             // (inline_diff) for write_file/patch. Turn it into a pending change
             // so the diff button lights up. The per-reply summary card is only
             // attached to the final message when the run finishes.
@@ -5605,7 +5666,7 @@ export function AgentFlowPanel() {
               // Extract file paths from tool params to track directories
               const params = parsed.toolParams || {};
               // 「后台任务」面板登记（运行中）：只登记显式 background=true 的
-              // terminal/process/bash/docker 进程，跟 Codex 一样——前台命令无论
+              // terminal/process/bash/docker 进程，跟官方客户端一样——前台命令无论
               // 跑多久都只是当前对话里的普通执行步骤，不进后台任务面板。
               // 必须在这里登记而不是 serve-gateway——那里只有后端会话 id，而顶栏按
               // 前端对话 id（myCid）过滤，口径不一致会导致任务恒被过滤（2026-08-18 修复）。
@@ -5713,8 +5774,8 @@ export function AgentFlowPanel() {
 
               // 修改文件时（write_file / patch）把改动写入 pendingChanges，
               // 触发 DiffPreview 弹窗显示 diff（实现「修改文件时显示 diff」）。
-              // 注意：Hermes 的 tool_call 事件里 toolName 是人类可读标题（如 "write: …"），
-              // 不是工具原始名，所以不能用 === 'write_file' 判断。Hermes 把这两个文件工具
+              // 注意：后端的 tool_call 事件里 toolName 是人类可读标题（如 "write: …"），
+              // 不是工具原始名，所以不能用 === 'write_file' 判断。后端把这两个文件工具
               // 的 kind 都映射成 'edit'（见 acp_adapter/tools.py 的 TOOL_KIND_MAP），
               // 因此用 toolKind==='edit' + 文件路径 + 内容参数来判定文件修改。
               // 主路径是 tool.complete 的 inline_diff（见 onEvent 的 tool_call_update 分支）；
@@ -5781,10 +5842,10 @@ export function AgentFlowPanel() {
               const isCumulative = curTrim && incTrim.startsWith(curTrim);
 
               if (isCumulative) {
-                // Hermes sent cumulative content - replace, don't append
+                // The backend sent cumulative content - replace, don't append
                 thoughtBufferRef.current = inc;
               } else {
-                // Hermes sent incremental content - append
+                // The backend sent incremental content - append
                 thoughtBufferRef.current = cur + inc;
               }
               pendingThinkingRef.current = thoughtBufferRef.current;
@@ -5935,11 +5996,11 @@ export function AgentFlowPanel() {
                 return prev;
               });
             } else if (parsed.type === "text") {
-              // Hermes streams the reply as word/token chunks and ALSO re-sends
+              // The backend streams the reply as word/token chunks and ALSO re-sends
               // the full final_response as another agent_message_chunk at the
               // end (acp.update_agent_message_text). If the incoming chunk is the
               // complete text, replace instead of appending — kills duplication.
-              // Also detect retry-duplicated content: when Hermes retries after an
+              // Also detect retry-duplicated content: when the backend retries after an
               // MCP failure, the model regenerates similar text which should
               // replace (not append to) the existing buffer.
               const incRaw = normalizeAcpContent(parsed.content);
@@ -5971,7 +6032,7 @@ export function AgentFlowPanel() {
                 // 保留原始内容，让 reconcileBlocksWithContent 在 done 时处理
                 newText = incRaw;
               } else if (incTrim.startsWith(curTrim)) {
-                // New text is a superset of accumulated text (Hermes full resend).
+                // New text is a superset of accumulated text (backend full resend).
                 // Guard: a resend that LOST whitespace (fewer bytes, same normalized
                 // content) must not clobber the accumulated copy — whitespace loss is
                 // what breaks markdown tables/strong ("**加粗** 后" → "**加粗**后").
@@ -5985,7 +6046,7 @@ export function AgentFlowPanel() {
                 // in streamed markdown). Whitespace-only chunks must be appended.
                 newText = cur;
               } else if (textSimilarityRatio(curTrim, incTrim) >= 0.6) {
-                // 归一化后高度相似：Hermes 全文重发微差版 / 模型重试改写。
+                // 归一化后高度相似：后端全文重发微差版 / 模型重试改写。
                 // 直接拼接会把同一内容写两遍（"输出重复两次"的根因）。
                 // 仅当传入文本达到"全文重发"尺度（≥累积文本一半）才替换——
                 // 否则它只是与某段相关的独立新段落，替换会把已累积内容截断。
@@ -6265,14 +6326,24 @@ export function AgentFlowPanel() {
                 // 计划模式产出方案后必须停在人工审查；只有用户点击批准才切换执行模式。
                 // 计划模式产出方案后停在人工审查；弹出 PlanReviewBar，
                 // 用户点批准才切换到 accept_edits 并执行。
-                if (content && useHelixStore.getState().approvalMode === "plan") {
+                if (
+                  content &&
+                  useHelixStore.getState().approvalMode === "plan"
+                ) {
                   const cid = useHelixStore.getState().currentSessionId;
-                  setPendingPlanReview({
-                    sessionId: cid ?? DRAFT_SESSION_KEY,
-                    content,
+                  // 如果 plan_complete 事件已经用真实 plan 工件（plan_mode_complete
+                  // 工具的 args.plan）弹过浮条，这里就不再覆盖。
+                  setPendingPlanReview((prev) => {
+                    const key = cid ?? DRAFT_SESSION_KEY;
+                    return prev && prev.sessionId === key
+                      ? prev
+                      : { sessionId: key, content };
                   });
                 }
+              } else {
                 // 防御性兜底：run 结束但无任何可见内容（根因已修复，极少触发）。
+                // 注意：必须放在「有内容」分支的 else 里——上一版误置于 if 内，
+                // 导致每次成功运行都无条件追加这条警告，模型有输出却仍显示。
                 const st = useHelixStore.getState();
                 const mid = st.addChatMessage({
                   role: "assistant",
@@ -6286,7 +6357,7 @@ export function AgentFlowPanel() {
                 }
                 st.setChatMessageStreaming(mid, false);
               }
-              // Hermes' ACP adapter only emits a `tool_call` (tool.started) event
+              // The backend adapter only emits a `tool_call` (tool.started) event
               // and NOT a matching completion/failure event (see backend
               // _tool_progress: `if event_type != "tool.started": return`). So a
               // tool_call step we created as `running` would otherwise stay stuck
@@ -6426,9 +6497,14 @@ export function AgentFlowPanel() {
               ]);
             } else if (parsed.type === "usage_prompt_complete") {
               const u = parsed.usage;
-              if (u && typeof u === "object" && !usageReceivedRef.current) {
+              if (u && typeof u === "object") {
                 const model =
                   useHelixStore.getState().apiConfig.model || "unknown";
+                // pi 口径：一次 run（带工具循环）产生多条 assistant 消息，每条
+                // usage 事件是该次 LLM 调用的计费量（provider 对每次调用独立
+                // 计费）。因此每条都要累加进会话用量统计——只记第一条会漏掉工具
+                // 循环中后续调用的全部 token。usageReceivedRef 仅用于 done 事件
+                // 的"等 usage 落地"判断与消息级 token 展示，不再拦截累加。
                 useHelixStore.getState().addSessionUsageStats(model, {
                   totalTokens: Number(u.totalTokens) || undefined,
                   inputTokens: Number(u.inputTokens) || undefined,
@@ -6437,13 +6513,20 @@ export function AgentFlowPanel() {
                   cachedReadTokens: Number(u.cachedReadTokens) || undefined,
                   cachedWriteTokens: Number(u.cachedWriteTokens) || undefined,
                 });
-                usageReceivedRef.current = true;
+                if (!usageReceivedRef.current) {
+                  usageReceivedRef.current = true;
+                }
                 thoughtTokensRef.current = Number(u.thoughtTokens) || 0;
                 outputTokensRef.current = Number(u.outputTokens) || 0;
                 totalTokensRef.current = Number(u.totalTokens) || 0;
                 uiTotalTokens(totalTokensRef.current);
                 // 只用后端 message.complete 携带的真实 context_used/context_max，
                 // 不再用客户端估算。无后端数据时上下文环显示空态。
+                // pi 口径：一次 run（带工具循环）产生多条 assistant 消息，每条
+                // usage 事件携带该次 LLM 调用的 totalTokens（含此前全部历史+缓存
+                // token）——它本身就是当时的上下文占用，且随工具循环单调递增。
+                // 因此每次事件都覆盖环读数（不是只吃第一条）：环在 run 期间持续
+                // 走高，而非冻结到下一个用户轮次。
                 const ctxMax = Number(u.context_max) || 0;
                 const ctxUsed = Number(u.context_used) || 0;
                 // 后端 in-turn 自动压缩对前端不可见（"上下文数量无故变小"根因）：
@@ -6531,6 +6614,7 @@ export function AgentFlowPanel() {
                     );
                 }
               } else {
+                bumpPendingUserRequests(1);
                 setApprovalQueue((prev) => [
                   ...prev,
                   {
@@ -6543,6 +6627,7 @@ export function AgentFlowPanel() {
                 ]);
               }
             } else if (parsed.type === "clarify_request") {
+              bumpPendingUserRequests(1);
               setClarifyQueue((prev) => [
                 ...prev,
                 {
@@ -6990,6 +7075,7 @@ export function AgentFlowPanel() {
       //（RPC_TIMEOUT_MS=60s，agent 已继续但审批仍在占屏）。未送达时 agent 会再发
       // 新 approval.request 重新入队，UI 与后端状态自然对齐。
       setApprovalQueue((prev) => prev.filter((r) => r.id !== approvalId));
+      bumpPendingUserRequests(-1);
       try {
         // 用 getState() 拿当前会话，避免 useCallback([]) 闭包里的 currentSessionId
         // 因依赖变化而读到旧值（弹条常跨会话存活，出队必须删对的会话）。
@@ -7038,15 +7124,17 @@ export function AgentFlowPanel() {
         console.error("Clarify respond error:", err);
       } finally {
         setClarifyQueue((prev) => prev.filter((r) => r.id !== requestId));
+        bumpPendingUserRequests(-1);
       }
     },
-    [currentSessionId],
+    [currentSessionId, bumpPendingUserRequests],
   );
 
   // 批准计划：关掉审批浮条，把 approvalMode 切到 accept_edits（用 live store + 后端
-  // set_mode 双保险，让后端/前端都进入"替我审批"模式），然后重跑 handleRun 让 agent
-  // 真正动手执行刚才的方案。注意 handleRun 是幂等的：它按当前输入重新发 prompt，模型
-  // 在 accept_edits 模式下会继续执行（而非再次只读规划）。
+  // set_mode 双保险，让后端/前端都进入“替我审批”模式），然后用 pi 计划扩展的
+  // /plan implement 命令真正启动实现（扩展会把已完成的方案交接给实现阶段并解锁
+  // 写工具）。plan_approved: true 告诉网关“这是批准”——不要发 /plan exit，
+  // 否则会把刚批准、正要执行的计划清掉。
   const handleApprovePlan = useCallback(async () => {
     setPendingPlanReview(null);
     const cid = useHelixStore.getState().currentSessionId;
@@ -7059,27 +7147,39 @@ export function AgentFlowPanel() {
         .send("session/set_mode", {
           session_id: helixSid,
           mode_id: "accept_edits",
+          plan_approved: true,
         })
         .catch((e: any) => {
           console.warn("[Helix] set_mode(accept_edits) failed:", e);
         });
     }
-    // 把"批准"注入输入框再跑，模型以此确认用户已同意并开始动手；setInputSynced
-    // 只写 ref（不触发 store 写入），setTimeout 确保新输入在 handleRun 读到的是
-    // 批准后的状态。
-    setInputSynced("[计划已获批准] 请按你刚才给出的计划开始执行。");
+    // 批准动作即 /plan implement：pi 计划扩展接管后续，从已保存的方案开始实现。
+    setInputSynced("/plan implement");
     setTimeout(() => handleRun(), 0);
   }, [setApprovalMode, setInputSynced, handleRun]);
 
   // 调整计划：只关闭审批浮条（保持 plan 模式），用户自己修改输入后重新触发即可；
   // 后端 session 模式不变，仍是只读规划模式。
-  const handleAdjustPlan = useCallback(() => {
-    setPendingPlanReview(null);
-  }, []);
+  // 修改计划：有反馈 → 填入输入框并提交为 plan follow-up（仍在 plan 模式，
+  // agent 基于意见重新规划，run 结束后 PlanReviewBar 重新弹出）；
+  // 无反馈 → 仅关条，用户自己在输入框里改。
+  const handleAdjustPlan = useCallback(
+    (feedback?: string) => {
+      setPendingPlanReview(null);
+      const fb = feedback?.trim();
+      if (!fb) return;
+      setInputSynced(
+        `请按以下意见修改刚才的计划，修改后重新输出完整计划：\n${fb}`,
+      );
+      void handleRunRef.current();
+    },
+    [setInputSynced],
+  );
 
   const handleApproveAll = useCallback(async () => {
     if (approvalQueue.length === 0) return;
     // 先把队列清空（fail-closed），让弹条立即消失；RPC 逐个发，任一个失败不阻塞整体。
+    bumpPendingUserRequests(-approvalQueue.length);
     setApprovalQueue([]);
     try {
       const cid = useHelixStore.getState().currentSessionId;
@@ -7110,6 +7210,7 @@ export function AgentFlowPanel() {
   const handleRejectAll = useCallback(async () => {
     if (approvalQueue.length === 0) return;
     // 先清空队列（fail-closed），弹条立即消失；逐个发 deny 让 agent 侧拒绝。
+    bumpPendingUserRequests(-approvalQueue.length);
     setApprovalQueue([]);
     try {
       const cid = useHelixStore.getState().currentSessionId;
@@ -7206,7 +7307,7 @@ export function AgentFlowPanel() {
         <button
           type="button"
           onClick={() => setShowApprovalModeDropdown(!showApprovalModeDropdown)}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ui-text-sm2 transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
           data-tip="审批模式"
         >
           {approvalMode === "default" && <Hand className="size-3.5" />}
@@ -7307,7 +7408,7 @@ export function AgentFlowPanel() {
     return (
       <div
         ref={chatInputWrapRef}
-        className={`helix-chat-input-card border transition-all duration-200 relative bg-card backdrop-blur-md border-border/40 rounded-2xl ${isDraggingFile ? "border-primary/40" : "hover:border-border/60 focus-within:border-primary/30"}`}
+        className={`helix-chat-input-card border transition-all duration-200 relative shadow-sm border-border/30 rounded-xl ${isDraggingFile ? "border-primary/40" : "hover:border-border/40 focus-within:border-primary/30"}`}
         onDragOver={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -7335,7 +7436,7 @@ export function AgentFlowPanel() {
         )}
         {pendingFiles.length > 0 && (
           <div
-            className={`flex flex-wrap gap-2 border-t border-border/20 px-4 py-2`}
+            className={`flex flex-wrap gap-2 border-t border-border/30 px-4 py-2`}
           >
             {pendingFiles.map((f) => (
               <div
@@ -7352,7 +7453,7 @@ export function AgentFlowPanel() {
                   <FileText className="size-4 text-muted-foreground shrink-0" />
                 )}
                 <div className="min-w-0">
-                  <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground max-w-[8ch] truncate">
+                  <p className="ui-text-sm2 font-medium text-foreground max-w-[8ch] truncate">
                     {f.name.length > 8 ? f.name.slice(0, 8) + "…" : f.name}
                   </p>
                   <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60">
@@ -7372,7 +7473,7 @@ export function AgentFlowPanel() {
 
         {/* Web link cards picked from the in-app browser (compact替代长 URL 纯文本) */}
         {pendingLinks.length > 0 && (
-          <div className="border-t border-border/20 px-4 py-2">
+          <div className="border-t border-border/30 px-4 py-2">
             <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 mb-1.5">
               {pendingLinks.length} 个网页链接
             </p>
@@ -7400,7 +7501,7 @@ export function AgentFlowPanel() {
                   >
                     <Link className="size-4 text-primary shrink-0" />
                     <div className="min-w-0">
-                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground truncate">
+                      <p className="ui-text-sm2 font-medium text-foreground truncate">
                         {linkTitle}
                       </p>
                       <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 truncate">
@@ -7457,18 +7558,18 @@ export function AgentFlowPanel() {
           onPaste={handlePaste}
           placeholder={"随心输入..."}
           rows={2}
-          className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-[length:var(--helix-transcript-size)] min-h-[52px] max-h-[300px] px-4 pt-3.5 pb-1 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
+          className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-[length:var(--helix-transcript-size)] min-h-[38px] max-h-[300px] px-2.5 pt-2 pb-0.5 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
           style={{
             overflowX: "hidden",
             overflowY: "auto",
-            height: "52px",
+            height: "38px",
           }}
           onInput={(e) => {
             const target = e.target as HTMLTextAreaElement;
-            const prevHeight = parseInt(target.style.height || "52", 10);
-            target.style.height = "52px";
+            const prevHeight = parseInt(target.style.height || "38", 10);
+            target.style.height = "38px";
             const ch = target.scrollHeight;
-            const min = 52;
+            const min = 38;
             const nextHeight = ch > min ? Math.min(ch, 300) : min;
             target.style.height = nextHeight + "px";
             // 输入框长高时自动把视口滚到底，防止输入框跑到可见区域下方
@@ -7485,7 +7586,7 @@ export function AgentFlowPanel() {
 
         {/* Unified slash command dropdown */}
         {showSlashMenu && (
-          <div className="absolute bottom-full left-0 right-0 mb-2 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 z-50 max-h-[300px] overflow-y-auto mx-3">
+          <div className="absolute bottom-full left-0 right-0 mb-2 bg-popover rounded-xl border border-border shadow-xl z-50 max-h-[300px] overflow-y-auto mx-3">
             {/* Quick commands section */}
             {matchedQuickCmds.length > 0 && (
               <>
@@ -7513,7 +7614,7 @@ export function AgentFlowPanel() {
                         : "hover:bg-muted/30"
                     }`}
                   >
-                    <code className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-primary/70 shrink-0 w-20">
+                    <code className="ui-text-sm2 font-mono text-primary/70 shrink-0 w-20">
                       {qc.cmd}
                     </code>
                     <div className="min-w-0 flex-1">
@@ -7533,7 +7634,7 @@ export function AgentFlowPanel() {
             {filteredSkills.length > 0 && (
               <>
                 {matchedQuickCmds.length > 0 && (
-                  <div className="border-t border-border/20 mx-3" />
+                  <div className="border-t border-border/30 mx-3" />
                 )}
                 <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">
                   命令
@@ -7595,7 +7696,7 @@ export function AgentFlowPanel() {
 
         {/* @-triggered file reference dropdown */}
         {showAtRef && filteredAtFiles.length > 0 && (
-          <div className="absolute bottom-full left-0 right-0 mb-2 bg-background/95 backdrop-blur-sm rounded-2xl border border-border/30 shadow-xl shadow-black/10 z-50 max-h-[200px] overflow-y-auto mx-3">
+          <div className="absolute bottom-full left-0 right-0 mb-2 bg-popover rounded-xl border border-border shadow-xl z-50 max-h-[200px] overflow-y-auto mx-3">
             {filteredAtFiles.map((file, index) => (
               <button
                 key={file.path}
@@ -7641,7 +7742,7 @@ export function AgentFlowPanel() {
         )}
 
         {/* Input toolbar */}
-        <div className={`flex items-center justify-between px-3 pb-2.5 pt-0.5`}>
+        <div className={`flex items-center justify-between px-2 pb-1.5 pt-0`}>
           {isEmpty ? (
             <>
               <div className="flex items-center gap-1">
@@ -7670,7 +7771,7 @@ export function AgentFlowPanel() {
                   <button
                     type="button"
                     onClick={() => storeActions.toggleSettings("api")}
-                    className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/50 hover:text-foreground hover:bg-muted/60 px-2.5 py-1.5 h-9 rounded-lg transition-colors"
+                    className="ui-text-sm2 text-foreground/50 hover:text-foreground hover:bg-muted/60 px-2.5 py-1.5 h-9 rounded-lg transition-colors"
                   >
                     设置模型
                   </button>
@@ -7762,26 +7863,10 @@ export function AgentFlowPanel() {
     );
   };
 
-  const renderEmptyBreadcrumb = () => {
-    // 项目外对话（已加载但 workDir 为空）不显示项目目录与分支。新对话（无会话，
-    // currentSessionId 为 null）仍显示所选项目或「选择项目」提示。
-    const showProjectContext =
-      currentSessionId === null || !!activeSessionWorkDir;
-    if (!showProjectContext) return null;
-    const projectName = selectedWorkDir
-      ? selectedWorkDir.split(/[\\/\\]/).pop() || selectedWorkDir
-      : "选择项目";
-    return (
-      <div className="flex items-center gap-1.5 mb-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/60">
-        <Folder className="size-3.5 text-amber-500 shrink-0" />
-        <span className="max-w-[200px] truncate">
-          {projectName.length > 14
-            ? projectName.slice(0, 14) + "…"
-            : projectName}
-        </span>
-      </div>
-    );
-  };
+  // NOTE: the empty state used to render a second project row here
+  // (`renderEmptyBreadcrumb` — folder icon + project basename). Removed: it
+  // duplicated the project chip above the input (same `selectedWorkDir`
+  // basename), so the project name showed twice back-to-back.
 
   return (
     <div className="h-full flex flex-col bg-transparent text-foreground relative">
@@ -7880,7 +7965,7 @@ export function AgentFlowPanel() {
                           });
                         }
                       }}
-                      className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/60 hover:text-foreground hover:bg-muted/40 transition-colors"
+                      className="flex items-center gap-1.5 px-2 py-1 rounded-lg ui-text-sm2 text-foreground/60 hover:text-foreground hover:bg-muted/40 transition-colors"
                       data-tip="选择项目目录"
                     >
                       <Folder className="size-3.5 text-amber-500" />
@@ -7906,7 +7991,7 @@ export function AgentFlowPanel() {
                       </svg>
                     </button>
                     {showFolderDropdown && (
-                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 bg-popover border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in overflow-hidden">
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-[220px] bg-popover border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in overflow-hidden">
                         {showRemoteServers ? (
                           <div>
                             <div className="px-3 py-2 border-b border-border/30 flex items-center gap-2">
@@ -7938,7 +8023,7 @@ export function AgentFlowPanel() {
                               </p>
                             </div>
                             {showAddServerForm ? (
-                              <div className="px-3 py-3 space-y-2 bg-muted/20">
+                              <div className="px-3 py-2.5 space-y-1.5 bg-muted/20">
                                 <input
                                   type="text"
                                   value={newServerName}
@@ -7946,7 +8031,7 @@ export function AgentFlowPanel() {
                                     setNewServerName(e.target.value)
                                   }
                                   placeholder="名称（可选）"
-                                  className="w-full px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
+                                  className="w-full px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
                                 />
                                 <input
                                   type="text"
@@ -7955,7 +8040,7 @@ export function AgentFlowPanel() {
                                     setNewServerHost(e.target.value)
                                   }
                                   placeholder="主机地址（必填）"
-                                  className="w-full px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
+                                  className="w-full px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
                                 />
                                 <div className="flex gap-2">
                                   <input
@@ -7965,7 +8050,7 @@ export function AgentFlowPanel() {
                                       setNewServerUser(e.target.value)
                                     }
                                     placeholder="用户名"
-                                    className="flex-1 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
+                                    className="flex-1 px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
                                   />
                                   <input
                                     type="text"
@@ -7974,7 +8059,7 @@ export function AgentFlowPanel() {
                                       setNewServerPort(e.target.value)
                                     }
                                     placeholder="端口"
-                                    className="w-16 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
+                                    className="w-16 px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
                                   />
                                 </div>
                                 <div className="flex gap-2 justify-end pt-1">
@@ -7987,7 +8072,7 @@ export function AgentFlowPanel() {
                                       setNewServerUser("");
                                       setNewServerName("");
                                     }}
-                                    className="px-3 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground rounded-md transition-colors"
+                                    className="px-3 py-1 ui-text-sm2 text-muted-foreground hover:text-foreground rounded-md transition-colors"
                                   >
                                     取消
                                   </button>
@@ -8016,7 +8101,7 @@ export function AgentFlowPanel() {
                                         title: "服务器已添加",
                                       });
                                     }}
-                                    className="px-3 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="px-3 py-1 ui-text-sm2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                     disabled={!newServerHost.trim()}
                                   >
                                     添加
@@ -8028,7 +8113,7 @@ export function AgentFlowPanel() {
                                 <button
                                   type="button"
                                   onClick={() => setShowAddServerForm(true)}
-                                  className="w-full flex items-center gap-2 px-3 py-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
+                                  className="w-full flex items-center gap-2 px-3 py-3 ui-text-sm2 text-foreground/70 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
                                 >
                                   <span className="size-5 flex items-center justify-center border border-current rounded text-sm leading-none">
                                     +
@@ -8037,7 +8122,7 @@ export function AgentFlowPanel() {
                                 </button>
                               </div>
                             ) : (
-                              <div className="max-h-60 overflow-y-auto py-1">
+                              <div className="max-h-32 overflow-y-auto py-1">
                                 {externalServices.map((svc) => {
                                   const displayName =
                                     svc.name ||
@@ -8092,7 +8177,7 @@ export function AgentFlowPanel() {
                                           svc.port;
                                         await selectWorkDir(remotePath);
                                       }}
-                                      className={`w-full text-left px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent transition-colors flex items-center gap-2.5 ${selectedWorkDir && selectedWorkDir.startsWith("ssh://" + svc.host) ? "bg-primary/10 text-primary font-medium" : "text-foreground/80"}`}
+                                      className={`w-full text-left px-3 py-2.5 ui-text-sm2 hover:bg-accent transition-colors flex items-center gap-2.5 ${selectedWorkDir && selectedWorkDir.startsWith("ssh://" + svc.host) ? "bg-primary/10 text-primary font-medium" : "text-foreground/80"}`}
                                     >
                                       {isConnected ? (
                                         <span className="size-2 rounded-full bg-green-500 shrink-0" />
@@ -8121,7 +8206,7 @@ export function AgentFlowPanel() {
                                 <button
                                   type="button"
                                   onClick={() => setShowAddServerForm(true)}
-                                  className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 hover:text-foreground/80 hover:bg-accent transition-colors border-t border-border/20 mt-1"
+                                  className="w-full flex items-center gap-2 px-3 py-2 ui-text-sm2 text-muted-foreground/60 hover:text-foreground/80 hover:bg-accent transition-colors border-t border-border/30 mt-1"
                                 >
                                   <span className="size-4 flex items-center justify-center border border-dashed border-current rounded text-xs leading-none">
                                     +
@@ -8155,7 +8240,7 @@ export function AgentFlowPanel() {
                                     );
                                   }
                                 }}
-                                className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
+                                className="w-full flex items-center gap-2.5 px-3 py-2.5 ui-text-sm2 text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
                               >
                                 <Folder className="size-4 text-muted-foreground shrink-0" />
                                 <span>本地项目</span>
@@ -8165,7 +8250,7 @@ export function AgentFlowPanel() {
                               <button
                                 type="button"
                                 onClick={() => setShowRemoteServers(true)}
-                                className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
+                                className="w-full flex items-center gap-2.5 px-3 py-2.5 ui-text-sm2 text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
                               >
                                 <Server className="size-4 text-muted-foreground shrink-0" />
                                 <span>
@@ -8180,6 +8265,22 @@ export function AgentFlowPanel() {
                       </div>
                     )}
                   </div>
+                  {/* Branch chip — the empty (new-conversation) state had no
+                      branch UI at all: the header branch picker only renders
+                      once the conversation has messages, and the in-transcript
+                      indicator lives in the messages branch below. The probe
+                      (`currentBranch`/`gitAvailable`) runs on every
+                      selectedWorkDir change regardless, so show it here too.
+                      NOTE: `currentBranchInfo` is conversation-fork metadata
+                      (null without a session) — NOT the git branch. */}
+                  {gitAvailable && currentBranch && (
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[calc(var(--helix-transcript-size)*0.7857)] text-blue-600 dark:text-blue-400 bg-blue-500/10 shrink-0">
+                      <GitBranch className="size-3" />
+                      <span className="max-w-[120px] truncate">
+                        {currentBranch}
+                      </span>
+                    </span>
+                  )}
                 </div>
 
                 {renderChatInput({ isEmpty: true })}
@@ -8189,7 +8290,7 @@ export function AgentFlowPanel() {
             <div className="space-y-3">
               {/* Branch indicator */}
               {currentBranchInfo && (
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-500/5 border border-blue-500/15 text-[calc(var(--helix-transcript-size)*0.8571)]">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-500/5 border border-blue-500/15 ui-text-sm2">
                   <GitBranch className="size-3.5 text-blue-500 shrink-0" />
                   <span className="text-blue-600 dark:text-blue-400 font-medium">
                     {currentBranchInfo.branchName}
@@ -8201,8 +8302,6 @@ export function AgentFlowPanel() {
                   )}
                 </div>
               )}
-              {/* Project breadcrumb — shown above messages */}
-              {renderEmptyBreadcrumb()}
               {/* Chat messages (input/output)  — completed messages only.
                   Each row is memoized (TranscriptMessage) so streamed chunks
                   don't re-render the whole transcript. */}
@@ -8295,50 +8394,6 @@ export function AgentFlowPanel() {
                     {/* Show thinking content if available (kaomoji status line stripped).
                         Only render while streaming AND no completed thinking blocks exist yet;
                         once thinking is flushed into displayResponseBlocks it renders there to avoid dup. */}
-                    {streamingActive &&
-                      thinkingBody &&
-                      !displayResponseBlocks.some(
-                        (b) => b.type === "thinking",
-                      ) && (
-                        <div className="my-2">
-                          <details className="group/details">
-                            <summary
-                              className="text-muted-foreground cursor-pointer hover:text-foreground/60 select-none flex items-center gap-1 list-none transition-colors"
-                              style={{ fontSize: transcriptFontSize }}
-                            >
-                              <span>
-                                {isReconnecting
-                                  ? "重连"
-                                  : thinkingStatus || "思考中..."}
-                              </span>
-                              <svg
-                                className="size-3.5 transition-transform group-open/details:rotate-90"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                              >
-                                <path d="m9 18 6-6-6-6" />
-                              </svg>
-                            </summary>
-                            <div
-                              className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/60 break-all leading-relaxed thinking-cap-tall thinking-scroll"
-                              style={{ fontSize: transcriptFontSize }}
-                            >
-                              {conversationSearchOpen &&
-                              conversationSearchQuery.trim() ? (
-                                <HighlightText
-                                  text={thinkingBody}
-                                  query={conversationSearchQuery}
-                                  active={false}
-                                />
-                              ) : (
-                                <HelixMarkdown text={thinkingBody} />
-                              )}
-                            </div>
-                          </details>
-                        </div>
-                      )}
 
                     {/* Inline thinking block (collapsible) — kept for completed messages */}
 
@@ -8351,35 +8406,98 @@ export function AgentFlowPanel() {
                         const normalizedBlocks = mergeAdjacentThinking(
                           normalizeTextBlocks(displayResponseBlocks),
                         );
-                        const lastTextIndex = normalizedBlocks.reduce(
+                        // Consolidate: merge all text blocks into a single block at
+                        // the end. Without this, interleaved text/tool blocks (e.g.
+                        // [text, tool_group, text]) cause buildProcessSegments to
+                        // split the text with "任务执行" in between.
+                        const nonTextBlocks = normalizedBlocks.filter(
+                          (b) => b.type !== "text",
+                        );
+                        const textContent = normalizedBlocks
+                          .filter((b) => b.type === "text")
+                          .map((b) => String(b.content || ""))
+                          .join("");
+                        const consolidatedBlocks = textContent.trim()
+                          ? [
+                              ...nonTextBlocks,
+                              { type: "text" as const, content: textContent },
+                            ]
+                          : nonTextBlocks;
+                        const lastTextIndex = consolidatedBlocks.reduce(
                           (acc, b, i) =>
-                            b.type === "text" &&
-                            String(b.content || "").trim()
+                            b.type === "text" && String(b.content || "").trim()
                               ? i
                               : acc,
                           -1,
                         );
                         const processBlocks =
                           lastTextIndex >= 0
-                            ? normalizedBlocks.slice(0, lastTextIndex)
-                            : normalizedBlocks;
+                            ? consolidatedBlocks.slice(0, lastTextIndex)
+                            : consolidatedBlocks;
                         const answerBlocks =
                           lastTextIndex >= 0
-                            ? normalizedBlocks.slice(lastTextIndex)
+                            ? consolidatedBlocks.slice(lastTextIndex)
                             : [];
                         const processSegments =
                           buildProcessSegments(processBlocks);
                         const answerSegments =
                           buildProcessSegments(answerBlocks);
+                        const showStreamThinking =
+                          streamingActive &&
+                          !!thinkingBody &&
+                          !normalizedBlocks.some((b) => b.type === "thinking");
                         return (
                           <>
-                            <div className="my-2 space-y-2">
+                            {/* 二级折叠：外层「过程」收纳本轮全部中间产物（思考 +
+                                任务执行），流式期间展开看进度、结束后自动收起。 */}
+                            <details
+                              className="my-2 group/details"
+                              open={streamingActive}
+                            >
+                              <summary className="cursor-pointer hover:text-foreground/60 flex items-center gap-1.5 list-none transition-colors">
+                                <FoldTitle
+                                  label={streamingActive ? "执行过程" : "已完成"}
+                                  active={streamingActive}
+                                  fontSize={transcriptFontSize}
+                                />
+                                {!streamingActive &&
+                                runStartedAtRef.current > 0 ? (
+                                  <span className="ml-auto tabular-nums text-foreground/25">
+                                    {formatDuration(
+                                      Math.max(
+                                        0,
+                                        Math.round(
+                                          (Date.now() -
+                                            runStartedAtRef.current) /
+                                            1000,
+                                        ),
+                                      ),
+                                    )}
+                                  </span>
+                                ) : null}
+                                <FoldChevron />
+                              </summary>
+                              <div className="mt-1 space-y-2">
+                              {showStreamThinking && (
+                                <ThinkingFold
+                                  content={thinkingBody}
+                                  fontSize={transcriptFontSize}
+                                  active
+                                  status={
+                                    isReconnecting
+                                      ? "重连"
+                                      : thinkingStatus || "思考中"
+                                  }
+                                  searchOpen={conversationSearchOpen}
+                                  searchQuery={conversationSearchQuery}
+                                  isSearchActive={false}
+                                />
+                              )}
                               {processSegments.map((seg, si) => {
-                                if (seg.kind === "text") {
-                                  return (
-                                    <div key={si} className="space-y-1">
-                                      {seg.blocks.map((b, i) => {
-                                        if (b.type !== "text") return null;
+                                return (
+                                  <div key={si} className="space-y-1">
+                                    {seg.blocks.map((b, i) => {
+                                      if (b.type === "text") {
                                         return (
                                           <div
                                             key={i}
@@ -8409,150 +8527,58 @@ export function AgentFlowPanel() {
                                             )}
                                           </div>
                                         );
-                                      })}
-                                    </div>
-                                  );
-                                }
-                                if (seg.kind === "thinking") {
-                                  const firstBlock = seg.blocks[0];
-                                  const firstContent =
-                                    firstBlock && "content" in firstBlock
-                                      ? String(firstBlock.content)
-                                      : "";
-                                  const thinkingDone =
-                                    !streamingActive ||
-                                    si < processSegments.length - 1 ||
-                                    answerBlocks.length > 0;
-                                  if (
-                                    thinkingDone &&
-                                    !seg.blocks.some(
-                                      (b) =>
-                                        "content" in b &&
-                                        String(b.content || "").trim(),
-                                    )
-                                  ) {
-                                    return null;
-                                  }
-                                  return (
-                                    <details
-                                      key={si}
-                                      className="group/details"
-                                    >
-                                      <summary
-                                        className="text-foreground/50 cursor-pointer hover:text-foreground/70 select-none flex items-center gap-1 list-none transition-colors"
-                                        style={{
-                                          fontSize: transcriptFontSize,
-                                        }}
-                                      >
-                                        <span>
-                                          {thinkingDone
-                                            ? "思考完成"
-                                            : isReconnecting
-                                              ? "重连"
-                                              : extractKaomojiStatus(
-                                                  firstContent,
-                                                ).status || "思考中"}
-                                        </span>
-                                        <svg
-                                          className="size-3.5 transition-transform group-open/details:rotate-90"
-                                          viewBox="0 0 24 24"
-                                          fill="none"
-                                          stroke="currentColor"
-                                          strokeWidth="2"
-                                        >
-                                          <path d="m9 18 6-6-6-6" />
-                                        </svg>
-                                      </summary>
-                                      <div className="mt-1 pl-3 border-l-2 border-border/60 space-y-1">
-                                        {seg.blocks.map((b, i) => {
-                                          const content =
-                                            "content" in b
-                                              ? String(b.content)
-                                              : "";
-                                          return (
-                                            <div
-                                              key={i}
-                                              className="text-foreground/60 break-all leading-relaxed thinking-cap thinking-scroll"
-                                              style={{
-                                                fontSize: transcriptFontSize,
-                                              }}
-                                            >
-                                              {conversationSearchOpen &&
-                                              conversationSearchQuery.trim() ? (
-                                                <HighlightText
-                                                  text={normalizeAcpContentRaw(
-                                                    content,
-                                                  )}
-                                                  query={
-                                                    conversationSearchQuery
-                                                  }
-                                                  active={false}
-                                                />
-                                              ) : (
-                                                <HelixMarkdown
-                                                  text={normalizeAcpContentRaw(
-                                                    content,
-                                                  )}
-                                                />
-                                              )}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </details>
-                                  );
-                                }
-                                return (
-                                  <details
-                                    key={si}
-                                    className="group/details"
-                                  >
-                                    <summary
-                                      className="text-foreground/50 cursor-pointer hover:text-foreground/70 select-none flex items-center gap-1 list-none transition-colors"
-                                      style={{ fontSize: transcriptFontSize }}
-                                    >
-                                      <span>任务执行</span>
-                                      <svg
-                                        className="size-3.5 transition-transform group-open/details:rotate-90"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        strokeWidth="2"
-                                      >
-                                        <path d="m9 18 6-6-6-6" />
-                                      </svg>
-                                    </summary>
-                                    <div className="mt-1 pl-3 space-y-1">
-                                      {seg.blocks.map((b, i) =>
-                                        b.type === "tool_group" ? (
+                                      }
+                                      if (b.type === "thinking") {
+                                        const content =
+                                          "content" in b ? String(b.content) : "";
+                                        if (!content.trim()) return null;
+                                        return (
+                                          <ThinkingFold
+                                            key={i}
+                                            content={content}
+                                            fontSize={transcriptFontSize}
+                                            active={
+                                              streamingActive &&
+                                              si === processSegments.length - 1 &&
+                                              i === seg.blocks.length - 1
+                                            }
+                                            searchOpen={conversationSearchOpen}
+                                            searchQuery={conversationSearchQuery}
+                                            isSearchActive={false}
+                                          />
+                                        );
+                                      }
+                                      if (b.type === "tool_group") {
+                                        return (
                                           <InlineToolGroup
                                             key={i}
                                             steps={b.steps}
                                             isRunning={isRunning}
                                             fontSize={transcriptFontSize}
                                           />
-                                        ) : b.type === "file_change" ? (
+                                        );
+                                      }
+                                      if (b.type === "file_change") {
+                                        return (
                                           <FileChangeSummary
                                             key={i}
                                             changes={b.changes}
                                           />
-                                        ) : null,
-                                      )}
-                                    </div>
-                                  </details>
+                                        );
+                                      }
+                                      return null;
+                                    })}
+                                  </div>
                                 );
                               })}
-                            </div>
-                            <div className="mt-2 pt-2 border-t border-border/20">
+                              </div>
+                            </details>
+                            <div className="helix-answer mt-3">
                               {answerSegments.map((seg, si) => {
-                                if (seg.kind === "text") {
-                                  return (
-                                    <div
-                                      key={si}
-                                      style={{ fontSize: transcriptFontSize }}
-                                    >
-                                      {seg.blocks.map((b, i) => {
-                                        if (b.type !== "text") return null;
+                                return (
+                                  <div key={si} className="space-y-1">
+                                    {seg.blocks.map((b, i) => {
+                                      if (b.type === "text") {
                                         return (
                                           <div
                                             key={i}
@@ -8582,124 +8608,43 @@ export function AgentFlowPanel() {
                                             )}
                                           </div>
                                         );
-                                      })}
-                                    </div>
-                                  );
-                                }
-                                if (seg.kind === "thinking") {
-                                  const firstBlock = seg.blocks[0];
-                                  const firstContent =
-                                    firstBlock && "content" in firstBlock
-                                      ? String(firstBlock.content)
-                                      : "";
-                                  const thinkingDone =
-                                    !streamingActive ||
-                                    si < answerSegments.length - 1;
-                                  if (thinkingDone) {
-                                    return null;
-                                  }
-                                  return (
-                                    <details
-                                      key={si}
-                                      className="mb-2 mt-3 group/details"
-                                    >
-                                      <summary
-                                        className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors"
-                                        style={{ fontSize: transcriptFontSize }}
-                                      >
-                                        <span>
-                                          {thinkingDone
-                                            ? "思考完成"
-                                            : isReconnecting
-                                              ? "重连"
-                                              : extractKaomojiStatus(
-                                                  firstContent,
-                                                ).status || "思考中"}
-                                        </span>
-                                        <svg
-                                          className="size-3.5 transition-transform group-open/details:rotate-90"
-                                          viewBox="0 0 24 24"
-                                          fill="none"
-                                          stroke="currentColor"
-                                          strokeWidth="2"
-                                        >
-                                          <path d="m9 18 6-6-6-6" />
-                                        </svg>
-                                      </summary>
-                                      <div
-                                        className="mt-1 pl-3 border-l-2 border-border/60 text-foreground/50 break-all leading-relaxed thinking-cap thinking-scroll"
-                                        style={{ fontSize: transcriptFontSize }}
-                                      >
-                                        {seg.blocks.map((b, i) => {
-                                          const content =
-                                            "content" in b
-                                              ? String(b.content)
-                                              : "";
-                                          return (
-                                            <div key={i}>
-                                              {conversationSearchOpen &&
-                                              conversationSearchQuery.trim() ? (
-                                                <HighlightText
-                                                  text={normalizeAcpContentRaw(
-                                                    content,
-                                                  )}
-                                                  query={
-                                                    conversationSearchQuery
-                                                  }
-                                                  active={false}
-                                                />
-                                              ) : (
-                                                <HelixMarkdown
-                                                  text={normalizeAcpContentRaw(
-                                                    content,
-                                                  )}
-                                                />
-                                              )}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </details>
-                                  );
-                                }
-                                return (
-                                  <details
-                                    key={si}
-                                    className="mb-2 mt-3 group/details"
-                                  >
-                                    <summary
-                                      className="text-foreground/35 cursor-pointer hover:text-foreground/55 select-none flex items-center gap-1 list-none transition-colors"
-                                      style={{ fontSize: transcriptFontSize }}
-                                    >
-                                      <span>任务执行</span>
-                                      <svg
-                                        className="size-3.5 transition-transform group-open/details:rotate-90"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        strokeWidth="2"
-                                      >
-                                        <path d="m9 18 6-6-6-6" />
-                                      </svg>
-                                    </summary>
-                                    <div className="mt-1 pl-3 space-y-1">
-                                      {seg.blocks.map((b, i) =>
-                                        b.type === "tool_group" ? (
+                                      }
+                                      if (b.type === "thinking") {
+                                        const content =
+                                          "content" in b ? String(b.content) : "";
+                                        if (!content.trim()) return null;
+                                        return (
+                                          <ThinkingFold
+                                            key={i}
+                                            content={content}
+                                            fontSize={transcriptFontSize}
+                                            searchOpen={conversationSearchOpen}
+                                            searchQuery={conversationSearchQuery}
+                                            isSearchActive={false}
+                                          />
+                                        );
+                                      }
+                                      if (b.type === "tool_group") {
+                                        return (
                                           <InlineToolGroup
                                             key={i}
                                             steps={b.steps}
                                             isRunning={isRunning}
                                             fontSize={transcriptFontSize}
                                           />
-                                        ) : b.type === "file_change" ? (
+                                        );
+                                      }
+                                      if (b.type === "file_change") {
+                                        return (
                                           <FileChangeSummary
                                             key={i}
                                             changes={b.changes}
                                           />
-                                        ) : null,
-                                      )}
-                                    </div>
-                                  </details>
+                                        );
+                                      }
+                                      return null;
+                                    })}
+                                  </div>
                                 );
                               })}
                             </div>
@@ -8778,7 +8723,7 @@ export function AgentFlowPanel() {
         <div className="flex justify-center shrink-0 -my-1 relative z-10">
           <button
             onClick={jumpToBottom}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-muted/80 hover:bg-muted border border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground hover:text-foreground transition-all duration-200 shadow-sm backdrop-blur-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-muted hover:bg-accent border border-border ui-text-sm2 text-muted-foreground hover:text-foreground transition-all duration-200 shadow-sm"
           >
             <ArrowDown className="size-3.5" />
           </button>

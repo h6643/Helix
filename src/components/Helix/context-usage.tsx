@@ -406,8 +406,9 @@ export function ContextUsageIndicator() {
   // (app/gateway restarted, or the conversation was never run this session) fall
   // fallback to the locally persisted per-conversation store
   // (contextUsage[currentSessionId]) so the ring does NOT reset to 0 after a
-  // restart. The snapshot is written in agent-flow-panel.tsx on
-  // `usage_prompt_complete`. (No client-side estimation - real saved values.)
+  // restart. The snapshot is written by usage_prompt_complete (实测) AND
+  // captureContextBreakdown (max 合并下一条 prompt 的真实估算).
+  // (No client-side estimation - real saved values.)
   const localCtx = useHelixStore((s) =>
     s.currentSessionId ? s.contextUsage[s.currentSessionId] : undefined,
   );
@@ -415,10 +416,10 @@ export function ContextUsageIndicator() {
     s.currentSessionId ? s.estimatedTokens[s.currentSessionId] : undefined,
   );
   const isChatLoading = useHelixStore((s) => s.isChatLoading);
-  // 统一口径：环读数以本地每对话快照（usage_prompt_complete 落盘）为唯一来源，
-  // 不再与弹窗 RPC 的 anchored 读数做 max() 合并——两者语义不同
-  // （last_prompt_tokens vs prompt+completion+增量），合并导致「开弹窗跳升、
-  // 关弹窗回落」的乱跳。后端 RPC 只用来取分类明细与触发自动压缩。
+  // 统一口径：环读数以本地每对话快照为唯一渲染来源（usage_prompt_complete
+  // 实测值与 captureContextBreakdown 的 max 合并写回——后两者同语义，都是
+  // 「下一条 prompt 的真实上下文」）。弹窗 RPC 不直接喂环：它通过
+  // captureContextBreakdown 落盘后再反映到环，避免开/关弹窗读数乱跳。
   //
   // 如果请求正在进行中（isChatLoading），且有估算值，显示估算值（带 ~ 前缀）。
   // 请求完成后，显示真实的 context_used 值。

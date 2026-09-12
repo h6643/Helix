@@ -8,16 +8,22 @@ import {
   ChevronLeft,
   Search,
   X,
+  GripVertical,
   Globe,
   Keyboard,
-  GitBranch,
   Zap,
   Bot,
   Activity,
   Workflow,
   RefreshCw,
 } from "lucide-react";
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, {
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+  useMemo,
+} from "react";
 import { Button } from "@/components/ui/button";
 import { pushModelConfig } from "@/lib/config-sync";
 import {
@@ -35,7 +41,6 @@ import { useGatewayStore } from "@/stores/gateway-store";
 import { AgentsSettings } from "./agents-settings";
 import { AppearanceSettingsPanel } from "./appearance-settings-panel";
 import { GeneralSettingsPanel } from "./general-settings-panel";
-import { GitSettingsPanel } from "./git-settings-panel";
 import { HookSettings } from "./hook-settings";
 import { McpEditorForm, type McpFormData } from "./mcp-editor-form";
 import { ShortcutsPage } from "./shortcuts-page";
@@ -47,7 +52,6 @@ import {
 } from "./usage-stats";
 import { PopupSelect, SettingGroup } from "./settings-ui";
 import { VisionModelSettings } from "./vision-model-settings";
-import { WebSearchSettings } from "./web-search-settings";
 
 function SectionTitle({
   children,
@@ -108,12 +112,10 @@ type SettingsPage =
   | "shortcuts"
   | "mcp"
   | "archive"
-  | "git"
   | "hook"
   | "usage"
   | "help"
-  | "agents"
-  | "websearch";
+  | "agents";
 
 interface NavItem {
   id: SettingsPage;
@@ -147,10 +149,8 @@ const NAV_GROUPS: NavGroup[] = [
   {
     title: "集成",
     items: [
-      { id: "git", label: "Git", icon: GitBranch },
       { id: "hook", label: "Hooks", icon: Workflow },
       { id: "archive", label: "历史归档", icon: Archive },
-      { id: "websearch", label: "搜索引擎", icon: Search },
     ],
   },
 ];
@@ -227,21 +227,6 @@ export function ApiSettings({
     mcpServers,
     removeMcpServer,
     toggleMcpServer,
-    // Git
-    gitAutoCommit,
-    setGitAutoCommit,
-    gitAutoPush,
-    setGitAutoPush,
-    gitPushConfirm,
-    setGitPushConfirm,
-    gitAutoBranch,
-    setGitAutoBranch,
-    gitRemoteUrl,
-    setGitRemoteUrl,
-    gitCommitTemplate,
-    setGitCommitTemplate,
-    gitBranchPrefix,
-    setGitBranchPrefix,
     // Helix config-backed toggles
     personality,
     setPersonality,
@@ -291,10 +276,12 @@ export function ApiSettings({
   // this handle to resize — which also resizes the main sidebar live.
   const SETTINGS_NAV_MIN = 200;
   const SETTINGS_NAV_MAX = 500;
+  const uiFontSize = useHelixStore((s) => s.fontSize);
   const navWidth = Math.max(
     SETTINGS_NAV_MIN,
     Math.min(SETTINGS_NAV_MAX, sidebarWidth),
   );
+  const navVisualWidth = navWidth * (uiFontSize / 14);
   const [isResizing, setIsResizing] = useState(false);
   const resizeStartX = useRef(0);
   const resizeStartW = useRef(navWidth);
@@ -429,6 +416,98 @@ export function ApiSettings({
   const [showAddModelModal, setShowAddModelModal] = useState(false);
   type ModelTab = "main" | "vision";
   const [modelTab, setModelTab] = useState<ModelTab>("main");
+
+  // ── Pi-backed model list ──────────────────────────────────────────────────
+  // The dropdowns used to render only Helix's own static provider table plus
+  // whatever a manual `/v1/models` probe returned. Neither reflects what the Pi
+  // backend can actually run (Pi resolves models from ~/.pi/agent/settings.json
+  // + custom-providers.json), so a user could pick a model Pi has never heard
+  // of. Pull Pi's authoritative list via the `get_available_models` RPC.
+  type PiModel = {
+    id: string;
+    provider: string;
+    name?: string;
+    baseUrl?: string;
+    api?: string;
+    reasoning?: boolean;
+    contextWindow?: number;
+  };
+  const [piModels, setPiModels] = useState<PiModel[]>([]);
+  const [isLoadingPiModels, setIsLoadingPiModels] = useState(false);
+
+  const loadPiModels = useCallback(async () => {
+    if (!isElectron()) return;
+    setIsLoadingPiModels(true);
+    try {
+      const r = await window.electron.helix.piGetAvailableModels();
+      const list = Array.isArray(r?.models) ? (r.models as PiModel[]) : [];
+      setPiModels(list.filter((m) => m?.id && m?.provider));
+    } catch {
+      // Pi may still be spawning (gateway not INITIALIZED yet) — degrade to the
+      // manual probe path silently instead of firing a scary toast on open.
+      setPiModels([]);
+    } finally {
+      setIsLoadingPiModels(false);
+    }
+  }, []);
+
+  // Refresh whenever the add-model form opens so the list can't go stale after
+  // the user edits ~/.pi/agent/custom-providers.json outside Helix.
+  useEffect(() => {
+    if (showAddModelModal) void loadPiModels();
+  }, [showAddModelModal, loadPiModels]);
+
+  /** Providers Pi actually has configured, with their model counts. */
+  const piProviders = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of piModels) {
+      counts.set(m.provider, (counts.get(m.provider) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([id, count]) => ({ id, count }));
+  }, [piModels]);
+
+  /** Provider dropdown: Pi's live providers first (they're the ones that will
+   *  actually work), then the static table, then the custom escape hatch. */
+  const providerOptions = useMemo(() => {
+    const piIds = new Set(piProviders.map((p) => p.id));
+    return [
+      ...piProviders.map((p) => ({
+        label: `${p.id} · Pi (${p.count})`,
+        value: p.id,
+      })),
+      ...ALL_PROVIDERS.filter((p) => !piIds.has(p.id)).map((p) => ({
+        label: `${p.name} (${p.id})`,
+        value: p.id,
+      })),
+      { label: "＋ 自定义", value: CUSTOM_PROVIDER_ID },
+    ];
+  }, [piProviders]);
+
+  /** Pi model ids scoped to the selected provider. Helix prefixes custom
+   *  providers with `custom:` to avoid colliding with built-in env-var names,
+   *  while Pi stores them under the bare name — strip it before matching. */
+  const piModelIds = useMemo(() => {
+    const prov = localConfig.provider.trim().replace(/^custom:/, "");
+    const scoped = prov
+      ? piModels.filter((m) => m.provider === prov)
+      : piModels;
+    return [...new Set(scoped.map((m) => m.id))];
+  }, [piModels, localConfig.provider]);
+
+  /** Union of the endpoint probe result and Pi's configured list, so neither
+   *  source hides the other (probe first — the user asked for it explicitly). */
+  const modelOptions = useMemo(() => {
+    const out = [...availableModels];
+    for (const id of piModelIds) if (!out.includes(id)) out.push(id);
+    return out;
+  }, [availableModels, piModelIds]);
+
+  /** Ids that came from Pi and were NOT in the probe result — tagged in the UI
+   *  so the user can tell which entries the backend already knows about. */
+  const piOnlyIds = useMemo(
+    () => new Set(piModelIds.filter((id) => !availableModels.includes(id))),
+    [piModelIds, availableModels],
+  );
 
   const applyYamlKey = useCallback(
     async (key: string, value: boolean) => {
@@ -619,28 +698,37 @@ export function ApiSettings({
   }, [loadArchives]);
 
   // ── API handlers ──────────────────────────────────────────────────────────
-  const handleSelectProvider = useCallback((providerId: string) => {
-    setAvailableModels([]);
-    if (providerId === CUSTOM_PROVIDER_ID) {
-      setIsCustomProvider(true);
+  const handleSelectProvider = useCallback(
+    (providerId: string) => {
+      setAvailableModels([]);
+      if (providerId === CUSTOM_PROVIDER_ID) {
+        setIsCustomProvider(true);
+        setLocalConfig((prev) => ({
+          ...prev,
+          provider: "",
+          baseUrl: "",
+          model: "",
+        }));
+        return;
+      }
+      setIsCustomProvider(false);
+      setCustomInputFocused(false);
+      const provider = ALL_PROVIDERS.find((p) => p.id === providerId);
+      // Pi's own entries win: they carry the endpoint the backend will really
+      // dial, which for gateway providers differs from Helix's static table.
+      const piForProvider = piModels.filter((m) => m.provider === providerId);
       setLocalConfig((prev) => ({
         ...prev,
-        provider: "",
-        baseUrl: "",
-        model: "",
+        provider: providerId,
+        baseUrl:
+          piForProvider.find((m) => m.baseUrl)?.baseUrl ||
+          getBaseUrl(providerId) ||
+          prev.baseUrl,
+        model: piForProvider[0]?.id || provider?.models[0] || prev.model,
       }));
-      return;
-    }
-    setIsCustomProvider(false);
-    setCustomInputFocused(false);
-    const provider = ALL_PROVIDERS.find((p) => p.id === providerId);
-    setLocalConfig((prev) => ({
-      ...prev,
-      provider: providerId,
-      baseUrl: getBaseUrl(providerId) || prev.baseUrl,
-      model: provider?.models[0] || prev.model,
-    }));
-  }, []);
+    },
+    [piModels],
+  );
 
   const handleCustomProviderChange = useCallback((providerValue: string) => {
     setLocalConfig((prev) => ({ ...prev, provider: providerValue }));
@@ -674,8 +762,15 @@ export function ApiSettings({
   const [apiView, setApiView] = useState<"list" | "edit">("list");
 
   const handleFetchModels = useCallback(async () => {
+    // Pi's list needs no credentials, so refresh it unconditionally — it is the
+    // list the backend can actually serve.
+    void loadPiModels();
     if (!localConfig.apiKey.trim() || !localConfig.baseUrl.trim()) {
-      showToast({ type: "warning", title: "请先填写 Base URL 和 API Key" });
+      // Only nag when Pi gave us nothing either; otherwise the dropdown is
+      // already usable and a warning would just be noise.
+      if (piModels.length === 0) {
+        showToast({ type: "warning", title: "请先填写 Base URL 和 API Key" });
+      }
       return;
     }
     setIsLoadingModels(true);
@@ -831,6 +926,15 @@ export function ApiSettings({
       showToast({ type: "error", title: "请填写模型名称" });
       return;
     }
+    if (
+      localConfig.contextWindow !== undefined &&
+      (!Number.isFinite(localConfig.contextWindow) ||
+        !Number.isInteger(localConfig.contextWindow) ||
+        localConfig.contextWindow <= 0)
+    ) {
+      showToast({ type: "error", title: "上下文窗口必须是正整数" });
+      return;
+    }
     const keyMissing = !localConfig.apiKey.trim();
     // Store ONLY the single chosen model — NOT the full fetched list. The model
     // list is fetched live when the selector is opened (renderModelSelector), so
@@ -915,6 +1019,7 @@ export function ApiSettings({
               : "custom",
           baseUrl: localConfig.baseUrl,
           apiKey: localConfig.apiKey,
+          contextWindow: localConfig.contextWindow,
         };
         await helix.setConfig(cfg);
         // Persist the active profile so the next cold start re-asserts it
@@ -1308,12 +1413,12 @@ export function ApiSettings({
       pushNavigation({ type: "chat", sessionId: session.id });
       // 恢复 = 取消归档：把 isArchived 置回 false，让会话回到侧边栏主列表。
       // 之前只加载内容不改归档标记 → toast 显示"已恢复"但会话仍留在归档里，
-      // 主列表看不到 → "实际没效果"。
+      // 主列表看不到 → "实际没效果"。恢复不是新对话——savedAt 保持最后一条
+      // 消息的时间。
       if (session.isArchived) {
         await persistence.saveSession({
           ...session,
           isArchived: false,
-          savedAt: Date.now(),
         });
       }
       await persistToStorage();
@@ -1600,30 +1705,11 @@ export function ApiSettings({
       case "api":
         return (
           <div className="space-y-6">
-            {/* Title bar with sub-tabs */}
+            {/* Title + add model */}
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1 bg-muted/60 rounded-full p-1">
-                <button
-                  onClick={() => setModelTab("main")}
-                  className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
-                    modelTab === "main"
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  主模型
-                </button>
-                <button
-                  onClick={() => setModelTab("vision")}
-                  className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
-                    modelTab === "vision"
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  视觉模型
-                </button>
-              </div>
+              <h1 className="ui-title font-semibold text-foreground tracking-tight">
+                模型设置
+              </h1>
               {modelTab === "main" && !showAddModelModal && (
                 <button
                   onClick={() => {
@@ -1652,6 +1738,30 @@ export function ApiSettings({
                   关闭
                 </button>
               )}
+            </div>
+
+            {/* Sub-tabs: 对话 / 视觉 */}
+            <div className="flex items-center gap-1 bg-muted/60 rounded-full p-1 w-fit">
+              <button
+                onClick={() => setModelTab("main")}
+                className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
+                  modelTab === "main"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                对话
+              </button>
+              <button
+                onClick={() => setModelTab("vision")}
+                className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
+                  modelTab === "vision"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                视觉
+              </button>
             </div>
 
             {modelTab === "main" ? (
@@ -1759,6 +1869,28 @@ export function ApiSettings({
                       </div>
                     </div>
 
+                    {/* Context window */}
+                    <div>
+                      <label className="block ui-text font-medium text-foreground mb-1.5">
+                        上下文窗口
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1000}
+                        value={localConfig.contextWindow ?? ""}
+                        onChange={(e) => {
+                          const raw = e.target.value.trim();
+                          setLocalConfig((prev) => ({
+                            ...prev,
+                            contextWindow: raw ? Number(raw) : undefined,
+                          }));
+                        }}
+                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                      />
+                      <p className="mt-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70"></p>
+                    </div>
+
                     {/* Model */}
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
@@ -1806,9 +1938,18 @@ export function ApiSettings({
                                   key={model}
                                   type="button"
                                   onClick={() => {
+                                    const metadata = piModels.find(
+                                      (m) =>
+                                        m.id === model &&
+                                        m.provider ===
+                                          localConfig.provider
+                                            .trim()
+                                            .replace(/^custom:/, ""),
+                                    );
                                     setLocalConfig((prev) => ({
                                       ...prev,
                                       model,
+                                      contextWindow: metadata?.contextWindow,
                                     }));
                                     setShowModelDropdown(false);
                                   }}
@@ -2113,9 +2254,6 @@ export function ApiSettings({
           </div>
         );
 
-      case "git":
-        return <GitSettingsPanel />;
-
       case "usage":
         return (
           <div className="max-w-3xl space-y-6">
@@ -2146,49 +2284,8 @@ export function ApiSettings({
                       return next;
                     })
                   }
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
-                      关于
-                    </span>
-                  </div>
-                </button>
-                <div
-                  className={`p-4 space-y-4 ${collapsedSections.has("about") ? "hidden" : ""}`}
-                >
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[length:var(--helix-transcript-size)] text-muted-foreground">
-                        版本
-                      </span>
-                      <span className="text-[length:var(--helix-transcript-size)] font-mono text-foreground">
-                        v{appVersion || "0.1.2"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-[length:var(--helix-transcript-size)] text-muted-foreground">
-                        许可证
-                      </span>
-                      <span className="text-[length:var(--helix-transcript-size)] text-foreground">
-                        MIT License
-                      </span>
-                    </div>
-                  </div>
-                  <div className="pt-2 border-t border-border/50 flex justify-end">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        window.open(
-                          "https://github.com/helix-ai/helix",
-                          "_blank",
-                        );
-                      }}
-                    >
-                      访问 GitHub
-                    </Button>
-                  </div>
-                </div>
+                ></button>
+                <div></div>
               </div>
             </section>
           </div>
@@ -2196,25 +2293,23 @@ export function ApiSettings({
 
       case "agents":
         return <AgentsSettings />;
-      case "websearch":
-        return <WebSearchSettings />;
     }
   };
 
   return (
-    <div className="fixed top-10 left-0 right-0 bottom-0 z-50 flex bg-background">
+    <div className="flex-1 min-h-0 flex flex-row">
       {/* Left nav — width synced with the main sidebar */}
       {showSidebar && (
         <div
-          className={`relative flex flex-col shrink-0 h-full overflow-hidden ${isResizing ? "" : "transition-[width] duration-200 ease-out"}`}
-          style={{ width: sidebarCollapsed ? 48 : navWidth }}
+          className={`helix-sidebar relative flex flex-col shrink-0 h-full overflow-hidden ${isResizing ? "" : "transition-[width] duration-200 ease-out"}`}
+          style={{ width: sidebarCollapsed ? 48 : navVisualWidth }}
         >
           {sidebarCollapsed ? (
             <div className="flex-1 flex flex-col items-center pt-2 gap-1 overflow-y-auto">
               <button
                 onClick={() => useHelixStore.getState().toggleSettings()}
                 data-tip="返回"
-                className="p-2.5 rounded-lg text-foreground/60 hover:text-foreground hover:bg-muted/50 transition-colors"
+                className="p-2.5 rounded-lg text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40 transition-colors"
               >
                 <ChevronLeft className="size-[18px]" />
               </button>
@@ -2228,8 +2323,8 @@ export function ApiSettings({
                   data-tip={item.label}
                   className={`p-2.5 rounded-lg transition-colors ${
                     page === item.id
-                      ? "bg-muted text-foreground"
-                      : "text-foreground/60 hover:text-foreground hover:bg-muted/50"
+                      ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
+                      : "text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40"
                   }`}
                 >
                   <item.icon className="size-[18px]" />
@@ -2241,12 +2336,12 @@ export function ApiSettings({
               <div className="px-4 pt-2 pb-1 space-y-2">
                 <button
                   onClick={() => useHelixStore.getState().toggleSettings()}
-                  className="flex items-center gap-2 w-full px-3 py-2 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/60 hover:text-foreground hover:bg-muted/80 rounded-xl transition-colors"
+                  className="flex items-center gap-2 w-full px-3 py-2 text-[calc(var(--helix-transcript-size)*0.9286)] text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 rounded-xl transition-colors"
                 >
                   <ChevronLeft className="size-4" />
                   返回
                 </button>
-                <div className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-lg border border-border/50 bg-transparent transition-all duration-150 focus-within:border-primary/40 focus-within:shadow-[0_0_0_3px_color-mix(in_oklch,var(--primary)_10%,transparent)] hover:border-border/70">
+                <div className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-lg border border-sidebar-border/60 bg-sidebar/40 transition-all duration-150 focus-within:border-primary/40 focus-within:shadow-[0_0_0_3px_color-mix(in_oklch,var(--primary)_10%,transparent)] hover:border-sidebar-border">
                   <Search className="size-3.5 text-muted-foreground/25 shrink-0" />
                   <input
                     ref={navSearchRef}
@@ -2259,12 +2354,12 @@ export function ApiSettings({
                       }
                     }}
                     placeholder="搜索设置..."
-                    className="flex-1 bg-transparent text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground placeholder:text-muted-foreground/30 focus:outline-none min-w-0"
+                    className="flex-1 bg-transparent text-[calc(var(--helix-transcript-size)*0.9286)] text-sidebar-foreground placeholder:text-sidebar-foreground/30 focus:outline-none min-w-0"
                   />
                   {navSearch && (
                     <button
                       onClick={() => setNavSearch("")}
-                      className="text-muted-foreground/20 hover:text-foreground/60 shrink-0"
+                      className="text-sidebar-foreground/25 hover:text-sidebar-foreground/60 shrink-0"
                     >
                       <X className="size-3" />
                     </button>
@@ -2283,7 +2378,7 @@ export function ApiSettings({
                   : NAV_GROUPS;
                 if (!filtered.length)
                   return (
-                    <div className="px-5 py-8 text-center text-[calc(var(--helix-transcript-size)*0.9286)] text-muted-foreground/40">
+                    <div className="px-5 py-8 text-center text-[calc(var(--helix-transcript-size)*0.9286)] text-sidebar-foreground/40">
                       未找到匹配项
                     </div>
                   );
@@ -2291,7 +2386,7 @@ export function ApiSettings({
                   <nav className="flex-1 overflow-y-auto pt-1 pb-2">
                     {filtered.map((group) => (
                       <div key={group.title} className="mb-2">
-                        <p className="px-5 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold text-muted-foreground/40 uppercase tracking-[0.12em] select-none">
+                        <p className="px-5 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold text-sidebar-foreground/40 uppercase tracking-[0.12em] select-none">
                           {group.title}
                         </p>
                         <div className="space-y-0.5 px-2">
@@ -2306,10 +2401,10 @@ export function ApiSettings({
                                 });
                                 setNavSearch("");
                               }}
-                              className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] rounded-md transition-colors duration-100 ${
+                              className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] rounded-lg transition-colors duration-100 ${
                                 page === item.id
-                                  ? "bg-muted text-foreground font-medium"
-                                  : "text-foreground/65 hover:bg-muted/50 hover:text-foreground"
+                                  ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
+                                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
                               }`}
                             >
                               <item.icon className="size-4" />
@@ -2328,8 +2423,8 @@ export function ApiSettings({
           {/* Resize handle — drag to resize the settings nav (also resizes the
             main sidebar, since they share one width). */}
           {!sidebarCollapsed && (
-            <div
-              className={`absolute top-0 -right-1 w-2 h-full cursor-col-resize z-30 group ${
+              <div
+                className={`absolute top-0 -right-1 w-2 h-full cursor-col-resize z-30 group ${
                 isResizing ? "bg-primary/20" : ""
               }`}
               onMouseDown={startNavResize}
@@ -2341,15 +2436,18 @@ export function ApiSettings({
                     : "bg-transparent group-hover:bg-border/40"
                 }`}
               />
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <GripVertical className="size-3 text-primary/60" />
+              </div>
             </div>
           )}
         </div>
       )}
 
-      {/* Right content — floating card */}
-      <div className="flex-1 mt-3 mb-px ml-0 mr-px rounded-2xl border-0 bg-card shadow-2xl shadow-primary/5 overflow-y-auto relative">
+      {/* Right content — flat card, border-separated from the nav sidebar */}
+      <div className="helix-surface flex-1 overflow-y-auto relative">
         <div className="flex justify-center">
-          <div className="px-8 pt-5 pb-10 w-full max-w-3xl">
+          <div className="px-8 pt-10 pb-10 w-full max-w-3xl">
             {renderContent()}
           </div>
         </div>

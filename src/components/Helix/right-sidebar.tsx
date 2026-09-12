@@ -323,7 +323,7 @@ export function RightSidebar() {
           row (the editor's own per-file tab bar was removed so the file name is
           never shown twice). Tabs compress / truncate as more are added. */}
       {(stripPages.length > 0 || editorTabs.length > 0) && (
-        <div className="flex items-end gap-0.5 px-1 pt-1 h-9 shrink-0 bg-card border-b border-border/40">
+        <div className="flex items-end gap-0.5 px-1 mt-10 h-9 shrink-0 bg-card border-b border-border/40">
           {stripPages.map((p) => {
             const label =
               p.kind === "browser"

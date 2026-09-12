@@ -1,10 +1,10 @@
-//! Vision model IPC — read/write `~/.codex/vision.json` and call the model.
+//! Vision model IPC — read/write `~/.pi/agent/helix/vision.json` and call the model.
 //!
 //! The vision model is invoked directly (OpenAI-compatible `/chat/completions`)
 //! to turn an image into a text description before it reaches the main model
 //! (mirrors the helix-era behaviour, saving the main model's multimodal tokens).
 //! It is persisted in its own JSON file rather than config.yaml so it never
-//! collides with the codex app-server's config and needs no YAML deep-merge.
+//! needs a YAML deep-merge.
 
 use crate::paths::helix_data_dir;
 use serde_json::{json, Value};

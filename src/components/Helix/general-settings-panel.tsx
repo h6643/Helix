@@ -10,7 +10,6 @@ import {
   PopupSelect,
 } from "./settings-ui";
 import { electronApp, electronDialog } from "@/lib/electron-bridge";
-import { CodingContextSetting } from "./agents-settings";
 
 export function GeneralSettingsPanel() {
   const showToast = useHelixStore((s) => s.showToast);
@@ -189,8 +188,6 @@ export function GeneralSettingsPanel() {
   return (
     <div className="space-y-4">
       <SectionHeading>常规</SectionHeading>
-
-      <CodingContextSetting />
 
       <SettingGroup>
         <SettingRow label="HTTP 代理" hint="模型、MCP出口流量将经此代理">

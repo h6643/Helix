@@ -19,9 +19,7 @@ import { parseChineseSchedule } from "@/lib/schedule-utils";
 import { useHelixStore, type ScheduledTask } from "@/stores/helix-store";
 import { useGatewayStore } from "@/stores/gateway-store";
 
-interface ScheduledTasksPanelProps {
-  onClose: () => void;
-}
+interface ScheduledTasksPanelProps {}
 
 function cn(...classes: Array<string | false | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -374,25 +372,7 @@ function TaskItem({
   );
 }
 
-const TEMPLATE_SUGGESTIONS = [
-  {
-    label: "每日代码总结",
-    prompt: "总结一下今天的代码改动和项目进展",
-    schedule: "every day at 18:00",
-  },
-  {
-    label: "定时提醒",
-    prompt: "提醒我开始专注工作",
-    schedule: "every day at 9:00",
-  },
-  {
-    label: "健康检查",
-    prompt: "检查项目是否有异常、错误日志或未提交改动",
-    schedule: "every hour",
-  },
-];
-
-export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
+export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
   const {
     scheduledTasks,
     addScheduledTask,
@@ -402,7 +382,6 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
     showToast,
     selectedWorkDir,
   } = useHelixStore();
-  const [activeTab, setActiveTab] = useState<"tasks" | "templates">("tasks");
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isAdding, setIsAdding] = useState(false);
@@ -588,183 +567,114 @@ export function ScheduledTasksPanel({ onClose }: ScheduledTasksPanelProps) {
     }
   }, [selectedIds.size, filteredTasks, filteredTasks.length]);
 
-  const applyTemplate = (tpl: (typeof TEMPLATE_SUGGESTIONS)[0]) => {
-    handleAdd(tpl.label, tpl.prompt, tpl.schedule);
-    setActiveTab("tasks");
-  };
-
   return (
     <div className="h-full w-full flex flex-col bg-background">
-      {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 shrink-0">
-        <div className="flex items-center gap-1 bg-muted/60 rounded-full p-1">
+      {/* Header — big title + add action, search below (same layout as the
+          plugin center). 40px top padding clears the window controls. */}
+      <div className="px-6 pt-10 pb-4 shrink-0 border-b border-border/40">
+        <div className="flex items-center justify-between">
+          <h1 className="ui-title font-semibold text-foreground tracking-tight">
+            计划任务
+          </h1>
           <button
-            onClick={() => setActiveTab("tasks")}
-            className={cn(
-              "px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors",
-              activeTab === "tasks"
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-          >
-            任务
-          </button>
-          <button
-            onClick={() => setActiveTab("templates")}
-            className={cn(
-              "px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors",
-              activeTab === "templates"
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-          >
-            模板
-          </button>
-        </div>
-
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => {
-              setActiveTab("tasks");
-              setIsAdding(true);
-            }}
+            onClick={() => setIsAdding(true)}
             className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
-            data-tip="添加"
+            data-tip="添加计划"
           >
             <Plus className="size-4" />
           </button>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
-            data-tip="关闭"
-          >
-            <X className="size-4" />
-          </button>
+        </div>
+
+        <div className="relative mt-3">
+          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="搜索计划任务"
+            className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+          />
         </div>
       </div>
 
       <ScrollArea className="flex-1">
-        <div className="max-w-3xl mx-auto px-6 pt-2 pb-8">
-          {activeTab === "tasks" ? (
-            <>
-              {/* Search */}
-              <div className="relative mb-6">
-                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="搜索计划任务"
-                  className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
-                />
+        <div className="max-w-3xl mx-auto px-6 pt-4 pb-8">
+          {/* Current section */}
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <h2 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
+                  当前
+                </h2>
+                {filteredTasks.length > 0 && (
+                  <label className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={
+                        selectedIds.size === filteredTasks.length &&
+                        filteredTasks.length > 0
+                      }
+                      onChange={handleSelectAll}
+                      className="size-3.5 rounded border-border/60 text-primary focus:ring-primary/20"
+                    />
+                    全选
+                  </label>
+                )}
               </div>
-
-              {/* Current section */}
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3">
-                    <h2 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
-                      当前
-                    </h2>
-                    {filteredTasks.length > 0 && (
-                      <label className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={
-                            selectedIds.size === filteredTasks.length &&
-                            filteredTasks.length > 0
-                          }
-                          onChange={handleSelectAll}
-                          className="size-3.5 rounded border-border/60 text-primary focus:ring-primary/20"
-                        />
-                        全选
-                      </label>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {selectedIds.size > 0 && (
-                      <button
-                        onClick={handleDeleteSelected}
-                        className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-500 hover:text-red-600 transition-colors"
-                      >
-                        <Trash2 className="size-3" />
-                        删除 ({selectedIds.size})
-                      </button>
-                    )}
-                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
-                      {enabledCount} 运行中
-                    </span>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  {filteredTasks.length === 0 && !isAdding ? (
-                    <div className="text-center py-14">
-                      <Clock className="size-10 text-muted-foreground/20 mx-auto mb-3" />
-                      <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground">
-                        暂无定时任务
-                      </p>
-                      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-1">
-                        添加定时任务，agent 将按时自动执行
-                      </p>
-                    </div>
-                  ) : (
-                    <>
-                      {filteredTasks.map((task) => (
-                        <TaskItem
-                          key={task.id}
-                          task={task}
-                          selectedWorkDir={selectedWorkDir}
-                          onToggle={() => handleToggle(task)}
-                          onDelete={() => handleDelete(task)}
-                          onUpdate={(updates) =>
-                            updateScheduledTask(task.id, updates)
-                          }
-                          onRunNow={() => handleRunNow(task)}
-                          isSelected={selectedIds.has(task.id)}
-                          onToggleSelect={() => handleToggleSelect(task.id)}
-                        />
-                      ))}
-                      {isAdding && (
-                        <AddTaskForm
-                          onCancel={() => setIsAdding(false)}
-                          onAdd={handleAdd}
-                        />
-                      )}
-                    </>
-                  )}
-                </div>
-              </div>
-            </>
-          ) : (
-            <div>
-              <h2 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground mb-4">
-                模板
-              </h2>
-              <div className="space-y-2">
-                {TEMPLATE_SUGGESTIONS.map((tpl) => (
+              <div className="flex items-center gap-2">
+                {selectedIds.size > 0 && (
                   <button
-                    key={tpl.label}
-                    onClick={() => applyTemplate(tpl)}
-                    className="w-full text-left p-4 rounded-xl border border-border/30 bg-card/40 hover:bg-card/70 transition-colors"
+                    onClick={handleDeleteSelected}
+                    className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-500 hover:text-red-600 transition-colors"
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground/90">
-                        {tpl.label}
-                      </span>
-                      <Plus className="size-3.5 text-muted-foreground" />
-                    </div>
-                    <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-1">
-                      {tpl.prompt}
-                    </p>
-                    <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50 mt-2">
-                      {tpl.schedule}
-                    </p>
+                    <Trash2 className="size-3" />
+                    删除 ({selectedIds.size})
                   </button>
-                ))}
+                )}
+                <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
+                  {enabledCount} 运行中
+                </span>
               </div>
             </div>
-          )}
+
+            <div className="space-y-2">
+              {filteredTasks.length === 0 && !isAdding ? (
+                <div className="text-center py-14">
+                  <Clock className="size-10 text-muted-foreground/20 mx-auto mb-3" />
+                  <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground">
+                    暂无定时任务
+                  </p>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-1">
+                    添加定时任务，agent 将按时自动执行
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {filteredTasks.map((task) => (
+                    <TaskItem
+                      key={task.id}
+                      task={task}
+                      selectedWorkDir={selectedWorkDir}
+                      onToggle={() => handleToggle(task)}
+                      onDelete={() => handleDelete(task)}
+                      onUpdate={(updates) =>
+                        updateScheduledTask(task.id, updates)
+                      }
+                      onRunNow={() => handleRunNow(task)}
+                      isSelected={selectedIds.has(task.id)}
+                      onToggleSelect={() => handleToggleSelect(task.id)}
+                    />
+                  ))}
+                  {isAdding && (
+                    <AddTaskForm
+                      onCancel={() => setIsAdding(false)}
+                      onAdd={handleAdd}
+                    />
+                  )}
+                </>
+              )}
+            </div>
+          </div>
         </div>
       </ScrollArea>
     </div>

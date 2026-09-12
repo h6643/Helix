@@ -210,7 +210,7 @@ export function HookSettings() {
                           onChange={(e) =>
                             updateHook(hook.id, { command: e.target.value })
                           }
-                          placeholder="如 python3 ~/.codex/hooks/notify.py"
+                          placeholder="如 python3 ~/.pi/agent/helix/hooks/notify.py"
                           className="w-full px-2.5 py-1.5 bg-background/60 border border-border/20 rounded-md ui-text text-foreground text-center placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/40 font-mono transition-colors"
                         />
                       </div>

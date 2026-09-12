@@ -249,7 +249,7 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
   return (
     <div className="flex flex-col h-full w-full bg-background">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border/50">
+      <div className="flex items-center justify-between px-4 pr-36 py-3 border-b border-border/50">
         <div className="flex items-center gap-2">
           <Users className="size-4 text-primary" />
           <h2 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">

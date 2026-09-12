@@ -1,7 +1,6 @@
 //! Helix Tauri backend crate.
 
 mod app;
-mod codex_gateway;
 mod config;
 mod delegations;
 mod external;
@@ -14,6 +13,18 @@ mod mcp;
 mod memory;
 mod page_fetch;
 mod paths;
+mod pi_gateway;
+/// Test-only re-exports of pi_gateway's session-trim helpers (integration
+/// tests in tests/trim_session.rs). Not part of the app surface.
+/// NOT #[cfg(test)]: integration tests compile this crate as a dependency,
+/// where the lib's own test cfg is not set.
+#[doc(hidden)]
+pub mod pi_gateway_test_hooks {
+    pub use crate::pi_gateway::{
+        estimate_active_branch, estimate_message_tokens, trim_session_if_oversized,
+        TRIM_MARGIN_TOKENS,
+    };
+}
 mod profile;
 mod proxy;
 mod scheduled_tasks;
@@ -53,6 +64,21 @@ pub fn run() {
             // emit `helix:event` without threading a handle through every call.
             let _ = APP_HANDLE.set(app.handle().clone());
 
+            // Global AppState for async code paths (pi_gateway::send) that
+            // have no Tauri State<> parameter — must be set before the
+            // gateway spawns.
+            let _ = crate::state::APP_STATE.set(app_state.clone());
+
+            // One-time migration: legacy ~/.codex / ~/.helix → ~/.pi/agent/helix
+            // (rename/copy, best effort, only when no override is configured).
+            crate::paths::migrate_legacy_data_dir();
+
+            // Re-assert the Helix model selection into Pi's own config so a
+            // gateway respawn picks up the intended defaults (heals drift
+            // from manual edits to ~/.pi/agent/*.json).
+            // NOTE: with pi's files as the single source of truth this is no
+            // longer needed — read/write paths both point at pi directly.
+
             // Main window is created manually here (config has "create": false)
             // so we can attach the HTTP proxy to the renderer at creation time.
             // proxy_url is cross-platform: WebKitGTK (Linux) / WebView2
@@ -82,9 +108,11 @@ pub fn run() {
             // Apply the HTTP proxy to the renderer (WebKitGTK default context)
             // BEFORE the gateway spawns so the webview fetches already honor it.
             crate::proxy::apply_webview_proxy();
-            if let Err(e) = codex_gateway::spawn(&app_state) {
-                eprintln!("[Helix] Codex app-server failed to start: {e}");
-            }
+            std::thread::spawn(move || {
+                if let Err(e) = pi_gateway::spawn(&app_state) {
+                    eprintln!("[Helix] pi agent failed to start: {e}");
+                }
+            });
 
             // ── System tray ──────────────────────
             use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -157,7 +185,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            // agent backend (helix:* protocol → codex adapter)
+            // agent backend (helix:* protocol → pi adapter)
             helix::helix_send,
             helix::helix_notify,
             helix::helix_interrupt,
@@ -176,10 +204,8 @@ pub fn run() {
             helix::helix_list_memories,
             helix::helix_add_memory_entry,
             helix::helix_remove_memory_entry,
-            // Memory status & provider config
+            // Memory status
             helix::helix_get_memory_status,
-            helix::helix_get_memory_provider_config,
-            helix::helix_set_memory_provider_config,
             // Personality management
             helix::helix_list_personalities,
             helix::helix_set_personality,
@@ -306,6 +332,22 @@ pub fn run() {
             scheduled_tasks::helix_cron_create,
             scheduled_tasks::helix_cron_delete,
             scheduled_tasks::helix_cron_run,
+            // Pi agent commands (extensions/skills/prompts listing)
+            helix::pi_get_commands,
+            helix::pi_list_installed,
+            helix::pi_set_package_enabled,
+            helix::pi_get_available_models,
+            helix::pi_get_state,
+            helix::pi_set_model,
+            helix::pi_set_thinking_level,
+            helix::pi_set_thinking_level_all,
+            helix::pi_compact,
+            helix::pi_get_session_stats,
+            helix::pi_search_packages,
+            helix::pi_install_package,
+            helix::pi_uninstall_package,
+            helix::pi_check_updates,
+            helix::pi_package_latest,
             // gateway MCP servers (config.yaml mcp_servers, read/write)
             mcp::mcp_config_list,
             mcp::mcp_config_save,

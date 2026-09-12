@@ -264,7 +264,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center">
       <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        className="absolute inset-0 bg-black/60"
         onClick={onClose}
       />
       <div className="relative bg-card border border-border/60 rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[80vh] flex flex-col">

@@ -23,7 +23,7 @@ pub fn connect(
     let conn_id = format!("{}:{}@{}", username, host, port);
 
     let output = Command::new("ssh")
-        .args(&[
+        .args([
             "-o",
             "ConnectTimeout=10",
             "-o",
@@ -84,7 +84,7 @@ pub fn exec(conn_id: &str, command: &str) -> Result<String, String> {
     };
 
     let output = Command::new("ssh")
-        .args(&[
+        .args([
             "-o",
             "ConnectTimeout=30",
             "-o",

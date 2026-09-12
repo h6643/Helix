@@ -58,7 +58,7 @@ export function ToastContainer() {
           key={toast.id}
           role={toast.onClick ? "button" : undefined}
           onClick={() => toast.onClick?.()}
-          className={`flex items-center gap-2 bg-card/95 border border-border/60 rounded-xl shadow-lg shadow-black/10 px-3 py-2 backdrop-blur-md transition-all duration-300 ${
+          className={`flex items-center gap-2 bg-card border border-border rounded-xl shadow-lg px-3 py-2 transition-all duration-300 ${
             toast.onClick ? "cursor-pointer hover:bg-accent/50" : ""
           } ${
             exiting.has(toast.id)

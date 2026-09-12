@@ -97,6 +97,10 @@
   --helix-interface-font: var(--font-geist-sans);
   --helix-transcript-size: 14px;
   --helix-font-size: 13px;
+  --helix-surface-light: color-mix(in oklch, var(--primary) 4%, var(--card));
+  --helix-surface-shadow: color-mix(in oklch, var(--primary) 16%, transparent);
+  --helix-surface-highlight: color-mix(in oklch, white 40%, transparent);
+  --helix-surface-frame: color-mix(in oklch, var(--foreground) 9%, transparent);
 
   /* Context-usage category colors — match backend `session.context_breakdown`
      payload (var(--context-usage-*), see upstream agent context_breakdown.py). */
@@ -148,6 +152,10 @@
   --sidebar-accent-foreground: oklch(0.93 0.006 250);
   --sidebar-border: oklch(0.26 0.007 250);
   --sidebar-ring: oklch(0.72 0.14 255);
+  --helix-surface-light: color-mix(in oklch, var(--primary) 4%, var(--card));
+  --helix-surface-shadow: color-mix(in oklch, black 48%, transparent);
+  --helix-surface-highlight: color-mix(in oklch, white 8%, transparent);
+  --helix-surface-frame: color-mix(in oklch, white 8%, transparent);
 }
 
 /* ── Base & accessibility ─────────────────────────── */
@@ -210,28 +218,336 @@
 }
 
 
-/* Thinking block max-height cap — hand-written (NOT a Tailwind utility) so it always takes effect regardless of utility generation timing */
-.thinking-cap { max-height: 15rem; overflow-y: auto; }
-.thinking-cap-tall { max-height: 50vh; overflow-y: auto; }
+/* Thinking block — Claude Code 终端风 "✻ Thinking"：无面板底色，
+   左侧 2px 折角引出线 + 低对比文字，标题行强调色脉冲。 */
+.thinking-fold {
+  position: relative;
+  isolation: isolate;
+  margin: 2px 0 14px;
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.thinking-fold[open] {
+  padding-bottom: 0;
+}
+
+.thinking-fold > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 1px 0;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  list-style: none;
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
+  transition: color 160ms ease;
+}
+
+.thinking-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-fold > summary:hover {
+  background: none;
+  box-shadow: none;
+  color: color-mix(in oklch, var(--foreground) 70%, var(--muted-foreground));
+}
+
+.think-glyph {
+  color: var(--primary);
+  font-style: normal;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: -0.12em;
+  position: relative;
+  width: 0.9em;
+  height: 0.9em;
+  line-height: 1;
+}
+
+.think-flake {
+  position: absolute;
+  inset: 0;
+  color: inherit;
+  text-align: center;
+  line-height: 1;
+  mask-image: conic-gradient(
+    from calc(var(--flake-angle) - 36deg) at 50% 50%,
+    #000 0 72deg,
+    transparent 72deg 360deg
+  );
+  -webkit-mask-image: conic-gradient(
+    from calc(var(--flake-angle) - 36deg) at 50% 50%,
+    #000 0 72deg,
+    transparent 72deg 360deg
+  );
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+.think-flake::after {
+  content: "✻";
+}
+
+.think-flake:nth-child(1) {
+  --flake-angle: 0deg;
+  --flake-x: 0;
+  --flake-y: -0.36em;
+}
+
+.think-flake:nth-child(2) {
+  --flake-angle: 60deg;
+  --flake-x: 0.31em;
+  --flake-y: -0.18em;
+}
+
+.think-flake:nth-child(3) {
+  --flake-angle: 120deg;
+  --flake-x: 0.31em;
+  --flake-y: 0.18em;
+}
+
+.think-flake:nth-child(4) {
+  --flake-angle: 180deg;
+  --flake-x: 0;
+  --flake-y: 0.36em;
+}
+
+.think-flake:nth-child(5) {
+  --flake-angle: 240deg;
+  --flake-x: -0.31em;
+  --flake-y: 0.18em;
+}
+
+.think-flake:nth-child(6) {
+  --flake-angle: 300deg;
+  --flake-x: -0.31em;
+  --flake-y: -0.18em;
+}
+
+.think-glyph-active .think-flake {
+  animation: helix-flake-scatter 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes helix-flake-scatter {
+  0% {
+    transform: translate(0, 0) scale(0.35);
+    opacity: 1;
+  }
+  12% {
+    transform: translate(0, 0) scale(0.7);
+    opacity: 1;
+  }
+  38% {
+    transform: translate(var(--flake-x), var(--flake-y)) scale(0.65);
+    opacity: 0.9;
+  }
+  62% {
+    transform: translate(var(--flake-x), var(--flake-y)) scale(0.65);
+    opacity: 0.9;
+  }
+  84% {
+    transform: translate(0, 0) scale(0.85);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(0, 0) scale(0.35);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .think-flake {
+    animation: none;
+    transform: none;
+    opacity: 1;
+  }
+}
+
+.think-title {
+  min-width: 0;
+  font-weight: 400;
+}
+
+.think-time {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+  font-weight: 400;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.think-body {
+  position: relative;
+  z-index: 1;
+  margin: 6px 0 2px 8px;
+  padding: 0 0 0 13px;
+  border-left: 2px solid var(--border);
+  color: var(--muted-foreground);
+  line-height: 1.65;
+  max-height: 14rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@keyframes helix-glyph-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.think-body p {
+  margin: 0.4em 0;
+}
+
+/* ── 工具块 — Claude Code 终端风：⏺ 强调色工具符号 + ⎿ 左折角引出结果 ──
+   与 thinking-fold 同一套视觉语言：无面板底、2px 折角线、等宽内联。 */
+.tool-glyph {
+  color: var(--primary);
+  flex-shrink: 0;
+  display: inline-block;
+  width: 1em;
+  text-align: center;
+  line-height: 1;
+  font-style: normal;
+}
+
+.tool-glyph-failed {
+  color: var(--destructive);
+}
+
+.tool-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 400;
+}
+
+.tool-title em,
+.tool-title .tool-title-target {
+  font-style: normal;
+  color: color-mix(in oklch, var(--foreground) 62%, var(--muted-foreground));
+}
+
+/* ⎿ 折角引出容器：左 2px 折线 + 内嵌底色（bg-inset 深一档）+ 右侧圆角 */
+.tool-result-panel {
+  margin: 6px 0 2px 8px;
+  padding: 7px 11px;
+  border-left: 2px solid var(--border);
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in oklch, var(--muted) 55%, transparent);
+  color: var(--muted-foreground);
+  font-size: 0.85em;
+  line-height: 1.6;
+  max-height: 190px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-result-panel > * {
+  white-space: normal;
+}
+
+.tool-result-panel pre,
+.tool-result-panel code {
+  white-space: pre-wrap;
+}
+
+.thinking-dot {
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: helix-think-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes helix-think-breathe {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.9; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-dot {
+    animation: none;
+    opacity: 0.8;
+  }
+}
+
+/* Final answer separator — a subtle editorial transition from process to result. */
+.helix-answer {
+  position: relative;
+}
+
+.helix-answer::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 0;
+  width: 3.5rem;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklch, var(--primary) 45%, transparent),
+    transparent
+  );
+}
+
+.helix-answer > .helix-md,
+.helix-answer > div {
+  text-wrap: pretty;
+}
 
 /* Thinking block scrollbar — clearly visible (global quiet scrollbar is too faint to notice) */
 .thinking-scroll {
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 45%, transparent) transparent;
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 42%, transparent) transparent;
 }
 .thinking-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
-.thinking-scroll::-webkit-scrollbar-track { background: transparent; }
+.thinking-scroll::-webkit-scrollbar-track {
+  background: color-mix(in oklch, var(--muted-foreground) 8%, transparent);
+  border-radius: 0;
+}
 .thinking-scroll::-webkit-scrollbar-thumb {
-  background: color-mix(in oklch, var(--muted-foreground) 45%, transparent);
-  border-radius: 4px;
+  background: color-mix(in oklch, var(--muted-foreground) 42%, transparent);
+  border: 1px solid transparent;
+  border-radius: 0;
+  background-clip: content-box;
 }
 .thinking-scroll::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
+  background: color-mix(in oklch, var(--muted-foreground) 62%, transparent);
+  background-clip: content-box;
 }
 
 html, body {
   /* UI font scope: chat + settings inherit this. The code editor overrides
      its own font via --helix-font-family on the CodeMirror element. */
+}
+
+/* Flat workspace backdrop — solid base color, no gradients or texture
+   (dsh-desktop language: planes are separated by 1px borders, not glow). */
+.helix-app-backdrop {
+  isolation: isolate;
+  background: var(--background);
+}
+
+/* Flat planes separated by 1px borders — no blur, no gradients, no rims. */
+.helix-app-titlebar {
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+}
+
+.helix-sidebar {
+  position: relative;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
 }
 
 /* Headings: tighter tracking for cleaner hierarchy */
@@ -361,6 +677,98 @@ button, [role="button"], a, input, textarea, select {
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* Tactile interaction for shared controls. */
+[data-slot="button"] {
+  transition-property: color, background-color, border-color, opacity,
+    box-shadow, transform, filter;
+  transition-duration: 180ms;
+  transition-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+[data-slot="button"]:hover {
+  filter: saturate(1.04);
+}
+
+[data-slot="button"]:active:not(:disabled) {
+  transform: translateY(1px) scale(0.99);
+}
+
+/* Flat content plane — solid card color; separation comes from borders,
+   not blur or ambient shadow (dsh-desktop language). */
+.helix-surface {
+  position: relative;
+  background: var(--card);
+  isolation: isolate;
+  box-shadow: none;
+}
+
+/* Full-area overlay panel (计划 / 插件) that covers the conversation card.
+   The positioning MUST be declared here, unlayered: Tailwind v4 emits its
+   utilities inside `@layer utilities`, and unlayered declarations always beat
+   layered ones — so `.helix-surface { position: relative }` would override a
+   co-located `absolute` utility, and the panel would collapse into an ordinary
+   flex child at the card bottom instead of overlaying it. */
+.helix-surface-overlay {
+  position: absolute;
+  inset: 0;
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  .helix-app-titlebar {
+    background: var(--background);
+  }
+
+  .helix-sidebar {
+    background: var(--sidebar);
+  }
+
+  .helix-surface,
+  .helix-chat-input-card {
+    background: var(--card);
+  }
+
+  [class*="bg-popover"] {
+    background: var(--popover);
+  }
+}
+
+/* Popover/浮层是唯一允许阴影的层级 — 实色底 + 边框 + 单层投影。 */
+[class*="bg-popover"] {
+  background-color: var(--popover);
+  background-image: none;
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 12px 32px color-mix(in oklch, black 24%, transparent);
+}
+
+.dark .helix-app-titlebar {
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  box-shadow: none;
+}
+
+.dark .helix-sidebar {
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  box-shadow: none;
+}
+
+.dark .helix-surface {
+  background: var(--card);
+  box-shadow: none;
+}
+
+/* Input depth without replacing each component's own surface. */
+input:not(.chat-input),
+textarea:not(.chat-input),
+select {
+  box-shadow: none;
+}
+
+button:not([data-slot="button"]):active:not(:disabled) {
+  transform: translateY(1px) scale(0.99);
+}
+
 
 /* ── Settings page premium polish ──────────────────────────────────────────── */
 
@@ -382,9 +790,17 @@ button[class*="rounded-full"][class*="transition-colors"] {
   box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.06);
 }
 
-/* Input focus glow — subtle, not blue */
+/* Input focus — flat 2px ring, no glow stack */
 input:focus, textarea:focus, select:focus {
-  box-shadow: 0 0 0 3px oklch(from var(--primary) l c h / 0.06);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 22%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="button"]:hover,
+  button:not([data-slot="button"]):active:not(:disabled) {
+    filter: none;
+    transform: none;
+  }
 }
 
 /* Select dropdown arrow refinement */
@@ -730,7 +1146,7 @@ pre code.hljs {
 
 .helix-md {
   font-size: var(--helix-transcript-size, 14px);  /* 界面字号：对话界面跟随设置 */
-  line-height: 2.0;          /* 更宽松的行高，缓解密集感 */
+  line-height: 1.85;          /* 宽松但不过分松散，长答案更精致 */
   overflow-wrap: break-word;
   text-spacing-trim: space-all;
   color: var(--foreground);
@@ -739,7 +1155,7 @@ pre code.hljs {
 }
 
 .helix-md p {
-  margin: 1em 0;
+  margin: 0.9em 0;
   text-wrap: pretty;         /* 更优雅的换行，避免孤字/标点悬挂 */
   /* 段落内保留软换行：模型常写 "1第一点\n2第二点" 这类单换行分点，
      CommonMark 把段落内单个 \n 当软换行渲染成空格，white-space: normal 下
@@ -756,25 +1172,31 @@ pre code.hljs {
 }
 
 .helix-md h1, .helix-md h2, .helix-md h3, .helix-md h4 {
-  font-weight: 600;
-  margin: 1.8em 0 0.9em;     /* 标题前后更多呼吸感，强化层级 */
-  color: var(--primary);      /* 暖橙色标题，像截图里的“表达链接” */
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 1.7em 0 0.75em;
+  color: var(--foreground);
   text-wrap: balance;
 }
 
-.helix-md h1 { font-size: 1.5em; }
-.helix-md h2 { font-size: 1.25em; border-bottom: 1px solid color-mix(in oklch, var(--primary) 18%, transparent); padding-bottom: 0.35em; }
-.helix-md h3 { font-size: 1.1em; }
+.helix-md h1 { font-size: 1.35em; }
+.helix-md h2 {
+  font-size: 1.18em;
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 82%, transparent);
+  padding-bottom: 0.32em;
+}
+.helix-md h3 { font-size: 1.07em; color: color-mix(in oklch, var(--foreground) 88%, var(--muted-foreground)); }
 .helix-md h4 { font-size: 1em; }
 
 .helix-md ul, .helix-md ol {
   padding-left: 1.6em;
-  margin: 1em 0;
+  margin: 0.85em 0;
   list-style-position: outside;
 }
 
 .helix-md li {
-  margin: 0.6em 0;
+  margin: 0.45em 0;
+  padding-left: 0.25em;
 }
 
 /* 列表项标记用柔和灰，弱化“噪音” */
@@ -796,13 +1218,15 @@ pre code.hljs {
 .helix-md code {
   font-size: 0.8em;
   background: var(--muted);
-  box-shadow: 0 1px 2px color-mix(in oklch, var(--muted-foreground) 25%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklch, var(--foreground) 5%, transparent),
+    0 1px 2px color-mix(in oklch, var(--muted-foreground) 20%, transparent);
   padding: 0.1em 0.35em;
   border-radius: 4px;
   vertical-align: -0.05em;
   line-height: 1;
   overflow-wrap: break-word;
-  color: color-mix(in oklch, var(--foreground) 80%, var(--primary));
+  color: color-mix(in oklch, var(--foreground) 88%, var(--primary));
 }
 
 .helix-md pre {
@@ -930,7 +1354,8 @@ pre code.hljs {
   font-variant-ligatures: none;
 }
 
-/* ── diff 视图：+ 绿 / - 红 / @@ 色块（参考上游桌面版 chat-diff-*） ── */
+/* ── diff 视图：+ 绿 / - 红 / @@ 色块（参考上游桌面版 chat-diff-*） ──
+   行级背景按设计稿走整行色带（无圆角），文字色固定亮暗两套，保证任何主题下可读。 */
 .helix-md .helix-diff-content {
   font-family: var(--font-mono);
   font-size: 0.85em;
@@ -942,16 +1367,19 @@ pre code.hljs {
 .helix-md .helix-diff-line {
   padding: 0 0.25em;
   white-space: pre;
+  display: block;
 }
 
 .helix-md .helix-diff-add {
-  background: rgba(34, 197, 94, 0.12);
+  background: color-mix(in srgb, #22c55e 14%, transparent);
   color: #16a34a;
+  box-shadow: inset 2px 0 0 #22c55e;
 }
 
 .helix-md .helix-diff-remove {
-  background: rgba(239, 68, 68, 0.12);
+  background: color-mix(in srgb, #ef4444 12%, transparent);
   color: #dc2626;
+  box-shadow: inset 2px 0 0 #ef4444;
 }
 
 .helix-md .helix-diff-hunk {
@@ -960,11 +1388,11 @@ pre code.hljs {
 }
 
 .dark .helix-md .helix-diff-add {
-  color: #4ade80;
+  color: #7fd99a;
 }
 
 .dark .helix-md .helix-diff-remove {
-  color: #f87171;
+  color: #f09a9a;
 }
 
 .helix-md blockquote {
@@ -1477,8 +1905,12 @@ nav::-webkit-scrollbar-thumb:hover {
 /* ── Chat input toolbar collapse ───────────────────────────────────────────
    拖拽右侧边栏把对话区压窄时，工具栏先截断文字、空间再不足就隐藏
    非关键文字（模型名 / 审批模式 / 推理强度），发送按钮始终留在框内。 */
+/* 与设置卡片（SettingGroup：rounded-xl bg-card shadow-sm）统一材质：
+   实心卡片 + 轻阴影，去掉磨砂 / 渐变 / 内高光，避免对话浮层与设置浮窗观感不一。
+   阴影交给元素自身的 shadow-sm（与 SettingGroup 同款），此处只负责底色。 */
 .helix-chat-input-card {
   container-type: inline-size;
+  background: var(--card);
 }
 @container (max-width: 620px) {
   .chat-toolbar-label {

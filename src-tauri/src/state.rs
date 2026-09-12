@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use tauri::Manager;
 
 /// Global AppHandle set once during setup — lets background threads and sync
@@ -14,22 +14,29 @@ pub fn app_handle() -> &'static tauri::AppHandle {
     APP_HANDLE.get().expect("APP_HANDLE not initialized")
 }
 
+/// Global AppState set once during setup — lets async code paths
+/// (pi_gateway::send and friends) reach the work dir / quit flag without a
+/// Tauri State<> parameter.
+pub static APP_STATE: std::sync::OnceLock<Arc<AppState>> = std::sync::OnceLock::new();
+
+pub fn app_state() -> Option<Arc<AppState>> {
+    APP_STATE.get().cloned()
+}
+
 /// The app's data dir (mirror of Electron `app.getPath('userData')`).
 pub fn user_data_dir() -> Option<PathBuf> {
     app_handle().path().app_data_dir().ok()
 }
 
-/// State for the agent backend child process (`codex app-server --stdio`).
+/// State for the agent backend (`pi --mode rpc` children owned by the
+/// per-conversation instances in pi_gateway).
 pub struct GatewayState {
-    /// Handle to the spawned backend child process.
-    pub child: Mutex<Option<std::process::Child>>,
     pub app_quitting: AtomicBool,
 }
 
 impl Default for GatewayState {
     fn default() -> Self {
         Self {
-            child: Mutex::new(None),
             app_quitting: AtomicBool::new(false),
         }
     }

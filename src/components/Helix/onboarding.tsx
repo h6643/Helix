@@ -32,7 +32,7 @@ export function Onboarding() {
   const finish = () => setHasOnboarded(true);
 
   return (
-    <div className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/70 backdrop-blur-sm p-6">
+    <div className="fixed inset-0 z-[10001] flex items-center justify-center bg-black/70 p-6">
       <div className="relative w-full max-w-md bg-card border border-border/60 rounded-2xl shadow-2xl p-6">
         <button
           onClick={finish}

@@ -45,10 +45,14 @@ interface ContextBreakdownData {
  *   没有本对话的条目时，直接放弃捕获（返回 false）。
  *
  * 写回规则：
- * - 仅当后端返回非空分类才写（唯一目的是持久化分类/工具集明细，重启后
- *   弹窗不显示"暂无上下文分类数据"）；
- * - size/used 不改——环的读数唯一来源是 usage_prompt_complete 实测值
- *   （agent-flow-panel 落盘），两个口径不同，合并会造成读数跳变。
+ * - 仅当后端返回非空分类或非零用量才写（空会话不把本地真实值覆盖成 0）；
+ * - size/used 取 max(本地快照, 后端值)。后端 context_used 现在是「下一条
+ *   prompt 将重放的真实上下文」（pi 最后一次请求用量与 jsonl 活跃分支估算
+ *   的较大者，见 pi_gateway context_breakdown）——与环要显示的语义一致。
+ *   max 合并保证单调不减：恢复的旧对话不再停留在上一次 run 的过期读数
+ *   （环显示 50k 而下一条 prompt 实际要发 276k 的根因），也不会在估算
+ *   偏低时把环缩水。压缩后的下降由下一次 run 的 usage_prompt_complete
+ *   实测值覆盖（非 max 路径），不受影响。
  *
  * @returns 是否实际写入了本地快照（供调用方决定是否标记"已捕获"）。
  */
@@ -71,16 +75,13 @@ export async function captureContextBreakdown(
     if (!hasBreakdown) return false;
     const key = conversationId || sid;
     const localPrev = useHelixStore.getState().contextUsage[key];
-    // 只写分类/工具集明细，不改 size/used：环的 used/size 由 run 结束的
-    // usage_prompt_complete 实测值落盘（agent-flow-panel），是唯一写入口径。
-    // 此处是 breakdown RPC（anchored 口径，语义不同），若做 max() 合并会让
-    // 本地快照在「开弹窗/切会话」时被抬升，环随之跳变（"上下文乱变动"根因）。
-    // 从未跑过 run 的对话 localPrev 为空 → size/used 落 0，环显示空态，符合
-    // "没跑过就没有读数"的语义。
+    // max 合并：后端 context_used 与本地快照同语义（下一条 prompt 的真实
+    // 上下文），取较大者——恢复的旧对话读数被抬升到真实值，估算偏低时
+    // 也不缩水（见函数头注释）。
     useHelixStore.getState().setContextUsage(
       key,
-      localPrev?.size || data.context_max || 0,
-      localPrev?.used || data.context_used || 0,
+      Math.max(localPrev?.size || 0, data.context_max || 0),
+      Math.max(localPrev?.used || 0, data.context_used || 0),
       data.categories.map((c) => ({
         id: c.id,
         label: c.label,

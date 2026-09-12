@@ -234,6 +234,13 @@ function txAll<T>(
 
 // ============ Public API ============
 
+// LRU cache backing persistence.loadSession — module-level so it survives
+// HMR and is shared across all persistence references (the object literal
+// has no private fields). All session writes go through persistence methods
+// that write through to this map, so no external invalidation is needed.
+const SESSION_CACHE_MAX = 12;
+const sessionCache = new Map<string, PersistedSession>();
+
 export const persistence = {
   // --- Memories ---
   async saveMemories(memories: PersistedMemory[]): Promise<void> {
@@ -511,6 +518,34 @@ export const persistence = {
     return value;
   },
 
+  // --- Session LRU cache ---
+  // 切换会话的加载路径（sidebar → loadSession）每次都从 IndexedDB 全量反序列化
+  // 整个会话记录（多 MB 级 chatMessages 时数百 ms）。这里按 sessionId 缓存最近
+  // 的记录，命中时跳过 IndexedDB 读。写穿：saveSession/deleteSession 等写入方法
+  // 同步更新缓存，因此不存在失效传播问题（所有写入都经过本模块）。
+  // 容量取 12：侧边栏可见会话数 + 若干后台运行中会话，再大收益递减。
+  sessionCacheGet(id: string): PersistedSession | undefined {
+    const hit = sessionCache.get(id);
+    if (hit) {
+      // LRU refresh
+      sessionCache.delete(id);
+      sessionCache.set(id, hit);
+    }
+    return hit;
+  },
+
+  sessionCachePut(session: PersistedSession) {
+    if (sessionCache.has(session.id)) {
+      sessionCache.delete(session.id);
+    }
+    sessionCache.set(session.id, session);
+    while (sessionCache.size > SESSION_CACHE_MAX) {
+      const oldest = sessionCache.keys().next().value;
+      if (oldest === undefined) break;
+      sessionCache.delete(oldest);
+    }
+  },
+
   // --- Full Session Save/Restore ---
   async saveSession(data: {
     goal: string | null;
@@ -546,10 +581,20 @@ export const persistence = {
     );
     const createdAt =
       data.createdAt ?? existing?.createdAt ?? existing?.savedAt ?? now;
+    // "上次使用"= 最后一条消息的时间，不是本次落盘/点击会话的时间：
+    // flushSessionPersist 在切换/点击会话时也会触发保存，若这里用 now 会把
+    // 所有被翻过牌的会话的 savedAt 全部顶到当前时刻。消息时间戳才是会话
+    // 真正"被使用"的时刻；无消息时（导入/空会话）退回调用方显式传入的
+    // savedAt 或 now。
+    const lastMsgAt = data.chatMessages.reduce(
+      (max, m) => Math.max(max, m.timestamp || 0),
+      0,
+    );
+    const savedAt = lastMsgAt || data.savedAt || now;
     const session: PersistedSession = {
       id,
       label: dataLabel || new Date().toLocaleString("zh-CN"),
-      savedAt: data.savedAt || now,
+      savedAt,
       createdAt,
       workDir: data.workDir ?? null,
       // 归档标记兜底：调用方没传 isArchived 时保留现有值——否则任何自动保存
@@ -563,6 +608,7 @@ export const persistence = {
       })),
     };
     await tx(db, "sessions", "readwrite", (store) => store.put(session));
+    this.sessionCachePut(session);
     return id;
   },
 
@@ -572,16 +618,21 @@ export const persistence = {
   },
 
   async loadSession(id: string): Promise<PersistedSession | undefined> {
+    const cached = this.sessionCacheGet(id);
+    if (cached) return cached;
     const db = await openDB();
-    return tx<PersistedSession | undefined>(
+    const session = await tx<PersistedSession | undefined>(
       db,
       "sessions",
       "readonly",
       (store) => store.get(id),
     );
+    if (session) this.sessionCachePut(session);
+    return session;
   },
 
   async deleteSession(id: string): Promise<void> {
+    sessionCache.delete(id);
     const db = await openDB();
     await tx(db, "sessions", "readwrite", (store) => store.delete(id));
   },
@@ -596,8 +647,10 @@ export const persistence = {
     );
     if (session) {
       session.label = label;
-      session.savedAt = Date.now();
+      // 重命名不是"使用"——不更新 savedAt，侧边栏的"上次使用"保持最后一条
+      // 消息的时间。
       await tx(db, "sessions", "readwrite", (store) => store.put(session));
+      this.sessionCachePut(session);
     }
   },
 
@@ -610,9 +663,10 @@ export const persistence = {
       const s = sessions.find((x) => x.id === orderedIds[i]);
       if (s && s.createdAt !== now - i * 1000) {
         s.createdAt = now - i * 1000;
-        s.savedAt = now;
+        // 拖拽排序不是"使用"——不动 savedAt。
         const db = await openDB();
         await tx(db, "sessions", "readwrite", (store) => store.put(s));
+        this.sessionCachePut(s);
       }
     }
   },
@@ -627,8 +681,9 @@ export const persistence = {
     );
     if (session) {
       session.isArchived = !session.isArchived;
-      session.savedAt = Date.now();
+      // 归档/取消归档不是"使用"——不动 savedAt。
       await tx(db, "sessions", "readwrite", (store) => store.put(session));
+      this.sessionCachePut(session);
       return session.isArchived;
     }
     return false;
@@ -644,8 +699,9 @@ export const persistence = {
     );
     if (session) {
       session.isPinned = !session.isPinned;
-      session.savedAt = Date.now();
+      // 置顶/取消置顶不是"使用"——不动 savedAt。
       await tx(db, "sessions", "readwrite", (store) => store.put(session));
+      this.sessionCachePut(session);
       return session.isPinned;
     }
     return false;
@@ -746,6 +802,7 @@ export const persistence = {
     const db = await openDB();
     for (const s of toDelete) {
       await tx(db, "sessions", "readwrite", (store) => store.delete(s.id));
+      sessionCache.delete(s.id);
     }
     return toDelete.length;
   },
@@ -758,8 +815,9 @@ export const persistence = {
     const db = await openDB();
     for (const s of toArchive) {
       s.isArchived = true;
-      s.savedAt = Date.now();
+      // 批量归档不是"使用"——不动 savedAt。
       await tx(db, "sessions", "readwrite", (store) => store.put(s));
+      this.sessionCachePut(s);
     }
     return toArchive.length;
   },

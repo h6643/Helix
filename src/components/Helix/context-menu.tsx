@@ -71,7 +71,7 @@ function ContextMenu({ state, onClose }: ContextMenuProps) {
   return (
     <div
       ref={menuRef}
-      className="fixed z-50 bg-popover border border-border rounded-xl shadow-xl py-1 min-w-[180px] max-w-[260px] backdrop-blur-sm"
+      className="fixed z-50 bg-popover border border-border rounded-xl shadow-xl py-1 min-w-[180px] max-w-[260px]"
       style={{ left: state.x, top: state.y }}
       onKeyDown={(e) => {
         const items = state.items.filter((i) => !i.disabled);

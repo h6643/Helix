@@ -3,7 +3,9 @@
 //! and the workdir.json persistence helpers.
 
 use crate::gateway::{kill_current, shutdown, spawn_gateway};
-use crate::paths::{data_root_pointer_path, default_helix_data_dir, helix_data_dir};
+use crate::paths::{
+    data_root_pointer_path, default_helix_data_dir, helix_data_dir, strip_verbatim_prefix,
+};
 use crate::state::{user_data_dir, AppState};
 use serde_json::{json, Value};
 use std::io;
@@ -37,8 +39,15 @@ pub fn persist_work_dir(dir: &str) {
         // Storing it verbatim is harmless while the dir exists, but the raw form
         // is what later spawn() calls use as child cwd — and it also leaks into
         // the renderer, where path joins compare against non-verbatim paths.
-        let clean = dir.trim_start_matches(r"\\?\\");
-        let _ = std::fs::write(d.join(WORKDIR_FILE), json!({ "workDir": clean }).to_string());
+        // NOTE: a raw string can't end with a backslash, so the previous
+        // `trim_start_matches(r"\\?\\")` matched a 5-char pattern (`\\?\\`)
+        // that never occurs — the prefix was never stripped and workdir.json
+        // kept `\\?\D:\...`. Use the shared helper (also handles UNC).
+        let clean = strip_verbatim_prefix(Path::new(dir));
+        let _ = std::fs::write(
+            d.join(WORKDIR_FILE),
+            json!({ "workDir": clean }).to_string(),
+        );
     }
 }
 
@@ -85,8 +94,10 @@ fn platform() -> String {
 #[tauri::command]
 pub fn get_info(state: State<'_, Arc<AppState>>) -> Value {
     let work_dir = state.work_dir.read().unwrap().clone();
+    let pi_version = crate::helix::installed_pi_version();
     json!({
         "version": app_version(),
+        "piVersion": pi_version.unwrap_or_default(),
         "platform": platform(),
         "workDir": display_path(&work_dir),
     })
@@ -223,8 +234,12 @@ pub fn set_data_root(path: String) -> Result<Value, String> {
             home.join(raw)
         };
         // Canonicalize only if it already exists; otherwise keep as-is so we
-        // can create it below.
-        expanded.canonicalize().unwrap_or(expanded)
+        // can create it below. Strip the verbatim `\\?\` prefix canonicalize
+        // adds on Windows — the plain form goes into the pointer file, the
+        // renderer response, and the `target == current/default` equality
+        // checks (verbatim vs plain strings would never compare equal).
+        let canon = expanded.canonicalize().unwrap_or(expanded);
+        strip_verbatim_prefix(&canon)
     };
 
     // No-op: already at the requested location. Make sure the pointer reflects

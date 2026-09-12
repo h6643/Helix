@@ -55,7 +55,7 @@ pub fn apply_active_profile_cache() {
     let model = cfg_str(&cfg, "model", "model");
     let base_url = cfg_str(&cfg, "baseUrl", "base_url");
     let api_key = cfg_str(&cfg, "apiKey", "api_key");
-    write_helix_config(model, provider, base_url, api_key);
+    write_helix_config(model, provider, base_url, api_key, None);
 }
 
 /// Persist the active profile to userData/active-profile.json.
@@ -105,7 +105,7 @@ pub fn activate_profile(cfg: Value) -> Value {
     let provider = cfg_str(&cfg, "provider", "provider");
     let base_url = cfg_str(&cfg, "baseUrl", "base_url");
     let api_key = cfg_str(&cfg, "apiKey", "api_key");
-    write_helix_config(model, provider, base_url, api_key);
+    write_helix_config(model, provider, base_url, api_key, None);
     let _ = cache_config(cfg);
     json!({ "success": true })
 }

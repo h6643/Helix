@@ -3,35 +3,26 @@
 import { useEffect } from "react";
 import { useHelixStore } from "@/stores/helix-store";
 
-const GITHUB_REPO = "h6643/Helix";
 let checked = false;
 
-function parseVersion(ver: string): number[] {
-  return ver.replace(/^v/i, "").split(".").map(Number);
-}
-
-function isNewer(current: string, latest: string): boolean {
-  const cur = parseVersion(current);
-  const lat = parseVersion(latest);
-  for (let i = 0; i < Math.max(cur.length, lat.length); i++) {
-    const a = cur[i] || 0;
-    const b = lat[i] || 0;
-    if (b > a) return true;
-    if (b < a) return false;
-  }
-  return false;
-}
-
+/**
+ * Helix 应用自身版本（Tauri get_info），用于"关于"里的版本号显示——
+ * 与更新检查无关（更新检查查的是 pi agent）。
+ */
 export async function getCurrentVersion(): Promise<string | null> {
-  // 对比 Helix 应用自身版本（来自 get_info），而非 helix 后端版本
   try {
     const info = await (window as any).electron?.app?.getInfo?.();
-    const v = info?.version;
+    const v = info?.piVersion || info?.version;
     if (v) return String(v);
   } catch {}
-  return null; // 无法获取应用版本 — 跳过更新检查
+  return null;
 }
 
+/**
+ * 启动时静默检查 pi agent 更新（npm registry）。后端 agent 是外部的
+ * pi 包（@earendil-works/pi-coding-agent），Helix 应用自身没有自动更新
+ * 通道，GitHub releases 检查是 pi 迁移前的残留。
+ */
 export function useCheckUpdate() {
   useEffect(() => {
     if (checked) return;
@@ -39,33 +30,30 @@ export function useCheckUpdate() {
 
     const check = async () => {
       try {
-        const [currentVer, res] = await Promise.all([
-          getCurrentVersion(),
-          fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
-            signal: AbortSignal.timeout(8000),
-          }),
-        ]);
-        if (!res.ok) return;
-        const data = await res.json();
-        const latestTag = (data.tag_name || data.name || "").replace(/^v/i, "");
-
-        if (currentVer && latestTag && isNewer(currentVer, latestTag)) {
+        const res = await (window as any).electron?.helix?.piCheckUpdates?.();
+        const pi = res?.pi;
+        if (pi?.hasUpdate && pi.latest) {
           const state = useHelixStore.getState();
+          const outdated = (res.packages || []).filter(
+            (p: any) => p.hasUpdate,
+          ).length;
           state.showToast({
             type: "info",
-            title: "有新版本可用",
-            description: `v${latestTag} 已发布`,
+            title: "pi 有新版本可用",
+            description: `v${pi.installed} → v${pi.latest}${
+              outdated > 0 ? `（另有 ${outdated} 个插件可更新）` : ""
+            }`,
             duration: 8000,
             onClick: () =>
               window.open(
-                `https://github.com/${GITHUB_REPO}/releases/latest`,
+                "https://www.npmjs.com/package/@earendil-works/pi-coding-agent",
                 "_blank",
               ),
           });
-          state.setPendingUpdate?.(latestTag);
+          state.setPendingUpdate?.(pi.latest as string);
         }
       } catch {
-        // Silent fail
+        // Silent fail — startup check must never nag
       }
     };
 

@@ -115,7 +115,7 @@ export function VisionModelSettings() {
               type="text"
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              placeholder="如 gpt-4o、glm-5v-turbo、gemini-2.5-pro、claude-3.5-sonnet ..."
+              placeholder=""
               className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
             />
           </div>
@@ -144,7 +144,7 @@ export function VisionModelSettings() {
                   type="text"
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
-                  placeholder="https://your-vlm-endpoint/v1"
+                  placeholder=""
                   className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
                 />
               </div>

@@ -1,86 +1,35 @@
-//! Gateway MCP servers — read/write view of the `mcp_servers:` block in
-//! Helix config.yaml.
+//! Gateway MCP servers — read/write view of the pi MCP adapter's config.
 //!
-//! The desktop app manages its OWN MCP list in the store (localStorage,
-//! sent per-session via ACP `session/new`). Separately, the Helix gateway
-//! loads `mcp_servers` from config.yaml at startup. This module exposes
-//! the latter so the settings page can show AND edit what the gateway
-//! actually runs (e.g. `ssh-bridge`), which the store-based list never
-//! reflects.
+//! The pi agent has no built-in MCP; the user-installed `pi-mcp-adapter`
+//! package loads servers from `~/.pi/agent/mcp.json` (`{ "mcpServers": {...} }`,
+//! ServerEntry schema: command/args/env/cwd/url/headers/disabled/...). This
+//! module reads and writes that file so the settings page manages what the
+//! agent actually runs.
 //!
-//! `mcp_config_list(include_env=false)` returns the block for display,
-//! omitting `env` values (they may hold secrets). `mcp_config_save` writes
-//! the whole block back, preserving each server's existing `env` when the
-//! incoming config omits it, so a save never silently drops secrets.
+//! The renderer speaks the old config.yaml shape: `{ name: { enabled?, ... } }`.
+//! `enabled: false` is translated to the adapter's `disabled: true` on write
+//! and back on read; every other field passes through verbatim.
+//!
+//! One-time migration: a `mcp_servers:` block in the legacy config.yaml (the
+//! pre-pi gateway's source of truth) is carried over into mcp.json when
+//! mcp.json doesn't exist yet. Once created, mcp.json is authoritative — an
+//! empty file means "no servers", not "migrate again". The YAML block is left
+//! in place untouched.
+//!
+//! `list(include_env=false)` strips `env` values from every entry (secrets stay
+//! out of the renderer's display path); `save` preserves each server's
+//! existing env when the incoming config omits it, so a save never silently
+//! drops secrets.
 
-use crate::config::config_yaml_path;
+use crate::paths::pi_agent_dir;
 use serde_json::{json, Map, Value};
+use std::sync::Arc;
 
-fn strip_quotes(s: &str) -> String {
-    s.trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim()
-        .to_string()
+fn mcp_json_path() -> std::path::PathBuf {
+    pi_agent_dir().join("mcp.json")
 }
 
-fn parse_scalar(raw: &str) -> Value {
-    let v = raw.trim();
-    match v {
-        "true" => json!(true),
-        "false" => json!(false),
-        _ => json!(strip_quotes(v)),
-    }
-}
-
-/// Split a `key: value` YAML line at the first colon (keys never contain one).
-fn split_key_value(line: &str) -> Option<(String, String)> {
-    let idx = line.find(':')?;
-    let key = line[..idx].trim().to_string();
-    let val = line[idx + 1..].trim().to_string();
-    if key.is_empty() {
-        None
-    } else {
-        Some((key, val))
-    }
-}
-
-/// Parse the `mcp_servers:` block of a config.yaml text.
-///
-/// Result: `{ <name>: { command?, args?, url?, headers?, env?, ... } }`.
-/// Nested maps/lists (env, headers, tools, sampling, ...) are parsed
-/// generically. When `include_env` is false the `env` key is stripped from
-/// every entry (secrets stay out of the renderer's display path); the internal
-/// parse always keeps it so `mcp_config_save` can carry env blocks over.
-fn parse_mcp_servers(text: &str, include_env: bool) -> Map<String, Value> {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut servers: Map<String, Value> = Map::new();
-    let mut i = 0usize;
-
-    while i < lines.len() {
-        let line = lines[i];
-        if indent_of(line) == 0 && line.trim_start().starts_with("mcp_servers:") {
-            i += 1;
-            if let Some((next, next_indent)) = next_content(&lines, i) {
-                i = next;
-                if let Value::Object(map) = parse_yaml_block(&lines, &mut i, next_indent) {
-                    servers = map;
-                }
-            }
-            break;
-        }
-        i += 1;
-    }
-
-    if !include_env {
-        for (_name, v) in servers.iter_mut() {
-            if let Some(obj) = v.as_object_mut() {
-                obj.remove("env");
-            }
-        }
-    }
-    servers
-}
+// ── Legacy YAML subset parser (migration input only) ───────────────────────
 
 fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start().len()
@@ -101,6 +50,23 @@ fn next_content(lines: &[&str], mut i: usize) -> Option<(usize, usize)> {
     None
 }
 
+fn strip_quotes(s: &str) -> String {
+    s.trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
+fn parse_scalar(raw: &str) -> Value {
+    let v = raw.trim();
+    match v {
+        "true" => json!(true),
+        "false" => json!(false),
+        _ => json!(strip_quotes(v)),
+    }
+}
+
 fn try_json_value(raw: &str) -> Option<Value> {
     let t = raw.trim();
     if t.starts_with('[') || t.starts_with('{') {
@@ -108,6 +74,41 @@ fn try_json_value(raw: &str) -> Option<Value> {
     } else {
         None
     }
+}
+
+/// Split a `key: value` YAML line at the first colon (keys never contain one).
+fn split_key_value(line: &str) -> Option<(String, String)> {
+    let idx = line.find(':')?;
+    let key = line[..idx].trim().to_string();
+    let val = line[idx + 1..].trim().to_string();
+    if key.is_empty() {
+        None
+    } else {
+        Some((key, val))
+    }
+}
+
+/// Parse the `mcp_servers:` block of a legacy config.yaml text.
+fn parse_legacy_mcp_servers(text: &str) -> Map<String, Value> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut servers: Map<String, Value> = Map::new();
+    let mut i = 0usize;
+
+    while i < lines.len() {
+        let line = lines[i];
+        if indent_of(line) == 0 && line.trim_start().starts_with("mcp_servers:") {
+            i += 1;
+            if let Some((next, next_indent)) = next_content(&lines, i) {
+                i = next;
+                if let Value::Object(map) = parse_yaml_block(&lines, &mut i, next_indent) {
+                    servers = map;
+                }
+            }
+            break;
+        }
+        i += 1;
+    }
+    servers
 }
 
 fn parse_yaml_block(lines: &[&str], i: &mut usize, indent: usize) -> Value {
@@ -134,13 +135,7 @@ fn parse_yaml_map(lines: &[&str], i: &mut usize, indent: usize) -> Value {
         }
         let line = lines[*i];
         let line_indent = indent_of(line);
-        if line_indent < indent {
-            break;
-        }
-        if line_indent > indent {
-            // A deeper block that was not consumed by the previous key's
-            // recursion is malformed YAML for this subset; stop rather than
-            // misattributing it to this map.
+        if line_indent != indent {
             break;
         }
         let trimmed = line.trim_start();
@@ -180,8 +175,7 @@ fn parse_yaml_list(lines: &[&str], i: &mut usize, indent: usize) -> Value {
             break;
         }
         let line = lines[*i];
-        let line_indent = indent_of(line);
-        if line_indent < indent {
+        if indent_of(line) < indent {
             break;
         }
         let trimmed = line.trim_start();
@@ -202,266 +196,151 @@ fn parse_yaml_list(lines: &[&str], i: &mut usize, indent: usize) -> Value {
         } else if let Some(v) = try_json_value(rest) {
             arr.push(v);
         } else {
-            // List items under `args`/`include` are scalars, not YAML maps.
-            // Treating a string like `D:\MCP\server.js` as `key: value` would
-            // turn it into an object and later render as `[object Object]`.
+            // List items under `args`/`include` are scalars, not YAML maps —
+            // a Windows path like `D:\MCP\server.js` must stay a string.
             arr.push(parse_scalar(rest));
         }
     }
     Value::Array(arr)
 }
 
-/// Serialize a scalar value as a YAML plain/single-quoted scalar.
-fn yaml_scalar(v: &Value) -> String {
-    match v {
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => {
-            if s.is_empty() {
-                return "''".to_string();
-            }
-            let safe = s.chars().all(|c| {
-                c.is_ascii_alphanumeric()
-                    || matches!(
-                        c,
-                        '_' | '.' | '/' | '\\' | '-' | ':' | '@' | '+' | '%' | '~'
-                    )
-            }) && !s.ends_with(':');
-            if safe {
-                s.clone()
-            } else {
-                format!("'{}'", s.replace('\'', "''"))
-            }
-        }
-        _ => format!("'{}'", v.to_string().replace('\'', "''")),
-    }
-}
+// ── enabled <-> disabled translation ───────────────────────────────────────
 
-/// Write a nested YAML value (map / list / scalar) under `key` at `indent`.
-fn push_yaml_field(out: &mut String, indent: &str, key: &str, value: &Value) {
-    match value {
-        Value::Array(items) if !items.is_empty() => {
-            out.push_str(&format!("{indent}{key}:\n"));
-            for item in items {
-                if item.is_object() || item.is_array() {
-                    out.push_str(&format!("{indent}  - {}\n", item.to_string()));
-                } else {
-                    out.push_str(&format!("{indent}  - {}\n", yaml_scalar(item)));
-                }
-            }
-        }
-        Value::Array(_) => {
-            out.push_str(&format!("{indent}{key}: []\n"));
-        }
-        Value::Object(map) if !map.is_empty() => {
-            out.push_str(&format!("{indent}{key}:\n"));
-            for (k, v) in map {
-                push_yaml_field(out, &format!("{indent}  "), k, v);
-            }
-        }
-        Value::Object(_) => {
-            out.push_str(&format!("{indent}{key}: {{}}\n"));
-        }
-        Value::Null => {
-            out.push_str(&format!("{indent}{key}: null\n"));
-        }
-        _ => {
-            out.push_str(&format!("{indent}{key}: {}\n", yaml_scalar(value)));
+/// Adapter shape (mcp.json on disk) → renderer shape (`enabled` instead of
+/// `disabled`). Unknown fields pass through untouched.
+fn adapter_to_renderer(mut entry: Value) -> Value {
+    if let Some(obj) = entry.as_object_mut() {
+        if let Some(disabled) = obj.remove("disabled") {
+            obj.insert(
+                "enabled".into(),
+                json!(!disabled.as_bool().unwrap_or(false)),
+            );
         }
     }
+    entry
 }
 
-/// Serialize the full `mcp_servers:` block from a server map.
-///
-/// `old_servers` is the pre-edit parse (with env) so that any server whose
-/// incoming config omits `env` keeps its previous env block — protects
-/// secrets from being dropped by a display-only round trip.
-fn serialize_mcp_servers(
-    servers: &Map<String, Value>,
-    old_servers: &Map<String, Value>,
-) -> String {
-    let mut out = String::from("mcp_servers:\n");
-    for (name, cfg) in servers {
-        out.push_str(&format!("  {}:\n", name));
-        let obj = cfg.as_object().cloned().unwrap_or_default();
+/// Renderer shape → adapter shape for writing. `enabled: false` becomes
+/// `disabled: true`; `enabled: true` is dropped (the adapter default is on).
+fn renderer_to_adapter(mut entry: Value) -> Value {
+    if let Some(obj) = entry.as_object_mut() {
+        if let Some(enabled) = obj.remove("enabled") {
+            if !enabled.as_bool().unwrap_or(true) {
+                obj.insert("disabled".into(), json!(true));
+            }
+        }
+    }
+    entry
+}
 
-        // Transport: url (remote) vs command+args (stdio).
-        if let Some(url) = obj
-            .get("url")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            out.push_str(&format!("    url: {}\n", yaml_scalar(&json!(url))));
-        } else {
-            let cmd_str = obj
-                .get("command")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-            let cmd_arr = obj.get("command").and_then(|v| v.as_array());
-            if let Some(cmd) = cmd_str {
-                out.push_str(&format!("    command: {}\n", yaml_scalar(&json!(cmd))));
-            } else if let Some(arr) = cmd_arr {
-                if let Some(first) = arr
-                    .first()
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    out.push_str(&format!("    command: {}\n", yaml_scalar(&json!(first))));
-                    let rest: Vec<&Value> = arr.iter().skip(1).collect();
-                    if !rest.is_empty() {
-                        out.push_str("    args:\n");
-                        for a in rest {
-                            out.push_str(&format!("      - {}\n", yaml_scalar(a)));
-                        }
-                    }
-                }
-            }
-            if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
-                if !args.is_empty() {
-                    out.push_str("    args:\n");
-                    for a in args {
-                        out.push_str(&format!("      - {}\n", yaml_scalar(a)));
-                    }
-                }
-            }
-        }
+/// Read the servers map from mcp.json. `include_env=false` strips `env`
+/// (display path keeps secrets out of the renderer).
+fn read_mcp_json(include_env: bool) -> Map<String, Value> {
+    let servers: Map<String, Value> = std::fs::read_to_string(mcp_json_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| {
+            v.get("mcpServers")
+                .or_else(|| v.get("mcp_servers").or_else(|| v.get("mcp-servers")))
+                .and_then(Value::as_object)
+                .cloned()
+        })
+        .unwrap_or_default();
 
-        // headers (remote)
-        if let Some(h) = obj.get("headers").and_then(|v| v.as_object()) {
-            if !h.is_empty() {
-                out.push_str("    headers:\n");
-                for (k, v) in h {
-                    out.push_str(&format!("      {}: {}\n", k, yaml_scalar(v)));
-                }
+    let mut out: Map<String, Value> = Map::new();
+    for (name, entry) in servers {
+        let mut entry = adapter_to_renderer(entry);
+        if !include_env {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.remove("env");
             }
         }
-
-        // env: incoming config wins; otherwise carry over the old block so a
-        // save that never touched env can't clobber secrets.
-        let env = obj.get("env").and_then(|v| v.as_object());
-        let env_vals: Option<&Map<String, Value>> = env.or_else(|| {
-            old_servers
-                .get(name)
-                .and_then(|o| o.as_object())
-                .and_then(|o| o.get("env"))
-                .and_then(|v| v.as_object())
-        });
-        if let Some(e) = env_vals {
-            if !e.is_empty() {
-                out.push_str("    env:\n");
-                for (k, v) in e {
-                    out.push_str(&format!("      {}: {}\n", k, yaml_scalar(v)));
-                }
-            }
-        }
-
-        // misc scalar overrides
-        for key in ["enabled", "cwd", "timeout", "connect_timeout", "auth"] {
-            if let Some(v) = obj.get(key) {
-                if !v.is_null() {
-                    out.push_str(&format!("    {}: {}\n", key, yaml_scalar(v)));
-                }
-            }
-        }
-
-        // Any other fields (transport, tools, lazy, sampling, ...) must
-        // survive an edit round trip. Write unknown incoming keys, then carry
-        // over old unknown keys the edit did not touch.
-        const KNOWN: &[&str] = &[
-            "url",
-            "command",
-            "args",
-            "headers",
-            "env",
-            "enabled",
-            "cwd",
-            "timeout",
-            "connect_timeout",
-            "auth",
-        ];
-        for (key, value) in &obj {
-            if !KNOWN.contains(&key.as_str()) && !value.is_null() {
-                push_yaml_field(&mut out, "    ", key, value);
-            }
-        }
-        if let Some(old_obj) = old_servers.get(name).and_then(|o| o.as_object()) {
-            for (key, value) in old_obj {
-                if !KNOWN.contains(&key.as_str()) && !obj.contains_key(key) && !value.is_null() {
-                    push_yaml_field(&mut out, "    ", key, value);
-                }
-            }
-        }
+        out.insert(name, entry);
     }
     out
 }
 
-/// Replace the `mcp_servers:` block in `text` with `block` (which must end
-/// with a newline). Appends the block when the key is absent.
-fn replace_mcp_block(text: &str, block: &str) -> String {
-    let lines: Vec<&str> = text.split('\n').collect();
-    let start = lines.iter().position(|l| l.starts_with("mcp_servers:"));
-    let mut end = start.map(|s| s + 1).unwrap_or(0);
-    if start.is_some() {
-        while end < lines.len() {
-            let l = lines[end];
-            if l.trim().is_empty() || l.starts_with(' ') || l.starts_with('\t') {
-                end += 1;
-            } else {
-                break;
-            }
-        }
+/// Load servers for the renderer; runs the one-time legacy migration when
+/// mcp.json doesn't exist yet and config.yaml carries an `mcp_servers:` block.
+/// An existing mcp.json is authoritative even when empty — deleting all
+/// servers in the UI must not resurrect them from the legacy YAML.
+fn load_servers() -> Map<String, Value> {
+    if mcp_json_path().exists() {
+        return read_mcp_json(true);
     }
+    let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).unwrap_or_default();
+    let legacy = parse_legacy_mcp_servers(&yaml);
+    if legacy.is_empty() {
+        return Map::new();
+    }
+    let migrated: Map<String, Value> = legacy
+        .into_iter()
+        .map(|(name, entry)| (name, renderer_to_adapter(entry)))
+        .collect();
+    let _ = write_mcp_json(&migrated);
+    migrated
+        .into_iter()
+        .map(|(name, entry)| (name, adapter_to_renderer(entry)))
+        .collect()
+}
 
-    let mut out = String::new();
-    match start {
-        Some(s) => {
-            out.push_str(&lines[..s].join("\n"));
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(block);
-            if end < lines.len() {
-                out.push('\n');
-                out.push_str(&lines[end..].join("\n"));
-            }
-        }
-        None => {
-            out.push_str(text);
-            if !text.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push('\n');
-            out.push_str(block);
-        }
+/// Serialize the servers map into the adapter's `{ "mcpServers": {...} }`
+/// document and write it. `old` (full env parse) supplies env values the
+/// incoming config omits, so a display-only round trip can't drop secrets.
+fn write_mcp_json(servers: &Map<String, Value>) -> Result<(), String> {
+    let mut doc: Map<String, Value> = std::fs::read_to_string(mcp_json_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    // Preserve unknown top-level keys (adapter settings etc.); only the
+    // mcpServers block is rewritten.
+    doc.insert("mcpServers".into(), Value::Object(servers.clone()));
+    let path = mcp_json_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
-    out
+    serde_json::to_string_pretty(&Value::Object(doc))
+        .map_err(|e| e.to_string())
+        .and_then(|text| std::fs::write(&path, text + "\n").map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
 pub fn mcp_config_list(include_env: Option<bool>) -> Value {
-    let yaml_path = config_yaml_path();
-    let text = match std::fs::read_to_string(&yaml_path) {
-        Ok(t) => t,
-        Err(_) => return json!({ "ok": true, "servers": {} }),
+    let servers = load_servers();
+    let servers = if include_env.unwrap_or(false) {
+        servers
+    } else {
+        servers
+            .into_iter()
+            .map(|(name, mut entry)| {
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.remove("env");
+                }
+                (name, entry)
+            })
+            .collect()
     };
-    let servers = parse_mcp_servers(&text, include_env.unwrap_or(false));
     json!({ "ok": true, "servers": Value::Object(servers) })
 }
 
-/// Write the full `mcp_servers:` block from `servers` ({ name: cfg }) into
-/// config.yaml. Everything outside the block is preserved verbatim.
+/// Write the full server map ({ name: cfg }) into `~/.pi/agent/mcp.json`.
 /// Per-server `env` is carried over from the current file when the incoming
-/// config omits it (see serialize_mcp_servers).
+/// config omits it (display round trips never clobber secrets).
 #[tauri::command]
-pub fn mcp_config_save(servers: Value) -> Value {
-    let obj = match servers.as_object() {
-        Some(o) => o,
-        None => return json!({ "ok": false, "error": "servers must be an object" }),
+pub fn mcp_config_save(
+    state: tauri::State<'_, Arc<crate::state::AppState>>,
+    servers: Value,
+) -> Value {
+    let Some(obj) = servers.as_object() else {
+        return json!({ "ok": false, "error": "servers must be an object" });
     };
     for name in obj.keys() {
         if name.is_empty()
             || name.contains(':')
             || name.contains('\n')
+            || name.contains('/')
+            || name.contains('\\')
             || name.starts_with('-')
             || name.starts_with(' ')
         {
@@ -469,21 +348,38 @@ pub fn mcp_config_save(servers: Value) -> Value {
         }
     }
 
-    let yaml_path = config_yaml_path();
-    let text = match std::fs::read_to_string(&yaml_path) {
-        Ok(t) => t,
-        Err(_) => String::new(),
-    };
-    let old_servers = parse_mcp_servers(&text, true); // full parse incl. env
-    let block = serialize_mcp_servers(obj, &old_servers);
-    let out = replace_mcp_block(&text, &block);
-
-    if let Some(dir) = yaml_path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    let current = read_mcp_json(true); // full parse incl. env
+    let mut out: Map<String, Value> = Map::new();
+    for (name, entry) in obj {
+        let mut entry = entry.clone();
+        // Carry over env when the incoming entry omits it.
+        if entry
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|e| e.is_empty())
+            .unwrap_or(true)
+        {
+            if let Some(old_env) = current
+                .get(name)
+                .and_then(|o| o.get("env"))
+                .and_then(Value::as_object)
+            {
+                if !old_env.is_empty() {
+                    if let Some(e) = entry.as_object_mut() {
+                        e.insert("env".into(), Value::Object(old_env.clone()));
+                    }
+                }
+            }
+        }
+        out.insert(name.clone(), renderer_to_adapter(entry));
     }
-    if let Err(e) = std::fs::write(&yaml_path, &out) {
+
+    if let Err(e) = write_mcp_json(&out) {
         return json!({ "ok": false, "error": format!("write failed: {e}") });
     }
+    // The adapter reads mcp.json at process start — respawn pi so the change
+    // takes effect for the running agent.
+    crate::gateway::restart_gateway_soon(&Arc::clone(&state));
     json!({ "ok": true })
 }
 
@@ -492,51 +388,91 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mcp_round_trip_preserves_unknown_fields() {
-        let yaml = r#"mcp_servers:
-  demo:
-    command: npx
-    args:
-      - -y
-      - demo-server
-    env:
-      TOKEN: secret
-    enabled: true
-    lazy: true
-    tools:
-      include: ["beta"]
-"#;
-        let parsed = parse_mcp_servers(yaml, true);
-        let servers = json!({ "demo": parsed["demo"] });
-        let block = serialize_mcp_servers(servers.as_object().unwrap(), &parsed);
-        assert!(block.contains("lazy: true"), "lazy should survive edit");
-        assert!(block.contains("tools:"), "tools should survive edit");
-        assert!(block.contains("include"), "tools block should survive edit");
-        assert!(block.contains("TOKEN: secret"), "env should survive edit");
+    fn enabled_disabled_round_trip() {
+        let on = json!({ "command": "npx", "enabled": true });
+        let adapter = renderer_to_adapter(on);
+        assert!(
+            adapter.get("disabled").is_none(),
+            "enabled:true must not write disabled"
+        );
+        assert!(
+            adapter.get("enabled").is_none(),
+            "adapter shape has no enabled field"
+        );
+        assert_eq!(adapter.get("command"), Some(&json!("npx")));
+        // No `disabled` key reads back as enabled (renderer checks === false).
+        let back = adapter_to_renderer(adapter);
+        assert!(back.get("enabled").is_none() || back.get("enabled") == Some(&json!(true)));
+        assert!(back.get("disabled").is_none());
+
+        let off = json!({ "command": "npx", "enabled": false });
+        let adapter = renderer_to_adapter(off);
+        assert_eq!(adapter.get("disabled"), Some(&json!(true)));
+        let back = adapter_to_renderer(adapter);
+        assert_eq!(back.get("enabled"), Some(&json!(false)));
+        assert!(back.get("disabled").is_none());
     }
 
     #[test]
-    fn mcp_parse_supports_inline_json_values() {
-        let yaml = "mcp_servers:\n  demo:\n    command: npx\n    args: [\"-y\", \"demo\"]\n";
-        let parsed = parse_mcp_servers(yaml, true);
-        let cfg = parsed["demo"].as_object().unwrap();
-        let args = cfg["args"].as_array().unwrap();
+    fn legacy_yaml_migrates_to_adapter_shape() {
+        let yaml = concat!(
+            "model: something\n",
+            "mcp_servers:\n",
+            "  demo:\n",
+            "    command: npx\n",
+            "    args:\n",
+            "      - -y\n",
+            "      - demo-server\n",
+            "    env:\n",
+            "      TOKEN: secret\n",
+            "    enabled: false\n",
+            "agent:\n",
+            "  personality: ''\n",
+        );
+        let legacy = parse_legacy_mcp_servers(yaml);
+        assert_eq!(legacy.len(), 1);
+        let adapter = renderer_to_adapter(legacy["demo"].clone());
+        assert_eq!(adapter.get("command"), Some(&json!("npx")));
+        let args = adapter.get("args").unwrap().as_array().unwrap();
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], json!("-y"));
+        assert_eq!(adapter.get("disabled"), Some(&json!(true)));
+        assert_eq!(
+            adapter.get("env").unwrap().get("TOKEN"),
+            Some(&json!("secret")),
+            "env must survive migration"
+        );
+        // The block ends at the next top-level key.
+        assert!(!legacy.contains_key("agent"));
     }
 
     #[test]
-    fn mcp_parse_keeps_windows_path_args_as_strings() {
-        let yaml = "mcp_servers:\n"
-            + "  demo:\n"
-            + "    command: D:\\nodejs\\node.EXE\n"
-            + "    args:\n"
-            + "      - D:\\MCP\\demo\\server.js\n";
-        let parsed = parse_mcp_servers(yaml, true);
-        let cfg = parsed["demo"].as_object().unwrap();
+    fn list_strips_env_when_not_included() {
+        let entry = json!({ "command": "npx", "env": { "TOKEN": "s" } });
+        let stripped = {
+            let mut e = entry.clone();
+            if let Some(obj) = e.as_object_mut() {
+                obj.remove("env");
+            }
+            e
+        };
+        assert!(stripped.get("env").is_none());
+        assert_eq!(stripped.get("command"), Some(&json!("npx")));
+    }
+
+    #[test]
+    fn windows_path_args_stay_strings() {
+        let yaml = concat!(
+            "mcp_servers:\n",
+            "  demo:\n",
+            "    command: D:\\nodejs\\node.EXE\n",
+            "    args:\n",
+            "      - D:\\MCP\\demo\\server.js\n",
+        );
+        let legacy = parse_legacy_mcp_servers(yaml);
+        let cfg = legacy["demo"].as_object().unwrap();
         assert_eq!(cfg["command"], json!("D:\\nodejs\\node.EXE"));
         let args = cfg["args"].as_array().unwrap();
-        assert_eq!(args.len(), 1);
         assert_eq!(args[0], json!("D:\\MCP\\demo\\server.js"));
     }
 }

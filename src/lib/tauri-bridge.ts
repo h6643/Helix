@@ -337,12 +337,8 @@ function buildTauriAPI(): ElectronAPI {
     getRawConfig: () => invoke("helix_get_raw_config"),
     setRawConfig: (patch: unknown) => invoke("helix_set_raw_config", { patch }),
     getMemoryStatus: () => invoke("helix_get_memory_status"),
-    getMemoryProviderConfig: (name: string) =>
-      invoke("helix_get_memory_provider_config", { name }),
-    setMemoryProviderConfig: (name: string, values: Record<string, unknown>) =>
-      invoke("helix_set_memory_provider_config", { name, values }),
-    memoryProviderSetup: (name: string) =>
-      invoke("helix_memory_provider_setup", { name }),
+    // Memory provider config commands were serve-backend stubs; removed with
+    // the pi migration (no backend implementation, no UI callers).
     setYamlKey: (key: string, value: unknown) =>
       invoke("helix_set_yaml_key", { key, value }),
     setDelegationIdentities: (identities: unknown) =>
@@ -373,6 +369,26 @@ function buildTauriAPI(): ElectronAPI {
     update: () => invoke("helix_update"),
     installPlugin: (identifier: string, force?: boolean) =>
       invoke("helix_install_plugin", { identifier, force: force ?? false }),
+    // Pi agent commands (extensions / skills / prompts / models)
+    piGetCommands: () => invoke("pi_get_commands"),
+    piListInstalled: () => invoke("pi_list_installed"),
+    piGetAvailableModels: () => invoke("pi_get_available_models"),
+    piGetState: () => invoke("pi_get_state"),
+    piSetModel: (provider: string, modelId: string) =>
+      invoke("pi_set_model", { provider, modelId }),
+    piSetThinkingLevel: (level: string) =>
+      invoke("pi_set_thinking_level", { level }),
+    piSetThinkingLevelAll: (level: string) =>
+      invoke("pi_set_thinking_level_all", { level }),
+    piCompact: () => invoke("pi_compact"),
+    piGetSessionStats: () => invoke("pi_get_session_stats"),
+    piSearchPackages: (query: string) => invoke("pi_search_packages", { query }),
+    piInstallPackage: (pkg: string) => invoke("pi_install_package", { package: pkg }),
+    piUninstallPackage: (pkg: string) => invoke("pi_uninstall_package", { package: pkg }),
+    piSetPackageEnabled: (pkg: string, enabled: boolean) =>
+      invoke("pi_set_package_enabled", { package: pkg, enabled }),
+    piCheckUpdates: () => invoke("pi_check_updates"),
+    piPackageLatest: (name: string) => invoke("pi_package_latest", { name }),
     cronList: () => invoke("helix_cron_list"),
     cronCreate: (schedule: string, command: string, name?: string) =>
       invoke("helix_cron_create", { schedule, command, name: name ?? null }),

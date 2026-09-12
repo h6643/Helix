@@ -1,0 +1,34 @@
+{
+  "defaultModel": "z-ai/glm-5.3-free",
+  "defaultProvider": "api.tokenrouter.com",
+  "extensions": [
+    "pi-lens-lite.ts",
+    "!extensions/pi-cron/**",
+    "!extensions/pi-web-access/**"
+  ],
+  "hideThinkingBlock": true,
+  "lastChangelogVersion": "0.85.1",
+  "packages": [
+    {
+      "source": "npm:pi-subagents",
+      "extensions": [
+        "./index.ts"
+      ],
+      "skills": [],
+      "prompts": []
+    },
+    "npm:@juicesharp/rpiv-todo",
+    "npm:@juicesharp/rpiv-ask-user-question",
+    "npm:@narumitw/pi-plan-mode",
+    "npm:pi-hermes-memory",
+    {
+      "extensions": [],
+      "prompts": [],
+      "skills": [],
+      "source": "npm:pi-mcp-adapter",
+      "themes": []
+    }
+  ],
+  "theme": "dark",
+  "tuiMode": "regular"
+}

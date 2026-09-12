@@ -340,7 +340,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
       {/* xterm.js terminal */}
       <div
         ref={containerRef}
-        className="flex-1 overflow-hidden bg-transparent backdrop-blur-sm px-1 py-1"
+        className="flex-1 overflow-hidden bg-transparent px-1 py-1"
         onClick={() => termRef.current?.focus()}
       />
 
@@ -408,7 +408,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
       className={`shrink-0 h-64 flex flex-col bg-card border-t border-border/40 rounded-t-lg overflow-hidden ${isTerminalOpen ? "" : "hidden"}`}
     >
       {/* Tab bar — Windows Terminal style */}
-      <div className="flex items-center h-8 bg-black/5 backdrop-blur-sm shrink-0 select-none">
+      <div className="flex items-center h-8 bg-muted shrink-0 select-none">
         <div className="flex items-center gap-1 px-1 h-full min-w-0 overflow-x-auto scrollbar-hide">
           {tabs.map((tab, i) => {
             const isActive = tab.id === activeId;

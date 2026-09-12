@@ -644,7 +644,7 @@ export class ServeGatewayClient {
         //
         // CRITICAL dedup: the backend sets `already_streamed=true` when this
         // interim text has ALREADY been rendered via message.delta for the same
-        // message (see agent/codex_runtime.py: "The gateway's already_streamed
+        // message (see the gateway's already_streamed
         // check dedupes against any text the stream-delta callback already
         // rendered for the same message"). Blindly appending it as another
         // agent_message_chunk makes the same paragraph render TWICE — the

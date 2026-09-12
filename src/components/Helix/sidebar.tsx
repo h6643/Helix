@@ -6,7 +6,6 @@ import {
   Clock,
   Puzzle,
   Settings,
-  Brain,
   Loader2,
   Trash2,
   Folder,
@@ -14,14 +13,11 @@ import {
   FolderTree,
   Archive,
   Pin,
-  Sparkles,
   RotateCcw,
   MoreVertical,
   Pencil,
   GitBranch,
   AlertTriangle,
-  PanelLeft,
-  Users,
 } from "lucide-react";
 import React, {
   useState,
@@ -32,21 +28,19 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
-import {
-  isElectron,
-  electronDialog,
-  electronShell,
-} from "@/lib/electron-bridge";
-import { persistence, type PersistedSession } from "@/lib/persist";
-import { timeAgo } from "@/lib/format";
-import { useHelixStore } from "@/stores/helix-store";
-import { useGatewayStore } from "@/stores/gateway-store";
 import { FileTreePanel } from "./file-tree-panel";
+import { isElectron, electronShell, helixApi } from "@/lib/electron-bridge";
+import { captureContextBreakdown } from "@/lib/context-capture";
+import { timeAgo } from "@/lib/format";
+import { persistence, type PersistedSession } from "@/lib/persist";
+import { resolveBackendSid } from "@/lib/session-map";
+import { mapBackendMessages } from "@/lib/session-resync";
+import { useGatewayStore } from "@/stores/gateway-store";
+import { useHelixStore } from "@/stores/helix-store";
 
 interface SidebarProps {
   onNewTask?: () => void;
   collapsed?: boolean;
-  onToggle?: () => void;
 }
 
 interface SessionActionsMenuProps {
@@ -376,20 +370,11 @@ function ProjectActionsMenu({
   );
 }
 
-export function Sidebar({
-  onNewTask,
-  collapsed = false,
-  onToggle,
-}: SidebarProps) {
+export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   const {
     clearChat,
-    clearExecutionFlow,
-    flushSessionPersist,
-    setCurrentSessionId,
     pushNavigation,
     toggleSettings,
-    toggleScheduledTasksPanel,
-    toggleSkillPanel,
     toggleSessionManager,
     showToast,
     setSelectedWorkDir,
@@ -397,13 +382,8 @@ export function Sidebar({
   } = useHelixStore(
     useShallow((s) => ({
       clearChat: s.clearChat,
-      clearExecutionFlow: s.clearExecutionFlow,
-      flushSessionPersist: s.flushSessionPersist,
-      setCurrentSessionId: s.setCurrentSessionId,
       pushNavigation: s.pushNavigation,
       toggleSettings: s.toggleSettings,
-      toggleScheduledTasksPanel: s.toggleScheduledTasksPanel,
-      toggleSkillPanel: s.toggleSkillPanel,
       toggleSessionManager: s.toggleSessionManager,
       showToast: s.showToast,
       setSelectedWorkDir: s.setSelectedWorkDir,
@@ -452,12 +432,10 @@ export function Sidebar({
   const clampPage = (page: number, total: number) =>
     Math.min(Math.max(1, page), Math.max(1, total));
 
-  const [, setFavRefresh] = useState(0);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     new Set(),
   );
   const [recentCollapsed, setRecentCollapsed] = useState(false);
-  const [recentHovered, setRecentHovered] = useState(false);
   // Bumped to force the full-area directory view's FileTreePanel to reload.
   const [dirReloadKey, setDirReloadKey] = useState(0);
 
@@ -714,19 +692,89 @@ export function Sidebar({
           // 用轻量 syncWorkDir（不重启网关、不持久化），绝不能走 setWorkDir——那会
           // 触发“切换项目”副作用，打断正在运行的对话。
           try {
-            await (window as any).electron?.app?.syncWorkDir?.(fresh.workDir);
+            await window.electron?.app?.syncWorkDir?.(fresh.workDir);
           } catch {
             /* best-effort */
           }
         }
         useHelixStore.getState().setCurrentSessionId(session.id);
         pushNavigation({ type: "chat", sessionId: session.id });
+        // Background resume warm-up: the backend's session instance may have
+        // been reaped (idle) or never existed (app restart). Restoring it
+        // costs spawn + switch_session (scales with conversation length —
+        // tens of seconds for long sessions). Kicking it off here means the
+        // user's first prompt finds the instance hot instead of paying the
+        // whole restore inside "工作中".
+        void (async () => {
+          try {
+            const sid = await resolveBackendSid(session.id);
+            if (!sid) return;
+            await helixApi()?.send("session/prepare", { session_id: sid });
+          } catch {
+            /* best-effort warm-up; the first prompt restores on demand */
+          }
+        })();
+        // 切换对话时刷新上下文环快照：本地持久化的 used 是该对话上一次 run
+        // 的实测值——恢复/重启用后不再增长，环会停在过期读数（显示 50k 而
+        // 下一条 prompt 实际要重放 ~276k 的根因）。captureContextBreakdown
+        // 向后端要真实下条 prompt 估算（含 restore-time trim 后的文件），
+        // max 合并落盘，环读数恢复真实。等待 prepare 完成后拉取——restore
+        // （含 trim switch）完成后 get_session_stats 才反映切换后的文件。
+        void (async () => {
+          try {
+            const sid = await resolveBackendSid(session.id);
+            if (!sid) return;
+            await helixApi()?.send("session/prepare", { session_id: sid });
+            await captureContextBreakdown(session.id, sid);
+          } catch {
+            /* best-effort; the popover's 5s poll refreshes on open */
+          }
+        })();
+        // Instant history when the local record has nothing rendered (e.g.
+        // messages were never persisted / lost): tail the backend jsonl
+        // directly — no pi process involved, O(last 512KB).
+        if (msgs.length === 0) {
+          void (async () => {
+            try {
+              const sid = await resolveBackendSid(session.id);
+              if (!sid) return;
+              const res = await helixApi()?.send("session/peek", {
+                session_id: sid,
+                count: 30,
+              });
+              const peekMsgs = Array.isArray(res?.messages) ? res.messages : [];
+              if (peekMsgs.length === 0) return;
+              // Only fill the view if the conversation is still the focused
+              // one and still empty (the user may have navigated away).
+              const st = useHelixStore.getState();
+              if (st.currentSessionId !== session.id) return;
+              const current = st.chatMessages.filter(
+                (m) => m.sessionId === session.id,
+              );
+              if (current.length > 0) return;
+              useHelixStore.setState((state) => ({
+                chatMessages: [
+                  ...state.chatMessages.filter(
+                    (m) => m.sessionId && m.sessionId !== session.id,
+                  ),
+                  ...mapBackendMessages(peekMsgs, session.id),
+                ],
+              }));
+            } catch {
+              /* fall back to the first-prompt restore path */
+            }
+          })();
+        }
       } catch (e) {
         console.error("Failed to load session:", e);
         showToast({ type: "error", title: "加载失败" });
       }
     },
-    [showToast],
+    // Deliberately empty: this callback reads live state via useHelixStore.getState()
+    // so it never goes stale; listing store getters here would churn identities on
+    // every store update. Zustand store actions are stable references.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
   );
 
   const handleDeleteSession = useCallback(
@@ -765,7 +813,7 @@ export function Sidebar({
     } catch (e) {
       console.error("Failed to delete session:", e);
     }
-  }, [deleteTarget, showToast, sortSessions]);
+  }, [deleteTarget, sortSessions]);
 
   const handleToggleArchive = useCallback(
     async (id: string, e?: React.MouseEvent) => {
@@ -884,7 +932,7 @@ export function Sidebar({
   const handleArchiveProject = useCallback(
     async (dir: string) => {
       try {
-        const count = await persistence.archiveSessionsByWorkDir(dir);
+        await persistence.archiveSessionsByWorkDir(dir);
         const remaining = await persistence.loadSessions();
         setSessions(sortSessions(remaining));
       } catch (e) {
@@ -910,7 +958,7 @@ export function Sidebar({
           .filter((s) => s.workDir === deleteProjectDir)
           .map((s) => s.id),
       );
-      const count = await persistence.deleteSessionsByWorkDir(deleteProjectDir);
+      await persistence.deleteSessionsByWorkDir(deleteProjectDir);
       await persistence.deleteProjectFolder(deleteProjectDir);
       // Drop the dir from pinned folders (if it was pinned) so it can't re-appear.
       const pinned = await persistence.getPinnedProjectFolders();
@@ -988,8 +1036,10 @@ export function Sidebar({
       label: "计划",
       icon: Clock,
       action: () => {
-        if (!showScheduledTasksPanel && showSkillPanel) toggleSkillPanel();
-        toggleScheduledTasksPanel();
+        useHelixStore.setState((s) => ({
+          showScheduledTasksPanel: !s.showScheduledTasksPanel,
+          showSkillPanel: false,
+        }));
       },
     },
     {
@@ -997,15 +1047,16 @@ export function Sidebar({
       label: "插件",
       icon: Puzzle,
       action: () => {
-        if (!showSkillPanel && showScheduledTasksPanel)
-          toggleScheduledTasksPanel();
-        toggleSkillPanel();
+        useHelixStore.setState((s) => ({
+          showSkillPanel: !s.showSkillPanel,
+          showScheduledTasksPanel: false,
+        }));
       },
     },
   ];
 
   return (
-    <div className="h-full flex flex-col text-sidebar-foreground select-none">
+    <div className="helix-sidebar h-full flex flex-col text-sidebar-foreground select-none">
       {/* Collapsed icon-only mode */}
       {collapsed ? (
         <div className="flex-1 flex flex-col items-center pt-3 pb-2 gap-1 overflow-y-auto">
@@ -1247,26 +1298,29 @@ export function Sidebar({
                                                   "text/session-reorder",
                                                 );
                                               if (!raw) return;
-                                              const { sessionId: draggedId } =
-                                                JSON.parse(raw);
+                                              let draggedId: string;
+                                              try {
+                                                ({ sessionId: draggedId } =
+                                                  JSON.parse(raw));
+                                              } catch {
+                                                // malformed drag payload — nothing to reorder
+                                                return;
+                                              }
                                               if (draggedId === session.id)
                                                 return;
                                               // Reorder: move dragged session before this one
                                               const updated =
                                                 project.sessions.filter(
-                                                  (s: any) =>
-                                                    s.id !== draggedId,
+                                                  (s) => s.id !== draggedId,
                                                 );
                                               const dragged =
                                                 project.sessions.find(
-                                                  (s: any) =>
-                                                    s.id === draggedId,
+                                                  (s) => s.id === draggedId,
                                                 );
                                               if (dragged) {
                                                 const targetIdx =
                                                   updated.findIndex(
-                                                    (s: any) =>
-                                                      s.id === session.id,
+                                                    (s) => s.id === session.id,
                                                   );
                                                 updated.splice(
                                                   targetIdx,
@@ -1277,11 +1331,11 @@ export function Sidebar({
                                                 try {
                                                   await persistence.reorderSessions(
                                                     project.dir,
-                                                    updated.map(
-                                                      (s: any) => s.id,
-                                                    ),
+                                                    updated.map((s) => s.id),
                                                   );
-                                                } catch {}
+                                                } catch {
+                                                  // best-effort reorder; ignore persistence failure
+                                                }
                                               }
                                             }}
                                             onClick={() =>
@@ -1586,80 +1640,86 @@ export function Sidebar({
       )}
       {/* Delete confirmation dialog */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-[10000] flex items-center justify-center animate-fade-in">
-          <div
-            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-            onClick={() => setDeleteTarget(null)}
-          />
-          <div className="relative bg-popover border border-border/40 rounded-2xl shadow-2xl w-96 mx-4 p-6 space-y-4 animate-scale-in">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center shrink-0">
-                <AlertTriangle className="size-5 text-destructive" />
+        createPortal(
+          <div className="fixed inset-0 z-[10000] flex items-center justify-center animate-fade-in">
+            <div
+              className="absolute inset-0 bg-black/50"
+              onClick={() => setDeleteTarget(null)}
+            />
+            <div className="relative bg-popover border border-border/40 rounded-2xl shadow-2xl w-96 mx-4 p-6 space-y-4 animate-scale-in">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="size-5 text-destructive" />
+                </div>
+                <div>
+                  <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
+                    删除对话
+                  </h3>
+                  <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground mt-1">
+                    确定要删除「{deleteTarget.label}」吗？此操作不可撤销。
+                  </p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
-                  删除对话
-                </h3>
-                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground mt-1">
-                  确定要删除「{deleteTarget.label}」吗？此操作不可撤销。
-                </p>
+              <div className="flex justify-between gap-2">
+                <button
+                  onClick={handleConfirmDelete}
+                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
+                >
+                  删除
+                </button>
+                <button
+                  onClick={() => setDeleteTarget(null)}
+                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/70 hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+                >
+                  取消
+                </button>
               </div>
             </div>
-            <div className="flex justify-between gap-2">
-              <button
-                onClick={handleConfirmDelete}
-                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
-              >
-                删除
-              </button>
-              <button
-                onClick={() => setDeleteTarget(null)}
-                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/70 hover:text-foreground hover:bg-accent rounded-lg transition-colors"
-              >
-                取消
-              </button>
-            </div>
-          </div>
-        </div>
+          </div>,
+          document.body,
+        )
       )}
       {deleteProjectDir && (
-        <div className="fixed inset-0 z-[10000] flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => setDeleteProjectDir(null)}
-          />
-          <div className="relative bg-card border border-border rounded-2xl shadow-2xl w-96 mx-4 p-6 space-y-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center shrink-0">
-                <AlertTriangle className="size-5 text-destructive" />
+        createPortal(
+          <div className="fixed inset-0 z-[10000] flex items-center justify-center animate-fade-in">
+            <div
+              className="absolute inset-0 bg-black/50"
+              onClick={() => setDeleteProjectDir(null)}
+            />
+            <div className="relative bg-popover border border-border/40 rounded-2xl shadow-2xl w-96 mx-4 p-6 space-y-4 animate-scale-in">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="size-5 text-destructive" />
+                </div>
+                <div>
+                  <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
+                    删除项目
+                  </h3>
+                  <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground mt-1">
+                    确定要删除「
+                    {deleteProjectDir.split(/[/\\\\]/).pop() || deleteProjectDir}
+                    」及该项目下的所有对话吗？此操作不可撤销。
+                  </p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
-                  删除项目
-                </h3>
-                <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground mt-1">
-                  确定要删除「
-                  {deleteProjectDir.split(/[/\\\\]/).pop() || deleteProjectDir}
-                  」及该项目下的所有对话吗？此操作不可撤销。
-                </p>
+              <div className="flex justify-between gap-2">
+                <button
+                  onClick={handleConfirmDeleteProject}
+                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
+                >
+                  删除
+                </button>
+                <button
+                  onClick={() => setDeleteProjectDir(null)}
+                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/70 hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+                >
+                  取消
+                </button>
               </div>
             </div>
-            <div className="flex justify-between gap-2">
-              <button
-                onClick={handleConfirmDeleteProject}
-                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
-              >
-                删除
-              </button>
-              <button
-                onClick={() => setDeleteProjectDir(null)}
-                className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/70 hover:text-foreground hover:bg-accent rounded-lg transition-colors"
-              >
-                取消
-              </button>
-            </div>
-          </div>
-        </div>
+          </div>,
+          document.body,
+        )
       )}
     </div>
   );

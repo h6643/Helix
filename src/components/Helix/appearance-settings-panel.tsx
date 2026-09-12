@@ -133,7 +133,7 @@ function ThemeStylePicker({
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed z-50 w-40 bg-popover border-0 rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto overscroll-contain backdrop-blur-sm"
+          className="fixed z-50 w-40 bg-popover border border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto overscroll-contain"
           style={{ left: pos.left, top: pos.top }}
         >
           {THEME_SELECT_GROUPS.map((g) => (

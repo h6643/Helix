@@ -32,7 +32,7 @@ export function CustomizePanel({ onClose }: CustomizePanelProps) {
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="w-full max-w-4xl bg-card border border-border/60 rounded-2xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border/60 shrink-0">
           <div className="flex items-center gap-2">
@@ -199,7 +199,7 @@ function ShortcutsSection() {
 
       {/* Recording overlay */}
       {recording && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="bg-card/50 border border-border/50 rounded-xl p-6 shadow-xl max-w-sm w-full">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse" />
