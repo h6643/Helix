@@ -21,6 +21,11 @@ import {
   XCircle,
   MoreHorizontal,
   Users,
+  ChevronRight,
+  FilePlus,
+  GitCommit,
+  Send,
+  Pencil,
 } from "lucide-react";
 import React, {
   useState,
@@ -37,6 +42,7 @@ import { getCurrentVersion } from "@/hooks/use-check-update";
 import { createPortal } from "react-dom";
 import { useProviderStore } from "@/stores/slices/provider-store";
 import { useCheckUpdate } from "@/hooks/use-check-update";
+import { useGitChangeStat } from "@/hooks/use-git-change-stat";
 import {
   pushModelConfig,
   pushAgentConfigLive,
@@ -46,11 +52,11 @@ import {
   isElectron,
   electronHelix,
   electronShell,
+  electronGit,
 } from "@/lib/electron-bridge";
 import { startScheduledTaskRunner } from "@/lib/scheduled-task-runner";
 import { isServeActive, getServeClient } from "@/lib/serve-gateway";
 import { useHelixStore } from "@/stores/helix-store";
-import { useBackgroundTasksStore } from "@/stores/background-tasks-store";
 import { applyHelixPalette } from "@/lib/themes";
 import { AgentFlowPanel } from "./agent-flow-panel";
 import { GlobalTooltip } from "./global-tooltip";
@@ -59,7 +65,7 @@ import { Sidebar } from "./sidebar";
 import { BranchPicker } from "./branch-picker";
 import { KeyboardShortcuts } from "./keyboard-shortcuts";
 import { ContextMenuProvider } from "./context-menu";
-import { BackgroundTasksPanel } from "./background-tasks-panel";
+import { BackgroundTasksPanel, type BgTask } from "./background-tasks-panel";
 
 import { ToastContainer } from "./toast-container";
 import { useGatewayStore } from "@/stores/gateway-store";
@@ -459,77 +465,117 @@ export function HelixLayout() {
   const navigationIndex = useHelixStore((s) => s.navigationIndex);
   const customShortcuts = useHelixStore((s) => s.customShortcuts);
   const helixTodos = useHelixStore((s) => s.helixTodos);
+  const pendingPlanReview = useHelixStore((s) => s.pendingPlanReview);
   // Stable action references — these never change so getState() is safe
   const storeActions = useMemo(() => useHelixStore.getState(), []);
   const [restoreReady, setRestoreReady] = useState(startupSyncDone);
-  const [todoPopoverOpen, setTodoPopoverOpen] = useState(false);
   const [delegations, setDelegations] = useState<
     Array<{ id: string; tasks: Array<{ name: string; modified: number }> }>
   >([]);
-  const [delegationsPopoverOpen, setDelegationsPopoverOpen] = useState(false);
-  const delegationsPopoverRef = useRef<HTMLDivElement>(null);
+  // 后台任务（pi-background-tasks 扩展注册表）：面板打开时 3s 轮询，平时
+  // 10s 慢轮询维持按钮徽标。数据经 Rust tasks_list 读共享 tasks.json。
+  const [bgTasks, setBgTasks] = useState<BgTask[]>([]);
   const [bgTasksOpen, setBgTasksOpen] = useState(false);
   const bgTasksRef = useRef<HTMLDivElement>(null);
-  // 只选稳定引用（s.tasks 数组只在 store set 时换引用）；过滤在组件内做，
-  // 不能写成 s.tasks.filter(...) —— selector 每次返回新数组会让
-  // useSyncExternalStore 认为快照永远在变 → "Maximum update depth exceeded"。
-  const bgTasks = useBackgroundTasksStore((s) => s.tasks);
-  const activeSessionId = useHelixStore((s) => s.currentSessionId);
-  // 后台任务绑定当前会话：只显示本对话的任务
-  const myBgTasks = useMemo(
-    () => bgTasks.filter((t) => t.sessionId === activeSessionId),
-    [bgTasks, activeSessionId],
-  );
+  const helixSessionId = useGatewayStore((s) => s.helixSessionId);
+  const loadBgTasks = useCallback(async () => {
+    if (!isElectron()) return;
+    try {
+      const api = (window as any).electron as any;
+      const res = await api?.backgroundTasks?.list?.();
+      if (res?.ok) setBgTasks(res.tasks || []);
+    } catch {}
+  }, []);
+  useEffect(() => {
+    if (!isElectron()) return;
+    loadBgTasks();
+    const interval = setInterval(loadBgTasks, bgTasksOpen ? 3000 : 10000);
+    return () => clearInterval(interval);
+  }, [bgTasksOpen, loadBgTasks]);
   const runningBgTasks = useMemo(
-    () => myBgTasks.filter((t) => t.status === "running"),
-    [myBgTasks],
+    () => bgTasks.filter((t) => t.status === "running"),
+    [bgTasks],
   );
-  // Close the todo popover when clicking outside of it
-  const todoPopoverRef = useRef<HTMLDivElement>(null);
+  // 右上角「更改」胶囊：当前工作区未提交改动的行数统计。
+  // 数据 = git diff --numstat 各文件 +/- 求和（二进制文件输出 "-\t-" 会被跳过）。
+  // 无会话/项目目录、非 git 仓库、或零改动时置空 → 胶囊不渲染。
+  // agent 编辑文件很频繁，5s 轮询跟上；workDir 变化（切会话/项目）立即重算。
+  // 「更改」胶囊重新统计的信号：提交成功后 +1 立即刷新，无需等 5s 轮询。
+  const [gitRevision, setGitRevision] = useState(0);
+  // 未提交改动（git diff --numstat）。这里只取总计，「更改」tab 用同一 hook
+  // 拿文件明细。无改动 / 非 git 仓库 → null → 胶囊不渲染。
+  const gitChangeStat = useGitChangeStat(branchPickerWorkDir, gitRevision);
+  // 右上角「提交 / 提交并推送」的提交中状态。
+  const [isCommitting, setIsCommitting] = useState(false);
+  // 提交弹窗（点「提交并推送」时弹出，内含提交信息输入框 + 提交 / 提交并推送 两个动作）。
+  const [commitDialogOpen, setCommitDialogOpen] = useState(false);
+  const [commitMessage, setCommitMessage] = useState("");
+  // 右上角统一工作面板（更改 / 任务清单 / 子 Agent 共用的下拉）。
+  const [workPanelOpen, setWorkPanelOpen] = useState(false);
+  const workPanelRef = useRef<HTMLDivElement>(null);
+  // 点击面板外部时关闭统一工作面板。
   useEffect(() => {
-    if (!todoPopoverOpen) return;
+    if (!workPanelOpen) return;
     const onDocClick = (e: MouseEvent) => {
       if (
-        todoPopoverRef.current &&
-        !todoPopoverRef.current.contains(e.target as Node)
+        workPanelRef.current &&
+        !workPanelRef.current.contains(e.target as Node)
       ) {
-        setTodoPopoverOpen(false);
+        setWorkPanelOpen(false);
       }
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
-  }, [todoPopoverOpen]);
-
-  // Close delegations popover when clicking outside
-  useEffect(() => {
-    if (!delegationsPopoverOpen) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (
-        delegationsPopoverRef.current &&
-        !delegationsPopoverRef.current.contains(e.target as Node)
-      ) {
-        setDelegationsPopoverOpen(false);
+  }, [workPanelOpen]);
+  // 复用分支管理的 quick commit 逻辑：提交当前工作区改动，可选随后推送。
+  const quickCommit = useCallback(
+    async (pushAfter = false, message?: string) => {
+      if (!isElectron() || !branchPickerWorkDir || isCommitting) return;
+      setIsCommitting(true);
+      try {
+        const commitRes = await electronGit.commit(
+          message && message.trim().length > 0
+            ? message.trim()
+            : `chore: auto-commit (${new Date().toLocaleString("zh-CN")})`,
+        );
+        if (!commitRes.ok) {
+          storeActions.showToast({
+            type: "error",
+            title: "提交失败",
+            description: commitRes.error,
+          });
+          return;
+        }
+        if (pushAfter) {
+          const pushRes = await electronGit.push();
+          if (!pushRes.ok) {
+            storeActions.showToast({
+              type: "error",
+              title: "推送失败",
+              description: pushRes.error,
+            });
+            return;
+          }
+        }
+        storeActions.showToast({
+          type: "success",
+          title: pushAfter ? "提交并推送成功" : "提交成功",
+        });
+        // 改动已落库，立即刷新「更改」胶囊。
+        setGitRevision((r) => r + 1);
+        setCommitDialogOpen(false);
+      } catch (e) {
+        storeActions.showToast({
+          type: "error",
+          title: "操作失败",
+          description: String(e),
+        });
+      } finally {
+        setIsCommitting(false);
       }
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [delegationsPopoverOpen]);
-
-  // Close background-tasks popover when clicking outside
-  useEffect(() => {
-    if (!bgTasksOpen) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (
-        bgTasksRef.current &&
-        !bgTasksRef.current.contains(e.target as Node)
-      ) {
-        setBgTasksOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [bgTasksOpen]);
-
+    },
+    [branchPickerWorkDir, isCommitting, storeActions],
+  );
   // Load delegations data — scoped to the current session.
   useEffect(() => {
     if (!isElectron()) return;
@@ -610,6 +656,9 @@ export function HelixLayout() {
       if (!isElectron()) return;
       const cfg = st.apiConfig;
       if (!cfg || !cfg.model) return;
+      // 启动重申只推 model/provider/baseUrl——凭据以 pi 侧文件为准。带 key 会
+      // 在每次重启时把缓存里的旧 key 重建进 models.json，覆盖用户在外部轮换
+      // 过的 key（pushModelConfig 内部也会剥 key，这里显式不传）。
       pushModelConfig({
         model: cfg.model,
         provider:
@@ -617,7 +666,6 @@ export function HelixLayout() {
             ? cfg.provider
             : "custom",
         baseUrl: cfg.baseUrl,
-        apiKey: cfg.apiKey,
       });
     })();
     return () => {
@@ -765,10 +813,8 @@ export function HelixLayout() {
         gw.setHelixSessionId(null);
         const s = useHelixStore.getState();
         const cfg = s.apiConfig;
-        const ap = s.activeProviderId
-          ? s.providers.find((p) => p.id === s.activeProviderId)
-          : undefined;
-        const resolvedKey = ap?.apiKey || cfg.apiKey || "";
+        // Key 不推送：凭据以 pi 侧文件（models.json/auth.json）为准，后端在
+        // 未收到 key 时保留已存的。推缓存 key 会把轮换过的 key 覆盖回旧值。
         pushModelConfig({
           model: cfg.model,
           provider:
@@ -776,7 +822,6 @@ export function HelixLayout() {
               ? cfg.provider
               : "custom",
           baseUrl: cfg.baseUrl,
-          apiKey: resolvedKey,
         });
       } else {
         // Model not declared in Helix providers (e.g. fetched list only) — at
@@ -907,7 +952,10 @@ export function HelixLayout() {
         scheduleProbe(1500, 0);
       } else if (event === "gateway.retry") {
         const phase = params?.phase as
-          "error" | "retrying" | "recovered" | undefined;
+          | "error"
+          | "retrying"
+          | "recovered"
+          | undefined;
         if (phase === "recovered") {
           useGatewayStore.getState().setHelixConnected(true);
           useHelixStore.getState().setGatewayStatus("ready");
@@ -1272,16 +1320,7 @@ export function HelixLayout() {
         label: "后退",
         shortcut: shortcutLabel("go-back", customShortcuts),
         action: () => {
-          const entry = storeActions.navigateBack();
-          if (entry) {
-            if (entry.type === "chat") {
-              if (showSettings) storeActions.toggleSettings();
-              storeActions.navigateSession("back");
-            } else {
-              if (!showSettings) storeActions.toggleSettings(entry.page);
-              else storeActions.setSettingsPage(entry.page);
-            }
-          }
+          storeActions.navigateHistory("back");
           closeWindowMenu();
         },
       },
@@ -1289,16 +1328,7 @@ export function HelixLayout() {
         label: "前进",
         shortcut: shortcutLabel("go-forward", customShortcuts),
         action: () => {
-          const entry = storeActions.navigateForward();
-          if (entry) {
-            if (entry.type === "chat") {
-              if (showSettings) storeActions.toggleSettings();
-              storeActions.navigateSession("forward");
-            } else {
-              if (!showSettings) storeActions.toggleSettings(entry.page);
-              else storeActions.setSettingsPage(entry.page);
-            }
-          }
+          storeActions.navigateHistory("forward");
           closeWindowMenu();
         },
       },
@@ -1322,15 +1352,14 @@ export function HelixLayout() {
   );
 
   const sidebarExpanded = showSidebar;
-  const sidebarPixelWidth =
-    sidebarCollapsed ? SIDEBAR_COLLAPSED : sidebarWidth * (uiFontSize / 14);
+  const sidebarPixelWidth = sidebarCollapsed
+    ? SIDEBAR_COLLAPSED
+    : sidebarWidth * (uiFontSize / 14);
   const titlebarPixelWidth =
     showSidebar && !showSettings ? sidebarPixelWidth : SIDEBAR_COLLAPSED;
 
   return (
-    <div
-      className="helix-app-backdrop relative h-screen w-screen flex flex-row overflow-hidden"
-    >
+    <div className="helix-app-backdrop relative h-screen w-screen flex flex-row overflow-hidden">
       <KeyboardShortcuts />
       <CommandPalette />
       <ContextMenuProvider />
@@ -1347,232 +1376,207 @@ export function HelixLayout() {
           className="helix-app-titlebar flex items-center justify-between h-10 px-3 shrink-0 select-none"
           style={{ width: titlebarPixelWidth }}
         >
-        {/* Left: navigation buttons */}
-        <div
-          className="flex items-center gap-0.5"
-          style={{ WebkitAppRegion: "no-drag" } as any}
-        >
-          {!showSettings && (
+          {/* Left: navigation buttons */}
+          <div
+            className="flex items-center gap-0.5"
+            style={{ WebkitAppRegion: "no-drag" } as any}
+          >
+            {!showSettings && (
+              <button
+                onClick={() => setShowSidebar((v) => !v)}
+                className={`p-1.5 rounded-lg transition-colors ${showSidebar ? "text-primary bg-primary/10" : "text-foreground/40 hover:text-foreground/80 hover:bg-accent/50"}`}
+                data-tip="侧边栏"
+              >
+                <PanelLeft className="size-5" />
+              </button>
+            )}
+            {!showSettings && (
+              <button
+                onClick={() => storeActions.navigateHistory("back")}
+                disabled={navigationIndex <= 0}
+                className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-30"
+                data-tip="后退"
+              >
+                <ArrowLeft className="size-5" />
+              </button>
+            )}
             <button
-              onClick={() => setShowSidebar((v) => !v)}
-              className={`p-1.5 rounded-lg transition-colors ${showSidebar ? "text-primary bg-primary/10" : "text-foreground/40 hover:text-foreground/80 hover:bg-accent/50"}`}
-              data-tip="侧边栏"
-            >
-              <PanelLeft className="size-4" />
-            </button>
-          )}
-          {!showSettings && (
-            <button
-              onClick={() => {
-                const entry = storeActions.navigateBack();
-                if (!entry) return;
-                if (entry.type === "chat") {
-                  // Load the chat session
-                  if (showSettings) storeActions.toggleSettings();
-                  storeActions.navigateSession("back");
-                } else {
-                  // Open settings with the page
-                  if (!showSettings) storeActions.toggleSettings(entry.page);
-                  else storeActions.setSettingsPage(entry.page);
-                }
-              }}
-              disabled={!storeActions.canGoBack()}
+              onClick={() => storeActions.navigateHistory("forward")}
+              disabled={navigationIndex >= navigationHistory.length - 1}
               className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-30"
-              data-tip="后退"
+              data-tip="前进"
             >
-              <ArrowLeft className="size-4" />
+              <ArrowRight className="size-5" />
             </button>
-          )}
-          <button
-            onClick={() => {
-              const entry = storeActions.navigateForward();
-              if (!entry) return;
-              if (entry.type === "chat") {
-                // Load the chat session
-                if (showSettings) storeActions.toggleSettings();
-                storeActions.navigateSession("forward");
-              } else {
-                // Open settings with the page
-                if (!showSettings) storeActions.toggleSettings(entry.page);
-                else storeActions.setSettingsPage(entry.page);
-              }
-            }}
-            disabled={!storeActions.canGoForward()}
-            className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-30"
-            data-tip="前进"
-          >
-            <ArrowRight className="size-4" />
-          </button>
-          <button
-            ref={windowMenuButtonRef}
-            onClick={toggleWindowMenu}
-            className="px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-            data-tip="窗口"
-          >
-            窗口
-          </button>
-          <button
-            ref={helpMenuButtonRef}
-            onClick={() => setHelpMenuOpen((v) => !v)}
-            className="px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-            data-tip="帮助"
-          >
-            帮助
-          </button>
-          {helpMenuOpen &&
-            typeof window !== "undefined" &&
-            createPortal(
-              <div
-                className="fixed z-[100]"
-                style={{
-                  top:
-                    (helpMenuButtonRef.current?.getBoundingClientRect()
-                      .bottom ?? 0) + 4,
-                  left:
-                    helpMenuButtonRef.current?.getBoundingClientRect().left ??
-                    0,
-                }}
-              >
+            <button
+              ref={windowMenuButtonRef}
+              onClick={toggleWindowMenu}
+              className="px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+              data-tip="窗口"
+            >
+              窗口
+            </button>
+            <button
+              ref={helpMenuButtonRef}
+              onClick={() => setHelpMenuOpen((v) => !v)}
+              className="px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+              data-tip="帮助"
+            >
+              帮助
+            </button>
+            {helpMenuOpen &&
+              typeof window !== "undefined" &&
+              createPortal(
                 <div
-                  ref={helpMenuRef}
-                  className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1"
+                  className="fixed z-[100]"
+                  style={{
+                    top:
+                      (helpMenuButtonRef.current?.getBoundingClientRect()
+                        .bottom ?? 0) + 4,
+                    left:
+                      helpMenuButtonRef.current?.getBoundingClientRect().left ??
+                      0,
+                  }}
                 >
-                  <div className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
-                    版本 v{appVersion || "0.1.2"}
-                  </div>
-                  <button
-                    className="w-full px-3 py-2 text-[length:var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
-                    onClick={async () => {
-                      setHelpMenuOpen(false);
-                      try {
-                        // 检查 pi agent + npm 插件的更新（npm registry），
-                        // 不再查 Helix 应用自身——后端 agent 是外部 pi 包。
-                        const res = await (
-                          window as any
-                        ).electron?.helix?.piCheckUpdates?.();
-                        if (!res) {
-                          useHelixStore.getState().showToast({
-                            type: "error",
-                            title: "检查更新失败",
-                            description: "更新检查不可用",
-                          });
-                          return;
-                        }
-                        const pi = res.pi || {};
-                        const outdated = (res.packages || []).filter(
-                          (p: any) => p.hasUpdate,
-                        );
-                        if (pi.hasUpdate && pi.latest) {
-                          useHelixStore.getState().showToast({
-                            type: "info",
-                            title: "pi 有新版本可用",
-                            description: `v${pi.installed} → v${pi.latest}${
-                              outdated.length > 0
-                                ? `，另有 ${outdated.length} 个插件可更新`
-                                : ""
-                            }`,
-                            duration: 8000,
-                            onClick: () =>
-                              window.open(
-                                "https://www.npmjs.com/package/@earendil-works/pi-coding-agent",
-                                "_blank",
-                              ),
-                          });
-                        } else if (outdated.length > 0) {
-                          const names = outdated
-                            .slice(0, 3)
-                            .map(
-                              (p: any) =>
-                                `${p.name} v${p.installed} → v${p.latest}`,
-                            )
-                            .join("\n");
-                          useHelixStore.getState().showToast({
-                            type: "info",
-                            title: `有 ${outdated.length} 个插件可更新`,
-                            description:
-                              names +
-                              (outdated.length > 3
-                                ? `\n…等 ${outdated.length} 个`
-                                : ""),
-                            duration: 10000,
-                          });
-                        } else if (pi.installed) {
-                          useHelixStore.getState().showToast({
-                            type: "success",
-                            title: "已是最新版本",
-                            description: `pi v${pi.installed}（含全部插件）`,
-                          });
-                        } else {
-                          useHelixStore.getState().showToast({
-                            type: "error",
-                            title: "检查更新失败",
-                            description: "未找到 pi 安装",
-                          });
-                        }
-                      } catch (e) {
-                        useHelixStore.getState().showToast({
-                          type: "error",
-                          title: "检查更新失败",
-                          description:
-                            e instanceof Error ? e.message : "网络异常",
-                        });
-                      }
-                    }}
+                  <div
+                    ref={helpMenuRef}
+                    className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1"
                   >
-                    <FileText className="size-4" />
-                    检查更新
-                  </button>
-                </div>
-              </div>,
-              document.body,
-            )}
-          {windowMenuOpen &&
-            typeof window !== "undefined" &&
-            createPortal(
-              <div
-                className="fixed z-[100]"
-                style={{
-                  top:
-                    (windowMenuButtonRef.current?.getBoundingClientRect()
-                      .bottom ?? 0) + 4,
-                  left:
-                    windowMenuButtonRef.current?.getBoundingClientRect().left ??
-                    0,
-                }}
-              >
+                    <div className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
+                      版本 v{appVersion || "0.1.2"}
+                    </div>
+                    <button
+                      className="w-full px-3 py-2 text-[length:var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
+                      onClick={async () => {
+                        setHelpMenuOpen(false);
+                        try {
+                          // 检查 pi agent + npm 插件的更新（npm registry），
+                          // 不再查 Helix 应用自身——后端 agent 是外部 pi 包。
+                          const res = await (
+                            window as any
+                          ).electron?.helix?.piCheckUpdates?.();
+                          if (!res) {
+                            useHelixStore.getState().showToast({
+                              type: "error",
+                              title: "检查更新失败",
+                              description: "更新检查不可用",
+                            });
+                            return;
+                          }
+                          const pi = res.pi || {};
+                          const outdated = (res.packages || []).filter(
+                            (p: any) => p.hasUpdate,
+                          );
+                          if (pi.hasUpdate && pi.latest) {
+                            useHelixStore.getState().showToast({
+                              type: "info",
+                              title: "pi 有新版本可用",
+                              description: `v${pi.installed} → v${pi.latest}${
+                                outdated.length > 0
+                                  ? `，另有 ${outdated.length} 个插件可更新`
+                                  : ""
+                              }`,
+                              duration: 8000,
+                              onClick: () =>
+                                window.open(
+                                  "https://www.npmjs.com/package/@earendil-works/pi-coding-agent",
+                                  "_blank",
+                                ),
+                            });
+                          } else if (outdated.length > 0) {
+                            const names = outdated
+                              .slice(0, 3)
+                              .map(
+                                (p: any) =>
+                                  `${p.name} v${p.installed} → v${p.latest}`,
+                              )
+                              .join("\n");
+                            useHelixStore.getState().showToast({
+                              type: "info",
+                              title: `有 ${outdated.length} 个插件可更新`,
+                              description:
+                                names +
+                                (outdated.length > 3
+                                  ? `\n…等 ${outdated.length} 个`
+                                  : ""),
+                              duration: 10000,
+                            });
+                          } else if (pi.installed) {
+                            useHelixStore.getState().showToast({
+                              type: "success",
+                              title: "已是最新版本",
+                              description: `pi v${pi.installed}（含全部插件）`,
+                            });
+                          } else {
+                            useHelixStore.getState().showToast({
+                              type: "error",
+                              title: "检查更新失败",
+                              description: "未找到 pi 安装",
+                            });
+                          }
+                        } catch (e) {
+                          useHelixStore.getState().showToast({
+                            type: "error",
+                            title: "检查更新失败",
+                            description:
+                              e instanceof Error ? e.message : "网络异常",
+                          });
+                        }
+                      }}
+                    >
+                      <FileText className="size-5" />
+                      检查更新
+                    </button>
+                  </div>
+                </div>,
+                document.body,
+              )}
+            {windowMenuOpen &&
+              typeof window !== "undefined" &&
+              createPortal(
                 <div
-                  ref={windowMenuRef}
-                  className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1"
+                  className="fixed z-[100]"
+                  style={{
+                    top:
+                      (windowMenuButtonRef.current?.getBoundingClientRect()
+                        .bottom ?? 0) + 4,
+                    left:
+                      windowMenuButtonRef.current?.getBoundingClientRect()
+                        .left ?? 0,
+                  }}
                 >
-                  {windowMenuItems.map((item, i) =>
-                    "divider" in item ? (
-                      <div key={i} className="h-px bg-border/60 my-1" />
-                    ) : (
-                      <button
-                        key={i}
-                        onClick={item.action}
-                        className="w-full flex items-center justify-between px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
-                      >
-                        <span>{item.label}</span>
-                        {item.shortcut && (
-                          <span className="text-foreground/40 ml-4">
-                            {item.shortcut}
-                          </span>
-                        )}
-                      </button>
-                    ),
-                  )}
-                </div>
-              </div>,
-              document.body,
-            )}
-        </div>
+                  <div
+                    ref={windowMenuRef}
+                    className="w-56 bg-card border border-border/80 rounded-lg shadow-xl py-1"
+                  >
+                    {windowMenuItems.map((item, i) =>
+                      "divider" in item ? (
+                        <div key={i} className="h-px bg-border/60 my-1" />
+                      ) : (
+                        <button
+                          key={i}
+                          onClick={item.action}
+                          className="w-full flex items-center justify-between px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:bg-accent/60 transition-colors"
+                        >
+                          <span>{item.label}</span>
+                          {item.shortcut && (
+                            <span className="text-foreground/40 ml-4">
+                              {item.shortcut}
+                            </span>
+                          )}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                </div>,
+                document.body,
+              )}
+          </div>
 
-        {/* Center: drag region (Tauri uses data-tauri-drag-region; the Electron
+          {/* Center: drag region (Tauri uses data-tauri-drag-region; the Electron
             -webkit-app-region CSS is a no-op on Tauri and leaves the window
             undraggable) */}
-        <div className="flex-1 self-stretch" data-tauri-drag-region="" />
-
+          <div className="flex-1 self-stretch" data-tauri-drag-region="" />
         </div>
 
         {/* Sidebar — hidden in settings mode (owned by ApiSettings there). */}
@@ -1591,17 +1595,11 @@ export function HelixLayout() {
             {/* Resize handle — only visible when sidebar is expanded */}
             {!sidebarCollapsed && (
               <div
-                className={`absolute top-0 -right-1 w-2 h-full cursor-col-resize z-30 group ${
-                  isDragging ? "bg-primary/20" : ""
-                }`}
+                className="absolute top-0 -right-1 w-2 h-full cursor-col-resize z-30 group"
                 onMouseDown={handleDragStart}
               >
                 {/* Visual grip line — hidden until hover */}
-                <div
-                  className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${
-                    isDragging ? "bg-primary/40" : "bg-transparent group-hover:bg-border/40"
-                  }`}
-                />
+                <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-transparent group-hover:bg-border/40 transition-colors" />
                 <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
                   <GripVertical className="size-3 text-primary/60" />
                 </div>
@@ -1615,15 +1613,329 @@ export function HelixLayout() {
           region) so the capsule stays visible in settings mode too, where the
           whole left region above is hidden. Pinned to the window's top-right
           corner via the relative `helix-app-backdrop` root. */}
-      <div className="absolute top-1 right-1 z-40 flex items-center gap-2">
+      {/* Unified top-right icon row: conversation actions (任务清单 / 子 Agent /
+          后台任务) + window controls (终端 / 更多操作 / min / max / close) all in
+          ONE evenly-spaced flex. Conversation actions share the same gating as
+          终端/更多操作 — hidden in settings & full-screen panel modes. */}
+      <div className="absolute top-[2px] right-2 z-40 h-10 flex items-center gap-3">
         {!showSettings && !hideConversationActions && (
           <>
+            {/* 统一工作面板：更改（含提交/推送）、任务清单、子 Agent 收进同一个下拉。 */}
+            <div className="relative" ref={workPanelRef}>
+              <button
+                type="button"
+                onClick={() => setWorkPanelOpen((o) => !o)}
+                className={`relative flex items-center gap-1.5 h-7 pl-2 pr-2.5 rounded-full border bg-card text-card-foreground shadow-sm select-none transition-colors ${
+                  workPanelOpen
+                    ? "border-primary/60 ring-1 ring-primary/20"
+                    : "border-border/70 hover:border-border"
+                }`}
+                data-tip="工作面板"
+              >
+                {pendingPlanReview ? (
+                  <>
+                    <Pencil className="size-3.5 text-foreground/60 shrink-0" />
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
+                      计划
+                    </span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
+                      待批准
+                    </span>
+                  </>
+                ) : delegations.length > 0 ? (
+                  <>
+                    <Users className="size-3.5 text-foreground/60 shrink-0" />
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
+                      子 Agent
+                    </span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-foreground/60">
+                      {delegations.length}
+                    </span>
+                  </>
+                ) : helixTodos.length > 0 ? (
+                  <>
+                    <ListTodo className="size-3.5 text-foreground/60 shrink-0" />
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
+                      任务
+                    </span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-foreground/60">
+                      {helixTodos.length}
+                    </span>
+                  </>
+                ) : gitChangeStat ? (
+                  <>
+                    <FilePlus className="size-3.5 text-foreground/60 shrink-0" />
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
+                      更改
+                    </span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-emerald-600 dark:text-emerald-400">
+                      +{gitChangeStat.added}
+                    </span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-red-500 dark:text-red-400">
+                      -{gitChangeStat.removed}
+                    </span>
+                  </>
+                ) : (
+                  <ListTodo className="size-[18px] text-foreground/60" />
+                )}
+              </button>
+              {workPanelOpen && (
+                <div className="absolute left-0 top-[calc(100%+6px)] z-50 w-80 max-h-[70vh] overflow-y-auto overflow-x-hidden min-w-0 flex flex-col rounded-xl border border-border/80 bg-card text-card-foreground shadow-xl">
+                  {gitChangeStat && (
+                    <section className="border-b border-border/70">
+                      {/* 这里只给总体数字；整行可点 → 跳右侧栏「更改」看逐文件明细。 */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          storeActions.setRightSidebarTab("diff");
+                          setWorkPanelOpen(false);
+                        }}
+                        className="w-full flex items-center gap-2 min-w-0 px-3 py-2 text-left hover:bg-accent/50 transition-colors"
+                        data-tip="查看更改明细"
+                      >
+                        <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">
+                          更改
+                        </span>
+                        <span className="shrink-0 flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums">
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            +{gitChangeStat.added}
+                          </span>
+                          <span className="text-red-500 dark:text-red-400">
+                            -{gitChangeStat.removed}
+                          </span>
+                        </span>
+                        <ChevronRight className="size-3.5 shrink-0 text-foreground/40" />
+                      </button>
+                      <div className="px-3 pb-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCommitMessage(
+                              `chore: auto-commit (${new Date().toLocaleString("zh-CN")})`,
+                            );
+                            setWorkPanelOpen(false);
+                            setCommitDialogOpen(true);
+                          }}
+                          disabled={isCommitting}
+                          className="w-full inline-flex items-center justify-center gap-1.5 h-8 rounded-lg border border-border/70 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80 hover:bg-accent/60 disabled:opacity-50 transition-colors"
+                        >
+                          <Send className="size-4" />
+                          提交并推送
+                        </button>
+                      </div>
+                    </section>
+                  )}
+                  {pendingPlanReview && (
+                    <section className="border-b border-border/70">
+                      <div className="flex items-center gap-2 min-w-0 px-3 py-2">
+                        <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">
+                          计划 · 待批准
+                        </span>
+                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
+                          计划模式
+                        </span>
+                      </div>
+                      <div className="px-3 pb-3">
+                        <div className="max-h-48 overflow-y-auto rounded-lg border border-border/30 bg-muted/20 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/80 whitespace-pre-wrap break-words">
+                          {pendingPlanReview.content}
+                        </div>
+                        <p className="mt-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                          底部「计划审批」浮条可选择 批准执行 / 继续调整
+                        </p>
+                      </div>
+                    </section>
+                  )}
+                  <section className="border-b border-border/70">
+                    <div className="flex items-center gap-2 min-w-0 px-3 py-2">
+                      <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">
+                        任务清单
+                      </span>
+                      <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
+                        {
+                          helixTodos.filter((t) => t.status === "completed")
+                            .length
+                        }
+                        /{helixTodos.length}
+                      </span>
+                    </div>
+                    <ul className="py-1">
+                      {helixTodos.map((todo) => (
+                        <li
+                          key={todo.id}
+                          className="flex items-start gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)]"
+                        >
+                          {todo.status === "completed" ? (
+                            <CheckCircle2 className="size-4 text-green-500 shrink-0 mt-0.5" />
+                          ) : todo.status === "in_progress" ? (
+                            <Loader2 className="size-4 text-primary shrink-0 mt-0.5 animate-spin" />
+                          ) : todo.status === "cancelled" ? (
+                            <XCircle className="size-4 text-muted-foreground shrink-0 mt-0.5" />
+                          ) : (
+                            <Circle className="size-4 text-foreground/40 shrink-0 mt-0.5" />
+                          )}
+                          <span
+                            className={`min-w-0 break-words ${
+                              todo.status === "completed"
+                                ? "line-through text-foreground/50"
+                                : todo.status === "cancelled"
+                                  ? "line-through text-foreground/40"
+                                  : "text-foreground/90"
+                            }`}
+                          >
+                            {todo.content}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                  {isElectron() && (
+                    <section>
+                      <div className="flex items-center gap-2 min-w-0 px-3 py-2">
+                        <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">
+                          子 Agent
+                        </span>
+                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
+                          {delegations.length} 个
+                        </span>
+                      </div>
+                      <div className="max-h-64 overflow-auto">
+                        {/* 点某个 agent → 右侧栏打开它的工作内容（不再走「查看详情」）。 */}
+                        {delegations.map((del) => (
+                          <button
+                            key={del.id}
+                            type="button"
+                            onClick={() => {
+                              storeActions.openAgentView({
+                                id: del.id,
+                                name: del.id,
+                              });
+                              setWorkPanelOpen(false);
+                            }}
+                            className="w-full text-left px-3 py-2 border-t border-border/30 first:border-t-0 hover:bg-accent/60 transition-colors"
+                            data-tip="在右侧栏查看工作内容"
+                          >
+                            <div className="flex items-center gap-2">
+                              <Terminal className="size-3 text-primary shrink-0" />
+                              <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/80">
+                                {del.id}
+                              </span>
+                              <ChevronRight className="size-3.5 text-foreground/40 shrink-0" />
+                            </div>
+                            <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                              {(del.tasks || []).length} 个任务
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* 提交弹窗：点「提交并推送」弹出，含提交信息输入框 + 提交 / 提交并推送 两个动作 */}
+            {commitDialogOpen && typeof window !== "undefined" && (
+              <>
+                <div
+                  className="fixed inset-0 bg-black/30 z-[300]"
+                  onClick={() => !isCommitting && setCommitDialogOpen(false)}
+                />
+                <div className="fixed z-[310] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] max-h-[80vh] bg-card rounded-xl border border-border/50 shadow-2xl flex flex-col overflow-hidden">
+                  <div className="shrink-0 px-5 pt-5 pb-3 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-semibold text-foreground leading-tight">
+                        提交更改
+                      </h3>
+                      <p className="mt-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground tabular-nums">
+                        {gitChangeStat?.files.length ?? 0} 个文件待提交 ·{" "}
+                        <span className="text-emerald-600 dark:text-emerald-400">
+                          +{gitChangeStat?.added ?? 0}
+                        </span>{" "}
+                        <span className="text-red-500 dark:text-red-400">
+                          -{gitChangeStat?.removed ?? 0}
+                        </span>
+                      </p>
+                    </div>
+                    <button
+                      onClick={() =>
+                        !isCommitting && setCommitDialogOpen(false)
+                      }
+                      disabled={isCommitting}
+                      className="shrink-0 p-1 rounded text-foreground/40 hover:text-foreground hover:bg-accent/50 transition-colors disabled:opacity-40"
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
+                  <div className="shrink-0 px-5 pb-4">
+                    <label className="block text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground mb-1.5">
+                      提交信息
+                    </label>
+                    <textarea
+                      value={commitMessage}
+                      onChange={(e) => setCommitMessage(e.target.value)}
+                      rows={3}
+                      autoFocus
+                      className="w-full resize-none rounded-lg border border-border/30 bg-muted/20 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground outline-none focus:border-primary/50 transition-colors"
+                    />
+                  </div>
+                  <div className="shrink-0 px-5 pb-5 flex items-center justify-end gap-2.5">
+                    <button
+                      onClick={() => quickCommit(false, commitMessage)}
+                      disabled={isCommitting}
+                      className="px-4 py-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] font-medium text-foreground/70 bg-muted/50 hover:bg-muted/80 transition-colors disabled:opacity-40 flex items-center gap-1.5"
+                    >
+                      {isCommitting ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <GitCommit className="size-4" />
+                      )}
+                      提交
+                    </button>
+                    <button
+                      onClick={() => quickCommit(true, commitMessage)}
+                      disabled={isCommitting}
+                      className="px-4 py-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] font-medium text-primary-foreground bg-primary hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                    >
+                      {isCommitting ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Send className="size-4" />
+                      )}
+                      提交并推送
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+            {(runningBgTasks.length > 0 || bgTasksOpen) && (
+              <div className="relative" ref={bgTasksRef}>
+                <button
+                  onClick={() => setBgTasksOpen((v) => !v)}
+                  className={`relative p-1.5 rounded-lg transition-colors ${bgTasksOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
+                  data-tip="后台任务"
+                >
+                  <Loader2 className="size-[18px]" />
+                  {runningBgTasks.length > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[calc(var(--helix-transcript-size)*0.6429)] font-medium flex items-center justify-center">
+                      {runningBgTasks.length}
+                    </span>
+                  )}
+                </button>
+                {bgTasksOpen && (
+                  <BackgroundTasksPanel
+                    tasks={bgTasks}
+                    activeSessionId={helixSessionId}
+                    onClose={() => setBgTasksOpen(false)}
+                    onRefresh={loadBgTasks}
+                  />
+                )}
+              </div>
+            )}
             <button
               onClick={() => storeActions.toggleTerminal()}
               className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
               data-tip="终端"
             >
-              <Terminal className="size-3.5" />
+              <Terminal className="size-4" />
             </button>
             <button
               ref={browserMenuButtonRef}
@@ -1631,37 +1943,35 @@ export function HelixLayout() {
               className={`p-1.5 rounded-lg transition-colors ${browserMenuOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
               data-tip="更多操作"
             >
-              <MoreHorizontal className="size-3.5" />
+              <MoreHorizontal className="size-4" />
             </button>
           </>
         )}
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => (window as any).electron?.window?.minimize()}
-            className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-            data-tip="最小化"
-          >
-            <Minus className="size-3.5" />
-          </button>
-          <button
-            onClick={handleMaximizeToggle}
-            className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
-            data-tip={isMaximized ? "还原" : "最大化"}
-          >
-            {isMaximized ? (
-              <Copy className="size-3.5" />
-            ) : (
-              <Square className="size-3.5" />
-            )}
-          </button>
-          <button
-            onClick={() => (window as any).electron?.window?.close()}
-            className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg transition-colors"
-            data-tip="关闭"
-          >
-            <X className="size-3.5" />
-          </button>
-        </div>
+        <button
+          onClick={() => (window as any).electron?.window?.minimize()}
+          className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+          data-tip="最小化"
+        >
+          <Minus className="size-4" />
+        </button>
+        <button
+          onClick={handleMaximizeToggle}
+          className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
+          data-tip={isMaximized ? "还原" : "最大化"}
+        >
+          {isMaximized ? (
+            <Copy className="size-4" />
+          ) : (
+            <Square className="size-4" />
+          )}
+        </button>
+        <button
+          onClick={() => (window as any).electron?.window?.close()}
+          className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg transition-colors"
+          data-tip="关闭"
+        >
+          <X className="size-4" />
+        </button>
       </div>
 
       {/* Right region: settings or conversation */}
@@ -1672,342 +1982,195 @@ export function HelixLayout() {
         <div className="flex-1 flex flex-col overflow-hidden">
           {showSettings ? (
             <div className="helix-surface flex-1 flex flex-col overflow-hidden min-h-0">
-            <PanelSuspense>
-              <ApiSettings
-                themeStyle={themeStyle}
-                onSelectThemeStyle={setThemeStyle}
-                sidebarWidth={sidebarWidth}
-                setSidebarWidth={setSidebarWidth}
-                saveSidebarWidth={saveSidebarWidth}
-                showSidebar={showSidebar}
-                setShowSidebar={setShowSidebar}
-                sidebarCollapsed={sidebarCollapsed}
-                setSidebarCollapsed={setSidebarCollapsed}
-              />
-            </PanelSuspense>
-          </div>
+              <PanelSuspense>
+                <ApiSettings
+                  themeStyle={themeStyle}
+                  onSelectThemeStyle={setThemeStyle}
+                  sidebarWidth={sidebarWidth}
+                  setSidebarWidth={setSidebarWidth}
+                  saveSidebarWidth={saveSidebarWidth}
+                  showSidebar={showSidebar}
+                  setShowSidebar={setShowSidebar}
+                  sidebarCollapsed={sidebarCollapsed}
+                  setSidebarCollapsed={setSidebarCollapsed}
+                />
+              </PanelSuspense>
+            </div>
           ) : (
-          <div className="flex-1 min-h-0 flex flex-col mr-px ml-0 overflow-hidden">
-          <div className="flex-1 min-h-0 flex flex-row relative">
-            {/* Floating card — main content. Hidden when the code panel is in
+            <div className="flex-1 min-h-0 flex flex-col mr-px ml-0 overflow-hidden">
+              <div className="flex-1 min-h-0 flex flex-row relative">
+                {/* Floating card — main content. Hidden when the code panel is in
             fullscreen (the right sidebar takes over the main area). */}
-            <div
-              className={`helix-surface flex-1 flex flex-col overflow-hidden ${codeFullscreen ? "hidden" : ""}`}
-            >
-              {/* Main area */}
-              <div className="relative flex-1 h-full flex flex-col overflow-hidden">
                 <div
-                  className={`flex-1 flex flex-row overflow-hidden ${sidePanelOpen ? "hidden" : ""}`}
+                  className={`helix-surface flex-1 flex flex-col overflow-hidden ${codeFullscreen ? "hidden" : ""}`}
                 >
-                  <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-                    {/* Conversation header — only visible when an active conversation has messages */}
-                    {chatMessages.length > 0 && !!currentSessionId && (
-                      <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 pr-36">
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          {/* 项目外对话（activeSessionWorkDir 为空）不显示项目目录与分支 */}
-                          {activeSessionWorkDir && (
-                            <button
-                              onClick={handleOpenLocation}
-                              className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
-                              data-tip={
-                                selectedWorkDir
-                                  ? "在资源管理器中打开"
-                                  : "选择位置"
-                              }
-                            >
-                              <Folder className="size-3.5 text-muted-foreground" />
-                              <span className="max-w-[200px] truncate">
-                                {selectedWorkDir
-                                  ? (() => {
-                                      const n =
-                                        selectedWorkDir.split(/[\/\\]/).pop() ||
-                                        selectedWorkDir;
-                                      return n.length > 8
-                                        ? n.slice(0, 8) + "…"
-                                        : n;
-                                    })()
-                                  : "未选择位置"}
-                              </span>
-                            </button>
-                          )}
-                          {branchPickerWorkDir && gitBranch && (
-                            <BranchPicker
-                              workDir={branchPickerWorkDir}
-                              currentBranch={gitBranch}
-                              onBranchChange={(b) => setGitBranch(b)}
-                              drop="down"
-                            />
-                          )}
-                        </div>
-                        <div className="flex items-center gap-1 shrink-0">
-                          {helixTodos.length > 0 && (
-                            <div className="relative" ref={todoPopoverRef}>
-                              <button
-                                onClick={() => setTodoPopoverOpen((o) => !o)}
-                                className={`relative p-1.5 rounded-lg transition-colors ${todoPopoverOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
-                                data-tip="任务清单"
-                              >
-                                <ListTodo className="size-4" />
-                                {helixTodos.length > 0 && (
-                                  <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[calc(var(--helix-transcript-size)*0.6429)] font-medium flex items-center justify-center">
-                                    {helixTodos.length}
-                                  </span>
-                                )}
-                              </button>
-                              {todoPopoverOpen && helixTodos.length > 0 && (
-                                <div className="absolute right-0 top-[calc(100%+6px)] z-50 w-72 max-h-[60vh] overflow-y-auto rounded-xl border border-border bg-popover text-popover-foreground shadow-xl">
-                                  <div className="sticky top-0 flex items-center justify-between px-3 py-2 border-b border-border bg-popover rounded-t-xl">
-                                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">
-                                      任务清单
+                  {/* Main area */}
+                  <div className="relative flex-1 h-full flex flex-col overflow-hidden">
+                    <div
+                      className={`flex-1 flex flex-row overflow-hidden ${sidePanelOpen ? "hidden" : ""}`}
+                    >
+                      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+                        {/* Conversation header — only visible when an active conversation has messages */}
+                        {chatMessages.length > 0 && !!currentSessionId && (
+                          <div className="shrink-0 h-10 flex items-center justify-between gap-2 px-3 pr-44">
+                            {!showSettings && !hideConversationActions && (
+                              <div className="flex items-center gap-3 min-w-0 mt-[2px] ml-2">
+                                {/* 项目外对话（activeSessionWorkDir 为空）不显示项目目录与分支 */}
+                                {activeSessionWorkDir && (
+                                  <button
+                                    onClick={handleOpenLocation}
+                                    className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
+                                    data-tip={
+                                      selectedWorkDir
+                                        ? "在资源管理器中打开"
+                                        : "选择位置"
+                                    }
+                                  >
+                                    <Folder className="size-4 text-muted-foreground" />
+                                    <span className="max-w-[200px] truncate">
+                                      {selectedWorkDir
+                                        ? (() => {
+                                            const n =
+                                              selectedWorkDir
+                                                .split(/[\/\\]/)
+                                                .pop() || selectedWorkDir;
+                                            return n.length > 8
+                                              ? n.slice(0, 8) + "…"
+                                              : n;
+                                          })()
+                                        : "未选择位置"}
                                     </span>
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
-                                        {
-                                          helixTodos.filter(
-                                            (t) => t.status === "completed",
-                                          ).length
-                                        }
-                                        /{helixTodos.length}
-                                      </span>
-                                    </div>
-                                  </div>
-                                  <ul className="py-1">
-                                    {helixTodos.map((todo) => (
-                                      <li
-                                        key={todo.id}
-                                        className="flex items-start gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)]"
-                                      >
-                                        {todo.status === "completed" ? (
-                                          <CheckCircle2 className="size-4 text-green-500 shrink-0 mt-0.5" />
-                                        ) : todo.status === "in_progress" ? (
-                                          <Loader2 className="size-4 text-primary shrink-0 mt-0.5 animate-spin" />
-                                        ) : todo.status === "cancelled" ? (
-                                          <XCircle className="size-4 text-muted-foreground shrink-0 mt-0.5" />
-                                        ) : (
-                                          <Circle className="size-4 text-foreground/40 shrink-0 mt-0.5" />
-                                        )}
-                                        <span
-                                          className={
-                                            todo.status === "completed"
-                                              ? "line-through text-foreground/50"
-                                              : todo.status === "cancelled"
-                                                ? "line-through text-foreground/40"
-                                                : "text-foreground/90"
-                                          }
-                                        >
-                                          {todo.content}
-                                        </span>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {/* Delegations button */}
-                          {isElectron() && delegations.length > 0 && (
-                            <div
-                              className="relative"
-                              ref={delegationsPopoverRef}
-                            >
-                              <button
-                                onClick={() =>
-                                  setDelegationsPopoverOpen((v) => !v)
-                                }
-                                className={`p-1.5 rounded-lg transition-colors ${delegationsPopoverOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
-                                data-tip={`${delegations.length} 个子 Agent`}
-                              >
-                                <Users className="size-4" />
-                                <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-primary text-white text-[calc(var(--helix-transcript-size)*0.6429)] font-bold rounded-full flex items-center justify-center">
-                                  {delegations.length}
-                                </span>
-                              </button>
-                              {delegationsPopoverOpen && (
-                                <div className="absolute right-0 top-full mt-1 w-72 bg-card border border-border/80 rounded-lg shadow-xl z-50">
-                                  <div className="px-3 py-2 border-b border-border/50">
-                                    <h3 className="text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold text-foreground">
-                                      子 Agent
-                                    </h3>
-                                  </div>
-                                  <div className="max-h-64 overflow-auto">
-                                    {delegations.map((del) => (
-                                      <div
-                                        key={del.id}
-                                        className="px-3 py-2 border-b border-border/30 last:border-b-0"
-                                      >
-                                        <div className="flex items-center gap-2">
-                                          <Terminal className="size-3 text-primary" />
-                                          <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/80 truncate">
-                                            {del.id}
-                                          </span>
-                                        </div>
-                                        <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
-                                          {(del.tasks || []).length} 个任务
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                  <div className="px-3 py-2 border-t border-border/50">
-                                    <button
-                                      onClick={() => {
-                                        storeActions.toggleSubAgentPanel();
-                                        setDelegationsPopoverOpen(false);
-                                      }}
-                                      className="w-full text-[calc(var(--helix-transcript-size)*0.8571)] text-primary hover:underline"
-                                    >
-                                      查看详情
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {/* 后台任务按钮（终端按钮左侧）：无任务时收起为 0 宽（不再留
-                       phantom 间距）；用 width+opacity 平滑过渡替代条件挂载，
-                       避免任务启动瞬间按钮闪入/闪出把右侧终端、更多操作顶来顶去。
-                       overflow-hidden 只在收起态加——展开态若保留会把绝对定位的
-                       面板裁剪到 32px 宽盒子里（2026-08-18 bug：点按钮面板不显示）。 */}
-                          <div
-                            className={`relative transition-all duration-200 ${myBgTasks.length === 0 ? "opacity-0 pointer-events-none w-0 overflow-hidden" : "w-8"}`}
-                            ref={bgTasksRef}
-                          >
-                            <button
-                              onClick={() => setBgTasksOpen((v) => !v)}
-                              className={`relative p-1.5 rounded-lg transition-colors ${bgTasksOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
-                              data-tip="后台任务"
-                            >
-                              <Loader2 className="size-4" />
-                              {runningBgTasks.length > 0 && (
-                                <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[calc(var(--helix-transcript-size)*0.6429)] font-medium flex items-center justify-center">
-                                  {runningBgTasks.length}
-                                </span>
-                              )}
-                            </button>
-                            {bgTasksOpen && (
-                              <BackgroundTasksPanel
-                                sessionId={activeSessionId ?? ""}
-                                onClose={() => setBgTasksOpen(false)}
-                              />
-                            )}
-                          </div>
-                          {browserMenuOpen &&
-                            typeof window !== "undefined" &&
-                            createPortal(
-                              <div
-                                className="fixed z-[100]"
-                                style={{
-                                  top:
-                                    (browserMenuButtonRef.current?.getBoundingClientRect()
-                                      .bottom ?? 0) + 4,
-                  left: browserMenuButtonRef.current
-                    ? Math.max(
-                        8,
-                        browserMenuButtonRef.current.getBoundingClientRect()
-                          .right - 208,
-                      )
-                    : 0,
-                                }}
-                              >
-                                <div ref={browserMenuRef}>
-                                  <MoreActionsMenu
-                                    onToggleTab={(kind) => {
-                                      if (rightSidebarTab !== kind)
-                                        storeActions.setRightSidebarTab(kind);
-                                      setBrowserMenuOpen(false);
-                                    }}
-                                    onAddBrowser={() => {
-                                      storeActions.requestAddBrowserPage();
-                                      setBrowserMenuOpen(false);
-                                    }}
+                                  </button>
+                                )}
+                                {branchPickerWorkDir && gitBranch && (
+                                  <BranchPicker
+                                    workDir={branchPickerWorkDir}
+                                    currentBranch={gitBranch}
+                                    onBranchChange={(b) => setGitBranch(b)}
+                                    drop="down"
                                   />
-                                </div>
-                              </div>,
-                              document.body,
+                                )}
+                              </div>
                             )}
+                            <div className="flex items-center gap-1 shrink-0">
+                              {browserMenuOpen &&
+                                typeof window !== "undefined" &&
+                                createPortal(
+                                  <div
+                                    className="fixed z-[100]"
+                                    style={{
+                                      top:
+                                        (browserMenuButtonRef.current?.getBoundingClientRect()
+                                          .bottom ?? 0) + 4,
+                                      left: browserMenuButtonRef.current
+                                        ? Math.max(
+                                            8,
+                                            browserMenuButtonRef.current.getBoundingClientRect()
+                                              .right - 208,
+                                          )
+                                        : 0,
+                                    }}
+                                  >
+                                    <div ref={browserMenuRef}>
+                                      <MoreActionsMenu
+                                        onToggleTab={(kind) => {
+                                          if (rightSidebarTab !== kind)
+                                            storeActions.setRightSidebarTab(
+                                              kind,
+                                            );
+                                          setBrowserMenuOpen(false);
+                                        }}
+                                        onAddBrowser={() => {
+                                          storeActions.requestAddBrowserPage();
+                                          setBrowserMenuOpen(false);
+                                        }}
+                                      />
+                                    </div>
+                                  </div>,
+                                  document.body,
+                                )}
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex-1 min-h-0 min-w-0 flex flex-col">
+                          <AgentFlowPanel />
                         </div>
                       </div>
-                    )}
-                    <div className="flex-1 min-h-0 min-w-0 flex flex-col">
-                      <AgentFlowPanel />
                     </div>
                   </div>
+                  {showScheduledTasksPanel && (
+                    <div className="helix-surface helix-surface-overlay z-20 rounded-2xl overflow-hidden flex flex-col">
+                      <PanelSuspense>
+                        <ScheduledTasksPanel />
+                      </PanelSuspense>
+                    </div>
+                  )}
+                  {showSkillPanel && (
+                    <div className="helix-surface helix-surface-overlay z-20 rounded-2xl overflow-hidden flex flex-col">
+                      <PanelSuspense>
+                        <SkillPanel />
+                      </PanelSuspense>
+                    </div>
+                  )}
                 </div>
-              </div>
-              {showScheduledTasksPanel && (
-                <div className="helix-surface helix-surface-overlay z-20 rounded-2xl overflow-hidden flex flex-col">
-                  <PanelSuspense>
-                    <ScheduledTasksPanel />
-                  </PanelSuspense>
-                </div>
-              )}
-              {showSkillPanel && (
-                <div className="helix-surface helix-surface-overlay z-20 rounded-2xl overflow-hidden flex flex-col">
-                  <PanelSuspense>
-                    <SkillPanel />
-                  </PanelSuspense>
-                </div>
-              )}
-            </div>
-            {/* Floating card — right sidebar. Kept mounted at all times so switching
+                {/* Floating card — right sidebar. Kept mounted at all times so switching
             tabs (and the browser <webview>) never rebuilds; visibility is toggled
             with the `hidden` class + width instead of a conditional mount, which
             removes the "flash / white-screen on first open and on every tab
             switch". */}
-            <div
-              className={`relative ${codeFullscreen ? "flex-1 min-w-0" : "shrink-0"} ${rightSidebarTab ? "" : "hidden"}`}
-              style={
-                codeFullscreen
-                  ? undefined
-                  : { width: rightSidebarTab ? rightSidebarWidth : 0 }
-              }
-            >
-              {!codeFullscreen && (
                 <div
-                  className={`absolute top-0 -left-1 w-2 h-full cursor-col-resize z-30 group ${isRightDragging ? "bg-primary/20" : ""}`}
-                  onMouseDown={handleRightDragStart}
+                  className={`relative ${codeFullscreen ? "flex-1 min-w-0" : "shrink-0"} ${rightSidebarTab && !(showSkillPanel || showScheduledTasksPanel || showRuntimePanel || showWorktreePanel || showSubAgentPanel) ? "" : "hidden"}`}
+                  style={
+                    codeFullscreen
+                      ? undefined
+                      : { width: rightSidebarTab ? rightSidebarWidth : 0 }
+                  }
                 >
-                  <div
-                    className={`absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 transition-colors ${isRightDragging ? "bg-primary/40" : "bg-transparent group-hover:bg-border/40"}`}
-                  />
+                  {!codeFullscreen && (
+                    <div
+                      className="absolute top-0 -left-1 w-2 h-full cursor-col-resize z-30 group"
+                      onMouseDown={handleRightDragStart}
+                    >
+                      <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-transparent group-hover:bg-border/40 transition-colors" />
+                    </div>
+                  )}
+                  <div className="helix-surface h-full rounded-2xl overflow-hidden">
+                    <RightSidebar />
+                  </div>
                 </div>
-              )}
-              <div className="helix-surface h-full rounded-2xl overflow-hidden">
-                <RightSidebar />
+                {showRuntimePanel && (
+                  <div className="absolute inset-0 z-20">
+                    <PanelSuspense>
+                      <RuntimePanel
+                        onClose={() => storeActions.toggleRuntimePanel()}
+                      />
+                    </PanelSuspense>
+                  </div>
+                )}
+                {showWorktreePanel && (
+                  <div className="absolute inset-0 z-20">
+                    <PanelSuspense>
+                      <WorktreePanel
+                        onClose={() => storeActions.toggleWorktreePanel()}
+                      />
+                    </PanelSuspense>
+                  </div>
+                )}
+                <div
+                  className={`absolute inset-0 z-20 ${showSubAgentPanel ? "" : "hidden"}`}
+                >
+                  <PanelSuspense>
+                    <DelegationsPanel
+                      onClose={() => storeActions.toggleSubAgentPanel()}
+                    />
+                  </PanelSuspense>
+                </div>
               </div>
-            </div>
-            {showRuntimePanel && (
-              <div className="absolute inset-0 z-20">
-                <PanelSuspense>
-                  <RuntimePanel
-                    onClose={() => storeActions.toggleRuntimePanel()}
-                  />
-                </PanelSuspense>
-              </div>
-            )}
-            {showWorktreePanel && (
-              <div className="absolute inset-0 z-20">
-                <PanelSuspense>
-                  <WorktreePanel
-                    onClose={() => storeActions.toggleWorktreePanel()}
-                  />
-                </PanelSuspense>
-              </div>
-            )}
-            <div
-              className={`absolute inset-0 z-20 ${showSubAgentPanel ? "" : "hidden"}`}
-            >
-              <PanelSuspense>
-                <DelegationsPanel
-                  onClose={() => storeActions.toggleSubAgentPanel()}
-                />
-              </PanelSuspense>
-            </div>
-          </div>
-            {/* Terminal: a bottom panel of the whole main area (NOT inside the main
+              {/* Terminal: a bottom panel of the whole main area (NOT inside the main
               conversation card), so it stays visible when the code editor is in
               fullscreen — which hides the conversation card. */}
-            <TerminalPanel onClose={storeActions.toggleTerminal} />
-          </div>
+              <TerminalPanel onClose={storeActions.toggleTerminal} />
+            </div>
           )}
         </div>
       </div>

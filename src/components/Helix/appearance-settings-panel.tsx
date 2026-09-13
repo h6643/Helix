@@ -122,7 +122,7 @@ function ThemeStylePicker({
         ref={btnRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 flex items-center justify-between gap-2 text-left focus:outline-none focus:border-primary/40 transition-colors"
+        className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 flex items-center justify-between gap-2 text-left transition-colors"
       >
         <span className="truncate">{currentLabel}</span>
         <ChevronDown
@@ -198,7 +198,7 @@ const fontSelect = (
     onChange={onChange}
     options={options}
     placeholder="默认"
-    className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 focus:outline-none focus:border-primary/40 transition-colors"
+    className="w-40 ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 transition-colors"
   />
 );
 

@@ -236,7 +236,7 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
             value={newPath}
             onChange={(e) => setNewPath(e.target.value)}
             placeholder="路径 (e.g. ../project-feature)"
-            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 font-mono"
           />
           <div className="flex gap-2">
             <input
@@ -244,14 +244,14 @@ export function WorktreePanel({ onClose }: WorktreePanelProps) {
               value={newBranch}
               onChange={(e) => setNewBranch(e.target.value)}
               placeholder="已有分支名 (留空=detached)"
-              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 font-mono"
             />
             <input
               type="text"
               value={createFromBranch}
               onChange={(e) => setCreateFromBranch(e.target.value)}
               placeholder="新建分支 (可选)"
-              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 font-mono"
             />
           </div>
           <div className="flex justify-end gap-2">

@@ -28,8 +28,15 @@ fn is_bad_config(cfg: &Value) -> bool {
     base.trim().is_empty()
 }
 
-/// Re-assert the user's last-saved model profile into Helix config.yaml
-/// BEFORE spawning the gateway. Called from lib.rs setup.
+/// Re-assert the user's last-saved model profile into Pi's own config
+/// (settings.json + models.json) BEFORE spawning the gateway. Called from
+/// lib.rs setup.
+///
+/// The apiKey is deliberately NOT carried: pi's own files (models.json inline
+/// key / auth.json) are the single source of truth for credentials. Carrying
+/// a cached key here re-created provider entries with a STALE key on every
+/// restart, clobbering keys the user rotated outside Helix. An empty key
+/// preserves the existing entry's key in apply_pi_model_config.
 pub fn apply_active_profile_cache() {
     let Some(path) = active_profile_path() else {
         return;
@@ -54,11 +61,18 @@ pub fn apply_active_profile_cache() {
     }
     let model = cfg_str(&cfg, "model", "model");
     let base_url = cfg_str(&cfg, "baseUrl", "base_url");
-    let api_key = cfg_str(&cfg, "apiKey", "api_key");
-    write_helix_config(model, provider, base_url, api_key, None);
+    write_helix_config(model, provider, base_url, None, None);
 }
 
 /// Persist the active profile to userData/active-profile.json.
+///
+/// The apiKey is stripped before writing: the cache exists so a cold start can
+/// re-assert the last-selected model/provider/baseUrl into pi's config, and
+/// credentials live in pi's own files (models.json / auth.json). Persisting
+/// the key here meant a later rotation outside Helix got clobbered back on
+/// every restart. Callers that DO save a fresh key still apply it immediately
+/// via write_helix_config (activate_profile / helix_set_config) — the cache
+/// just no longer remembers it.
 #[tauri::command]
 pub fn cache_config(cfg: Value) -> Value {
     // Normalize to one shape (camelCase) before writing so every reader can
@@ -80,7 +94,11 @@ pub fn cache_config(cfg: Value) -> Value {
             "provider": APIHUB_DEFAULT.provider,
             "baseUrl": APIHUB_DEFAULT.base_url,
             "model": APIHUB_DEFAULT.model,
-            "apiKey": APIHUB_DEFAULT.api_key,
+        });
+    } else if cfg.get("apiKey").is_some() || cfg.get("api_key").is_some() {
+        cfg.as_object_mut().map(|o| {
+            o.remove("apiKey");
+            o.remove("api_key");
         });
     }
     let Some(path) = active_profile_path() else {
@@ -95,7 +113,9 @@ pub fn cache_config(cfg: Value) -> Value {
     }
 }
 
-/// Apply a profile immediately: write config + persist cache.
+/// Apply a profile immediately: write config + persist cache. The api_key, if
+/// given, is applied to pi's files right away (one-time write) — the cache
+/// copy strips it, so restarts never re-assert a stale key.
 #[tauri::command]
 pub fn activate_profile(cfg: Value) -> Value {
     if is_bad_config(&cfg) {

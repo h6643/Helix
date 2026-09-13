@@ -1,6 +1,7 @@
 //! Helix Tauri backend crate.
 
 mod app;
+mod background_tasks;
 mod config;
 mod delegations;
 mod external;
@@ -229,6 +230,9 @@ pub fn run() {
             skills::helix_read_file,
             skills::helix_delete_dir,
             skills::helix_list_skills,
+            skills::helix_list_subagents,
+            skills::helix_set_subagent_enabled,
+            skills::helix_delete_subagent,
             skills::helix_track_skill_call,
             // auxiliary vision model (image → description)
             vision::vision_config_list,
@@ -248,6 +252,10 @@ pub fn run() {
             // delegations (subagent live transcript browser)
             delegations::delegations_list,
             delegations::delegations_read_log,
+            // background tasks (pi-background-tasks extension registry)
+            background_tasks::tasks_list,
+            background_tasks::tasks_read,
+            background_tasks::tasks_kill,
             // window
             window::minimize,
             window::maximize,

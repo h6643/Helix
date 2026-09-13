@@ -271,7 +271,7 @@ function InstructionsSection() {
           value={localPersonality}
           onChange={(e) => setLocalPersonality(e.target.value)}
           placeholder="例如：你是一个耐心友好的助手..."
-          className="w-full h-48 p-3 text-[length:var(--helix-transcript-size)] rounded-xl border border-border/50 bg-card/50 resize-none focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40"
+          className="w-full h-48 p-3 text-[length:var(--helix-transcript-size)] rounded-xl border border-border/50 bg-card/50 resize-none"
         />
         <div className="flex justify-end">
           <Button size="sm" onClick={handleSave}>
@@ -385,7 +385,7 @@ function AppearanceSection() {
             <PopupSelect
               value={fontFamily}
               onChange={setFontFamily}
-              className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70 transition-colors"
               options={fontOptions}
             />
           </div>
@@ -401,7 +401,7 @@ function AppearanceSection() {
               onChange={(e) => {
                 setFontSize(Number(e.target.value));
               }}
-              className="w-full px-3 py-2 text-[length:var(--helix-transcript-size)] rounded-lg border border-border/50 bg-card/50 focus:outline-none focus:ring-2 focus:ring-primary/20"
+              className="w-full px-3 py-2 text-[length:var(--helix-transcript-size)] rounded-lg border border-border/50 bg-card/50"
             />
           </div>
         </div>
@@ -418,7 +418,7 @@ function AppearanceSection() {
           <PopupSelect
             value={interfaceFont}
             onChange={setInterfaceFont}
-            className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70 focus:outline-none focus:border-primary/30 transition-colors"
+            className="w-full px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70 transition-colors"
             options={interfaceFontOptions}
           />
         </div>

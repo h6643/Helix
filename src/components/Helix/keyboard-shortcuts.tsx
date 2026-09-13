@@ -73,26 +73,8 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
     },
     "search-chats": () => state.toggleSessionManager(),
     "prev-chat": () => state.toggleSessionManager(),
-    "go-back": () => {
-      const entry = state.navigateBack();
-      if (!entry) return;
-      if (entry.type === "chat") {
-        state.navigateSession("back");
-      } else {
-        if (!state.showSettings) state.toggleSettings(entry.page);
-        else state.setSettingsPage(entry.page);
-      }
-    },
-    "go-forward": () => {
-      const entry = state.navigateForward();
-      if (!entry) return;
-      if (entry.type === "chat") {
-        state.navigateSession("forward");
-      } else {
-        if (!state.showSettings) state.toggleSettings(entry.page);
-        else state.setSettingsPage(entry.page);
-      }
-    },
+    "go-back": () => state.navigateHistory("back"),
+    "go-forward": () => state.navigateHistory("forward"),
 
     // Tabs
     "prev-tab": () => {

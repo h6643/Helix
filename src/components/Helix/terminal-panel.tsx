@@ -150,9 +150,14 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
     // We collapse identical bursts within 250ms into ONE PTY write.
     let lastPasteText = "";
     let lastPasteAt = 0;
+    let editingLine = "";
+    let lastWriteWasEnter = false;
     const PASTE_DEDUP_MS = 250;
     const writePty = (d: string) => {
       electronTerminal.write(id, d);
+    };
+    const erasePreviousChar = () => {
+      term.write("\b \b");
     };
     const writePasteOnce = (text: string) => {
       if (!text) return;
@@ -160,6 +165,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
       if (text === lastPasteText && now - lastPasteAt < PASTE_DEDUP_MS) return;
       lastPasteText = text;
       lastPasteAt = now;
+      editingLine += text;
       writePty(text);
     };
     // A multi-char burst arriving via onData that duplicates a just-handled paste
@@ -182,7 +188,26 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
     // never double-fed into the PTY.
     term.onData((d) => {
       if (isDupPasteBurst(d)) return;
+      if (d === "\r") {
+        writePty(d);
+        editingLine = "";
+        lastWriteWasEnter = true;
+        return;
+      }
+      if (d === "\u007f" || d === "\b") {
+        if (lastWriteWasEnter) return;
+        if (!editingLine) return;
+        editingLine = editingLine.slice(0, -1);
+        erasePreviousChar();
+        return;
+      }
+      if (d.length === 1 && !lastWriteWasEnter) {
+        editingLine += d;
+        writePty(d);
+        return;
+      }
       writePty(d);
+      if (!lastWriteWasEnter) editingLine += d;
     });
 
     // ── Copy / paste ────────────────────────────────────────────────────

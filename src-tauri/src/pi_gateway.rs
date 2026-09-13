@@ -434,7 +434,7 @@ fn now_ms() -> u64 {
 
 /// Path equality that tolerates case, separators and trailing slashes
 /// (Windows dir paths arrive from the renderer in arbitrary form).
-fn same_path(a: &str, b: &str) -> bool {
+pub fn same_path(a: &str, b: &str) -> bool {
     let norm = |p: &str| {
         p.trim_end_matches(['/', '\\'])
             .replace('/', "\\")
@@ -1126,6 +1126,21 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                     .request("set_thinking_level", json!({ "level": level }), RPC_TIMEOUT)
                     .await;
             }
+            // session/new's mode_id was previously dropped here — a new
+            // conversation created in plan mode then ran its FIRST prompt with
+            // the plan contract never armed, so the model skipped straight to
+            // execution. Arm it the same way session/set_mode does: a plan
+            // mode_id translates into the /plan start extension command.
+            let initial_mode = params
+                .get("mode_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if initial_mode == "plan" {
+                let _ = instance
+                    .request("prompt", json!({ "message": "/plan start" }), RPC_TIMEOUT)
+                    .await;
+                *instance.plan_mode.lock().unwrap() = true;
+            }
             let state_data = instance.session_state().await?;
             let session_id = state_data
                 .get("sessionId")
@@ -1730,12 +1745,9 @@ async fn instance_for_session(
         let mut locks = RESUME_LOCKS.lock().unwrap();
         Arc::clone(locks.entry(session_id.to_string()).or_default())
     };
-    // Restore on a blocking thread: the std MutexGuard must not ride an async
-    // worker across .await points (Send), and switch_session can block for
-    // HANDSHAKE_TIMEOUT on long sessions.
     let sid = session_id.to_string();
-    let state = Arc::clone(state);
-    let result = tokio::task::spawn_blocking(move || {
+    let state2 = Arc::clone(state);
+    let restored = tokio::task::spawn_blocking(move || {
         let _guard = lock.lock().unwrap();
         // Double-check after acquiring: the first flyer may have finished
         // while we waited.
@@ -1744,11 +1756,16 @@ async fn instance_for_session(
                 return Ok(Arc::clone(instance));
             }
         }
-        restore_session_instance(&sid, &state)
+        restore_session_instance(&sid, &state2)
     })
     .await
-    .map_err(|e| format!("session restore task failed: {e}"))??;
-    Ok(result)
+    .map_err(|e| format!("session restore task failed: {e}"))?;
+    // restore 失败（如 "no session file"）原样上抛给调用方（session/prompt、
+    // session/resume、session/prepare）。绝不在这里静默 new_session 建空白
+    // 会话：session/prompt 路由过来时前端不会带 seedHistory，用户消息会直接
+    // 落进零上下文的空白会话——无声的彻底失忆。显式报错让前端走
+    // session/new + seedHistory 兜底（文本级历史仍在，远好于空白）。
+    restored
 }
 
 /// Spawn (or warm-spare-claim) the instance for a not-live session and
@@ -1869,6 +1886,106 @@ pub fn estimate_message_tokens(message: &Value) -> i64 {
         }
     }
     chars / 4
+}
+
+/// Split the active branch's replay context into per-content-type buckets.
+/// This is what the NEXT prompt actually sends — the breakdown the usage bar
+/// is supposed to show. Mirrors estimate_active_branch's branch location
+/// (latest compaction summary + everything after firstKeptEntryId), but
+/// classifies by message content-block type instead of returning one total.
+fn estimate_active_branch_by_kind(lines: &[String]) -> (i64, Vec<(&'static str, i64)>) {
+    let parse = |line: &str| serde_json::from_str::<Value>(line).ok();
+    let mut latest_compaction: Option<(String, i64, usize)> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(v) = parse(line) {
+            if v.get("type").and_then(Value::as_str) == Some("compaction") {
+                let summary_tokens = v
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .map(|s| s.len() as i64 / 4)
+                    .unwrap_or(0);
+                let first_kept = v
+                    .get("firstKeptEntryId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if first_kept.is_some() {
+                    latest_compaction = Some((first_kept.unwrap(), summary_tokens, i));
+                }
+            }
+        }
+    }
+    let (mut tokens, start_line) = match &latest_compaction {
+        Some((first_kept, summary_tokens, _)) => {
+            let start = lines.iter().position(|l| {
+                parse(l)
+                    .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+                    .as_deref()
+                    == Some(first_kept.as_str())
+            });
+            (*summary_tokens, start)
+        }
+        None => (0, Some(0)),
+    };
+    let start = start_line.unwrap_or(0);
+    let mut buckets: HashMap<&'static str, i64> = HashMap::new();
+    if tokens > 0 {
+        buckets.insert("summary", tokens);
+    }
+    for line in lines.iter().skip(start) {
+        let Some(v) = parse(line) else { continue };
+        if v.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(message) = v.get("message") else {
+            continue;
+        };
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        let blocks = match message.get("content") {
+            Some(Value::Array(blocks)) => blocks,
+            Some(Value::String(s)) => {
+                let kind = match role {
+                    "user" => "user",
+                    "toolResult" => "tools",
+                    _ => "assistant",
+                };
+                *buckets.entry(kind).or_insert(0) += s.len() as i64 / 4;
+                tokens += s.len() as i64 / 4;
+                continue;
+            }
+            _ => continue,
+        };
+        for block in blocks {
+            let (kind, chars) = match block.get("type").and_then(Value::as_str) {
+                Some("text") => (
+                    if role == "user" { "user" } else { "assistant" },
+                    block.get("text").and_then(Value::as_str).map(str::len),
+                ),
+                Some("thinking") => (
+                    "thinking",
+                    block.get("thinking").and_then(Value::as_str).map(str::len),
+                ),
+                Some("toolCall") => (
+                    "tools",
+                    block
+                        .get("arguments")
+                        .and_then(|a| serde_json::to_string(a).ok())
+                        .map(|s| s.len()),
+                ),
+                Some("toolResult") => (
+                    "tools",
+                    block.get("text").and_then(Value::as_str).map(str::len),
+                ),
+                _ => continue,
+            };
+            if let Some(n) = chars {
+                *buckets.entry(kind).or_insert(0) += n as i64 / 4;
+                tokens += n as i64 / 4;
+            }
+        }
+    }
+    let mut parts: Vec<(&'static str, i64)> = buckets.into_iter().collect();
+    parts.sort_by_key(|(k, _)| *k);
+    (tokens, parts)
 }
 
 /// Estimate the context the NEXT prompt will replay: pi sends the active
@@ -2309,6 +2426,7 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
     // True next-prompt replay size from the session file — same estimator the
     // restore-time trim uses. Cheaper than a stale 2k figure hiding a 276k
     // replay behind a 128k window.
+    let mut by_kind: Vec<(&'static str, i64)> = Vec::new();
     if let Value::String(sid) = instance.current_session_id() {
         // Scope the guard: it must not ride across the read_to_string await.
         let cached_file = SESSION_FILES.lock().unwrap().get(&sid).cloned();
@@ -2327,7 +2445,10 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
                     .filter(|l| !l.is_empty())
                     .map(str::to_string)
                     .collect();
-                let (estimated, _, _) = estimate_active_branch(&lines);
+                let (estimated, parts) = estimate_active_branch_by_kind(&lines);
+                if estimated > 0 {
+                    by_kind = parts;
+                }
                 if estimated > context_used {
                     context_used = estimated;
                 }
@@ -2340,6 +2461,10 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
         0.0
     };
 
+    // Composition categories: what the next prompt actually replays, split
+    // by content type. The billing fields (input/cachedRead/cachedWrite/
+    // output) are LIFETIME counters — drawing them as segments of the usage
+    // bar was misleading, so they moved to the payload as a stats reference.
     let mut categories = Vec::new();
     let mut push_category = |id: &str, label: &str, tokens: i64, color: &str| {
         if tokens > 0 {
@@ -2351,25 +2476,49 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
             }));
         }
     };
-    push_category("input", "输入", input_tokens, "var(--context-usage-system)");
-    push_category(
-        "cached-read",
-        "缓存读取",
-        cached_read,
-        "var(--context-usage-skills)",
-    );
-    push_category(
-        "cached-write",
-        "缓存写入",
-        cached_write,
-        "var(--context-usage-mcp)",
-    );
-    push_category(
-        "output",
-        "输出",
-        output_tokens,
-        "var(--context-usage-conversation)",
-    );
+    for (kind, tokens) in &by_kind {
+        match *kind {
+            "user" => push_category(
+                "user",
+                "用户消息",
+                *tokens,
+                "var(--context-usage-conversation)",
+            ),
+            "assistant" => {
+                push_category("assistant", "回复", *tokens, "var(--context-usage-system)")
+            }
+            "thinking" => push_category(
+                "thinking",
+                "思考",
+                *tokens,
+                "var(--context-usage-subagents)",
+            ),
+            "tools" => push_category(
+                "tools",
+                "工具调用与结果",
+                *tokens,
+                "var(--context-usage-tools)",
+            ),
+            "summary" => push_category(
+                "summary",
+                "压缩摘要",
+                *tokens,
+                "var(--context-usage-memory)",
+            ),
+            _ => {}
+        }
+    }
+    // No session-file breakdown yet (fresh instance, file not written):
+    // fall back to the provider's current context figure as one lump so the
+    // bar still shows something honest.
+    if context_used > 0 && by_kind.is_empty() {
+        push_category(
+            "conversation",
+            "会话上下文",
+            context_used,
+            "var(--context-usage-conversation)",
+        );
+    }
     let estimated_total = categories
         .iter()
         .filter_map(|c| c.get("tokens").and_then(Value::as_i64))
@@ -2381,6 +2530,14 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
         "context_percent": context_percent,
         "estimated_total": estimated_total,
         "categories": categories,
+        // Lifetime billing counters (not composition) — the panel shows them
+        // as a reference row, not as usage-bar segments.
+        "usage_stats": {
+            "input": input_tokens,
+            "output": output_tokens,
+            "cache_read": cached_read,
+            "cache_write": cached_write,
+        },
     }))
 }
 

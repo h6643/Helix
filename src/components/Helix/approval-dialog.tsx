@@ -267,8 +267,8 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
 
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
-      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-2">
-        <div className="flex items-center justify-between gap-3 mb-1.5">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-4">
+        <div className="flex items-center justify-between gap-3 mb-2">
           <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
             需要你的确认
           </h3>
@@ -277,14 +277,12 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
           </span>
         </div>
 
-        <div className="bg-muted rounded-lg px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-1.5 max-h-16 overflow-auto">
+        <div className="bg-muted rounded-lg px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-2 max-h-32 overflow-auto">
           {request.question || "模型需要你的选择"}
         </div>
 
         {choices.length > 0 && (
-          // 选项列表限制高度：模型一次可能给很多选项，全部平铺会把弹窗撑到
-          // 占满整个对话界面。max-h-28(112px,约 3 个选项)以上滚动。
-          <div className="flex flex-col gap-1 mb-1.5 max-h-28 overflow-y-auto pr-0.5">
+          <div className="flex flex-col gap-1.5 mb-2 max-h-40 overflow-y-auto pr-0.5">
             {choices.map((c, idx) => {
               const isSel = selectedIdx === idx;
               return (
@@ -295,7 +293,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
                   onMouseEnter={() => setSelectedIdx(idx)}
                   disabled={submitting}
                   className={
-                    "flex items-center gap-2 px-2.5 py-1 rounded-lg border text-left transition-colors disabled:opacity-60 " +
+                    "flex items-center gap-2 px-3 py-1.5 rounded-lg border text-left transition-colors disabled:opacity-60 " +
                     (isSel
                       ? "border-ring bg-accent ring-1 ring-ring"
                       : "border-transparent hover:bg-accent/60")
@@ -326,13 +324,13 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
             onChange={(e) => setFreeText(e.target.value)}
             disabled={submitting}
             placeholder={choices.length ? "或输入其他回答…" : "输入回答…"}
-            className="flex-1 h-8 px-3 rounded-lg bg-background/60 border border-border/50 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground outline-none focus:border-ring disabled:opacity-50"
+            className="flex-1 h-9 px-3 rounded-lg bg-background/60 border border-border/50 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground disabled:opacity-50"
           />
           <Button
             size="sm"
             disabled={submitting || !freeText.trim()}
             onClick={() => submit(freeText)}
-            className="h-8 px-4 text-[calc(var(--helix-transcript-size)*0.9286)]"
+            className="h-9 px-4 text-[calc(var(--helix-transcript-size)*0.9286)]"
           >
             {submitting ? (
               <Loader2 className="size-3.5 animate-spin" />
@@ -342,7 +340,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
           </Button>
         </div>
 
-        <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-1">
+        <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-2">
           内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · Enter 确认 · 也可自由输入
         </div>
       </div>
@@ -465,7 +463,7 @@ export function PlanReviewBar({
               placeholder="写修改意见，提交后 agent 基于意见重新规划…"
               rows={2}
               autoFocus
-              className="w-full rounded-lg border border-border/60 bg-background px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] resize-none focus:outline-none focus:ring-2 focus:ring-primary/20"
+              className="w-full rounded-lg border border-border/60 bg-background px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] resize-none"
             />
             <div className="flex items-center gap-2">
               <Button

@@ -228,9 +228,6 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
           useHelixStore.getState().setSelectedWorkDir(fresh.workDir);
         }
         useHelixStore.getState().setCurrentSessionId(session.id);
-        useHelixStore
-          .getState()
-          .pushNavigation({ type: "chat", sessionId: session.id });
         await useHelixStore.getState().persistToStorage();
         onClose();
       } catch (e) {
@@ -322,7 +319,7 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="搜索会话（按名称或内容）..."
-                className="w-full pl-8 pr-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-muted/50 border border-border/50 rounded-lg focus:outline-none focus:ring-1 focus:ring-ring"
+                className="w-full pl-8 pr-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-muted/50 border border-border/50 rounded-lg"
               />
             </div>
           </div>

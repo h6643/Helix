@@ -7,7 +7,8 @@
 //! takes effect).
 
 use crate::config::{
-    read_helix_config, set_model as config_set_model, set_yaml_key, write_helix_config, HelixConfig,
+    atomic_write, read_helix_config, set_model as config_set_model, set_yaml_key,
+    write_helix_config, HelixConfig,
 };
 use crate::gateway::restart_gateway_soon;
 use crate::pi_gateway;
@@ -94,10 +95,7 @@ pub fn helix_set_yaml_key(state: State<'_, Arc<AppState>>, key: String, value: V
     if updated == yaml {
         return json!({ "success": true, "changed": false });
     }
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&path, updated);
+    let _ = atomic_write(&path, &updated);
     let arc: Arc<AppState> = Arc::clone(&state);
     restart_gateway_soon(&arc);
     json!({ "success": true, "changed": true })
@@ -115,10 +113,7 @@ pub fn helix_set_delegation_identities(
     if updated == yaml {
         return json!({ "success": true, "changed": false });
     }
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&path, updated);
+    let _ = atomic_write(&path, &updated);
     let arc: Arc<AppState> = Arc::clone(&state);
     restart_gateway_soon(&arc);
     json!({ "success": true, "changed": true })
@@ -171,10 +166,7 @@ pub fn helix_set_config_key_value(params: Option<Value>) -> Value {
     let yaml = std::fs::read_to_string(&path).unwrap_or_default();
     let updated = set_yaml_key(&yaml, key, &value);
     if updated != yaml {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(&path, updated);
+        let _ = atomic_write(&path, &updated);
     }
     json!({ "success": true })
 }
@@ -195,10 +187,7 @@ pub fn helix_set_agent_config(state: State<'_, Arc<AppState>>, params: Option<Va
         changed = true;
     }
     if changed {
-        if let Some(dir) = yaml_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(&yaml_path, yaml);
+        let _ = atomic_write(&yaml_path, &yaml);
         let arc: Arc<AppState> = Arc::clone(&state);
         restart_gateway_soon(&arc);
     }
@@ -215,10 +204,7 @@ pub fn helix_set_reasoning_effort(params: Option<Value>) -> Value {
     let yaml = std::fs::read_to_string(&path).unwrap_or_default();
     let updated = set_yaml_key(&yaml, "agent.reasoning_effort", &json!(re));
     if updated != yaml {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(&path, updated);
+        let _ = atomic_write(&path, &updated);
     }
     json!({ "success": true })
 }
@@ -437,11 +423,7 @@ pub async fn pi_get_commands() -> Result<Value, String> {
 /// means the package was installed but removed from settings — also disabled.
 fn pi_packages_enabled_map() -> std::collections::HashMap<String, bool> {
     let mut map = std::collections::HashMap::new();
-    let settings: Value =
-        std::fs::read_to_string(crate::paths::pi_agent_dir().join("settings.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(json!({}));
+    let settings = crate::config::read_pi_settings();
     let empty = Vec::new();
     let packages = settings
         .get("packages")
@@ -491,10 +473,10 @@ pub async fn pi_set_package_enabled(
         return Err("package name cannot be empty".into());
     }
 
-    let settings_path = crate::paths::pi_agent_dir().join("settings.json");
-    let mut settings: Value = std::fs::read_to_string(&settings_path)
-        .map_err(|e| format!("failed to read pi settings: {e}"))
-        .and_then(|s| serde_json::from_str(&s).map_err(|e| format!("invalid settings: {e}")))?;
+    let mut settings = crate::config::read_pi_settings();
+    if settings.is_null() {
+        settings = json!({});
+    }
 
     if raw.starts_with("npm:") {
         let name = raw.trim_start_matches("npm:");
@@ -526,9 +508,7 @@ pub async fn pi_set_package_enabled(
         set_local_extension_enabled(&mut settings, &package, enabled)?;
     }
 
-    let raw = serde_json::to_string_pretty(&settings)
-        .map_err(|e| format!("failed to serialize settings: {e}"))?;
-    std::fs::write(&settings_path, raw).map_err(|e| format!("failed to write settings: {e}"))?;
+    crate::config::write_pi_settings(&settings);
 
     // pi snapshots settings at process start: respawn the gateway so the
     // enabled/disabled change actually takes effect.
@@ -731,11 +711,7 @@ pub async fn pi_list_installed() -> Result<Value, String> {
 /// `isEnabledByOverrides`: `!<glob>` excludes, `+<path>` force-includes,
 /// `-<path>` force-excludes; a path with no matching override defaults to on.
 fn pi_local_extension_patterns() -> Vec<String> {
-    let settings: Value =
-        std::fs::read_to_string(crate::paths::pi_agent_dir().join("settings.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(json!({}));
+    let settings = crate::config::read_pi_settings();
     settings
         .get("extensions")
         .and_then(Value::as_array)

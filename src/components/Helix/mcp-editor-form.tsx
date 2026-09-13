@@ -41,7 +41,7 @@ export function McpEditorForm({
             value={form.name}
             onChange={(e) => onChange({ name: e.target.value })}
             placeholder="MCP server name"
-            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+            className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 font-mono"
           />
         </div>
 
@@ -76,7 +76,7 @@ export function McpEditorForm({
               value={form.command}
               onChange={(e) => onChange({ command: e.target.value })}
               placeholder="npx -y @modelcontextprotocol/server-filesystem ./data"
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 font-mono"
             />
           </div>
         ) : (
@@ -89,7 +89,7 @@ export function McpEditorForm({
               value={form.url}
               onChange={(e) => onChange({ url: e.target.value })}
               placeholder="http://localhost:3001/sse"
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 font-mono"
             />
           </div>
         )}
@@ -105,7 +105,7 @@ export function McpEditorForm({
               value={form.args}
               onChange={(e) => onChange({ args: e.target.value })}
               placeholder="--port 3000 --verbose"
-              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+              className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/50 font-mono"
             />
           </div>
         )}

@@ -164,26 +164,6 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Keyboard focus ring — visible only on keyboard navigation */
-:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-/* Remove default outline on mouse click */
-:focus:not(:focus-visible) {
-  outline: none;
-}
-
-/* The chat input box (transparent textarea over a highlight layer) must not
-   show the blue :focus-visible ring — it has no visible border to outline. */
-.chat-input:focus,
-.chat-input:focus-visible {
-  outline: none !important;
-  box-shadow: none !important;
-}
-
 /* Selection color — primary-tinted amber glow */
 ::selection {
   background: color-mix(in oklch, var(--primary) 18%, transparent);
@@ -391,10 +371,25 @@
   border-left: 2px solid var(--border);
   color: var(--muted-foreground);
   line-height: 1.65;
-  max-height: 14rem;
-  overflow-y: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* 思考体限高滚动：完整过程保留在数据里，但 UI 不再被超长 reasoning 撑爆。 */
+.think-body-live {
+  max-height: 16.5em;
+  overflow-y: auto;
+}
+
+/* 流式过程区限高滚动窗口（终端式）：思考+工具在固定高度内滚动，
+   页面总高度稳定、答案区始终可见；贴底跟随由 ProcessWindow 控制，
+   用户上翻即停跟随。完成后此窗口随外层 details 收起而失效。
+   高度收紧到 16rem——过程区只承担"瞄一眼当前进度"的职责，细看靠点开。 */
+.process-window {
+  overflow-y: auto;
+}
+
+.process-window-live {
 }
 
 @keyframes helix-glyph-pulse {
@@ -759,10 +754,21 @@ button, [role="button"], a, input, textarea, select {
 }
 
 /* Input depth without replacing each component's own surface. */
-input:not(.chat-input),
-textarea:not(.chat-input),
+input,
+textarea,
 select {
   box-shadow: none;
+}
+
+/* Remove all focus visual feedback from inputs (no ring, no outline, no border change) */
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+select:focus,
+select:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 button:not([data-slot="button"]):active:not(:disabled) {
@@ -788,11 +794,6 @@ button[class*="hover:bg-"]:hover {
 /* Premium toggle switch */
 button[class*="rounded-full"][class*="transition-colors"] {
   box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.06);
-}
-
-/* Input focus — flat 2px ring, no glow stack */
-input:focus, textarea:focus, select:focus {
-  box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 22%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {

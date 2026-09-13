@@ -70,7 +70,7 @@ import {
 import { ContextUsageIndicator } from "./context-usage";
 
 import { getToolDisplayLabel } from "@/lib/tool-display-utils";
-import { InlineToolGroup } from "./inline-tool-group";
+import { InlineToolGroup, toolActionText, toolVerb } from "./inline-tool-group";
 import { HistoryStrip } from "./history-strip";
 import { FileChangeSummaryCard } from "./file-change-summary-card";
 import { FileChangeSummary } from "./file-change-summary";
@@ -97,7 +97,6 @@ import type {
   HelixTodo,
   PendingChange,
 } from "@/stores/helix-types";
-import { useBackgroundTasksStore } from "@/stores/background-tasks-store";
 import { HelixMarkdown } from "./helix-markdown";
 
 // ── Persisted per-conversation backend session map ──────────────────────────
@@ -163,10 +162,89 @@ function mergeAdjacentThinking(
   return out;
 }
 
+// 交替段切分：按时间序把过程区切成「思考段 / 工具段」的交替序列，
+// 保住模型"思考→执行→再思考→再执行"的叙事节奏（不是全部压成一坨）。
+// 相邻同类块归入同段（两批工具之间的思考是独立段，段内多个工具合并）。
+// text / file_change 块归入当时的工具段（过程区里它们通常紧跟工具出现，
+// 不值得独立成段）。
+function segmentizeProcessBlocks<T extends { type: string }>(
+  blocks: T[],
+): ProcessSegment<T>[] {
+  const segs: ProcessSegment<T>[] = [];
+  for (const block of blocks) {
+    // 思考 / 文本 / 文件变更 各自独立成段（保住时序交替）；其余归入 tasks 段。
+    const kind: ProcessSegment<T>["kind"] =
+      block.type === "thinking"
+        ? "thinking"
+        : block.type === "text"
+          ? "text"
+          : block.type === "file_change"
+            ? "file"
+            : "tasks";
+    const prev = segs[segs.length - 1];
+    if (prev && prev.kind === kind) {
+      prev.blocks.push(block);
+    } else {
+      segs.push({ kind, blocks: [block] });
+    }
+  }
+  return segs;
+}
+
 type ProcessSegment<T extends { type: string }> = {
-  kind: "text" | "thinking" | "tasks";
+  kind: "text" | "thinking" | "tasks" | "file";
   blocks: T[];
 };
+
+// 段内思考文本合并：后端两种流式形态混发时（有的 chunk 是增量、有的是
+// 累积全文重发），相邻块会出现"后块包含前块全文"的重复；steering/重试还会
+// 把整段思考近似原样重发（首尾略改）。直接 join 会把同一段思考渲染 N 遍。
+// 去重三层：① includes（精确累积/重复）② 高相似度（复用文本块的
+// textSimilarityRatio，≥0.85 视为重发，取更长的）③ 独立段才以空行连接。
+function mergeThinkingContents(contents: string[]): string {
+  let merged = "";
+  for (const raw of contents) {
+    const cur = String(raw || "");
+    if (!cur.trim()) continue;
+    if (!merged) {
+      merged = cur;
+      continue;
+    }
+    if (cur.includes(merged) || merged.includes(cur)) {
+      // 累积重发 / 完全重复 → 取更全的那份
+      merged = cur.length > merged.length ? cur : merged;
+      continue;
+    }
+    if (textSimilarityRatio(merged, cur) >= 0.85) {
+      // 近似重发（steering/重试整段重贴，首尾微改）→ 取更全的那份
+      merged = cur.length > merged.length ? cur : merged;
+      continue;
+    }
+    const separator = cur.startsWith(merged) ? "\n" : "\n\n";
+    merged = `${merged}${separator}${cur}`;
+  }
+  return normalizeThinkingText(merged);
+}
+
+function dedupeThinkingBlocks<T extends { type: string; content?: string }>(
+  blocks: T[],
+): T[] {
+  let previous: string[] = [];
+  return blocks.map((block) => {
+    if (block.type !== "thinking") return block;
+    const content = String(block.content || "");
+    if (previous.length === 0) {
+      previous = [content];
+      return block;
+    }
+    const prefix = previous
+      .filter((item) => item && content.startsWith(item))
+      .sort((a, b) => b.length - a.length)[0];
+    const next = prefix ? content.slice(prefix.length).trim() : content;
+    previous = [...previous, content];
+    return next === content ? block : { ...block, content: next };
+  });
+}
 
 // 过程区折叠标题:轻量一行(chevron + 标题词),完成后不再是高权重大标题,
 // 正在进行时标题词略强以示意当前阶段。三处(thinking / 任务执行)共用。
@@ -202,6 +280,7 @@ const ThinkingFold = React.memo(function ThinkingFold({
   content,
   fontSize,
   active = false,
+  streaming = false,
   status,
   duration,
   searchOpen,
@@ -211,48 +290,176 @@ const ThinkingFold = React.memo(function ThinkingFold({
   content: string;
   fontSize: number;
   active?: boolean;
+  /** 本轮仍在流式（合并思考卡在过程窗口内保持展开可读，但不脉冲） */
+  streaming?: boolean;
   status?: string;
   duration?: number;
   searchOpen: boolean;
   searchQuery: string;
   isSearchActive: boolean;
 }) {
-  const { status: kaomojiStatus, body } = extractKaomojiStatus(content);
+  const { status: kaomojiStatus, body: rawBody } =
+    extractKaomojiStatus(content);
+  const body = useMemo(() => normalizeThinkingText(rawBody), [rawBody]);
+  // 流式态摘要 = 尾行实时预览（当前想到哪写到哪），完成后 = 首行摘要。
   const summary = useMemo(() => {
-    const firstLine = body
+    const lines = body
       .split("\n")
       .map((line) => line.trim())
-      .find((line) => line.length > 0);
-    return firstLine ? firstLine.slice(0, 56) : "";
-  }, [body]);
+      .filter((line) => line.length > 0);
+    const picked = streaming ? lines[lines.length - 1] : lines[0];
+    return picked ? picked.slice(0, 56) : "";
+  }, [body, streaming]);
+
+  // 点开过才保持展开（本地 state）；流式的"思考中"脉冲只由 active 决定。
+  const [userOpen, setUserOpen] = useState(false);
+  const open = userOpen;
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  // 思考中 + 已展开 → 限高体内自动贴底跟随（用户上翻查看时 scrollTop 由
+  // 浏览器保持，effect 只在内容变化时拉到底会打断上翻——所以仅 active 时拉）。
+  useEffect(() => {
+    if (active && open && bodyRef.current) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    }
+  }, [active, open, body]);
 
   return (
-    <details className="thinking-fold group/details" open={active}>
+    <details
+      className="thinking-fold group/details"
+      open={open}
+      onToggle={(e) => setUserOpen((e.target as HTMLDetailsElement).open)}
+    >
       <summary>
         <ThinkGlyph active={active} />
         <span className="think-title" style={{ fontSize }}>
           {active ? status || kaomojiStatus || "思考中" : "思考"}
         </span>
-        {!active && (duration || summary) ? (
+        {summary ? (
           <span className="think-time" style={{ fontSize }}>
-            {duration ? `· ${formatDuration(duration)}` : ""}
-            {duration && summary ? " · " : ""}
+            {duration ? `· ${formatDuration(duration)} · ` : "· "}
             {summary}
           </span>
+        ) : duration ? (
+          <span className="think-time" style={{ fontSize }}>
+            · {formatDuration(duration)}
+          </span>
         ) : null}
-
-        <FoldChevron />
       </summary>
       <div
-        className="think-body thinking-scroll"
+        ref={bodyRef}
+        className={`think-body thinking-scroll${open ? " think-body-live" : ""}`}
         style={{ fontSize }}
       >
         {searchOpen && searchQuery.trim() ? (
-          <HighlightText text={body} query={searchQuery} active={isSearchActive} />
+          <HighlightText
+            text={body}
+            query={searchQuery}
+            active={isSearchActive}
+          />
         ) : (
           <HelixMarkdown text={body} />
         )}
       </div>
+    </details>
+  );
+});
+
+// 流式过程区的限高滚动窗口（终端式）：思考+工具在固定高度内滚动，页面
+// 总高度稳定、答案区始终可见。贴底跟随——只有当用户本来就在底部（距底
+// <40px）时新内容才自动滚到底；用户上翻查看即停跟随，手动滚回底部恢复。
+// 轮结束后外层 details 收起为「已完成」一行，此窗口随之失效。
+const ProcessWindow = React.memo(function ProcessWindow({
+  active,
+  children,
+  dependency,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+  /** 内容变化信号（如 blocks 引用）；仅用于触发贴底跟随 effect */
+  dependency: unknown;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const stick = useRef(true);
+  const onScroll = () => {
+    const el = ref.current;
+    if (!el) return;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
+  useEffect(() => {
+    const el = ref.current;
+    if (active && el && stick.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [active, dependency]);
+  return (
+    <div
+      ref={ref}
+      onScroll={onScroll}
+      className={`mt-1 space-y-2 process-window${active ? " process-window-live" : ""}`}
+    >
+      {children}
+    </div>
+  );
+});
+
+// 完成态工具流折叠：整轮 N 个工具调用收成一行「N 个操作 · 动词统计」，
+// 点开才平铺各工具卡（卡片本身仍保留各自的展开语义）。与 ThinkingFold
+// 同一套视觉语言。流式期间不参与——过程窗口已在滚动展示。
+const ToolStreamFold = React.memo(function ToolStreamFold({
+  blocks,
+  fontSize,
+  children,
+}: {
+  blocks: Array<{ type: string; steps?: ExecutionStep[] }>;
+  fontSize: number;
+  children: React.ReactNode;
+}) {
+  const { verbs, total } = useMemo(() => summarizeTaskBlocks(blocks), [blocks]);
+  if (total === 0) return <>{children}</>;
+  // 动词去重统计：读取 5 · 执行 2 · 编辑 1
+  const counts = new Map<string, number>();
+  for (const v of verbs) counts.set(v, (counts.get(v) || 0) + 1);
+  const verbStats = [...counts.entries()].map(([v, n]) => `${v} ${n}`);
+  
+  // 当只有一个工具调用时，显示具体命令文本而非计数
+  const singleToolLabel = useMemo(() => {
+    if (total !== 1) return null;
+    for (const b of blocks) {
+      if (b.type !== "tool_group" || !b.steps) continue;
+      for (const s of b.steps) {
+        if (s.type !== "tool_call") continue;
+        const action = toolActionText(s);
+        if (!action) return null;
+        const verb = toolVerb(s.toolName || "");
+        return `${verb} ${action}`;
+      }
+    }
+    return null;
+  }, [blocks, total]);
+
+  return (
+    <details className="group/details">
+      <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
+        <span className="tool-glyph" aria-hidden>
+          ⏺
+        </span>
+        {singleToolLabel ? (
+          <span
+            className="text-foreground/25 select-none truncate"
+            style={{ fontSize }}
+          >
+            {singleToolLabel}
+          </span>
+        ) : verbStats.length > 0 ? (
+          <span
+            className="text-foreground/25 select-none truncate"
+            style={{ fontSize }}
+          >
+            · {verbStats.join(" · ")}
+          </span>
+        ) : null}
+      </summary>
+      <div className="mt-1">{children}</div>
     </details>
   );
 });
@@ -376,6 +583,33 @@ function isNearDuplicate(aN: string, bN: string): boolean {
   );
 }
 
+function mergeThinkingStreams(current: string, incoming: string): string {
+  const cur = String(current || "");
+  const inc = String(incoming || "");
+  const curN = normalizeForCompare(cur);
+  const incN = normalizeForCompare(inc);
+  if (!incN) return cur;
+  if (!curN) return inc;
+  if (incN.startsWith(curN) || incN.includes(curN)) return inc;
+  if (curN.startsWith(incN) || curN.includes(incN)) return cur;
+  if (textSimilarityRatio(curN, incN) >= 0.85) {
+    return inc.length > cur.length ? inc : cur;
+  }
+  return cur + inc;
+}
+
+function normalizeThinkingText(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(
+      (line, index, lines) => line.length > 0 || !lines[index - 1]?.trim(),
+    )
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 // reconcileBlocksWithContent repairs streaming-accumulated text blocks using
 // the authoritative msg.content. The forwarding chain intermittently drops
 // whitespace/newlines inside streamed chunks (e.g. "**加粗** 后" glued into
@@ -388,8 +622,9 @@ function isNearDuplicate(aN: string, bN: string): boolean {
 // content, never skip. Old logic would skip replacement when blocks matched
 // content (normalized comparison), but that left streaming-stage raw text
 // rendered alongside done-stage preprocessed text, causing duplicate display.
-// Now we always consolidate ALL text into a single block at the END of the
-// block list, ensuring only the authoritative (preprocessed) version renders.
+// Now we always replace streaming-accumulated text with the authoritative
+// (preprocessed) version, keeping the text block at its ORIGINAL position
+// (no longer pinned to the end) so thinking/tool/text render in true order.
 function reconcileBlocksWithContent(
   blocks: NonNullable<ChatMessage["blocks"]>,
   content?: string | null,
@@ -409,25 +644,11 @@ function reconcileBlocksWithContent(
   )
     return blocks;
   if (content.length < joined.length) return blocks;
-  // Same-or-fuller authoritative text: consolidate ALL text into a single
-  // block pinned to the END of the block list, after every thinking /
-  // tool_group / file_change block. Earlier text blocks are blanked
-  // (normalizeTextBlocks filters empty ones).
-  //
-  // Why pin to the end instead of keeping the first/last text block's
-  // original position: this model (and several reasoning providers) emits
-  // thinking chunks AFTER the final answer text, so the block list can be
-  // [text, thinking] or [thinking, text, thinking]. If the consolidated
-  // answer stays at an early position, the renderer's lastTextIndex split
-  // puts the trailing thinking cards into the "answer" zone — the user sees
-  // the conclusion first and a collapsed 思考 card dangling BELOW it
-  // (2026-08-18 bug). The answer text is semantically the final word of the
-  // run, so pinning it last is always correct.
-  const lastTextBlock = textBlocks[textBlocks.length - 1];
-  const rest = blocks.map((b) =>
-    b.type === "text" ? { ...b, content: "" } : b,
-  );
-  return [...rest, { ...lastTextBlock, content }];
+  const firstTextBlock = textBlocks[0];
+  return [
+    ...blocks.map((b) => (b.type === "text" ? { ...b, content: "" } : b)),
+    { ...firstTextBlock, content },
+  ];
 }
 
 function normalizeTextBlocks(
@@ -1305,7 +1526,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
     [msg.content],
   );
   const reasoning = useMemo(
-    () => normalizeAcpContentRaw(msg.reasoning || ""),
+    () => normalizeThinkingText(normalizeAcpContentRaw(msg.reasoning || "")),
     [msg.reasoning],
   );
   const messageDuration = msg.duration ?? msg.thinkingTime;
@@ -1329,235 +1550,169 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
           <div className="flex-1 min-w-0">
             {msg.blocks && msg.blocks.length > 0 ? (
               (() => {
-                // 按时间序交替渲染 thinking / tool_group / text（不置顶工具、不合并
-                // 所有思考）：被工具隔开的思考段各自独立折叠，工具卡按事件顺序出现，
-                // 模型"思考→执行→再思考→再执行"的节奏原样呈现。仅合并相邻思考块。
-                const normalizedBlocks = mergeAdjacentThinking(
-                  normalizeTextBlocks(
-                    reconcileBlocksWithContent(msg.blocks, msg.content),
+                // 交替展示：按时间序把过程切成「思考段 / 工具段」交替（保住
+                // "思考→执行→再思考→再执行"的叙事节奏），段内合并同类块。
+                // 每段一张折叠卡（思考段 / N 个操作），持久化结构不受影响。
+                const normalizedBlocks = dedupeThinkingBlocks(
+                  mergeAdjacentThinking(
+                    normalizeTextBlocks(
+                      reconcileBlocksWithContent(msg.blocks, msg.content),
+                    ),
                   ),
                 );
-                // Fallback consolidation: merge all text blocks into a single
-                // block at the end, in case reconcileBlocksWithContent failed
-                // (e.g. normalization mismatch). Without this, interleaved
-                // text/tool blocks cause buildProcessSegments to split text
-                // with "任务执行" in between.
-                const nonTextBlocks = normalizedBlocks.filter(
-                  (b) => b.type !== "text",
-                );
-                const textContent = normalizedBlocks
-                  .filter((b) => b.type === "text")
-                  .map((b) => String(b.content || ""))
-                  .join("");
-                const consolidatedBlocks = textContent.trim()
-                  ? [
-                      ...nonTextBlocks,
-                      { type: "text" as const, content: textContent },
-                    ]
-                  : nonTextBlocks;
-                const lastTextIndex = consolidatedBlocks.reduce(
-                  (acc, b, i) =>
-                    b.type === "text" && String(b.content || "").trim()
-                      ? i
-                      : acc,
-                  -1,
-                );
-                const processBlocks =
-                  lastTextIndex >= 0
-                    ? consolidatedBlocks.slice(0, lastTextIndex)
-                    : consolidatedBlocks;
-                const answerBlocks =
-                  lastTextIndex >= 0
-                    ? consolidatedBlocks.slice(lastTextIndex)
-                    : [];
                 const showInlineReasoning = !!(
                   msg.reasoning &&
                   msg.reasoning.trim().length > 0 &&
                   !(msg.blocks && msg.blocks.some((b) => b.type === "thinking"))
                 );
-                const processSegments = buildProcessSegments(processBlocks);
-                const hasProcess =
-                  processSegments.length > 0 || showInlineReasoning;
+                // ① 按原始流顺序渲染：不再把文本钉到末尾（2026-08-18 的 pin
+                // 逻辑已移除）。思考/工具/文本按真实时序交替呈现，文本块内联在
+                // 它实际出现的位置。若模型把思考发在答案之后，会出现"结论先出、
+                // 思考吊在下面"——这正是真·交叉显示，接受该取舍。
+                const orderedBlocks = normalizedBlocks;
+                // 完成态摘要的操作计数：N 个操作。
+                const processOpCount = summarizeTaskBlocks(
+                  orderedBlocks.filter((b) => b.type === "tool_group"),
+                ).total;
+                const hasReasoningContent =
+                  showInlineReasoning ||
+                  orderedBlocks.some(
+                    (b) =>
+                      b.type === "thinking" ||
+                      b.type === "tool_group" ||
+                      b.type === "file_change",
+                  );
+                const processSegments = segmentizeProcessBlocks(
+                  orderedBlocks.filter((b) => b.type !== "text"),
+                );
+                const answerText = orderedBlocks
+                  .filter((b) => b.type === "text")
+                  .map((b) => String(b.content || ""))
+                  .join("");
+                const processDuration =
+                  !isStreaming && (messageDuration ?? 0) > 0
+                    ? formatDuration(messageDuration ?? 0)
+                    : "";
+                // 段内渲染：每个交替段按其 kind 渲染（思考/文件/工具）。
+                const segmentNodes = processSegments.map((seg, si) => {
+                  if (seg.kind === "thinking") {
+                    const segContent = mergeThinkingContents(
+                      seg.blocks.map((b) =>
+                        b.type === "thinking" ? String(b.content || "") : "",
+                      ),
+                    );
+                    if (!segContent.trim()) return null;
+                    return (
+                      <ThinkingFold
+                        key={si}
+                        content={segContent}
+                        fontSize={fontSize}
+                        duration={msg.thinkingTime}
+                        searchOpen={searchOpen}
+                        searchQuery={searchQuery}
+                        isSearchActive={isSearchActive}
+                      />
+                    );
+                  }
+                  if (seg.kind === "file") {
+                    return (
+                      <div key={si} className="my-2">
+                        {seg.blocks.map((b, fi) =>
+                          b.type === "file_change" ? (
+                            <FileChangeSummary key={fi} changes={b.changes} />
+                          ) : null,
+                        )}
+                      </div>
+                    );
+                  }
+                  // tasks 段：连续工具调用合并为一张「N 个操作」折叠卡。
+                  const toolBlocks = seg.blocks.filter(
+                    (b) => b.type === "tool_group",
+                  );
+                  const otherBlocks = seg.blocks.filter(
+                    (b) => b.type === "file_change",
+                  );
+                  return (
+                    <div key={si} className="space-y-1">
+                      {otherBlocks.map((b, i) => {
+                        if (b.type === "file_change") {
+                          return (
+                            <FileChangeSummary key={i} changes={b.changes} />
+                          );
+                        }
+                        return null;
+                      })}
+                      {toolBlocks.length > 0 && (
+                        <ToolStreamFold blocks={toolBlocks} fontSize={fontSize}>
+                          {toolBlocks.map((tb, tbi) => (
+                            <InlineToolGroup
+                              key={tbi}
+                              steps={tb.steps}
+                              isRunning={false}
+                              fontSize={fontSize}
+                            />
+                          ))}
+                        </ToolStreamFold>
+                      )}
+                    </div>
+                  );
+                });
+                const processContent = hasReasoningContent ? (
+                  <details className="my-2 group/details" open>
+                    <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
+                      <FoldTitle
+                        label={isStreaming ? "工作中" : "已完成"}
+                        active={isStreaming}
+                        fontSize={fontSize}
+                      />
+                      {!isStreaming && processDuration ? (
+                        <span className="tabular-nums text-foreground/25">
+                          {processDuration}
+                        </span>
+                      ) : null}
+                    </summary>
+                    <div className="mt-1">
+                      {showInlineReasoning && (
+                        <ThinkingFold
+                          content={msg.reasoning ?? ""}
+                          fontSize={fontSize}
+                          searchOpen={searchOpen}
+                          searchQuery={searchQuery}
+                          isSearchActive={isSearchActive}
+                        />
+                      )}
+                      <div className="my-2 space-y-2">{segmentNodes}</div>
+                    </div>
+                  </details>
+                ) : (
+                  <div className="my-2 space-y-2">{segmentNodes}</div>
+                );
                 return (
                   <>
-                    {hasProcess && (
-                      // 二级折叠：外层「过程」把本轮所有中间产物（思考 + 任务执行）
-                      // 收成一行；展开后才是原来各自独立的思考/任务执行折叠。
-                      // 流式期间默认展开（能看进度），结束后自动收起。
-                      <details className="my-2 group/details" open={isStreaming}>
-                        <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
-                          <FoldTitle
-                            label={isStreaming ? "执行过程" : "已完成"}
-                            active={isStreaming}
-                            fontSize={fontSize}
-                          />
-                          {!isStreaming && (messageDuration ?? 0) > 0 ? (
-                            <span className="ml-auto tabular-nums text-foreground/25">
-                              {formatDuration(messageDuration ?? 0)}
-                            </span>
-                          ) : null}
-                          <FoldChevron />
-                        </summary>
-                        <div className="mt-1">
-                        {showInlineReasoning && (
-                          <ThinkingFold
-                            content={reasoning}
-                            fontSize={fontSize}
-                            active={isStreaming}
-                            duration={messageDuration}
-                            searchOpen={searchOpen}
-                            searchQuery={searchQuery}
-                            isSearchActive={isSearchActive}
-                          />
-                        )}
-                        <div className="my-2 space-y-2">
-                          {processSegments.map((seg, si) => {
-                            return (
-                              <div key={si} className="space-y-1">
-                                {seg.blocks.map((b, i) => {
-                                  if (b.type === "text") {
-                                    return (
-                                      <div key={i} style={{ fontSize }}>
-                                        {searchOpen && searchQuery.trim() ? (
-                                          <div
-                                            className="whitespace-pre-wrap break-words"
-                                            style={{ fontSize }}
-                                          >
-                                            <HighlightText
-                                              text={normalizeAcpContentRaw(
-                                                b.content,
-                                              )}
-                                              query={searchQuery}
-                                              active={isSearchActive}
-                                            />
-                                          </div>
-                                        ) : (
-                                          <HelixMarkdown
-                                            text={normalizeAcpContentRaw(
-                                              b.content,
-                                            )}
-                                          />
-                                        )}
-                                      </div>
-                                    );
-                                  }
-                                  if (b.type === "thinking") {
-                                    const content =
-                                      "content" in b ? String(b.content) : "";
-                                    if (!content.trim()) return null;
-                                    return (
-                                      <ThinkingFold
-                                        key={i}
-                                        content={content}
-                                        fontSize={fontSize}
-                                        searchOpen={searchOpen}
-                                        searchQuery={searchQuery}
-                                        isSearchActive={isSearchActive}
-                                      />
-                                    );
-                                  }
-                                  if (b.type === "tool_group") {
-                                    return (
-                                      <InlineToolGroup
-                                        key={i}
-                                        steps={b.steps}
-                                        isRunning={false}
-                                        fontSize={fontSize}
-                                      />
-                                    );
-                                  }
-                                  if (b.type === "file_change") {
-                                    return (
-                                      <FileChangeSummary
-                                        key={b.changes?.[0]?.fileId || `fc-${i}`}
-                                        changes={b.changes}
-                                      />
-                                    );
-                                  }
-                                  return null;
-                                })}
-                              </div>
-                            );
-                          })}
-                        </div>
-                        </div>
-                      </details>
-                    )}
-                    {answerBlocks.length > 0 && (
+                    {processContent}
+                    {answerText.trim() ? (
                       <div
                         className="helix-md helix-answer mt-3"
                         style={{ fontSize }}
                       >
-                        {buildProcessSegments(answerBlocks).map((seg, si) => {
-                          return (
-                            <div key={si} className="space-y-1">
-                              {seg.blocks.map((b, i) => {
-                                if (b.type === "text") {
-                                  return (
-                                    <div key={i} style={{ fontSize }}>
-                                      {searchOpen && searchQuery.trim() ? (
-                                        <div
-                                          className="whitespace-pre-wrap break-words"
-                                          style={{ fontSize }}
-                                        >
-                                          <HighlightText
-                                            text={normalizeAcpContentRaw(
-                                              b.content,
-                                            )}
-                                            query={searchQuery}
-                                            active={isSearchActive}
-                                          />
-                                        </div>
-                                      ) : (
-                                        <HelixMarkdown
-                                          text={normalizeAcpContentRaw(
-                                            b.content,
-                                          )}
-                                        />
-                                      )}
-                                    </div>
-                                  );
-                                }
-                                if (b.type === "thinking") {
-                                  const content =
-                                    "content" in b ? String(b.content) : "";
-                                  if (!content.trim()) return null;
-                                  return (
-                                    <ThinkingFold
-                                      key={i}
-                                      content={content}
-                                      fontSize={fontSize}
-                                      searchOpen={searchOpen}
-                                      searchQuery={searchQuery}
-                                      isSearchActive={isSearchActive}
-                                    />
-                                  );
-                                }
-                                if (b.type === "tool_group") {
-                                  return (
-                                    <InlineToolGroup
-                                      key={i}
-                                      steps={b.steps}
-                                      isRunning={false}
-                                      fontSize={fontSize}
-                                    />
-                                  );
-                                }
-                                if (b.type === "file_change") {
-                                  return (
-                                    <FileChangeSummary
-                                      key={b.changes?.[0]?.fileId || `fc-${i}`}
-                                      changes={b.changes}
-                                    />
-                                  );
-                                }
-                                return null;
-                              })}
-                            </div>
-                          );
-                        })}
+                        {searchOpen && searchQuery.trim() ? (
+                          <div
+                            className="whitespace-pre-wrap break-words"
+                            style={{ fontSize }}
+                          >
+                            <HighlightText
+                              text={normalizeAcpContentRaw(answerText)}
+                              query={searchQuery}
+                              active={isSearchActive}
+                            />
+                          </div>
+                        ) : (
+                          <HelixMarkdown
+                            text={normalizeAcpContentRaw(answerText)}
+                          />
+                        )}
                       </div>
-                    )}
+                    ) : null}
                   </>
                 );
               })()
@@ -1579,14 +1734,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 )}
               </div>
             )}
-            {(messageDuration ?? 0) > 0 && (
-              <div
-                className="text-foreground/30 tabular-nums mt-1 px-1"
-                style={{ fontSize }}
-              >
-                {formatDuration(messageDuration ?? 0)}
-              </div>
-            )}
+
             {/* Copy button */}
             <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1 gap-0.5">
               <CopyButton text={mdContent} />
@@ -1713,10 +1861,10 @@ export function AgentFlowPanel() {
   >([]);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
 
-  // 计划审批（plan 模式）：模型产出方案后先弹浮条让用户决定“批准执行”或“继续调整”，
-  // 用户批准后才以 accept_edits 模式真正跑 handleRun（done 时由它触发 + handleApprovePlan）。
-  const [pendingPlanReview, setPendingPlanReview] =
-    useState<PlanReviewRequest | null>(null);
+  // 计划审批（plan 模式）：方案提升到全局 store（panel-slice），
+  // 工作面板与底部 PlanReviewBar 共用同一份状态。
+  const pendingPlanReview = useHelixStore((s) => s.pendingPlanReview);
+  const setPendingPlanReview = useHelixStore((s) => s.setPendingPlanReview);
 
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [showFolderDropdown, setShowFolderDropdown] = useState(false);
@@ -1952,9 +2100,10 @@ export function AgentFlowPanel() {
     useHelixStore
       .getState()
       .clearCompressionNotice(currentSessionId ?? DRAFT_SESSION_KEY);
-    setPendingPlanReview((prev) =>
-      prev && prev.sessionId === (currentSessionId ?? DRAFT_SESSION_KEY)
-        ? prev
+    const curPlan = useHelixStore.getState().pendingPlanReview;
+    setPendingPlanReview(
+      curPlan && curPlan.sessionId === (currentSessionId ?? DRAFT_SESSION_KEY)
+        ? curPlan
         : null,
     );
   }, [currentSessionId]);
@@ -2192,6 +2341,24 @@ export function AgentFlowPanel() {
       runningSessionIdRef.current = sid;
     }
   }, [currentSessionId, streamingDrafts]);
+  // 切换会话时把该会话的审批模式同步到后端实例。每个对话在 pi 侧是独立
+  // 进程、各自记模式；前端 setCurrentSessionId 只恢复本地 approvalMode，
+  // 从不通知后端 —— 切回一个"计划模式"的旧对话时，后端仍停在上次的模式，
+  // 模型直接执行而不等批准（根因）。此处用 set_mode 兜底同步；尚无 sid 的
+  // 新草稿不适用（session/new 会带 mode_id，网关已消费）。
+  useEffect(() => {
+    const cid = currentSessionId;
+    if (!cid) return;
+    const entry = sessionMapRef.current.get(cid);
+    const sid = entry?.sid;
+    if (!sid) return;
+    const mode = useHelixStore.getState().approvalMode;
+    helixApi()
+      ?.send("session/set_mode", { session_id: sid, mode_id: mode })
+      .catch((e: unknown) => {
+        console.warn("[Helix] set_mode(sync on switch) failed:", e);
+      });
+  }, [currentSessionId]);
   // Per-session running: any conversation whose draft is running (whether it's
   // the front run or a background run you switched to) shows busy state.
   const isRunning = useMemo(() => {
@@ -2300,6 +2467,7 @@ export function AgentFlowPanel() {
   // Detect whether this session already has a completed assistant message.
   const transcriptFontSize = useHelixStore((s) => s.transcriptFontSize);
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
+  const workDirEpoch = useHelixStore((s) => s.workDirEpoch);
   const activeSessionWorkDir = useHelixStore((s) => s.activeSessionWorkDir);
   const activeProviderId = useHelixStore((s) => s.activeProviderId);
   const activeModel = useHelixStore((s) => s.activeModel);
@@ -2370,9 +2538,22 @@ export function AgentFlowPanel() {
   }, []);
   // Drop the cached backend session when the project directory changes so the
   // next prompt opens a fresh session rooted at the new cwd.
-  // 例外：对话正在运行（有 streamingDraft）时绝不删——否则下次 session/prompt 会拿一个
-  // 已从 sessionMapRef 移除的死会话去 prompt.submit → 后端 4001 "session not found" → 模型停止。
+  // 门控信号是 workDirEpoch（只有真实 setWorkDir 才 bump，helix-store.ts
+  // setWorkDir 的三个分支），而 selectedWorkDir 本身在重启恢复
+  // （restoreFromStorage 会同时恢复 currentSessionId 和 selectedWorkDir）和
+  // 「运行中浏览切换」时也会变——以它为信号会在重启挂载时把刚恢复的
+  // conversation→session 映射删掉，下一条消息被迫 session/new + seedHistory
+  // 重建（丢工具/思考上下文），即「每次重启后模型失忆」的根因。epoch 不变
+  // 时本 effect 是 no-op；真实切换项目（空闲分支）bump epoch → 删映射。
+  // 例外：对话正在运行（有 streamingDraft）时绝不删——否则下次 session/prompt
+  // 会拿一个已从 sessionMapRef 移除的死会话去 prompt.submit → 后端 4001
+  // "session not found" → 模型停止。
+  const lastWorkDirEpochRef = useRef(useHelixStore.getState().workDirEpoch);
   useEffect(() => {
+    const liveEpoch = useHelixStore.getState().workDirEpoch;
+    const prevEpoch = lastWorkDirEpochRef.current;
+    lastWorkDirEpochRef.current = liveEpoch;
+    if (liveEpoch === prevEpoch) return; // 重启恢复 / 浏览切换：不动映射
     if (!currentSessionId) return;
     const running =
       useHelixStore.getState().isAgentRunning ||
@@ -2381,7 +2562,7 @@ export function AgentFlowPanel() {
       sessionMapRef.current.delete(currentSessionId);
       persistSessionMap(sessionMapRef.current);
     }
-  }, [selectedWorkDir]);
+  }, [workDirEpoch, selectedWorkDir, currentSessionId]);
 
   // Switching conversations: clear the *front-end* streaming UI so the newly
   // focused conversation starts with a clean panel. We deliberately do NOT
@@ -2515,59 +2696,6 @@ export function AgentFlowPanel() {
       } catch {}
     };
   }, []);
-  // /btw 后台任务的完成通知需要一个 persistent listener（handleRun 里的 per-run
-  // onEvent 在 finally 里退订，后台 run 与当前 run 生命周期不同步，事件会漏掉）。
-  // background.complete 参数 = { session_id: 后台任务的 sid, task_id, text }。
-  useEffect(() => {
-    let unsubFn: (() => void) | undefined;
-    try {
-      unsubFn = helixApi()!.onEvent((method: string, params: any) => {
-        if (method !== "background.complete") return;
-        const parentSid = params?.session_id;
-        const text = typeof params?.text === "string" ? params.text : "";
-        const taskId = params?.task_id;
-        const failed = text.startsWith("error:");
-        if (typeof taskId === "string" && taskId) {
-          useBackgroundTasksStore
-            .getState()
-            .finishTask(taskId, failed ? "failed" : "completed");
-        }
-        // 通过 session 映射反查它属于哪个对话（后台会话未注册时落到当前对话）。
-        let bgCid: string | null = null;
-        if (parentSid) {
-          for (const [c, entry] of sessionMapRef.current.entries()) {
-            if (entry.sid === parentSid) {
-              bgCid = c;
-              break;
-            }
-          }
-        }
-        const target =
-          bgCid || useHelixStore.getState().currentSessionId || undefined;
-        if (text) {
-          useHelixStore.getState().addChatMessage({
-            role: "assistant",
-            content: text,
-            sessionId: target,
-          });
-        }
-        storeActions.showToast({
-          type: failed ? "error" : "success",
-          title: failed ? "后台任务失败" : "后台任务已完成",
-          description:
-            text.slice(0, 80) || (taskId ? `任务 ${taskId} 已完成` : undefined),
-          duration: 8000,
-        });
-      });
-    } catch (e) {
-      console.warn("[Helix] background.complete listener setup failed:", e);
-    }
-    return () => {
-      try {
-        unsubFn?.();
-      } catch {}
-    };
-  }, []);
   // 孤儿 usage 事件兜底：usage:prompt-complete 是上下文环（contextUsage）的唯一
   // 写入来源，正常由 handleRun 的 per-run onEvent 消费。整页重载（Vite HMR /
   // WebView2 崩溃恢复）会销毁 per-run 订阅，但主进程与后端 agent 子进程不受影响，
@@ -2667,10 +2795,14 @@ export function AgentFlowPanel() {
         .catch(() => setGitAvailable(false));
     };
     refresh();
-    const timer = setInterval(refresh, 4000);
+    // 4 秒常轮询会在空闲时持续 spawn git 进程；改为仅在窗口重新获得焦点时
+    // 探活一次——后台分支切换（终端手动 git checkout 等）在用户切回来刷新时
+    // 自然被发现，代价从"永远 4s 一次"降为"重新聚焦一次"。
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
     };
   }, [selectedWorkDir]);
 
@@ -2810,20 +2942,16 @@ export function AgentFlowPanel() {
       sessionMapRef.current.delete(currentSessionId);
       persistSessionMap(sessionMapRef.current);
     }
-    // 3) Push the resolved config (provider+baseUrl+apiKey+model) to the backend.
+    // 3) Push the resolved config (provider+baseUrl+model) to the backend.
     if (isElectron()) {
       const store = useHelixStore.getState();
       const cfg = store.apiConfig;
-      // Use the ACTIVE provider's stored key. We must NOT fall back to a stale
-      // in-memory apiConfig.apiKey: after a reload it can be empty/stale, and
-      // pushing it would send the PREVIOUS provider's key — the classic swap-401.
-      // When the resolved key is genuinely empty, push '' and let the backend
-      // (main.js) fall back to the target provider's own key stored in
-      // config.yaml's custom_providers block (which is correct on disk).
-      const provider = store.activeProviderId
-        ? store.providers.find((p) => p.id === store.activeProviderId)
-        : undefined;
-      const resolvedKey = provider?.apiKey || cfg.apiKey || "";
+      // The apiKey is intentionally NOT resolved/pushed here: credentials live
+      // in pi's own files (models.json / auth.json) and the backend preserves
+      // the stored key when none is given (apply_pi_model_config). Pushing a
+      // cached in-memory key here was the "restart re-creates the model with a
+      // stale key" root cause. A key only travels on an explicit settings-page
+      // save (pushModelConfigWithKey).
       const push = {
         model: cfg.model,
         provider:
@@ -2831,10 +2959,9 @@ export function AgentFlowPanel() {
             ? cfg.provider
             : "custom",
         baseUrl: cfg.baseUrl,
-        apiKey: resolvedKey,
       };
       debug(
-        `[config-switch] → provider=${push.provider} baseUrl=${push.baseUrl} model=${push.model} apiKey=${resolvedKey ? resolvedKey.substring(0, 6) + "…" : "(EMPTY → backend falls back to target provider stored key)"}`,
+        `[config-switch] → provider=${push.provider} baseUrl=${push.baseUrl} model=${push.model}（key 由 pi 侧文件持有，不推送）`,
       );
       // Flush IMMEDIATELY (bypass the 1.2s debounce). A model switch is an
       // explicit user action and must persist to active-profile.json + config.yaml
@@ -3356,14 +3483,30 @@ export function AgentFlowPanel() {
     if (history.length <= 1 && sessionId === state.currentSessionId) return; // Don't close last tab
     state.clearTabInput(sessionId);
     state.clearStreamingDraft?.(sessionId);
-    // Remove from history
+    // Remove from both stacks. sessionHistoryIndex must follow the removal —
+    // 否则索引悬在已删条目上，后退会加载已关会话。
+    const removedAt = history.indexOf(sessionId);
     const newHistory = history.filter((id) => id !== sessionId);
+    useHelixStore.setState((s) => {
+      let newIndex = s.navigationIndex;
+      if (removedAt >= 0 && removedAt < s.sessionHistoryIndex) {
+        newIndex = s.sessionHistoryIndex - 1;
+      }
+      const clamped = Math.min(newIndex, newHistory.length - 1);
+      const navHistory = s.navigationHistory.filter(
+        (e) => !(e.type === "chat" && e.sessionId === sessionId),
+      );
+      return {
+        sessionHistory: newHistory,
+        sessionHistoryIndex: clamped,
+        navigationHistory: navHistory,
+      };
+    });
     // If closing active tab, switch to another one
     if (sessionId === state.currentSessionId) {
       const next = newHistory[newHistory.length - 1] || null;
       state.setCurrentSessionId(next);
     }
-    useHelixStore.setState({ sessionHistory: newHistory });
   }, []);
 
   const handleSwitchTab = useCallback(
@@ -4274,9 +4417,6 @@ export function AgentFlowPanel() {
       useHelixStore.setState({
         activeSessionWorkDir: useHelixStore.getState().selectedWorkDir,
       });
-      useHelixStore
-        .getState()
-        .pushNavigation({ type: "chat", sessionId: activeSessionId });
       useHelixStore.getState().persistToStorage();
     }
     runningSessionIdRef.current = activeSessionId;
@@ -4307,9 +4447,6 @@ export function AgentFlowPanel() {
     uiTotalTokens(0);
     firstContentAtRef.current = 0;
     usageReceivedRef.current = false;
-    // A fresh question starts a new todo scope — drop any stale list from the
-    // previous run so the header button hides until the backend streams a new one.
-    useHelixStore.getState().clearHelixTodos();
     // Add user message to store with images
     const imagesSnapshot =
       pendingImages.length > 0 ? [...pendingImages] : undefined;
@@ -4358,19 +4495,15 @@ export function AgentFlowPanel() {
       // Wait for the gateway to be ready only if it's actually disconnected.
       // Do NOT wait for a fresh `gateway.ready` just because the epoch changed;
       // that produced a 10s blind hang on every new conversation after a config
-      // change. Instead, invalidate stale sessions immediately and let
-      // session/new attempt directly. If the backend is still recycling,
-      // the backend will return an error we can catch and retry.
+      // change. Instead, keep the persisted SID and let the resume path below
+      // attempt directly. If the backend is still recycling, resume will fail
+      // cleanly and fall back to rebuilding from the local history.
       const helixStore = useGatewayStore.getState();
       const liveEpoch = helixStore.gatewayEpoch;
       const epochStale = liveEpoch > sessionEpochRef.current;
       if (!helixStore.helixConnected) {
-        if (epochStale) {
-          sessionMapRef.current.delete(
-            useHelixStore.getState().currentSessionId || "",
-          );
-          persistSessionMap(sessionMapRef.current);
-        }
+        // Keep the persisted SID here. Gateway restarts are recoverable, and
+        // the resume path below will either revive it or fall back cleanly.
         await new Promise<boolean>((resolve) => {
           const startEpoch = useGatewayStore.getState().gatewayEpoch;
           const check = () => {
@@ -4394,10 +4527,12 @@ export function AgentFlowPanel() {
             } catch {}
           };
           check();
-          if (!(
-            useGatewayStore.getState().helixConnected &&
-            useGatewayStore.getState().gatewayEpoch > startEpoch
-          )) {
+          if (
+            !(
+              useGatewayStore.getState().helixConnected &&
+              useGatewayStore.getState().gatewayEpoch > startEpoch
+            )
+          ) {
             setTimeout(() => {
               cleanup();
               resolve(useGatewayStore.getState().helixConnected);
@@ -4405,10 +4540,10 @@ export function AgentFlowPanel() {
           }
         });
       } else if (epochStale) {
-        sessionMapRef.current.delete(
-          useHelixStore.getState().currentSessionId || "",
-        );
-        persistSessionMap(sessionMapRef.current);
+        // 2026-09-12 修复：不再整体删除映射。旧逻辑把持久化 sid 直接丢弃，
+        // 下一条消息必然 session/new 新建 sid（旧逻辑），且后端 pi_gateway
+        // 的 instance_for_session 会因 "no session file" 报错——用户感受是
+        // "重启后对话不可用"。保留映射，让下方 resume 分支尝试透明恢复。
       }
 
       // Create a backend session if we don't already have one for THIS
@@ -4416,22 +4551,59 @@ export function AgentFlowPanel() {
       // conversations can run in parallel (each keeps its own backend session).
       const myCid = activeSessionId;
       const existing = sessionMapRef.current.get(myCid);
-      // A cached session is only valid if it was created under the CURRENT gateway
-      // epoch — a gateway restart wipes backend sessions, so a stale id would hit
-      // "session not found". Treat stale/epoch-mismatched ids as missing and
-      // recreate below.
-      let sessionId =
-        existing && existing.epoch === liveEpoch ? existing.sid : null;
+      // 重启/刷新后（epochStale，持久化 sid 由后端 pi 网关从 session jsonl
+      // 透明恢复）：优先 session.resume 把后端原会话复活——sid 不变、历史
+      // 不重放、上下文完整。resume 失败才走下面的 session/new 重建兜底
+      // （带 seedHistory，不丢上下文）。旧逻辑 epoch 不匹配直接删映射 + 新
+      // 建 sid：新会话下旧 sid 的 "no session file" 错误把对话判成"不可用"，
+      // 且每次重启上下文重放一次（seedHistory 全量进新会话）。
+      let sessionId: string | null = existing?.sid || null;
       let wasCreated = false;
-      if (!sessionId && existing) {
-        sessionMapRef.current.delete(myCid);
-        persistSessionMap(sessionMapRef.current);
+      if (sessionId && (epochStale || existing!.epoch !== liveEpoch)) {
+        const staleEntry = existing!;
+        let resumeRes = await helixApi()!
+          .send("session/resume", { session_id: sessionId })
+          .catch(() => null); // resume 失败（会话已死/文件丢失）→ 走 session/new 重建
+        if (!resumeRes || (typeof resumeRes === "object" && resumeRes.error)) {
+          // Migration fallback: older serve-gateway records may carry a DB key
+          // in storedId while sid remains the current pi session id.
+          if (staleEntry.storedId && staleEntry.storedId !== sessionId) {
+            resumeRes = await helixApi()!
+              .send("session/resume", { session_id: staleEntry.storedId })
+              .catch(() => null);
+          }
+        }
+        if (resumeRes && !(typeof resumeRes === "object" && resumeRes.error)) {
+          const resumedId =
+            (typeof resumeRes === "object" ? resumeRes.session_id : null) ||
+            sessionId;
+          sessionId = resumedId;
+          sessionMapRef.current.set(myCid, {
+            sid: resumedId,
+            epoch: liveEpoch,
+            storedId: staleEntry.storedId,
+          });
+          persistSessionMap(sessionMapRef.current);
+          sessionEpochRef.current = liveEpoch;
+          if (isFrontRun()) {
+            helixSessionIdRef.current = resumedId;
+            try {
+              useGatewayStore.getState().setHelixSessionId(resumedId);
+            } catch {
+              /* store setHelixSessionId 不应抛错；防御性忽略 */
+            }
+          }
+        } else {
+          // resume 失败（会话文件不存在/被清理）：删映射，走 session/new 重建。
+          sessionMapRef.current.delete(myCid);
+          persistSessionMap(sessionMapRef.current);
+        }
       }
       if (!sessionId) {
         wasCreated = true;
         const st0 = useHelixStore.getState();
-        // 重启/刷新后后端会话已失效，重建 session 时把当前对话历史带回去，
-        // 否则模型不知道之前的对话内容，等于每次都是新对话。
+        // 重建 session 时把当前对话历史带回去，否则模型不知道之前的对话内容，
+        // 等于每次都是新对话。
         const seedHistory = useHelixStore
           .getState()
           .chatMessages.filter(
@@ -4472,18 +4644,20 @@ export function AgentFlowPanel() {
         // 改成后台会话的 sid，让 ContextUsageIndicator（读全局）查错会话 → 空
         // 分类。全局只由「前台 run」（下方 isFrontRun 分支）和「切换对话时的
         // sync effect」写入。
-        // Auto-approve edits for this session (no manual approval UI): switch
-        // the backend into "don"t ask" mode. The backend has no `session/approve` RPC — it
-        // waits for an approval response to a permission_request, so the only
-        // way to skip manual approval is to set the session mode here.
-        try {
-          await helixApi()!.send("session/set_mode", {
-            session_id: sessionId,
-            mode_id: approvalMode,
-          });
-        } catch (e) {
-          console.warn("[Helix] set_mode(" + approvalMode + ") failed:", e);
-        }
+      }
+      // Auto-approve edits for this session (no manual approval UI): switch
+      // the backend into "don"t ask" mode. Sent on EVERY run (not just
+      // session creation) — a reused conversation's pi instance keeps its own
+      // mode, and the switch-session effect above only fires on focus change;
+      // re-syncing here makes the mode badge and backend state agree even
+      // after gateway restarts or drift.
+      try {
+        await helixApi()!.send("session/set_mode", {
+          session_id: sessionId,
+          mode_id: approvalMode,
+        });
+      } catch (e) {
+        console.warn("[Helix] set_mode(" + approvalMode + ") failed:", e);
       }
       // Only update the global ref / store if THIS run is the focused conversation.
       // A background run must NOT overwrite the global — that would make Stop /
@@ -4492,7 +4666,9 @@ export function AgentFlowPanel() {
         helixSessionIdRef.current = sessionId;
         try {
           useGatewayStore.getState().setHelixSessionId(sessionId);
-        } catch {}
+        } catch {
+          /* store setHelixSessionId 不应抛错；防御性忽略 */
+        }
       }
 
       // Stop button -> ask the backend to cancel the current run.
@@ -4610,6 +4786,19 @@ export function AgentFlowPanel() {
                   type: "tool_output_delta",
                   toolCallId: tcId,
                   content: normalizeAcpContent(u.content),
+                };
+              }
+              // pi 后端（pi_gateway.rs）的 toolcall_start 不带参数（rawInput
+              // 恒为 null），命令/文件路径要等 toolcall_end / tool_execution_start
+              // 才随本事件（status=in_progress + rawInput）到达。转发为参数补写
+              // 事件，让已创建的 tool_call 步骤补上 toolParams —— 否则命令类
+              // 卡片标题永远只有"执行 执行命令"，看不到具体命令。
+              if (u.status === "in_progress" && u.rawInput != null) {
+                return {
+                  type: "tool_args_update",
+                  toolCallId: tcId,
+                  toolName: u.toolName || u.title || "",
+                  rawInput: u.rawInput,
                 };
               }
               // 工具完成/失败：serve 模式下 tool.complete 走这里（status='completed'/'failed'），
@@ -5559,50 +5748,116 @@ export function AgentFlowPanel() {
       // Fire the prompt — events stream back via onEvent (don't await the promise itself).
       // ACP expects prompt as a list of content blocks, not a plain string
       promptSentAtRef.current = Date.now();
-      helixApi()!
-        .send("session/prompt", {
-          session_id: sessionId,
-          prompt: [{ type: "text", text: finalPromptText }],
-        })
-        .then((result: any) => {
-          // session/prompt is now ack-only (official model): result == {status:'streaming'}.
-          // Completion + usage are driven by events — run_complete → done (mapHelixEvent
-          // :1848), usage:prompt-complete → addSessionUsageStats (run loop :2791). Nothing
-          // to do on the ack itself except log it; do NOT synthesize `done` here.
-          debug("[HelixTrace] session/prompt ack", {
-            sessionId,
-            runningSessionId: runningSessionIdRef.current,
-            currentSessionId,
-            result,
-          });
-          // serve-gateway 在 "session not found" 时已自动重建会话并重放 prompt，
-          // 返回新 session_id。改绑 conversation→session 映射，后续消息用新会话。
-          if (result?.session_id && result.session_id !== sessionId) {
-            debug(
-              "[HelixTrace] session/prompt 会话被替换 →",
-              sessionId,
-              "→",
-              result.session_id,
-            );
-            sessionId = result.session_id;
-            sessionMapRef.current.set(myCid, {
-              sid: result.session_id,
-              epoch: useGatewayStore.getState().gatewayEpoch,
+      const firePrompt = (sid: string) =>
+        helixApi()!
+          .send("session/prompt", {
+            session_id: sid,
+            prompt: promptItems,
+          })
+          .then((result: any) => {
+            // session/prompt is now ack-only (official model): result == {status:'streaming'}.
+            // Completion + usage are driven by events — run_complete → done (mapHelixEvent
+            // :1848), usage:prompt-complete → addSessionUsageStats (run loop :2791). Nothing
+            // to do on the ack itself except log it; do NOT synthesize `done` here.
+            debug("[HelixTrace] session/prompt ack", {
+              sessionId: sid,
+              runningSessionId: runningSessionIdRef.current,
+              currentSessionId,
+              result,
             });
-            persistSessionMap(sessionMapRef.current);
-          }
-        })
-        .catch((err: any) => {
+            // serve-gateway 在 "session not found" 时已自动重建会话并重放 prompt，
+            // 返回新 session_id。改绑 conversation→session 映射，后续消息用新会话。
+            if (result?.session_id && result.session_id !== sid) {
+              debug(
+                "[HelixTrace] session/prompt 会话被替换 →",
+                sid,
+                "→",
+                result.session_id,
+              );
+              sessionId = result.session_id;
+              sessionMapRef.current.set(myCid, {
+                sid: result.session_id,
+                epoch: useGatewayStore.getState().gatewayEpoch,
+              });
+              persistSessionMap(sessionMapRef.current);
+            }
+          });
+      firePrompt(sessionId!).catch(async (err: any) => {
+        // 会话文件丢失/被清理（后端 restore 显式报错，如 "no session file for
+        // <sid>"）：删掉死映射，用 seedHistory 重建会话后重发一次 prompt（只
+        // 重试一次，防循环）。重建后模型至少保留文本级历史，远好于直接报错
+        // 或后端静默空白会话（后者是彻底失忆）。
+        const msg = String(err?.message ?? err ?? "");
+        const unrecoverable = /no session file|session not found|restore/i.test(
+          msg,
+        );
+        if (wasCreated || !unrecoverable || !sessionId) {
           console.error("[Helix] session/prompt error", err);
           enqueue(
             "data: " +
               JSON.stringify({
                 type: "error",
-                content: err?.message || "请求失败",
+                content: msg || "请求失败",
               }),
           );
           queueDone = true;
-        });
+          return;
+        }
+        debug(
+          "[HelixTrace] session/prompt 会话不可恢复（" +
+            msg +
+            "）→ seedHistory 重建",
+        );
+        sessionMapRef.current.delete(myCid);
+        persistSessionMap(sessionMapRef.current);
+        try {
+          const st = useHelixStore.getState();
+          const seedHistory = st.chatMessages
+            .filter(
+              (m) => m.sessionId === activeSessionId && m.id !== newUserMsgId,
+            )
+            .map((m) => ({ role: m.role, content: m.content }));
+          const res = (await helixApi()!.send("session/new", {
+            mcpServers: buildAcpMcpServers(st.mcpServers),
+            messages: seedHistory,
+            mode_id: st.approvalMode,
+            cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? undefined,
+          })) as any;
+          const newSid: string | null =
+            res?.session_id ||
+            res?.sessionID ||
+            res?.threadId ||
+            (typeof res === "string" ? res : null);
+          if (!newSid) throw new Error("session/new 缺少 session_id");
+          sessionId = newSid;
+          wasCreated = true;
+          sessionMapRef.current.set(myCid, {
+            sid: newSid,
+            epoch: useGatewayStore.getState().gatewayEpoch,
+          });
+          persistSessionMap(sessionMapRef.current);
+          if (isFrontRun()) {
+            helixSessionIdRef.current = newSid;
+            try {
+              useGatewayStore.getState().setHelixSessionId(newSid);
+            } catch {
+              /* 防御性忽略 */
+            }
+          }
+          await firePrompt(newSid);
+        } catch (rebuildErr: any) {
+          console.error("[Helix] session/prompt 重建失败", rebuildErr);
+          enqueue(
+            "data: " +
+              JSON.stringify({
+                type: "error",
+                content:
+                  String(rebuildErr?.message ?? rebuildErr) || "会话重建失败",
+              }),
+          );
+          queueDone = true;
+        }
+      });
 
       // 提交后立即武装超长兜底：即使后端迟迟不流式（agent 构建/纯思考），
       // 也有保险；正常内容事件会不断重置它，真实终结事件到达则作废。
@@ -5665,33 +5920,6 @@ export function AgentFlowPanel() {
 
               // Extract file paths from tool params to track directories
               const params = parsed.toolParams || {};
-              // 「后台任务」面板登记（运行中）：只登记显式 background=true 的
-              // terminal/process/bash/docker 进程，跟官方客户端一样——前台命令无论
-              // 跑多久都只是当前对话里的普通执行步骤，不进后台任务面板。
-              // 必须在这里登记而不是 serve-gateway——那里只有后端会话 id，而顶栏按
-              // 前端对话 id（myCid）过滤，口径不一致会导致任务恒被过滤（2026-08-18 修复）。
-              // 终态由 serve-gateway 的 tool.complete / process.exit 按 toolId 标完成。
-              const isBackgroundTool =
-                params.background === true ||
-                params.background === "true" ||
-                params.background === 1;
-              if (
-                toolCallId &&
-                isBackgroundTool &&
-                (parsed.toolName === "terminal" ||
-                  parsed.toolName === "process" ||
-                  parsed.toolName === "bash" ||
-                  parsed.toolName === "docker")
-              ) {
-                const cmdStr =
-                  (typeof params.command === "string" && params.command) ||
-                  (typeof params.context === "string" && params.context) ||
-                  (typeof params.raw === "string" && params.raw) ||
-                  parsed.toolName;
-                useBackgroundTasksStore
-                  .getState()
-                  .startTask(toolCallId, cmdStr, myCid);
-              }
               const pathKeys = [
                 "path",
                 "file_path",
@@ -5758,6 +5986,7 @@ export function AgentFlowPanel() {
                 ),
                 toolName: parsed.toolName,
                 toolKind: parsed.toolKind,
+                toolCallId: toolCallId || undefined,
                 toolParams: params,
                 timestamp: Date.now(),
                 status: "running",
@@ -5823,7 +6052,19 @@ export function AgentFlowPanel() {
               if (!thinkingStartTimeRef.current)
                 thinkingStartTimeRef.current = Date.now();
               const inc = normalizeAcpContent(parsed.content);
-              const cur = thoughtBufferRef.current;
+              const lastBlock = pendingBlocksRef.current.length
+                ? pendingBlocksRef.current[pendingBlocksRef.current.length - 1]
+                : responseBlocksRef.current[
+                    responseBlocksRef.current.length - 1
+                  ];
+              const continuesThinking =
+                !lastBlock || lastBlock.type === "thinking";
+              const cur = continuesThinking ? thoughtBufferRef.current : "";
+              const next = normalizeThinkingText(
+                mergeThinkingStreams(cur, inc),
+              );
+              if (!next && !cur) return;
+              if (continuesThinking && next === cur) return;
               if (cur.length >= MAX_STREAM_CHARS) {
                 if (!thinkingCappedRef.current) {
                   thinkingCappedRef.current = true;
@@ -5837,17 +6078,7 @@ export function AgentFlowPanel() {
                 scheduleStreamRender();
                 return;
               }
-              const curTrim = cur.trim();
-              const incTrim = inc.trim();
-              const isCumulative = curTrim && incTrim.startsWith(curTrim);
-
-              if (isCumulative) {
-                // The backend sent cumulative content - replace, don't append
-                thoughtBufferRef.current = inc;
-              } else {
-                // The backend sent incremental content - append
-                thoughtBufferRef.current = cur + inc;
-              }
+              thoughtBufferRef.current = next;
               pendingThinkingRef.current = thoughtBufferRef.current;
               pendingBlocksRef.current.push({
                 type: "thinking",
@@ -5988,6 +6219,88 @@ export function AgentFlowPanel() {
                         s.id === lastToolCall.id
                           ? { ...s, content: (s.content || "") + delta }
                           : s,
+                      ),
+                    };
+                    return nb;
+                  }
+                }
+                return prev;
+              });
+            } else if (parsed.type === "tool_args_update") {
+              // tool_call_update 携带的迟到参数补写（见 mapHelixEvent 的
+              // tool_args_update 分支）。合并进 steps 与 responseBlocks 中匹配
+              // toolCallId 的 tool_call 步骤的 toolParams —— 命令/文件路径随
+              // 后端 toolcall_end / tool_execution_start 才到，不补写则标题
+              // 一直停在"执行 执行命令"。
+              let args = parsed.rawInput;
+              if (typeof args === "string") {
+                try {
+                  args = JSON.parse(args);
+                } catch {
+                  /* keep raw string */
+                }
+              }
+              const mergedParams: Record<string, unknown> =
+                args && typeof args === "object" && !Array.isArray(args)
+                  ? (args as Record<string, unknown>)
+                  : { raw: args };
+              const tcId = parsed.toolCallId || "";
+              const mergeInto = (s: ExecutionStep): ExecutionStep =>
+                s.type !== "tool_call"
+                  ? s
+                  : {
+                      ...s,
+                      // 后端两次事件（toolcall_end、tool_execution_start）先后带
+                      // 同一份 args —— 已有 command/path 键时不再覆盖。
+                      toolParams: {
+                        ...mergedParams,
+                        ...(s.toolParams && Object.keys(s.toolParams).length
+                          ? s.toolParams
+                          : {}),
+                      },
+                      // start 事件的 title 只是工具名（"bash"），execution_start
+                      // 才带更准确的 toolName —— 保持非空即可。
+                      toolName: s.toolName || parsed.toolName || "",
+                    };
+              const matches = (s: ExecutionStep) =>
+                s.type === "tool_call" &&
+                ((tcId && s.toolCallId === tcId) ||
+                  (!tcId &&
+                    s.status === "running" &&
+                    !s.toolParams?.command &&
+                    !s.toolParams?.raw));
+              uiSteps((prev) => {
+                let hit = false;
+                const next = prev.map((s) => {
+                  if (!hit && matches(s)) {
+                    hit = true;
+                    return mergeInto(s);
+                  }
+                  return s;
+                });
+                // 未匹配到（id 缺失且无 running 空参步骤）→ 退化为补写最后一个
+                // tool_call 步骤，保证参数尽量不丢。
+                if (!hit && tcId === "") {
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    if (next[i].type === "tool_call") {
+                      next[i] = mergeInto(next[i]);
+                      break;
+                    }
+                  }
+                }
+                return next;
+              });
+              uiRB((prev) => {
+                const nb = prev.slice();
+                for (let i = nb.length - 1; i >= 0; i--) {
+                  const block = nb[i];
+                  if (block.type !== "tool_group") continue;
+                  const target = [...block.steps].reverse().find(matches);
+                  if (target) {
+                    nb[i] = {
+                      ...block,
+                      steps: block.steps.map((s) =>
+                        s.id === target.id ? mergeInto(s) : s,
                       ),
                     };
                     return nb;
@@ -6256,6 +6569,9 @@ export function AgentFlowPanel() {
                 ) {
                   finalBlocks = [...finalBlocks, { type: "text", content }];
                 }
+                if (finalBlocks) {
+                  finalBlocks = dedupeThinkingBlocks(finalBlocks);
+                }
                 // 权威全文自愈（见 reconcileBlocksWithContent）：流式转发链会间歇丢
                 // 空白/换行，done 时 content 已被 finalText 修复；把同样的权威文本写回
                 // blocks 的 text 块，让 blocks 渲染路径与 msg.content 一致——否则
@@ -6333,12 +6649,13 @@ export function AgentFlowPanel() {
                   const cid = useHelixStore.getState().currentSessionId;
                   // 如果 plan_complete 事件已经用真实 plan 工件（plan_mode_complete
                   // 工具的 args.plan）弹过浮条，这里就不再覆盖。
-                  setPendingPlanReview((prev) => {
-                    const key = cid ?? DRAFT_SESSION_KEY;
-                    return prev && prev.sessionId === key
-                      ? prev
-                      : { sessionId: key, content };
-                  });
+                  const key = cid ?? DRAFT_SESSION_KEY;
+                  const curPlan = useHelixStore.getState().pendingPlanReview;
+                  setPendingPlanReview(
+                    curPlan && curPlan.sessionId === key
+                      ? curPlan
+                      : { sessionId: key, content },
+                  );
                 }
               } else {
                 // 防御性兜底：run 结束但无任何可见内容（根因已修复，极少触发）。
@@ -6720,7 +7037,9 @@ export function AgentFlowPanel() {
       // Always unsubscribe to prevent duplicate event handlers
       try {
         if (unsubscribe) unsubscribe();
-      } catch {}
+      } catch {
+        /* unsubscribe 不应抛错；忽略避免 finally 中断 */
+      }
 
       // Cancel any pending synthetic-done timer so it can't fire after the run
       // ended (e.g. on abort / unmount) and call setState on a dead context.
@@ -7408,7 +7727,7 @@ export function AgentFlowPanel() {
     return (
       <div
         ref={chatInputWrapRef}
-        className={`helix-chat-input-card border transition-all duration-200 relative shadow-sm border-border/30 rounded-xl ${isDraggingFile ? "border-primary/40" : "hover:border-border/40 focus-within:border-primary/30"}`}
+        className={`helix-chat-input-card border transition-all duration-200 relative shadow-sm border-border/30 rounded-xl ${isDraggingFile ? "border-primary/40" : "hover:border-border/40"}`}
         onDragOver={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -7558,7 +7877,7 @@ export function AgentFlowPanel() {
           onPaste={handlePaste}
           placeholder={"随心输入..."}
           rows={2}
-          className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 outline-none focus-visible:outline-none text-[length:var(--helix-transcript-size)] min-h-[38px] max-h-[300px] px-2.5 pt-2 pb-0.5 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
+          className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 text-[length:var(--helix-transcript-size)] min-h-[38px] max-h-[300px] px-2.5 pt-2 pb-0.5 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
           style={{
             overflowX: "hidden",
             overflowY: "auto",
@@ -7975,20 +8294,6 @@ export function AgentFlowPanel() {
                             selectedWorkDir
                           : "选择项目"}
                       </span>
-                      <svg
-                        className={`size-2.5 text-muted-foreground transition-transform shrink-0 ${showFolderDropdown ? "rotate-180" : ""}`}
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="10"
-                        height="10"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="m6 9 6 6 6-6" />
-                      </svg>
                     </button>
                     {showFolderDropdown && (
                       <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-[220px] bg-popover border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in overflow-hidden">
@@ -8031,7 +8336,7 @@ export function AgentFlowPanel() {
                                     setNewServerName(e.target.value)
                                   }
                                   placeholder="名称（可选）"
-                                  className="w-full px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
+                                  className="w-full px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/40"
                                 />
                                 <input
                                   type="text"
@@ -8040,7 +8345,7 @@ export function AgentFlowPanel() {
                                     setNewServerHost(e.target.value)
                                   }
                                   placeholder="主机地址（必填）"
-                                  className="w-full px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
+                                  className="w-full px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/40"
                                 />
                                 <div className="flex gap-2">
                                   <input
@@ -8050,7 +8355,7 @@ export function AgentFlowPanel() {
                                       setNewServerUser(e.target.value)
                                     }
                                     placeholder="用户名"
-                                    className="flex-1 px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
+                                    className="flex-1 px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/40"
                                   />
                                   <input
                                     type="text"
@@ -8059,7 +8364,7 @@ export function AgentFlowPanel() {
                                       setNewServerPort(e.target.value)
                                     }
                                     placeholder="端口"
-                                    className="w-16 px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md outline-none focus:ring-1 focus:ring-ring text-foreground placeholder:text-muted-foreground/40"
+                                    className="w-16 px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/40"
                                   />
                                 </div>
                                 <div className="flex gap-2 justify-end pt-1">
@@ -8381,15 +8686,6 @@ export function AgentFlowPanel() {
                         no completed assistant message exists yet in this session.
                         Prevents duplicate "reasoning..." when a prior assistant message
                         was already committed (e.g. think→done→think again within one run). */}
-                    {/* Top status bar — 执行中显示「工作中」，完成后显示「已结束」 */}
-                    {(streamingActive || displayResponseBlocks.length > 0) && (
-                      <div
-                        className="flex items-center gap-1.5 my-1 text-foreground/50"
-                        style={{ fontSize: transcriptFontSize }}
-                      >
-                        <span>{streamingActive ? "工作中" : "已结束"}</span>
-                      </div>
-                    )}
 
                     {/* Show thinking content if available (kaomoji status line stripped).
                         Only render while streaming AND no completed thinking blocks exist yet;
@@ -8438,14 +8734,32 @@ export function AgentFlowPanel() {
                           lastTextIndex >= 0
                             ? consolidatedBlocks.slice(lastTextIndex)
                             : [];
+                        // 交替段：思考段一张折叠卡、工具段一张折叠卡，按时间序
+                        // 交替（保住"思考→执行→再思考→再执行"的节奏）。
                         const processSegments =
-                          buildProcessSegments(processBlocks);
+                          segmentizeProcessBlocks(processBlocks);
                         const answerSegments =
                           buildProcessSegments(answerBlocks);
                         const showStreamThinking =
                           streamingActive &&
                           !!thinkingBody &&
                           !normalizedBlocks.some((b) => b.type === "thinking");
+                        // 「思考中」脉冲只在该状态真实成立时亮：最后一个非
+                        // 文本/非文件变更块是 thinking 才算（工具执行/收尾时
+                        // 思考卡仅保持展开可读，不冒充思考中）。
+                        let thinkingActiveNow = false;
+                        for (let i = processBlocks.length - 1; i >= 0; i--) {
+                          const b = processBlocks[i];
+                          if (b.type === "text" || b.type === "file_change") {
+                            continue;
+                          }
+                          thinkingActiveNow = b.type === "thinking";
+                          break;
+                        }
+                        // 完成态摘要的操作计数：N 个操作（复用 summarizeTaskBlocks）。
+                        const processOpCount = streamingActive
+                          ? 0
+                          : summarizeTaskBlocks(processBlocks).total;
                         return (
                           <>
                             {/* 二级折叠：外层「过程」收纳本轮全部中间产物（思考 +
@@ -8456,13 +8770,13 @@ export function AgentFlowPanel() {
                             >
                               <summary className="cursor-pointer hover:text-foreground/60 flex items-center gap-1.5 list-none transition-colors">
                                 <FoldTitle
-                                  label={streamingActive ? "执行过程" : "已完成"}
+                                  label={streamingActive ? "工作中" : "已完成"}
                                   active={streamingActive}
                                   fontSize={transcriptFontSize}
                                 />
                                 {!streamingActive &&
                                 runStartedAtRef.current > 0 ? (
-                                  <span className="ml-auto tabular-nums text-foreground/25">
+                                  <span className="ml-2 tabular-nums text-foreground/25">
                                     {formatDuration(
                                       Math.max(
                                         0,
@@ -8474,104 +8788,131 @@ export function AgentFlowPanel() {
                                       ),
                                     )}
                                   </span>
+                                ) : isRunning ? (
+                                  <span
+                                    className="ml-2 tabular-nums text-foreground/25"
+                                    style={{ fontSize: transcriptFontSize }}
+                                  >
+                                    <ThinkingTimer
+                                      questionStartTs={
+                                        streamingDrafts[currentSessionId || ""]
+                                          ?.startedAt ?? questionStartTs
+                                      }
+                                      isRunning={isRunning}
+                                    />
+                                  </span>
                                 ) : null}
-                                <FoldChevron />
                               </summary>
-                              <div className="mt-1 space-y-2">
-                              {showStreamThinking && (
-                                <ThinkingFold
-                                  content={thinkingBody}
-                                  fontSize={transcriptFontSize}
-                                  active
-                                  status={
-                                    isReconnecting
-                                      ? "重连"
-                                      : thinkingStatus || "思考中"
+                              <ProcessWindow
+                                active={streamingActive}
+                                dependency={displayResponseBlocks}
+                              >
+                                {showStreamThinking && (
+                                  <ThinkingFold
+                                    content={thinkingBody}
+                                    fontSize={transcriptFontSize}
+                                    active
+                                    status={
+                                      isReconnecting
+                                        ? "重连"
+                                        : thinkingStatus || "思考中"
+                                    }
+                                    searchOpen={conversationSearchOpen}
+                                    searchQuery={conversationSearchQuery}
+                                    isSearchActive={false}
+                                  />
+                                )}
+                                {processSegments.map((seg, si) => {
+                                  // 交替段渲染：思考段一张 ThinkingFold（段内
+                                  // 思考合并成一段文本），工具段默认平铺工具卡
+                                  // （流式时本来就要逐个看进度）。最后一段若正在
+                                  // 思考则脉冲跟随。
+                                  if (seg.kind === "thinking") {
+                                    const segContent = mergeThinkingContents(
+                                      seg.blocks.map((b) =>
+                                        b.type === "thinking"
+                                          ? String(b.content || "")
+                                          : "",
+                                      ),
+                                    );
+                                    if (!segContent.trim()) return null;
+                                    const isLastSeg =
+                                      si === processSegments.length - 1;
+                                    return (
+                                      <ThinkingFold
+                                        key={si}
+                                        content={segContent}
+                                        fontSize={transcriptFontSize}
+                                        active={
+                                          streamingActive &&
+                                          thinkingActiveNow &&
+                                          isLastSeg
+                                        }
+                                        streaming={streamingActive && isLastSeg}
+                                        searchOpen={conversationSearchOpen}
+                                        searchQuery={conversationSearchQuery}
+                                        isSearchActive={false}
+                                      />
+                                    );
                                   }
-                                  searchOpen={conversationSearchOpen}
-                                  searchQuery={conversationSearchQuery}
-                                  isSearchActive={false}
-                                />
-                              )}
-                              {processSegments.map((seg, si) => {
-                                return (
-                                  <div key={si} className="space-y-1">
-                                    {seg.blocks.map((b, i) => {
-                                      if (b.type === "text") {
-                                        return (
-                                          <div
-                                            key={i}
-                                            style={{
-                                              fontSize: transcriptFontSize,
-                                            }}
-                                          >
-                                            {conversationSearchOpen &&
-                                            conversationSearchQuery.trim() ? (
-                                              <div className="whitespace-pre-wrap break-words">
-                                                <HighlightText
+                                  return (
+                                    <div key={si} className="space-y-1">
+                                      {seg.blocks.map((b, i) => {
+                                        if (b.type === "text") {
+                                          return (
+                                            <div
+                                              key={i}
+                                              style={{
+                                                fontSize: transcriptFontSize,
+                                              }}
+                                            >
+                                              {conversationSearchOpen &&
+                                              conversationSearchQuery.trim() ? (
+                                                <div className="whitespace-pre-wrap break-words">
+                                                  <HighlightText
+                                                    text={normalizeAcpContentRaw(
+                                                      b.content,
+                                                    )}
+                                                    query={
+                                                      conversationSearchQuery
+                                                    }
+                                                    active={false}
+                                                  />
+                                                </div>
+                                              ) : (
+                                                <HelixMarkdown
                                                   text={normalizeAcpContentRaw(
                                                     b.content,
                                                   )}
-                                                  query={
-                                                    conversationSearchQuery
-                                                  }
-                                                  active={false}
                                                 />
-                                              </div>
-                                            ) : (
-                                              <HelixMarkdown
-                                                text={normalizeAcpContentRaw(
-                                                  b.content,
-                                                )}
-                                              />
-                                            )}
-                                          </div>
-                                        );
-                                      }
-                                      if (b.type === "thinking") {
-                                        const content =
-                                          "content" in b ? String(b.content) : "";
-                                        if (!content.trim()) return null;
-                                        return (
-                                          <ThinkingFold
-                                            key={i}
-                                            content={content}
-                                            fontSize={transcriptFontSize}
-                                            active={
-                                              streamingActive &&
-                                              si === processSegments.length - 1 &&
-                                              i === seg.blocks.length - 1
-                                            }
-                                            searchOpen={conversationSearchOpen}
-                                            searchQuery={conversationSearchQuery}
-                                            isSearchActive={false}
-                                          />
-                                        );
-                                      }
-                                      if (b.type === "tool_group") {
-                                        return (
-                                          <InlineToolGroup
-                                            key={i}
-                                            steps={b.steps}
-                                            isRunning={isRunning}
-                                            fontSize={transcriptFontSize}
-                                          />
-                                        );
-                                      }
-                                      if (b.type === "file_change") {
-                                        return (
-                                          <FileChangeSummary
-                                            key={i}
-                                            changes={b.changes}
-                                          />
-                                        );
-                                      }
-                                      return null;
-                                    })}
-                                  </div>
-                                );
-                              })}
-                              </div>
+                                              )}
+                                            </div>
+                                          );
+                                        }
+                                        if (b.type === "tool_group") {
+                                          return (
+                                            <InlineToolGroup
+                                              key={i}
+                                              steps={b.steps}
+                                              isRunning={isRunning}
+                                              fontSize={transcriptFontSize}
+                                            />
+                                          );
+                                        }
+                                        if (b.type === "file_change") {
+                                          return (
+                                            <FileChangeSummary
+                                              key={i}
+                                              changes={b.changes}
+                                            />
+                                          );
+                                        }
+                                        return null;
+                                      })}
+                                    </div>
+                                  );
+                                })}
+                              </ProcessWindow>
                             </details>
                             <div className="helix-answer mt-3">
                               {answerSegments.map((seg, si) => {
@@ -8611,7 +8952,9 @@ export function AgentFlowPanel() {
                                       }
                                       if (b.type === "thinking") {
                                         const content =
-                                          "content" in b ? String(b.content) : "";
+                                          "content" in b
+                                            ? String(b.content)
+                                            : "";
                                         if (!content.trim()) return null;
                                         return (
                                           <ThinkingFold
@@ -8619,7 +8962,9 @@ export function AgentFlowPanel() {
                                             content={content}
                                             fontSize={transcriptFontSize}
                                             searchOpen={conversationSearchOpen}
-                                            searchQuery={conversationSearchQuery}
+                                            searchQuery={
+                                              conversationSearchQuery
+                                            }
                                             isSearchActive={false}
                                           />
                                         );
@@ -8651,25 +8996,6 @@ export function AgentFlowPanel() {
                           </>
                         );
                       })()}
-
-                    {/* Live thinking duration — only while actually streaming (isRunning).
-                        Must NOT hang on streamingActive/isChatLoading; those can stay true
-                        after completion (e.g. session-id drift prevents the finally block
-                        from clearing isChatLoading), causing the timer to tick forever. */}
-                    {isRunning && (
-                      <div
-                        className="text-foreground/30 tabular-nums mt-1 ml-3"
-                        style={{ fontSize: transcriptFontSize }}
-                      >
-                        <ThinkingTimer
-                          questionStartTs={
-                            streamingDrafts[currentSessionId || ""]
-                              ?.startedAt ?? questionStartTs
-                          }
-                          isRunning={isRunning}
-                        />
-                      </div>
-                    )}
                   </div>
                 </div>
               )}
@@ -8698,7 +9024,7 @@ export function AgentFlowPanel() {
                 if (e.key === "Enter") handleCreateProject();
               }}
               placeholder="输入项目名称..."
-              className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40 transition-all duration-200"
+              className="flex-1 px-3 py-2 bg-muted border border-border rounded-lg text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground transition-all duration-200"
               autoFocus
             />
             <Button size="sm" onClick={handleCreateProject} className="px-3">

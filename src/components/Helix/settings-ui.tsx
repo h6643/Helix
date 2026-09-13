@@ -147,7 +147,7 @@ export function NumberField({
         onKeyDown={(e) => {
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
         }}
-        className={`w-24 px-2 py-1 rounded-lg bg-muted/50 ${small ? "ui-text-sm2" : "ui-text"} text-foreground text-center border border-border focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed`}
+        className={`w-24 px-2 py-1 rounded-lg bg-muted/50 ${small ? "ui-text-sm2" : "ui-text"} text-foreground text-center border border-border disabled:cursor-not-allowed`}
       />
       {suffix && (
         <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 w-8">

@@ -37,7 +37,7 @@ const TOOL_LABELS: Record<string, string> = {
   memory_add: "添加记忆",
   memory_read: "读取记忆",
   git_status: "查看状态",
-  git_diff: "查看变更",
+  git_diff: "查看更改",
   git_log: "查看日志",
   git_branch: "查看分支",
   git_commit: "提交代码",
@@ -279,14 +279,8 @@ export function extractToolPath(step: ExecutionStep): string {
   if (step.toolParams?.context && typeof step.toolParams.context === "string") {
     return step.toolParams.context as string;
   }
-  // Try to parse content as JSON
-  try {
-    const parsed = JSON.parse(step.content);
-    if (typeof parsed.path === "string") return parsed.path;
-    if (typeof parsed.file_path === "string") return parsed.file_path;
-    if (typeof parsed.filePath === "string") return parsed.filePath;
-  } catch {}
-  // Fallback: extract first absolute-looking path from content
-  const match = step.content.match(/[A-Za-z]:\\[^\s]+|(?:\/[^\s]+)+/);
-  return match ? match[0] : "";
+  // 不再从 step.content 猜路径：content 会随 tool_output_delta 流式追加命令
+  // 输出，JSON.parse 恒失败后 fallback 正则会把输出里任意"路径样"片段（如
+  // 错误信息里的 C:\xxx 或 /usr/bin）误当成工具操作对象，污染卡片标题。
+  return "";
 }

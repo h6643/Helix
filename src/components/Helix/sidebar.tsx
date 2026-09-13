@@ -38,6 +38,25 @@ import { mapBackendMessages } from "@/lib/session-resync";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
+// Module-level in-flight dedup for session/prepare: the backend dedupes live
+// instances but not in-flight restore calls, so two concurrent prepares for
+// the same sid spawn two expensive restores. Share one promise per sid.
+const prepareInFlight = new Map<string, Promise<unknown>>();
+function inFlightPrepare(backendSid: string): Promise<unknown> {
+  let p = prepareInFlight.get(backendSid);
+  if (!p) {
+    p = (async () => {
+      try {
+        await helixApi()?.send("session/prepare", { session_id: backendSid });
+      } finally {
+        prepareInFlight.delete(backendSid);
+      }
+    })();
+    prepareInFlight.set(backendSid, p);
+  }
+  return p;
+}
+
 interface SidebarProps {
   onNewTask?: () => void;
   collapsed?: boolean;
@@ -373,7 +392,6 @@ function ProjectActionsMenu({
 export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   const {
     clearChat,
-    pushNavigation,
     toggleSettings,
     toggleSessionManager,
     showToast,
@@ -382,7 +400,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   } = useHelixStore(
     useShallow((s) => ({
       clearChat: s.clearChat,
-      pushNavigation: s.pushNavigation,
       toggleSettings: s.toggleSettings,
       toggleSessionManager: s.toggleSessionManager,
       showToast: s.showToast,
@@ -698,22 +715,23 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           }
         }
         useHelixStore.getState().setCurrentSessionId(session.id);
-        pushNavigation({ type: "chat", sessionId: session.id });
         // Background resume warm-up: the backend's session instance may have
         // been reaped (idle) or never existed (app restart). Restoring it
         // costs spawn + switch_session (scales with conversation length —
         // tens of seconds for long sessions). Kicking it off here means the
         // user's first prompt finds the instance hot instead of paying the
         // whole restore inside "工作中".
-        void (async () => {
-          try {
-            const sid = await resolveBackendSid(session.id);
-            if (!sid) return;
-            await helixApi()?.send("session/prepare", { session_id: sid });
-          } catch {
-            /* best-effort warm-up; the first prompt restores on demand */
-          }
-        })();
+        //
+        // 两个 void 块都会对同一 backend sid 发 session/prepare（warm-up +
+        // context-breakdown 刷新）；后端只去重 live 实例、不去重 in-flight，
+        // 并发两次会白白 spawn 两个 restore（几十秒级别）。用模块级
+        // in-flight 表去重：同一 sid 只有一个 prepare 在飞，其他调用者共享
+        // 同一个 promise。
+        const backendSid = await resolveBackendSid(session.id);
+        if (backendSid) {
+          const sharedPrepare = inFlightPrepare(backendSid);
+          void sharedPrepare.catch(() => {}); // 吞掉 warm-up 的 best-effort 失败
+        }
         // 切换对话时刷新上下文环快照：本地持久化的 used 是该对话上一次 run
         // 的实测值——恢复/重启用后不再增长，环会停在过期读数（显示 50k 而
         // 下一条 prompt 实际要重放 ~276k 的根因）。captureContextBreakdown
@@ -722,12 +740,13 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         // （含 trim switch）完成后 get_session_stats 才反映切换后的文件。
         void (async () => {
           try {
-            const sid = await resolveBackendSid(session.id);
+            const sid = backendSid;
             if (!sid) return;
-            await helixApi()?.send("session/prepare", { session_id: sid });
+            await inFlightPrepare(sid);
             await captureContextBreakdown(session.id, sid);
-          } catch {
-            /* best-effort; the popover's 5s poll refreshes on open */
+          } catch (e) {
+            // best-effort context breakdown; the popover's 5s poll refreshes on open
+            console.error("[sidebar] context-breakdown refresh failed:", e);
           }
         })();
         // Instant history when the local record has nothing rendered (e.g.
@@ -1639,7 +1658,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         </>
       )}
       {/* Delete confirmation dialog */}
-      {deleteTarget && (
+      {deleteTarget &&
         createPortal(
           <div className="fixed inset-0 z-[10000] flex items-center justify-center animate-fade-in">
             <div
@@ -1677,9 +1696,8 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
             </div>
           </div>,
           document.body,
-        )
-      )}
-      {deleteProjectDir && (
+        )}
+      {deleteProjectDir &&
         createPortal(
           <div className="fixed inset-0 z-[10000] flex items-center justify-center animate-fade-in">
             <div
@@ -1697,7 +1715,8 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                   </h3>
                   <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground mt-1">
                     确定要删除「
-                    {deleteProjectDir.split(/[/\\\\]/).pop() || deleteProjectDir}
+                    {deleteProjectDir.split(/[/\\\\]/).pop() ||
+                      deleteProjectDir}
                     」及该项目下的所有对话吗？此操作不可撤销。
                   </p>
                 </div>
@@ -1719,8 +1738,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
             </div>
           </div>,
           document.body,
-        )
-      )}
+        )}
     </div>
   );
 }

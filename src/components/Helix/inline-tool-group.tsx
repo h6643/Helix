@@ -1,11 +1,8 @@
 "use client";
 
-import {
-  ChevronRight,
-  Copy,
-  CheckCheck,
-} from "lucide-react";
+import { Copy, CheckCheck } from "lucide-react";
 import React, { useState } from "react";
+import { CodeCard } from "@/components/Helix/helix-markdown";
 import { formatDurationSeconds } from "@/lib/format";
 import { normalizeAcpContent, stripEmoji } from "@/lib/text-utils";
 import {
@@ -14,13 +11,16 @@ import {
   extractToolPath,
 } from "@/lib/tool-display-utils";
 import type { ExecutionStep } from "@/stores/helix-store";
-import { CodeCard } from "@/components/Helix/helix-markdown";
 
 const TOOL_RESULT_CLAMP = 20_000;
 
 // ── ANSI escape code stripper ───────────────────────────────────────────
 
-const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07/g;
+const ANSI_ESCAPE = String.fromCharCode(27);
+const ANSI_RE = new RegExp(
+  `${ANSI_ESCAPE}\\[[0-9;]*[a-zA-Z]|${ANSI_ESCAPE}\\].*?${String.fromCharCode(7)}`,
+  "g",
+);
 function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "");
 }
@@ -42,10 +42,9 @@ function stripMktempNoise(s: string): string {
 
 function extractResultCount(
   content: string,
-  toolName: string,
+  _toolName: string,
   params?: Record<string, unknown>,
 ): string {
-  const name = (toolName || "").toLowerCase();
   // Check params for explicit count fields
   if (params) {
     for (const key of [
@@ -119,7 +118,11 @@ function detectResultKind(toolName: string, content: string): ResultKind {
   )
     return "diff";
   if (/^(---|\+\+\+|@@|diff --git)/.test(content.trim())) return "diff";
-  if (/^\x1b\[.*?(added|removed|modified)/.test(content)) return "diff";
+  if (
+    content.startsWith(`${ANSI_ESCAPE}[`) &&
+    /added|removed|modified/i.test(content)
+  )
+    return "diff";
 
   // Image detection
   if (/^data:image\//.test(content.trim())) return "image";
@@ -201,40 +204,45 @@ function ImageRenderer({ content }: { content: string }) {
 
 // The tool's concrete action: the command/script for bash, the path for
 // file tools, etc. — shown WITHOUT the Chinese action prefix.
-function toolActionText(step: ExecutionStep): string {
-  const path = extractToolPath(step);
-  if (path) return path;
+export function toolActionText(step: ExecutionStep): string {
   // 非命令工具（GUI/浏览器/MCP 等）的参数经常把正文/代码/错误说明塞在 text/input
   // 里，直接拿它当标题会显示 "Clear the draft's responseBlocks" 这类内容。非命令
   // 工具只显示工具名，不拿参数当标题。
   const isCommandTool = /bash|terminal|shell|run|execute|command/i.test(
     step.toolName || "",
   );
-  if (!isCommandTool) return "";
 
-  const cmd = extractCommandSnippet(step.toolParams);
-  if (cmd) {
-    // 非命令工具（GUI/浏览器/MCP 等）的参数可能把错误文案放在 text/input 里，
-    // 直接拿它当标题会变成 "指令完成 (gui.lock) prevented..."。明显是错误/拦截
-    // 说明时不当作命令标题，回退到工具名。
-    const looksLikeError =
-      /^\(|prevented|failed|error|cannot|unable|permission|denied|timeout/i.test(
-        cmd,
-      );
-    if (looksLikeError) return "";
-    // bash/terminal：标题返回命令完整首行（不手动截断 50）——命令卡已不可
-    // 展开、标题是唯一查看入口，截断太短会看不到命令本体；视觉过长由外层
-    // CSS truncate 省略，完整命令放 title 悬停可见。
-    const firstLine = cmd.split("\n")[0];
-    return firstLine;
+  // 命令类工具优先取命令本体：extractToolPath 的 content 兜底正则会从
+  // tool_output_delta 追加进来的输出文本里误抓"路径样"片段，把标题变成输出中
+  // 的某个路径而非命令本身。
+  if (isCommandTool) {
+    const cmd = extractCommandSnippet(step.toolParams);
+    if (cmd) {
+      // 非命令工具（GUI/浏览器/MCP 等）的参数可能把错误文案放在 text/input 里，
+      // 直接拿它当标题会变成 "指令完成 (gui.lock) prevented..."。明显是错误/拦截
+      // 说明时不当作命令标题，回退到工具名。
+      const looksLikeError =
+        /^\(|prevented|failed|error|cannot|unable|permission|denied|timeout/i.test(
+          cmd,
+        );
+      if (looksLikeError) return "";
+      // bash/terminal：标题返回命令完整首行（不手动截断 50）——命令卡已不可
+      // 展开、标题是唯一查看入口，截断太短会看不到命令本体；视觉过长由外层
+      // CSS truncate 省略，完整命令放 title 悬停可见。
+      return cmd.split("\n")[0];
+    }
+    return "";
   }
+
+  const path = extractToolPath(step);
+  if (path) return path;
   return "";
 }
 
 // Action verb shown before the concrete action, derived from the tool type:
 // a command shows "执行", a search shows "搜索", a read shows "读取" — NOT a
 // generic "执行中" that doesn't describe what the tool does.
-function toolVerb(toolName: string): string {
+export function toolVerb(toolName: string): string {
   const name = (toolName || "").toLowerCase();
   if (
     name.includes("grep") ||
@@ -314,6 +322,9 @@ function ToolCard({
         )
       : [];
   const hasParams = !hasSubSteps && visibleParamEntries.length > 0;
+  // 是否有可展开内容：参数 / 子步骤 / 结果 / 运行中实时输出。
+  const hasExpandableContent =
+    hasParams || hasSubSteps || results.length > 0 || !!step.content;
   const stepStatus =
     results.length > 0
       ? step.status === "failed"
@@ -342,7 +353,6 @@ function ToolCard({
       path,
       step.toolParams,
     );
-  const fullTitle = `${verbText} ${titleLabel}`;
 
   return (
     <div className="group">
@@ -351,15 +361,19 @@ function ToolCard({
       <button
         type="button"
         onClick={() => {
-          if (canExpand) setOpen((prev) => !prev);
+          if (hasExpandableContent) setOpen((prev) => !prev);
         }}
-        className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${canExpand ? "" : "cursor-default"}`}
+        className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${hasExpandableContent ? "" : "cursor-default"}`}
       >
         {/* Claude Code 终端风工具符号：⏺（失败态 × 变红）替代彩色图标 */}
         {failed ? (
-          <span className="tool-glyph tool-glyph-failed" aria-hidden>✕</span>
+          <span className="tool-glyph tool-glyph-failed" aria-hidden>
+            ✕
+          </span>
         ) : (
-          <span className="tool-glyph" aria-hidden>⏺</span>
+          <span className="tool-glyph" aria-hidden>
+            ⏺
+          </span>
         )}
         <span
           className={`flex-1 min-w-0 truncate text-foreground/60 ${running ? "text-foreground/85" : ""}`}
@@ -396,11 +410,6 @@ function ToolCard({
             </span>
           ) : null;
         })()}
-        {canExpand && (
-          <ChevronRight
-            className={`size-3.5 shrink-0 text-foreground/30 transition-all ${open ? "rotate-90" : ""}`}
-          />
-        )}
       </button>
 
       {/* 命令类不可展开：运行中的实时输出与失败错误直接外露在标题下，不依赖展开。 */}
@@ -425,7 +434,7 @@ function ToolCard({
         </div>
       )}
 
-      {canExpand && open && (
+      {hasExpandableContent && open && (
         <div className="tool-result-panel space-y-1.5">
           {/* Streaming output preview — shown while tool is running.
               tool.progress → tool_call_update(in_progress) → tool_output_delta 把
@@ -444,9 +453,16 @@ function ToolCard({
                 return (
                   <div key={sub.id} className="flex items-center gap-1.5">
                     {subFailed ? (
-                      <span className="tool-glyph tool-glyph-failed !text-[0.85em]" aria-hidden>✕</span>
+                      <span
+                        className="tool-glyph tool-glyph-failed !text-[0.85em]"
+                        aria-hidden
+                      >
+                        ✕
+                      </span>
                     ) : (
-                      <span className="tool-glyph !text-[0.85em]" aria-hidden>⏺</span>
+                      <span className="tool-glyph !text-[0.85em]" aria-hidden>
+                        ⏺
+                      </span>
                     )}
                     <span className="text-[0.85em] text-foreground/50">
                       {getToolDisplayLabel(
@@ -516,10 +532,15 @@ function ToolCard({
                     </div>
                   );
                 }
-                // 紧凑工具（命令/搜索/罗列）只显示标题，正常结果不展开。
+                // 紧凑工具（搜索/罗列）只显示标题，正常结果不展开；
+                // 命令类工具例外——展开后要能看到非 error 的运行结果。
                 // Note: r.type is typed as ExecutionStep['type'] which doesn't include 'error',
                 // but the runtime value might be 'error' from legacy code. Use type assertion.
-                if ((r.type as string) !== "error" && isCompactTool)
+                if (
+                  (r.type as string) !== "error" &&
+                  isCompactTool &&
+                  !isCommandTool
+                )
                   return null;
                 const raw = stripMktempNoise(
                   stripEmoji(normalizeAcpContent(r.content || "")),

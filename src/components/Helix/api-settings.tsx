@@ -25,7 +25,7 @@ import React, {
   useMemo,
 } from "react";
 import { Button } from "@/components/ui/button";
-import { pushModelConfig } from "@/lib/config-sync";
+import { pushModelConfig, pushModelConfigWithKey } from "@/lib/config-sync";
 import {
   isElectron,
   helixApi,
@@ -857,11 +857,12 @@ export function ApiSettings({
             apiKey: p.config.apiKey,
           };
           // serve 模式：helix:setConfig 是 no-op（main.js 直接 return success），
-          // 必须走 pushModelConfig —— 内部按模式分流：serve → setModel 写
+          // 必须走 pushModelConfigWithKey —— 内部按模式分流：serve → setModel 写
           // config.yaml（生效）；acp → setConfig + cacheConfig（行为不变）。
           // 否则在设置里切换 profile 永远到不了网关，config.yaml 残留旧配置
-          // （如 deepseek+Ling 错配 → 400 无输出）。
-          pushModelConfig(cfg);
+          // （如 deepseek+Ling 错配 → 400 无输出）。这是用户显式切换 profile 的
+          // 动作，key 走一次性通道（cacheConfig 落盘时会剥掉 key）。
+          pushModelConfigWithKey(cfg);
           // Persist the active profile so the next cold start re-asserts it
           // into Helix config.yaml (no hardcoded pin, free switching preserved).
           await window.electron.profile.cacheConfig(cfg);
@@ -1116,7 +1117,7 @@ export function ApiSettings({
     }
     const api = (window as any).electron?.mcpConfig;
     if (!api?.save) {
-      showToast({ type: "error", title: "当前环境不支持写入 config.yaml" });
+      showToast({ type: "error", title: "当前环境不支持写入 mcp.json" });
       return;
     }
     const cmdParts = [
@@ -1410,7 +1411,6 @@ export function ApiSettings({
         useHelixStore.getState().setSelectedWorkDir(session.workDir);
       }
       useHelixStore.getState().setCurrentSessionId(session.id);
-      pushNavigation({ type: "chat", sessionId: session.id });
       // 恢复 = 取消归档：把 isArchived 置回 false，让会话回到侧边栏主列表。
       // 之前只加载内容不改归档标记 → toast 显示"已恢复"但会话仍留在归档里，
       // 主列表看不到 → "实际没效果"。恢复不是新对话——savedAt 保持最后一条
@@ -1489,7 +1489,7 @@ export function ApiSettings({
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
-          className="flex-1 px-3 py-2 bg-transparent text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 focus:outline-none font-mono"
+          className="flex-1 px-3 py-2 bg-transparent text-[length:var(--helix-transcript-size)] text-foreground placeholder:text-muted-foreground/40 font-mono"
         />
         {suffix && <span className="pr-3">{suffix}</span>}
       </div>
@@ -1804,7 +1804,7 @@ export function ApiSettings({
                             onFocus={() => setCustomInputFocused(true)}
                             onBlur={handleBlurCustomInput}
                             placeholder="输入 Provider 名称"
-                            className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                            className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
                             autoFocus
                           />
                           <button
@@ -1837,7 +1837,7 @@ export function ApiSettings({
                           }))
                         }
                         placeholder="https://api.openai.com/v1"
-                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
                       />
                     </div>
 
@@ -1857,7 +1857,7 @@ export function ApiSettings({
                             }))
                           }
                           placeholder="sk-..."
-                          className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                          className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
                         />
                         <button
                           type="button"
@@ -1886,7 +1886,7 @@ export function ApiSettings({
                             contextWindow: raw ? Number(raw) : undefined,
                           }));
                         }}
-                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
                       />
                       <p className="mt-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70"></p>
                     </div>
@@ -1976,7 +1976,7 @@ export function ApiSettings({
                             }))
                           }
                           placeholder="gpt-4o-mini"
-                          className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring font-mono"
+                          className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
                         />
                       )}
                     </div>
@@ -2341,7 +2341,7 @@ export function ApiSettings({
                   <ChevronLeft className="size-4" />
                   返回
                 </button>
-                <div className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-lg border border-sidebar-border/60 bg-sidebar/40 transition-all duration-150 focus-within:border-primary/40 focus-within:shadow-[0_0_0_3px_color-mix(in_oklch,var(--primary)_10%,transparent)] hover:border-sidebar-border">
+                <div className="flex items-center gap-2 w-full px-2.5 py-1.5 rounded-lg border border-sidebar-border/60 bg-sidebar/40 transition-all duration-150  hover:border-sidebar-border">
                   <Search className="size-3.5 text-muted-foreground/25 shrink-0" />
                   <input
                     ref={navSearchRef}
@@ -2354,7 +2354,7 @@ export function ApiSettings({
                       }
                     }}
                     placeholder="搜索设置..."
-                    className="flex-1 bg-transparent text-[calc(var(--helix-transcript-size)*0.9286)] text-sidebar-foreground placeholder:text-sidebar-foreground/30 focus:outline-none min-w-0"
+                    className="flex-1 bg-transparent text-[calc(var(--helix-transcript-size)*0.9286)] text-sidebar-foreground placeholder:text-sidebar-foreground/30 min-w-0"
                   />
                   {navSearch && (
                     <button
@@ -2423,8 +2423,8 @@ export function ApiSettings({
           {/* Resize handle — drag to resize the settings nav (also resizes the
             main sidebar, since they share one width). */}
           {!sidebarCollapsed && (
-              <div
-                className={`absolute top-0 -right-1 w-2 h-full cursor-col-resize z-30 group ${
+            <div
+              className={`absolute top-0 -right-1 w-2 h-full cursor-col-resize z-30 group ${
                 isResizing ? "bg-primary/20" : ""
               }`}
               onMouseDown={startNavResize}

@@ -369,6 +369,13 @@ function buildTauriAPI(): ElectronAPI {
     update: () => invoke("helix_update"),
     installPlugin: (identifier: string, force?: boolean) =>
       invoke("helix_install_plugin", { identifier, force: force ?? false }),
+    // Subagent presets bundled with the pi-subagents extension (surfaced in the
+    // Subagent settings page alongside user identities). deleteSubagent moves
+    // the preset's agents/<name>.md out of the scanned dir (recoverable backup).
+    listSubagents: () => invoke("helix_list_subagents"),
+    setSubagentEnabled: (name: string, enabled: boolean) =>
+      invoke("helix_set_subagent_enabled", { name, enabled }),
+    deleteSubagent: (name: string) => invoke("helix_delete_subagent", { name }),
     // Pi agent commands (extensions / skills / prompts / models)
     piGetCommands: () => invoke("pi_get_commands"),
     piListInstalled: () => invoke("pi_list_installed"),
@@ -382,9 +389,12 @@ function buildTauriAPI(): ElectronAPI {
       invoke("pi_set_thinking_level_all", { level }),
     piCompact: () => invoke("pi_compact"),
     piGetSessionStats: () => invoke("pi_get_session_stats"),
-    piSearchPackages: (query: string) => invoke("pi_search_packages", { query }),
-    piInstallPackage: (pkg: string) => invoke("pi_install_package", { package: pkg }),
-    piUninstallPackage: (pkg: string) => invoke("pi_uninstall_package", { package: pkg }),
+    piSearchPackages: (query: string) =>
+      invoke("pi_search_packages", { query }),
+    piInstallPackage: (pkg: string) =>
+      invoke("pi_install_package", { package: pkg }),
+    piUninstallPackage: (pkg: string) =>
+      invoke("pi_uninstall_package", { package: pkg }),
     piSetPackageEnabled: (pkg: string, enabled: boolean) =>
       invoke("pi_set_package_enabled", { package: pkg, enabled }),
     piCheckUpdates: () => invoke("pi_check_updates"),
@@ -523,6 +533,15 @@ function buildTauriAPI(): ElectronAPI {
       invoke("delegations_list", { sessionId: sessionId ?? null }),
     readLog: (path: string, lines?: number) =>
       invoke("delegations_read_log", { path, lines: lines ?? null }),
+  };
+
+  // ── background tasks (pi-background-tasks extension registry) ───────────
+  api.backgroundTasks = {
+    list: (sessionId?: string) =>
+      invoke("tasks_list", { sessionId: sessionId ?? null }),
+    read: (taskId: string, tailBytes?: number) =>
+      invoke("tasks_read", { taskId, tailBytes: tailBytes ?? null }),
+    kill: (taskId: string) => invoke("tasks_kill", { taskId }),
   };
 
   // ── diagnostics ─────────────────────────────────────────────────────────

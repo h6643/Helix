@@ -80,7 +80,15 @@ export function pushConfigKeyValue(
 /**
  * Push model/provider config to the backend.
  * This writes config.yaml AND may trigger gateway restart (model switch
- * requires session recreation with new credentials).
+ * requires session creation with new credentials).
+ *
+ * The apiKey is deliberately NOT forwarded: pi's own files (models.json /
+ * auth.json) are the single source of truth for credentials. Forwarding the
+ * cached apiConfig key on every startup re-created provider entries with a
+ * STALE key, clobbering keys rotated outside Helix. apply_pi_model_config
+ * preserves the existing stored key when none is given. Callers that just
+ * saved a FRESH key in the settings page still pass it through `pushApiKey`
+ * (one-time), never via this generic path.
  */
 export function pushModelConfig(payload: {
   model?: string;
@@ -88,11 +96,21 @@ export function pushModelConfig(payload: {
   baseUrl?: string;
   apiKey?: string;
 }) {
+  // Strip the key: credentials live in pi's own files; this generic (startup
+  // re-assert / model-switch) path must never carry a cached key.
+  const modelPayload: {
+    model?: string;
+    provider?: string;
+    baseUrl?: string;
+  } = {
+    model: payload.model,
+    provider: payload.provider,
+    baseUrl: payload.baseUrl,
+  };
   const hasModelPayload = !!(
-    payload.model ||
-    payload.baseUrl ||
-    payload.apiKey ||
-    payload.provider
+    modelPayload.model ||
+    modelPayload.baseUrl ||
+    modelPayload.provider
   );
   if (!hasModelPayload) return;
 
@@ -100,7 +118,7 @@ export function pushModelConfig(payload: {
   if (!isElectron()) {
     const helix = (window as any).electron?.helix;
     if (helix?.setConfig) {
-      helix.setConfig(payload).catch((e: unknown) => {
+      helix.setConfig(modelPayload).catch((e: unknown) => {
         console.warn("[config-sync] tauri setConfig 失败:", e);
       });
     }
@@ -130,18 +148,42 @@ export function pushModelConfig(payload: {
           return;
         }
         await c.setModel({
-          model: payload.model || "",
-          provider: payload.provider,
-          baseUrl: payload.baseUrl,
-          apiKey: payload.apiKey,
+          ...modelPayload,
+          model: modelPayload.model || "",
         });
       } catch (e) {
         console.warn("[config-sync] serve setModel 失败（不回落 IPC）:", e);
       }
       return;
     }
-    pushModelConfigViaIpc(payload, hasModelPayload);
+    pushModelConfigViaIpc(modelPayload, hasModelPayload);
   })();
+}
+
+/**
+ * One-time push of a FRESHLY-SAVED api key (settings page save). Unlike
+ * pushModelConfig this carries the key — it must only be called from an
+ * explicit user save action, never from startup re-assertions.
+ */
+export function pushModelConfigWithKey(payload: {
+  model?: string;
+  provider?: string;
+  baseUrl?: string;
+  apiKey?: string;
+}) {
+  if (!isElectron()) {
+    // Tauri mode: setConfig carries the key once (backend keeps it in
+    // models.json / auth.json from here on).
+    const helix = (window as any).electron?.helix;
+    if (helix?.setConfig) {
+      helix.setConfig(payload).catch((e: unknown) => {
+        console.warn("[config-sync] tauri setConfig(key) 失败:", e);
+      });
+    }
+    return;
+  }
+  // Electron acp mode: reuse the IPC path (carries the key once).
+  pushModelConfigViaIpc(payload, true);
 }
 
 /** acp 模式的原有链路：冷启动缓存 + IPC setConfig（会写 config.yaml 并重启网关） */
@@ -161,7 +203,7 @@ function pushModelConfigViaIpc(
   try {
     if (
       profile?.cacheConfig &&
-      (payload.model || payload.baseUrl || payload.apiKey || payload.provider)
+      (payload.model || payload.baseUrl || payload.provider)
     ) {
       profile.cacheConfig({
         model: payload.model,

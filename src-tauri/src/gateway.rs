@@ -65,6 +65,17 @@ pub fn restart_gateway_soon(state: &Arc<AppState>) {
     });
 }
 
+/// Restart the gateway in the background without debouncing. Use when the
+/// restart is a one-shot user action (e.g. work-dir switch) where every
+/// call must take effect. The overlapping handover keeps the old main
+/// serving until the replacement is ready — no disconnected window.
+pub fn restart_gateway_now(state: &Arc<AppState>) {
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        let _ = crate::pi_gateway::restart_overlapping(&state);
+    });
+}
+
 /// Called when the app exits: kill the backend child.
 pub fn shutdown(state: &AppState) {
     state

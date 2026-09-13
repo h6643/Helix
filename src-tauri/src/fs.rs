@@ -214,6 +214,14 @@ fn build_file_tree(dir: &Path, base: &str, depth: usize, counter: &mut usize) ->
         if name.starts_with('.') {
             continue;
         }
+        // Skip common heavy directories to keep the tree small and fast.
+        if name.eq_ignore_ascii_case("node_modules")
+            || name.eq_ignore_ascii_case("dist")
+            || name.eq_ignore_ascii_case("target")
+            || name.eq_ignore_ascii_case("__pycache__")
+        {
+            continue;
+        }
         let abs = e.path();
         let rel = if base.is_empty() {
             name.clone()

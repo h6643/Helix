@@ -224,7 +224,7 @@ export function BranchPicker({
         className={`flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/60 bg-accent/40 px-2 py-1 rounded-lg shrink-0 transition-colors hover:text-foreground hover:bg-accent/60 disabled:opacity-50 disabled:cursor-default ${className ?? ""}`}
         data-tip={currentBranch ? `当前分支：${currentBranch}` : undefined}
       >
-        <GitBranch className="size-3.5 text-muted-foreground" />
+        <GitBranch className="size-4 text-muted-foreground" />
         <span className="whitespace-nowrap">{currentBranch}</span>
       </button>
       {open && (
@@ -265,10 +265,10 @@ export function BranchPicker({
                   <GitBranch className="size-3.5 shrink-0 text-foreground/40" />
                   <span className="truncate flex-1 text-left">{b}</span>
                   {b === currentBranch && (
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       {dirtyCount > 0 && (
                         <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground">
-                          未提交：{dirtyCount} 个文件
+                          未提交：{dirtyCount}
                         </span>
                       )}
                       <Check
@@ -306,7 +306,7 @@ export function BranchPicker({
                     if (e.key === "Escape") setCreating(false);
                   }}
                   placeholder="新分支名称"
-                  className="w-full text-[calc(var(--helix-transcript-size)*0.8571)] px-2 py-1 rounded-md bg-muted/40 border border-border/30 outline-none focus:border-primary/50"
+                  className="w-full text-[calc(var(--helix-transcript-size)*0.8571)] px-2 py-1 rounded-md bg-muted/40 border border-border/30"
                   autoFocus
                 />
                 <div className="flex gap-1.5">

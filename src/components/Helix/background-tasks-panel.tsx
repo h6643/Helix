@@ -1,23 +1,30 @@
-﻿"use client";
+"use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Loader2,
   X,
   XCircle,
   CheckCircle2,
-  Trash2,
+  Ban,
   Terminal,
-  Pause,
-  Play,
+  ScrollText,
 } from "lucide-react";
-import {
-  useBackgroundTasksStore,
-  type BackgroundTask,
-} from "@/stores/background-tasks-store";
-import { getServeClient } from "@/lib/serve-gateway";
-import { useGatewayStore } from "@/stores/gateway-store";
-import { useHelixStore } from "@/stores/helix-store";
+
+/** 后台任务记录（与 pi-background-tasks 扩展的 tasks.json schema 对齐，
+ *  经 Rust tasks_list 命令读出——Rust 侧还会把 running 但进程已消失的
+ *  任务就地标记为 failed，前端拿来即用）。 */
+export interface BgTask {
+  id: string;
+  command: string;
+  pid: number;
+  session_id: string;
+  started_at: number;
+  status: "running" | "completed" | "failed" | "killed";
+  exit_code?: number;
+  finished_at?: number;
+  output_file: string;
+}
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -27,48 +34,28 @@ function formatDuration(ms: number): string {
   return r > 0 ? `${m} 分 ${r} 秒` : `${m} 分`;
 }
 
-/** 暂停/恢复一个后台任务（RPC 到 process.pause / process.resume）。 */
-async function toggleTaskPaused(task: BackgroundTask): Promise<void> {
-  const client = getServeClient();
-  if (!client) return;
-  const target = !task.paused;
-  // 乐观更新；失败回滚并提示
-  useBackgroundTasksStore.getState().setTaskPaused(task.id, target);
-  try {
-    await client.rpc(target ? "process.pause" : "process.resume", {
-      session_id: useGatewayStore.getState().helixSessionId ?? undefined,
-      task_id: task.id,
-      proc_id: task.procSessionId ?? undefined,
-      command: task.command,
-    });
-  } catch (e) {
-    useBackgroundTasksStore.getState().setTaskPaused(task.id, !target);
-    useHelixStore.getState().showToast({
-      type: "error",
-      title: target ? "暂停失败" : "恢复失败",
-      description: String((e as Error)?.message ?? e).slice(0, 120),
-    });
-  }
-}
-
-/** 后台任务面板：顶栏「后台任务」按钮的弹出卡片。只显示当前会话的任务，
- *  每项 = 命令名 + 状态 + 执行时间（不做流式输出）。 */
+/** 后台任务面板：右上角「后台任务」按钮的弹出卡片。
+ *  数据源 = pi-background-tasks 扩展的共享注册表（~/.pi/agent/tasks.json），
+ *  由本组件自己轮询（3s），父组件只负责开合与当前会话过滤。 */
 export function BackgroundTasksPanel({
-  sessionId,
+  tasks,
+  activeSessionId,
   onClose,
+  onRefresh,
 }: {
-  sessionId: string;
+  tasks: BgTask[];
+  activeSessionId: string | null;
   onClose: () => void;
+  onRefresh: () => void;
 }) {
-  const tasks = useBackgroundTasksStore((s) => s.tasks);
-  const clearFinished = useBackgroundTasksStore((s) => s.clearFinished);
-  const removeTask = useBackgroundTasksStore((s) => s.removeTask);
   const ref = useRef<HTMLDivElement>(null);
+  const [viewing, setViewing] = useState<BgTask | null>(null);
+  const [outputText, setOutputText] = useState<string>("加载中…");
+  const [, setTick] = useState(0);
 
   // 每秒 tick 刷新运行中任务的耗时显示
-  const [, setNow] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
+    const t = setInterval(() => setTick(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
 
@@ -81,12 +68,106 @@ export function BackgroundTasksPanel({
     return () => document.removeEventListener("mousedown", onDown);
   }, [onClose]);
 
-  const myTasks = useMemo(
-    () => tasks.filter((t) => t.sessionId === sessionId),
-    [tasks, sessionId],
-  );
+  // 我的任务：当前会话的任务排前面，其余会话的任务折叠在后（后端 tasks
+  // 按 session_id 过滤；会话切换期间 sid 可能为 null → 显示全部）。
+  const myTasks = activeSessionId
+    ? tasks.filter((t) => t.session_id === activeSessionId)
+    : tasks;
   const running = myTasks.filter((t) => t.status === "running");
   const done = myTasks.filter((t) => t.status !== "running");
+
+  const openOutput = useCallback(
+    async (task: BgTask) => {
+      setViewing(task);
+      setOutputText("加载中…");
+      try {
+        const api = (window as any).electron as any;
+        const res = await api?.backgroundTasks?.read?.(task.id, 16384);
+        if (res?.ok) {
+          setOutputText(res.text || "(暂无输出)");
+        } else {
+          setOutputText(`读取失败：${res?.error ?? "未知错误"}`);
+        }
+      } catch (e) {
+        setOutputText(`读取失败：${String(e)}`);
+      }
+    },
+    [],
+  );
+
+  const killTask = useCallback(
+    async (task: BgTask) => {
+      try {
+        const api = (window as any).electron as any;
+        await api?.backgroundTasks?.kill?.(task.id);
+      } catch {}
+      onRefresh();
+    },
+    [onRefresh],
+  );
+
+  if (viewing) {
+    return (
+      <div
+        ref={ref}
+        className="absolute right-0 top-[calc(100%+6px)] z-50 w-[30rem] max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-popover text-popover-foreground shadow-xl flex flex-col max-h-[60vh]"
+      >
+        <div className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0 gap-2">
+          <span className="flex-1 min-w-0 truncate font-mono text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/80">
+            {viewing.command}
+          </span>
+          <span
+            className={`shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] ${
+              viewing.status === "running"
+                ? "text-primary"
+                : viewing.status === "completed"
+                  ? "text-emerald-500"
+                  : "text-red-500"
+            }`}
+          >
+            {viewing.status === "running"
+              ? "运行中"
+              : viewing.status === "completed"
+                ? `完成 (exit 0)`
+                : viewing.status === "killed"
+                  ? "已终止"
+                  : `失败${viewing.exit_code !== undefined ? ` (exit ${viewing.exit_code})` : ""}`}
+          </span>
+          <button
+            onClick={() => setViewing(null)}
+            className="p-1 rounded text-foreground/50 hover:text-foreground hover:bg-muted/40 shrink-0"
+            data-tip="返回列表"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+        <pre className="flex-1 overflow-auto min-h-0 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.7143)] font-mono whitespace-pre-wrap break-all text-foreground/80">
+          {outputText}
+        </pre>
+        {viewing.status === "running" && (
+          <div className="px-3 py-2 border-t border-border shrink-0 flex gap-2">
+            <button
+              onClick={() => openOutput(viewing)}
+              className="flex items-center gap-1 px-2 py-1 rounded text-[calc(var(--helix-transcript-size)*0.7143)] text-primary hover:bg-primary/10 transition-colors"
+            >
+              <ScrollText className="size-3" />
+              刷新输出
+            </button>
+            <button
+              onClick={() => {
+                killTask(viewing);
+                setViewing(null);
+              }}
+              className="flex items-center gap-1 px-2 py-1 rounded text-[calc(var(--helix-transcript-size)*0.7143)] text-red-500 hover:bg-red-500/10 transition-colors"
+            >
+              <Ban className="size-3" />
+              终止任务
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -102,85 +183,62 @@ export function BackgroundTasksPanel({
             </span>
           )}
         </span>
-        <div className="flex items-center gap-1">
-          {done.length > 0 && (
-            <button
-              onClick={clearFinished}
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/50 hover:text-foreground hover:bg-muted/40 transition-colors"
-              data-tip="清理已完成/失败任务"
-            >
-              <Trash2 className="size-3" />
-              清理
-            </button>
-          )}
-          <button
-            onClick={onClose}
-            className="p-1 rounded text-foreground/50 hover:text-foreground hover:bg-muted/40 transition-colors"
-            data-tip="关闭"
-          >
-            <X className="size-3.5" />
-          </button>
-        </div>
+        <button
+          onClick={onClose}
+          className="p-1 rounded text-foreground/50 hover:text-foreground hover:bg-muted/40"
+          data-tip="关闭"
+        >
+          <X className="size-3.5" />
+        </button>
       </div>
 
       <div className="flex-1 overflow-y-auto min-h-0">
         {myTasks.length === 0 && (
           <div className="px-3 py-6 text-center text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/40">
             当前对话没有后台任务。
+            <br />
+            <span className="text-[calc(var(--helix-transcript-size)*0.7143)]">
+              提示模型使用 background 工具启动长任务，这里就能看到。
+            </span>
           </div>
         )}
-        {myTasks.map((task) => {
-          const runningTask = task.status === "running";
-          const durationMs = (task.finishedAt ?? Date.now()) - task.startedAt;
+        {[...running, ...done].map((task) => {
+          const isRunning = task.status === "running";
+          const durationMs =
+            (task.finished_at ?? Date.now()) - task.started_at;
           return (
             <div
               key={task.id}
-              className="flex items-center gap-2 px-3 py-2 border-b border-border/30 last:border-b-0"
+              className="flex items-center gap-2 px-3 py-2 border-b border-border/30 last:border-b-0 hover:bg-muted/20 transition-colors"
             >
-              {runningTask ? (
-                task.paused ? (
-                  <Pause className="size-3.5 text-amber-500 shrink-0" />
-                ) : (
-                  <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
-                )
-              ) : task.status === "failed" ? (
-                <XCircle className="size-3.5 text-red-500 shrink-0" />
-              ) : (
+              {isRunning ? (
+                <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
+              ) : task.status === "completed" ? (
                 <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
+              ) : (
+                <XCircle className="size-3.5 text-red-500 shrink-0" />
               )}
               <Terminal className="size-3.5 text-foreground/30 shrink-0" />
               <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.7857)] font-mono text-foreground/80">
                 {task.command}
               </span>
               <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground shrink-0">
-                {runningTask
-                  ? `${task.paused ? "已暂停" : "运行中"} ${formatDuration(durationMs)}`
-                  : `耗时 ${formatDuration(durationMs)}`}
+                {formatDuration(durationMs)}
               </span>
-              {runningTask && (
+              <button
+                onClick={() => openOutput(task)}
+                className="p-0.5 rounded text-foreground/30 hover:text-foreground hover:bg-muted/40 transition-colors shrink-0"
+                data-tip="查看输出"
+              >
+                <ScrollText className="size-3" />
+              </button>
+              {isRunning && (
                 <button
-                  onClick={() => toggleTaskPaused(task)}
-                  className={`p-0.5 rounded transition-colors shrink-0 ${
-                    task.paused
-                      ? "text-primary hover:text-primary/80 hover:bg-primary/10"
-                      : "text-foreground/30 hover:text-foreground hover:bg-muted/40"
-                  }`}
-                  data-tip={task.paused ? "恢复" : "暂停"}
+                  onClick={() => killTask(task)}
+                  className="p-0.5 rounded text-foreground/30 hover:text-red-500 hover:bg-red-500/10 transition-colors shrink-0"
+                  data-tip="终止"
                 >
-                  {task.paused ? (
-                    <Play className="size-3" />
-                  ) : (
-                    <Pause className="size-3" />
-                  )}
-                </button>
-              )}
-              {!runningTask && (
-                <button
-                  onClick={() => removeTask(task.id)}
-                  className="p-0.5 rounded text-foreground/30 hover:text-foreground hover:bg-muted/40 transition-colors shrink-0"
-                  data-tip="移除"
-                >
-                  <Trash2 className="size-3" />
+                  <Ban className="size-3" />
                 </button>
               )}
             </div>

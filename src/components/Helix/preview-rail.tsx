@@ -286,7 +286,7 @@ export function BrowserView({
               }}
               onBlur={submitUrlEdit}
               spellCheck={false}
-              className="w-full px-2 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] bg-muted/40 border border-border/50 rounded-md text-foreground outline-none focus:border-primary/60 text-center"
+              className="w-full px-2 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] bg-muted/40 border border-border/50 rounded-md text-foreground outline-none text-center"
             />
           ) : (
             <button

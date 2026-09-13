@@ -306,11 +306,6 @@ export function SkillPanel({}: SkillPanelProps) {
           ),
         );
         await api.piSetPackageEnabled(identifier, next);
-        useHelixStore.getState().showToast({
-          type: "success",
-          title: next ? "插件已启用" : "插件已禁用",
-          description: `${item.name} — 网关正在重启使配置生效`,
-        });
         await loadItems();
       } catch (e) {
         // 回滚
@@ -708,7 +703,7 @@ export function SkillPanel({}: SkillPanelProps) {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="搜索插件..."
-              className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+              className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
             />
           </div>
         )}
@@ -728,7 +723,7 @@ export function SkillPanel({}: SkillPanelProps) {
                       value={browseQuery}
                       onChange={(e) => handleBrowseSearchChange(e.target.value)}
                       placeholder="搜索 npm 上的 Pi 插件..."
-                      className="w-full h-10 pl-10 pr-4 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+                      className="w-full h-10 pl-10 pr-4 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
                     />
                     {searchLoading && (
                       <Loader2 className="absolute right-3.5 top-1/2 -translate-y-1/2 size-4 animate-spin text-muted-foreground" />
@@ -737,7 +732,7 @@ export function SkillPanel({}: SkillPanelProps) {
                   <select
                     value={filterType}
                     onChange={(e) => setFilterType(e.target.value)}
-                    className="h-10 px-3 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all min-w-[110px]"
+                    className="h-10 px-3 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground transition-all min-w-[110px]"
                   >
                     <option value="all">全部类型</option>
                     <option value="extension">扩展</option>
@@ -748,7 +743,7 @@ export function SkillPanel({}: SkillPanelProps) {
                   <select
                     value={sortBy}
                     onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-                    className="h-10 px-3 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all min-w-[130px]"
+                    className="h-10 px-3 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground transition-all min-w-[130px]"
                   >
                     <option value="downloads">最多下载</option>
                     <option value="date">最近更新</option>

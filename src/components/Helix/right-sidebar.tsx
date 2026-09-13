@@ -7,11 +7,12 @@ import { cleanUrl } from "@/lib/url-utils";
 import { useHelixStore } from "@/stores/helix-store";
 import { CodeEditorPanel } from "./code-editor-panel";
 import { DiffSidebarPanel } from "./diff-sidebar-panel";
+import { AgentWorkPanel } from "./agent-work-panel";
 import { BrowserView } from "./preview-rail";
 import { summarizeUrl } from "@/lib/url-utils";
 import { MoreActionsMenu } from "./more-actions-menu";
 
-type PageKind = "browser" | "code" | "diff";
+type PageKind = "browser" | "code" | "diff" | "agent";
 interface PanelPage {
   id: string;
   kind: PageKind;
@@ -42,10 +43,12 @@ export function RightSidebar() {
   const isTerminalOpen = useHelixStore((s) => s.isTerminalOpen);
   const editorTabs = useHelixStore((s) => s.editorTabs);
   const activeEditorTabId = useHelixStore((s) => s.activeEditorTabId);
+  const activeAgentView = useHelixStore((s) => s.activeAgentView);
 
   const [pages, setPages] = useState<PanelPage[]>(() => {
     const start = cleanUrl(previewRailUrl ?? "") || "";
     if (tab === "diff") return [{ id: newPageId(), kind: "diff", url: "" }];
+    if (tab === "agent") return [{ id: newPageId(), kind: "agent", url: "" }];
     if (tab === "browser")
       return [{ id: newPageId(), kind: "browser", url: start }];
     return [];
@@ -103,7 +106,7 @@ export function RightSidebar() {
   const pendingActivateRef = useRef<string | null>(null);
 
   // Keep the active view in sync with the selected sidebar tab WITHOUT remounting
-  // (the header "目录/变更/浏览器" menu just sets `rightSidebarTab`). This replaces
+  // (the header "目录/更改/浏览器" menu just sets `rightSidebarTab`). This replaces
   // the old `key={rightSidebarTab}` remount that rebuilt the whole panel — and the
   // browser <webview> — on every tab switch (the white flash). Code is shown via
   // the editor's own tabs (editorTabs), so selecting "code" just reveals the code
@@ -114,7 +117,14 @@ export function RightSidebar() {
       setActivePageId("");
       return;
     }
-    const kind = tab === "diff" ? "diff" : tab === "browser" ? "browser" : null;
+    const kind =
+      tab === "diff"
+        ? "diff"
+        : tab === "browser"
+          ? "browser"
+          : tab === "agent"
+            ? "agent"
+            : null;
     if (!kind) return;
     const existing = pagesRef.current.find((p) => p.kind === kind);
     if (existing) {
@@ -328,7 +338,9 @@ export function RightSidebar() {
             const label =
               p.kind === "browser"
                 ? p.title || summarizeUrl(p.url) || "网页"
-                : "变更";
+                : p.kind === "agent"
+                  ? activeAgentView?.name || "子 Agent"
+                  : "更改";
             const active = p.id === activePageId;
             return (
               <div
@@ -411,14 +423,21 @@ export function RightSidebar() {
           non-active page can never show even if the Tailwind `hidden` utility is
           missing/overridden in a given build — otherwise two stacked browser
           panels (the active one + a leftover blank one) can appear. */}
-      <div className="flex-1 min-h-0 flex">
-        <div className="flex-1 min-h-0 flex flex-col">
+      {/* `min-w-0` on every flex link is load-bearing: without it a page's
+          min-content (e.g. a long path row or the diff header's stats) makes the
+          column lay out WIDER than the panel box, and the panel's
+          `overflow-hidden` then silently cuts the right-hand side — which is
+          where +/- counts live. */}
+      <div className="flex-1 min-h-0 min-w-0 flex">
+        <div className="flex-1 min-h-0 min-w-0 flex flex-col">
           {pages.map((p) => {
             const isActive = p.id === activePageId;
             return (
               <div
                 key={p.id}
-                className={isActive ? "flex-1 min-h-0 flex flex-col" : "hidden"}
+                className={
+                  isActive ? "flex-1 min-h-0 min-w-0 flex flex-col" : "hidden"
+                }
                 style={isActive ? undefined : { display: "none" }}
               >
                 {p.kind === "browser" && (
@@ -429,11 +448,12 @@ export function RightSidebar() {
                   />
                 )}
                 {p.kind === "diff" && <DiffSidebarPanel />}
+                {p.kind === "agent" && <AgentWorkPanel />}
               </div>
             );
           })}
           {editorTabs.length > 0 && codeViewActive && (
-            <div className="flex-1 min-h-0 flex flex-col">
+            <div className="flex-1 min-h-0 min-w-0 flex flex-col">
               <CodeEditorPanel onClose={closeCodeView} />
             </div>
           )}

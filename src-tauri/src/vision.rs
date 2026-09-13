@@ -1,24 +1,61 @@
-//! Vision model IPC — read/write `~/.pi/agent/helix/vision.json` and call the model.
+//! Vision model IPC — read/write the `vision:` block in config.yaml and call
+//! the model.
 //!
 //! The vision model is invoked directly (OpenAI-compatible `/chat/completions`)
 //! to turn an image into a text description before it reaches the main model
 //! (mirrors the helix-era behaviour, saving the main model's multimodal tokens).
-//! It is persisted in its own JSON file rather than config.yaml so it never
-//! needs a YAML deep-merge.
+//! Config lives in config.yaml's `vision:` block (provider / model / baseUrl /
+//! apiKey) alongside the rest of Helix's non-model settings; a legacy
+//! standalone `vision.json` is folded in on first read.
 
-use crate::paths::helix_data_dir;
+use crate::config::{atomic_write, config_yaml_path, read_yaml_block, set_yaml_key};
 use serde_json::{json, Value};
-use std::path::PathBuf;
 
-fn vision_json_path() -> PathBuf {
-    helix_data_dir().join("vision.json")
-}
+const VISION_KEYS: [&str; 4] = ["provider", "model", "baseUrl", "apiKey"];
 
 fn read_config() -> Value {
-    match std::fs::read_to_string(vision_json_path()) {
-        Ok(t) => serde_json::from_str(&t).unwrap_or(json!({})),
-        Err(_) => json!({}),
+    let yaml = std::fs::read_to_string(config_yaml_path()).unwrap_or_default();
+    let block = read_yaml_block(&yaml, "vision");
+
+    // One-time migration: fold a legacy standalone vision.json into the
+    // `vision:` block, then remove the old file so it can't drift again.
+    if block.is_empty() {
+        let legacy_path = crate::paths::helix_data_dir().join("vision.json");
+        if let Ok(raw) = std::fs::read_to_string(&legacy_path) {
+            if let Ok(old) = serde_json::from_str::<Value>(&raw) {
+                if old.get("provider").and_then(|v| v.as_str()).is_some() {
+                    let mut yaml = yaml;
+                    for k in VISION_KEYS {
+                        if let Some(v) = old.get(k).and_then(|v| v.as_str()) {
+                            if !v.is_empty() {
+                                yaml = set_yaml_key(&yaml, &format!("vision.{k}"), &json!(v));
+                            }
+                        }
+                    }
+                    let _ = atomic_write(&config_yaml_path(), &yaml);
+                    let _ = std::fs::remove_file(&legacy_path);
+                    return read_yaml_block(&yaml, "vision")
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<serde_json::Map<String, Value>>()
+                        .into();
+                }
+            }
+        }
     }
+
+    // Serialize the block map into a JSON object (`read_yaml_block` values
+    // are scalar strings; missing keys default to "").
+    let mut obj = serde_json::Map::new();
+    for k in VISION_KEYS {
+        let v = block
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        obj.insert(k.to_string(), Value::String(v));
+    }
+    Value::Object(obj)
 }
 
 #[tauri::command]
@@ -40,21 +77,18 @@ pub fn vision_config_save(config: Value) -> Value {
     if !config.is_object() {
         return json!({ "ok": false, "error": "invalid config" });
     }
-    let out = json!({
-        "provider": config.get("provider").and_then(|v| v.as_str()).unwrap_or(""),
-        "model": config.get("model").and_then(|v| v.as_str()).unwrap_or(""),
-        "baseUrl": config.get("baseUrl").and_then(|v| v.as_str()).unwrap_or(""),
-        "apiKey": config.get("apiKey").and_then(|v| v.as_str()).unwrap_or(""),
-    });
-    let path = vision_json_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    let yaml_path = config_yaml_path();
+    let mut yaml = std::fs::read_to_string(&yaml_path).unwrap_or_default();
+    for k in VISION_KEYS {
+        let v = config
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        yaml = set_yaml_key(&yaml, &format!("vision.{k}"), &json!(v));
     }
-    match std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&out).unwrap_or_default(),
-    ) {
-        Ok(_) => json!({ "ok": true }),
+    match atomic_write(&yaml_path, &yaml) {
+        Ok(()) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),
     }
 }

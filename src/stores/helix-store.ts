@@ -123,8 +123,7 @@ export type {
 export { DEFAULT_SHORTCUTS };
 
 interface HelixState
-  extends
-    GitSlice,
+  extends GitSlice,
     ToastSlice,
     CompactNoticeSlice,
     TerminalSlice,
@@ -201,10 +200,14 @@ interface HelixState
   setBrowserHomeUrl: (url: string) => void;
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: "browser" | "code" | "email" | "diff" | null;
+  rightSidebarTab: "browser" | "code" | "email" | "diff" | "agent" | null;
   setRightSidebarTab: (
-    tab: "browser" | "code" | "email" | "diff" | null,
+    tab: "browser" | "code" | "email" | "diff" | "agent" | null,
   ) => void;
+  // 右侧栏的「子 Agent 工作内容」视图：点击工作面板里的某个 agent 时写入，
+  // RightSidebar 据此渲染该 agent 的任务 / live 日志。null = 未选中。
+  activeAgentView: { id: string; name: string } | null;
+  openAgentView: (agent: { id: string; name: string }) => void;
   // Left sidebar: which project's file tree is expanded (null = none). Triggered
   // by the per-project "目录" button; opening a file from it opens the right
   // sidebar code editor.
@@ -318,7 +321,13 @@ interface HelixState
   setCurrentSessionId: (id: string | null) => void;
   sessionHistory: string[];
   sessionHistoryIndex: number;
-  navigateSession: (direction: "back" | "forward") => Promise<void>;
+  /** direction 步进 sessionHistory；给 targetId 时直接跳到该会话在栈中的
+   *  位置（导航栈含设置页条目，与 sessionHistory 步进方向可能不同步，
+   *  前进/后退必须以目标会话为准而不是方向）。 */
+  navigateSession: (
+    direction: "back" | "forward",
+    targetId?: string,
+  ) => Promise<void>;
   addExecutionStep: (step: {
     type: string;
     toolName?: string;
@@ -482,6 +491,9 @@ interface HelixState
   rejectPendingChange: (changeId: string) => void;
   applyAllPendingChanges: () => void;
   rejectAllPendingChanges: () => void;
+  /** Acknowledge (not re-apply) all pending changes of the given work dir —
+   * used after a git commit so committed files leave the "更改" list. */
+  ackPendingChangesForWorkDir: (workDir: string | null | undefined) => void;
 
   // Actions - Goal
   setGoal: (goal: string | null) => void;
@@ -1231,6 +1243,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   browserAddSeq: 0,
   browserHomeUrl: "",
   rightSidebarTab: null,
+  activeAgentView: null,
   directoryProjectDir: null,
   codeFullscreen: false,
   approvalMode: "accept_edits" as const,
@@ -1527,12 +1540,25 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           showPreviewRail: false,
           editorOpen: false,
         };
+      if (tab === "agent")
+        return {
+          rightSidebarTab: "agent",
+          showPreviewRail: false,
+          editorOpen: false,
+        };
       return {
         rightSidebarTab: null,
         showPreviewRail: false,
         editorOpen: false,
       };
     }),
+  openAgentView: (agent) =>
+    set(() => ({
+      activeAgentView: agent,
+      rightSidebarTab: "agent",
+      showPreviewRail: false,
+      editorOpen: false,
+    })),
   toggleDirectoryProject: (dir) =>
     set((s) => ({
       directoryProjectDir: s.directoryProjectDir === dir ? null : dir,
@@ -1983,7 +2009,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       Object.keys(get().streamingDrafts || {}).length > 0;
     if (running && api) {
       try {
-        const res = await api.app.setWorkDir(relativePath);
+        // 轻量对齐（不杀 Pi 实例、不重启网关）——与注释中“不打断运行中对话”的
+        // 意图一致。重型的 setWorkDir 会 kill+restart 全部后端实例，绝不能用于此。
+        const res = await api.app.syncWorkDir(relativePath);
         const absDir = res?.workDir || relativePath;
         set({ selectedWorkDir: absDir });
         // 显式传目录扫描（与非运行分支一致），失败要看得见而不是静默吞掉。
@@ -2276,18 +2304,18 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         dailyUsage: prunedDaily,
       };
     }),
-    // Persist immediately: the settings usage panel (TokenUsagePanel) reads
-    // these two keys, and persistToStorage only fires on config changes /
-    // new-session creation — usage accumulated during normal conversation
-    // runs was never flushed to IndexedDB, so the panel showed stale values
-    // after a restart ("模型用量不会更新").
-    import("@/lib/persist").then(({ persistence }) => {
-      const s = get();
-      Promise.all([
-        persistence.saveSetting("sessionUsageStats", s.sessionUsageStats),
-        persistence.saveSetting("dailyUsage", s.dailyUsage),
-      ]).catch(() => {});
-    });
+      // Persist immediately: the settings usage panel (TokenUsagePanel) reads
+      // these two keys, and persistToStorage only fires on config changes /
+      // new-session creation — usage accumulated during normal conversation
+      // runs was never flushed to IndexedDB, so the panel showed stale values
+      // after a restart ("模型用量不会更新").
+      import("@/lib/persist").then(({ persistence }) => {
+        const s = get();
+        Promise.all([
+          persistence.saveSetting("sessionUsageStats", s.sessionUsageStats),
+          persistence.saveSetting("dailyUsage", s.dailyUsage),
+        ]).catch(() => {});
+      });
   },
   setCurrentSessionId: (id) =>
     set((state) => {
@@ -2313,6 +2341,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const idx = state.sessionHistoryIndex;
       // Check if the target ID already exists at the current position (deduplicate)
       if (history[idx] === id) {
+        get().pushNavigation({ type: "chat", sessionId: id });
         return {
           currentSessionId: id,
           helixTodos,
@@ -2322,6 +2351,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
       // Remove any forward history when navigating to a new session
       const newHistory = [...history.slice(0, idx + 1), id];
+      // 同步推送导航栈：所有会话切换路径都过 setCurrentSessionId，在这里
+      // 推 chat 条目保证 navigationHistory 与 sessionHistory 永不错位。
+      get().pushNavigation({ type: "chat", sessionId: id });
       return {
         currentSessionId: id,
         sessionHistory: newHistory,
@@ -2331,12 +2363,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         approvalModeBySession,
       };
     }),
-  navigateSession: async (direction) => {
+  navigateSession: async (direction, targetId) => {
     const state = get();
     const { sessionHistory, sessionHistoryIndex } = state;
     if (sessionHistory.length === 0) return;
     let newIndex = sessionHistoryIndex;
-    if (direction === "back" && newIndex > 0) {
+    if (targetId) {
+      const found = sessionHistory.indexOf(targetId);
+      if (found < 0) return;
+      newIndex = found;
+    } else if (direction === "back" && newIndex > 0) {
       newIndex--;
     } else if (
       direction === "forward" &&
@@ -2346,8 +2382,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     } else {
       return;
     }
-    const targetId = sessionHistory[newIndex];
-    if (!targetId) return;
+    const target = sessionHistory[newIndex];
+    if (!target) return;
 
     // Flush current session first so we don't lose unsaved messages
     if (state.currentSessionId) {
@@ -2357,10 +2393,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     try {
       const { persistence } = await import("@/lib/persist");
       const all = await persistence.loadSessions();
-      const session = all.find((s) => s.id === targetId);
+      const session = all.find((s) => s.id === target);
       if (!session) {
         // Session may have been deleted — just update the index
-        set({ currentSessionId: targetId, sessionHistoryIndex: newIndex });
+        set({ currentSessionId: target, sessionHistoryIndex: newIndex });
         return;
       }
 
@@ -2411,7 +2447,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       set({
         chatMessages: msgs,
         activeSessionWorkDir: session.workDir ?? null,
-        currentSessionId: targetId,
+        currentSessionId: target,
         sessionHistoryIndex: newIndex,
       });
 
@@ -2608,6 +2644,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }),
 
   rejectAllPendingChanges: () => set({ pendingChanges: [] }),
+
+  ackPendingChangesForWorkDir: (workDir) =>
+    set((state) => ({
+      pendingChanges: state.pendingChanges.filter(
+        (c) => (c.workDir ?? "") !== (workDir ?? ""),
+      ),
+    })),
 
   // Actions - Goal
   setGoal: (goal) => set({ goal }),
@@ -3852,6 +3895,39 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           ? prunedIndex
           : 0
         : prunedIndex;
+
+      // 恢复导航栈：优先用持久化的 navigationHistory/navigationIndex（含
+      // 设置页条目）；旧版本/缺失时用 sessionHistory 重建 chat-only 栈。
+      const [savedNavHistory, savedNavIndex] = await Promise.all([
+        safeLoad(
+          persistence.loadSetting<
+            Array<
+              | { type: "chat"; sessionId: string }
+              | { type: "settings"; page: string }
+            >
+          >("navigationHistory"),
+          "navigationHistory",
+        ),
+        safeLoad(
+          persistence.loadSetting<number>("navigationIndex"),
+          "navigationIndex",
+        ),
+      ]);
+      const navHistory =
+        Array.isArray(savedNavHistory) && savedNavHistory.length > 0
+          ? savedNavHistory
+          : restoredHistory.map((id) => ({
+              type: "chat" as const,
+              sessionId: id,
+            }));
+      const navIndex =
+        typeof savedNavIndex === "number" &&
+        savedNavIndex >= 0 &&
+        Array.isArray(savedNavHistory) &&
+        savedNavHistory.length > 0
+          ? savedNavIndex
+          : restoredIndex;
+      get().restoreNavigation(navHistory, navIndex, validSessionIds);
 
       set({
         // memories are global and owned by the Helix backend (memories/MEMORY.md);

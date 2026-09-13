@@ -166,10 +166,11 @@ pub fn strip_verbatim_prefix(p: &std::path::Path) -> PathBuf {
 }
 
 /// The Pi agent config directory (`~/.pi/agent` on all platforms). Pi reads its
-/// `settings.json` (defaultProvider / defaultModel) and `custom-providers.json`
-/// from here at startup — NOT from Helix's `~/.pi/agent/helix/config.yaml`. Model/provider
-/// changes written through the Helix UI must be mirrored into these files so the
-/// Pi backend actually picks them up.
+/// `settings.json` (defaultProvider / defaultModel) and `models.json`
+/// (custom providers) from here at startup — NOT from Helix's
+/// `~/.pi/agent/helix/config.yaml`. Model/provider changes written through the
+/// Helix UI must be mirrored into these files so the Pi backend actually
+/// picks them up.
 pub fn pi_agent_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))

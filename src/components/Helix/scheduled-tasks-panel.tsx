@@ -125,7 +125,7 @@ function AddTaskForm({
         <input
           value={label}
           onChange={(e) => setLabel(e.target.value)}
-          className="flex-1 min-w-0 bg-transparent text-[length:var(--helix-transcript-size)] font-medium text-foreground placeholder:text-muted-foreground focus:outline-none"
+          className="flex-1 min-w-0 bg-transparent text-[length:var(--helix-transcript-size)] font-medium text-foreground placeholder:text-muted-foreground"
           placeholder="任务名称"
           autoFocus
         />
@@ -133,13 +133,13 @@ function AddTaskForm({
       <textarea
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono min-h-[70px] focus:outline-none focus:ring-2 focus:ring-primary/20"
+        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono min-h-[70px]"
         placeholder="输入要 agent 执行的 prompt..."
       />
       <input
         value={schedule}
         onChange={(e) => setSchedule(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono focus:outline-none focus:ring-2 focus:ring-primary/20"
+        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono"
         placeholder="e.g. every day at 9:00, every 30 minutes, in 5 minutes"
       />
       <div className="flex justify-end gap-2">
@@ -195,20 +195,20 @@ function EditTaskForm({
         <input
           value={editLabel}
           onChange={(e) => setEditLabel(e.target.value)}
-          className="flex-1 min-w-0 bg-transparent text-[length:var(--helix-transcript-size)] font-medium text-foreground placeholder:text-muted-foreground focus:outline-none"
+          className="flex-1 min-w-0 bg-transparent text-[length:var(--helix-transcript-size)] font-medium text-foreground placeholder:text-muted-foreground"
           placeholder="任务名称"
         />
       </div>
       <textarea
         value={editPrompt}
         onChange={(e) => setEditPrompt(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono min-h-[70px] focus:outline-none focus:ring-2 focus:ring-primary/20"
+        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono min-h-[70px]"
         placeholder="prompt 内容"
       />
       <input
         value={editSchedule}
         onChange={(e) => setEditSchedule(e.target.value)}
-        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono focus:outline-none focus:ring-2 focus:ring-primary/20"
+        className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono"
         placeholder="e.g. every day at 9:00, every 30 minutes"
       />
       <div className="flex justify-end gap-2">
@@ -277,7 +277,7 @@ function TaskItem({
           type="checkbox"
           checked={isSelected}
           onChange={onToggleSelect}
-          className="mt-1 shrink-0 size-3.5 rounded border-border/60 text-primary focus:ring-primary/20 cursor-pointer"
+          className="mt-1 shrink-0 size-3.5 rounded border-border/60 text-primary cursor-pointer"
         />
       )}
       <button
@@ -592,7 +592,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索计划任务"
-            className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+            className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
           />
         </div>
       </div>
@@ -615,7 +615,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
                         filteredTasks.length > 0
                       }
                       onChange={handleSelectAll}
-                      className="size-3.5 rounded border-border/60 text-primary focus:ring-primary/20"
+                      className="size-3.5 rounded border-border/60 text-primary"
                     />
                     全选
                   </label>

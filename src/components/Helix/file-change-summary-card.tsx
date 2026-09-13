@@ -99,7 +99,7 @@ export function FileChangeSummaryCard({
       if (restored == null) throw new Error("无法解析 diff，无法撤销");
       await electronFS.writeFile(absolutePath, restored);
     } else {
-      throw new Error("缺少可撤销的变更内容");
+      throw new Error("缺少可撤销的更改内容");
     }
 
     useHelixStore.setState((s) => ({

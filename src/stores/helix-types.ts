@@ -63,6 +63,9 @@ export interface ExecutionStep {
   content: string;
   toolName?: string;
   toolKind?: string;
+  // pi 后端事件 id（toolcall_start 的 id）：toolcall_end / tool_execution_start
+  // 的迟到参数补写靠它匹配回这一步。
+  toolCallId?: string;
   toolParams?: Record<string, unknown>;
   fileChanges?: Array<{
     path: string;
@@ -179,7 +182,7 @@ export interface PendingChange {
   fileId: string;
   fileName: string;
   filePath: string;
-  /** 捕获该变更时所属的项目工作目录（绝对路径）。diff 面板按当前项目过滤；
+  /** 捕获该更改时所属的项目工作目录（绝对路径）。diff 面板按当前项目过滤；
    *  对话内联 file_change 块（非聚合列表）可以没有该字段。 */
   workDir?: string;
   oldContent: string;

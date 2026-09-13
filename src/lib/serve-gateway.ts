@@ -23,7 +23,6 @@
 import { warn, error as logError, debug } from "@/lib/logger";
 import { buildAcpMcpServers } from "@/lib/mcp";
 import { installTauriBridge } from "@/lib/tauri-bridge";
-import { useBackgroundTasksStore } from "@/stores/background-tasks-store";
 
 // ── 类型 ────────────────────────────────────────────────────────────────
 
@@ -285,7 +284,7 @@ export class ServeGatewayClient {
     // （否则 respawn 后的新实例会拿 ~/.helix 里可能陈旧的配置建 agent → 30s 超时）
     this.modelSynced = false;
     this.modelSyncPromise = null;
-    debug("[ServeGateway] 网关地址变更 → port=", next.port, "，重连");
+    debug("[ServeGateway] 网关地址更改 → port=", next.port, "，重连");
     const old = this.ws;
     this.ws = null; // 先置空：旧 socket 的 onclose 会被陈旧检查忽略
     try {
@@ -313,7 +312,7 @@ export class ServeGatewayClient {
         info.baseUrl
       ) {
         if (info.wsUrl !== this.info.wsUrl) {
-          debug("[ServeGateway] 重连前发现端口变更 →", info.port);
+          debug("[ServeGateway] 重连前发现端口更改 →", info.port);
         }
         this.info = { ...this.info, ...info };
       }
@@ -845,10 +844,6 @@ export class ServeGatewayClient {
         const name = payload?.name ?? "";
         this.emit(type, { ...base, tool_call_id: toolId, tool_name: name });
         if (type === "tool.start") {
-          // 后台任务登记已移至 agent-flow-panel 的 tool_call 处理处——那里拿得到
-          // 前端对话 id（myCid）；此处只有后端会话 id，与顶栏过滤口径不一致
-          // （2026-08-18 bug：任务恒被过滤，右上角按钮从不显示）。终态 finishTask
-          // 仍在本文件按 toolId 匹配（process.exit / tool.complete），与 id 口径无关。
           this.emit("session/update", {
             session_id: sessionId,
             update: {
@@ -895,25 +890,6 @@ export class ServeGatewayClient {
         return;
       }
 
-      case "process.exit": {
-        // 后台进程真正退出（process_registry on_exit）→ 任务终态。
-        // 与 tool.complete 不同：background=true 的工具 spawn 即 complete，
-        // 进程可能还在跑；只有这里才是真实生命周期终点。
-        const toolId = payload?.tool_id ?? "";
-        const exitCode = payload?.exit_code;
-        const status =
-          typeof exitCode === "number" && exitCode === 0
-            ? ("completed" as const)
-            : ("failed" as const);
-        useBackgroundTasksStore.getState().finishTask(toolId, status);
-        this.emit("process.exit", {
-          ...base,
-          tool_call_id: toolId,
-          exit_code: exitCode,
-        });
-        return;
-      }
-
       case "tool.complete": {
         const toolId = payload?.tool_id ?? "";
         const name = payload?.name ?? "";
@@ -939,35 +915,6 @@ export class ServeGatewayClient {
           resultText = err ? (out ? `${out}\n⚠️ ${err}` : `⚠️ ${err}`) : out;
         }
         const inlineDiff = stripAnsi(payload?.inline_diff);
-        // background=true 工具 spawn 即返回 "Background process started"——
-        // 这不是进程结束，任务终态由后续 process.exit 决定，这里不标完成。
-        const isBackgroundSpawn = resultText.includes(
-          "Background process started",
-        );
-        // 后台任务暂停/恢复：把 process_registry 会话 id（proc_xxx）从工具结果
-        // 带回任务记录，作为 process.pause / process.resume RPC 的直查凭据。
-        // （后端 tool_commands 的 command→tool_call_id 映射在 tool.complete
-        // 时即被删除，靠它反查不可靠——proc id 是唯一稳定句柄。）
-        if (
-          isBackgroundSpawn &&
-          payload?.result &&
-          typeof payload.result === "object"
-        ) {
-          const procSid = (payload.result as Record<string, unknown>)
-            .session_id;
-          if (typeof procSid === "string" && procSid) {
-            useBackgroundTasksStore.getState().setTaskProcId(toolId, procSid);
-          }
-        }
-        if (!isBackgroundSpawn) {
-          // 前台命令在这里收尾（后台进程的终态另有 process.exit，但 spawn 那次
-          // tool.complete 已被 isBackgroundSpawn 跳过）。无条件调用 finishTask，
-          // 未登记的任务只是 no-op。
-          const taskStatus = payload?.is_error
-            ? ("failed" as const)
-            : ("completed" as const);
-          useBackgroundTasksStore.getState().finishTask(toolId, taskStatus);
-        }
         this.emit("tool.complete", {
           ...base,
           tool_call_id: toolId,
@@ -1091,12 +1038,6 @@ export class ServeGatewayClient {
         });
         return;
       }
-
-      case "background.complete":
-        // Informational: 后台（非活跃）会话的远端 turn 已结束。Helix 前端
-        // 只渲染活跃会话流，此事件原样透传（default 分支兜底），不注入正文。
-        this.emit(type, base);
-        return;
 
       case "session.info":
         this.emit("session.info", base);
@@ -1563,10 +1504,12 @@ export class ServeGatewayClient {
       debug("[ServeGateway] 无 Electron 桥，跳过 setModel（纯浏览器环境）");
       return { skipped: true };
     }
+    // 凭据不随会话预同步携带：pi 的 models.json/auth.json 是 key 的唯一归属，
+    // 后端在未收到 key 时保留已存的。带缓存 key 会在每次建会话时把旧 key 写回
+    // （启动重申同源问题的另一条路径）。
     const res = await helix.setModel({
       model: params.model,
       baseUrl: params.baseUrl,
-      apiKey: params.apiKey,
       provider: params.baseUrl
         ? params.provider && params.provider !== "custom"
           ? params.provider

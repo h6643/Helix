@@ -82,6 +82,39 @@ export interface ElectronAPI {
     ) => () => void;
   };
 
+  // Background tasks (pi-background-tasks extension's shared registry
+  // ~/.pi/agent/tasks.json — see src-tauri/src/background_tasks.rs).
+  backgroundTasks: {
+    list: (sessionId?: string) => Promise<{
+      ok: boolean;
+      tasks?: Array<{
+        id: string;
+        command: string;
+        pid: number;
+        session_id: string;
+        started_at: number;
+        status: "running" | "completed" | "failed" | "killed";
+        exit_code?: number;
+        finished_at?: number;
+        output_file: string;
+      }>;
+    }>;
+    read: (
+      taskId: string,
+      tailBytes?: number,
+    ) => Promise<{
+      ok: boolean;
+      text?: string;
+      total_bytes?: number;
+      error?: string;
+    }>;
+    kill: (taskId: string) => Promise<{
+      ok: boolean;
+      already_finished?: boolean;
+      error?: string;
+    }>;
+  };
+
   scheduledTasks: {
     list: () => Promise<{
       ok: boolean;
@@ -232,6 +265,27 @@ export interface ElectronAPI {
       message?: string;
       error?: string;
     }>;
+    // pi-subagents preset subagents (read-only list surfaced in Subagent settings).
+    listSubagents: () => Promise<
+      Array<{
+        id: string;
+        name: string;
+        description: string;
+        tools: string[];
+        thinking: string;
+        aliases: string[];
+        systemPromptMode: string;
+        systemPrompt: string;
+        path: string;
+        disabled: boolean;
+      }>
+    >;
+    // Enable/disable a bundled preset: move its agents/<name>.md into/out of the
+    // .helix-disabled folder (reversible; pi skips disabled presets at runtime).
+    setSubagentEnabled: (name: string, enabled: boolean) => Promise<void>;
+    // Delete a bundled pi-subagents preset by moving its agents/<name>.md to a
+    // recoverable .helix-deleted backup folder inside the package.
+    deleteSubagent: (name: string) => Promise<void>;
     // Pi agent commands (extensions / skills / prompts / models)
     piGetCommands: () => Promise<{
       commands: Array<{
@@ -348,7 +402,11 @@ export interface ElectronAPI {
       output?: string;
     }>;
     piCheckUpdates: () => Promise<{
-      pi: { installed: string | null; latest: string | null; hasUpdate?: boolean };
+      pi: {
+        installed: string | null;
+        latest: string | null;
+        hasUpdate?: boolean;
+      };
       packages: Array<{
         name: string;
         installed: string;

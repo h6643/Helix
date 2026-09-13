@@ -27,7 +27,7 @@ fn pi_models_path() -> PathBuf {
 }
 
 /// Read Pi's settings.json as JSON (empty object on any error).
-fn read_pi_settings() -> serde_json::Value {
+pub fn read_pi_settings() -> serde_json::Value {
     std::fs::read_to_string(pi_settings_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -35,7 +35,7 @@ fn read_pi_settings() -> serde_json::Value {
 }
 
 /// Read Pi's models.json as JSON (empty doc on any error).
-fn read_pi_models() -> serde_json::Value {
+pub fn read_pi_models() -> serde_json::Value {
     std::fs::read_to_string(pi_models_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -43,24 +43,16 @@ fn read_pi_models() -> serde_json::Value {
 }
 
 /// Persist Pi's settings.json, preserving unknown keys.
-fn write_pi_settings(settings: &serde_json::Value) {
-    let path = pi_settings_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+pub fn write_pi_settings(settings: &serde_json::Value) {
     if let Ok(buf) = serde_json::to_string_pretty(settings) {
-        let _ = std::fs::write(&path, buf);
+        let _ = atomic_write(&pi_settings_path(), &buf);
     }
 }
 
 /// Persist Pi's models.json, preserving unknown keys.
-fn write_pi_models(models: &serde_json::Value) {
-    let path = pi_models_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+pub fn write_pi_models(models: &serde_json::Value) {
     if let Ok(buf) = serde_json::to_string_pretty(models) {
-        let _ = std::fs::write(&path, buf);
+        let _ = atomic_write(&pi_models_path(), &buf);
     }
 }
 
@@ -96,20 +88,20 @@ fn pi_provider_api_key(provider: &str) -> String {
 use std::path::PathBuf;
 
 /// Known-good fallback endpoint used when the frontend supplies a dead/bad
-/// config (mirror of electron/lib/security.js APIHUB_DEFAULT).
+/// config (mirror of electron/lib/security.js APIHUB_DEFAULT). No api_key
+/// field: credentials never travel through the profile cache — pi's own
+/// files (models.json / auth.json) are the single source of truth for keys.
 #[derive(Debug, Clone)]
 pub struct ApiHubDefault {
     pub provider: &'static str,
     pub base_url: &'static str,
     pub model: &'static str,
-    pub api_key: &'static str,
 }
 
 pub const APIHUB_DEFAULT: ApiHubDefault = ApiHubDefault {
     provider: "ant-ling",
     base_url: "https://api.ant-ling.com/v1",
     model: "Ling-2.6-1T",
-    api_key: "",
 };
 
 pub fn config_yaml_path() -> PathBuf {
@@ -473,6 +465,56 @@ pub fn set_delegation_identities(yaml: &str, identities: &serde_json::Value) -> 
     set_yaml_key(yaml, "delegation_identities", identities)
 }
 
+/// Read a 2-level scalar block from config.yaml (e.g. the `vision:` block):
+/// returns the sub-key → scalar string map, `{}` when the top-level key is
+/// absent. Mirrors the line-oriented style of `read_helix_config`'s
+/// delegation parser — config.yaml is intentionally not parsed with a real
+/// YAML library so comments and ordering survive the round-trip.
+pub fn read_yaml_block(yaml: &str, top: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let mut in_block = false;
+    for l in yaml.replace("\r\n", "\n").split('\n') {
+        if !l.starts_with(' ') {
+            let is_top = l.starts_with(top) && l[top.len()..].starts_with(':');
+            if !is_top {
+                in_block = false;
+                continue;
+            }
+            in_block = true;
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        let t = l.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(colon) = t.find(':') else { continue };
+        let key = t[..colon].trim();
+        if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let val = t[colon + 1..].trim().trim_matches('"').trim_matches('\'');
+        out.insert(key.to_string(), serde_json::Value::String(val.to_string()));
+    }
+    out
+}
+
+/// Atomic file write (tmp + rename) — the same pattern `hooks_save` uses, so
+/// a crash mid-write can never leave a truncated settings.json / config.yaml.
+pub fn atomic_write(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
+    ));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,11 +572,7 @@ pub async fn write_raw_config(config: serde_json::Value) -> Result<(), String> {
         serde_yaml::to_string(&config).map_err(|e| format!("YAML serialize error: {}", e))?;
 
     tokio::task::spawn_blocking(move || {
-        let path = config_yaml_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, yaml).map_err(|e| e.to_string())?;
+        atomic_write(&config_yaml_path(), &yaml).map_err(|e| e.to_string())?;
         Ok::<(), String>(())
     })
     .await

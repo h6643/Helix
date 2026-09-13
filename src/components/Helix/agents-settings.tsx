@@ -64,6 +64,151 @@ const SubagentItem = ({
   </div>
 );
 
+/// Card for a pi-subagents preset subagent.
+/// - Disable/enable moves `agents/<id>.md` into/out of `.helix-disabled` (pi
+///   skips disabled presets at runtime) — reversible, handled by
+///   `helix_set_subagent_enabled`.
+/// - Delete moves the `.md` to a recoverable `.helix-deleted` backup — handled by
+///   `helix_delete_subagent`. A two-step confirm prevents accidents.
+const PresetSubagentItem = ({
+  p,
+  onToggle,
+  onDelete,
+}: {
+  p: any;
+  onToggle: (id: string, enabled: boolean) => void;
+  onDelete: (id: string) => void;
+}) => {
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [toggling, setToggling] = useState(false);
+  const disabled = p.disabled === true;
+  return (
+    <div
+      className={
+        "rounded-lg border border-border/20 bg-muted/5 px-3 py-2.5 space-y-2 " +
+        (disabled ? "opacity-60" : "")
+      }
+    >
+      <div className="flex items-center justify-between gap-3">
+        <p
+          className={
+            "ui-text font-semibold truncate " +
+            (disabled ? "text-muted-foreground/60" : "text-foreground")
+          }
+        >
+          {p.name?.trim() || p.id}
+        </p>
+        <div className="flex items-center gap-2 shrink-0">
+          {disabled && (
+            <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-amber-500/80 border border-amber-500/30 rounded px-1.5 py-0.5">
+              已禁用
+            </span>
+          )}
+          <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50 border border-border/20 rounded px-1.5 py-0.5">
+            pi-subagents
+          </span>
+          <button
+            type="button"
+            disabled={toggling}
+            onClick={async () => {
+              setToggling(true);
+              try {
+                await onToggle(p.id, !disabled);
+              } finally {
+                setToggling(false);
+              }
+            }}
+            className={
+              "text-[calc(var(--helix-transcript-size)*0.7857)] hover:underline disabled:opacity-50 " +
+              (disabled
+                ? "text-primary hover:text-primary/80"
+                : "text-muted-foreground hover:text-foreground")
+            }
+          >
+            {toggling ? "…" : disabled ? "启用" : "禁用"}
+          </button>
+          {confirming ? (
+            <span className="flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={async () => {
+                  setDeleting(true);
+                  try {
+                    await onDelete(p.id);
+                  } finally {
+                    setDeleting(false);
+                    setConfirming(false);
+                  }
+                }}
+                className="text-[calc(var(--helix-transcript-size)*0.7857)] text-destructive hover:underline disabled:opacity-50"
+              >
+                {deleting ? "删除中…" : "确认删除"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground hover:underline"
+              >
+                取消
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              aria-label="删除预设"
+              data-tip="删除"
+              className="text-muted-foreground/40 hover:text-destructive transition-colors"
+            >
+              <Trash2 className="size-4" />
+            </button>
+          )}
+        </div>
+      </div>
+      {p.description?.trim() && (
+        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
+          {p.description}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-1.5">
+        {Array.isArray(p.tools) &&
+          p.tools.map((t: string) => (
+            <span
+              key={t}
+              className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/60 bg-muted/20 border border-border/15 rounded px-1.5 py-0.5 font-mono"
+            >
+              {t}
+            </span>
+          ))}
+      </div>
+      {(p.thinking || (Array.isArray(p.aliases) && p.aliases.length > 0)) && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">
+          {p.thinking && <span>思考强度：{p.thinking}</span>}
+          {Array.isArray(p.aliases) && p.aliases.length > 0 && (
+            <span>别名：{p.aliases.join("、")}</span>
+          )}
+        </div>
+      )}
+      {p.systemPrompt?.trim() && (
+        <details className="group">
+          <summary className="cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] text-primary/80 hover:text-primary select-none list-none">
+            <span className="inline-flex items-center gap-1">
+              <span className="group-open:hidden">▸</span>
+              <span className="hidden group-open:inline">▾</span>
+              查看系统提示词
+            </span>
+          </summary>
+          <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted/10 border border-border/15 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 font-mono leading-relaxed">
+            {p.systemPrompt}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+};
+
 export function AgentsSettings() {
   const [cfg, setCfg] = useState<DelegationConfig>(DEFAULTS);
   const [loading, setLoading] = useState(true);
@@ -74,6 +219,23 @@ export function AgentsSettings() {
     { id: string; name: string; system_prompt: string }[]
   >([]);
   const [adding, setAdding] = useState(false);
+
+  // pi-subagents preset subagents (surfaced alongside user identities, with a
+  // reversible enable/disable + a recoverable delete).
+  const [presets, setPresets] = useState<
+    {
+      id: string;
+      name: string;
+      description: string;
+      tools: string[];
+      thinking: string;
+      aliases: string[];
+      systemPromptMode: string;
+      systemPrompt: string;
+      path: string;
+      disabled: boolean;
+    }[]
+  >([]);
 
   const apiHistory = useHelixStore((s) => s.apiHistory);
 
@@ -118,6 +280,15 @@ export function AgentsSettings() {
               system_prompt: String(x?.system_prompt ?? ""),
             })),
           );
+        }
+        // Bridge: surface pi-subagents preset subagents (read-only).
+        const listSubagents = (window as any).electron?.helix?.listSubagents;
+        if (typeof listSubagents === "function") {
+          listSubagents()
+            .then((ps: any[]) => {
+              if (alive && Array.isArray(ps)) setPresets(ps);
+            })
+            .catch(() => {});
         }
       })
       .catch((e: any) => alive && setErr(String(e?.message || e)))
@@ -197,6 +368,40 @@ export function AgentsSettings() {
   const removeIdentity = (id: string) =>
     setIdentities((prev) => prev.filter((i) => i.id !== id));
 
+  // Remove a bundled pi-subagents preset: move its <id>.md to the package's
+  // .helix-deleted backup folder (recoverable), then drop it from view.
+  const deletePreset = async (id: string) => {
+    const fn = (window as any).electron?.helix?.deleteSubagent;
+    if (typeof fn !== "function") {
+      setErr("网关未连接，无法删除预设");
+      return;
+    }
+    try {
+      await fn(id);
+      setPresets((prev) => prev.filter((p) => p.id !== id));
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    }
+  };
+
+  // Enable/disable a bundled preset: move its <id>.md into/out of the
+  // .helix-disabled folder (reversible; pi skips disabled presets at runtime).
+  const togglePreset = async (id: string, enabled: boolean) => {
+    const fn = (window as any).electron?.helix?.setSubagentEnabled;
+    if (typeof fn !== "function") {
+      setErr("网关未连接，无法切换预设状态");
+      return;
+    }
+    try {
+      await fn(id, enabled);
+      setPresets((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, disabled: !enabled } : p)),
+      );
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    }
+  };
+
   const field = (
     label: string,
     key: keyof DelegationConfig,
@@ -215,7 +420,7 @@ export function AgentsSettings() {
             [key]: type === "number" ? Number(e.target.value) : e.target.value,
           }))
         }
-        className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text font-mono text-foreground/70 text-center placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/30 transition-colors"
+        className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text font-mono text-foreground/70 text-center placeholder:text-muted-foreground/30 transition-colors"
       />
     </SettingRow>
   );
@@ -295,7 +500,7 @@ export function AgentsSettings() {
                                   })
                                 }
                                 placeholder="如 researcher"
-                                className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text font-semibold text-foreground text-center placeholder:text-muted-foreground/30 placeholder:font-normal focus:outline-none focus:border-primary/30 transition-colors"
+                                className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text font-semibold text-foreground text-center placeholder:text-muted-foreground/30 placeholder:font-normal transition-colors"
                               />
                               <Button
                                 size="icon"
@@ -321,7 +526,7 @@ export function AgentsSettings() {
                                 })
                               }
                               placeholder="系统提示词 / 人格描述…"
-                              className="w-72 min-h-[80px] px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground text-left placeholder:text-muted-foreground/30 focus:outline-none focus:border-primary/30 resize-y transition-colors"
+                              className="w-72 min-h-[80px] px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground text-left placeholder:text-muted-foreground/30 resize-y transition-colors"
                             />
                           </SettingRow>
                         </>
@@ -345,11 +550,6 @@ export function AgentsSettings() {
                   </SettingRow>
                 </SettingGroup>
 
-                {err && (
-                  <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400 pt-2">
-                    {err}
-                  </p>
-                )}
                 <div className="flex items-center justify-end gap-3 pt-4">
                   <Button
                     size="sm"
@@ -375,6 +575,35 @@ export function AgentsSettings() {
               .map((i) => (
                 <SubagentItem key={i.id} i={i} remove={removeIdentity} />
               ))}
+
+            {err && (
+              <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400 pt-2">
+                {err}
+              </p>
+            )}
+
+            {presets.length > 0 && (
+              <div className="pt-2 space-y-3">
+                <div className="flex items-center gap-2">
+                  <h4 className="ui-text font-semibold text-foreground/80">
+                    pi-subagents 预设
+                  </h4>
+                  <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
+                    来自扩展 · 可禁用 / 启用 / 删除
+                  </span>
+                </div>
+                <div className="space-y-2.5">
+                  {presets.map((p) => (
+                    <PresetSubagentItem
+                      key={p.id}
+                      p={p}
+                      onToggle={togglePreset}
+                      onDelete={deletePreset}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

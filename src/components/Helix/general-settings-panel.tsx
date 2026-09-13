@@ -197,7 +197,7 @@ export function GeneralSettingsPanel() {
               value={proxyUrl}
               onChange={(e) => setProxyUrl(e.target.value)}
               placeholder="例如 http://127.0.0.1:7890"
-              className="w-64 ui-text-sm2 px-2 py-1 rounded-md border border-border bg-background text-foreground outline-none focus:border-primary"
+              className="w-64 ui-text-sm2 px-2 py-1 rounded-md border border-border bg-background text-foreground"
             />
             <Button
               size="sm"
@@ -219,7 +219,7 @@ export function GeneralSettingsPanel() {
               value={dataRootPath}
               onChange={(e) => setDataRootPath(e.target.value)}
               placeholder={dataRootInfo.dataRootDefault || "未设置"}
-              className="w-72 ui-text-sm2 px-2 py-1 rounded-md border border-border bg-background text-foreground outline-none focus:border-primary"
+              className="w-72 ui-text-sm2 px-2 py-1 rounded-md border border-border bg-background text-foreground"
             />
             <Button size="sm" variant="outline" onClick={pickDataRoot}>
               选择文件夹

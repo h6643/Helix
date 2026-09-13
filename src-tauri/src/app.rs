@@ -159,13 +159,27 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
     // as strings, so a case/separator mismatch would make a later scanTree fail
     // with "Path is outside working directory".
     let canonical = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+    // No-op: same directory already active — skip restart + persist entirely.
+    {
+        let current = state
+            .work_dir
+            .read()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let is_same = crate::pi_gateway::same_path(&current, canonical.to_str().unwrap_or(""));
+        if is_same {
+            return json!({ "success": true, "workDir": display_path(&canonical), "unchanged": true });
+        }
+    }
     *state.work_dir.write().unwrap() = canonical.clone();
     state.add_allowed_root(canonical.to_str().unwrap_or(""));
     persist_work_dir(canonical.to_str().unwrap_or(""));
-    // Backend cwd is fixed at spawn time — restart to apply.
-    kill_current(&state);
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let _ = spawn_gateway(&state);
+    // Backend cwd is fixed at spawn time — restart to apply. Use the
+    // overlapping (non-blocking) restart: the replacement handshakes while
+    // the old main keeps serving, so the Tauri command returns instantly
+    // instead of blocking on sleep(300ms) + cold spawn.
+    crate::gateway::restart_gateway_now(&state);
     json!({ "success": true, "workDir": display_path(&canonical) })
 }
 
