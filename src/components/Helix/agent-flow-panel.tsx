@@ -33,10 +33,23 @@ import React, {
   useMemo,
 } from "react";
 import { createPortal } from "react-dom";
+import {
+  ApprovalDialog,
+  ClarifyBar,
+  PlanReviewBar,
+  type ApprovalRequest,
+  type PlanReviewRequest,
+} from "./approval-dialog";
+import { ContextUsageIndicator } from "./context-usage";
+import { FileChangeSummary } from "./file-change-summary";
+import { FileChangeSummaryCard } from "./file-change-summary-card";
+import { HelixMarkdown } from "./helix-markdown";
+import { HistoryStrip } from "./history-strip";
+import { InlineToolGroup, summarizeGroupDiff } from "./inline-tool-group";
+import { ScheduledTaskConfirm } from "./scheduled-task-confirm";
 import { Button } from "@/components/ui/button";
-import type { ApprovalMode, ReasoningEffortLevel } from "@/stores/helix-types";
-import { useProviderStore } from "@/stores/slices/provider-store";
 import { pushModelConfig } from "@/lib/config-sync";
+import { captureContextBreakdown } from "@/lib/context-capture";
 import {
   isElectron,
   electronDialog,
@@ -51,6 +64,7 @@ import {
   blobToDataUrl,
   compressImage,
 } from "@/lib/image-utils";
+import { debug } from "@/lib/logger";
 import { buildAcpMcpServers } from "@/lib/mcp";
 import {
   detectScheduledTasks,
@@ -58,57 +72,6 @@ import {
   type DetectedTask,
 } from "@/lib/schedule-utils";
 import { isServeActive } from "@/lib/serve-gateway";
-import { debug } from "@/lib/logger";
-import {
-  decodeBase64Utf8,
-  extractThinkTags,
-  normalizeAcpContent,
-  normalizeAcpContentRaw,
-  stripEmoji,
-  extractKaomojiStatus,
-} from "@/lib/text-utils";
-import { ContextUsageIndicator } from "./context-usage";
-
-import { getToolDisplayLabel } from "@/lib/tool-display-utils";
-import { InlineToolGroup, toolActionText, toolVerb } from "./inline-tool-group";
-import { HistoryStrip } from "./history-strip";
-import { FileChangeSummaryCard } from "./file-change-summary-card";
-import { FileChangeSummary } from "./file-change-summary";
-import {
-  ApprovalDialog,
-  ClarifyBar,
-  PlanReviewBar,
-  type ApprovalRequest,
-  type PlanReviewRequest,
-} from "./approval-dialog";
-import type { ApprovalLevel } from "@/stores/helix-types";
-import { ScheduledTaskConfirm } from "./scheduled-task-confirm";
-import {
-  useHelixStore,
-  type ImageAttachment,
-  type FileAttachment,
-  type LinkAttachment,
-  type ExecutionStep,
-  type StreamingResponseBlock,
-} from "@/stores/helix-store";
-import { useGatewayStore } from "@/stores/gateway-store";
-import type {
-  ChatMessage,
-  HelixTodo,
-  PendingChange,
-} from "@/stores/helix-types";
-import { HelixMarkdown } from "./helix-markdown";
-
-// ── Persisted per-conversation backend session map ──────────────────────────
-// `sessionMapRef` lives in component memory and is wiped on every app restart.
-// We persist it so a conversation keeps remembering its backend session
-// id across restarts. BUT backend sessions are ephemeral: the gateway
-// respawns on app launch and kills them all. So a restored id is only valid if
-// its recorded gateway `epoch` still matches the live epoch — otherwise it's a
-// dead id and must be treated as missing (the run path recreates it on demand,
-// and the context-usage indicator falls back to the per-conversation store).
-// SessionMapEntry / SESSION_MAP_KEY / loadSessionMap / resolveBackendSid 已迁移到
-// @/lib/session-map 模块，供多个组件复用；这里仅导入所需引用。
 import {
   SESSION_MAP_KEY,
   loadSessionMap,
@@ -120,7 +83,44 @@ import {
   resyncCurrentSessionFromBackend,
   isCurrentSessionRenderBroken,
 } from "@/lib/session-resync";
-import { captureContextBreakdown } from "@/lib/context-capture";
+import {
+  decodeBase64Utf8,
+  extractThinkTags,
+  normalizeAcpContent,
+  normalizeAcpContentRaw,
+  stripEmoji,
+  extractKaomojiStatus,
+} from "@/lib/text-utils";
+
+import { getToolDisplayLabel } from "@/lib/tool-display-utils";
+import { useGatewayStore } from "@/stores/gateway-store";
+import {
+  useHelixStore,
+  type ImageAttachment,
+  type FileAttachment,
+  type LinkAttachment,
+  type ExecutionStep,
+  type StreamingResponseBlock,
+} from "@/stores/helix-store";
+import type { ApprovalLevel } from "@/stores/helix-types";
+import type {
+  ChatMessage,
+  HelixTodo,
+  PendingChange,
+} from "@/stores/helix-types";
+
+// ── Persisted per-conversation backend session map ──────────────────────────
+// `sessionMapRef` lives in component memory and is wiped on every app restart.
+// We persist it so a conversation keeps remembering its backend session
+// id across restarts. BUT backend sessions are ephemeral: the gateway
+// respawns on app launch and kills them all. So a restored id is only valid if
+// its recorded gateway `epoch` still matches the live epoch — otherwise it's a
+// dead id and must be treated as missing (the run path recreates it on demand,
+// and the context-usage indicator falls back to the per-conversation store).
+// SessionMapEntry / SESSION_MAP_KEY / loadSessionMap / resolveBackendSid 已迁移到
+// @/lib/session-map 模块，供多个组件复用；这里仅导入所需引用。
+import type { ApprovalMode, ReasoningEffortLevel } from "@/stores/helix-types";
+import { useProviderStore } from "@/stores/slices/provider-store";
 
 async function persistSessionMap(map: Map<string, SessionMapEntry>) {
   try {
@@ -162,25 +162,20 @@ function mergeAdjacentThinking(
   return out;
 }
 
-// 交替段切分：按时间序把过程区切成「思考段 / 工具段」的交替序列，
-// 保住模型"思考→执行→再思考→再执行"的叙事节奏（不是全部压成一坨）。
+// 交替段切分：按时间序把过程区切成「思考段 / 工具段 / 文本段」的交替序列，
+// 保住模型"思考→执行→总结→再思考→再执行→再总结"的叙事节奏。
 // 相邻同类块归入同段（两批工具之间的思考是独立段，段内多个工具合并）。
-// text / file_change 块归入当时的工具段（过程区里它们通常紧跟工具出现，
-// 不值得独立成段）。
 function segmentizeProcessBlocks<T extends { type: string }>(
   blocks: T[],
 ): ProcessSegment<T>[] {
   const segs: ProcessSegment<T>[] = [];
   for (const block of blocks) {
-    // 思考 / 文本 / 文件变更 各自独立成段（保住时序交替）；其余归入 tasks 段。
-    const kind: ProcessSegment<T>["kind"] =
+    const kind: "thinking" | "tasks" | "text" =
       block.type === "thinking"
         ? "thinking"
         : block.type === "text"
           ? "text"
-          : block.type === "file_change"
-            ? "file"
-            : "tasks";
+          : "tasks";
     const prev = segs[segs.length - 1];
     if (prev && prev.kind === kind) {
       prev.blocks.push(block);
@@ -192,7 +187,7 @@ function segmentizeProcessBlocks<T extends { type: string }>(
 }
 
 type ProcessSegment<T extends { type: string }> = {
-  kind: "text" | "thinking" | "tasks" | "file";
+  kind: "text" | "thinking" | "tasks";
   blocks: T[];
 };
 
@@ -220,30 +215,9 @@ function mergeThinkingContents(contents: string[]): string {
       merged = cur.length > merged.length ? cur : merged;
       continue;
     }
-    const separator = cur.startsWith(merged) ? "\n" : "\n\n";
-    merged = `${merged}${separator}${cur}`;
+    merged = `${merged}\n\n${cur}`;
   }
-  return normalizeThinkingText(merged);
-}
-
-function dedupeThinkingBlocks<T extends { type: string; content?: string }>(
-  blocks: T[],
-): T[] {
-  let previous: string[] = [];
-  return blocks.map((block) => {
-    if (block.type !== "thinking") return block;
-    const content = String(block.content || "");
-    if (previous.length === 0) {
-      previous = [content];
-      return block;
-    }
-    const prefix = previous
-      .filter((item) => item && content.startsWith(item))
-      .sort((a, b) => b.length - a.length)[0];
-    const next = prefix ? content.slice(prefix.length).trim() : content;
-    previous = [...previous, content];
-    return next === content ? block : { ...block, content: next };
-  });
+  return merged;
 }
 
 // 过程区折叠标题:轻量一行(chevron + 标题词),完成后不再是高权重大标题,
@@ -298,9 +272,20 @@ const ThinkingFold = React.memo(function ThinkingFold({
   searchQuery: string;
   isSearchActive: boolean;
 }) {
-  const { status: kaomojiStatus, body: rawBody } =
-    extractKaomojiStatus(content);
-  const body = useMemo(() => normalizeThinkingText(rawBody), [rawBody]);
+  const { status: kaomojiStatus, body: rawBody } = extractKaomojiStatus(content);
+  // 空行规整：流式思考里后端/模型常连发多个空行，pre-wrap + markdown
+  // 段落间距叠加会把它们渲染成大片视觉空白。连续空行压成单个，行内
+  // 首尾空白去掉。
+  const body = useMemo(
+    () =>
+      rawBody
+        .split("\n")
+        .map((l) => l.trimEnd())
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim(),
+    [rawBody],
+  );
   // 流式态摘要 = 尾行实时预览（当前想到哪写到哪），完成后 = 首行摘要。
   const summary = useMemo(() => {
     const lines = body
@@ -313,7 +298,7 @@ const ThinkingFold = React.memo(function ThinkingFold({
 
   // 点开过才保持展开（本地 state）；流式的"思考中"脉冲只由 active 决定。
   const [userOpen, setUserOpen] = useState(false);
-  const open = userOpen;
+  const open = active || userOpen;
   const bodyRef = useRef<HTMLDivElement | null>(null);
   // 思考中 + 已展开 → 限高体内自动贴底跟随（用户上翻查看时 scrollTop 由
   // 浏览器保持，effect 只在内容变化时拉到底会打断上翻——所以仅 active 时拉）。
@@ -344,6 +329,8 @@ const ThinkingFold = React.memo(function ThinkingFold({
             · {formatDuration(duration)}
           </span>
         ) : null}
+
+        <FoldChevron />
       </summary>
       <div
         ref={bodyRef}
@@ -415,49 +402,44 @@ const ToolStreamFold = React.memo(function ToolStreamFold({
   children: React.ReactNode;
 }) {
   const { verbs, total } = useMemo(() => summarizeTaskBlocks(blocks), [blocks]);
-  if (total === 0) return <>{children}</>;
+  const diff = useMemo(() => summarizeGroupDiff(blocks), [blocks]);
+  if (total <= 1) return <>{children}</>;
   // 动词去重统计：读取 5 · 执行 2 · 编辑 1
   const counts = new Map<string, number>();
   for (const v of verbs) counts.set(v, (counts.get(v) || 0) + 1);
   const verbStats = [...counts.entries()].map(([v, n]) => `${v} ${n}`);
-  
-  // 当只有一个工具调用时，显示具体命令文本而非计数
-  const singleToolLabel = useMemo(() => {
-    if (total !== 1) return null;
-    for (const b of blocks) {
-      if (b.type !== "tool_group" || !b.steps) continue;
-      for (const s of b.steps) {
-        if (s.type !== "tool_call") continue;
-        const action = toolActionText(s);
-        if (!action) return null;
-        const verb = toolVerb(s.toolName || "");
-        return `${verb} ${action}`;
-      }
-    }
-    return null;
-  }, [blocks, total]);
-
   return (
     <details className="group/details">
       <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
-        <span className="tool-glyph" aria-hidden>
-          ⏺
+        <span
+          className="text-foreground/40 font-normal select-none"
+          style={{ fontSize }}
+        >
+          {total} 个操作
         </span>
-        {singleToolLabel ? (
-          <span
-            className="text-foreground/25 select-none truncate"
-            style={{ fontSize }}
-          >
-            {singleToolLabel}
-          </span>
-        ) : verbStats.length > 0 ? (
+        {verbStats.length > 0 && (
           <span
             className="text-foreground/25 select-none truncate"
             style={{ fontSize }}
           >
             · {verbStats.join(" · ")}
           </span>
-        ) : null}
+        )}
+        {/* 整组 diff 汇总：+N −n 贴摘要行最右侧，收起时也能看出这轮改了多少行 */}
+        {(diff.added > 0 || diff.removed > 0) && (
+          <span
+            className="ml-auto shrink-0 tabular-nums flex items-center gap-1"
+            style={{ fontSize }}
+          >
+            {diff.added > 0 && (
+              <span className="text-emerald-500/70">+{diff.added}</span>
+            )}
+            {diff.removed > 0 && (
+              <span className="text-rose-500/70">−{diff.removed}</span>
+            )}
+          </span>
+        )}
+        <FoldChevron />
       </summary>
       <div className="mt-1">{children}</div>
     </details>
@@ -583,33 +565,6 @@ function isNearDuplicate(aN: string, bN: string): boolean {
   );
 }
 
-function mergeThinkingStreams(current: string, incoming: string): string {
-  const cur = String(current || "");
-  const inc = String(incoming || "");
-  const curN = normalizeForCompare(cur);
-  const incN = normalizeForCompare(inc);
-  if (!incN) return cur;
-  if (!curN) return inc;
-  if (incN.startsWith(curN) || incN.includes(curN)) return inc;
-  if (curN.startsWith(incN) || curN.includes(incN)) return cur;
-  if (textSimilarityRatio(curN, incN) >= 0.85) {
-    return inc.length > cur.length ? inc : cur;
-  }
-  return cur + inc;
-}
-
-function normalizeThinkingText(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(
-      (line, index, lines) => line.length > 0 || !lines[index - 1]?.trim(),
-    )
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
 // reconcileBlocksWithContent repairs streaming-accumulated text blocks using
 // the authoritative msg.content. The forwarding chain intermittently drops
 // whitespace/newlines inside streamed chunks (e.g. "**加粗** 后" glued into
@@ -622,9 +577,8 @@ function normalizeThinkingText(text: string): string {
 // content, never skip. Old logic would skip replacement when blocks matched
 // content (normalized comparison), but that left streaming-stage raw text
 // rendered alongside done-stage preprocessed text, causing duplicate display.
-// Now we always replace streaming-accumulated text with the authoritative
-// (preprocessed) version, keeping the text block at its ORIGINAL position
-// (no longer pinned to the end) so thinking/tool/text render in true order.
+// Now we always consolidate ALL text into a single block at the END of the
+// block list, ensuring only the authoritative (preprocessed) version renders.
 function reconcileBlocksWithContent(
   blocks: NonNullable<ChatMessage["blocks"]>,
   content?: string | null,
@@ -644,11 +598,25 @@ function reconcileBlocksWithContent(
   )
     return blocks;
   if (content.length < joined.length) return blocks;
-  const firstTextBlock = textBlocks[0];
-  return [
-    ...blocks.map((b) => (b.type === "text" ? { ...b, content: "" } : b)),
-    { ...firstTextBlock, content },
-  ];
+  // Same-or-fuller authoritative text: consolidate ALL text into a single
+  // block pinned to the END of the block list, after every thinking /
+  // tool_group / file_change block. Earlier text blocks are blanked
+  // (normalizeTextBlocks filters empty ones).
+  //
+  // Why pin to the end instead of keeping the first/last text block's
+  // original position: this model (and several reasoning providers) emits
+  // thinking chunks AFTER the final answer text, so the block list can be
+  // [text, thinking] or [thinking, text, thinking]. If the consolidated
+  // answer stays at an early position, the renderer's lastTextIndex split
+  // puts the trailing thinking cards into the "answer" zone — the user sees
+  // the conclusion first and a collapsed 思考 card dangling BELOW it
+  // (2026-08-18 bug). The answer text is semantically the final word of the
+  // run, so pinning it last is always correct.
+  const lastTextBlock = textBlocks[textBlocks.length - 1];
+  const rest = blocks.map((b) =>
+    b.type === "text" ? { ...b, content: "" } : b,
+  );
+  return [...rest, { ...lastTextBlock, content }];
 }
 
 function normalizeTextBlocks(
@@ -838,12 +806,12 @@ const EXFIL_CMD_RE =
   /\bcurl\b[^\n]*\s(-T|-F|--upload-file|--data-binary|--data @)|\bscp\b|\brsync\b|\bgit\s+push\b|\bnc\s+-|\bncat\b|\bftp\b.*\bput\b/i;
 /** 敏感文件路径片段 */
 const SENSITIVE_PATH_RE =
-  /(\.ssh[\/\\]|id_rsa|id_ed25519|\.pem\b|\.key\b|\.env\b|credentials|\.aws[\/\\]|\.gnupg[\/\\]|\.kube[\/\\]config|ntuser\.dat|sam$)/i;
+  /(.ssh[/\\]|id_rsa|id_ed25519|.pem\b|.key\b|.env\b|credentials|.aws[/\\]|.gnupg[/\\]|.kube[/\\]config|ntuser\.dat|sam$)/i;
 /** 项目内文件写工具名（这些命中且路径在项目内 → auto） */
 const FILE_WRITE_TOOL_RE =
   /write_file|create_file|edit|patch|str_replace|apply_patch/i;
 /** 项目内文件读工具名（这些命中且路径在项目内 → auto） */
-const FILE_READ_TOOL_RE = /read_file|cat|head|tail/i;
+const _FILE_READ_TOOL_RE = /read_file|cat|head|tail/i;
 
 /** 从命令/描述文本里提取形如绝对路径的片段（用于“项目外访问”判断） */
 function extractAbsPaths(text: string): string[] {
@@ -950,7 +918,7 @@ function isTextualFile(file: File): boolean {
   return TEXTUAL_EXT.test(file.name);
 }
 
-function readFileAsText(file: File): Promise<string> {
+function _readFileAsText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result as string);
@@ -1002,82 +970,6 @@ function formatDuration(seconds: number): string {
   return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
-// Isolated so the 200ms ticking only re-renders this tiny node, not the whole
-// conversation panel — the old implementation called a parent-level setState
-// every 200ms, forcing the entire agent-flow-panel to re-render 5×/sec.
-function ThinkingTimer({
-  questionStartTs,
-  isRunning,
-}: {
-  questionStartTs: number;
-  isRunning: boolean;
-}) {
-  const [duration, setDuration] = useState(0);
-  useEffect(() => {
-    if (!isRunning || !questionStartTs) {
-      setDuration(0);
-      return;
-    }
-    const tick = () =>
-      setDuration(Math.round((Date.now() - questionStartTs) / 1000));
-    tick();
-    const id = setInterval(tick, 200);
-    return () => clearInterval(id);
-  }, [isRunning, questionStartTs]);
-  return <>{formatDuration(duration)}</>;
-}
-
-// Quick command templates
-const QUICK_COMMANDS: { cmd: string; label: string; prompt: string }[] = [
-  {
-    cmd: "/review",
-    label: "代码审查",
-    prompt:
-      "请审查当前代码变更，检查安全漏洞、性能问题、代码风格，并给出改进建议。",
-  },
-  {
-    cmd: "/fix",
-    label: "修复问题",
-    prompt: "请分析并修复当前存在的问题。先定位根因，再给出最小改动方案。",
-  },
-  {
-    cmd: "/test",
-    label: "编写测试",
-    prompt: "请为当前代码编写单元测试，覆盖主要功能路径和边界情况。",
-  },
-  {
-    cmd: "/doc",
-    label: "生成文档",
-    prompt: "请为当前代码生成清晰的文档注释，包括函数说明、参数说明和示例。",
-  },
-  {
-    cmd: "/refactor",
-    label: "重构优化",
-    prompt:
-      "请重构当前代码，提高可读性、可维护性，消除重复代码，但不改变功能。",
-  },
-  {
-    cmd: "/explain",
-    label: "解释代码",
-    prompt: "请详细解释当前代码的工作原理、设计思路和关键实现细节。",
-  },
-  {
-    cmd: "/security",
-    label: "安全审查",
-    prompt:
-      "请对当前代码进行安全审查，检查 OWASP Top 10 漏洞、输入验证、权限控制等。",
-  },
-  {
-    cmd: "/optimize",
-    label: "性能优化",
-    prompt: "请分析当前代码的性能瓶颈，并给出具体的优化方案。",
-  },
-  {
-    cmd: "/summary",
-    label: "代码总结",
-    prompt: "请总结当前代码的功能、架构和主要模块，给出一份简洁的概述。",
-  },
-];
 
 // Schedule parsing — extracted to lib/schedule-utils.ts
 
@@ -1125,7 +1017,7 @@ function CopyButton({
 
 // ==== Empty State ====================================================================================
 
-function EmptyState() {
+function _EmptyState() {
   return null;
 }
 
@@ -1145,7 +1037,7 @@ function ReasoningEffortControl({
   onChange,
 }: {
   value: ReasoningEffortLevel;
-  onChange: (v: ReasoningEffortLevel) => void;
+  onChange: (_v: ReasoningEffortLevel) => void;
 }) {
   const idx = REASONING_OPTIONS.findIndex((o) => o.value === value);
   const safeIdx = idx < 0 ? 2 : idx;
@@ -1223,7 +1115,7 @@ function ReasoningEffortControl({
     setIsDragging(false);
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {}
+    } catch { /* no-op */ }
   }, []);
 
   return (
@@ -1514,7 +1406,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
   searchQuery: string;
   isSearchMatch: boolean;
   isSearchActive: boolean;
-  onFork: (id: string) => void;
+  onFork: (_id: string) => void;
   onUndo?: () => void;
 }) {
   const content = useMemo(
@@ -1526,7 +1418,7 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
     [msg.content],
   );
   const reasoning = useMemo(
-    () => normalizeThinkingText(normalizeAcpContentRaw(msg.reasoning || "")),
+    () => normalizeAcpContentRaw(msg.reasoning || ""),
     [msg.reasoning],
   );
   const messageDuration = msg.duration ?? msg.thinkingTime;
@@ -1553,166 +1445,248 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 // 交替展示：按时间序把过程切成「思考段 / 工具段」交替（保住
                 // "思考→执行→再思考→再执行"的叙事节奏），段内合并同类块。
                 // 每段一张折叠卡（思考段 / N 个操作），持久化结构不受影响。
-                const normalizedBlocks = dedupeThinkingBlocks(
-                  mergeAdjacentThinking(
-                    normalizeTextBlocks(
-                      reconcileBlocksWithContent(msg.blocks, msg.content),
-                    ),
+                const normalizedBlocks = mergeAdjacentThinking(
+                  normalizeTextBlocks(
+                    reconcileBlocksWithContent(msg.blocks, msg.content),
                   ),
                 );
+                // 保持原始交替顺序：思考/工具/文本按时间序排列，
+                // 不再合并文本到末尾，确保思考→执行→总结的交叉节奏。
+                const consolidatedBlocks = normalizedBlocks;
+                const lastTextIndex = consolidatedBlocks.reduce(
+                  (acc, b, i) =>
+                    b.type === "text" && String(b.content || "").trim()
+                      ? i
+                      : acc,
+                  -1,
+                );
+                const processBlocks =
+                  lastTextIndex >= 0
+                    ? consolidatedBlocks.slice(0, lastTextIndex)
+                    : consolidatedBlocks;
+                const answerBlocks =
+                  lastTextIndex >= 0
+                    ? consolidatedBlocks.slice(lastTextIndex)
+                    : [];
                 const showInlineReasoning = !!(
                   msg.reasoning &&
                   msg.reasoning.trim().length > 0 &&
                   !(msg.blocks && msg.blocks.some((b) => b.type === "thinking"))
                 );
-                // ① 按原始流顺序渲染：不再把文本钉到末尾（2026-08-18 的 pin
-                // 逻辑已移除）。思考/工具/文本按真实时序交替呈现，文本块内联在
-                // 它实际出现的位置。若模型把思考发在答案之后，会出现"结论先出、
-                // 思考吊在下面"——这正是真·交叉显示，接受该取舍。
-                const orderedBlocks = normalizedBlocks;
+                // 交替段：思考段一张折叠卡，工具段一张折叠卡。
+                const processSegments = segmentizeProcessBlocks(processBlocks);
                 // 完成态摘要的操作计数：N 个操作。
-                const processOpCount = summarizeTaskBlocks(
-                  orderedBlocks.filter((b) => b.type === "tool_group"),
-                ).total;
-                const hasReasoningContent =
-                  showInlineReasoning ||
-                  orderedBlocks.some(
-                    (b) =>
-                      b.type === "thinking" ||
-                      b.type === "tool_group" ||
-                      b.type === "file_change",
-                  );
-                const processSegments = segmentizeProcessBlocks(
-                  orderedBlocks.filter((b) => b.type !== "text"),
-                );
-                const answerText = orderedBlocks
-                  .filter((b) => b.type === "text")
-                  .map((b) => String(b.content || ""))
-                  .join("");
+                const processOpCount = summarizeTaskBlocks(processBlocks).total;
+                const hasProcess =
+                  processSegments.length > 0 || showInlineReasoning;
                 const processDuration =
                   !isStreaming && (messageDuration ?? 0) > 0
                     ? formatDuration(messageDuration ?? 0)
                     : "";
-                // 段内渲染：每个交替段按其 kind 渲染（思考/文件/工具）。
-                const segmentNodes = processSegments.map((seg, si) => {
-                  if (seg.kind === "thinking") {
-                    const segContent = mergeThinkingContents(
-                      seg.blocks.map((b) =>
-                        b.type === "thinking" ? String(b.content || "") : "",
-                      ),
-                    );
-                    if (!segContent.trim()) return null;
-                    return (
-                      <ThinkingFold
-                        key={si}
-                        content={segContent}
-                        fontSize={fontSize}
-                        duration={msg.thinkingTime}
-                        searchOpen={searchOpen}
-                        searchQuery={searchQuery}
-                        isSearchActive={isSearchActive}
-                      />
-                    );
-                  }
-                  if (seg.kind === "file") {
-                    return (
-                      <div key={si} className="my-2">
-                        {seg.blocks.map((b, fi) =>
-                          b.type === "file_change" ? (
-                            <FileChangeSummary key={fi} changes={b.changes} />
-                          ) : null,
-                        )}
-                      </div>
-                    );
-                  }
-                  // tasks 段：连续工具调用合并为一张「N 个操作」折叠卡。
-                  const toolBlocks = seg.blocks.filter(
-                    (b) => b.type === "tool_group",
-                  );
-                  const otherBlocks = seg.blocks.filter(
-                    (b) => b.type === "file_change",
-                  );
-                  return (
-                    <div key={si} className="space-y-1">
-                      {otherBlocks.map((b, i) => {
-                        if (b.type === "file_change") {
-                          return (
-                            <FileChangeSummary key={i} changes={b.changes} />
-                          );
-                        }
-                        return null;
-                      })}
-                      {toolBlocks.length > 0 && (
-                        <ToolStreamFold blocks={toolBlocks} fontSize={fontSize}>
-                          {toolBlocks.map((tb, tbi) => (
-                            <InlineToolGroup
-                              key={tbi}
-                              steps={tb.steps}
-                              isRunning={false}
-                              fontSize={fontSize}
-                            />
-                          ))}
-                        </ToolStreamFold>
-                      )}
-                    </div>
-                  );
-                });
-                const processContent = hasReasoningContent ? (
-                  <details className="my-2 group/details" open>
-                    <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
-                      <FoldTitle
-                        label={isStreaming ? "工作中" : "已完成"}
-                        active={isStreaming}
-                        fontSize={fontSize}
-                      />
-                      {!isStreaming && processDuration ? (
-                        <span className="tabular-nums text-foreground/25">
-                          {processDuration}
-                        </span>
-                      ) : null}
-                    </summary>
-                    <div className="mt-1">
-                      {showInlineReasoning && (
-                        <ThinkingFold
-                          content={msg.reasoning ?? ""}
-                          fontSize={fontSize}
-                          searchOpen={searchOpen}
-                          searchQuery={searchQuery}
-                          isSearchActive={isSearchActive}
-                        />
-                      )}
-                      <div className="my-2 space-y-2">{segmentNodes}</div>
-                    </div>
-                  </details>
-                ) : (
-                  <div className="my-2 space-y-2">{segmentNodes}</div>
-                );
                 return (
                   <>
-                    {processContent}
-                    {answerText.trim() ? (
+                    {hasProcess && (
+                      // 二级折叠：外层「过程」把本轮所有中间产物（思考 + 任务执行）
+                      // 收成一行；展开后才是原来各自独立的思考/任务执行折叠。
+                      // 流式期间默认展开（能看进度），结束后自动收起。
+                      <details
+                        className="my-2 group/details"
+                        open={isStreaming}
+                      >
+                        <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
+                          <FoldTitle
+                            label={isStreaming ? "" : "已完成"}
+                            active={isStreaming}
+                            fontSize={fontSize}
+                          />
+                          {!isStreaming && processDuration ? (
+                            <span className="tabular-nums text-foreground/25">
+                              {processDuration}
+                            </span>
+                          ) : null}
+                          <FoldChevron />
+                        </summary>
+                        <div className="mt-1">
+                          {showInlineReasoning && (
+                            <ThinkingFold
+                              content={reasoning}
+                              fontSize={fontSize}
+                              active={isStreaming}
+                              duration={messageDuration}
+                              searchOpen={searchOpen}
+                              searchQuery={searchQuery}
+                              isSearchActive={isSearchActive}
+                            />
+                          )}
+                          <div className="my-2 space-y-2">
+                            {processSegments.map((seg, si) => {
+                              // 交替段：思考段一张 ThinkingFold，工具段一张
+                              // ToolStreamFold，文本段按原样渲染 markdown。
+                              if (seg.kind === "thinking") {
+                                const segContent = mergeThinkingContents(
+                                  seg.blocks.map((b) =>
+                                    b.type === "thinking"
+                                      ? String(b.content || "")
+                                      : "",
+                                  ),
+                                );
+                                if (!segContent.trim()) return null;
+                                return (
+                                  <ThinkingFold
+                                    key={si}
+                                    content={segContent}
+                                    fontSize={fontSize}
+                                    duration={msg.thinkingTime}
+                                    searchOpen={searchOpen}
+                                    searchQuery={searchQuery}
+                                    isSearchActive={isSearchActive}
+                                  />
+                                );
+                              }
+                              const toolBlocks = seg.blocks.filter(
+                                (b) => b.type === "tool_group",
+                              );
+                              const otherBlocks = seg.blocks.filter(
+                                (b) =>
+                                  b.type !== "tool_group" &&
+                                  b.type !== "thinking",
+                              );
+                              return (
+                                <div key={si} className="space-y-1">
+                                  {otherBlocks.map((b, i) => {
+                                    if (b.type === "text") {
+                                      return (
+                                        <div key={i} style={{ fontSize }}>
+                                          {searchOpen && searchQuery.trim() ? (
+                                            <div
+                                              className="whitespace-pre-wrap break-words"
+                                              style={{ fontSize }}
+                                            >
+                                              <HighlightText
+                                                text={normalizeAcpContentRaw(
+                                                  b.content,
+                                                )}
+                                                query={searchQuery}
+                                                active={isSearchActive}
+                                              />
+                                            </div>
+                                          ) : (
+                                            <HelixMarkdown
+                                              text={normalizeAcpContentRaw(
+                                                b.content,
+                                              )}
+                                            />
+                                          )}
+                                        </div>
+                                      );
+                                    }
+                                    if (b.type === "file_change") {
+                                      return (
+                                        <FileChangeSummary
+                                          key={i}
+                                          changes={b.changes}
+                                        />
+                                      );
+                                    }
+                                    return null;
+                                  })}
+                                  {toolBlocks.length > 0 && (
+                                    <ToolStreamFold
+                                      blocks={toolBlocks}
+                                      fontSize={fontSize}
+                                    >
+                                      {toolBlocks.map((tb, tbi) => (
+                                        <InlineToolGroup
+                                          key={tbi}
+                                          steps={tb.steps}
+                                          isRunning={false}
+                                          fontSize={fontSize}
+                                        />
+                                      ))}
+                                    </ToolStreamFold>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </details>
+                    )}
+                    {answerBlocks.length > 0 && (
                       <div
                         className="helix-md helix-answer mt-3"
                         style={{ fontSize }}
                       >
-                        {searchOpen && searchQuery.trim() ? (
-                          <div
-                            className="whitespace-pre-wrap break-words"
-                            style={{ fontSize }}
-                          >
-                            <HighlightText
-                              text={normalizeAcpContentRaw(answerText)}
-                              query={searchQuery}
-                              active={isSearchActive}
-                            />
-                          </div>
-                        ) : (
-                          <HelixMarkdown
-                            text={normalizeAcpContentRaw(answerText)}
-                          />
-                        )}
+                        {buildProcessSegments(answerBlocks).map((seg, si) => {
+                          return (
+                            <div key={si} className="space-y-1">
+                              {seg.blocks.map((b, i) => {
+                                if (b.type === "text") {
+                                  return (
+                                    <div key={i} style={{ fontSize }}>
+                                      {searchOpen && searchQuery.trim() ? (
+                                        <div
+                                          className="whitespace-pre-wrap break-words"
+                                          style={{ fontSize }}
+                                        >
+                                          <HighlightText
+                                            text={normalizeAcpContentRaw(
+                                              b.content,
+                                            )}
+                                            query={searchQuery}
+                                            active={isSearchActive}
+                                          />
+                                        </div>
+                                      ) : (
+                                        <HelixMarkdown
+                                          text={normalizeAcpContentRaw(
+                                            b.content,
+                                          )}
+                                        />
+                                      )}
+                                    </div>
+                                  );
+                                }
+                                if (b.type === "thinking") {
+                                  const content =
+                                    "content" in b ? String(b.content) : "";
+                                  if (!content.trim()) return null;
+                                  return (
+                                    <ThinkingFold
+                                      key={i}
+                                      content={content}
+                                      fontSize={fontSize}
+                                      searchOpen={searchOpen}
+                                      searchQuery={searchQuery}
+                                      isSearchActive={isSearchActive}
+                                    />
+                                  );
+                                }
+                                if (b.type === "tool_group") {
+                                  return (
+                                    <InlineToolGroup
+                                      key={i}
+                                      steps={b.steps}
+                                      isRunning={false}
+                                      fontSize={fontSize}
+                                    />
+                                  );
+                                }
+                                if (b.type === "file_change") {
+                                  return (
+                                    <FileChangeSummary
+                                      key={b.changes?.[0]?.fileId || `fc-${i}`}
+                                      changes={b.changes}
+                                    />
+                                  );
+                                }
+                                return null;
+                              })}
+                            </div>
+                          );
+                        })}
                       </div>
-                    ) : null}
+                    )}
                   </>
                 );
               })()
@@ -1861,10 +1835,10 @@ export function AgentFlowPanel() {
   >([]);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
 
-  // 计划审批（plan 模式）：方案提升到全局 store（panel-slice），
-  // 工作面板与底部 PlanReviewBar 共用同一份状态。
-  const pendingPlanReview = useHelixStore((s) => s.pendingPlanReview);
-  const setPendingPlanReview = useHelixStore((s) => s.setPendingPlanReview);
+  // 计划审批（plan 模式）：模型产出方案后先弹浮条让用户决定“批准执行”或“继续调整”，
+  // 用户批准后才以 accept_edits 模式真正跑 handleRun（done 时由它触发 + handleApprovePlan）。
+  const [pendingPlanReview, setPendingPlanReview] =
+    useState<PlanReviewRequest | null>(null);
 
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [showFolderDropdown, setShowFolderDropdown] = useState(false);
@@ -2100,10 +2074,9 @@ export function AgentFlowPanel() {
     useHelixStore
       .getState()
       .clearCompressionNotice(currentSessionId ?? DRAFT_SESSION_KEY);
-    const curPlan = useHelixStore.getState().pendingPlanReview;
-    setPendingPlanReview(
-      curPlan && curPlan.sessionId === (currentSessionId ?? DRAFT_SESSION_KEY)
-        ? curPlan
+    setPendingPlanReview((prev) =>
+      prev && prev.sessionId === (currentSessionId ?? DRAFT_SESSION_KEY)
+        ? prev
         : null,
     );
   }, [currentSessionId]);
@@ -2467,7 +2440,6 @@ export function AgentFlowPanel() {
   // Detect whether this session already has a completed assistant message.
   const transcriptFontSize = useHelixStore((s) => s.transcriptFontSize);
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
-  const workDirEpoch = useHelixStore((s) => s.workDirEpoch);
   const activeSessionWorkDir = useHelixStore((s) => s.activeSessionWorkDir);
   const activeProviderId = useHelixStore((s) => s.activeProviderId);
   const activeModel = useHelixStore((s) => s.activeModel);
@@ -2538,22 +2510,9 @@ export function AgentFlowPanel() {
   }, []);
   // Drop the cached backend session when the project directory changes so the
   // next prompt opens a fresh session rooted at the new cwd.
-  // 门控信号是 workDirEpoch（只有真实 setWorkDir 才 bump，helix-store.ts
-  // setWorkDir 的三个分支），而 selectedWorkDir 本身在重启恢复
-  // （restoreFromStorage 会同时恢复 currentSessionId 和 selectedWorkDir）和
-  // 「运行中浏览切换」时也会变——以它为信号会在重启挂载时把刚恢复的
-  // conversation→session 映射删掉，下一条消息被迫 session/new + seedHistory
-  // 重建（丢工具/思考上下文），即「每次重启后模型失忆」的根因。epoch 不变
-  // 时本 effect 是 no-op；真实切换项目（空闲分支）bump epoch → 删映射。
-  // 例外：对话正在运行（有 streamingDraft）时绝不删——否则下次 session/prompt
-  // 会拿一个已从 sessionMapRef 移除的死会话去 prompt.submit → 后端 4001
-  // "session not found" → 模型停止。
-  const lastWorkDirEpochRef = useRef(useHelixStore.getState().workDirEpoch);
+  // 例外：对话正在运行（有 streamingDraft）时绝不删——否则下次 session/prompt 会拿一个
+  // 已从 sessionMapRef 移除的死会话去 prompt.submit → 后端 4001 "session not found" → 模型停止。
   useEffect(() => {
-    const liveEpoch = useHelixStore.getState().workDirEpoch;
-    const prevEpoch = lastWorkDirEpochRef.current;
-    lastWorkDirEpochRef.current = liveEpoch;
-    if (liveEpoch === prevEpoch) return; // 重启恢复 / 浏览切换：不动映射
     if (!currentSessionId) return;
     const running =
       useHelixStore.getState().isAgentRunning ||
@@ -2562,7 +2521,7 @@ export function AgentFlowPanel() {
       sessionMapRef.current.delete(currentSessionId);
       persistSessionMap(sessionMapRef.current);
     }
-  }, [workDirEpoch, selectedWorkDir, currentSessionId]);
+  }, [selectedWorkDir]);
 
   // Switching conversations: clear the *front-end* streaming UI so the newly
   // focused conversation starts with a clean panel. We deliberately do NOT
@@ -2795,14 +2754,10 @@ export function AgentFlowPanel() {
         .catch(() => setGitAvailable(false));
     };
     refresh();
-    // 4 秒常轮询会在空闲时持续 spawn git 进程；改为仅在窗口重新获得焦点时
-    // 探活一次——后台分支切换（终端手动 git checkout 等）在用户切回来刷新时
-    // 自然被发现，代价从"永远 4s 一次"降为"重新聚焦一次"。
-    const onFocus = () => refresh();
-    window.addEventListener("focus", onFocus);
+    const timer = setInterval(refresh, 4000);
     return () => {
       cancelled = true;
-      window.removeEventListener("focus", onFocus);
+      clearInterval(timer);
     };
   }, [selectedWorkDir]);
 
@@ -3199,42 +3154,13 @@ export function AgentFlowPanel() {
     () => [
       {
         name: "compact",
-        aliases: ["summarize", "compress"],
         description: "压缩上下文",
         action: "compact" as const,
-      },
-      {
-        name: "resync",
-        aliases: ["sync"],
-        description: "从后端重新同步当前会话消息（无需重启应用）",
-        action: "resync" as const,
-      },
-      {
-        name: "clear",
-        aliases: ["clean"],
-        description: "清空当前对话",
-        action: "clear" as const,
-      },
-      {
-        name: "reset",
-        description: "重置会话（清空对话+上下文）",
-        action: "reset" as const,
       },
       {
         name: "image",
         description: "生成一张图片：/image <prompt>",
         action: "image" as const,
-      },
-      { name: "mcp", description: "管理 MCP 服务器", action: "mcp" as const },
-      {
-        name: "model",
-        description: "切换到模型选择设置",
-        action: "model" as const,
-      },
-      {
-        name: "skill",
-        description: "打开技能管理面板",
-        action: "skill" as const,
       },
     ],
     [],
@@ -3243,7 +3169,7 @@ export function AgentFlowPanel() {
   // Merge local skills with pi slash commands
   const allSlashItems = useMemo(() => {
     const builtinCmds = BUILTIN_COMMANDS.flatMap((c) => {
-      const names = [c.name, ...(c.aliases ?? [])];
+      const names = [c.name];
       return names.map((name) => ({
         name,
         description: c.description,
@@ -3256,39 +3182,37 @@ export function AgentFlowPanel() {
     return [...builtinCmds, ...allSkills];
   }, [allSkills, BUILTIN_COMMANDS]);
 
-  const slashCmd = input.startsWith("/")
-    ? input.slice(1).split(" ")[0].toLowerCase()
-    : "";
-  const matchedQuickCmds = input.startsWith("/")
-    ? QUICK_COMMANDS.filter(
-        (c) => !slashCmd || c.cmd.slice(1).startsWith(slashCmd),
-      )
-    : [];
   const filteredSkills = useMemo(() => {
     if (input.startsWith("/")) {
       const query = input.slice(1).toLowerCase();
-      // 命令/技能按「名称前缀」精确匹配（与快捷指令的 startsWith 规则一致），
-      // 避免 /fi 误中 notification / specification 等含 "fi" 子串的 description 风格名称。
+      // 命令/技能按「名称前缀」精确匹配，避免 /fi 误中 notification / specification
+      // 等含 "fi" 子串的名称。
       const prefix = allSlashItems.filter((s) =>
         s.name.toLowerCase().startsWith(query),
       );
       if (prefix.length > 0) return prefix;
-      // 已有快捷指令命中（如 /fi → /fix）时，不再退化到子串匹配，避免把名字里夹带
-      // "fi" 的命令/技能当成"描述"误显示。只有连快捷指令都没命中，才退化为子串匹配，
-      // 保留中段检索技能的能力。
-      if (matchedQuickCmds.length > 0) return [];
+      // 没有前缀命中时退化为子串匹配，保留中段检索技能的能力。
       return allSlashItems.filter((s) => s.name.toLowerCase().includes(query));
     }
     return allSlashItems;
-  }, [allSlashItems, input, matchedQuickCmds]);
-  // 快捷指令与「命令/技能」共用同一套键盘选中索引：先排快捷指令，再排命令。
-  const slashTotal = matchedQuickCmds.length + filteredSkills.length;
+  }, [allSlashItems, input]);
+  // 命令（builtin）与技能（skill）拆成两个分组，分别渲染「命令」「技能」两段。
+  const filteredCommands = useMemo(
+    () => filteredSkills.filter((s) => (s as any).isBuiltinCommand),
+    [filteredSkills],
+  );
+  const filteredSkillsOnly = useMemo(
+    () => filteredSkills.filter((s) => !(s as any).isBuiltinCommand),
+    [filteredSkills],
+  );
+  // 键盘选中索引仅针对「命令/技能」列表。
+  const slashTotal = filteredSkills.length;
   const [selectedSkillIndex, setSelectedSkillIndex] = useState(0);
   const [slashMenuOpen, setSlashMenuOpen] = useState(true);
   const showSlashMenu =
     input.startsWith("/") &&
     slashMenuOpen &&
-    (filteredSkills.length > 0 || matchedQuickCmds.length > 0) &&
+    filteredSkills.length > 0 &&
     !input.includes(" ");
 
   // Handle input change for skill detection
@@ -3874,9 +3798,7 @@ export function AgentFlowPanel() {
     const builtinMatch = baseTrimmed.match(/^\/(\S+)/);
     if (builtinMatch) {
       const builtin = BUILTIN_COMMANDS.find(
-        (c) =>
-          c.name === builtinMatch[1].toLowerCase() ||
-          c.aliases?.includes(builtinMatch[1].toLowerCase()),
+        (c) => c.name === builtinMatch[1].toLowerCase(),
       );
       if (builtin) {
         setInputSynced("");
@@ -4036,31 +3958,6 @@ export function AgentFlowPanel() {
             }
             break;
           }
-          case "resync": {
-            // Manual nudge: pull authoritative history from backend for the current
-            // session. The same logic also runs automatically after compaction, so
-            // typing this is rarely needed — it's just a manual escape hatch.
-            await resyncCurrentSessionFromBackend({
-              sessionId: currentSessionId || "",
-              showToast: true,
-            });
-            break;
-          }
-          case "reset": {
-            // Reset: clear messages + reset backend session (model forgets history)
-            if (currentSessionId) {
-              sessionMapRef.current.delete(currentSessionId);
-              persistSessionMap(sessionMapRef.current);
-            }
-            await storeActions.clearChatInPlace();
-            storeActions.showToast({ type: "success", title: "会话已重置" });
-            break;
-          }
-          case "clear": {
-            // Clear: only clear frontend messages (keep backend session alive)
-            await storeActions.clearChatInPlace();
-            break;
-          }
           case "image": {
             // /image <prompt> — 调用 image.generate 生成一张图片，作为 assistant 消息
             // 带 images 挂到当前对话。
@@ -4126,15 +4023,6 @@ export function AgentFlowPanel() {
             }
             break;
           }
-          case "mcp":
-            storeActions.toggleSettings("mcp");
-            break;
-          case "model":
-            storeActions.toggleSettings("api");
-            break;
-          case "skill":
-            storeActions.toggleSettings("skills");
-            break;
         }
         // Builtin commands are instant client-side operations — never leave the
         // isChatLoading flag stuck true (it was set before this branch).
@@ -4564,7 +4452,10 @@ export function AgentFlowPanel() {
         let resumeRes = await helixApi()!
           .send("session/resume", { session_id: sessionId })
           .catch(() => null); // resume 失败（会话已死/文件丢失）→ 走 session/new 重建
-        if (!resumeRes || (typeof resumeRes === "object" && resumeRes.error)) {
+        if (
+          !resumeRes ||
+          (typeof resumeRes === "object" && resumeRes.error)
+        ) {
           // Migration fallback: older serve-gateway records may carry a DB key
           // in storedId while sid remains the current pi session id.
           if (staleEntry.storedId && staleEntry.storedId !== sessionId) {
@@ -4809,10 +4700,25 @@ export function AgentFlowPanel() {
                 u.status === "failed" ||
                 u.status === "complete"
               ) {
+                // pi 的 edit 类工具：真 diff 在 details.diff / details.patch
+                // （网关 tool_execution_end 只挑 diff 类字段转发），content
+                // 只是一句 "Successfully replaced N block(s)"。把 diff 拼进
+                // 结果文本，标题 +N −n 徽标与展开后的 Diff 卡片才有着落。
+                const d = (u as any).details as
+                  | Record<string, unknown>
+                  | undefined;
+                const diffText =
+                  typeof d?.diff === "string" && d.diff.trim() ? d.diff : "";
+                const patchText =
+                  typeof d?.patch === "string" && d.patch.trim() ? d.patch : "";
+                const diffPayload = diffText || patchText;
+                const baseText = normalizeAcpContent(u.content || "");
                 return {
                   type: "tool_result",
                   toolName: u.toolName || u.title || "",
-                  content: normalizeAcpContent(u.content || ""),
+                  content: diffPayload
+                    ? `${baseText}\n${diffPayload}`
+                    : baseText,
                   failed: u.status === "failed",
                 };
               }
@@ -4961,6 +4867,7 @@ export function AgentFlowPanel() {
               goal || text || "执行子任务",
               undefined,
               subagentId,
+              myCid ?? undefined,
             );
           return;
         }
@@ -4976,6 +4883,7 @@ export function AgentFlowPanel() {
                 goal || text || "思考中",
                 undefined,
                 subagentId,
+                myCid ?? undefined,
               );
           }
           return;
@@ -4990,6 +4898,17 @@ export function AgentFlowPanel() {
             typeof params.tool_preview === "string" && params.tool_preview
               ? params.tool_preview
               : text;
+          // 后台启动确认带扩展自己的 agent_id（.output 转录文件名）——绑到
+          // 卡片上，侧边栏时间线重启后仍能定位转录，不依赖网关内存映射。
+          if (
+            toolName === "background" &&
+            typeof params.agent_id === "string" &&
+            params.agent_id
+          ) {
+            useHelixStore
+              .getState()
+              .setSubAgentAgentId(subagentId, params.agent_id);
+          }
           useHelixStore.getState().addSubAgentToolCall(subagentId, {
             toolName,
             params: preview.slice(0, 500),
@@ -5748,116 +5667,50 @@ export function AgentFlowPanel() {
       // Fire the prompt — events stream back via onEvent (don't await the promise itself).
       // ACP expects prompt as a list of content blocks, not a plain string
       promptSentAtRef.current = Date.now();
-      const firePrompt = (sid: string) =>
-        helixApi()!
-          .send("session/prompt", {
-            session_id: sid,
-            prompt: promptItems,
-          })
-          .then((result: any) => {
-            // session/prompt is now ack-only (official model): result == {status:'streaming'}.
-            // Completion + usage are driven by events — run_complete → done (mapHelixEvent
-            // :1848), usage:prompt-complete → addSessionUsageStats (run loop :2791). Nothing
-            // to do on the ack itself except log it; do NOT synthesize `done` here.
-            debug("[HelixTrace] session/prompt ack", {
-              sessionId: sid,
-              runningSessionId: runningSessionIdRef.current,
-              currentSessionId,
-              result,
-            });
-            // serve-gateway 在 "session not found" 时已自动重建会话并重放 prompt，
-            // 返回新 session_id。改绑 conversation→session 映射，后续消息用新会话。
-            if (result?.session_id && result.session_id !== sid) {
-              debug(
-                "[HelixTrace] session/prompt 会话被替换 →",
-                sid,
-                "→",
-                result.session_id,
-              );
-              sessionId = result.session_id;
-              sessionMapRef.current.set(myCid, {
-                sid: result.session_id,
-                epoch: useGatewayStore.getState().gatewayEpoch,
-              });
-              persistSessionMap(sessionMapRef.current);
-            }
+      helixApi()!
+        .send("session/prompt", {
+          session_id: sessionId,
+          prompt: [{ type: "text", text: finalPromptText }],
+        })
+        .then((result: any) => {
+          // session/prompt is now ack-only (official model): result == {status:'streaming'}.
+          // Completion + usage are driven by events — run_complete → done (mapHelixEvent
+          // :1848), usage:prompt-complete → addSessionUsageStats (run loop :2791). Nothing
+          // to do on the ack itself except log it; do NOT synthesize `done` here.
+          debug("[HelixTrace] session/prompt ack", {
+            sessionId,
+            runningSessionId: runningSessionIdRef.current,
+            currentSessionId,
+            result,
           });
-      firePrompt(sessionId!).catch(async (err: any) => {
-        // 会话文件丢失/被清理（后端 restore 显式报错，如 "no session file for
-        // <sid>"）：删掉死映射，用 seedHistory 重建会话后重发一次 prompt（只
-        // 重试一次，防循环）。重建后模型至少保留文本级历史，远好于直接报错
-        // 或后端静默空白会话（后者是彻底失忆）。
-        const msg = String(err?.message ?? err ?? "");
-        const unrecoverable = /no session file|session not found|restore/i.test(
-          msg,
-        );
-        if (wasCreated || !unrecoverable || !sessionId) {
+          // serve-gateway 在 "session not found" 时已自动重建会话并重放 prompt，
+          // 返回新 session_id。改绑 conversation→session 映射，后续消息用新会话。
+          if (result?.session_id && result.session_id !== sessionId) {
+            debug(
+              "[HelixTrace] session/prompt 会话被替换 →",
+              sessionId,
+              "→",
+              result.session_id,
+            );
+            sessionId = result.session_id;
+            sessionMapRef.current.set(myCid, {
+              sid: result.session_id,
+              epoch: useGatewayStore.getState().gatewayEpoch,
+            });
+            persistSessionMap(sessionMapRef.current);
+          }
+        })
+        .catch((err: any) => {
           console.error("[Helix] session/prompt error", err);
           enqueue(
             "data: " +
               JSON.stringify({
                 type: "error",
-                content: msg || "请求失败",
+                content: err?.message || "请求失败",
               }),
           );
           queueDone = true;
-          return;
-        }
-        debug(
-          "[HelixTrace] session/prompt 会话不可恢复（" +
-            msg +
-            "）→ seedHistory 重建",
-        );
-        sessionMapRef.current.delete(myCid);
-        persistSessionMap(sessionMapRef.current);
-        try {
-          const st = useHelixStore.getState();
-          const seedHistory = st.chatMessages
-            .filter(
-              (m) => m.sessionId === activeSessionId && m.id !== newUserMsgId,
-            )
-            .map((m) => ({ role: m.role, content: m.content }));
-          const res = (await helixApi()!.send("session/new", {
-            mcpServers: buildAcpMcpServers(st.mcpServers),
-            messages: seedHistory,
-            mode_id: st.approvalMode,
-            cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? undefined,
-          })) as any;
-          const newSid: string | null =
-            res?.session_id ||
-            res?.sessionID ||
-            res?.threadId ||
-            (typeof res === "string" ? res : null);
-          if (!newSid) throw new Error("session/new 缺少 session_id");
-          sessionId = newSid;
-          wasCreated = true;
-          sessionMapRef.current.set(myCid, {
-            sid: newSid,
-            epoch: useGatewayStore.getState().gatewayEpoch,
-          });
-          persistSessionMap(sessionMapRef.current);
-          if (isFrontRun()) {
-            helixSessionIdRef.current = newSid;
-            try {
-              useGatewayStore.getState().setHelixSessionId(newSid);
-            } catch {
-              /* 防御性忽略 */
-            }
-          }
-          await firePrompt(newSid);
-        } catch (rebuildErr: any) {
-          console.error("[Helix] session/prompt 重建失败", rebuildErr);
-          enqueue(
-            "data: " +
-              JSON.stringify({
-                type: "error",
-                content:
-                  String(rebuildErr?.message ?? rebuildErr) || "会话重建失败",
-              }),
-          );
-          queueDone = true;
-        }
-      });
+        });
 
       // 提交后立即武装超长兜底：即使后端迟迟不流式（agent 构建/纯思考），
       // 也有保险；正常内容事件会不断重置它，真实终结事件到达则作废。
@@ -6052,19 +5905,7 @@ export function AgentFlowPanel() {
               if (!thinkingStartTimeRef.current)
                 thinkingStartTimeRef.current = Date.now();
               const inc = normalizeAcpContent(parsed.content);
-              const lastBlock = pendingBlocksRef.current.length
-                ? pendingBlocksRef.current[pendingBlocksRef.current.length - 1]
-                : responseBlocksRef.current[
-                    responseBlocksRef.current.length - 1
-                  ];
-              const continuesThinking =
-                !lastBlock || lastBlock.type === "thinking";
-              const cur = continuesThinking ? thoughtBufferRef.current : "";
-              const next = normalizeThinkingText(
-                mergeThinkingStreams(cur, inc),
-              );
-              if (!next && !cur) return;
-              if (continuesThinking && next === cur) return;
+              const cur = thoughtBufferRef.current;
               if (cur.length >= MAX_STREAM_CHARS) {
                 if (!thinkingCappedRef.current) {
                   thinkingCappedRef.current = true;
@@ -6078,7 +5919,17 @@ export function AgentFlowPanel() {
                 scheduleStreamRender();
                 return;
               }
-              thoughtBufferRef.current = next;
+              const curTrim = cur.trim();
+              const incTrim = inc.trim();
+              const isCumulative = curTrim && incTrim.startsWith(curTrim);
+
+              if (isCumulative) {
+                // The backend sent cumulative content - replace, don't append
+                thoughtBufferRef.current = inc;
+              } else {
+                // The backend sent incremental content - append
+                thoughtBufferRef.current = cur + inc;
+              }
               pendingThinkingRef.current = thoughtBufferRef.current;
               pendingBlocksRef.current.push({
                 type: "thinking",
@@ -6569,9 +6420,6 @@ export function AgentFlowPanel() {
                 ) {
                   finalBlocks = [...finalBlocks, { type: "text", content }];
                 }
-                if (finalBlocks) {
-                  finalBlocks = dedupeThinkingBlocks(finalBlocks);
-                }
                 // 权威全文自愈（见 reconcileBlocksWithContent）：流式转发链会间歇丢
                 // 空白/换行，done 时 content 已被 finalText 修复；把同样的权威文本写回
                 // blocks 的 text 块，让 blocks 渲染路径与 msg.content 一致——否则
@@ -6649,13 +6497,12 @@ export function AgentFlowPanel() {
                   const cid = useHelixStore.getState().currentSessionId;
                   // 如果 plan_complete 事件已经用真实 plan 工件（plan_mode_complete
                   // 工具的 args.plan）弹过浮条，这里就不再覆盖。
-                  const key = cid ?? DRAFT_SESSION_KEY;
-                  const curPlan = useHelixStore.getState().pendingPlanReview;
-                  setPendingPlanReview(
-                    curPlan && curPlan.sessionId === key
-                      ? curPlan
-                      : { sessionId: key, content },
-                  );
+                  setPendingPlanReview((prev) => {
+                    const key = cid ?? DRAFT_SESSION_KEY;
+                    return prev && prev.sessionId === key
+                      ? prev
+                      : { sessionId: key, content };
+                  });
                 }
               } else {
                 // 防御性兜底：run 结束但无任何可见内容（根因已修复，极少触发）。
@@ -7268,13 +7115,7 @@ export function AgentFlowPanel() {
           // the highlighted item directly.
           e.preventDefault();
           const idx = Math.min(selectedSkillIndex, slashTotal - 1);
-          // 选中的是快捷指令：把它的提示词模板填入输入框（不立即执行）
-          if (idx < matchedQuickCmds.length) {
-            setInputSynced(matchedQuickCmds[idx].prompt);
-            inputRef.current?.focus();
-            return;
-          }
-          const selected = filteredSkills[idx - matchedQuickCmds.length] as any;
+          const selected = filteredSkills[idx] as any;
           if (!selected) return;
           if (!hasSlashQuery) {
             handleSkillSelect(selected);
@@ -7321,7 +7162,6 @@ export function AgentFlowPanel() {
       handleStop,
       showSlashMenu,
       filteredSkills,
-      matchedQuickCmds,
       slashTotal,
       handleSkillSelect,
       selectedSkillIndex,
@@ -7906,91 +7746,37 @@ export function AgentFlowPanel() {
         {/* Unified slash command dropdown */}
         {showSlashMenu && (
           <div className="absolute bottom-full left-0 right-0 mb-2 bg-popover rounded-xl border border-border shadow-xl z-50 max-h-[300px] overflow-y-auto mx-3">
-            {/* Quick commands section */}
-            {matchedQuickCmds.length > 0 && (
+            {/* Commands section */}
+            {filteredCommands.length > 0 && (
               <>
-                <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">
-                  快捷指令
-                </p>
-                {matchedQuickCmds.map((qc, j) => (
-                  <button
-                    key={qc.cmd}
-                    type="button"
-                    ref={
-                      j === selectedSkillIndex
-                        ? (el) => {
-                            if (el) el.scrollIntoView({ block: "nearest" });
-                          }
-                        : undefined
-                    }
-                    onClick={() => {
-                      setInputSynced(qc.prompt);
-                      inputRef.current?.focus();
-                    }}
-                    className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
-                      j === selectedSkillIndex
-                        ? "bg-primary/10 text-primary"
-                        : "hover:bg-muted/30"
-                    }`}
-                  >
-                    <code className="ui-text-sm2 font-mono text-primary/70 shrink-0 w-20">
-                      {qc.cmd}
-                    </code>
-                    <div className="min-w-0 flex-1">
-                      <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block">
-                        {qc.label}
-                      </span>
-                      <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground block truncate">
-                        {qc.prompt}
-                      </span>
-                    </div>
-                  </button>
-                ))}
-              </>
-            )}
-
-            {/* Skills/Commands section */}
-            {filteredSkills.length > 0 && (
-              <>
-                {matchedQuickCmds.length > 0 && (
-                  <div className="border-t border-border/30 mx-3" />
-                )}
                 <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">
                   命令
                 </p>
-                {filteredSkills.map((skill, index) => (
+                {filteredCommands.map((skill, index) => (
                   <button
                     key={skill.id}
                     type="button"
                     ref={
-                      matchedQuickCmds.length + index === selectedSkillIndex
+                      index === selectedSkillIndex
                         ? (el) => {
                             if (el) el.scrollIntoView({ block: "nearest" });
                           }
                         : undefined
                     }
                     onClick={() => {
-                      if ((skill as any).isBuiltinCommand) {
-                        setInputSynced(`/${skill.name}`);
-                        setTimeout(() => handleRun(), 0);
-                      } else {
-                        handleSkillSelect(skill);
-                      }
+                      setInputSynced(`/${skill.name}`);
+                      setTimeout(() => handleRun(), 0);
                     }}
                     className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
-                      matchedQuickCmds.length + index === selectedSkillIndex
+                      index === selectedSkillIndex
                         ? "bg-primary/10 text-primary"
                         : "hover:bg-muted/30"
                     }`}
                   >
-                    {(skill as any).isBuiltinCommand ? (
-                      <Circle
-                        className="size-3.5 text-amber-500/70 shrink-0"
-                        fill="currentColor"
-                      />
-                    ) : (
-                      <FileText className="size-4 text-foreground/40 shrink-0" />
-                    )}
+                    <Circle
+                      className="size-3.5 text-amber-500/70 shrink-0"
+                      fill="currentColor"
+                    />
                     <div className="min-w-0 flex-1">
                       <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block truncate">
                         {skill.name}
@@ -8001,13 +7787,59 @@ export function AgentFlowPanel() {
                         </span>
                       )}
                     </div>
-                    {(skill as any).isBuiltinCommand && (
-                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-amber-500/70 shrink-0">
-                        CMD
-                      </span>
-                    )}
+                    <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-amber-500/70 shrink-0">
+                      CMD
+                    </span>
                   </button>
                 ))}
+              </>
+            )}
+
+            {/* Skills section */}
+            {filteredSkillsOnly.length > 0 && (
+              <>
+                {filteredCommands.length > 0 && (
+                  <div className="border-t border-border/30 mx-3" />
+                )}
+                <p className="px-3 pt-2 pb-1 text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/30 uppercase tracking-wider">
+                  技能
+                </p>
+                {filteredSkillsOnly.map((skill, index) => {
+                  const flatIndex = filteredCommands.length + index;
+                  return (
+                  <button
+                    key={skill.id}
+                    type="button"
+                    ref={
+                      flatIndex === selectedSkillIndex
+                        ? (el) => {
+                            if (el) el.scrollIntoView({ block: "nearest" });
+                          }
+                        : undefined
+                    }
+                    onClick={() => {
+                      handleSkillSelect(skill);
+                    }}
+                    className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
+                      flatIndex === selectedSkillIndex
+                        ? "bg-primary/10 text-primary"
+                        : "hover:bg-muted/30"
+                    }`}
+                  >
+                    <FileText className="size-4 text-foreground/40 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block truncate">
+                        {skill.name}
+                      </span>
+                      {skill.description && (
+                        <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground block truncate">
+                          {skill.description}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                  );
+                })}
               </>
             )}
           </div>
@@ -8686,6 +8518,27 @@ export function AgentFlowPanel() {
                         no completed assistant message exists yet in this session.
                         Prevents duplicate "reasoning..." when a prior assistant message
                         was already committed (e.g. think→done→think again within one run). */}
+                    {/* Top status bar — 执行中显示「工作中」+ 计时，完成后显示「已结束」 */}
+                    {(streamingActive || displayResponseBlocks.length > 0) && (
+                      <div
+                        className="flex items-center gap-1.5 my-1 text-foreground/50"
+                        style={{ fontSize: transcriptFontSize + 2 }}
+                      >
+                        <span className="font-medium">{streamingActive ? "工作中" : "已结束"}</span>
+                        {runStartedAtRef.current > 0 && (
+                          <span className="tabular-nums text-foreground/35">
+                            {formatDuration(
+                              Math.max(
+                                0,
+                                Math.round(
+                                  (Date.now() - runStartedAtRef.current) / 1000,
+                                ),
+                              ),
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    )}
 
                     {/* Show thinking content if available (kaomoji status line stripped).
                         Only render while streaming AND no completed thinking blocks exist yet;
@@ -8697,28 +8550,14 @@ export function AgentFlowPanel() {
                     {displayResponseBlocks.length > 0 &&
                       (() => {
                         // 把中间过程按「文本 / 非文本」分段：文本段→「总结」扁平块，
-                        // 思考+工具+文件变更段→独立的「思考过程」折叠卡片，得到
+                        // 思考+工具+文件更改段→独立的「思考过程」折叠卡片，得到
                         // 「思考过程 → 总结 → 思考过程 → 总结」节奏，每段都和第一个一致。
                         const normalizedBlocks = mergeAdjacentThinking(
                           normalizeTextBlocks(displayResponseBlocks),
                         );
-                        // Consolidate: merge all text blocks into a single block at
-                        // the end. Without this, interleaved text/tool blocks (e.g.
-                        // [text, tool_group, text]) cause buildProcessSegments to
-                        // split the text with "任务执行" in between.
-                        const nonTextBlocks = normalizedBlocks.filter(
-                          (b) => b.type !== "text",
-                        );
-                        const textContent = normalizedBlocks
-                          .filter((b) => b.type === "text")
-                          .map((b) => String(b.content || ""))
-                          .join("");
-                        const consolidatedBlocks = textContent.trim()
-                          ? [
-                              ...nonTextBlocks,
-                              { type: "text" as const, content: textContent },
-                            ]
-                          : nonTextBlocks;
+                        // 保持原始交替顺序：思考/工具/文本按时间序排列，
+                        // 不再合并文本到末尾，确保思考→执行→总结的交叉节奏。
+                        const consolidatedBlocks = normalizedBlocks;
                         const lastTextIndex = consolidatedBlocks.reduce(
                           (acc, b, i) =>
                             b.type === "text" && String(b.content || "").trim()
@@ -8745,7 +8584,7 @@ export function AgentFlowPanel() {
                           !!thinkingBody &&
                           !normalizedBlocks.some((b) => b.type === "thinking");
                         // 「思考中」脉冲只在该状态真实成立时亮：最后一个非
-                        // 文本/非文件变更块是 thinking 才算（工具执行/收尾时
+                        // 文本/非文件更改块是 thinking 才算（工具执行/收尾时
                         // 思考卡仅保持展开可读，不冒充思考中）。
                         let thinkingActiveNow = false;
                         for (let i = processBlocks.length - 1; i >= 0; i--) {
@@ -8756,10 +8595,8 @@ export function AgentFlowPanel() {
                           thinkingActiveNow = b.type === "thinking";
                           break;
                         }
-                        // 完成态摘要的操作计数：N 个操作（复用 summarizeTaskBlocks）。
-                        const processOpCount = streamingActive
-                          ? 0
-                          : summarizeTaskBlocks(processBlocks).total;
+                        // 实时操作计数：流式期间也显示已完成的操作数。
+                        const processOpCount = summarizeTaskBlocks(processBlocks).total;
                         return (
                           <>
                             {/* 二级折叠：外层「过程」收纳本轮全部中间产物（思考 +
@@ -8768,40 +8605,23 @@ export function AgentFlowPanel() {
                               className="my-2 group/details"
                               open={streamingActive}
                             >
+                              {/* 流式期间折叠行留空（不渲染 FoldTitle / 箭头，免得在
+                                  「工作中」下方挂一个孤立箭头）。但 <summary> 元素本身
+                                  必须始终存在：一旦整个删掉，浏览器会按 HTML 规范
+                                  "if there is no child summary element, the user agent
+                                  should provide its own legend" 自行补一个本地化图例，
+                                  zh-CN 下就渲染成「详细信息」，反而多出一行文字。 */}
                               <summary className="cursor-pointer hover:text-foreground/60 flex items-center gap-1.5 list-none transition-colors">
-                                <FoldTitle
-                                  label={streamingActive ? "工作中" : "已完成"}
-                                  active={streamingActive}
-                                  fontSize={transcriptFontSize}
-                                />
-                                {!streamingActive &&
-                                runStartedAtRef.current > 0 ? (
-                                  <span className="ml-2 tabular-nums text-foreground/25">
-                                    {formatDuration(
-                                      Math.max(
-                                        0,
-                                        Math.round(
-                                          (Date.now() -
-                                            runStartedAtRef.current) /
-                                            1000,
-                                        ),
-                                      ),
-                                    )}
-                                  </span>
-                                ) : isRunning ? (
-                                  <span
-                                    className="ml-2 tabular-nums text-foreground/25"
-                                    style={{ fontSize: transcriptFontSize }}
-                                  >
-                                    <ThinkingTimer
-                                      questionStartTs={
-                                        streamingDrafts[currentSessionId || ""]
-                                          ?.startedAt ?? questionStartTs
-                                      }
-                                      isRunning={isRunning}
+                                {!streamingActive && (
+                                  <>
+                                    <FoldTitle
+                                      label="已完成"
+                                      active={false}
+                                      fontSize={transcriptFontSize}
                                     />
-                                  </span>
-                                ) : null}
+                                    <FoldChevron />
+                                  </>
+                                )}
                               </summary>
                               <ProcessWindow
                                 active={streamingActive}
@@ -8822,11 +8642,18 @@ export function AgentFlowPanel() {
                                     isSearchActive={false}
                                   />
                                 )}
+                                {isReconnecting && streamingActive && (
+                                  <div className="flex items-center gap-1.5 px-1 py-1 text-amber-500/90 text-xs">
+                                    <div className="h-0.5 flex-1 rounded-full overflow-hidden bg-amber-500/15">
+                                      <div className="h-full w-1/3 rounded-full bg-amber-500/70 animate-[reconnect-slide_1.2s_ease-in-out_infinite]" />
+                                    </div>
+                                    <span className="shrink-0">限流重试中</span>
+                                  </div>
+                                )}
                                 {processSegments.map((seg, si) => {
-                                  // 交替段渲染：思考段一张 ThinkingFold（段内
-                                  // 思考合并成一段文本），工具段默认平铺工具卡
-                                  // （流式时本来就要逐个看进度）。最后一段若正在
-                                  // 思考则脉冲跟随。
+                                  // 交替段渲染：思考段一张 ThinkingFold，工具段
+                                  // 平铺工具卡，文本段渲染 markdown。
+                                  // 最后一段若正在思考则脉冲跟随。
                                   if (seg.kind === "thinking") {
                                     const segContent = mergeThinkingContents(
                                       seg.blocks.map((b) =>
@@ -8999,12 +8826,12 @@ export function AgentFlowPanel() {
                   </div>
                 </div>
               )}
+              {/* 执行中扫描线：跟在模型输出最底部 */}
+              {streamingActive && <div className="conversation-scan-line" />}
             </div>
           )}
         </div>
       </div>
-
-      {/* API key warning */}
 
       {/* New project form */}
       {showNewProjectForm && (

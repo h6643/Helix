@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
 import { Trash2 } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { SettingRow, SettingGroup, PopupSelect } from "./settings-ui";
 import { Button } from "@/components/ui/button";
 import { useHelixStore } from "@/stores/helix-store";
-import { SettingRow, SettingGroup, PopupSelect } from "./settings-ui";
 
 interface DelegationConfig {
   provider: string;
@@ -64,12 +64,20 @@ const SubagentItem = ({
   </div>
 );
 
-/// Card for a pi-subagents preset subagent.
-/// - Disable/enable moves `agents/<id>.md` into/out of `.helix-disabled` (pi
-///   skips disabled presets at runtime) — reversible, handled by
+/// Card for a pi-subagents agent type.
+/// - Disable/enable writes/removes `enabled: false` in the agent .md's
+///   frontmatter (or a stub for compiled defaults) — the same mechanism the
+///   extension's own /agents command uses, handled by
 ///   `helix_set_subagent_enabled`.
-/// - Delete moves the `.md` to a recoverable `.helix-deleted` backup — handled by
-///   `helix_delete_subagent`. A two-step confirm prevents accidents.
+/// - Delete unlinks a custom agent's .md — handled by `helix_delete_subagent`.
+///   A two-step confirm prevents accidents.
+const SOURCE_LABEL: Record<string, string> = {
+  default: "内置默认",
+  project: "项目",
+  workspace: "工作区",
+  global: "全局",
+};
+
 const PresetSubagentItem = ({
   p,
   onToggle,
@@ -83,6 +91,8 @@ const PresetSubagentItem = ({
   const [deleting, setDeleting] = useState(false);
   const [toggling, setToggling] = useState(false);
   const disabled = p.disabled === true;
+  const source = typeof p.source === "string" ? p.source : "global";
+  const sourceLabel = SOURCE_LABEL[source] ?? source;
   return (
     <div
       className={
@@ -105,8 +115,11 @@ const PresetSubagentItem = ({
               已禁用
             </span>
           )}
-          <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50 border border-border/20 rounded px-1.5 py-0.5">
-            pi-subagents
+          <span
+            className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50 border border-border/20 rounded px-1.5 py-0.5"
+            data-tip={p.path || "扩展内置，无对应文件"}
+          >
+            {sourceLabel}
           </span>
           <button
             type="button"
@@ -183,12 +196,10 @@ const PresetSubagentItem = ({
             </span>
           ))}
       </div>
-      {(p.thinking || (Array.isArray(p.aliases) && p.aliases.length > 0)) && (
+      {(p.model || p.thinking) && (
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">
+          {p.model && <span>模型：{p.model}</span>}
           {p.thinking && <span>思考强度：{p.thinking}</span>}
-          {Array.isArray(p.aliases) && p.aliases.length > 0 && (
-            <span>别名：{p.aliases.join("、")}</span>
-          )}
         </div>
       )}
       {p.systemPrompt?.trim() && (
@@ -220,20 +231,21 @@ export function AgentsSettings() {
   >([]);
   const [adding, setAdding] = useState(false);
 
-  // pi-subagents preset subagents (surfaced alongside user identities, with a
-  // reversible enable/disable + a recoverable delete).
+  // pi-subagents agent types (extension defaults + project/workspace/global
+  // .md files), with reversible enable/disable + delete.
   const [presets, setPresets] = useState<
     {
       id: string;
       name: string;
       description: string;
       tools: string[];
+      model: string;
       thinking: string;
-      aliases: string[];
       systemPromptMode: string;
       systemPrompt: string;
       path: string;
       disabled: boolean;
+      source: "default" | "project" | "workspace" | "global";
     }[]
   >([]);
 
@@ -281,7 +293,8 @@ export function AgentsSettings() {
             })),
           );
         }
-        // Bridge: surface pi-subagents preset subagents (read-only).
+        // Bridge: surface pi-subagents agent types (the extension's registry:
+        // defaults + .pi/agents files).
         const listSubagents = (window as any).electron?.helix?.listSubagents;
         if (typeof listSubagents === "function") {
           listSubagents()
@@ -368,8 +381,8 @@ export function AgentsSettings() {
   const removeIdentity = (id: string) =>
     setIdentities((prev) => prev.filter((i) => i.id !== id));
 
-  // Remove a bundled pi-subagents preset: move its <id>.md to the package's
-  // .helix-deleted backup folder (recoverable), then drop it from view.
+  // Delete a pi-subagents custom agent: unlinks its .md (built-in defaults
+  // have no file and are refused), then drop it from view.
   const deletePreset = async (id: string) => {
     const fn = (window as any).electron?.helix?.deleteSubagent;
     if (typeof fn !== "function") {
@@ -384,8 +397,10 @@ export function AgentsSettings() {
     }
   };
 
-  // Enable/disable a bundled preset: move its <id>.md into/out of the
-  // .helix-disabled folder (reversible; pi skips disabled presets at runtime).
+  // Enable/disable an agent: writes/removes `enabled: false` in its
+  // frontmatter — the same edit the extension's own /agents command makes,
+  // so both surfaces stay in sync. Disabling a compiled default writes a
+  // stub to ~/.pi/agent/agents/<type>.md.
   const togglePreset = async (id: string, enabled: boolean) => {
     const fn = (window as any).electron?.helix?.setSubagentEnabled;
     if (typeof fn !== "function") {
@@ -585,12 +600,6 @@ export function AgentsSettings() {
             {presets.length > 0 && (
               <div className="pt-2 space-y-3">
                 <div className="flex items-center gap-2">
-                  <h4 className="ui-text font-semibold text-foreground/80">
-                    pi-subagents 预设
-                  </h4>
-                  <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
-                    来自扩展 · 可禁用 / 启用 / 删除
-                  </span>
                 </div>
                 <div className="space-y-2.5">
                   {presets.map((p) => (

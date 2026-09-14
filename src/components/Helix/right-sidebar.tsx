@@ -3,14 +3,14 @@
 import { Globe, Plus, X, Maximize2, Minimize2, Terminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { cleanUrl } from "@/lib/url-utils";
-import { useHelixStore } from "@/stores/helix-store";
+import { AgentWorkPanel } from "./agent-work-panel";
 import { CodeEditorPanel } from "./code-editor-panel";
 import { DiffSidebarPanel } from "./diff-sidebar-panel";
-import { AgentWorkPanel } from "./agent-work-panel";
-import { BrowserView } from "./preview-rail";
-import { summarizeUrl } from "@/lib/url-utils";
 import { MoreActionsMenu } from "./more-actions-menu";
+import { BrowserView } from "./preview-rail";
+import { cleanUrl } from "@/lib/url-utils";
+import { summarizeUrl } from "@/lib/url-utils";
+import { useHelixStore } from "@/stores/helix-store";
 
 type PageKind = "browser" | "code" | "diff" | "agent";
 interface PanelPage {
@@ -145,7 +145,7 @@ export function RightSidebar() {
     activePageIdRef.current = np.id;
     setPages((prev) => [...prev, np]);
     setActivePageId(np.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [tab]);
 
   // External link (e.g. a message link click) → open / navigate a browser page.
@@ -187,7 +187,7 @@ export function RightSidebar() {
     pendingActivateRef.current = null;
     activePageIdRef.current = id;
     setActivePageId(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [pages]);
 
   const updatePageUrl = (id: string, url: string) =>
@@ -238,7 +238,7 @@ export function RightSidebar() {
     setPages((prev) => [...prev, np]);
     activePageIdRef.current = np.id;
     setActivePageId(np.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [browserAddSeq]);
 
   // Close the whole code view (empty-state "关闭编辑器" button).

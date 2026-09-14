@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
 import { GitBranch, Search, Plus, Check, AlertCircle, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { isElectron, electronGit } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 

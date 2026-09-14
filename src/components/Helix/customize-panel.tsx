@@ -10,10 +10,10 @@ import {
   Moon,
 } from "lucide-react";
 import React, { useState, useCallback, useEffect } from "react";
+import { PopupSelect } from "./settings-ui";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useHelixStore, DEFAULT_SHORTCUTS } from "@/stores/helix-store";
-import { PopupSelect } from "./settings-ui";
 
 interface CustomizePanelProps {
   onClose: () => void;

@@ -2,9 +2,9 @@
  * API configuration slice — provider, model, profiles, history.
  */
 import type { StateCreator } from "zustand";
+import type { ApiConfig, ApiProfile, ProviderConfig } from "../helix-types";
 import { generateId } from "@/lib/format";
 import { warn } from "@/lib/logger";
-import type { ApiConfig, ApiProfile, ProviderConfig } from "../helix-types";
 import { isModelProviderMismatch } from "@/lib/provider-match";
 
 /** Provider ids currently auto-fetching their model lists (in-flight guard). */

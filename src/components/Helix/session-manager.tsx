@@ -17,8 +17,8 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { timeAgo } from "@/lib/format";
 import { persistence, type PersistedSession } from "@/lib/persist";
-import { useHelixStore } from "@/stores/helix-store";
 import { useGatewayStore } from "@/stores/gateway-store";
+import { useHelixStore } from "@/stores/helix-store";
 
 export function SessionManager({ onClose }: { onClose: () => void }) {
   const [sessions, setSessions] = useState<PersistedSession[]>([]);

@@ -26,6 +26,7 @@ pub mod pi_gateway_test_hooks {
         TRIM_MARGIN_TOKENS,
     };
 }
+mod image_model;
 mod profile;
 mod proxy;
 mod scheduled_tasks;
@@ -238,6 +239,8 @@ pub fn run() {
             vision::vision_config_list,
             vision::vision_config_save,
             vision::vision_describe,
+            image_model::image_config_list,
+            image_model::image_config_save,
             // SSH connections
             ssh::ssh_connect,
             ssh::ssh_exec,
@@ -252,6 +255,8 @@ pub fn run() {
             // delegations (subagent live transcript browser)
             delegations::delegations_list,
             delegations::delegations_read_log,
+            delegations::subagent_timeline,
+            pi_gateway::subagent_map,
             // background tasks (pi-background-tasks extension registry)
             background_tasks::tasks_list,
             background_tasks::tasks_read,
@@ -308,6 +313,7 @@ pub fn run() {
             git::fetch,
             // app
             app::get_info,
+            app::get_sessions_dir,
             app::read_env_key,
             app::get_helix_version,
             app::get_status,

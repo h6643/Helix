@@ -2,8 +2,8 @@
 
 import { ChevronRight, FilePen } from "lucide-react";
 import React, { useMemo, useState } from "react";
-import type { PendingChange } from "@/stores/helix-types";
 import { computeDiff, countDiffLines } from "./diff-preview";
+import type { PendingChange } from "@/stores/helix-types";
 
 function DiffBody({ change }: { change: PendingChange }) {
   const fallbackDiff = useMemo(

@@ -8,7 +8,7 @@ import type { ElectronAPI } from "@/types/electron";
  */
 export function isElectron(): boolean {
   if (typeof window === "undefined") return false;
-  if (!!window.electron?.isElectron) return true;
+  if (window.electron?.isElectron) return true;
   // Tauri: install the invoke-backed bridge lazily so any consumer (even one
   // that only checks `isElectron()` first) sees a consistent environment.
   if (isTauri()) {
@@ -335,6 +335,15 @@ export const electronApp = {
       return api.app.getDataRoot();
     }
     return { dataRoot: "", dataRootDefault: "", dataRootCustom: false };
+  },
+
+  /** 默认会话工作目录（~/.pi/agent/sessions），未选择项目时使用 */
+  async getSessionsDir(): Promise<{ sessionsDir: string }> {
+    const api = getElectronAPI();
+    if (api && typeof api.app.getSessionsDir === "function") {
+      return api.app.getSessionsDir();
+    }
+    return { sessionsDir: "" };
   },
 
   async setDataRoot(path: string): Promise<{

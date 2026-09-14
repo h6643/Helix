@@ -363,6 +363,12 @@ export interface SubAgent {
   parentId: string | null;
   chatMessageId: string | null;
   createdAt: number;
+  /** 归属的前端会话 id（spawn 时快照）：工作面板/子 Agent 面板按当前会话过滤，
+   *  防止并行会话的子代理互相串台。 */
+  sessionId?: string;
+  /** pi-subagents 扩展自己的子代理 id（后台启动确认 details.agentId 带回）。
+   *  .output 转录文件以它命名 —— 侧边栏时间线靠它定位，重启后依然有效。 */
+  agentId?: string;
   completedAt?: number;
   result?: string;
   filesModified?: string[];

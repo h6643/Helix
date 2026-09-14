@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronDown, ChevronUp } from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -7,7 +8,6 @@ import React, {
   useState,
   useRef,
 } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
 import { useHelixStore } from "@/stores/helix-store";
 
 const PAGE_SIZE = 20;
@@ -15,6 +15,7 @@ const PAGE_SIZE = 20;
 export function HistoryStrip() {
   const chatMessages = useHelixStore((s) => s.chatMessages);
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
+  const rightSidebarOpen = useHelixStore((s) => s.rightSidebarTab !== null);
   const [hovered, setHovered] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [pageOffset, setPageOffset] = useState(0);
@@ -104,11 +105,13 @@ export function HistoryStrip() {
   if (messages.length === 0) return null;
 
   const isAnyHovered = hovered !== null;
+  // 右侧边栏打开时，条带变窄（让出空间），对话长条显示成一个个点
+  const compact = rightSidebarOpen;
 
   return (
     // 命中范围恒为 28px 条带：外层盒与文字层均 pointer-events-none，
-    // 只有条带本体响应 hover/滚轮。悬停时所有标题一起展开（全部展开保留），
-    // 但文字不占命中区——鼠标可穿过文字直接点到对话内容。
+    // 只有条带本体响应 hover/滚轮。悬停时所有标题一起展开，但文字不占命中区，
+    // 鼠标可穿过文字直接点到对话内容。
     <div
       className="absolute left-5 top-[6%] bottom-[12%] z-30 pointer-events-none"
       ref={containerRef}
@@ -129,15 +132,17 @@ export function HistoryStrip() {
               onClick={() => locate(m.id)}
               onMouseEnter={() => setHovered(m.id)}
               className={`
-                flex items-center h-2.5 w-7 shrink-0 px-1 rounded-md
-                transition-colors duration-150
+                flex items-center h-2.5 shrink-0 rounded-md
+                transition-all duration-200
+                ${compact ? "w-4 px-0.5" : "w-7 px-1"}
                 ${isHovered ? "bg-muted/60" : ""}
               `}
             >
-              {/* 细线 */}
+              {/* 细线 / 圆点 */}
               <span
                 className={`
-                  w-5 h-1 rounded-full shrink-0 transition-colors duration-200
+                  rounded-full shrink-0 transition-all duration-200
+                  ${compact ? "size-1.5" : "w-5 h-1"}
                   ${isActive ? "bg-primary" : "bg-primary/30"}
                 `}
               />
@@ -145,7 +150,7 @@ export function HistoryStrip() {
           );
         })}
 
-        {totalPages > 1 && (
+        {totalPages > 1 && !compact && (
           <div className="flex items-center gap-0.5 pt-1 mt-0.5 border-t border-border/40">
             <button
               type="button"
@@ -176,26 +181,29 @@ export function HistoryStrip() {
       </div>
 
       {/* 文字层：与左侧条带逐行对齐（h-2.5 + gap-1.5 同节奏，top-1 对齐 py-1），
-          pointer-events-none —— 悬停时全部标题一起显示，但不占命中区。 */}
-      <div className="absolute left-8 top-1 flex flex-col gap-1.5 pointer-events-none">
-        {pageMessages.map((m) => {
-          const raw = (m.content ?? "").trim() || "(空消息)";
-          const text = raw.replace(/\s+/g, " ").slice(0, 10);
-          return (
-            <span
-              key={m.id}
-              className={`
-                flex h-2.5 items-center whitespace-nowrap text-foreground/75
-                transition-opacity duration-200
-                text-[calc(var(--helix-transcript-size)*0.8571)]
-                ${isAnyHovered ? "opacity-100" : "opacity-0"}
-              `}
-            >
-              {text}
-            </span>
-          );
-        })}
-      </div>
+          pointer-events-none —— 悬停时全部标题一起显示，但不占命中区。
+          紧凑模式（右侧边栏打开）下隐藏。 */}
+      {!compact && (
+        <div className="absolute left-8 top-1 flex flex-col gap-1.5 pointer-events-none">
+          {pageMessages.map((m) => {
+            const raw = (m.content ?? "").trim() || "(空消息)";
+            const text = raw.replace(/\s+/g, " ").slice(0, 10);
+            return (
+              <span
+                key={m.id}
+                className={`
+                  flex h-2.5 items-center whitespace-nowrap text-foreground/75
+                  transition-opacity duration-200
+                  text-[calc(var(--helix-transcript-size)*0.8571)]
+                  ${isAnyHovered ? "opacity-100" : "opacity-0"}
+                `}
+              >
+                {text}
+              </span>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -12,8 +12,8 @@
  * - Personality is now named preset (not free text)
  */
 import type { StateCreator } from "zustand";
-import type { ReasoningEffortLevel } from "@/stores/helix-types";
 import { loadModelPresets, saveModelPreset } from "@/stores/agent-presets";
+import type { ReasoningEffortLevel } from "@/stores/helix-types";
 
 export interface AgentSettingsSlice {
   agentMaxIterations: number;

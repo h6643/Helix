@@ -162,6 +162,10 @@ pub struct PiInstance {
     turn_cancelled: AtomicBool,
     /// Buffered tool-call argument deltas, toolCallId → args string.
     tool_args: Mutex<HashMap<String, String>>,
+    /// Args of EXECUTING tools, toolCallId → parsed args. tool_execution_start
+    /// carries them, but tool_execution_end does not — needed there to
+    /// synthesize a patch for `write` (pi's write result has no details).
+    exec_tool_args: Mutex<HashMap<String, Value>>,
     /// Model context window (get_state's model.contextWindow) for usage ring.
     context_window: Mutex<Option<i64>>,
     initialized: AtomicBool,
@@ -187,6 +191,34 @@ pub struct PiInstance {
     /// matching end). Long-running tools legitimately produce no stream
     /// events, so the watchdog must not fire while this is non-empty.
     executing_tools: Mutex<std::collections::HashSet<String>>,
+    /// Authoritative final text/thinking of the last assistant message,
+    /// captured from pi's `message_end` (which carries the complete message
+    /// object). pi only streams text via `message_update` text_delta; when
+    /// that stream is lost/nonexistent the frontend's textBuffer ends up
+    /// empty and the run completes with no visible output. `agent_settled`
+    /// forwards these as session/complete content/reasoning so the frontend
+    /// can self-heal from the authoritative source.
+    last_assistant_text: Mutex<String>,
+    last_assistant_thinking: Mutex<String>,
+    /// Live subagents spawned by the pi-subagents extension. Maps the parent
+    /// tool-call id to the extension's real agent id — background Agent calls
+    /// return "Agent started in background" immediately while the child keeps
+    /// running, so the frontend card must stay "running" until the child's
+    /// terminal event arrives (entry_appended subagents:record / started).
+    subagents: Mutex<HashMap<String, SubAgentRecord>>,
+}
+
+/// One live pi-subagents child tracked across its full lifecycle.
+struct SubAgentRecord {
+    /// Extension-side agent id (stable across resume/steer).
+    agent_id: String,
+    /// Set when the parent Agent tool call has returned (background start
+    /// acknowledged or foreground result delivered). The terminal record
+    /// alone is authoritative for completion.
+    tool_returned: bool,
+    /// Terminal status from the extension (completed / failed / …). Absent
+    /// while the child still runs.
+    status: Option<String>,
 }
 
 impl PiInstance {
@@ -202,6 +234,7 @@ impl PiInstance {
             turn_waiter: Mutex::new(None),
             turn_cancelled: AtomicBool::new(false),
             tool_args: Mutex::new(HashMap::new()),
+            exec_tool_args: Mutex::new(HashMap::new()),
             context_window: Mutex::new(None),
             initialized: AtomicBool::new(false),
             spawn_lock: Mutex::new(()),
@@ -211,6 +244,9 @@ impl PiInstance {
             plan_mode: Mutex::new(false),
             last_event_ms: AtomicU64::new(now_ms()),
             executing_tools: Mutex::new(std::collections::HashSet::new()),
+            last_assistant_text: Mutex::new(String::new()),
+            last_assistant_thinking: Mutex::new(String::new()),
+            subagents: Mutex::new(HashMap::new()),
         })
     }
 
@@ -332,6 +368,7 @@ impl PiInstance {
         self.ui_requests.lock().unwrap().clear();
         *self.turn_waiter.lock().unwrap() = None;
         self.tool_args.lock().unwrap().clear();
+        self.exec_tool_args.lock().unwrap().clear();
         self.executing_tools.lock().unwrap().clear();
         self.initialized.store(false, Ordering::SeqCst);
         self.streaming.store(false, Ordering::SeqCst);
@@ -1706,6 +1743,38 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
     }
 }
 
+/// Frontend bridge: parent Agent toolCallId → extension agent id (and live
+/// status) per session, so AgentWorkPanel can map its card id to the child's
+/// .output transcript (see delegations::subagent_timeline). Session scoped:
+/// each instance only sees its own children.
+#[tauri::command]
+pub fn subagent_map(session_id: Option<String>) -> Value {
+    let instances = INSTANCES.lock().unwrap();
+    let mut agents = Vec::new();
+    let collect = |instance: &Arc<PiInstance>, agents: &mut Vec<Value>| {
+        for (tool_call_id, rec) in instance.subagents.lock().unwrap().iter() {
+            agents.push(json!({
+                "tool_call_id": tool_call_id,
+                "agent_id": rec.agent_id,
+                "status": rec.status.clone().unwrap_or_else(|| "running".into()),
+            }));
+        }
+    };
+    match session_id.as_deref() {
+        Some(sid) if !sid.is_empty() => {
+            if let Some(instance) = instances.get(sid) {
+                collect(instance, &mut agents);
+            }
+        }
+        _ => {
+            for instance in instances.values() {
+                collect(instance, &mut agents);
+            }
+        }
+    }
+    json!({ "ok": true, "agents": agents })
+}
+
 /// Move an instance from its placeholder key to its real pi session id.
 fn rekey_instance(instance: &Arc<PiInstance>, new_key: String) {
     let old_key = instance.key();
@@ -2574,6 +2643,174 @@ fn handle_line(instance: &Arc<PiInstance>, line: &str) {
 fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) {
     let sid = || instance.current_session_id();
     match event_type {
+        "message_end" => {
+            // pi's message_end carries the COMPLETE final message object —
+            // the authoritative text/thinking, byte-perfect from the model.
+            // text_delta streaming is the only text path today; when that
+            // stream is lost (or the provider never streams), the frontend
+            // ends the run with an empty buffer and shows "no visible
+            // content". Cache it here; agent_settled attaches it to
+            // session/complete as a self-heal fallback.
+            if let Some(msg) = message.get("message") {
+                if msg.get("role").and_then(Value::as_str) == Some("assistant") {
+                    let mut text_parts: Vec<&str> = Vec::new();
+                    let mut thinking_parts: Vec<&str> = Vec::new();
+                    if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
+                        for block in blocks {
+                            match block.get("type").and_then(Value::as_str) {
+                                Some("text") => {
+                                    if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                        text_parts.push(t);
+                                    }
+                                }
+                                Some("thinking") => {
+                                    if let Some(t) = block.get("thinking").and_then(Value::as_str) {
+                                        thinking_parts.push(t);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    *instance.last_assistant_text.lock().unwrap() = text_parts.join("");
+                    *instance.last_assistant_thinking.lock().unwrap() = thinking_parts.join("");
+                }
+            }
+        }
+        // pi-subagents terminal lifecycle: the extension persists each
+        // finished child via pi.appendEntry("subagents:record", {id, type,
+        // description, status, result, error, …}) — the ONLY completion
+        // signal that survives RPC mode (its subagents:completed event-bus
+        // emission has no RPC stdout bridge). Runs may outlive the parent
+        // tool call (background agents), so gate on the child's own status,
+        // never on the parent's tool return.
+        "entry_appended" => {
+            let entry = message.get("entry").cloned().unwrap_or(Value::Null);
+            if entry.get("type").and_then(Value::as_str) == Some("custom")
+                && entry.get("customType").and_then(Value::as_str) == Some("subagents:record")
+            {
+                let data = entry.get("data").cloned().unwrap_or(Value::Null);
+                let agent_id = data
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if agent_id.is_empty() {
+                    return;
+                }
+                let raw_status = data
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                // Extension statuses: done → completed; error / stopped /
+                // aborted → failed; anything still running never reaches here.
+                let status = match raw_status.as_str() {
+                    "error" | "stopped" | "aborted" => "failed".to_string(),
+                    other => other.to_string(),
+                };
+                let summary = data
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .or_else(|| data.get("error").and_then(Value::as_str))
+                    .unwrap_or_default()
+                    .to_string();
+
+                // Match the record to its parent Agent tool call.
+                let mut subagents = instance.subagents.lock().unwrap();
+                let matched = subagents
+                    .iter()
+                    .find(|(_, rec)| rec.agent_id == agent_id)
+                    .map(|(tool_call_id, _)| tool_call_id.clone());
+                let Some(tool_call_id) = matched else {
+                    // No parent tool call seen (scheduler / RPC spawn / child
+                    // of a nested agent) — key the card by the agent id so it
+                    // still shows up in the live panel.
+                    let tool_call_id = agent_id.clone();
+                    subagents.insert(
+                        tool_call_id.clone(),
+                        SubAgentRecord {
+                            agent_id: agent_id.clone(),
+                            tool_returned: true,
+                            status: Some(status.clone()),
+                        },
+                    );
+                    drop(subagents);
+                    if status == "running" {
+                        emit_helix_event(
+                            "subagent.start",
+                            &json!({
+                                "session_id": sid(),
+                                "subagent_id": tool_call_id,
+                                "goal": data.get("description").and_then(Value::as_str)
+                                    .unwrap_or("执行子任务"),
+                                "model": data.get("type").and_then(Value::as_str)
+                                    .unwrap_or_default(),
+                                "text": "",
+                            }),
+                        );
+                    } else {
+                        emit_helix_event(
+                            "subagent.complete",
+                            &json!({
+                                "session_id": sid(),
+                                "subagent_id": tool_call_id,
+                                "status": status,
+                                "summary": summary,
+                            }),
+                        );
+                    }
+                    return;
+                };
+                let rec = subagents.get_mut(&tool_call_id).unwrap();
+                if status == "running" {
+                    // Not terminal after all (resume re-arms the record) —
+                    // flip back to running on the frontend card.
+                    rec.status = None;
+                    drop(subagents);
+                    emit_helix_event(
+                        "subagent.start",
+                        &json!({
+                            "session_id": sid(),
+                            "subagent_id": tool_call_id,
+                            "goal": data.get("description").and_then(Value::as_str)
+                                .unwrap_or("执行子任务"),
+                            "model": data.get("type").and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            "text": "",
+                        }),
+                    );
+                    return;
+                }
+                rec.status = Some(status.clone());
+                let tool_returned = rec.tool_returned;
+                drop(subagents);
+                // Terminal record → also finish the disk journal (background
+                // children whose parent tool returned long before).
+                let dir = crate::delegations::delegation_live_root().join(&tool_call_id);
+                if dir.is_dir() {
+                    crate::delegations::mark_delegation_finished(&dir, &status, &summary);
+                }
+                if tool_returned {
+                    // Parent tool call already returned — the card is still
+                    // "running" waiting for this exact moment.
+                    emit_helix_event(
+                        "subagent.complete",
+                        &json!({
+                            "session_id": sid(),
+                            "subagent_id": tool_call_id,
+                            "status": status,
+                            "summary": summary,
+                        }),
+                    );
+                } else {
+                    // Terminal record arrived before the parent Agent tool
+                    // returned (foreground run completing fast): let the
+                    // tool_execution_end handler emit the completion so the
+                    // card order matches the transcript order.
+                }
+            }
+        }
         "message_update" => {
             let delta = message
                 .get("assistantMessageEvent")
@@ -2706,6 +2943,13 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 .unwrap_or("tool");
             let args = message.get("args").cloned().unwrap_or(Value::Null);
             if !tool_call_id.is_empty() {
+                if args.is_object() {
+                    instance
+                        .exec_tool_args
+                        .lock()
+                        .unwrap()
+                        .insert(tool_call_id.clone(), args.clone());
+                }
                 instance
                     .executing_tools
                     .lock()
@@ -2745,12 +2989,64 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     );
                 }
             }
+            // pi-subagents extension: the `Agent` tool spawns a sub-agent.
+            // Register the tool-call → agent-id mapping so later lifecycle
+            // events can be attributed, but DON'T emit subagent.start here:
+            // the in-flight tool card already shows this call, and a separate
+            // card would duplicate it. `tool_execution_update`/`_end` and the
+            // extension's own lifecycle events drive the sub-agent card.
+            if tool_name == "Agent" && !tool_call_id.is_empty() {
+                let goal = args
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .or_else(|| args.get("prompt").and_then(Value::as_str))
+                    .unwrap_or("执行子任务");
+                let model = args
+                    .get("subagent_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let prompt = args
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                // A resumption of an existing child carries no new goal — the
+                // frontend already has the card from the original spawn.
+                let is_resume = args.get("resume").and_then(Value::as_str).is_some();
+                if !is_resume {
+                    emit_helix_event(
+                        "subagent.start",
+                        &json!({
+                            "session_id": sid(),
+                            "subagent_id": tool_call_id,
+                            "goal": goal,
+                            "model": model,
+                            "text": prompt,
+                        }),
+                    );
+                    // Mirror the legacy delegate_task disk contract so the
+                    // 子Agent 历史记录 (delegations_list) sees this child too.
+                    if let Some(dir) = crate::delegations::ensure_delegation_dir(
+                        &tool_call_id,
+                        &sid().as_str().map(str::to_string).unwrap_or_default(),
+                        goal,
+                    ) {
+                        crate::delegations::append_delegation_log(
+                            &dir,
+                            &format!("[start] {model} — {goal}"),
+                        );
+                    }
+                }
+            }
         }
         "tool_execution_update" => {
             let tool_call_id = message
                 .get("toolCallId")
                 .and_then(Value::as_str)
                 .map(str::to_string)
+                .unwrap_or_default();
+            let tool_name = message
+                .get("toolName")
+                .and_then(Value::as_str)
                 .unwrap_or_default();
             let partial = message
                 .pointer("/partialResult/content")
@@ -2769,6 +3065,29 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         },
                     }),
                 );
+            }
+            // pi-subagents `Agent` tool: forward its streamed progress note
+            // ("N tool uses…", activity line) as subagent.tool so the live
+            // sub-agent card updates while the child runs.
+            if tool_name == "Agent" && !tool_call_id.is_empty() {
+                let preview = content_to_text(&partial);
+                if let Some(text) = preview.as_str() {
+                    if !text.is_empty() {
+                        emit_helix_event(
+                            "subagent.tool",
+                            &json!({
+                                "session_id": sid(),
+                                "subagent_id": tool_call_id,
+                                "tool_name": "progress",
+                                "tool_preview": text,
+                            }),
+                        );
+                        let dir = crate::delegations::delegation_live_root().join(&tool_call_id);
+                        if dir.is_dir() {
+                            crate::delegations::append_delegation_log(&dir, text);
+                        }
+                    }
+                }
             }
         }
         "tool_execution_end" => {
@@ -2791,6 +3110,57 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     .cloned()
                     .unwrap_or(Value::Null),
             );
+            // pi 的 edit/write 类工具把变更信息放在 result.details（edit 的
+            // details.diff / details.patch 是真正的统一 diff；content 只是一句
+            // "Successfully replaced N block(s)"）。前端 +N −n 徽标按 diff 文本
+            // 统计，不转发 details 时编辑类卡片永远不出统计。details 里其余
+            // 大字段（图片 base64 等）不转，只挑 diff 类字段，且各截 16KB。
+            let exec_args = instance
+                .exec_tool_args
+                .lock()
+                .unwrap()
+                .remove(&tool_call_id)
+                .unwrap_or(Value::Null);
+            let diff_details: Value = {
+                let mut picked = serde_json::Map::new();
+                if let Some(details) = message.pointer("/result/details").and_then(Value::as_object) {
+                    for key in ["diff", "patch", "firstChangedLine", "diffSummary", "changes"] {
+                        if let Some(v) = details.get(key) {
+                            let v = match v {
+                                Value::String(s) if s.len() > 16_384 => {
+                                    Value::String(format!("{}…[diff 过长已截断]", s.chars().take(16_384).collect::<String>()))
+                                }
+                                other => other.clone(),
+                            };
+                            picked.insert(key.to_string(), v);
+                        }
+                    }
+                }
+                // pi 的 write 工具 result 完全没有 details（全新文件无 diff 可
+                // 言），前端 write 卡片同样出不了 +N −n。用 execution_start 缓存
+                // 的 args（path + content）在网关侧合成一个 unified patch 兜底。
+                if picked.is_empty() && tool_name == "write" && !is_error {
+                    if let Some(path) = exec_args.get("path").and_then(Value::as_str) {
+                        if let Some(text) = exec_args.get("content").and_then(Value::as_str) {
+                            let lines: Vec<&str> = text.split('\n').collect();
+                            let body = if text.ends_with('\n') {
+                                &lines[..lines.len().saturating_sub(1)]
+                            } else {
+                                &lines[..]
+                            };
+                            let mut patch = format!(
+                                "--- {path}\n+++ {path}\n@@ -0,0 +1,{} @@\n",
+                                body.len().max(1)
+                            );
+                            for line in body {
+                                patch.push_str(&format!("+{line}\n"));
+                            }
+                            picked.insert("patch".to_string(), Value::String(patch));
+                        }
+                    }
+                }
+                Value::Object(picked)
+            };
             if !tool_call_id.is_empty() {
                 instance
                     .executing_tools
@@ -2807,9 +3177,119 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             "toolName": tool_name,
                             "status": if is_error { "failed" } else { "completed" },
                             "content": content,
+                            "details": diff_details,
                         },
                     }),
                 );
+            }
+            // pi-subagents `Agent` tool result. TWO shapes arrive here:
+            //  - details.status == "background": the tool returned "Agent
+            //    started in background. Agent ID: …" while the child keeps
+            //    running. Record the tool_call_id → agent_id mapping and keep
+            //    the frontend card RUNNING — the extension's terminal
+            //    lifecycle event completes it.
+            //  - anything else (foreground run): the child really finished;
+            //    complete the card with the result text.
+            if tool_name == "Agent" && !tool_call_id.is_empty() {
+                let details = message.pointer("/result/details");
+                let agent_id = details
+                    .and_then(|d| d.get("agentId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| tool_call_id.clone());
+                let record_status = details
+                    .and_then(|d| d.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let mut subagents = instance.subagents.lock().unwrap();
+                let record =
+                    subagents
+                        .entry(tool_call_id.clone())
+                        .or_insert_with(|| SubAgentRecord {
+                            agent_id: agent_id.clone(),
+                            tool_returned: false,
+                            status: None,
+                        });
+                if record.agent_id != agent_id {
+                    record.agent_id = agent_id.clone();
+                }
+                let summary = content.as_str().unwrap_or_default().trim().to_string();
+                let mut completed_status: Option<String> = None;
+                if record_status == "background" {
+                    record.tool_returned = true;
+                    if record.status.is_none() {
+                        // Still running in the background — surface the start
+                        // acknowledgement as a progress line on the live card
+                        // instead of a (wrong) completion. agent_id rides along
+                        // so the renderer can bind the card to the child's
+                        // .output transcript (subagent_timeline) without the
+                        // in-memory mapping table.
+                        drop(subagents);
+                        if !summary.is_empty() {
+                            emit_helix_event(
+                                "subagent.tool",
+                                &json!({
+                                    "session_id": sid(),
+                                    "subagent_id": tool_call_id,
+                                    "agent_id": agent_id,
+                                    "tool_name": "background",
+                                    "tool_preview": summary,
+                                }),
+                            );
+                        }
+                    } else {
+                        // Terminal lifecycle event already arrived before the
+                        // parent tool returned — emit the buffered completion
+                        // (status from the entry record, summary from the
+                        // tool result, which is the same child outcome).
+                        let status = record.status.clone().unwrap_or_else(|| "completed".into());
+                        completed_status = Some(status.clone());
+                        drop(subagents);
+                        emit_helix_event(
+                            "subagent.complete",
+                            &json!({
+                                "session_id": sid(),
+                                "subagent_id": tool_call_id,
+                                "status": status,
+                                "summary": summary,
+                            }),
+                        );
+                    }
+                } else {
+                    // Foreground (synchronous) Agent call — the child's real
+                    // result is the tool result; complete the card now. Prefer
+                    // the terminal entry record's status when it beat the tool
+                    // return here (some failures return non-error text).
+                    record.tool_returned = true;
+                    let final_status = record.status.clone().unwrap_or_else(|| {
+                        if is_error {
+                            "failed".into()
+                        } else {
+                            "completed".into()
+                        }
+                    });
+                    record.status = Some(final_status.clone());
+                    completed_status = Some(final_status.clone());
+                    drop(subagents);
+                    emit_helix_event(
+                        "subagent.complete",
+                        &json!({
+                            "session_id": sid(),
+                            "subagent_id": tool_call_id,
+                            "status": final_status,
+                            "summary": summary,
+                        }),
+                    );
+                }
+                // Journal the outcome to the legacy delegation layout (only
+                // terminal outcomes — a background start leaves the manifest
+                // "running" for the child's own terminal event to finish).
+                if let Some(status) = completed_status {
+                    let dir = crate::delegations::delegation_live_root().join(&tool_call_id);
+                    if dir.is_dir() {
+                        crate::delegations::mark_delegation_finished(&dir, &status, &summary);
+                    }
+                }
             }
             // rpiv-todo extension (@juicesharp/rpiv-todo): every `todo` tool
             // call returns the full task list in `result.details.tasks`.
@@ -2858,7 +3338,23 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             }
             instance.streaming.store(false, Ordering::SeqCst);
             if !cancelled {
-                emit_helix_event("session/complete", &json!({ "session_id": sid() }));
+                // Attach the authoritative final text/thinking captured at
+                // message_end. The frontend prefers its streamed buffer when
+                // non-empty and only falls back to these — so a healthy
+                // stream is unaffected, but a lost/nonexistent text_delta
+                // stream still completes with the full reply instead of
+                // "no visible content".
+                let final_text = std::mem::take(&mut *instance.last_assistant_text.lock().unwrap());
+                let final_thinking =
+                    std::mem::take(&mut *instance.last_assistant_thinking.lock().unwrap());
+                emit_helix_event(
+                    "session/complete",
+                    &json!({
+                        "session_id": sid(),
+                        "content": final_text,
+                        "reasoning": final_thinking,
+                    }),
+                );
             }
         }
         "auto_retry_start" => {

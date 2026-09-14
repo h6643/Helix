@@ -417,6 +417,18 @@
   color: var(--destructive);
 }
 
+/* ── 工具组执行中 ─────────────────────────────────────────────────── */
+
+/* ── 工具符号脉冲：执行时 ⏺ 呼吸动画 ──────────────────────────────── */
+.tool-glyph-running {
+  animation: toolGlyphPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes toolGlyphPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 .tool-title {
   flex: 1;
   min-width: 0;
@@ -482,17 +494,29 @@
 }
 
 .helix-answer::before {
-  content: "";
-  position: absolute;
-  top: -1px;
-  left: 0;
-  width: 3.5rem;
-  height: 1px;
+  display: none;
+}
+
+/* 执行中时：对话底部扫描动画 */
+.conversation-scan-line {
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
   background: linear-gradient(
     90deg,
-    color-mix(in oklch, var(--primary) 45%, transparent),
-    transparent
+    transparent 0%,
+    transparent 35%,
+    color-mix(in oklch, var(--primary) 50%, transparent) 50%,
+    transparent 65%,
+    transparent 100%
   );
+  background-size: 300% 100%;
+  animation: scanLine 3s linear infinite;
+}
+
+@keyframes scanLine {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 
 .helix-answer > .helix-md,

@@ -24,7 +24,23 @@ import React, {
   useRef,
   useMemo,
 } from "react";
+import { AgentsSettings } from "./agents-settings";
+import { AppearanceSettingsPanel } from "./appearance-settings-panel";
+import { GeneralSettingsPanel } from "./general-settings-panel";
+import { HookSettings } from "./hook-settings";
+import { ImageModelSettings } from "./image-model-settings";
+import { McpEditorForm, type McpFormData } from "./mcp-editor-form";
+import { PopupSelect, SettingGroup } from "./settings-ui";
+import { ShortcutsPage } from "./shortcuts-page";
+import {
+  ModelUsageStats,
+  UsageSummary,
+  UsageDetail,
+  TokenUsagePanel,
+} from "./usage-stats";
+import { VisionModelSettings } from "./vision-model-settings";
 import { Button } from "@/components/ui/button";
+import { getCurrentVersion } from "@/hooks/use-check-update";
 import { pushModelConfig, pushModelConfigWithKey } from "@/lib/config-sync";
 import {
   isElectron,
@@ -33,25 +49,10 @@ import {
   electronDialog,
   electronApp,
 } from "@/lib/electron-bridge";
-import { getCurrentVersion } from "@/hooks/use-check-update";
 import { persistence } from "@/lib/persist";
 import { getAllProviders, getBaseUrl } from "@/lib/providers";
-import { useHelixStore, type ApiConfig } from "@/stores/helix-store";
 import { useGatewayStore } from "@/stores/gateway-store";
-import { AgentsSettings } from "./agents-settings";
-import { AppearanceSettingsPanel } from "./appearance-settings-panel";
-import { GeneralSettingsPanel } from "./general-settings-panel";
-import { HookSettings } from "./hook-settings";
-import { McpEditorForm, type McpFormData } from "./mcp-editor-form";
-import { ShortcutsPage } from "./shortcuts-page";
-import {
-  ModelUsageStats,
-  UsageSummary,
-  UsageDetail,
-  TokenUsagePanel,
-} from "./usage-stats";
-import { PopupSelect, SettingGroup } from "./settings-ui";
-import { VisionModelSettings } from "./vision-model-settings";
+import { useHelixStore, type ApiConfig } from "@/stores/helix-store";
 
 function SectionTitle({
   children,
@@ -406,7 +407,7 @@ export function ApiSettings({
     if (cfg?.baseUrl && cfg?.model) {
       st.addApiHistory({ ...cfg });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, []);
 
   const [showApiKey, setShowApiKey] = useState(false);
@@ -414,7 +415,7 @@ export function ApiSettings({
   const [isCustomProvider, setIsCustomProvider] = useState(false);
   const [customInputFocused, setCustomInputFocused] = useState(false);
   const [showAddModelModal, setShowAddModelModal] = useState(false);
-  type ModelTab = "main" | "vision";
+  type ModelTab = "main" | "vision" | "image";
   const [modelTab, setModelTab] = useState<ModelTab>("main");
 
   // ── Pi-backed model list ──────────────────────────────────────────────────
@@ -1762,6 +1763,16 @@ export function ApiSettings({
               >
                 视觉
               </button>
+              <button
+                onClick={() => setModelTab("image")}
+                className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
+                  modelTab === "image"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                生图
+              </button>
             </div>
 
             {modelTab === "main" ? (
@@ -1997,8 +2008,10 @@ export function ApiSettings({
                   </div>
                 </SettingGroup>
               )
-            ) : (
+            ) : modelTab === "vision" ? (
               <VisionModelSettings />
+            ) : (
+              <ImageModelSettings />
             )}
           </div>
         );

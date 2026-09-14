@@ -12,6 +12,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { isElectron } from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
+import { resolveBackendSid } from "@/lib/session-map";
 import { cn } from "@/lib/utils";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -41,10 +42,21 @@ function formatSize(bytes: number) {
 /**
  * 右侧栏「子 Agent 工作内容」页：在多面板里点某个 agent 后打开。
  *
- * 上半部分是本次会话该 agent 的实时工具调用（store.subAgents，由 subagent.*
- * 事件写入）；下半部分是磁盘上它留下的任务记录（delegate_task 每次委托生成
- * 的 live 日志），点某条任务即可读日志内容。
+ * 实时区有两层数据：subagent.* 事件写入的 store 卡片（后台启动确认），
+ * 以及 pi-subagents 的 .output 转录时间线（子代理真实的逐个工具调用）。
+ * 后台子代理不再向父会话流进度——转录文件是它运行期间唯一的实时记录，
+ * 所以运行中的子代理以 3s 轮询时间线为准；完成后回落到 store 的结果。
+ * 磁盘任务记录（旧 delegate_task live 日志）在最下面，点某条读日志。
  */
+
+interface TimelineEntry {
+  kind: string;
+  tool_name?: string;
+  preview?: string;
+  status: string;
+  timestamp?: string;
+}
+
 export function AgentWorkPanel() {
   const agent = useHelixStore((s) => s.activeAgentView);
   const subAgents = useHelixStore((s) => s.subAgents);
@@ -57,6 +69,14 @@ export function AgentWorkPanel() {
   } | null>(null);
   const [logContent, setLogContent] = useState("");
   const [logLoading, setLogLoading] = useState(false);
+  // .output 转录时间线（子代理真实工具活动）与是否已定位到转录。
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [timelineFound, setTimelineFound] = useState(false);
+
+  const live = agent
+    ? subAgents.find((a) => a.id === agent.id || a.name === agent.id)
+    : undefined;
+  const isRunning = live?.status === "running";
 
   const load = useCallback(
     async (silent = false) => {
@@ -67,7 +87,15 @@ export function AgentWorkPanel() {
       if (!silent) setLoading(true);
       try {
         const api = (window as any).electron as any;
-        const sid = useHelixStore.getState().currentSessionId || undefined;
+        // 过滤键 = pi 后端 sid（manifest.json 里的命名空间），不是前端会话 id。
+        // 无后端会话 → 无磁盘记录，不退化为列出全部。
+        const sid = await resolveBackendSid(
+          useHelixStore.getState().currentSessionId,
+        );
+        if (!sid) {
+          setDelegation(null);
+          return;
+        }
         const res = await api?.delegations?.list?.(sid);
         if (res?.ok) {
           const found =
@@ -91,6 +119,75 @@ export function AgentWorkPanel() {
     const timer = setInterval(() => load(true), 10000);
     return () => clearInterval(timer);
   }, [load]);
+
+  // ── .output 转录时间线 ──────────────────────────────────────────────────
+  // agent.id 是父会话的 Agent 工具调用 id；.output 文件名是扩展的子代理
+  // id。优先用卡片上绑定的 agentId（后台启动确认带回，重启不丢）；缺失时
+  // 退回查 subagent_map（只对网关未重启的会话有效）。运行中 3s 轮询。
+  const pollTimeline = useCallback(
+    async (silent = true) => {
+      if (!isElectron() || !agent) return;
+      try {
+        const api = (window as any).electron as any;
+        const store = useHelixStore.getState();
+        // 卡片上绑定的扩展子代理 id —— 首选，不依赖任何内存状态。
+        const cardAgentId =
+          live?.agentId ||
+          subAgents.find((a) => a.id === agent.id)?.agentId;
+        if (cardAgentId) {
+          const res = await api?.delegations?.timeline?.(
+            cardAgentId,
+            undefined,
+            undefined,
+            60,
+          );
+          if (res?.ok && res.found) {
+            setTimelineFound(true);
+            setTimeline((res.entries || []) as TimelineEntry[]);
+            return;
+          }
+        }
+        // 兜底：网关内存映射（会话键是 pi 后端 sid）。
+        // subagent_map / .output 目录的会话键都是 pi 后端 sid。无后端会话
+        // → 无转录可读，直接跳过（不传键会扫全部实例，跨会话串台）。
+        const sid = await resolveBackendSid(store.currentSessionId);
+        if (!sid) return;
+        const mapRes = await api?.subagentMap?.list?.(sid);
+        const mapped: { agent_id: string } | undefined =
+          ((mapRes?.agents || []) as { tool_call_id: string; agent_id: string }[]).find(
+            (m) => m.tool_call_id === agent.id,
+          );
+        if (!mapped?.agent_id) return;
+        const workDir = store.activeSessionWorkDir || store.selectedWorkDir || undefined;
+        const res = await api?.delegations?.timeline?.(
+          mapped.agent_id,
+          workDir,
+          sid,
+          60,
+        );
+        if (res?.ok && res.found) {
+          setTimelineFound(true);
+          setTimeline((res.entries || []) as TimelineEntry[]);
+        }
+      } catch {
+        /* 静默失败：保留上一次时间线 */
+      }
+    },
+    [agent, live?.agentId, subAgents],
+  );
+
+  useEffect(() => {
+    if (!isElectron() || !agent) return;
+    setTimeline([]);
+    setTimelineFound(false);
+    pollTimeline(false);
+    const interval = setInterval(
+      () => pollTimeline(true),
+      isRunning ? 3000 : 10000,
+    );
+    return () => clearInterval(interval);
+    // isRunning 变化（完成/失败）时重设轮询频率。
+  }, [pollTimeline, isRunning]);
 
   // 切换 agent 时清掉上一条日志，避免张冠李戴。
   useEffect(() => {
@@ -132,8 +229,15 @@ export function AgentWorkPanel() {
     );
   }
 
-  const live = subAgents.find((a) => a.id === agent.id || a.name === agent.id);
   const tasks = delegation?.tasks || [];
+  // 标题优先用真实任务描述；agent.name 常是 call_… 工具调用 id（点磁盘
+  // 历史项 / 卡片描述缺失时传入），直接显示既丑也不说明任何事。
+  const headerTitle =
+    live?.description ||
+    live?.name ||
+    (agent.name && !agent.name.startsWith("call_") ? agent.name : "") ||
+    delegation?.tasks?.[0]?.goal ||
+    "子 Agent";
 
   return (
     <div className="flex flex-col h-full w-full min-h-0 min-w-0 bg-card">
@@ -141,10 +245,10 @@ export function AgentWorkPanel() {
       <div className="flex items-center gap-2 px-3 py-2 shrink-0 border-b border-border/40">
         <Terminal className="size-3.5 text-primary shrink-0" />
         <span
-          className="flex-1 min-w-0 truncate font-mono text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/85"
-          title={agent.name}
+          className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/85"
+          title={headerTitle}
         >
-          {agent.name}
+          {headerTitle}
         </span>
         <button
           onClick={() => load()}
@@ -183,7 +287,48 @@ export function AgentWorkPanel() {
                 {live.description || live.name}
               </span>
             </div>
-            {(live.toolCalls || []).length > 0 && (
+            {/* 优先展示 .output 转录时间线：后台子代理的真实逐个工具
+                调用（含结果状态），运行中 3s 轮询。 */}
+            {timelineFound && timeline.length > 0 && (
+              <div className="space-y-0.5">
+                {timeline.slice(-14).map((tc, i) => (
+                  <div
+                    key={i}
+                    className="flex items-start gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)]"
+                  >
+                    <span className="text-primary shrink-0">▸</span>
+                    <span className="text-foreground/70 font-mono shrink-0">
+                      {tc.tool_name || tc.kind}
+                    </span>
+                    {tc.preview && (
+                      <span className="text-muted-foreground truncate min-w-0 flex-1" title={tc.preview}>
+                        {tc.preview}
+                      </span>
+                    )}
+                    <span
+                      className={cn(
+                        "ml-auto shrink-0",
+                        tc.status === "error"
+                          ? "text-destructive"
+                          : tc.status === "success"
+                            ? "text-emerald-500"
+                            : "text-muted-foreground",
+                      )}
+                    >
+                      {tc.status === "running" ? (
+                        <Loader2 className="size-3 animate-spin" />
+                      ) : tc.status === "success" ? (
+                        "✓"
+                      ) : (
+                        "✗"
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* store 卡片的工具行（subagent.* 事件）——时间线不可用时的兜底。 */}
+            {!timelineFound && (live.toolCalls || []).length > 0 && (
               <div className="space-y-0.5">
                 {(live.toolCalls || []).slice(-12).map((tc, i) => (
                   <div
@@ -219,6 +364,14 @@ export function AgentWorkPanel() {
                 ))}
               </div>
             )}
+            {/* 运行中但时间线还没出现（后台 spawn 刚发生/转录尚未落盘）：
+                给出可感知的等待态，而不是空白。 */}
+            {isRunning && !timelineFound && (live.toolCalls || []).length === 0 && (
+              <div className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground">
+                <Loader2 className="size-3 animate-spin" />
+                正在启动，等待第一个工具调用…
+              </div>
+            )}
             {live.result && (
               <div className="mt-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 whitespace-pre-wrap break-words">
                 {live.result}
@@ -240,28 +393,18 @@ export function AgentWorkPanel() {
           </section>
         )}
 
-        {/* 任务记录 */}
-        <section className="px-3 py-2">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70">
-              任务记录
-            </span>
-            <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground">
-              {tasks.length} 个
-            </span>
-          </div>
-          {loading ? (
-            <div className="flex items-center justify-center h-20">
-              <Loader2 className="size-4 animate-spin text-primary" />
-            </div>
-          ) : tasks.length === 0 ? (
-            <div className="flex flex-col items-center gap-1 py-8 text-muted-foreground/60">
-              <FileText className="size-6 opacity-40" />
-              <span className="text-[calc(var(--helix-transcript-size)*0.8571)]">
-                暂无任务记录
+        {/* 任务记录（旧 delegate_task 磁盘日志）：只在确实有记录时渲染，
+            空列表整个隐藏，避免出现“任务记录 0 个”占一屏。 */}
+        {!loading && tasks.length > 0 && (
+          <section className="px-3 py-2">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70">
+                任务记录
+              </span>
+              <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground">
+                {tasks.length} 个
               </span>
             </div>
-          ) : (
             <div className="space-y-1">
               {tasks.map((task) => (
                 <button
@@ -307,8 +450,8 @@ export function AgentWorkPanel() {
                 </button>
               ))}
             </div>
-          )}
-        </section>
+          </section>
+        )}
       </div>
 
       {/* Log viewer */}

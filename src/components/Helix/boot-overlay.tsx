@@ -9,6 +9,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import React, { useEffect, useState, useRef } from "react";
+import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
 /** Bootstrap stage reported by the Rust backend. */
@@ -28,15 +29,26 @@ const STAGE_LABELS: Record<string, string> = {
 export function BootOverlay() {
   const status = useHelixStore((s) => s.gatewayStatus);
   const setGatewayStatus = useHelixStore((s) => s.setGatewayStatus);
+  // Single source of truth for connectivity — the SAME field the sidebar
+  // connection dot reads (gateway-store.helixConnected). Keying the overlay off
+  // this instead of the separate helix-store.gatewayStatus guarantees the dot
+  // and the overlay can never disagree, even across dev hot-reloads where the
+  // two stores can momentarily desync. gatewayStatus is kept only to pick the
+  // message/icon (connecting vs disconnected).
+  const helixConnected = useGatewayStore((s) => s.helixConnected);
   const [bootstrapStage, setBootstrapStage] = useState<BootstrapStage>(null);
   const [bootstrapMessage, setBootstrapMessage] = useState("");
   const [isReady, setIsReady] = useState(false);
   const [isFadingOut, setIsFadingOut] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
 
-  // Handle fade-out animation when ready
+  // Handle fade-out animation when connected.
+  // FIX: depend only on `helixConnected`. Previously `isFadingOut` was in the
+  // dependency array, so flipping it to true re-ran the effect immediately and
+  // the cleanup cleared the 800ms timer — `isReady` never became true and the
+  // overlay stayed on screen forever even after the gateway was ready.
   useEffect(() => {
-    if (status === "ready" && !isFadingOut) {
+    if (helixConnected && !isFadingOut) {
       setShowSuccess(true);
       setIsFadingOut(true);
       const timer = setTimeout(() => {
@@ -44,7 +56,7 @@ export function BootOverlay() {
       }, 800); // Fade out duration
       return () => clearTimeout(timer);
     }
-  }, [status, isFadingOut]);
+  }, [helixConnected]);
 
   // Listen for bootstrap progress events from the Rust backend.
   useEffect(() => {
@@ -93,6 +105,9 @@ export function BootOverlay() {
         const st = await helix?.status?.();
         if (st?.connected) {
           useHelixStore.getState().setGatewayStatus("ready");
+          // Also nudge the shared connection flag so the overlay dismisses even
+          // when the heartbeat probe is currently throttled.
+          useGatewayStore.getState().setHelixConnected(true);
           return;
         }
       } catch {}

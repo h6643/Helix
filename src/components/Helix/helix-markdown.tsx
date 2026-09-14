@@ -12,15 +12,6 @@
  */
 
 import {
-  cloneElement,
-  isValidElement,
-  memo,
-  useMemo,
-  useState,
-  type MouseEvent,
-  type ReactNode,
-} from "react";
-import {
   AlertCircle,
   AlertTriangle,
   Check,
@@ -30,16 +21,25 @@ import {
   type LucideIcon,
   Zap,
 } from "lucide-react";
+import {
+  cloneElement,
+  isValidElement,
+  memo,
+  useMemo,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
-import { useHelixStore } from "@/stores/helix-store";
-
+import { HighlightedCode } from "@/components/Helix/shiki-code";
 import { sanitizeLanguageTag } from "@/lib/markdown-code";
 import { preprocessMarkdown } from "@/lib/markdown-preprocess";
-import { HighlightedCode } from "@/components/Helix/shiki-code";
+import { useHelixStore } from "@/stores/helix-store";
+
 
 interface HelixMarkdownProps {
   text: string;
@@ -342,6 +342,7 @@ export function CodeCard({
   showRunButton = true,
   className,
   collapsible = true,
+  showHeader = true,
 }: {
   language: string;
   code: string;
@@ -349,6 +350,9 @@ export function CodeCard({
   showRunButton?: boolean;
   className?: string;
   collapsible?: boolean;
+  // showHeader=false 时完全不渲染顶部头部栏（语言标签 + 复制/执行按钮）——工具结果
+  // 卡用它去掉那条灰底"大边框"式头部，内容直接铺开；卡片外框与圆角保留。
+  showHeader?: boolean;
 }) {
   const trimmed = code.replace(/^\n+/, "").trimEnd();
   const [copied, setCopied] = useState(false);
@@ -399,50 +403,53 @@ export function CodeCard({
   return (
     <pre className={className} data-code-card-header="true">
       {/* 头部：不透明背景，显示语言类型和操作按钮（helix-code-card-header 由
-          globals.css 以 !important 压制 .helix-md pre > div 的通用透明规则） */}
-      <div className="flex items-center justify-between px-2 py-1 helix-code-card-header border-b border-border rounded-t-md">
-        <span className="text-[calc(var(--helix-transcript-size)*0.7143)] uppercase tracking-wider text-foreground/40 select-none font-medium">
-          {isDiff ? "diff" : language || (boxDiagram ? "text" : "code")}
-        </span>
-        <span className="flex items-center gap-1">
-          {showRunButton && canRun && (
+          globals.css 以 !important 压制 .helix-md pre > div 的通用透明规则）。
+          showHeader=false（工具结果卡）时整条头部不渲染——去掉那条灰底"大边框"。 */}
+      {showHeader && (
+        <div className="flex items-center px-2 py-1 helix-code-card-header border-b border-border rounded-t-md justify-between">
+          <span className="text-[calc(var(--helix-transcript-size)*0.7143)] uppercase tracking-wider text-foreground/40 select-none font-medium">
+            {isDiff ? "diff" : language || (boxDiagram ? "text" : "code")}
+          </span>
+          <span className="flex items-center gap-1">
+            {showRunButton && canRun && (
+              <button
+                type="button"
+                aria-label="执行代码"
+                title="执行代码"
+                onClick={runCode}
+                className="p-1 rounded text-foreground/40 hover:text-foreground/70 hover:bg-foreground/5 transition-colors cursor-pointer"
+              >
+                {sent ? (
+                  <Check className="size-3.5" />
+                ) : (
+                  <Play className="size-3.5" />
+                )}
+              </button>
+            )}
             <button
               type="button"
-              aria-label="执行代码"
-              title="执行代码"
-              onClick={runCode}
+              aria-label="复制代码"
+              title="复制代码"
+              onClick={() => {
+                try {
+                  void navigator.clipboard?.writeText(trimmed);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                } catch {
+                  /* clipboard unavailable */
+                }
+              }}
               className="p-1 rounded text-foreground/40 hover:text-foreground/70 hover:bg-foreground/5 transition-colors cursor-pointer"
             >
-              {sent ? (
+              {copied ? (
                 <Check className="size-3.5" />
               ) : (
-                <Play className="size-3.5" />
+                <Copy className="size-3.5" />
               )}
             </button>
-          )}
-          <button
-            type="button"
-            aria-label="复制代码"
-            title="复制代码"
-            onClick={() => {
-              try {
-                void navigator.clipboard?.writeText(trimmed);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 2000);
-              } catch {
-                /* clipboard unavailable */
-              }
-            }}
-            className="p-1 rounded text-foreground/40 hover:text-foreground/70 hover:bg-foreground/5 transition-colors cursor-pointer"
-          >
-            {copied ? (
-              <Check className="size-3.5" />
-            ) : (
-              <Copy className="size-3.5" />
-            )}
-          </button>
-        </span>
-      </div>
+          </span>
+        </div>
+      )}
       {/* 代码内容区域：透明背景（helix-code-body：globals.css 恢复被
           .helix-md pre > div { padding:0 } 清零的左右内边距） */}
       <div className="px-3 py-2 bg-transparent helix-code-body">

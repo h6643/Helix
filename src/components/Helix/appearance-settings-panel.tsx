@@ -1,8 +1,7 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
-import { useHelixStore } from "@/stores/helix-store";
+import React, { useEffect, useRef, useState } from "react";
 import {
   SettingRow,
   SettingGroup,
@@ -12,6 +11,7 @@ import {
   useLockScrollOnOpen,
 } from "./settings-ui";
 import { THEME_SELECT_GROUPS } from "@/lib/themes";
+import { useHelixStore } from "@/stores/helix-store";
 
 /**
  * Custom theme picker. Native `<select>` + `<optgroup>` popups are unreliable

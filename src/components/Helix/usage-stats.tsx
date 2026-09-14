@@ -1,10 +1,10 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { formatTokens } from "@/lib/format";
-import { useHelixStore } from "@/stores/helix-store";
 import { DailyUsageChart, type DailyUsagePoint } from "./usage-daily-chart";
 import { UsageHeatmap } from "./usage-heatmap";
+import { formatTokens } from "@/lib/format";
+import { useHelixStore } from "@/stores/helix-store";
 
 export function ModelUsageStats() {
   const modelUsage = useHelixStore((s) => s.modelUsage);

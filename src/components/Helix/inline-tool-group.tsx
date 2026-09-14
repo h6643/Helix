@@ -75,20 +75,6 @@ function extractResultCount(
 
 // ── Diff stats extraction ────────────────────────────────────────────────
 
-// 只对真正的 diff 类工具有意义。Read/grep 等工具输出的文件正文里，以 +/-
-// 开头的普通行（markdown 列表、YAML frontmatter 等）会被误数成增删行，
-// 在标题上挂出莫名其妙的绿色 +N / 红色 −N。
-function isDiffTool(toolName: string): boolean {
-  const name = (toolName || "").toLowerCase();
-  return (
-    name.includes("diff") ||
-    name.includes("patch") ||
-    name.includes("apply") ||
-    name.includes("edit") ||
-    name.includes("write")
-  );
-}
-
 function extractDiffStats(content: string): string {
   let added = 0,
     removed = 0;
@@ -114,10 +100,18 @@ function detectResultKind(toolName: string, content: string): ResultKind {
   if (
     name.includes("diff") ||
     name.includes("patch") ||
-    name.includes("git_diff")
+    name.includes("git_diff") ||
+    // pi 的 edit 工具：diff 拼在结果文本后段（gateway 从 details.diff 带出）
+    name === "edit"
   )
     return "diff";
-  if (/^(---|\+\+\+|@@|diff --git)/.test(content.trim())) return "diff";
+  // diff 头可能不在第一行（前面有 "Successfully replaced …" 一句），扫前几行。
+  if (
+    /(^|\n)\s*(---|\+\+\+|@@|diff --git)/.test(
+      content.split("\n").slice(0, 6).join("\n"),
+    )
+  )
+    return "diff";
   if (
     content.startsWith(`${ANSI_ESCAPE}[`) &&
     /added|removed|modified/i.test(content)
@@ -291,6 +285,29 @@ function groupSteps(
   return rows;
 }
 
+// 折叠摘要用：把一组 tool_group blocks 里所有 diff 结果的 +/- 行数汇总成
+// 「+N −n」，供 ToolStreamFold 摘要行右侧展示（与工具卡标题同一套判据）。
+export function summarizeGroupDiff(
+  blocks: Array<{ type: string; steps?: ExecutionStep[] }>,
+): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const b of blocks) {
+    if (b.type !== "tool_group" || !b.steps) continue;
+    for (const { results } of groupSteps(b.steps)) {
+      for (const r of results) {
+        const raw = normalizeAcpContent(r.content || "");
+        if (detectResultKind(r.toolName || "", raw) !== "diff") continue;
+        for (const line of raw.split("\n")) {
+          if (line.startsWith("+") && !line.startsWith("+++")) added++;
+          else if (line.startsWith("-") && !line.startsWith("---")) removed++;
+        }
+      }
+    }
+  }
+  return { added, removed };
+}
+
 function ToolCard({
   step,
   results,
@@ -306,10 +323,11 @@ function ToolCard({
   const isCommandTool = /bash|terminal|shell|run|execute|command/i.test(
     step.toolName || "",
   );
-  // 命令类 + 读文件类（read_file/list_directory…）点击不展开（标题/状态/错误外露即可）；
-  // 文件修改等其余工具保留展开。
-  const canExpand =
-    !isCommandTool && !/read|view|list|directory/i.test(step.toolName || "");
+  // 读文件类（read/read_file/list_directory…）**不支持展开**：标题/状态/错误外露即可，
+  // 点击标题不再切换结果区、结果区也不渲染。
+  const isReadTool = /read|view|list|directory/i.test(step.toolName || "");
+  // 命令类 + 读文件类点击不展开（标题/状态/错误外露即可）；文件修改等其余工具保留展开。
+  const canExpand = !isCommandTool && !isReadTool;
   // 紧凑工具：命令/搜索/罗列类工具，具体动作（命令/查询/路径）已经在标题里展示，
   // 参数区和结果区再平铺一遍纯属冗余。约定是"只显示标题/动作就够了"。
   const isCompactTool =
@@ -325,6 +343,11 @@ function ToolCard({
   // 是否有可展开内容：参数 / 子步骤 / 结果 / 运行中实时输出。
   const hasExpandableContent =
     hasParams || hasSubSteps || results.length > 0 || !!step.content;
+  // 点击标题是否切换结果区：读取类恒不切换（图片结果例外 —— 不展开就看不到图）。
+  const hasImageResult = results.some(
+    (r) => detectResultKind(r.toolName || "", r.content || "") === "image",
+  );
+  const expandable = hasExpandableContent && (!isReadTool || hasImageResult);
   const stepStatus =
     results.length > 0
       ? step.status === "failed"
@@ -353,6 +376,26 @@ function ToolCard({
       path,
       step.toolParams,
     );
+  // 卡片首部文本（"输入"）：命令类 → `$ 命令`；其余工具 → 参数。与结果合并为同一张
+  // 卡片，避免"参数卡 + 结果卡"分裂成两张。单参数且其值已作为标题展示（如 read/list
+  // 的 path、grep 的 query）时不再重复，仅在输入尚未见于标题时才并入卡片首部。
+  const headerText = (() => {
+    if (isCommandTool) {
+      const cmd = (extractCommandSnippet(step.toolParams) || "").trim();
+      return cmd ? `$ ${cmd}` : "";
+    }
+    const entries = visibleParamEntries.filter(
+      ([, v]) => !(typeof v === "string" && action && v === action),
+    );
+    if (entries.length === 0) return "";
+    if (entries.length === 1) {
+      const [, v] = entries[0];
+      return typeof v === "string" ? v : JSON.stringify(v, null, 2);
+    }
+    return entries
+      .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join("\n");
+  })();
 
   return (
     <div className="group">
@@ -361,9 +404,9 @@ function ToolCard({
       <button
         type="button"
         onClick={() => {
-          if (hasExpandableContent) setOpen((prev) => !prev);
+          if (expandable) setOpen((prev) => !prev);
         }}
-        className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${hasExpandableContent ? "" : "cursor-default"}`}
+        className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${expandable ? "" : "cursor-default"}`}
       >
         {/* Claude Code 终端风工具符号：⏺（失败态 × 变红）替代彩色图标 */}
         {failed ? (
@@ -371,7 +414,7 @@ function ToolCard({
             ✕
           </span>
         ) : (
-          <span className="tool-glyph" aria-hidden>
+          <span className={`tool-glyph${running ? " tool-glyph-running" : ""}`} aria-hidden>
             ⏺
           </span>
         )}
@@ -400,15 +443,38 @@ function ToolCard({
           ) : null;
         })()}
         {(() => {
-          const diff =
-            step.content && isDiffTool(step.toolName || "")
-              ? extractDiffStats(step.content)
-              : "";
-          return diff ? (
-            <span className="text-[0.72em] text-emerald-500/60 shrink-0">
-              {diff}
+          // 真正的统一 diff 在 tool_result 步骤（results[r].content），不在 tool_call
+          // 的流式预览 step.content（那是进度叙述文本，无 +- 行）。从所有 diff 类结果里
+          // 汇总 +N −n；结果里没有 diff 时再回退到 step.content（兼容个别把 diff 直接
+          // 流进预览的工具）。
+          let added = 0,
+            removed = 0;
+          for (const r of results) {
+            const raw = normalizeAcpContent(r.content || "");
+            if (detectResultKind(r.toolName || "", raw) !== "diff") continue;
+            for (const line of raw.split("\n")) {
+              if (line.startsWith("+") && !line.startsWith("+++")) added++;
+              else if (line.startsWith("-") && !line.startsWith("---")) removed++;
+            }
+          }
+          if (added === 0 && removed === 0) {
+            const fb = step.content ? extractDiffStats(step.content) : "";
+            return fb ? (
+              <span className="text-[0.72em] text-emerald-500/60 shrink-0">
+                {fb}
+              </span>
+            ) : null;
+          }
+          return (
+            <span className="text-[0.72em] shrink-0 flex items-center gap-1">
+              {added > 0 && (
+                <span className="text-emerald-500/70">+{added}</span>
+              )}
+              {removed > 0 && (
+                <span className="text-rose-500/70">−{removed}</span>
+              )}
             </span>
-          ) : null;
+          );
         })()}
       </button>
 
@@ -434,7 +500,7 @@ function ToolCard({
         </div>
       )}
 
-      {hasExpandableContent && open && (
+      {expandable && open && (
         <div className="tool-result-panel space-y-1.5">
           {/* Streaming output preview — shown while tool is running.
               tool.progress → tool_call_update(in_progress) → tool_output_delta 把
@@ -490,34 +556,11 @@ function ToolCard({
               })}
             </div>
           )}
-          {/* 内容单块 — 参数与结果合并展示，无单独标签分隔。
-              外层 ⎿ 面板已带 bg-inset 底与折角线，内部不再套边框卡。 */}
-          {(hasParams || results.length > 0) && (
+          {/* 参数与结果合并成同一张卡片：参数作为首部"输入"行，结果紧随其后。
+              外层 ⎿ 面板已带 bg-inset 底与折角线，内部只渲染一张代码卡。 */}
+          {(headerText || results.length > 0) && (
             <div className="space-y-1.5 divide-y divide-border/20">
-              {hasParams && (
-                <div className="space-y-1.5 pt-1.5">
-                  {visibleParamEntries.map(([k, v]) => (
-                    <div key={k} className="flex flex-col">
-                      <span className="text-[0.72em] text-foreground/40 font-medium uppercase tracking-wide">
-                        {k}
-                      </span>
-                      <div className="helix-md">
-                        <CodeCard
-                          language="json"
-                          code={
-                            typeof v === "string"
-                              ? v
-                              : JSON.stringify(v, null, 2)
-                          }
-                          showRunButton={false}
-                          className="!leading-snug !my-0"
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {results.map((r) => {
+              {results.map((r, ri) => {
                 if (r.type === "error") {
                   const errFiltered = stripMktempNoise(
                     stripEmoji(normalizeAcpContent(r.content || "")),
@@ -562,18 +605,30 @@ function ToolCard({
                   );
                 }
 
-                // 其余结果（diff / plain 文本）统一走 WorkBuddy 风格代码卡片：
-                // 语言标签 + 行数 + 复制按钮 + 语法高亮 + 过长自动折叠/展开。
-                // diff 由 CodeCard 内部的 DiffView 处理；plain 用 text 高亮。
+                // 其余结果（diff / plain 文本）统一走代码卡片：语法高亮 + 卡片外框。
+                // 工具结果一律不折叠（collapsible=false）、且不渲染头部栏
+                // （showHeader=false）——去掉顶部那条「语言标签 + 复制」灰底大边框，
+                // 内容直接铺开；工具输出不是正文，无需收起。
                 const resultLang =
                   detectResultKind(r.toolName || "", raw) === "diff"
                     ? "diff"
                     : "text";
+                // 卡片首部（"输入"）：命令 → `$ 命令`，其余工具 → 参数行。与结果合并
+                // 成同一张卡 —— 即"上面输入、下面输出"。只加在首个非 error 结果上；
+                // diff 结果不加（首行前缀会破坏 DiffView 的逐行解析）。
+                const firstResultIdx = results.findIndex(
+                  (x) => (x.type as string) !== "error",
+                );
+                const withHeader =
+                  headerText && resultLang === "text" && ri === firstResultIdx
+                    ? `${headerText}\n\n`
+                    : "";
+                const codeText = withHeader + raw;
                 const clamped =
-                  raw.length > TOOL_RESULT_CLAMP
-                    ? raw.slice(0, TOOL_RESULT_CLAMP) +
-                      `\n\n… (${raw.length - TOOL_RESULT_CLAMP} 字符已截断)`
-                    : raw;
+                  codeText.length > TOOL_RESULT_CLAMP
+                    ? codeText.slice(0, TOOL_RESULT_CLAMP) +
+                      `\n\n… (${codeText.length - TOOL_RESULT_CLAMP} 字符已截断)`
+                    : codeText;
 
                 return (
                   <div key={r.id} className="pt-1.5">
@@ -582,12 +637,30 @@ function ToolCard({
                         language={resultLang}
                         code={clamped}
                         showRunButton={false}
+                        collapsible={false}
+                        showHeader={false}
                         className="!leading-snug !my-0"
                       />
                     </div>
                   </div>
                 );
               })}
+              {/* 仅有"输入"、暂无结果（运行中）：把输入单独渲染成一张卡，
+                  保持"始终一张卡"的视觉，避免空面板。命令类由上方实时输出预览覆盖。 */}
+              {results.length === 0 && headerText && !isCommandTool && (
+                <div className="pt-1.5">
+                  <div className="helix-md">
+                    <CodeCard
+                      language="text"
+                      code={headerText}
+                      showRunButton={false}
+                      showHeader={false}
+                      collapsible={false}
+                      className="!leading-snug !my-0"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -605,8 +678,19 @@ export function InlineToolGroup({
   isRunning: boolean;
   fontSize?: number;
 }) {
-  const visible = steps;
-  if (visible.length === 0) return null;
+  const visible = steps ?? [];
+  if (visible.length === 0) {
+    // 防御：steps 为空的 tool_group 绝不能塌成零高度隐形间隙（否则两段文字之间
+    // 看起来像被截断）。始终渲染一行可见占位，标明此处有工具执行，而不是留空白。
+    return (
+      <div className="my-2 flex items-center gap-1.5 text-[0.85em] text-muted-foreground/70 select-none">
+        <span className="tool-glyph" aria-hidden>
+          ⏺
+        </span>
+        <span>工具执行</span>
+      </div>
+    );
+  }
 
   const rows = groupSteps(visible);
 

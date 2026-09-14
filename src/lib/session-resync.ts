@@ -1,7 +1,7 @@
 ﻿import { helixApi } from "@/lib/electron-bridge";
 import { loadSessionMap, resolveBackendSid } from "@/lib/session-map";
-import { useHelixStore } from "@/stores/helix-store";
 import { useGatewayStore } from "@/stores/gateway-store";
+import { useHelixStore } from "@/stores/helix-store";
 import type { ChatMessage } from "@/stores/helix-types";
 
 function genId(): string {

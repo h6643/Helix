@@ -1,5 +1,7 @@
 ﻿"use client";
 
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   Minus,
   Square,
@@ -36,11 +38,17 @@ import React, {
   lazy,
   Suspense,
 } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
-import { getCurrentVersion } from "@/hooks/use-check-update";
 import { createPortal } from "react-dom";
-import { useProviderStore } from "@/stores/slices/provider-store";
+import { AgentFlowPanel } from "./agent-flow-panel";
+import { BackgroundTasksPanel, type BgTask } from "./background-tasks-panel";
+import { BranchPicker } from "./branch-picker";
+import { CommandPalette } from "./command-palette";
+import { ContextMenuProvider } from "./context-menu";
+import { GlobalTooltip } from "./global-tooltip";
+import { KeyboardShortcuts } from "./keyboard-shortcuts";
+import { Sidebar } from "./sidebar";
+import { ToastContainer } from "./toast-container";
+import { getCurrentVersion } from "@/hooks/use-check-update";
 import { useCheckUpdate } from "@/hooks/use-check-update";
 import { useGitChangeStat } from "@/hooks/use-git-change-stat";
 import {
@@ -55,20 +63,12 @@ import {
   electronGit,
 } from "@/lib/electron-bridge";
 import { startScheduledTaskRunner } from "@/lib/scheduled-task-runner";
+import { resolveBackendSid } from "@/lib/session-map";
 import { isServeActive, getServeClient } from "@/lib/serve-gateway";
-import { useHelixStore } from "@/stores/helix-store";
 import { applyHelixPalette } from "@/lib/themes";
-import { AgentFlowPanel } from "./agent-flow-panel";
-import { GlobalTooltip } from "./global-tooltip";
-import { CommandPalette } from "./command-palette";
-import { Sidebar } from "./sidebar";
-import { BranchPicker } from "./branch-picker";
-import { KeyboardShortcuts } from "./keyboard-shortcuts";
-import { ContextMenuProvider } from "./context-menu";
-import { BackgroundTasksPanel, type BgTask } from "./background-tasks-panel";
-
-import { ToastContainer } from "./toast-container";
 import { useGatewayStore } from "@/stores/gateway-store";
+import { useHelixStore } from "@/stores/helix-store";
+
 import { DEFAULT_SHORTCUTS } from "@/stores/helix-types";
 
 // Process-wide guard so the startup restore + Helix sync runs exactly once.
@@ -135,6 +135,7 @@ const RightSidebar = lazy(() =>
   import("./right-sidebar").then((m) => ({ default: m.RightSidebar })),
 );
 import { MoreActionsMenu } from "./more-actions-menu";
+import { useProviderStore } from "@/stores/slices/provider-store";
 
 // Local Suspense for the always-visible panel areas. Without a boundary the
 // lazy panels' chunk load bubbles up to the root Suspense in main.tsx, which
@@ -465,16 +466,40 @@ export function HelixLayout() {
   const navigationIndex = useHelixStore((s) => s.navigationIndex);
   const customShortcuts = useHelixStore((s) => s.customShortcuts);
   const helixTodos = useHelixStore((s) => s.helixTodos);
-  const pendingPlanReview = useHelixStore((s) => s.pendingPlanReview);
+  const pendingPlanReviewAll = useHelixStore((s) => s.pendingPlanReview);
+  // 实时子代理（store.subAgents，由 subagent.* 事件写入）。pi-subagents 的
+  // Agent 工具不写旧 delegate_task 磁盘目录，磁盘探测（hasDelegations）看不到
+  // 它们 — 实时状态必须直接参与按钮显示条件。
+  const subAgentsAll = useHelixStore((s) => s.subAgents);
+  // ── 会话私有视图 ─────────────────────────────────────────────────────────
+  // 工作面板的所有区块只展示当前对话的内容：subAgents 按 spawn 时快照的
+  // sessionId 过滤（旧数据无该字段时回退为可见——升级瞬间不至于清空），
+  // pendingPlanReview 按 sessionId 匹配当前对话（草稿对话用 __draft__ 键）。
+  const DRAFT_KEY = "__draft__";
+  const planKey = currentSessionId ?? DRAFT_KEY;
+  const subAgents = useMemo(
+    () =>
+      subAgentsAll.filter(
+        (a) => !a.sessionId || a.sessionId === currentSessionId,
+      ),
+    [subAgentsAll, currentSessionId],
+  );
+  const pendingPlanReview =
+    pendingPlanReviewAll &&
+    (pendingPlanReviewAll.sessionId === planKey ||
+      !pendingPlanReviewAll.sessionId)
+      ? pendingPlanReviewAll
+      : null;
   // Stable action references — these never change so getState() is safe
   const storeActions = useMemo(() => useHelixStore.getState(), []);
   const [restoreReady, setRestoreReady] = useState(startupSyncDone);
   const [delegations, setDelegations] = useState<
     Array<{ id: string; tasks: Array<{ name: string; modified: number }> }>
   >([]);
+  const [hasDelegations, setHasDelegations] = useState(false);
   // 后台任务（pi-background-tasks 扩展注册表）：面板打开时 3s 轮询，平时
   // 10s 慢轮询维持按钮徽标。数据经 Rust tasks_list 读共享 tasks.json。
-  const [bgTasks, setBgTasks] = useState<BgTask[]>([]);
+  const [bgTasksAll, setBgTasks] = useState<BgTask[]>([]);
   const [bgTasksOpen, setBgTasksOpen] = useState(false);
   const bgTasksRef = useRef<HTMLDivElement>(null);
   const helixSessionId = useGatewayStore((s) => s.helixSessionId);
@@ -492,9 +517,29 @@ export function HelixLayout() {
     const interval = setInterval(loadBgTasks, bgTasksOpen ? 3000 : 10000);
     return () => clearInterval(interval);
   }, [bgTasksOpen, loadBgTasks]);
+  // 后台任务按会话隔离：registry 里的 session_id 是 pi 后端 sid，与全局
+  // helixSessionId（当前对话绑定的后端会话）比对。独立的后台任务面板不
+  // 在这里过滤（它自己分「本会话 / 其他来源」，收全量 bgTasksAll）。
+  // 工作面板下拉的后台任务区：本会话任务 + 其它会话仍在运行的（运行中的
+  // 后台进程跨会话仍有运维价值；旧版扩展没记会话 id 的 unknown 任务也由
+  // 这条兜底露出）。
+  const workPanelBgTasks = useMemo(() => {
+    const mine = helixSessionId
+      ? bgTasksAll.filter((t) => t.session_id === helixSessionId)
+      : [];
+    const othersRunning = bgTasksAll
+      .filter(
+        (t) =>
+          t.status === "running" &&
+          (!helixSessionId || t.session_id !== helixSessionId),
+      )
+      .slice(0, 4);
+    return [...mine.slice(0, 8), ...othersRunning];
+  }, [bgTasksAll, helixSessionId]);
+  // 独立「后台任务」按钮的徽标：全局运行数（它是全局面板，非会话私有）。
   const runningBgTasks = useMemo(
-    () => bgTasks.filter((t) => t.status === "running"),
-    [bgTasks],
+    () => bgTasksAll.filter((t) => t.status === "running"),
+    [bgTasksAll],
   );
   // 右上角「更改」胶囊：当前工作区未提交改动的行数统计。
   // 数据 = git diff --numstat 各文件 +/- 求和（二进制文件输出 "-\t-" 会被跳过）。
@@ -513,13 +558,17 @@ export function HelixLayout() {
   // 右上角统一工作面板（更改 / 任务清单 / 子 Agent 共用的下拉）。
   const [workPanelOpen, setWorkPanelOpen] = useState(false);
   const workPanelRef = useRef<HTMLDivElement>(null);
+  const workPanelBtnRef = useRef<HTMLButtonElement>(null);
+  const workPanelPortalRef = useRef<HTMLDivElement>(null);
   // 点击面板外部时关闭统一工作面板。
   useEffect(() => {
     if (!workPanelOpen) return;
     const onDocClick = (e: MouseEvent) => {
       if (
         workPanelRef.current &&
-        !workPanelRef.current.contains(e.target as Node)
+        !workPanelRef.current.contains(e.target as Node) &&
+        workPanelPortalRef.current &&
+        !workPanelPortalRef.current.contains(e.target as Node)
       ) {
         setWorkPanelOpen(false);
       }
@@ -576,23 +625,84 @@ export function HelixLayout() {
     },
     [branchPickerWorkDir, isCommitting, storeActions],
   );
-  // Load delegations data — scoped to the current session.
+  // Check if delegations exist on mount — for button visibility.
+  // 过滤键必须是 pi 后端 sid（delegation manifest.json 里存的是网关会话 id），
+  // 而非前端会话 id——两者命名空间不同，传错会全部漏掉（旧 bug：跨会话共享）。
+  // 无后端会话（草稿/未发消息的对话）→ 无委托，绝不能退化为列出全部。
   useEffect(() => {
     if (!isElectron()) return;
-    const loadDelegations = async () => {
+    let cancelled = false;
+    const checkDelegations = async () => {
       try {
+        const sid = await resolveBackendSid(currentSessionId);
+        if (!sid) {
+          if (!cancelled) setHasDelegations(false);
+          return;
+        }
         const api = (window as any).electron as any;
-        const sid = useHelixStore.getState().currentSessionId || undefined;
         const res = await api?.delegations?.list?.(sid);
-        if (res?.ok) {
-          setDelegations(res.delegations || []);
+        if (!cancelled && res?.ok) {
+          setHasDelegations((res.delegations || []).length > 0);
         }
       } catch {}
     };
-    loadDelegations();
-    // Refresh every 10 seconds
-    const interval = setInterval(loadDelegations, 10000);
-    return () => clearInterval(interval);
+    checkDelegations();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSessionId]);
+
+  // Load full delegations data on demand — only when work panel is opened.
+  // 同上：按后端 sid 过滤，只显示当前对话的子 Agent 磁盘记录。
+  const loadDelegations = useCallback(async () => {
+    if (!isElectron()) return;
+    try {
+      const sid = await resolveBackendSid(
+        useHelixStore.getState().currentSessionId,
+      );
+      if (!sid) {
+        setDelegations([]);
+        setHasDelegations(false);
+        return;
+      }
+      const api = (window as any).electron as any;
+      const res = await api?.delegations?.list?.(sid);
+      if (res?.ok) {
+        setDelegations(res.delegations || []);
+        setHasDelegations((res.delegations || []).length > 0);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (workPanelOpen) {
+      loadDelegations();
+    }
+  }, [workPanelOpen, loadDelegations]);
+  // 切换对话时立即按新会话的后端 sid 重新探测磁盘记录，胶囊可见性不留旧会话残影。
+  useEffect(() => {
+    if (!isElectron()) return;
+    let cancelled = false;
+    resolveBackendSid(currentSessionId)
+      .then(async (sid) => {
+        if (!sid) {
+          if (!cancelled) {
+            setDelegations([]);
+            setHasDelegations(false);
+          }
+          return;
+        }
+        const api = (window as any).electron as any;
+        const res = await api?.delegations?.list?.(sid);
+        if (!cancelled && res?.ok) {
+          setDelegations(res.delegations || []);
+          setHasDelegations((res.delegations || []).length > 0);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [currentSessionId]);
 
   // Apply the selected theme style (Catppuccin flavor or built-in cream) by
@@ -1620,10 +1730,17 @@ export function HelixLayout() {
       <div className="absolute top-[2px] right-2 z-40 h-10 flex items-center gap-3">
         {!showSettings && !hideConversationActions && (
           <>
-            {/* 统一工作面板：更改（含提交/推送）、任务清单、子 Agent 收进同一个下拉。 */}
+            {/* 统一工作面板：更改（含提交/推送）、任务清单、子 Agent 收进同一个下拉。仅在有内容时显示。 */}
+            {(pendingPlanReview ||
+              hasDelegations ||
+              delegations.length > 0 ||
+              subAgents.length > 0 ||
+              helixTodos.length > 0 ||
+              gitChangeStat) && (
             <div className="relative" ref={workPanelRef}>
               <button
                 type="button"
+                ref={workPanelBtnRef}
                 onClick={() => setWorkPanelOpen((o) => !o)}
                 className={`relative flex items-center gap-1.5 h-7 pl-2 pr-2.5 rounded-full border bg-card text-card-foreground shadow-sm select-none transition-colors ${
                   workPanelOpen
@@ -1638,19 +1755,34 @@ export function HelixLayout() {
                     <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
                       计划
                     </span>
-                    <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
+                    <span className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-px rounded-full bg-primary/10 text-primary">
                       待批准
                     </span>
                   </>
-                ) : delegations.length > 0 ? (
+                ) : subAgents.length > 0 ? (
                   <>
                     <Users className="size-3.5 text-foreground/60 shrink-0" />
                     <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
                       子 Agent
                     </span>
+                    <span className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-foreground/60">
+                      {subAgents.some((a) => a.status === "running") && (
+                        <span className="size-1.5 rounded-full bg-primary animate-pulse" />
+                      )}
+                      {subAgents.length}
+                    </span>
+                  </>
+                ) : (hasDelegations && delegations.length > 0) ? (
+                  <>
+                    <Users className="size-3.5 text-foreground/60 shrink-0" />
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
+                      子 Agent
+                    </span>
+                    {delegations.length > 0 && (
                     <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-foreground/60">
                       {delegations.length}
                     </span>
+                    )}
                   </>
                 ) : helixTodos.length > 0 ? (
                   <>
@@ -1679,10 +1811,24 @@ export function HelixLayout() {
                   <ListTodo className="size-[18px] text-foreground/60" />
                 )}
               </button>
-              {workPanelOpen && (
-                <div className="absolute left-0 top-[calc(100%+6px)] z-50 w-80 max-h-[70vh] overflow-y-auto overflow-x-hidden min-w-0 flex flex-col rounded-xl border border-border/80 bg-card text-card-foreground shadow-xl">
+              {workPanelOpen && typeof window !== "undefined" && (() => {
+                const btnRect = workPanelBtnRef.current?.getBoundingClientRect();
+                const btnLeft = btnRect?.left ?? 0;
+                const btnBottom = btnRect?.bottom ?? 0;
+                const maxW = Math.min(320, window.innerWidth - btnLeft - 12);
+                return createPortal(
+                <div
+                  ref={workPanelPortalRef}
+                  className="fixed z-[100]"
+                  style={{
+                    top: btnBottom + 4,
+                    left: btnLeft,
+                    width: Math.max(200, maxW),
+                  }}
+                >
+                <div className="w-full max-h-[70vh] overflow-y-auto overflow-x-hidden min-w-0 flex flex-col rounded-2xl border border-border bg-popover text-popover-foreground shadow-xl animate-scale-in">
                   {gitChangeStat && (
-                    <section className="border-b border-border/70">
+                    <section className="p-2 border-b border-border/60">
                       {/* 这里只给总体数字；整行可点 → 跳右侧栏「更改」看逐文件明细。 */}
                       <button
                         type="button"
@@ -1690,13 +1836,14 @@ export function HelixLayout() {
                           storeActions.setRightSidebarTab("diff");
                           setWorkPanelOpen(false);
                         }}
-                        className="w-full flex items-center gap-2 min-w-0 px-3 py-2 text-left hover:bg-accent/50 transition-colors"
+                        className="w-full flex items-center gap-2.5 min-w-0 px-2.5 py-2 text-left rounded-lg hover:bg-accent/50 transition-colors"
                         data-tip="查看更改明细"
                       >
-                        <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">
+                        <FilePlus className="size-4 shrink-0 text-foreground/50" />
+                        <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
                           更改
                         </span>
-                        <span className="shrink-0 flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums">
+                        <span className="shrink-0 flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums font-medium">
                           <span className="text-emerald-600 dark:text-emerald-400">
                             +{gitChangeStat.added}
                           </span>
@@ -1704,102 +1851,187 @@ export function HelixLayout() {
                             -{gitChangeStat.removed}
                           </span>
                         </span>
-                        <ChevronRight className="size-3.5 shrink-0 text-foreground/40" />
                       </button>
-                      <div className="px-3 pb-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setCommitMessage(
-                              `chore: auto-commit (${new Date().toLocaleString("zh-CN")})`,
-                            );
-                            setWorkPanelOpen(false);
-                            setCommitDialogOpen(true);
-                          }}
-                          disabled={isCommitting}
-                          className="w-full inline-flex items-center justify-center gap-1.5 h-8 rounded-lg border border-border/70 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80 hover:bg-accent/60 disabled:opacity-50 transition-colors"
-                        >
-                          <Send className="size-4" />
-                          提交并推送
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCommitMessage(
+                            `chore: auto-commit (${new Date().toLocaleString("zh-CN")})`,
+                          );
+                          setWorkPanelOpen(false);
+                          setCommitDialogOpen(true);
+                        }}
+                        disabled={isCommitting}
+                        className="mt-1 w-full inline-flex items-center justify-center gap-1.5 h-8 rounded-lg bg-primary/10 text-primary text-[calc(var(--helix-transcript-size)*0.8571)] font-medium hover:bg-primary/20 disabled:opacity-50 transition-colors"
+                      >
+                        <Send className="size-3.5" />
+                        提交并推送
+                      </button>
                     </section>
                   )}
                   {pendingPlanReview && (
-                    <section className="border-b border-border/70">
-                      <div className="flex items-center gap-2 min-w-0 px-3 py-2">
-                        <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">
+                    <section className="p-2 border-b border-border/60">
+                      <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
+                        <Pencil className="size-4 shrink-0 text-foreground/50" />
+                        <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
                           计划 · 待批准
                         </span>
-                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
+                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">
                           计划模式
                         </span>
                       </div>
-                      <div className="px-3 pb-3">
-                        <div className="max-h-48 overflow-y-auto rounded-lg border border-border/30 bg-muted/20 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/80 whitespace-pre-wrap break-words">
+                      <div className="px-1.5 pb-1.5">
+                        <div className="max-h-48 overflow-y-auto rounded-lg border border-border/30 bg-muted/30 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/80 whitespace-pre-wrap break-words">
                           {pendingPlanReview.content}
                         </div>
-                        <p className="mt-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                        <p className="mt-1.5 px-1 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
                           底部「计划审批」浮条可选择 批准执行 / 继续调整
                         </p>
                       </div>
                     </section>
                   )}
-                  <section className="border-b border-border/70">
-                    <div className="flex items-center gap-2 min-w-0 px-3 py-2">
-                      <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">
-                        任务清单
-                      </span>
-                      <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
-                        {
-                          helixTodos.filter((t) => t.status === "completed")
-                            .length
-                        }
-                        /{helixTodos.length}
-                      </span>
-                    </div>
-                    <ul className="py-1">
-                      {helixTodos.map((todo) => (
-                        <li
-                          key={todo.id}
-                          className="flex items-start gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)]"
-                        >
-                          {todo.status === "completed" ? (
-                            <CheckCircle2 className="size-4 text-green-500 shrink-0 mt-0.5" />
-                          ) : todo.status === "in_progress" ? (
-                            <Loader2 className="size-4 text-primary shrink-0 mt-0.5 animate-spin" />
-                          ) : todo.status === "cancelled" ? (
-                            <XCircle className="size-4 text-muted-foreground shrink-0 mt-0.5" />
-                          ) : (
-                            <Circle className="size-4 text-foreground/40 shrink-0 mt-0.5" />
-                          )}
-                          <span
-                            className={`min-w-0 break-words ${
-                              todo.status === "completed"
-                                ? "line-through text-foreground/50"
-                                : todo.status === "cancelled"
-                                  ? "line-through text-foreground/40"
-                                  : "text-foreground/90"
-                            }`}
-                          >
-                            {todo.content}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
+                  {helixTodos.length > 0 && (
+                  <section className="p-2 border-b border-border/60">
+                    {(() => {
+                      const doneCount = helixTodos.filter(
+                        (t) => t.status === "completed",
+                      ).length;
+                      const pct = Math.round(
+                        (doneCount / helixTodos.length) * 100,
+                      );
+                      return (
+                        <>
+                          <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
+                            <ListTodo className="size-4 shrink-0 text-foreground/50" />
+                            <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
+                              任务清单
+                            </span>
+                            <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums text-foreground/50">
+                              {doneCount}/{helixTodos.length}
+                            </span>
+                          </div>
+                          <div className="px-2.5 pb-2.5">
+                            <div className="h-1 rounded-full bg-muted overflow-hidden">
+                              <div
+                                className="h-full rounded-full bg-primary transition-[width] duration-300"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                          </div>
+                          <ul className="px-1 pb-1">
+                            {helixTodos.map((todo) => (
+                              <li
+                                key={todo.id}
+                                className="flex items-start gap-2 px-1.5 py-1.5 rounded-lg hover:bg-accent/40 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)]"
+                              >
+                                {todo.status === "completed" ? (
+                                  <CheckCircle2 className="size-4 text-emerald-500 shrink-0 mt-0.5" />
+                                ) : todo.status === "in_progress" ? (
+                                  <Loader2 className="size-4 text-primary shrink-0 mt-0.5 animate-spin" />
+                                ) : todo.status === "cancelled" ? (
+                                  <XCircle className="size-4 text-muted-foreground shrink-0 mt-0.5" />
+                                ) : (
+                                  <Circle className="size-4 text-foreground/40 shrink-0 mt-0.5" />
+                                )}
+                                <span
+                                  className={`min-w-0 break-words ${
+                                    todo.status === "completed"
+                                      ? "line-through text-foreground/50"
+                                      : todo.status === "cancelled"
+                                        ? "line-through text-foreground/40"
+                                        : "text-foreground/90"
+                                  }`}
+                                >
+                                  {todo.content}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      );
+                    })()}
                   </section>
-                  {isElectron() && (
-                    <section>
-                      <div className="flex items-center gap-2 min-w-0 px-3 py-2">
-                        <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-semibold">
-                          子 Agent
-                        </span>
-                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50">
-                          {delegations.length} 个
-                        </span>
-                      </div>
-                      <div className="max-h-64 overflow-auto">
-                        {/* 点某个 agent → 右侧栏打开它的工作内容（不再走「查看详情」）。 */}
+                  )}
+                  {(subAgents.length > 0 || isElectron()) &&
+                    (subAgents.length > 0 ||
+                      delegations.length > 0 ||
+                      workPanelBgTasks.length > 0) && (
+                    <section className="p-2">
+                      {(() => {
+                        const running = subAgents.filter(
+                          (a) => a.status === "running",
+                        ).length;
+                        const total = subAgents.length + delegations.length;
+                        return (
+                          <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
+                            <Users className="size-4 shrink-0 text-foreground/50" />
+                            <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
+                              子 Agent
+                            </span>
+                            {running > 0 ? (
+                              <span className="shrink-0 flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-primary">
+                                <span className="size-1.5 rounded-full bg-primary animate-pulse" />
+                                {running} 运行
+                                <span className="text-foreground/40">/</span>
+                                <span className="tabular-nums text-foreground/50">
+                                  {total}
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums text-foreground/50">
+                                {total} 个
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })()}
+                      <div className="max-h-72 overflow-auto px-1.5">
+                        {/* 实时区：store.subAgents（subagent.* 事件驱动），同步/后台
+                            agent 都能显示，磁盘 delegations 作历史兜底。 */}
+                        {subAgents.map((sa) => (
+                          <button
+                            key={`live-${sa.id}`}
+                            type="button"
+                            onClick={() => {
+                              storeActions.openAgentView({
+                                id: sa.id,
+                                name: sa.description || sa.name,
+                              });
+                              setWorkPanelOpen(false);
+                            }}
+                            className="w-full text-left px-2 py-2 rounded-lg hover:bg-accent/50 transition-colors"
+                            data-tip="在右侧栏查看工作内容"
+                          >
+                            <div className="flex items-center gap-2">
+                              {sa.status === "running" ? (
+                                <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
+                              ) : sa.status === "failed" ? (
+                                <XCircle className="size-3.5 text-destructive shrink-0" />
+                              ) : (
+                                <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
+                              )}
+                              <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/85">
+                                {sa.description || sa.name}
+                              </span>
+                              <ChevronRight className="size-3.5 text-foreground/30 shrink-0" />
+                            </div>
+                            {sa.status === "running" &&
+                              (sa.toolCalls || []).length > 0 && (
+                              <div className="mt-0.5 flex items-center gap-1.5 pl-5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                                <span className="font-mono truncate">
+                                  {sa.toolCalls![sa.toolCalls!.length - 1].toolName}
+                                </span>
+                                <span className="size-1 rounded-full bg-primary animate-pulse shrink-0" />
+                              </div>
+                            )}
+                            {sa.status !== "running" && sa.result && (
+                              <div className="mt-0.5 pl-5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground line-clamp-2">
+                                {sa.result}
+                              </div>
+                            )}
+                          </button>
+                        ))}
+                        {/* 历史区：磁盘 live 日志 */}
                         {delegations.map((del) => (
                           <button
                             key={del.id}
@@ -1811,27 +2043,70 @@ export function HelixLayout() {
                               });
                               setWorkPanelOpen(false);
                             }}
-                            className="w-full text-left px-3 py-2 border-t border-border/30 first:border-t-0 hover:bg-accent/60 transition-colors"
+                            className="w-full text-left px-2 py-2 rounded-lg hover:bg-accent/50 transition-colors"
                             data-tip="在右侧栏查看工作内容"
                           >
                             <div className="flex items-center gap-2">
-                              <Terminal className="size-3 text-primary shrink-0" />
-                              <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/80">
+                              <Terminal className="size-3.5 text-primary/60 shrink-0" />
+                              <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70">
                                 {del.id}
                               </span>
-                              <ChevronRight className="size-3.5 text-foreground/40 shrink-0" />
+                              <ChevronRight className="size-3.5 text-foreground/30 shrink-0" />
                             </div>
-                            <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                            <div className="mt-0.5 pl-5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
                               {(del.tasks || []).length} 个任务
                             </div>
                           </button>
                         ))}
+                        {/* 后台任务区：pi-background-tasks 注册表（tasks.json）。
+                            workPanelBgTasks = 本会话任务 + 其它会话仍在运行的。 */}
+                        {workPanelBgTasks.length > 0 && (
+                          <>
+                            <div className="px-2 pt-2.5 pb-1 flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                              <span className="h-px flex-1 bg-border/60" />
+                              后台任务
+                              <span className="h-px flex-1 bg-border/60" />
+                            </div>
+                            {workPanelBgTasks.map((t) => (
+                              <button
+                                key={t.id}
+                                type="button"
+                                onClick={() => {
+                                  setBgTasksOpen(true);
+                                  setWorkPanelOpen(false);
+                                }}
+                                className="w-full text-left px-2 py-2 rounded-lg hover:bg-accent/50 transition-colors"
+                                data-tip="在后台任务面板查看详情"
+                              >
+                                <div className="flex items-center gap-2">
+                                  {t.status === "running" ? (
+                                    <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
+                                  ) : t.status === "completed" ? (
+                                    <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
+                                  ) : (
+                                    <XCircle className="size-3.5 text-destructive shrink-0" />
+                                  )}
+                                  <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/80">
+                                    {t.command}
+                                  </span>
+                                  <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                                    {t.status}
+                                  </span>
+                                </div>
+                              </button>
+                            ))}
+                          </>
+                        )}
                       </div>
                     </section>
                   )}
                 </div>
-              )}
+                </div>,
+                document.body,
+              );
+            })()}
             </div>
+            )}
             {/* 提交弹窗：点「提交并推送」弹出，含提交信息输入框 + 提交 / 提交并推送 两个动作 */}
             {commitDialogOpen && typeof window !== "undefined" && (
               <>
@@ -1922,7 +2197,7 @@ export function HelixLayout() {
                 </button>
                 {bgTasksOpen && (
                   <BackgroundTasksPanel
-                    tasks={bgTasks}
+                    tasks={bgTasksAll}
                     activeSessionId={helixSessionId}
                     onClose={() => setBgTasksOpen(false)}
                     onRefresh={loadBgTasks}
@@ -2135,7 +2410,9 @@ export function HelixLayout() {
                     </div>
                   )}
                   <div className="helix-surface h-full rounded-2xl overflow-hidden">
-                    <RightSidebar />
+                    <PanelSuspense>
+                      <RightSidebar />
+                    </PanelSuspense>
                   </div>
                 </div>
                 {showRuntimePanel && (

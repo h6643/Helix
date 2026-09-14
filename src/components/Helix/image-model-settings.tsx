@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { isElectron } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
-const VISION_PROVIDERS = [
+const IMAGE_PROVIDERS = [
   { id: "gemini", name: "Gemini" },
   { id: "zai", name: "Zhipu AI (z.ai) / GLM" },
   { id: "__custom__", name: "自定义" },
@@ -18,7 +18,7 @@ const PROVIDER_BASE_URLS: Record<string, string> = {
   zai: "https://open.bigmodel.cn/api/paas/v4",
 };
 
-export function VisionModelSettings() {
+export function ImageModelSettings() {
   const showToast = useHelixStore((s) => s.showToast);
   const [provider, setProvider] = useState("gemini");
   const [model, setModel] = useState("");
@@ -29,7 +29,7 @@ export function VisionModelSettings() {
   useEffect(() => {
     const load = async () => {
       if (!isElectron()) {
-        const saved = localStorage.getItem("helix-vision-model");
+        const saved = localStorage.getItem("helix-image-model");
         if (saved) {
           try {
             const d = JSON.parse(saved);
@@ -37,12 +37,14 @@ export function VisionModelSettings() {
             setModel(d.model || "");
             setBaseUrl(d.baseUrl || "");
             setApiKey(d.apiKey || "");
-          } catch {}
+          } catch {
+            /* 本地缓存读取失败时静默降级，不影响后续保存 */
+          }
         }
         return;
       }
       try {
-        const api = (window as any).electron?.vision;
+        const api = (window as any).electron?.image;
         if (!api?.getConfig) return;
         const r = await api.getConfig();
         if (r?.ok && r.config) {
@@ -52,7 +54,7 @@ export function VisionModelSettings() {
           setApiKey(r.config.apiKey || "");
         }
       } catch (e) {
-        console.error("[VisionModelSettings] load failed:", e);
+        console.error("[ImageModelSettings] load failed:", e);
       }
     };
     load();
@@ -72,13 +74,13 @@ export function VisionModelSettings() {
         apiKey: showApiKey ? apiKey : "",
       };
       if (isElectron()) {
-        const api = (window as any).electron?.vision;
+        const api = (window as any).electron?.image;
         if (api?.setConfig) await api.setConfig(config);
       } else {
-        localStorage.setItem("helix-vision-model", JSON.stringify(config));
+        localStorage.setItem("helix-image-model", JSON.stringify(config));
       }
-      showToast({ type: "success", title: "视觉模型配置已保存" });
-    } catch (e) {
+      showToast({ type: "success", title: "生图模型配置已保存" });
+    } catch {
       showToast({ type: "error", title: "保存失败" });
     } finally {
       setSaving(false);
@@ -97,9 +99,9 @@ export function VisionModelSettings() {
             <PopupSelect
               value={provider}
               onChange={setProvider}
-              placeholder="选择视觉 Provider"
+              placeholder="选择生图 Provider"
               className="w-full ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2"
-              options={VISION_PROVIDERS.map((p) => ({
+              options={IMAGE_PROVIDERS.map((p) => ({
                 label: p.name,
                 value: p.id,
               }))}
@@ -151,7 +153,7 @@ export function VisionModelSettings() {
             )
           )}
 
-          {/* API Key：除 auto 外都显示 */}
+          {/* API Key */}
           {showApiKey && (
             <div>
               <label className="block ui-text font-medium text-foreground mb-1.5">

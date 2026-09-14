@@ -117,7 +117,7 @@ export function GlobalTooltip() {
       y = Math.min(Math.max(y, h / 2 + m), vh - h / 2 - m);
     }
     if (x !== state.x || y !== state.y) setState({ ...state, x, y });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [state]);
 
   if (!state || typeof document === "undefined") return null;

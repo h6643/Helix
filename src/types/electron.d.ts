@@ -168,6 +168,8 @@ export interface ElectronAPI {
       dataRootDefault: string;
       dataRootCustom: boolean;
     }>;
+    /** 默认会话工作目录（~/.pi/agent/sessions），未选择项目时使用 */
+    getSessionsDir: () => Promise<{ sessionsDir: string }>;
     setDataRoot: (path: string) => Promise<{
       success: boolean;
       dataRoot: string;
@@ -265,26 +267,29 @@ export interface ElectronAPI {
       message?: string;
       error?: string;
     }>;
-    // pi-subagents preset subagents (read-only list surfaced in Subagent settings).
+    // pi-subagents agent types, merged the way the extension resolves them:
+    // compiled defaults (general-purpose/Explore/Plan) overlaid by
+    // <work_dir>/.pi/agents, <work_dir>/.agents/agents and ~/.pi/agent/agents
+    // .md files (project overrides global on a type clash).
     listSubagents: () => Promise<
       Array<{
         id: string;
         name: string;
         description: string;
         tools: string[];
+        model: string;
         thinking: string;
-        aliases: string[];
         systemPromptMode: string;
         systemPrompt: string;
         path: string;
         disabled: boolean;
+        source: "default" | "project" | "workspace" | "global";
       }>
     >;
-    // Enable/disable a bundled preset: move its agents/<name>.md into/out of the
-    // .helix-disabled folder (reversible; pi skips disabled presets at runtime).
+    // Enable/disable an agent by writing/removing `enabled: false` in its
+    // frontmatter — the same edit the extension's own /agents command makes.
     setSubagentEnabled: (name: string, enabled: boolean) => Promise<void>;
-    // Delete a bundled pi-subagents preset by moving its agents/<name>.md to a
-    // recoverable .helix-deleted backup folder inside the package.
+    // Delete a custom agent's .md (the extension's Delete unlinks the file).
     deleteSubagent: (name: string) => Promise<void>;
     // Pi agent commands (extensions / skills / prompts / models)
     piGetCommands: () => Promise<{
@@ -643,6 +648,26 @@ export interface ElectronAPI {
     setConfig: (
       config: HooksConfig,
     ) => Promise<{ ok: boolean; error?: string }>;
+  };
+
+  // ── Image-generation model (config.yaml `image:` block) ───────────────
+  image: {
+    getConfig: () => Promise<{
+      ok: boolean;
+      config?: {
+        provider: string;
+        model: string;
+        baseUrl: string;
+        apiKey: string;
+      };
+      error?: string;
+    }>;
+    setConfig: (config: {
+      provider: string;
+      model: string;
+      baseUrl: string;
+      apiKey: string;
+    }) => Promise<{ ok: boolean; error?: string }>;
   };
 }
 

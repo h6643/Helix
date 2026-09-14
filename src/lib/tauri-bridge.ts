@@ -521,6 +521,12 @@ function buildTauriAPI(): ElectronAPI {
       invoke<string>("vision_describe", { image, prompt: prompt ?? null }),
   };
 
+  // ── image-generation model ─────────────────────────────────────────────
+  api.image = {
+    getConfig: () => invoke("image_config_list"),
+    setConfig: (config: unknown) => invoke("image_config_save", { config }),
+  };
+
   // ── gateway MCP servers (config.yaml mcp_servers, read/write) ────────
   api.mcpConfig = {
     list: () => invoke("mcp_config_list"),
@@ -533,6 +539,29 @@ function buildTauriAPI(): ElectronAPI {
       invoke("delegations_list", { sessionId: sessionId ?? null }),
     readLog: (path: string, lines?: number) =>
       invoke("delegations_read_log", { path, lines: lines ?? null }),
+    // pi-subagents 子代理的 .output 转录时间线（工具调用 + 结果状态）。
+    // agentId 是扩展自己的子代理 id；cwd/sessionId 用于直捣转录目录，
+    // 缺失时后端全盘扫描兜底。running 状态的子代理轮询可见实时进度。
+    timeline: (
+      agentId: string,
+      cwd?: string,
+      sessionId?: string,
+      tail?: number,
+    ) =>
+      invoke("subagent_timeline", {
+        agentId,
+        cwd: cwd ?? null,
+        sessionId: sessionId ?? null,
+        tail: tail ?? null,
+      }),
+  };
+
+  // ── pi-subagents live agent map ──────────────────────────────────────────
+  // 父 Agent 工具调用 id → 扩展子代理 id 的映射（+ 当前状态），供侧边栏把
+  // 实时卡片定位到对应的 .output 转录。
+  api.subagentMap = {
+    list: (sessionId?: string) =>
+      invoke("subagent_map", { sessionId: sessionId ?? null }),
   };
 
   // ── background tasks (pi-background-tasks extension registry) ───────────

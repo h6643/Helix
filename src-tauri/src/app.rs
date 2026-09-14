@@ -205,6 +205,13 @@ pub fn read_env_key(key: String) -> String {
     crate::config::read_env_key(&key)
 }
 
+/// The Pi agent's default sessions working directory (`~/.pi/agent/sessions`).
+/// Tauri command for the frontend fallback (未选择项目目录时默认工作目录).
+#[tauri::command]
+pub fn get_sessions_dir() -> Value {
+    json!({ "sessionsDir": crate::state::pi_sessions_dir().display().to_string() })
+}
+
 /// Returns the effective data-root info for the Settings UI.
 #[tauri::command]
 pub fn get_data_root() -> Value {

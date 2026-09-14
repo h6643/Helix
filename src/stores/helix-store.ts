@@ -1,20 +1,19 @@
 ﻿import { create } from "zustand";
 import type { StateCreator } from "zustand";
 import { cleanUrl } from "@/lib/url-utils";
-import { applyHelixPalette } from "@/lib/themes";
-import { isModelProviderMismatch } from "@/lib/provider-match";
-import {
-  isElectron,
-  getElectronAPI,
-  electronFS,
-  electronApp,
-} from "@/lib/electron-bridge";
-import { generateId, truncateString } from "@/lib/format";
-import { debug, warn, error as logError } from "@/lib/logger";
-import { defaultFiles } from "@/lib/seed-data";
-import type { McpServerConfig } from "@/stores/helix-types";
-import { useGatewayStore } from "@/stores/gateway-store";
 export type { McpServerConfig } from "@/stores/helix-types";
+
+// 未选择项目目录时的默认工作目录：~/.pi/agent/sessions（pi agent 的会话目录）。
+// 由后端 Tauri 命令 get_sessions_dir 返回（~/.pi/agent/sessions）。
+async function getDefaultSessionsDir(): Promise<string> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const r: { sessionsDir?: string } = await invoke("get_sessions_dir");
+    return r?.sessionsDir ?? "";
+  } catch {
+    return "";
+  }
+}
 import type {
   FileNode,
   ImageAttachment,
@@ -91,6 +90,10 @@ import {
   createApiConfigSlice,
   type ApiConfigSlice,
 } from "./slices/api-config-slice";
+import {
+  createCompactNoticeSlice,
+  type CompactNoticeSlice,
+} from "./slices/compact-notice-slice";
 import { createEditorSlice, type EditorSlice } from "./slices/editor-slice";
 import { createGitSlice, type GitSlice } from "./slices/git-slice";
 import { createPanelSlice, type PanelSlice } from "./slices/panel-slice";
@@ -101,9 +104,18 @@ import {
 } from "./slices/terminal-slice";
 import { createToastSlice, type ToastSlice } from "./slices/toast-slice";
 import {
-  createCompactNoticeSlice,
-  type CompactNoticeSlice,
-} from "./slices/compact-notice-slice";
+  isElectron,
+  getElectronAPI,
+  electronFS,
+  electronApp,
+} from "@/lib/electron-bridge";
+import { generateId, truncateString } from "@/lib/format";
+import { debug, warn, error as logError } from "@/lib/logger";
+import { isModelProviderMismatch } from "@/lib/provider-match";
+import { defaultFiles } from "@/lib/seed-data";
+import { applyHelixPalette } from "@/lib/themes";
+import { useGatewayStore } from "@/stores/gateway-store";
+import type { McpServerConfig } from "@/stores/helix-types";
 
 export type {
   FileNode,
@@ -123,7 +135,8 @@ export type {
 export { DEFAULT_SHORTCUTS };
 
 interface HelixState
-  extends GitSlice,
+  extends
+    GitSlice,
     ToastSlice,
     CompactNoticeSlice,
     TerminalSlice,
@@ -580,6 +593,7 @@ interface HelixState
     description: string,
     parentId?: string,
     agentId?: string,
+    sessionId?: string,
   ) => string;
   completeSubAgent: (
     agentId: string,
@@ -597,6 +611,18 @@ interface HelixState
       status: "running" | "success" | "error";
     },
   ) => void;
+  updateSubAgentToolCall: (
+    agentId: string,
+    index: number,
+    toolCall: {
+      toolName?: string;
+      params?: string;
+      status?: "running" | "success" | "error";
+    },
+  ) => void;
+  /** 把扩展的子代理 id（.output 转录文件名）绑到卡片上 —— 后台启动确认
+   *  （subagent.tool background 事件）带回，供侧边栏时间线定位转录。 */
+  setSubAgentAgentId: (agentId: string, extAgentId: string) => void;
 
   // Git — see slices/git-slice.ts
 
@@ -1984,11 +2010,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         title: "无效的工作目录，已回退到项目目录",
         type: "warning",
       });
-      const fallbackDir =
-        typeof process !== "undefined" &&
-        typeof (process as any).cwd === "function"
-          ? (process as any).cwd()
-          : "";
+      const fallbackDir = await getDefaultSessionsDir();
       const info = isElectron()
         ? await electronApp.getInfo()
         : { workDir: fallbackDir };
@@ -2133,7 +2155,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       return { estimatedTokens: rest };
     }),
   addSessionUsageStats: (model, usage) => {
-    set((state) => {
+    (set((state) => {
       const input = usage.inputTokens || 0;
       const output = usage.outputTokens || 0;
       const thought = usage.thoughtTokens || 0;
@@ -2315,7 +2337,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           persistence.saveSetting("sessionUsageStats", s.sessionUsageStats),
           persistence.saveSetting("dailyUsage", s.dailyUsage),
         ]).catch(() => {});
-      });
+      }));
   },
   setCurrentSessionId: (id) =>
     set((state) => {
@@ -3098,7 +3120,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // API Config — in slices/api-config-slice.ts
 
   // Actions - Sub-agents
-  spawnSubAgent: (name, description, parentId, agentId) => {
+  spawnSubAgent: (name, description, parentId, agentId, sessionId) => {
     // 外部传入 agentId（serve 后端 subagent_id）时沿用，保证后续 subagent.*
     // 事件（tool/complete）能按同一 id 命中；无则本地生成。
     const id = agentId || generateId();
@@ -3110,6 +3132,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       parentId: parentId || null,
       chatMessageId: null,
       createdAt: Date.now(),
+      // 会话归属快照：spawn 后切换会话不会改变归属；缺省记为当前会话，
+      // 供面板按 currentSessionId 过滤（见 helix-layout 工作面板）。
+      sessionId: sessionId ?? get().currentSessionId ?? undefined,
     };
     set((s) => ({ subAgents: [...s.subAgents, agent] }));
     return id;
@@ -3181,6 +3206,27 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
               ],
             }
           : a,
+      ),
+    })),
+
+  // 覆盖某子 Agent 的第 index 条工具记录（状态行原地刷新，见
+  // agent-flow-panel 对 background/progress 事件的处理）。
+  updateSubAgentToolCall: (agentId, index, toolCall) =>
+    set((s) => ({
+      subAgents: s.subAgents.map((a) => {
+        if (a.id !== agentId) return a;
+        const calls = a.toolCalls || [];
+        if (index < 0 || index >= calls.length) return a;
+        const next = [...calls];
+        next[index] = { ...next[index], ...toolCall, timestamp: Date.now() };
+        return { ...a, toolCalls: next };
+      }),
+    })),
+
+  setSubAgentAgentId: (agentId, extAgentId) =>
+    set((s) => ({
+      subAgents: s.subAgents.map((a) =>
+        a.id === agentId && !a.agentId ? { ...a, agentId: extAgentId } : a,
       ),
     })),
 
@@ -3550,9 +3596,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       };
       let defaultSessionsDir: string | null = null;
       try {
-        const info = await electronApp.getDataRoot();
-        if (info?.dataRoot)
-          defaultSessionsDir = `${info.dataRoot.replace(/[\\/]+$/, "")}/sessions`;
+        defaultSessionsDir = await getDefaultSessionsDir();
       } catch {
         // Electron bridge unavailable — leave default empty
       }
@@ -4289,11 +4333,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         currentDir === "\\" ||
         isDriveRoot
       ) {
-        const fallbackDir =
-          typeof process !== "undefined" &&
-          typeof (process as any).cwd === "function"
-            ? (process as any).cwd()
-            : "";
+        const fallbackDir = await getDefaultSessionsDir();
         let info = { workDir: fallbackDir };
         if (isElectron()) {
           try {

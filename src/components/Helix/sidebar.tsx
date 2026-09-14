@@ -29,8 +29,8 @@ import React, {
 import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
 import { FileTreePanel } from "./file-tree-panel";
-import { isElectron, electronShell, helixApi } from "@/lib/electron-bridge";
 import { captureContextBreakdown } from "@/lib/context-capture";
+import { isElectron, electronShell, helixApi } from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
 import { persistence, type PersistedSession } from "@/lib/persist";
 import { resolveBackendSid } from "@/lib/session-map";

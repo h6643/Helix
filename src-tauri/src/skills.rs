@@ -337,33 +337,36 @@ fn clean_yaml_scalar(v: &str) -> String {
     v.trim().to_string()
 }
 
-/// A subagent preset bundled with the `pi-subagents` pi extension
-/// (`~/.pi/agent/npm/node_modules/pi-subagents/agents/<name>.md`).
+/// A subagent type as the `pi-subagents` extension actually resolves it.
 ///
-/// These are pi's own delegation personas — richer than helix's
-/// `delegation.identities` (which only carry name + system_prompt). The
-/// Subagent settings page surfaces them read-only so the user can see what the
-/// extension makes available alongside their own configured identities.
+/// The extension merges three compiled defaults (general-purpose / Explore /
+/// Plan, src/default-agents.ts) with `<work_dir>/.pi/agents/*.md`,
+/// `<work_dir>/.agents/agents/*.md` and `~/.pi/agent/agents/*.md`
+/// (src/custom-agents.ts — project overrides global). Disabling an agent is
+/// an `enabled: false` line in its frontmatter; the extension never moves
+/// files, so this bridge edits frontmatter the same way its `/agents`
+/// command does (src/agent-file-toggle.ts).
 #[derive(Serialize)]
 pub struct SubagentPreset {
+    /// Registry key: the `subagent_type` the model passes to the Agent tool.
     pub id: String,
+    /// Display label (`display_name:`), falling back to the type.
     pub name: String,
-    #[serde(rename = "description")]
     pub description: String,
-    #[serde(rename = "tools")]
     pub tools: Vec<String>,
+    pub model: String,
     pub thinking: String,
-    #[serde(rename = "aliases")]
-    pub aliases: Vec<String>,
+    /// `prompt_mode:` ("replace" | "append"); absent means "replace".
     #[serde(rename = "systemPromptMode")]
     pub system_prompt_mode: String,
     #[serde(rename = "systemPrompt")]
     pub system_prompt: String,
+    /// Absolute path of the defining .md (empty for compiled defaults).
     pub path: String,
-    /// True when the preset lives in the package's `.helix-disabled` folder
-    /// (moved out of `agents/`) and is therefore skipped by pi at runtime.
     #[serde(rename = "disabled")]
     pub disabled: bool,
+    /// "default" | "project" | "workspace" | "global".
+    pub source: String,
 }
 
 /// Split a YAML scalar that is a comma-separated list into trimmed items.
@@ -374,36 +377,156 @@ fn split_csv(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse an `agents/<name>.md` file: frontmatter map + the body (system prompt).
-fn parse_subagent_md(content: &str) -> (std::collections::HashMap<String, String>, String) {
-    let mut fm = std::collections::HashMap::new();
-    let mut body = String::new();
+fn fm_scalar(fm: &HashMap<String, String>, key: &str) -> String {
+    fm.get(key)
+        .map(|v| clean_yaml_scalar(v))
+        .unwrap_or_default()
+}
+
+/// `~/.pi/agent/agents/` — the extension's personal agent dir
+/// (`getAgentDir()/agents`).
+fn global_agents_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".pi")
+        .join("agent")
+        .join("agents")
+}
+
+/// The extension is installed under one of these roots (this machine uses
+/// `extensions/pi-subagents-master`). Without it the Agent tool doesn't
+/// exist, so the settings section stays hidden.
+fn subagents_extension_installed() -> bool {
+    let ext = plugins_dir();
+    ext.join("pi-subagents").is_dir()
+        || ext.join("pi-subagents-master").is_dir()
+        || pi_npm_dir()
+            .join("node_modules")
+            .join("pi-subagents")
+            .is_dir()
+}
+
+/// Helix's current work dir — the cwd pi instances run with, and therefore
+/// the root the extension resolves project agents from.
+fn subagents_work_dir() -> PathBuf {
+    crate::state::app_state()
+        .map(|s| s.work_dir.read().unwrap().clone())
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+}
+
+/// Merged pi-subagents settings: global `~/.pi/agent/subagents.json` overlaid
+/// by `<work_dir>/.pi/subagents.json` (src/settings.ts `loadSettings`).
+fn merged_subagents_settings(cwd: &Path) -> HashMap<String, serde_json::Value> {
+    let mut out: HashMap<String, serde_json::Value> = HashMap::new();
+    let global = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".pi")
+        .join("agent")
+        .join("subagents.json");
+    for p in [global, cwd.join(".pi").join("subagents.json")] {
+        if let Ok(raw) = std::fs::read_to_string(&p) {
+            if let Ok(serde_json::Value::Object(o)) = serde_json::from_str(&raw) {
+                for (k, v) in o {
+                    out.insert(k, v);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The three agent dirs in load precedence order (project highest).
+fn subagent_agent_roots() -> Vec<PathBuf> {
+    let cwd = subagents_work_dir();
+    vec![
+        cwd.join(".pi").join("agents"),
+        cwd.join(".agents").join("agents"),
+        global_agents_dir(),
+    ]
+}
+
+struct ParsedAgent {
+    type_name: String,
+    display_name: String,
+    description: String,
+    tools: Vec<String>,
+    model: String,
+    thinking: String,
+    prompt_mode: String,
+    system_prompt: String,
+    disabled: bool,
+}
+
+/// Parse an `agents/<name>.md` file the way src/custom-agents.ts does:
+/// frontmatter map (tolerating a leading UTF-8 BOM) + body as the system
+/// prompt. The type is the declared `name:`, falling back to the filename;
+/// a name containing `:` is skipped (reserved for plugin-scoped ids).
+/// Disabling is `enabled: false` — only the literal spelling, matching what
+/// the extension writes and what pi's frontmatter parser keeps as boolean.
+fn parse_agent_md(content: &str, filename_stem: &str) -> Option<ParsedAgent> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let mut fm: HashMap<String, String> = HashMap::new();
+    let mut body: Vec<&str> = Vec::new();
     let mut in_frontmatter = false;
-    let mut after_frontmatter = false;
-    for line in content.lines() {
+    let mut closed = false;
+    for (i, line) in content.lines().enumerate() {
         let trimmed = line.trim();
-        if trimmed == "---" {
-            if !in_frontmatter {
+        if trimmed == "---" && !closed {
+            if i == 0 {
                 in_frontmatter = true;
                 continue;
             }
-            after_frontmatter = true;
-            continue;
+            if in_frontmatter {
+                closed = true;
+                continue;
+            }
         }
-        if in_frontmatter && !after_frontmatter {
+        if in_frontmatter && !closed {
             if let Some((k, v)) = trimmed.split_once(':') {
                 fm.insert(k.trim().to_string(), v.trim().to_string());
             }
-        } else if after_frontmatter {
-            body.push_str(line);
-            body.push('\n');
+        } else {
+            body.push(line);
         }
     }
-    (fm, body.trim().to_string())
+    let declared = fm.get("name").map(|v| clean_yaml_scalar(v));
+    if declared.as_deref().is_some_and(|d| d.contains(':')) {
+        return None;
+    }
+    let type_name = declared
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| filename_stem.to_string());
+    let prompt_mode = match fm_scalar(&fm, "prompt_mode").to_lowercase().as_str() {
+        "append" => "append".to_string(),
+        _ => "replace".to_string(),
+    };
+    let description = {
+        let d = fm_scalar(&fm, "description");
+        if d.trim().is_empty() {
+            type_name.clone()
+        } else {
+            d
+        }
+    };
+    Some(ParsedAgent {
+        type_name,
+        display_name: fm_scalar(&fm, "display_name"),
+        description,
+        tools: fm
+            .get("tools")
+            .map(|s| split_csv(&clean_yaml_scalar(s)))
+            .unwrap_or_default(),
+        model: fm_scalar(&fm, "model"),
+        thinking: fm_scalar(&fm, "thinking"),
+        prompt_mode,
+        system_prompt: body.join("\n").trim().to_string(),
+        disabled: fm.get("enabled").map(|v| v.trim()) == Some("false"),
+    })
 }
 
-/// Scan a directory of `*.md` subagent presets, tagging each with `disabled`.
-fn scan_subagents(dir: &Path, disabled: bool) -> Vec<SubagentPreset> {
+/// Scan one of the extension's agent dirs. A file that fails to parse is
+/// skipped — the loader skips it too (warnSkippedOverride path).
+fn scan_agent_dir(dir: &Path, source: &str) -> Vec<SubagentPreset> {
     let mut out: Vec<SubagentPreset> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
@@ -413,152 +536,322 @@ fn scan_subagents(dir: &Path, disabled: bool) -> Vec<SubagentPreset> {
         if p.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&p) else {
-            continue;
-        };
-        let (fm, body) = parse_subagent_md(&content);
-        let id = p
+        let stem = p
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
-        let name = fm.get("name").cloned().unwrap_or_else(|| id.clone());
+        if stem.is_empty() {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Some(a) = parse_agent_md(&content, &stem) else {
+            continue;
+        };
+        let name = if a.display_name.trim().is_empty() {
+            a.type_name.clone()
+        } else {
+            a.display_name
+        };
         out.push(SubagentPreset {
-            id,
+            id: a.type_name,
             name,
-            description: fm.get("description").cloned().unwrap_or_default(),
-            tools: fm.get("tools").map(|s| split_csv(s)).unwrap_or_default(),
-            thinking: fm.get("thinking").cloned().unwrap_or_default(),
-            aliases: fm.get("aliases").map(|s| split_csv(s)).unwrap_or_default(),
-            system_prompt_mode: fm.get("systemPromptMode").cloned().unwrap_or_default(),
-            system_prompt: body,
+            description: a.description,
+            tools: a.tools,
+            model: a.model,
+            thinking: a.thinking,
+            system_prompt_mode: a.prompt_mode,
+            system_prompt: a.system_prompt,
             path: p.to_string_lossy().into_owned(),
-            disabled,
+            disabled: a.disabled,
+            source: source.to_string(),
         });
     }
     out
 }
 
-/// List the subagent presets shipped by the installed `pi-subagents` extension.
-/// Enabled presets live in `agents/`; disabled ones live in `.helix-disabled/`.
-/// Returns an empty list when the package is not installed, so the renderer can
-/// simply skip the section.
+/// The extension's compiled DEFAULT_AGENTS (src/default-agents.ts). A user
+/// .md declaring the same type overrides these (same-name overlay).
+fn default_agent_presets() -> Vec<SubagentPreset> {
+    let mk = |id: &str,
+              display: &str,
+              description: &str,
+              tools: Vec<&str>,
+              model: &str,
+              prompt_mode: &str,
+              system_prompt: &str| SubagentPreset {
+        id: id.to_string(),
+        name: display.to_string(),
+        description: description.to_string(),
+        tools: tools.into_iter().map(str::to_string).collect(),
+        model: model.to_string(),
+        thinking: String::new(),
+        system_prompt_mode: prompt_mode.to_string(),
+        system_prompt: system_prompt.to_string(),
+        path: String::new(),
+        disabled: false,
+        source: "default".to_string(),
+    };
+    vec![
+        mk(
+            "general-purpose",
+            "Agent",
+            "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find a good match in the first few times use this agent to perform the search.",
+            vec!["read", "bash", "edit", "write", "grep", "find", "ls"],
+            "",
+            "append",
+            "",
+        ),
+        mk(
+            "Explore",
+            "Explore",
+            "Fast read-only agent for targeted code and file searches.",
+            vec!["read", "bash", "grep", "find", "ls"],
+            "anthropic/claude-haiku-4-5",
+            "replace",
+            "READ-ONLY: never create, modify, move, copy, or delete files, and never run commands that change system state.\nSearch code with grep, find files with find, and read files with read; use bash only for read-only commands.\nUse absolute paths, make independent searches in parallel, and report precise findings.",
+        ),
+        mk(
+            "Plan",
+            "Plan",
+            "Read-only planning agent for implementation strategy and critical files.",
+            vec!["read", "bash", "grep", "find", "ls"],
+            "",
+            "replace",
+            "READ-ONLY: never create, modify, move, copy, or delete files, and never run commands that change system state.\nUnderstand requirements, inspect relevant files, and follow existing patterns.\nProduce an ordered implementation plan with trade-offs, dependencies, risks, and absolute paths.\nEnd with \"Critical Files:\" and up to five file-path/reason bullets.",
+        ),
+    ]
+}
+
+/// List every subagent type the pi-subagents extension would resolve for the
+/// current work dir: compiled defaults + project/workspace/global .md files.
+///
+/// Mirrors the loader's merge (src/agent-types.ts `registerAgents`): defaults
+/// first (skipped entirely when `disableDefaultAgents` is set), then user
+/// files overlaid in precedence order, so a same-type project file replaces
+/// the global one. Case-insensitive on the type id, matching `resolveKeyIn`
+/// — first-loaded wins among case variants, as in the loader's map overlay.
 #[tauri::command]
 pub fn helix_list_subagents() -> Vec<SubagentPreset> {
-    let pkg = pi_npm_dir()
-        .join("node_modules")
-        .join("pi-subagents");
-    let mut out = scan_subagents(&pkg.join("agents"), false);
-    out.extend(scan_subagents(&pkg.join(".helix-disabled"), true));
-    out.sort_by_key(|a| a.name.to_lowercase());
+    if !subagents_extension_installed() {
+        return vec![];
+    }
+    let cwd = subagents_work_dir();
+    let settings = merged_subagents_settings(&cwd);
+    let defaults_off = settings
+        .get("disableDefaultAgents")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    let mut out: Vec<SubagentPreset> = Vec::new();
+    let push =
+        |p: SubagentPreset, out: &mut Vec<SubagentPreset>, seen: &mut HashMap<String, ()>| {
+            let key = p.id.to_lowercase();
+            if seen.insert(key, ()).is_none() {
+                out.push(p);
+            }
+        };
+
+    if !defaults_off {
+        for p in default_agent_presets() {
+            push(p, &mut out, &mut seen);
+        }
+    }
+    // Highest-precedence dir first; later entries are dropped on id clash.
+    for (dir, source) in [
+        (cwd.join(".pi").join("agents"), "project"),
+        (cwd.join(".agents").join("agents"), "workspace"),
+        (global_agents_dir(), "global"),
+    ] {
+        for p in scan_agent_dir(&dir, source) {
+            push(p, &mut out, &mut seen);
+        }
+    }
     out
 }
 
-/// Enable or disable a bundled pi-subagents preset by moving its `agents/<name>.md`
-/// into / out of the `.helix-disabled` folder.
+/// Locate the .md that defines an agent type, in the loader's precedence
+/// order (project → workspace → global). Built-in defaults have no file.
+fn find_agent_file(type_name: &str) -> Option<PathBuf> {
+    for dir in subagent_agent_roots() {
+        let p = dir.join(format!("{type_name}.md"));
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Set `enabled: false` / remove it — the same frontmatter edit the
+/// extension's own `/agents` command performs (src/agent-file-toggle.ts):
 ///
-/// - `enabled = false` → move `agents/<name>.md` → `.helix-disabled/<name>.md`
-///   (pi only scans `agents/*.md`, so the preset is skipped at runtime).
-/// - `enabled = true`  → move it back.
+/// - Has a .md → insert `enabled: false` right after the opening `---`
+///   (disable) or strip the line (enable), preserving the file's line
+///   endings and formatting. A file that was only a disable-stub is deleted
+///   on enable, restoring the compiled default.
+/// - No .md (compiled default) → disable writes a stub
+///   `---\nenabled: false\n---\n` to `~/.pi/agent/agents/<type>.md`;
+///   enable is a no-op (nothing to re-enable).
 ///
-/// This is a fully reversible alternative to `helix_delete_subagent`: the file is
-/// never destroyed, just parked outside pi's scan root.
-///
-/// Safety: `name` is restricted to `[A-Za-z0-9_-]`, and the resolved source path
-/// is canonicalized and asserted to stay inside either `agents/` or
-/// `.helix-disabled/` (defends against traversal / symlink escape).
+/// The extension re-reads agent files on every Agent call, so changes apply
+/// to the next spawn without restarting anything.
 #[tauri::command]
 pub fn helix_set_subagent_enabled(name: String, enabled: bool) -> Result<(), String> {
-    let pkg = pi_npm_dir()
-        .join("node_modules")
-        .join("pi-subagents");
-    if !pkg.is_dir() {
+    if !subagents_extension_installed() {
         return Err("pi-subagents 扩展未安装".to_string());
     }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    if name.trim().is_empty()
+        || name.trim() != name
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
     {
         return Err("非法的预设名".to_string());
     }
-    let agents_dir = pkg.join("agents");
-    let disabled_dir = pkg.join(".helix-disabled");
-    let agents_canon = std::fs::canonicalize(&agents_dir).map_err(|e| e.to_string())?;
-    let (src, dst) = if enabled {
-        (disabled_dir.join(format!("{name}.md")), agents_dir.join(format!("{name}.md")))
-    } else {
-        (agents_dir.join(format!("{name}.md")), disabled_dir.join(format!("{name}.md")))
-    };
-    if !src.is_file() {
-        return Err(format!("预设 {name} 在源位置不存在"));
+    let name = name.trim().to_string();
+
+    if let Some(path) = find_agent_file(&name) {
+        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        if is_disable_stub(&content) && enabled {
+            // Stub only existed to disable a compiled default — removing it
+            // restores the default (mirrors enableAgent's stub branch).
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        let updated = if enabled {
+            strip_enabled_false(&content).ok_or_else(|| format!("{name} 未处于禁用状态"))?
+        } else {
+            insert_enabled_false(&content)
+                .ok_or_else(|| format!("无法在 {name} 的 frontmatter 中写入禁用标记"))?
+        };
+        std::fs::write(&path, updated).map_err(|e| e.to_string())?;
+        return Ok(());
     }
-    let src_canon = std::fs::canonicalize(&src).map_err(|e| e.to_string())?;
-    let mut ok = src_canon.starts_with(&agents_canon);
-    if !ok && disabled_dir.is_dir() {
-        let disabled_canon = std::fs::canonicalize(&disabled_dir).map_err(|e| e.to_string())?;
-        ok = src_canon.starts_with(&disabled_canon);
+
+    if !enabled && is_default_agent(&name) {
+        // Compiled default: write the disable-stub into the personal dir,
+        // exactly what `/agents → Disable` does for a default with no file.
+        let dir = global_agents_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("{name}.md"));
+        if path.exists() {
+            return Err(format!("{name} 的覆盖文件已存在"));
+        }
+        std::fs::write(&path, "---\nenabled: false\n---\n").map_err(|e| e.to_string())?;
+        return Ok(());
     }
-    if !ok {
-        return Err("路径越界".to_string());
+    Err(format!("预设 {name} 不存在"))
+}
+
+/// Permanently remove a custom agent's .md file (the extension's Delete does
+/// `unlink`). Compiled defaults have no file to delete — refuse rather than
+/// suggest deleting something the extension would resurrect.
+#[tauri::command]
+pub fn helix_delete_subagent(name: String) -> Result<(), String> {
+    if !subagents_extension_installed() {
+        return Err("pi-subagents 扩展未安装".to_string());
     }
-    std::fs::create_dir_all(&disabled_dir).map_err(|e| e.to_string())?;
-    std::fs::rename(&src_canon, &dst).map_err(|e| e.to_string())?;
+    if name.trim().is_empty() || name.trim() != name {
+        return Err("非法的预设名".to_string());
+    }
+    let name = name.trim().to_string();
+    let path = find_agent_file(&name).ok_or_else(|| format!("预设 {name} 不存在"))?;
+    if is_disable_stub(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?) {
+        // A stub is a default's off-switch, not a definition — delete reads
+        // as "remove the agent" but the file carries nothing to remove.
+        return Err("内置默认的禁用存根只能启用，不能删除".to_string());
+    }
+    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Permanently remove a subagent preset bundled by the `pi-subagents` extension
-/// by moving its `<name>.md` out of the scanned directory (whether it currently
-/// lives in `agents/` or `.helix-disabled/`).
-///
-/// Safety:
-/// - The `name` is restricted to `[A-Za-z0-9_-]` so it can never escape the
-///   package folder via path traversal.
-/// - Even after validation we canonicalize the resolved path and assert it is
-///   still inside `agents_dir` or `.helix-disabled/` (defends against symlinks).
-/// - The file is **moved** (not deleted) to `<package>/.helix-deleted/<name>.md`
-///   so the removal is recoverable; pi never scans that folder.
-#[tauri::command]
-pub fn helix_delete_subagent(name: String) -> Result<(), String> {
-    let pkg = pi_npm_dir()
-        .join("node_modules")
-        .join("pi-subagents");
-    if !pkg.is_dir() {
-        return Err("pi-subagents 扩展未安装".to_string());
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err("非法的预设名".to_string());
-    }
-    let agents_dir = pkg.join("agents");
-    let disabled_dir = pkg.join(".helix-disabled");
-    let agents_canon = std::fs::canonicalize(&agents_dir).map_err(|e| e.to_string())?;
-    let candidates = [
-        agents_dir.join(format!("{name}.md")),
-        disabled_dir.join(format!("{name}.md")),
-    ];
-    let mut found: Option<PathBuf> = None;
-    for c in candidates {
-        if c.is_file() {
-            let c_canon = std::fs::canonicalize(&c).map_err(|e| e.to_string())?;
-            let mut inside = c_canon.starts_with(&agents_canon);
-            if !inside && disabled_dir.is_dir() {
-                let disabled_canon =
-                    std::fs::canonicalize(&disabled_dir).map_err(|e| e.to_string())?;
-                inside = c_canon.starts_with(&disabled_canon);
-            }
-            if inside {
-                found = Some(c_canon);
-                break;
-            }
+/// Is this type one of the extension's compiled defaults?
+fn is_default_agent(name: &str) -> bool {
+    ["general-purpose", "Explore", "Plan"]
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case(name))
+}
+
+/// A file the extension writes to disable a compiled default: exactly
+/// `---\nenabled: false\n---` (src/agent-file-toggle.ts isEmptyStub).
+fn is_disable_stub(content: &str) -> bool {
+    let normalized = content.replace("\r\n", "\n");
+    let trimmed = normalized.trim();
+    trimmed == "---\nenabled: false\n---" || trimmed == "---\n---"
+}
+
+/// Split keeping each line's terminator, matching splitFrontmatter in
+/// agent-file-toggle.ts: lines keep their terminators, so an edit preserves
+/// the file's line endings (and a missing final newline stays missing).
+fn split_lines_keep_ends(content: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (i, b) in content.bytes().enumerate() {
+        if b == b'\n' {
+            lines.push(content[start..=i].to_string());
+            start = i + 1;
         }
     }
-    let target = found.ok_or_else(|| format!("预设 {name} 不存在"))?;
-    let backup_dir = pkg.join(".helix-deleted");
-    std::fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
-    std::fs::rename(&target, backup_dir.join(format!("{name}.md"))).map_err(|e| e.to_string())?;
-    Ok(())
+    if start < content.len() {
+        lines.push(content[start..].to_string());
+    }
+    lines
+}
+
+/// Index of the frontmatter's closing `---` (a `---`-trimmed line after the
+/// opening one), or None when the file has no frontmatter block.
+fn frontmatter_close(lines: &[String]) -> Option<usize> {
+    if lines.first()?.trim() != "---" {
+        return None;
+    }
+    lines
+        .iter()
+        .skip(1)
+        .position(|l| l.trim() == "---")
+        .map(|i| i + 1)
+}
+
+/// Insert `enabled: false` immediately after the opening `---`, preserving
+/// everything else (disableInContent). None when there is no frontmatter
+/// block or the file is already disabled.
+fn insert_enabled_false(content: &str) -> Option<String> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let mut lines = split_lines_keep_ends(content);
+    let close = frontmatter_close(&lines)?;
+    if lines
+        .iter()
+        .take(close)
+        .any(|l| l.trim() == "enabled: false")
+    {
+        return None;
+    }
+    let eol = if lines[0].ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    lines.insert(1, format!("enabled: false{eol}"));
+    Some(lines.join(""))
+}
+
+/// Remove the `enabled: false` line from the frontmatter wherever it appears
+/// (enableInContent removes it at any position). None when the file has no
+/// frontmatter block; Some(content) unchanged when there was nothing to
+/// strip — the caller then reports the no-op.
+fn strip_enabled_false(content: &str) -> Option<String> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let lines = split_lines_keep_ends(content);
+    let close = frontmatter_close(&lines)?;
+    let kept: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| !(*i > 0 && *i < close && l.trim() == "enabled: false"))
+        .map(|(_, l)| l.clone())
+        .collect();
+    Some(kept.join(""))
 }
 
 #[cfg(test)]

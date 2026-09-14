@@ -10,10 +10,10 @@ import {
   Globe,
 } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
-import { isRealElectron } from "@/lib/electron-bridge";
-import { useHelixStore } from "@/stores/helix-store";
 import { createPortal } from "react-dom";
+import { isRealElectron } from "@/lib/electron-bridge";
 import { cleanUrl } from "@/lib/url-utils";
+import { useHelixStore } from "@/stores/helix-store";
 
 // ---------------------------------------------------------------------------
 // Suppress benign <webview> navigation-abort noise.
@@ -233,7 +233,7 @@ export function BrowserView({
     };
     window.addEventListener("message", onMsg);
     return () => window.removeEventListener("message", onMsg);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [loaded]);
 
   // Esc 退出选择模式

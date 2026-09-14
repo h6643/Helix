@@ -1,15 +1,15 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { useHelixStore } from "@/stores/helix-store";
 import {
   SettingRow,
   SettingGroup,
   SectionHeading,
   PopupSelect,
 } from "./settings-ui";
+import { Button } from "@/components/ui/button";
 import { electronApp, electronDialog } from "@/lib/electron-bridge";
+import { useHelixStore } from "@/stores/helix-store";
 
 export function GeneralSettingsPanel() {
   const showToast = useHelixStore((s) => s.showToast);

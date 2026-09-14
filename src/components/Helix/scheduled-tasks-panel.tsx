@@ -16,8 +16,8 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { helixApi } from "@/lib/electron-bridge";
 import { parseChineseSchedule } from "@/lib/schedule-utils";
-import { useHelixStore, type ScheduledTask } from "@/stores/helix-store";
 import { useGatewayStore } from "@/stores/gateway-store";
+import { useHelixStore, type ScheduledTask } from "@/stores/helix-store";
 
 interface ScheduledTasksPanelProps {}
 

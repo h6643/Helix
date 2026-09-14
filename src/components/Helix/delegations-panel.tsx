@@ -16,6 +16,7 @@ import {
 import React, { useState, useEffect, useCallback } from "react";
 import { isElectron } from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
+import { resolveBackendSid } from "@/lib/session-map";
 import { cn } from "@/lib/utils";
 import { useHelixStore } from "@/stores/helix-store";
 import type { SubAgent, ToolCallEntry } from "@/stores/helix-types";
@@ -165,8 +166,13 @@ function LiveSubAgentCard({ agent }: { agent: SubAgent }) {
 }
 
 export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
-  // 实时子代理：由 subagent.* 事件写入 store（agent-flow-panel.onEvent）
-  const subAgents = useHelixStore((s) => s.subAgents);
+  // 实时子代理：由 subagent.* 事件写入 store（agent-flow-panel.onEvent）。
+  // 只显示当前会话的：spawn 时快照了归属 sessionId，无该字段的旧数据回退可见。
+  const subAgentsAll = useHelixStore((s) => s.subAgents);
+  const currentSessionId = useHelixStore((s) => s.currentSessionId);
+  const subAgents = subAgentsAll.filter(
+    (a) => !a.sessionId || a.sessionId === currentSessionId,
+  );
   const runningCount = subAgents.filter((a) => a.status === "running").length;
 
   const [delegations, setDelegations] = useState<Delegation[]>([]);
@@ -180,6 +186,7 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
   const [logContent, setLogContent] = useState<string>("");
   const [logLoading, setLogLoading] = useState(false);
 
+  // 磁盘记录按当前对话的后端 sid 过滤（manifest.json 里的命名空间）。
   const loadDelegations = useCallback(async (silent = false) => {
     if (!isElectron()) {
       setLoading(false);
@@ -191,7 +198,16 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
     setError(null);
     try {
       const api = (window as any).electron as any;
-      const res = await api?.delegations?.list?.();
+      // 过滤键 = pi 后端 sid（manifest.json 里的命名空间）。无后端会话 →
+      // 无磁盘记录，不退化为列出全部（否则草稿对话会看到别的会话的记录）。
+      const sid = await resolveBackendSid(
+        useHelixStore.getState().currentSessionId,
+      );
+      if (!sid) {
+        setDelegations([]);
+        return;
+      }
+      const res = await api?.delegations?.list?.(sid);
       if (res?.ok) {
         setDelegations(res.delegations || []);
       } else if (!silent) {

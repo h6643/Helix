@@ -2,10 +2,10 @@
 
 import { FileCode, Undo2 } from "lucide-react";
 import React, { useMemo, useState } from "react";
+import { countDiffLines } from "./diff-preview";
 import { electronFS } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 import type { PendingChange } from "@/stores/helix-types";
-import { countDiffLines } from "./diff-preview";
 
 function reverseUnifiedDiff(
   diff: string,

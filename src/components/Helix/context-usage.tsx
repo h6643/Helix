@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { helixApi } from "@/lib/electron-bridge";
 import { captureContextBreakdown } from "@/lib/context-capture";
+import { helixApi } from "@/lib/electron-bridge";
 import { formatTokens } from "@/lib/format";
 import { debug } from "@/lib/logger";
 import { resolveBackendSid } from "@/lib/session-map";

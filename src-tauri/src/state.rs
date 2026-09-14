@@ -5,6 +5,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use tauri::Manager;
 
+/// The Pi agent's default sessions working directory (`~/.pi/agent/sessions`).
+/// Used as the fallback work dir when the user has not selected a project dir.
+pub fn pi_sessions_dir() -> PathBuf {
+    let dir = super::paths::pi_agent_dir().join("sessions");
+    let _ = std::fs::create_dir_all(&dir);
+    super::paths::strip_verbatim_prefix(&dir)
+}
+
 /// Global AppHandle set once during setup — lets background threads and sync
 /// commands emit Tauri events / resolve paths without threading a handle
 /// through every function.
@@ -69,7 +77,7 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            work_dir: RwLock::new(dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))),
+            work_dir: RwLock::new(pi_sessions_dir()),
             allowed_roots: RwLock::new(Vec::new()),
             gateway: GatewayState::default(),
         }

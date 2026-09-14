@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
 
 // 设置界面基础组件：每个 SettingGroup 渲染为一张卡片，
 // 卡片内设置项以分隔线区分，控件右对齐。

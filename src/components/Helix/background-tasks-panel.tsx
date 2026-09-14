@@ -1,6 +1,5 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Loader2,
   X,
@@ -10,6 +9,7 @@ import {
   Terminal,
   ScrollText,
 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /** 后台任务记录（与 pi-background-tasks 扩展的 tasks.json schema 对齐，
  *  经 Rust tasks_list 命令读出——Rust 侧还会把 running 但进程已消失的
@@ -68,11 +68,16 @@ export function BackgroundTasksPanel({
     return () => document.removeEventListener("mousedown", onDown);
   }, [onClose]);
 
-  // 我的任务：当前会话的任务排前面，其余会话的任务折叠在后（后端 tasks
-  // 按 session_id 过滤；会话切换期间 sid 可能为 null → 显示全部）。
+  // 我的任务：当前会话的任务排前面；其余（别的会话 / 扩展没能记下会话的
+  // "unknown" 任务）折叠在下面的「其他来源」区，而不是直接吞掉。
   const myTasks = activeSessionId
     ? tasks.filter((t) => t.session_id === activeSessionId)
     : tasks;
+  const otherTasks = activeSessionId
+    ? tasks.filter(
+        (t) => t.session_id !== activeSessionId,
+      )
+    : [];
   const running = myTasks.filter((t) => t.status === "running");
   const done = myTasks.filter((t) => t.status !== "running");
 
@@ -84,9 +89,26 @@ export function BackgroundTasksPanel({
         const api = (window as any).electron as any;
         const res = await api?.backgroundTasks?.read?.(task.id, 16384);
         if (res?.ok) {
-          setOutputText(res.text || "(暂无输出)");
+          const text = (res.text || "").trim();
+          const kb = res.total_bytes ? ` · 共 ${(res.total_bytes / 1024).toFixed(1)}KB` : "";
+          if (text) {
+            setOutputText(text + (kb ? `\n\n—— 输出末尾 16KB${kb}` : ""));
+          } else {
+            // 输出文件存在但为空：区分"还在跑没产出"和"秒退没吐任何东西"
+            setOutputText(
+              task.status === "running"
+                ? "（任务运行中，暂无输出 —— 等它产出后点「刷新输出」）"
+                : "（任务已结束，但未产生任何输出 —— 命令可能刚启动就退出了）",
+            );
+          }
         } else {
-          setOutputText(`读取失败：${res?.error ?? "未知错误"}`);
+          const err = res?.error ?? "未知错误";
+          setOutputText(
+            err === "output file missing"
+              ? "（输出日志文件已不存在 —— 任务是旧会话/重启前启动的，" +
+                "扩展重启时清理了日志。之后启动的任务会正常保留输出。）"
+              : `读取失败：${err}`,
+          );
         }
       } catch (e) {
         setOutputText(`读取失败：${String(e)}`);
@@ -193,13 +215,18 @@ export function BackgroundTasksPanel({
       </div>
 
       <div className="flex-1 overflow-y-auto min-h-0">
-        {myTasks.length === 0 && (
+        {myTasks.length === 0 && otherTasks.length === 0 && (
           <div className="px-3 py-6 text-center text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/40">
             当前对话没有后台任务。
             <br />
             <span className="text-[calc(var(--helix-transcript-size)*0.7143)]">
               提示模型使用 background 工具启动长任务，这里就能看到。
             </span>
+          </div>
+        )}
+        {myTasks.length === 0 && otherTasks.length > 0 && (
+          <div className="px-3 pt-3 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/40">
+            当前对话没有后台任务。
           </div>
         )}
         {[...running, ...done].map((task) => {
@@ -244,6 +271,51 @@ export function BackgroundTasksPanel({
             </div>
           );
         })}
+
+        {/* 其他来源：别的会话 / 扩展早期没记下会话 id 的任务。只列运行
+            中的 + 最近 5 条已结束的，避免历史堆积把当前会话挤出视野。 */}
+        {otherTasks.length > 0 && (
+          <div className="border-t border-border/50">
+            <div className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-muted/30">
+              其他来源（{otherTasks.length}）— 其他会话或未记录会话的后台任务
+            </div>
+            {[
+              ...otherTasks.filter((t) => t.status === "running"),
+              ...otherTasks.filter((t) => t.status !== "running").slice(0, 5),
+            ].map((task) => {
+              const isRunning = task.status === "running";
+              const durationMs =
+                (task.finished_at ?? Date.now()) - task.started_at;
+              return (
+                <div
+                  key={task.id}
+                  className="flex items-center gap-2 px-3 py-1.5 border-t border-border/20 hover:bg-muted/20 transition-colors"
+                >
+                  {isRunning ? (
+                    <Loader2 className="size-3 text-primary shrink-0 animate-spin" />
+                  ) : task.status === "completed" ? (
+                    <CheckCircle2 className="size-3 text-emerald-500 shrink-0" />
+                  ) : (
+                    <XCircle className="size-3 text-red-500 shrink-0" />
+                  )}
+                  <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.7143)] font-mono text-foreground/60">
+                    {task.command}
+                  </span>
+                  <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70 shrink-0">
+                    {formatDuration(durationMs)}
+                  </span>
+                  <button
+                    onClick={() => openOutput(task)}
+                    className="p-0.5 rounded text-foreground/30 hover:text-foreground hover:bg-muted/40 transition-colors shrink-0"
+                    data-tip="查看输出"
+                  >
+                    <ScrollText className="size-3" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

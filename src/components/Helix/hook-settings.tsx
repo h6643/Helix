@@ -2,9 +2,9 @@
 
 import { Plus, Trash2 } from "lucide-react";
 import React, { useState, useEffect, useCallback } from "react";
+import { Toggle, SettingGroup, SectionHeading } from "./settings-ui";
 import { Button } from "@/components/ui/button";
 import { isElectron } from "@/lib/electron-bridge";
-import { isTauri } from "@/lib/tauri-bridge";
 import {
   type HookType,
   type HookConfig,
@@ -14,7 +14,7 @@ import {
   EMPTY_HOOKS_SETTINGS,
   generateHookId,
 } from "@/lib/hooks-config";
-import { Toggle, SettingGroup, SectionHeading } from "./settings-ui";
+import { isTauri } from "@/lib/tauri-bridge";
 
 export function HookSettings() {
   const [settings, setSettings] = useState<HooksSettings>(EMPTY_HOOKS_SETTINGS);
