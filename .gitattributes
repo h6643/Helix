@@ -1,1 +1,16 @@
-*.sh text eol=lf
+# Normalize all text files to LF in both the repo and the working tree.
+# Stops Git's autocrlf=true from rewriting LF->CRLF on checkout (which emits
+# "LF will be replaced by CRLF" warnings) and keeps line endings consistent
+# across Windows / Linux / macOS contributors.
+* text=auto eol=lf
+
+# Explicit binary guards so Git never tries to normalize them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.gif binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

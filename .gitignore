@@ -82,6 +82,7 @@ original.txt
 
 # Tauri build output
 src-tauri/target/
+.pi-verify-target
 
 # Skills (user-specific, not shared)
 skills/
@@ -130,3 +131,4 @@ KaTeX_*
 # codex CLI temp dir
 .codex-tmp/
 *.log
+nul

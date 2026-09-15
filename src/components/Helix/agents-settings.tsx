@@ -282,7 +282,7 @@ export function AgentsSettings() {
         if (rawIds) {
           try {
             parsedIds = JSON.parse(rawIds);
-          } catch {}
+          } catch { /* empty */}
         }
         if (Array.isArray(parsedIds)) {
           setIdentities(

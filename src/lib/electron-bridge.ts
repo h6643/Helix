@@ -377,6 +377,35 @@ export const electronApp = {
     throw new Error("App not available in browser mode");
   },
 
+  /** Poll pending pi-extension browser requests (emits helix:browser-request
+   *  events with the full payload; navigate also emits the legacy
+   *  helix:open-browser for the sidebar-open path). */
+  async pollBrowserRequests(): Promise<{ ok: boolean; opened: string[] }> {
+    const api = getElectronAPI();
+    if (api && typeof api.app.pollBrowserRequests === "function") {
+      return api.app.pollBrowserRequests();
+    }
+    return { ok: true, opened: [] };
+  },
+
+  /** Write a browser automation result (<reqId>.result.json) for the pi
+   *  extension's request-response protocol. Best-effort: failures are
+   *  swallowed (the pi tool times out on its side). */
+  async browserWriteResult(
+    reqId: string,
+    result: unknown,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const api = getElectronAPI();
+    if (api && typeof api.app.browserWriteResult === "function") {
+      try {
+        return await api.app.browserWriteResult(reqId, result);
+      } catch {
+        return { ok: false };
+      }
+    }
+    return { ok: false };
+  },
+
   async readEnvKey(key: string): Promise<string> {
     const api = getElectronAPI();
     if (api) {

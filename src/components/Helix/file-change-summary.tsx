@@ -2,7 +2,11 @@
 
 import { ChevronRight, FilePen } from "lucide-react";
 import React, { useMemo, useState } from "react";
-import { computeDiff, countDiffLines } from "./diff-preview";
+import {
+  computeDiff,
+  countDiffLines,
+  looksLikeUnifiedDiff,
+} from "./diff-preview";
 import type { PendingChange } from "@/stores/helix-types";
 
 function DiffBody({ change }: { change: PendingChange }) {
@@ -10,7 +14,10 @@ function DiffBody({ change }: { change: PendingChange }) {
     () => computeDiff(change.oldContent || "", change.newContent || ""),
     [change.oldContent, change.newContent],
   );
-  if (change.unifiedDiff) {
+  // unifiedDiff 必须通过严格形态校验（diff 头行靠近开头 + 有 +/− 改动行）
+  // 才按逐行着色渲染；否则回退用 old/new 内容重算的 LCS diff —— 后端异常
+  // 注入的非 diff 文本（如普通命令输出）不会被误染成整列 + 行。
+  if (change.unifiedDiff && looksLikeUnifiedDiff(change.unifiedDiff)) {
     // Normalize CRLF to LF for consistent line splitting across platforms
     const normalizedDiff = change.unifiedDiff
       .replace(/\r\n/g, "\n")

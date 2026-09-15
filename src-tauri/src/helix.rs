@@ -16,7 +16,134 @@ use crate::state::AppState;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tauri::Emitter;
 use tauri::State;
+
+/// Open a URL in the right-sidebar embedded browser. Emits a
+/// `helix:open-browser` event that the renderer's global hook
+/// (`window.__helixOpenBrowser`, registered in `helix-layout.tsx`) listens for
+/// and forwards to `setPreviewRailUrl` + the browser tab.
+#[tauri::command]
+pub fn open_browser_url(url: String) -> Value {
+    use crate::state::app_handle;
+    let _ = app_handle().emit("helix:open-browser", json!({ "url": url }));
+    json!({ "ok": true, "url": url })
+}
+
+/// Poll the pi extension's browser request queue
+/// (`~/.pi/agent/helix-browser-requests/*.json`), forward each NEW request's
+/// full payload (op/url/reqId/params) as a `helix:browser-request` event, and
+/// mark consumed files by renaming to `*.consumed` so the frontend's periodic
+/// poll picks up each request exactly once. Result files (`*.result.json`)
+/// are skipped — they belong to the extension's request-response protocol.
+#[tauri::command]
+pub fn poll_browser_requests() -> Value {
+    use crate::state::app_handle;
+    let dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".pi")
+        .join("agent")
+        .join("helix-browser-requests");
+    let mut opened: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if !name.ends_with(".json")
+                || name.starts_with("latest")
+                || name.ends_with(".consumed")
+                || name.ends_with(".result.json")
+            {
+                continue;
+            }
+            let path = dir.join(&name);
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            // url is optional: navigate ops always carry one, but read/click/
+            // type/press target the currently-open browser page (url omitted).
+            // The frontend resolves the active URL from its own store; when
+            // there is no open page it writes a descriptive error result.
+            let url = v.get("url").and_then(Value::as_str).unwrap_or("");
+            let req_id = v
+                .get("reqId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let op = v.get("op").and_then(Value::as_str).unwrap_or("navigate");
+            let _ = app_handle().emit("helix:browser-request", &v);
+            // navigate has no execution payload of its own: it just points the
+            // real webview at `url`. Write an immediate result file so the pi
+            // extension's poll loop doesn't burn its full timeout waiting on a
+            // no-op; the frontend's navigate listener (helix:open-browser) is
+            // the source of truth for the actual webview navigation.
+            if op == "navigate" && !req_id.is_empty() {
+                let _ = browser_write_result(
+                    req_id.clone(),
+                    json!({ "ok": true, "navigated": url }),
+                );
+                // Back-compat: emit the legacy event so the sidebar-open path
+                // keeps working.
+                let _ = app_handle().emit(
+                    "helix:open-browser",
+                    json!({ "url": url }),
+                );
+            }
+            let consumed = dir.join(format!("{}.consumed", name));
+            let _ = std::fs::rename(&path, &consumed);
+            eprintln!(
+                "[browser-requests] forwarded op={op} url={} reqId={req_id} (navigate result written={})",
+                url,
+                op == "navigate"
+            );
+            opened.push(url.to_string());
+        }
+    }
+    json!({ "ok": true, "opened": opened })
+}
+
+/// Write a browser automation result (`<reqId>.result.json`) that the pi
+/// extension's request-response tools poll for. `result` is stored verbatim.
+#[tauri::command]
+pub fn browser_write_result(req_id: String, result: Value) -> Value {
+    let dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".pi")
+        .join("agent")
+        .join("helix-browser-requests");
+    let _ = std::fs::create_dir_all(&dir);
+    // Sanitize the id: it names a file — strip separators so a crafted reqId
+    // can't escape the request directory.
+    let safe: String = req_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if safe.is_empty() {
+        return json!({ "ok": false, "error": "invalid req id" });
+    }
+    let path = dir.join(format!("{safe}.result.json"));
+    let payload = json!({ "reqId": safe, "result": result, "ts": std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0) });
+    match std::fs::write(&path, serde_json::to_string(&payload).unwrap_or_default()) {
+        Ok(_) => {
+            eprintln!(
+                "[browser_write_result] reqId={} result={}",
+                safe,
+                serde_json::to_string(&result).unwrap_or_default()
+            );
+            json!({ "ok": true })
+        }
+        Err(e) => {
+            eprintln!("[browser_write_result] write failed reqId={safe}: {e}");
+            json!({ "ok": false, "error": e.to_string() })
+        }
+    }
+}
 
 #[tauri::command]
 pub async fn helix_send(method: String, params: Option<Value>) -> Result<Value, String> {
@@ -674,6 +801,11 @@ pub async fn pi_list_installed() -> Result<Value, String> {
     // Scan extensions directory for .ts files
     if pi_ext_dir.is_dir() {
         scan_pi_extensions(&pi_ext_dir, &mut items, &local_ext_patterns);
+        // registerTool() tools are invisible to the pi runtime's get_commands RPC
+        // (it only returns extension commands, prompt templates and skills),
+        // so the plugin manager must recover them statically: a `pi.registerTool`
+        // call in an enabled extension's source declares a model-facing tool.
+        extract_registered_tools(&pi_ext_dir, &mut items);
     }
 
     // Scan node_modules for user-installed extensions (directories with package.json)
@@ -937,6 +1069,159 @@ fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &
     }
 }
 
+/// Extract `registerTool` declarations from local extension sources so the
+/// plugin manager can surface model-facing tools. pi's `get_commands` RPC only
+/// returns extension commands (registerCommand), prompt templates, and skills —
+/// tools are a separate registry the RPC never exposes, so without this pass
+/// tools like the browser suite look "missing" from the extension list.
+///
+/// Heuristic: a `pi.registerTool(` call in an enabled extension's source
+/// contributes one `tool` item. The tool name is read from the `name:`
+/// property of the first argument object (string literal or identifier),
+/// falling back to the extension's own name when no `name` is present.
+fn extract_registered_tools(dir: &std::path::Path, items: &mut Vec<Value>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if file_name.starts_with('.') {
+            continue;
+        }
+        if path.is_file() {
+            let is_ext = file_name.ends_with(".ts")
+                || file_name.ends_with(".js")
+                || file_name.ends_with(".mts")
+                || file_name.ends_with(".mjs");
+            if is_ext {
+                ingest_extension_source(&path, items);
+            }
+            continue;
+        }
+        // Directory extension: pi loads a package when package.json has a
+        // `pi` manifest, or when a bare index.ts/index.js exists.
+        let pkg_json = path.join("package.json");
+        if pkg_json.exists() {
+            let content = std::fs::read_to_string(&pkg_json).unwrap_or_default();
+            if content.contains("\"pi\"") {
+                // Package with pi manifest — its tools are declared in index.*
+                for rel in ["index.ts", "index.js"] {
+                    let p = path.join(rel);
+                    if p.exists() {
+                        ingest_extension_source(&p, items);
+                    }
+                }
+            }
+            // No `pi` key in manifest: not a pi extension, skip.
+        } else if path.join("index.ts").exists() || path.join("index.js").exists() {
+            // Bare index dir
+            for rel in ["index.ts", "index.js"] {
+                let p = path.join(rel);
+                if p.exists() {
+                    ingest_extension_source(&p, items);
+                }
+            }
+        }
+    }
+}
+
+fn ingest_extension_source(file: &std::path::Path, items: &mut Vec<Value>) {
+    ingest_extension_source_named(file, None, items);
+}
+
+/// `ingest_extension_source` with an explicit display name (used by
+/// `scan_user_extensions` where the file stem is `index`, which is useless
+/// as a label — the npm package name is the right one).
+fn ingest_extension_source_named(
+    file: &std::path::Path,
+    display_override: Option<&str>,
+    items: &mut Vec<Value>,
+) {
+    let content = match std::fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let raw_stem = file
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("extension");
+    let mut stem = raw_stem.to_string();
+    for suffix in [".mts", ".mjs", ".ts", ".js"] {
+        if let Some(pos) = stem.strip_suffix(suffix) {
+            stem = pos.to_string();
+        }
+    }
+    let display_name = match display_override {
+        Some(d) if !d.is_empty() => d.to_string(),
+        _ => {
+            if stem == "index" || stem.is_empty() {
+                "extension".to_string()
+            } else {
+                stem
+            }
+        }
+    };
+
+    // Scan for `registerTool(` call sites. Handles two patterns:
+    //   1. Direct:  pi.registerTool({ name: "foo", ... })  → literal name
+    //   2. Helper:  registerTool(pi, { name: "foo", ... }) → literal name
+    // Both carry the tool name as a string literal in the tool object, so a
+    // 300-char window from the call site is enough. When `name:` holds a bare
+    // identifier (a variable reference like `tool.name`), skip it — the
+    // heuristic can't resolve a runtime value.
+    let search_text = content.as_str();
+    let mut search_from = 0usize;
+    loop {
+        let idx = match search_text[search_from..].find("registerTool(") {
+            Some(i) => search_from + i,
+            None => break,
+        };
+        // A `function registerTool(` / `function registerTool(` declaration
+        // line is not a call site — skip it.
+        let pre = &search_text[..idx];
+        let is_declaration = pre.trim_end().ends_with("function")
+            || pre.trim_end().ends_with("const")
+            || pre.trim_end().ends_with("let")
+            || pre.trim_end().ends_with("var");
+        if is_declaration {
+            search_from = idx + "registerTool(".len();
+            continue;
+        }
+        let window_end = (idx + 300).min(search_text.len());
+        let window = &search_text[idx..window_end];
+        let after_call = &window["registerTool(".len()..];
+        // Skip to the first `{` (the tool object argument).
+        let scan_from = after_call.find('{').unwrap_or(0);
+        let rest = &after_call[scan_from..];
+        let name_pos = rest.find("name:");
+        let tool_name: Option<String> = if let Some(np) = name_pos {
+            let after = &rest[np + 5..];
+            let trimmed = after.trim_start();
+            if trimmed.starts_with('"') || trimmed.starts_with('\'') {
+                let quote = trimmed.chars().next().unwrap();
+                trimmed[1..].find(quote).map(|end| trimmed[1..end + 1].to_string())
+            } else {
+                // Identifier (variable reference) — skip.
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(tool_name) = tool_name {
+            items.push(json!({
+                "name": tool_name,
+                "type": "tool",
+                "source": "pi-tool",
+                "description": format!("Tool registered by extension: {display_name}"),
+                "path": file.display().to_string(),
+                "location": "user",
+            }));
+        }
+        search_from = idx + "registerTool(".len();
+    }
+}
+
 /// Scan node_modules for user-installed Pi extensions.
 /// A package counts when it declares a `pi` manifest field (the exact rule
 /// pi itself uses — `pi.extensions` / `pi.skills` / `pi.prompts`); the legacy
@@ -1044,6 +1329,21 @@ fn scan_user_extensions(
                         "path": fpath.display().to_string(),
                         "location": "user",
                     }));
+                }
+            }
+        }
+
+        // ── registerTool tools declared in the extension entry point(s) ──
+        // pi's get_commands RPC never exposes these (tools are a separate
+        // registry), so scan the manifest's extension entry files directly.
+        if let Some(ext_paths) = pi_manifest.get("extensions").and_then(Value::as_array) {
+            for raw in ext_paths.iter().filter_map(Value::as_str) {
+                if raw.starts_with('!') || raw.contains('*') {
+                    continue;
+                }
+                let p = pkg_dir.join(raw.trim_start_matches("./"));
+                if p.is_file() {
+                    ingest_extension_source_named(&p, Some(ext_name), items);
                 }
             }
         }
@@ -1538,7 +1838,8 @@ pub async fn pi_package_latest(name: String) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{glob_match, merge_lite_wrappers};
+    use super::{glob_match, ingest_extension_source, merge_lite_wrappers};
+    use serde_json::Value;
 
     fn m(pattern: &str, text: &str) -> bool {
         let p: Vec<char> = pattern.chars().collect();
@@ -1620,5 +1921,52 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("lite wrapper active"));
+    }
+
+    #[test]
+    fn extract_register_tool_direct_and_helper_call_sites() {
+        let dir = std::env::temp_dir().join(format!(
+            "helix-test-ext-{}-{}",
+            std::process::id(),
+            1
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pi-test-ext.ts");
+        std::fs::write(
+            &file,
+            "function registerTool(pi: any, tool: any) {\n"
+                .to_string()
+                + "  pi.registerTool({\n"
+                    + "    name: tool.name,\n"
+                    + "    description: tool.description,\n"
+                    + "  });\n"
+                    + "}\n"
+                    + "export default function register(pi: any) {\n"
+                    // Helper pattern: name literal lives in the call-site object.
+                    + "  registerTool(pi, {\n"
+                    + "    name: \"open_browser\",\n"
+                    + "    description: \"x\",\n"
+                    + "  });\n"
+                    // Direct pattern.
+                    + "  pi.registerTool({\n"
+                    + "    name: \"browser_read\",\n"
+                    + "  });\n"
+                    + "}\n",
+        )
+        .unwrap();
+        let mut items: Vec<Value> = Vec::new();
+        ingest_extension_source(&file, &mut items);
+        let names: Vec<String> = items
+            .iter()
+            .filter_map(|i| i.get("name").and_then(Value::as_str).map(String::from))
+            .collect();
+        // The helper's own `pi.registerTool({ name: tool.name ... })` call
+        // uses a variable name — skipped. The two call sites with literal
+        // names are found.
+        assert!(names.contains(&"open_browser".to_string()), "{names:?}");
+        assert!(names.contains(&"browser_read".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("tool")), "{names:?}");
+        assert!(items.iter().all(|i| i["type"] == "tool"));
+        assert!(items.iter().all(|i| i["source"] == "pi-tool"));
     }
 }

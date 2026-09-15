@@ -373,6 +373,8 @@ export interface SubAgent {
   result?: string;
   filesModified?: string[];
   toolCalls?: ToolCallEntry[];
+  /** 完整 prompt 文本（比 description 更详细）。由后端 subagent.start 事件的 text 字段写入。 */
+  text?: string;
 }
 
 // Used as the `customShortcuts` value shape across the app.

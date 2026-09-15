@@ -110,7 +110,7 @@ export function BootOverlay() {
           useGatewayStore.getState().setHelixConnected(true);
           return;
         }
-      } catch {}
+      } catch { /* empty */}
       if (n < 20) setTimeout(() => probe(n + 1), 1500);
     };
     probe();

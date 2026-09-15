@@ -212,7 +212,7 @@ function pushModelConfigViaIpc(
         apiKey: payload.apiKey,
       });
     }
-  } catch {}
+  } catch { /* empty */}
   try {
     if (
       helix?.setConfig &&
@@ -225,7 +225,7 @@ function pushModelConfigViaIpc(
         apiKey: payload.apiKey,
       });
     }
-  } catch {}
+  } catch { /* empty */}
 }
 
 /**

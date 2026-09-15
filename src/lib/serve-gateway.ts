@@ -221,6 +221,7 @@ function toolKindFromName(name: string): string {
 // renderer can consume plain text.
 function stripAnsi(s: unknown): string {
   if (typeof s !== "string") return "";
+// eslint-disable-next-line no-control-regex
   return s.replace(/\u001b\[[0-9;]*m/g, "");
 }
 

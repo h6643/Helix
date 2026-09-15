@@ -97,6 +97,7 @@
   --helix-interface-font: var(--font-geist-sans);
   --helix-transcript-size: 14px;
   --helix-font-size: 13px;
+  --helix-mono: var(--font-geist-mono);
   --helix-surface-light: color-mix(in oklch, var(--primary) 4%, var(--card));
   --helix-surface-shadow: color-mix(in oklch, var(--primary) 16%, transparent);
   --helix-surface-highlight: color-mix(in oklch, white 40%, transparent);
@@ -351,6 +352,7 @@
 .think-title {
   min-width: 0;
   font-weight: 400;
+  white-space: nowrap;
 }
 
 .think-time {
@@ -398,7 +400,19 @@
 }
 
 .think-body p {
-  margin: 0.4em 0;
+  margin: 0.2em 0;
+}
+
+/* 思考体内的列表：压掉条目间距与首尾 margin，让 "1、2、3" 贴近单行节奏，
+   避免默认 markdown 列表的松散排版。 */
+.think-body ul,
+.think-body ol {
+  margin: 0.2em 0;
+  padding-left: 1.1em;
+}
+
+.think-body li {
+  margin: 0;
 }
 
 /* ── 工具块 — Claude Code 终端风：⏺ 强调色工具符号 + ⎿ 左折角引出结果 ──
@@ -1262,14 +1276,27 @@ pre code.hljs {
   border-radius: 0;
 }
 
+/* 工具结果代码卡（showHeader=false，不带 data-code-card-header）：与 CodeCard
+   同款的卡片外框，避免裸 <pre> 背景透明/无边框时与消息气泡糊在一起。 */
+.helix-md pre.helix-code-body-pre {
+  background: var(--color-card);
+  /* 代码块外框：用 --foreground 30% 混入 --color-card 生成，保证在任意主题下
+     都与卡片背景形成对比（--color-border 在暗色下与卡片太接近、几乎看不见）；
+     !important 防止被 .helix-md pre 的通用 border:none 规则覆盖。 */
+  border: 1.5px solid color-mix(in oklch, var(--foreground) 18%, var(--color-card)) !important;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
 /* CodeCard 需要不透明背景 + 可见外框。.helix-md pre 的通用规则把 border 置
    none、背景置 transparent，这里以更高特异性（属性选择器）覆盖，让整张卡片
    有 1px 圆角轮廓，头部/内容区不会与消息气泡糊在一起。 */
 .helix-md pre[data-code-card-header] {
   background: var(--color-card) !important;
-  border: 1px solid var(--color-border);
+  border: 1.5px solid color-mix(in oklch, var(--foreground) 7%, var(--color-card)) !important;
   border-radius: 0.5rem;
   overflow: hidden;
+  margin: 0.5rem 0;
 }
 
 /* CodeCard 头部条：不透明灰底（--muted 浅/深主题均为实色），以 !important
@@ -1287,9 +1314,14 @@ pre code.hljs {
 }
 
 .helix-md pre > .helix-code-card-header {
-  background: var(--muted) !important;
-  padding-top: 0.5rem !important;
-  padding-bottom: 0.5rem !important;
+  /* 头部条背景：由纯 --muted 改为「40% muted + 60% 卡片底色」的浅混合。
+     纯 --muted 在浅色主题是 oklch(0.92)（卡片 oklch(0.985)），深约 0.065(L)，
+     一条横贯整卡的色带显得又宽又重；混入卡片底色后只留极淡的暖灰调，
+     头部不再"压住"代码内容。深色主题同理（0.21 vs 0.16 → 混合后 ~0.18）。 */
+  background: color-mix(in oklch, var(--muted) 40%, var(--color-card)) !important;
+  /* 收紧上下内边距（0.5rem→0.25rem）：头部条更薄，视觉重量进一步降低。 */
+  padding-top: 0.25rem !important;
+  padding-bottom: 0.25rem !important;
 }
 
 .helix-md pre > .helix-code-body {
@@ -1936,6 +1968,19 @@ nav::-webkit-scrollbar-thumb:hover {
 .helix-chat-input-card {
   container-type: inline-size;
   background: var(--card);
+  /* 长内容（尤其是未断行的长 token / 长 URL）不会把卡片撑宽：
+     卡片宽度由外层布局（max-w-[700px]）决定，内容溢出靠 textarea 的
+     overflow-x:hidden + overflow-wrap:anywhere 吸收。overflow-x:clip 兜底
+     防止任何子元素（粘贴的图、链接卡）撑破右缘。
+
+     ⚠️ 纵向必须是 visible。工具条里的浮层全是 `absolute bottom-full` 向上弹出
+     的（上下文面板 / 模型选择 / slash 菜单 / 审批菜单），任何纵向裁剪
+     （overflow:hidden 或 overflow-y:hidden）都会把它们按卡片高度切掉——切口
+     正好是卡片顶边，也就是对话区与输入框的分界线，看起来就是"被对话截断"。
+     overflow-x:clip 不参与纵向裁剪；旧内核不支持 clip 时该声明整体失效，
+     退化为 visible，同样不会纵向裁剪。 */
+  overflow-x: clip;
+  overflow-y: visible;
 }
 @container (max-width: 620px) {
   .chat-toolbar-label {

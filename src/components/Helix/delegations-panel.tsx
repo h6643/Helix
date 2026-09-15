@@ -16,7 +16,8 @@ import {
 import React, { useState, useEffect, useCallback } from "react";
 import { isElectron } from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
-import { resolveBackendSid } from "@/lib/session-map";
+import { resolveBackendSids } from "@/lib/session-map";
+import { isSyntheticSubAgentToolRow } from "@/lib/tool-display-utils";
 import { cn } from "@/lib/utils";
 import { useHelixStore } from "@/stores/helix-store";
 import type { SubAgent, ToolCallEntry } from "@/stores/helix-types";
@@ -28,6 +29,7 @@ interface DelegationTask {
   modified: number;
   preview: string;
   goal?: string;
+  prompt?: string;
   status?: string;
 }
 
@@ -35,6 +37,9 @@ interface Delegation {
   id: string;
   path: string;
   tasks: DelegationTask[];
+  /** 完整指令（Rust persist_delegation_prompt 落盘的 manifest tasks[0].prompt）。
+   *  旧 manifest 没有该字段 → undefined，回退显示 goal。 */
+  prompt?: string;
 }
 
 interface DelegationsPanelProps {
@@ -78,7 +83,11 @@ function statusMeta(status: SubAgent["status"]) {
 function LiveSubAgentCard({ agent }: { agent: SubAgent }) {
   const meta = statusMeta(agent.status);
   const Icon = meta.icon;
-  const toolCalls: ToolCallEntry[] = agent.toolCalls || [];
+  // subagent.* 的合成行（背景启动确认等）不是真实工具调用，不渲染。
+  const toolCalls: ToolCallEntry[] = (agent.toolCalls || []).filter(
+    (tc) => !isSyntheticSubAgentToolRow(tc.toolName),
+  );
+  const [promptOpen, setPromptOpen] = useState(false);
   return (
     <div className="border border-border/30 rounded-lg overflow-hidden">
       <div className="px-3 py-2 bg-muted/20 flex items-start gap-2">
@@ -98,9 +107,28 @@ function LiveSubAgentCard({ agent }: { agent: SubAgent }) {
               {meta.label}
             </span>
           </div>
-          <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground mt-0.5 truncate font-mono">
-            {agent.name}
-          </div>
+          {/* 完整指令：description 是 3–5 词短标签，text 才是子 agent 真实执行的 prompt。
+              默认折叠为一行摘要（与旧视觉一致），点击展开全文，消除"子 agent 只跑了短标题"的误解。 */}
+          {agent.text ? (
+            <button
+              type="button"
+              onClick={() => setPromptOpen((v) => !v)}
+              className={cn(
+                "text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground mt-0.5 font-mono w-full text-left hover:text-foreground transition-colors",
+                promptOpen ? "whitespace-pre-wrap break-words" : "truncate",
+              )}
+              data-tip={promptOpen ? "收起完整指令" : "展开完整指令"}
+            >
+              <span className="select-none text-foreground/40 mr-1">
+                {promptOpen ? "▾" : "▸"}
+              </span>
+              {agent.text}
+            </button>
+          ) : (
+            <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground mt-0.5 truncate font-mono">
+              {agent.name}
+            </div>
+          )}
         </div>
       </div>
 
@@ -198,16 +226,16 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
     setError(null);
     try {
       const api = (window as any).electron as any;
-      // 过滤键 = pi 后端 sid（manifest.json 里的命名空间）。无后端会话 →
-      // 无磁盘记录，不退化为列出全部（否则草稿对话会看到别的会话的记录）。
-      const sid = await resolveBackendSid(
+      // 过滤键 = 会话全部历史后端 sid（manifest.json 里的命名空间）。无后端
+      // 会话 → 无磁盘记录，不退化为列出全部（否则草稿对话会看到别的会话的记录）。
+      const sids = await resolveBackendSids(
         useHelixStore.getState().currentSessionId,
       );
-      if (!sid) {
+      if (sids.length === 0) {
         setDelegations([]);
         return;
       }
-      const res = await api?.delegations?.list?.(sid);
+      const res = await api?.delegations?.list?.(sids);
       if (res?.ok) {
         setDelegations(res.delegations || []);
       } else if (!silent) {
@@ -341,7 +369,9 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
             </div>
           ) : (
             <div className="space-y-1">
-              {delegations.map((del) => {
+              {delegations
+                .filter((del) => !subAgents.some((sa) => sa.id === del.id))
+                .map((del) => {
                 const isExpanded = expandedId === del.id;
                 return (
                   <div

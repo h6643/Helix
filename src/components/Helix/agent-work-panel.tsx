@@ -1,53 +1,28 @@
 "use client";
 
 import {
-  CheckCircle2,
-  FileText,
+  ChevronRight,
   Loader2,
-  RefreshCw,
-  Terminal,
   Users,
-  X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { isElectron } from "@/lib/electron-bridge";
-import { timeAgo } from "@/lib/format";
-import { resolveBackendSid } from "@/lib/session-map";
+import { resolveBackendSids } from "@/lib/session-map";
+import {
+  isSyntheticSubAgentToolRow,
+  getToolIcon,
+  getToolLabel,
+  extractCommandSnippet,
+} from "@/lib/tool-display-utils";
 import { cn } from "@/lib/utils";
 import { useHelixStore } from "@/stores/helix-store";
-
-interface DelegationTask {
-  name: string;
-  path: string;
-  size: number;
-  modified: number;
-  preview: string;
-  goal?: string;
-  status?: string;
-}
+import { HelixMarkdown } from "@/components/Helix/helix-markdown";
 
 interface Delegation {
   id: string;
   path: string;
-  tasks: DelegationTask[];
+  agent_id?: string;
 }
-
-function formatSize(bytes: number) {
-  if (!bytes) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/**
- * 右侧栏「子 Agent 工作内容」页：在多面板里点某个 agent 后打开。
- *
- * 实时区有两层数据：subagent.* 事件写入的 store 卡片（后台启动确认），
- * 以及 pi-subagents 的 .output 转录时间线（子代理真实的逐个工具调用）。
- * 后台子代理不再向父会话流进度——转录文件是它运行期间唯一的实时记录，
- * 所以运行中的子代理以 3s 轮询时间线为准；完成后回落到 store 的结果。
- * 磁盘任务记录（旧 delegate_task live 日志）在最下面，点某条读日志。
- */
 
 interface TimelineEntry {
   kind: string;
@@ -57,46 +32,143 @@ interface TimelineEntry {
   timestamp?: string;
 }
 
+type StepStatus = "running" | "success" | "error";
+
+/** 一条原始工具行。detail 只用于悬停提示，不再逐条铺在面板上。 */
+interface RawStep {
+  toolName: string;
+  detail: string;
+  status: StepStatus;
+}
+
+/** 合并同类后的一行：`查阅 · 2 搜索, 1 文件`。items 保留组内原始工具行，供展开。 */
+interface MergedStep {
+  icon: ReactNode;
+  label: string;
+  detail: string;
+  status: StepStatus;
+  tip: string;
+  items: RawStep[];
+}
+
+// 工具名 → 「类目动词 + 细分类目」。顺序敏感：特异规则必须排在通用词之前
+// （browser_read 先于 read、memory_read 先于 read、run_task 先于 run）。
+const STEP_RULES: Array<{ test: RegExp; verb: string; kind: string }> = [
+  { test: /browser_navigate|browser_go|open_browser|navigate/i, verb: "浏览器", kind: "导航" },
+  { test: /browser_click/i, verb: "浏览器", kind: "点击" },
+  { test: /browser_type|browser_input/i, verb: "浏览器", kind: "输入" },
+  { test: /browser_scroll/i, verb: "浏览器", kind: "滚动" },
+  { test: /browser_screenshot/i, verb: "浏览器", kind: "截图" },
+  { test: /browser_read|browser_get_html|browser_extract|browser_snapshot/i, verb: "浏览器", kind: "读取" },
+  { test: /memory/i, verb: "记忆", kind: "记忆" },
+  { test: /sub_agent|spawn_agent|delegation/i, verb: "子代理", kind: "子代理" },
+  { test: /task_|todo_|plan_|run_task/i, verb: "任务", kind: "任务" },
+  { test: /skill/i, verb: "技能", kind: "技能" },
+  { test: /websearch|web_search|search_web/i, verb: "查阅", kind: "搜索" },
+  { test: /web_fetch|webfetch|fetch|web_extractor/i, verb: "查阅", kind: "网页" },
+  { test: /grep|search|glob|find|query/i, verb: "查阅", kind: "搜索" },
+  { test: /list_directory|list_files|list|dir/i, verb: "查阅", kind: "列表" },
+  { test: /read|view/i, verb: "查阅", kind: "文件" },
+  { test: /write|create|artifact/i, verb: "编辑", kind: "写入" },
+  { test: /edit|patch|modify|replace/i, verb: "编辑", kind: "编辑" },
+  { test: /bash|terminal|shell|run_|execute|command|cmd/i, verb: "终端", kind: "命令" },
+];
+
+function classifyStep(toolName: string): { verb: string; kind: string } {
+  const name = toolName || "";
+  for (const r of STEP_RULES) {
+    if (r.test.test(name)) return { verb: r.verb, kind: r.kind };
+  }
+  return { verb: "工具", kind: getToolLabel(name) || name || "工具" };
+}
+
+function oneLine(s: string, max: number): string {
+  const t = (s || "").replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
+/**
+ * 「合并同类」：连续同类目的工具收成一行（查阅 · 2 搜索, 1 文件），
+ * 不再一条工具一行地铺原始参数 JSON。失败步单独成行，保证错误可见。
+ */
+function mergeSteps(raw: RawStep[]): MergedStep[] {
+  const groups: Array<{ verb: string; items: RawStep[] }> = [];
+  for (const s of raw) {
+    const { verb } = classifyStep(s.toolName);
+    const last = groups[groups.length - 1];
+    const lastFailed = !!last && last.items.some((i) => i.status === "error");
+    if (last && last.verb === verb && !lastFailed) last.items.push(s);
+    else groups.push({ verb, items: [s] });
+  }
+  return groups.map((g) => {
+    const counts = new Map<string, number>();
+    for (const i of g.items) {
+      const { kind } = classifyStep(i.toolName);
+      counts.set(kind, (counts.get(kind) || 0) + 1);
+    }
+    const status: StepStatus = g.items.some((i) => i.status === "error")
+      ? "error"
+      : g.items.some((i) => i.status === "running")
+        ? "running"
+        : "success";
+    // 终端：只有一条时把命令本体顶上来（信息量大于计数），多条才收成计数。
+    const detail =
+      g.verb === "终端"
+        ? g.items.length === 1
+          ? oneLine(
+              extractCommandSnippet({ raw: g.items[0].detail }) ||
+                g.items[0].detail,
+              60,
+            ) || "1 个命令"
+          : `${g.items.length} 个命令`
+        : [...counts.entries()].map(([k, n]) => `${n} ${k}`).join(", ");
+    return {
+      icon: getToolIcon(g.items[0].toolName),
+      label: g.verb,
+      detail,
+      status,
+      items: g.items,
+      tip: g.items
+        .map((i) => `${i.toolName}${i.detail ? `  ${i.detail}` : ""}`)
+        .join("\n"),
+    };
+  });
+}
+
 export function AgentWorkPanel() {
   const agent = useHelixStore((s) => s.activeAgentView);
   const subAgents = useHelixStore((s) => s.subAgents);
 
   const [delegation, setDelegation] = useState<Delegation | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [selectedTask, setSelectedTask] = useState<{
-    path: string;
-    name: string;
-  } | null>(null);
-  const [logContent, setLogContent] = useState("");
-  const [logLoading, setLogLoading] = useState(false);
-  // .output 转录时间线（子代理真实工具活动）与是否已定位到转录。
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [timelineFound, setTimelineFound] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false);
+  // 执行流每组合并行的展开态。默认全折叠（只显示合并摘要），点击展开看组内原始工具。
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
   const live = agent
     ? subAgents.find((a) => a.id === agent.id || a.name === agent.id)
     : undefined;
   const isRunning = live?.status === "running";
+  // 切换子 agent 时收起展开态，避免上个 agent 的指令/执行流展开态残留。
+  useEffect(() => {
+    setPromptOpen(false);
+    setExpanded(new Set());
+  }, [agent?.id]);
 
   const load = useCallback(
     async (silent = false) => {
-      if (!isElectron() || !agent) {
-        setLoading(false);
-        return;
-      }
-      if (!silent) setLoading(true);
+      if (!isElectron() || !agent) return;
       try {
         const api = (window as any).electron as any;
-        // 过滤键 = pi 后端 sid（manifest.json 里的命名空间），不是前端会话 id。
-        // 无后端会话 → 无磁盘记录，不退化为列出全部。
-        const sid = await resolveBackendSid(
+        const sids = await resolveBackendSids(
           useHelixStore.getState().currentSessionId,
         );
-        if (!sid) {
+        if (sids.length === 0) {
           setDelegation(null);
           return;
         }
-        const res = await api?.delegations?.list?.(sid);
+        const res = await api?.delegations?.list?.(sids);
         if (res?.ok) {
           const found =
             ((res.delegations || []) as Delegation[]).find(
@@ -105,9 +177,7 @@ export function AgentWorkPanel() {
           setDelegation(found);
         }
       } catch {
-        /* 静默失败：面板保留上一次内容 */
-      } finally {
-        setLoading(false);
+        /* silent */
       }
     },
     [agent],
@@ -115,22 +185,16 @@ export function AgentWorkPanel() {
 
   useEffect(() => {
     load();
-    // 委托仍在跑时磁盘日志会持续追加，静默轮询保持最新。
     const timer = setInterval(() => load(true), 10000);
     return () => clearInterval(timer);
   }, [load]);
 
-  // ── .output 转录时间线 ──────────────────────────────────────────────────
-  // agent.id 是父会话的 Agent 工具调用 id；.output 文件名是扩展的子代理
-  // id。优先用卡片上绑定的 agentId（后台启动确认带回，重启不丢）；缺失时
-  // 退回查 subagent_map（只对网关未重启的会话有效）。运行中 3s 轮询。
   const pollTimeline = useCallback(
     async (silent = true) => {
       if (!isElectron() || !agent) return;
       try {
         const api = (window as any).electron as any;
         const store = useHelixStore.getState();
-        // 卡片上绑定的扩展子代理 id —— 首选，不依赖任何内存状态。
         const cardAgentId =
           live?.agentId ||
           subAgents.find((a) => a.id === agent.id)?.agentId;
@@ -147,33 +211,46 @@ export function AgentWorkPanel() {
             return;
           }
         }
-        // 兜底：网关内存映射（会话键是 pi 后端 sid）。
-        // subagent_map / .output 目录的会话键都是 pi 后端 sid。无后端会话
-        // → 无转录可读，直接跳过（不传键会扫全部实例，跨会话串台）。
-        const sid = await resolveBackendSid(store.currentSessionId);
-        if (!sid) return;
-        const mapRes = await api?.subagentMap?.list?.(sid);
-        const mapped: { agent_id: string } | undefined =
-          ((mapRes?.agents || []) as { tool_call_id: string; agent_id: string }[]).find(
-            (m) => m.tool_call_id === agent.id,
+        if (delegation?.agent_id && delegation.agent_id !== cardAgentId) {
+          const res = await api?.delegations?.timeline?.(
+            delegation.agent_id,
+            undefined,
+            undefined,
+            60,
           );
-        if (!mapped?.agent_id) return;
-        const workDir = store.activeSessionWorkDir || store.selectedWorkDir || undefined;
-        const res = await api?.delegations?.timeline?.(
-          mapped.agent_id,
-          workDir,
-          sid,
-          60,
-        );
-        if (res?.ok && res.found) {
-          setTimelineFound(true);
-          setTimeline((res.entries || []) as TimelineEntry[]);
+          if (res?.ok && res.found) {
+            setTimelineFound(true);
+            setTimeline((res.entries || []) as TimelineEntry[]);
+            return;
+          }
+        }
+        const mapSids = await resolveBackendSids(store.currentSessionId);
+        if (mapSids.length === 0) return;
+        for (const sid of mapSids) {
+          const mapRes = await api?.subagentMap?.list?.(sid);
+          const mapped: { agent_id: string } | undefined =
+            ((mapRes?.agents || []) as { tool_call_id: string; agent_id: string }[]).find(
+              (m) => m.tool_call_id === agent.id,
+            );
+          if (!mapped?.agent_id) continue;
+          const workDir = store.activeSessionWorkDir || store.selectedWorkDir || undefined;
+          const res = await api?.delegations?.timeline?.(
+            mapped.agent_id,
+            workDir,
+            sid,
+            60,
+          );
+          if (res?.ok && res.found) {
+            setTimelineFound(true);
+            setTimeline((res.entries || []) as TimelineEntry[]);
+            return;
+          }
         }
       } catch {
-        /* 静默失败：保留上一次时间线 */
+        /* silent */
       }
     },
-    [agent, live?.agentId, subAgents],
+    [agent, live?.agentId, subAgents, delegation?.agent_id],
   );
 
   useEffect(() => {
@@ -186,29 +263,12 @@ export function AgentWorkPanel() {
       isRunning ? 3000 : 10000,
     );
     return () => clearInterval(interval);
-    // isRunning 变化（完成/失败）时重设轮询频率。
   }, [pollTimeline, isRunning]);
 
-  // 切换 agent 时清掉上一条日志，避免张冠李戴。
   useEffect(() => {
-    setSelectedTask(null);
-    setLogContent("");
+    setTimeline([]);
+    setTimelineFound(false);
   }, [agent?.id]);
-
-  const openLog = useCallback(async (path: string, name: string) => {
-    setSelectedTask({ path, name });
-    setLogLoading(true);
-    setLogContent("");
-    try {
-      const api = (window as any).electron as any;
-      const res = await api?.delegations?.readLog?.(path, 400);
-      setLogContent(res?.ok ? res.content || "" : res?.error || "读取失败");
-    } catch (e) {
-      setLogContent(String(e));
-    } finally {
-      setLogLoading(false);
-    }
-  }, []);
 
   if (!isElectron()) {
     return (
@@ -229,261 +289,221 @@ export function AgentWorkPanel() {
     );
   }
 
-  const tasks = delegation?.tasks || [];
-  // 标题优先用真实任务描述；agent.name 常是 call_… 工具调用 id（点磁盘
-  // 历史项 / 卡片描述缺失时传入），直接显示既丑也不说明任何事。
-  const headerTitle =
-    live?.description ||
-    live?.name ||
-    (agent.name && !agent.name.startsWith("call_") ? agent.name : "") ||
-    delegation?.tasks?.[0]?.goal ||
-    "子 Agent";
+  const storeRows = (live?.toolCalls || []).filter(
+    (tc) => !isSyntheticSubAgentToolRow(tc.toolName),
+  );
+
+  // 取原始工具行（timeline 优先，回退 store）。明细只喂给悬停提示，
+  // 渲染统一走 mergeSteps 的「合并同类」，不再逐条摊开参数 JSON。
+  const rawSteps: RawStep[] = timelineFound
+    ? timeline.slice(-20).map((tc) => ({
+        toolName: tc.tool_name || tc.kind,
+        detail: tc.preview || "",
+        status:
+          tc.status === "error"
+            ? "error"
+            : tc.status === "success"
+              ? "success"
+              : "running",
+      }))
+    : storeRows
+        .filter((tc) => tc.toolName !== "progress")
+        .slice(-20)
+        .map((tc) => ({
+          toolName: tc.toolName,
+          detail: tc.params || "",
+          status: tc.status as StepStatus,
+        }));
+
+  const steps = mergeSteps(rawSteps);
+
+  const statusLabel = isRunning
+    ? "运行中"
+    : live?.status === "completed"
+      ? "已完成"
+      : live?.status === "failed"
+        ? "已失败"
+        : live?.status === "cancelled"
+          ? "已取消"
+          : "已停止";
 
   return (
     <div className="flex flex-col h-full w-full min-h-0 min-w-0 bg-card">
-      {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2 shrink-0 border-b border-border/40">
-        <Terminal className="size-3.5 text-primary shrink-0" />
-        <span
-          className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/85"
-          title={headerTitle}
-        >
-          {headerTitle}
-        </span>
-        <button
-          onClick={() => load()}
-          className="p-1 text-foreground/40 hover:text-foreground rounded transition-colors shrink-0"
-          data-tip="刷新"
-        >
-          <RefreshCw className="size-3.5" />
-        </button>
-      </div>
-
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {/* 实时：本次会话该 agent 的工具调用 */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3">
+        {/* ── Prompt card ─────────────────────────────────────────────── */}
         {live && (
-          <section className="px-3 py-2 border-b border-border/40">
-            <div className="flex items-center gap-2 mb-1.5">
-              <span
-                className={cn(
-                  "flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.7857)] px-1.5 py-0.5 rounded",
-                  live.status === "running"
-                    ? "bg-primary/10 text-primary"
-                    : live.status === "completed"
-                      ? "bg-emerald-500/10 text-emerald-600"
-                      : live.status === "failed"
-                        ? "bg-destructive/10 text-destructive"
-                        : "bg-muted text-muted-foreground",
-                )}
-              >
-                {live.status === "running" ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <CheckCircle2 className="size-3" />
-                )}
-                {live.status === "running" ? "进行中" : live.status}
-              </span>
-              <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground truncate">
-                {live.description || live.name}
-              </span>
+          <div className="rounded-xl border border-border/40 bg-muted/30 px-4 py-3">
+            <div className="text-[length:var(--helix-transcript-size)] text-foreground/85 leading-relaxed whitespace-pre-wrap break-words">
+              {live.description || live.name}
             </div>
-            {/* 优先展示 .output 转录时间线：后台子代理的真实逐个工具
-                调用（含结果状态），运行中 3s 轮询。 */}
-            {timelineFound && timeline.length > 0 && (
-              <div className="space-y-0.5">
-                {timeline.slice(-14).map((tc, i) => (
-                  <div
-                    key={i}
-                    className="flex items-start gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)]"
-                  >
-                    <span className="text-primary shrink-0">▸</span>
-                    <span className="text-foreground/70 font-mono shrink-0">
-                      {tc.tool_name || tc.kind}
-                    </span>
-                    {tc.preview && (
-                      <span className="text-muted-foreground truncate min-w-0 flex-1" title={tc.preview}>
-                        {tc.preview}
-                      </span>
-                    )}
-                    <span
-                      className={cn(
-                        "ml-auto shrink-0",
-                        tc.status === "error"
-                          ? "text-destructive"
-                          : tc.status === "success"
-                            ? "text-emerald-500"
-                            : "text-muted-foreground",
-                      )}
-                    >
-                      {tc.status === "running" ? (
-                        <Loader2 className="size-3 animate-spin" />
-                      ) : tc.status === "success" ? (
-                        "✓"
-                      ) : (
-                        "✗"
-                      )}
-                    </span>
-                  </div>
-                ))}
+            {/* 完整指令：description 是 3–5 词短标签，text 才是子 agent 真实
+                执行的 prompt。默认折叠，点击展开全文，避免"只跑了短标题"的误解。 */}
+            {live.text && (
+              <div className="mt-2 pt-2 border-t border-border/30">
+                <button
+                  type="button"
+                  onClick={() => setPromptOpen((v) => !v)}
+                  className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground hover:text-foreground transition-colors"
+                  data-tip={promptOpen ? "收起完整指令" : "展开完整指令"}
+                >
+                  <span className="select-none text-foreground/40 mr-1">
+                    {promptOpen ? "▾" : "▸"}
+                  </span>
+                  完整指令
+                </button>
+                {promptOpen && (
+                  <pre className="mt-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/75 leading-relaxed whitespace-pre-wrap break-words font-mono">
+                    {live.text}
+                  </pre>
+                )}
               </div>
             )}
-            {/* store 卡片的工具行（subagent.* 事件）——时间线不可用时的兜底。 */}
-            {!timelineFound && (live.toolCalls || []).length > 0 && (
-              <div className="space-y-0.5">
-                {(live.toolCalls || []).slice(-12).map((tc, i) => (
-                  <div
-                    key={i}
-                    className="flex items-start gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)]"
-                  >
-                    <span className="text-primary shrink-0">▸</span>
-                    <span className="text-foreground/70 font-mono shrink-0">
-                      {tc.toolName}
-                    </span>
-                    {tc.params && (
-                      <span className="text-muted-foreground truncate min-w-0 flex-1">
-                        {tc.params}
-                      </span>
-                    )}
-                    <span
-                      className={cn(
-                        "ml-auto shrink-0",
-                        tc.status === "error"
-                          ? "text-destructive"
-                          : tc.status === "success"
-                            ? "text-emerald-500"
-                            : "text-muted-foreground",
-                      )}
-                    >
-                      {tc.status === "running"
-                        ? "…"
-                        : tc.status === "success"
-                          ? "✓"
-                          : "✗"}
-                    </span>
-                  </div>
-                ))}
-              </div>
+          </div>
+        )}
+
+        {/* ── Status line ─────────────────────────────────────────────── */}
+        {live && (
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "text-[calc(var(--helix-transcript-size)*0.8571)]",
+                isRunning
+                  ? "text-primary"
+                  : live.status === "completed"
+                    ? "text-emerald-600"
+                    : live.status === "failed"
+                      ? "text-destructive"
+                      : "text-muted-foreground",
+              )}
+            >
+              {statusLabel}
+            </span>
+            {isRunning && (
+              <Loader2 className="size-3.5 animate-spin text-primary" />
             )}
-            {/* 运行中但时间线还没出现（后台 spawn 刚发生/转录尚未落盘）：
-                给出可感知的等待态，而不是空白。 */}
-            {isRunning && !timelineFound && (live.toolCalls || []).length === 0 && (
-              <div className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground">
+          </div>
+        )}
+
+        {/* ── Execution flow ──────────────────────────────────────────── */}
+        {live && (
+          <div className="space-y-0.5">
+            {steps.length > 0 &&
+              steps.map((step, i) => {
+                const open = expanded.has(i);
+                return (
+                  <div key={i} className="py-0.5">
+                    <button
+                      type="button"
+                      title={step.tip}
+                      onClick={() =>
+                        setExpanded((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(i)) next.delete(i);
+                          else next.add(i);
+                          return next;
+                        })
+                      }
+                      className="flex items-center gap-2 w-full text-left py-1 px-1 -mx-1 rounded-sm hover:bg-muted/40 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)]"
+                    >
+                      <ChevronRight
+                        className={cn(
+                          "size-3.5 shrink-0 text-muted-foreground/60 transition-transform",
+                          open && "rotate-90",
+                        )}
+                      />
+                      <span
+                        className={cn(
+                          "shrink-0 mt-0.5",
+                          step.status === "error"
+                            ? "text-destructive"
+                            : step.status === "running"
+                              ? "text-primary"
+                              : "text-muted-foreground",
+                        )}
+                      >
+                        {step.icon}
+                      </span>
+                      <div className="flex-1 min-w-0 flex items-baseline gap-1">
+                        <span className="text-foreground/80 shrink-0">
+                          {step.label}
+                        </span>
+                        {step.detail && (
+                          <span className="text-muted-foreground/70 min-w-0 truncate">
+                            · {step.detail}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                    {open && (
+                      <div className="ml-5 mt-0.5 space-y-0.5">
+                        {step.items.map((it, j) => (
+                          <div
+                            key={j}
+                            className="flex items-start gap-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.7857)]"
+                          >
+                            <span
+                              className={cn(
+                                "shrink-0 mt-0.5",
+                                it.status === "error"
+                                  ? "text-destructive"
+                                  : it.status === "running"
+                                    ? "text-primary"
+                                    : "text-muted-foreground/60",
+                              )}
+                            >
+                              {getToolIcon(it.toolName)}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <span className="text-foreground/70 shrink-0">
+                                {getToolLabel(it.toolName) || it.toolName}
+                              </span>
+                              {it.detail && (
+                                <span className="text-muted-foreground/60 ml-1.5 min-w-0 truncate">
+                                  {oneLine(it.detail, 90)}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+            {/* Running but no steps yet */}
+            {isRunning && steps.length === 0 && (
+              <div className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground py-1">
                 <Loader2 className="size-3 animate-spin" />
                 正在启动，等待第一个工具调用…
               </div>
             )}
-            {live.result && (
-              <div className="mt-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 whitespace-pre-wrap break-words">
-                {live.result}
-              </div>
-            )}
-            {(live.filesModified || []).length > 0 && (
-              <div className="mt-1.5 flex flex-wrap gap-1">
-                {(live.filesModified || []).slice(0, 8).map((f, i) => (
-                  <span
-                    key={i}
-                    className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground font-mono truncate max-w-full"
-                    title={f}
-                  >
-                    {f.split(/[/\\]/).pop()}
-                  </span>
-                ))}
-              </div>
-            )}
-          </section>
+          </div>
         )}
 
-        {/* 任务记录（旧 delegate_task 磁盘日志）：只在确实有记录时渲染，
-            空列表整个隐藏，避免出现“任务记录 0 个”占一屏。 */}
-        {!loading && tasks.length > 0 && (
-          <section className="px-3 py-2">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70">
-                任务记录
+        {/* ── Result ──────────────────────────────────────────────────── */}
+        {live?.result && (
+          <HelixMarkdown
+            text={live.result}
+            className="text-[calc(var(--helix-transcript-size)*0.8571)]"
+          />
+        )}
+
+        {/* ── Modified files ──────────────────────────────────────────── */}
+        {(live?.filesModified || []).length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {(live?.filesModified || []).slice(0, 8).map((f, i) => (
+              <span
+                key={i}
+                className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground font-mono truncate max-w-full"
+                title={f}
+              >
+                {f.split(/[/\\]/).pop()}
               </span>
-              <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground">
-                {tasks.length} 个
-              </span>
-            </div>
-            <div className="space-y-1">
-              {tasks.map((task) => (
-                <button
-                  key={task.name}
-                  onClick={() => openLog(task.path, task.name)}
-                  className={cn(
-                    "w-full flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left transition-colors",
-                    selectedTask?.path === task.path
-                      ? "bg-accent/40"
-                      : "hover:bg-accent/25",
-                  )}
-                >
-                  <div className="flex items-center gap-2">
-                    <FileText className="size-3 text-muted-foreground shrink-0" />
-                    <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70">
-                      {task.name}
-                    </span>
-                    {task.status && task.status !== "running" && (
-                      <span
-                        className={cn(
-                          "text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded shrink-0",
-                          task.status === "failed" || task.status === "error"
-                            ? "bg-destructive/10 text-destructive"
-                            : task.status === "interrupted" ||
-                                task.status === "cancelled"
-                              ? "bg-muted text-muted-foreground"
-                              : "bg-emerald-500/10 text-emerald-600",
-                        )}
-                      >
-                        {task.status}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 pl-5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
-                    <span>{formatSize(task.size)}</span>
-                    <span>{timeAgo(task.modified)}</span>
-                  </div>
-                  {task.goal && (
-                    <div className="pl-5 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/60 line-clamp-2">
-                      {task.goal}
-                    </div>
-                  )}
-                </button>
-              ))}
-            </div>
-          </section>
+            ))}
+          </div>
         )}
       </div>
-
-      {/* Log viewer */}
-      {selectedTask && (
-        <div className="shrink-0 border-t border-border/60">
-          <div className="flex items-center justify-between px-3 py-1.5 bg-muted/30">
-            <div className="flex items-center gap-2 min-w-0">
-              <Terminal className="size-3 text-primary shrink-0" />
-              <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/70 truncate">
-                {selectedTask.name}
-              </span>
-            </div>
-            <button
-              onClick={() => setSelectedTask(null)}
-              className="p-1 text-foreground/40 hover:text-foreground shrink-0"
-            >
-              <X className="size-3" />
-            </button>
-          </div>
-          <div className="h-56 overflow-auto p-3 bg-background/50">
-            {logLoading ? (
-              <div className="flex items-center justify-center h-full">
-                <Loader2 className="size-4 animate-spin text-primary" />
-              </div>
-            ) : (
-              <pre className="text-[calc(var(--helix-transcript-size)*0.7857)] font-mono text-foreground/70 whitespace-pre-wrap break-all">
-                {logContent || "（空）"}
-              </pre>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

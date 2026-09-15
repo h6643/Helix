@@ -7,14 +7,14 @@ export function cleanUrl(raw: string): string {
   // `<url>` autolink or `[text](url)` markdown link
   url = url.replace(/^<([^>]+)>$/, "$1");
   const linkMatch = url.match(
-    /^\[[^\]]*\]\(\s*([^)\s]+)\s*\)[\u3002\uFF0C\u3001\uFF1B\uFF1A\u201C\u201D\u2018\u2019\uFF08\uFF09\u3010\u3011\u300A\u300B\u3008\u3009\uFF01\uFF1F\u2026.,;:!?'"`)\]\}\-]*$/,
+    /^\[[^\]]*\]\(\s*([^)\s]+)\s*\)[\u3002\uFF0C\u3001\uFF1B\uFF1A\u201C\u201D\u2018\u2019\uFF08\uFF09\u3010\u3011\u300A\u300B\u3008\u3009\uFF01\uFF1F\u2026.,;:!?'"`)\]}-]*$/,
   );
   if (linkMatch) url = linkMatch[1];
   // markdown emphasis / code markers glued to either side
   url = url.replace(/^[*_`]+/, "");
   // trailing CJK / western punctuation, raw or percent-encoded
   const trailingRaw =
-    /[\u3002\uFF0C\u3001\uFF1B\uFF1A\u201C\u201D\u2018\u2019\uFF08\uFF09\u3010\u3011\u300A\u300B\u3008\u3009\uFF01\uFF1F\u2026.,;:!?'"`)\]\}\-]+$/;
+    /[\u3002\uFF0C\u3001\uFF1B\uFF1A\u201C\u201D\u2018\u2019\uFF08\uFF09\u3010\u3011\u300A\u300B\u3008\u3009\uFF01\uFF1F\u2026.,;:!?'"`)\]}-]+$/;
   const trailingEncoded =
     /(?:%E3%80%82|%E3%80%81|%EF%BC%8C|%EF%BC%9B|%EF%BC%9A|%EF%BC%88|%EF%BC%89|%E2%80%9C|%E2%80%9D|%E2%80%98|%E2%80%99|%EF%BC%81|%EF%BC%9F|%E3%80%8A|%E3%80%8B|%E2%80%A6)+$/i;
   let prev: string;

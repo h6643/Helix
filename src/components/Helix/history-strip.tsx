@@ -12,11 +12,17 @@ import { useHelixStore } from "@/stores/helix-store";
 
 const PAGE_SIZE = 20;
 
-export function HistoryStrip() {
+export function HistoryStrip({
+  onHoverChange,
+}: {
+  /** 悬停条带时回调宿主：true = 淡出对话内容（避免展开的标题与模型输出重叠） */
+  onHoverChange?: (hovered: boolean) => void;
+}) {
   const chatMessages = useHelixStore((s) => s.chatMessages);
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
   const rightSidebarOpen = useHelixStore((s) => s.rightSidebarTab !== null);
   const [hovered, setHovered] = useState<string | null>(null);
+  const [stripHover, setStripHover] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [pageOffset, setPageOffset] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -102,23 +108,32 @@ export function HistoryStrip() {
     };
   }, [messages]);
 
-  if (messages.length === 0) return null;
-
   const isAnyHovered = hovered !== null;
   // 右侧边栏打开时，条带变窄（让出空间），对话长条显示成一个个点
   const compact = rightSidebarOpen;
+  const dim = stripHover || isAnyHovered;
+
+  useEffect(() => {
+    onHoverChange?.(dim);
+  }, [dim, onHoverChange]);
+
+  if (messages.length === 0) return null;
 
   return (
     // 命中范围恒为 28px 条带：外层盒与文字层均 pointer-events-none，
-    // 只有条带本体响应 hover/滚轮。悬停时所有标题一起展开，但文字不占命中区，
-    // 鼠标可穿过文字直接点到对话内容。
+    // 只有条带本体响应 hover/滚轮。悬停时所有标题一起展开，
+    // 但文字不占命中区，鼠标可穿过文字直接点到对话内容。
     <div
-      className="absolute left-5 top-[6%] bottom-[12%] z-30 pointer-events-none"
+      className="absolute left-2 top-[6%] bottom-[12%] z-30 pointer-events-none"
       ref={containerRef}
     >
       <div
         className="flex flex-col gap-1.5 overflow-y-auto hide-scrollbar py-1 pointer-events-auto"
-        onMouseLeave={() => setHovered(null)}
+        onMouseEnter={() => setStripHover(true)}
+        onMouseLeave={() => {
+          setStripHover(false);
+          setHovered(null);
+        }}
         onWheel={onWheel}
       >
         {pageMessages.map((m) => {
@@ -134,7 +149,7 @@ export function HistoryStrip() {
               className={`
                 flex items-center h-2.5 shrink-0 rounded-md
                 transition-all duration-200
-                ${compact ? "w-4 px-0.5" : "w-7 px-1"}
+                ${compact ? "w-2.5 px-0" : "w-7 px-1"}
                 ${isHovered ? "bg-muted/60" : ""}
               `}
             >
@@ -142,7 +157,7 @@ export function HistoryStrip() {
               <span
                 className={`
                   rounded-full shrink-0 transition-all duration-200
-                  ${compact ? "size-1.5" : "w-5 h-1"}
+                  ${compact ? "size-1" : "w-5 h-1"}
                   ${isActive ? "bg-primary" : "bg-primary/30"}
                 `}
               />

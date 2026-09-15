@@ -9,7 +9,6 @@ import {
   Search,
   X,
   ArrowLeft,
-  RefreshCw,
   Terminal,
 } from "lucide-react";
 import React, {
@@ -274,7 +273,7 @@ export function FileTreePanel({
       if (gitResult.ok && gitResult.output) {
         setGitStatus(parsePorcelainV2(gitResult.output));
       }
-    } catch {}
+    } catch { /* empty */}
     // Load directory listing — recursive via scanTree
     try {
       const api = (window as any).electron;
@@ -485,7 +484,7 @@ export function FileTreePanel({
           return a.name.localeCompare(b.name);
         });
         item.children = children;
-      } catch {}
+      } catch { /* empty */}
     }
     setItems([...items]);
   };
@@ -579,6 +578,7 @@ export function FileTreePanel({
         return;
       }
       // Reject files that look binary (null bytes in the first 4KB).
+// eslint-disable-next-line no-control-regex
       if (/[\u0000-\u0008]/.test(content.slice(0, 4096))) {
         showToast({
           type: "error",
@@ -758,13 +758,6 @@ export function FileTreePanel({
             data-tip={isTerminalOpen ? "关闭终端" : "终端"}
           >
             <Terminal className="size-4" />
-          </button>
-          <button
-            onClick={onRefresh}
-            className="p-1.5 rounded-lg text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40 transition-colors"
-            data-tip="刷新"
-          >
-            <RefreshCw className="size-4" />
           </button>
         </div>
       )}

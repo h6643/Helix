@@ -378,7 +378,7 @@ export const createApiConfigSlice: StateCreator<
         try {
           localStorage.setItem("helix-active-model", model);
           localStorage.setItem("helix-active-provider-id", fallbackId);
-        } catch {}
+        } catch { /* empty */}
         return;
       }
       // Provider resolved by baseUrl — keep `model` exactly as the user selected.
@@ -420,7 +420,7 @@ export const createApiConfigSlice: StateCreator<
     try {
       localStorage.setItem("helix-active-model", model);
       localStorage.setItem("helix-active-provider-id", provider.id);
-    } catch {}
+    } catch { /* empty */}
     // Auto-fetch the newly-active provider's model list when we have no cached
     // copy yet, so the input-bar dropdown shows its full list without the user
     // having to open settings and click "获取模型列表".

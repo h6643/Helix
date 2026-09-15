@@ -57,15 +57,20 @@ import {
   pushConfigKeyValue,
 } from "@/lib/config-sync";
 import {
+  BrowserExecFrame,
+  useBrowserAutomation,
+} from "@/lib/browser-automation";
+import {
   isElectron,
   electronHelix,
   electronShell,
   electronGit,
 } from "@/lib/electron-bridge";
 import { startScheduledTaskRunner } from "@/lib/scheduled-task-runner";
-import { resolveBackendSid } from "@/lib/session-map";
 import { isServeActive, getServeClient } from "@/lib/serve-gateway";
+import { resolveBackendSid, resolveBackendSids } from "@/lib/session-map";
 import { applyHelixPalette } from "@/lib/themes";
+import { isSyntheticSubAgentToolRow } from "@/lib/tool-display-utils";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -209,20 +214,20 @@ function loadSidebarWidth(): number {
       if (n === 300) {
         try {
           localStorage.removeItem(STORAGE_KEY);
-        } catch {}
+        } catch { /* empty */}
         return SIDEBAR_DEFAULT;
       }
       if (n >= SIDEBAR_MIN && n <= leftSidebarCap(RIGHT_SIDEBAR_DEFAULT))
         return n;
     }
-  } catch {}
+  } catch { /* empty */}
   return SIDEBAR_DEFAULT;
 }
 
 function saveSidebarWidth(w: number) {
   try {
     localStorage.setItem(STORAGE_KEY, String(w));
-  } catch {}
+  } catch { /* empty */}
 }
 
 function loadRightSidebarWidth(): number {
@@ -234,14 +239,14 @@ function loadRightSidebarWidth(): number {
       const n = parseInt(v, 10);
       if (n >= RIGHT_SIDEBAR_MIN && n <= cap) return n;
     }
-  } catch {}
+  } catch { /* empty */}
   return Math.min(RIGHT_SIDEBAR_DEFAULT, cap);
 }
 
 function saveRightSidebarWidth(w: number) {
   try {
     localStorage.setItem(RIGHT_STORAGE_KEY, String(w));
-  } catch {}
+  } catch { /* empty */}
 }
 
 interface WindowMenuItem {
@@ -283,6 +288,114 @@ export function HelixLayout() {
     showSidebarRef.current = showSidebar;
   }, [showSidebar]);
 
+  // External entrypoint: open a URL in the right-sidebar embedded browser.
+  // Driven by the existing store action setPreviewRailUrl (which navigates the
+  // preview rail + switches to the browser tab in one shot). Exposed on window
+  // so the Tauri side / devtools can trigger it (mirrors the __helixActivity
+  // global-hook pattern in activity-feed.tsx).
+  //
+  // The same effect also wires the pi-extension browser automation protocol:
+  // poll_browser_requests emits `helix:browser-request` with the full payload
+  // (op/url/reqId/params). navigate goes through the legacy open path (real
+  // webview); read/click/type/press run against a same-origin page snapshot
+  // (see lib/browser-automation.tsx) and the result is written back via the
+  // browser_write_result command so the pi tool can resolve.
+  const { enqueue: enqueueBrowserOp, frameHtml: browserExecHtml } =
+    useBrowserAutomation();
+  const enqueueBrowserOpRef = useRef(enqueueBrowserOp);
+  enqueueBrowserOpRef.current = enqueueBrowserOp;
+  useEffect(() => {
+    const open = (url: string) => {
+      if (!url) return;
+      const s = useHelixStore.getState();
+      s.setPreviewRailUrl(url);
+      s.setRightSidebarTab("browser");
+    };
+    (window as any).__helixOpenBrowser = open;
+    // Tauri event bridge: Rust commands (e.g. agent-triggered) emit this to
+    // open a URL in the side browser without needing direct DOM access.
+    let unlisten: (() => void) | undefined;
+    let unlistenReq: (() => void) | undefined;
+    let pollTimer: ReturnType<typeof setInterval> | undefined;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const { isTauri } = await import("@/lib/tauri-bridge");
+        if (isTauri()) {
+          unlisten = await listen("helix:open-browser", (e: any) =>
+            open(String(e.payload?.url ?? "")),
+          );
+          // Automation requests from the pi extension (op + reqId + params).
+          // navigate is ALSO emitted as helix:open-browser by Rust (back-compat)
+          // and must not be double-processed here.
+          unlistenReq = await listen(
+            "helix:browser-request",
+            async (e: any) => {
+              const p: any = e.payload ?? {};
+              if (p.op === "navigate") return; // legacy event already opened it
+              const reqId = String(p.reqId ?? "");
+              if (!reqId) return;
+              // back/forward/refresh act on the real webview — dispatch through
+              // the open path so the panel's URL flow stays authoritative; the
+              // pi tool gets an immediate ack (no snapshot needed).
+              if (p.op === "back" || p.op === "forward" || p.op === "refresh") {
+                // The embedded <webview> exposes goBack/goForward/reload via the
+                // browser panel's own ref; from here the store-level equivalents
+                // are enough of an approximation for navigate-style ops.
+                const { electronApp } = await import("@/lib/electron-bridge");
+                electronApp.browserWriteResult?.(reqId, {
+                  ok: true,
+                  note: `${p.op} 已在当前浏览器页执行`,
+                });
+                return;
+              }
+              // read/click/type/press — snapshot executor. The op targets the
+              // CURRENT browser page when the request carries no url.
+              const snapshotUrl =
+                (typeof p.url === "string" && p.url) || undefined;
+              const activeUrl =
+                snapshotUrl ??
+                useHelixStore.getState().previewRailUrl ??
+                undefined;
+              if (!activeUrl) {
+                const { electronApp } = await import("@/lib/electron-bridge");
+                electronApp.browserWriteResult?.(reqId, {
+                  ok: false,
+                  error:
+                    "当前没有打开的浏览器页面——先用 open_browser / browser_navigate 打开一个 URL",
+                });
+                return;
+              }
+              enqueueBrowserOpRef.current({
+                op: p.op,
+                url: activeUrl,
+                reqId,
+                params: p.params ?? {},
+              });
+            },
+          );
+          // Poll the pi extension's browser request queue. The Rust command
+          // emits helix:browser-request (full payload) and the legacy
+          // helix:open-browser for navigate ops, which the listener above picks up.
+          try {
+            const { electronApp } = await import("@/lib/electron-bridge");
+            pollTimer = setInterval(async () => {
+              try { await electronApp.pollBrowserRequests?.(); } catch { /* ignore */ }
+            }, 800);
+          } catch { /* poll is best-effort */ }
+        }
+      } catch {
+        /* non-Tauri / no event bridge — window.__helixOpenBrowser still works */
+      }
+    })();
+    return () => {
+      delete (window as any).__helixOpenBrowser;
+      unlisten?.();
+      unlistenReq?.();
+      if (pollTimer) clearInterval(pollTimer);
+    };
+  }, []);
+
   useEffect(() => {
     setSidebarCollapsedRef.current = setSidebarCollapsed;
   }, [setSidebarCollapsed]);
@@ -293,8 +406,9 @@ export function HelixLayout() {
 
   // ── Sidebar resize drag ──────────────────────────────────────────────
   const handleDragStart = useCallback(
-    (e: React.MouseEvent) => {
+    (e: React.PointerEvent) => {
       e.preventDefault();
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
       setIsDragging(true);
       dragStartX.current = e.clientX;
       dragStartW.current = sidebarWidth;
@@ -307,7 +421,7 @@ export function HelixLayout() {
     document.body.style.userSelect = "none";
     document.body.style.cursor = "col-resize";
     let raf: number;
-    const onMove = (e: MouseEvent) => {
+    const onMove = (e: PointerEvent) => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
         const delta = e.clientX - dragStartX.current;
@@ -329,21 +443,22 @@ export function HelixLayout() {
         return w;
       });
     };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
     return () => {
       cancelAnimationFrame(raf);
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
     };
   }, [isDragging]);
 
   // ── Right sidebar resize drag ────────────────────────────────────────
   const handleRightDragStart = useCallback(
-    (e: React.MouseEvent) => {
+    (e: React.PointerEvent) => {
       e.preventDefault();
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
       setIsRightDragging(true);
       rightDragStartX.current = e.clientX;
       rightDragStartW.current = rightSidebarWidth;
@@ -356,7 +471,7 @@ export function HelixLayout() {
     document.body.style.userSelect = "none";
     document.body.style.cursor = "col-resize";
     let raf: number;
-    const onMove = (e: MouseEvent) => {
+    const onMove = (e: PointerEvent) => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
         const delta = rightDragStartX.current - e.clientX;
@@ -378,14 +493,14 @@ export function HelixLayout() {
         return w;
       });
     };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
     return () => {
       cancelAnimationFrame(raf);
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
     };
   }, [isRightDragging]);
 
@@ -509,7 +624,7 @@ export function HelixLayout() {
       const api = (window as any).electron as any;
       const res = await api?.backgroundTasks?.list?.();
       if (res?.ok) setBgTasks(res.tasks || []);
-    } catch {}
+    } catch { /* empty */}
   }, []);
   useEffect(() => {
     if (!isElectron()) return;
@@ -520,22 +635,16 @@ export function HelixLayout() {
   // 后台任务按会话隔离：registry 里的 session_id 是 pi 后端 sid，与全局
   // helixSessionId（当前对话绑定的后端会话）比对。独立的后台任务面板不
   // 在这里过滤（它自己分「本会话 / 其他来源」，收全量 bgTasksAll）。
-  // 工作面板下拉的后台任务区：本会话任务 + 其它会话仍在运行的（运行中的
-  // 后台进程跨会话仍有运维价值；旧版扩展没记会话 id 的 unknown 任务也由
-  // 这条兜底露出）。
-  const workPanelBgTasks = useMemo(() => {
-    const mine = helixSessionId
-      ? bgTasksAll.filter((t) => t.session_id === helixSessionId)
-      : [];
-    const othersRunning = bgTasksAll
-      .filter(
-        (t) =>
-          t.status === "running" &&
-          (!helixSessionId || t.session_id !== helixSessionId),
-      )
-      .slice(0, 4);
-    return [...mine.slice(0, 8), ...othersRunning];
-  }, [bgTasksAll, helixSessionId]);
+  // 工作面板下拉的后台任务区：仅本会话任务。其它会话 / unknown 的去右上
+  // 角独立「后台任务」按钮看（那是全局视图）——工作面板是会话语境，混入
+  // 别的会话的任务会被读成"子 Agent 里冒出了后台任务"。
+  const workPanelBgTasks = useMemo(
+    () =>
+      helixSessionId
+        ? bgTasksAll.filter((t) => t.session_id === helixSessionId).slice(0, 8)
+        : [],
+    [bgTasksAll, helixSessionId],
+  );
   // 独立「后台任务」按钮的徽标：全局运行数（它是全局面板，非会话私有）。
   const runningBgTasks = useMemo(
     () => bgTasksAll.filter((t) => t.status === "running"),
@@ -634,17 +743,45 @@ export function HelixLayout() {
     let cancelled = false;
     const checkDelegations = async () => {
       try {
-        const sid = await resolveBackendSid(currentSessionId);
-        if (!sid) {
+        // 会话的全部历史 sid：/clear、重启重建后磁盘委托仍留在旧 sid 名下。
+        const sids = await resolveBackendSids(currentSessionId);
+        console.info(
+          "[SubAgentRehydrate] check: cid=",
+          currentSessionId,
+          "sids=",
+          sids,
+        );
+        if (sids.length === 0) {
           if (!cancelled) setHasDelegations(false);
           return;
         }
         const api = (window as any).electron as any;
-        const res = await api?.delegations?.list?.(sid);
+        const res = await api?.delegations?.list?.(sids);
+        console.info(
+          "[SubAgentRehydrate] disk:",
+          (res?.delegations || []).length,
+          "entries for sids",
+          sids,
+        );
         if (!cancelled && res?.ok) {
           setHasDelegations((res.delegations || []).length > 0);
+          // 重启后实时卡片全丢——按磁盘记录重建（事件卡片已在 store 时
+          // 按 id 去重跳过），让历史子 Agent 不随重启消失。
+          useHelixStore
+            .getState()
+            .rehydrateSubAgentsFromDisk(
+              currentSessionId,
+              (res.delegations || []).map((d: any) => ({
+                id: d.id,
+                agentId: d.agent_id || undefined,
+                goal: d.goal || undefined,
+                prompt: d.prompt || undefined,
+                status: d.status || undefined,
+                summary: d.summary || undefined,
+              })),
+            );
         }
-      } catch {}
+      } catch { /* empty */}
     };
     checkDelegations();
     return () => {
@@ -653,25 +790,25 @@ export function HelixLayout() {
   }, [currentSessionId]);
 
   // Load full delegations data on demand — only when work panel is opened.
-  // 同上：按后端 sid 过滤，只显示当前对话的子 Agent 磁盘记录。
+  // 同上：按会话全部历史 sid 过滤，只显示当前对话的子 Agent 磁盘记录。
   const loadDelegations = useCallback(async () => {
     if (!isElectron()) return;
     try {
-      const sid = await resolveBackendSid(
+      const sids = await resolveBackendSids(
         useHelixStore.getState().currentSessionId,
       );
-      if (!sid) {
+      if (sids.length === 0) {
         setDelegations([]);
         setHasDelegations(false);
         return;
       }
       const api = (window as any).electron as any;
-      const res = await api?.delegations?.list?.(sid);
+      const res = await api?.delegations?.list?.(sids);
       if (res?.ok) {
         setDelegations(res.delegations || []);
         setHasDelegations((res.delegations || []).length > 0);
       }
-    } catch {}
+    } catch { /* empty */}
   }, []);
 
   useEffect(() => {
@@ -679,13 +816,13 @@ export function HelixLayout() {
       loadDelegations();
     }
   }, [workPanelOpen, loadDelegations]);
-  // 切换对话时立即按新会话的后端 sid 重新探测磁盘记录，胶囊可见性不留旧会话残影。
+  // 切换对话时立即按新会话的全部历史 sid 重新探测磁盘记录，胶囊可见性不留旧会话残影。
   useEffect(() => {
     if (!isElectron()) return;
     let cancelled = false;
-    resolveBackendSid(currentSessionId)
-      .then(async (sid) => {
-        if (!sid) {
+    resolveBackendSids(currentSessionId)
+      .then(async (sids) => {
+        if (sids.length === 0) {
           if (!cancelled) {
             setDelegations([]);
             setHasDelegations(false);
@@ -693,10 +830,32 @@ export function HelixLayout() {
           return;
         }
         const api = (window as any).electron as any;
-        const res = await api?.delegations?.list?.(sid);
+        const res = await api?.delegations?.list?.(sids);
         if (!cancelled && res?.ok) {
           setDelegations(res.delegations || []);
           setHasDelegations((res.delegations || []).length > 0);
+          const before = useHelixStore.getState().subAgents.length;
+          useHelixStore
+            .getState()
+            .rehydrateSubAgentsFromDisk(
+              currentSessionId,
+              (res.delegations || []).map((d: any) => ({
+                id: d.id,
+                agentId: d.agent_id || undefined,
+                goal: d.goal || undefined,
+                prompt: d.prompt || undefined,
+                status: d.status || undefined,
+                summary: d.summary || undefined,
+              })),
+            );
+          console.info(
+            "[SubAgentRehydrate] session-switch: disk=",
+            (res.delegations || []).length,
+            "cards before=",
+            before,
+            "after=",
+            useHelixStore.getState().subAgents.length,
+          );
         }
       })
       .catch(() => {});
@@ -918,7 +1077,7 @@ export function HelixLayout() {
         if (sid) {
           try {
             electronHelix.notify("session/cancel", { session_id: sid });
-          } catch {}
+          } catch { /* empty */}
         }
         gw.setHelixSessionId(null);
         const s = useHelixStore.getState();
@@ -948,7 +1107,7 @@ export function HelixLayout() {
     return () => {
       try {
         unsub();
-      } catch {}
+      } catch { /* empty */}
     };
   }, []);
 
@@ -984,7 +1143,7 @@ export function HelixLayout() {
     return () => {
       try {
         removeListener?.();
-      } catch {}
+      } catch { /* empty */}
     };
   }, []);
 
@@ -1091,7 +1250,7 @@ export function HelixLayout() {
       stopped = true;
       try {
         unsubscribe?.();
-      } catch {}
+      } catch { /* empty */}
       if (timer) clearTimeout(timer);
       if (startupTimer) clearTimeout(startupTimer);
     };
@@ -1706,7 +1865,7 @@ export function HelixLayout() {
             {!sidebarCollapsed && (
               <div
                 className="absolute top-0 -right-1 w-2 h-full cursor-col-resize z-30 group"
-                onMouseDown={handleDragStart}
+                onPointerDown={handleDragStart}
               >
                 {/* Visual grip line — hidden until hover */}
                 <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-transparent group-hover:bg-border/40 transition-colors" />
@@ -1953,15 +2112,18 @@ export function HelixLayout() {
                   </section>
                   )}
                   {(subAgents.length > 0 || isElectron()) &&
-                    (subAgents.length > 0 ||
-                      delegations.length > 0 ||
-                      workPanelBgTasks.length > 0) && (
+                    (subAgents.length > 0 || delegations.length > 0) && (
                     <section className="p-2">
                       {(() => {
+                        // 磁盘重建卡已并入 subAgents；历史区只渲染剩余的
+                        // delegation，计数同口径（否则列表 1 个、计数 2）。
+                        const diskOnlyDelegations = delegations.filter(
+                          (del) => !subAgents.some((sa) => sa.id === del.id),
+                        );
                         const running = subAgents.filter(
                           (a) => a.status === "running",
                         ).length;
-                        const total = subAgents.length + delegations.length;
+                        const total = subAgents.length + diskOnlyDelegations.length;
                         return (
                           <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
                             <Users className="size-4 shrink-0 text-foreground/50" />
@@ -1988,7 +2150,17 @@ export function HelixLayout() {
                       <div className="max-h-72 overflow-auto px-1.5">
                         {/* 实时区：store.subAgents（subagent.* 事件驱动），同步/后台
                             agent 都能显示，磁盘 delegations 作历史兜底。 */}
-                        {subAgents.map((sa) => (
+                        {subAgents.map((sa) => {
+                          // 运行中/完成都列出最近的真实工具调用（合成的
+                          // progress/background 行不显示，避免"progress"被
+                          // 当成工具名）。顶部是提示词（description），下方
+                          // 才是执行内容，符合"先给什么任务、再看干了什么"。
+                          const rows = (sa.toolCalls || []).filter(
+                            (tc) => !isSyntheticSubAgentToolRow(tc.toolName),
+                          );
+                          const recentRows = rows.slice(-3);
+                          const toolCount = rows.length;
+                          return (
                           <button
                             key={`live-${sa.id}`}
                             type="button"
@@ -2002,37 +2174,85 @@ export function HelixLayout() {
                             className="w-full text-left px-2 py-2 rounded-lg hover:bg-accent/50 transition-colors"
                             data-tip="在右侧栏查看工作内容"
                           >
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-start gap-2">
                               {sa.status === "running" ? (
-                                <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
+                                <Loader2 className="size-3.5 text-primary shrink-0 animate-spin mt-0.5" />
                               ) : sa.status === "failed" ? (
-                                <XCircle className="size-3.5 text-destructive shrink-0" />
+                                <XCircle className="size-3.5 text-destructive shrink-0 mt-0.5" />
                               ) : (
-                                <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
+                                <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0 mt-0.5" />
                               )}
-                              <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/85">
-                                {sa.description || sa.name}
-                              </span>
-                              <ChevronRight className="size-3.5 text-foreground/30 shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                {/* 提示词（最上面）：给这个子 Agent 的任务描述 */}
+                                <div
+                                  className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/85 line-clamp-2"
+                                  title={sa.description || sa.name}
+                                >
+                                  {sa.description || sa.name}
+                                </div>
+                                {/* 执行内容（下面）：最近几条真实工具调用 + 总数 */}
+                                {(recentRows.length > 0 || sa.status === "running") && (
+                                  <div className="mt-1 space-y-0.5">
+                                    {recentRows.map((tc, i) => (
+                                      <div
+                                        key={i}
+                                        className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground"
+                                      >
+                                        <span className="font-mono truncate">
+                                          {tc.toolName}
+                                        </span>
+                                        <span
+                                          className={
+                                            "shrink-0 " +
+                                            (tc.status === "running"
+                                              ? "text-primary"
+                                              : tc.status === "success"
+                                                ? "text-emerald-500"
+                                                : "text-destructive")
+                                          }
+                                        >
+                                          {tc.status === "running"
+                                            ? "…"
+                                            : tc.status === "success"
+                                              ? "✓"
+                                              : "✗"}
+                                        </span>
+                                        {tc.params && (
+                                          <span className="truncate min-w-0 flex-1 text-foreground/50">
+                                            {tc.params}
+                                          </span>
+                                        )}
+                                      </div>
+                                    ))}
+                                    {sa.status === "running" && recentRows.length === 0 && (
+                                      <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-primary">
+                                        等待第一个工具调用…
+                                      </div>
+                                    )}
+                                    {toolCount > recentRows.length && (
+                                      <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/40">
+                                        共 {toolCount} 次工具调用
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                                {sa.status !== "running" && sa.result && (
+                                  <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground line-clamp-2">
+                                    {sa.result}
+                                  </div>
+                                )}
+                              </div>
+                              <ChevronRight className="size-3.5 text-foreground/30 shrink-0 mt-0.5" />
                             </div>
-                            {sa.status === "running" &&
-                              (sa.toolCalls || []).length > 0 && (
-                              <div className="mt-0.5 flex items-center gap-1.5 pl-5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
-                                <span className="font-mono truncate">
-                                  {sa.toolCalls![sa.toolCalls!.length - 1].toolName}
-                                </span>
-                                <span className="size-1 rounded-full bg-primary animate-pulse shrink-0" />
-                              </div>
-                            )}
-                            {sa.status !== "running" && sa.result && (
-                              <div className="mt-0.5 pl-5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground line-clamp-2">
-                                {sa.result}
-                              </div>
-                            )}
                           </button>
-                        ))}
-                        {/* 历史区：磁盘 live 日志 */}
-                        {delegations.map((del) => (
+                          );
+                        })}
+                        {/* 历史区：磁盘 live 日志（重建卡已并入上方实时区，按 id 去重） */}
+                        {delegations
+                          .filter(
+                            (del) => !subAgents.some((sa) => sa.id === del.id),
+                          )
+                          .map((del) => (
                           <button
                             key={del.id}
                             type="button"
@@ -2058,48 +2278,58 @@ export function HelixLayout() {
                             </div>
                           </button>
                         ))}
-                        {/* 后台任务区：pi-background-tasks 注册表（tasks.json）。
-                            workPanelBgTasks = 本会话任务 + 其它会话仍在运行的。 */}
-                        {workPanelBgTasks.length > 0 && (
-                          <>
-                            <div className="px-2 pt-2.5 pb-1 flex items-center gap-2 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
-                              <span className="h-px flex-1 bg-border/60" />
-                              后台任务
-                              <span className="h-px flex-1 bg-border/60" />
-                            </div>
-                            {workPanelBgTasks.map((t) => (
-                              <button
-                                key={t.id}
-                                type="button"
-                                onClick={() => {
-                                  setBgTasksOpen(true);
-                                  setWorkPanelOpen(false);
-                                }}
-                                className="w-full text-left px-2 py-2 rounded-lg hover:bg-accent/50 transition-colors"
-                                data-tip="在后台任务面板查看详情"
-                              >
-                                <div className="flex items-center gap-2">
-                                  {t.status === "running" ? (
-                                    <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
-                                  ) : t.status === "completed" ? (
-                                    <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
-                                  ) : (
-                                    <XCircle className="size-3.5 text-destructive shrink-0" />
-                                  )}
-                                  <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/80">
-                                    {t.command}
-                                  </span>
-                                  <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
-                                    {t.status}
-                                  </span>
-                                </div>
-                              </button>
-                            ))}
-                          </>
-                        )}
                       </div>
                     </section>
-                  )}
+                    )}
+                    {/* 后台任务区：独立 section，不属于「子 Agent」——它们是
+                        pi-background-tasks 的 shell 进程，不是子代理。
+                        仅本会话用 background 工具启动的任务；其它会话的在
+                        右上角「后台任务」按钮的全局面板里。 */}
+                    {workPanelBgTasks.length > 0 && (
+                      <section className="p-2">
+                        <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
+                          <Terminal className="size-4 shrink-0 text-foreground/50" />
+                          <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
+                            后台任务
+                          </span>
+                          <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums text-foreground/50">
+                            {workPanelBgTasks.filter((t) => t.status === "running")
+                              .length}{" "}
+                            运行 / {workPanelBgTasks.length}
+                          </span>
+                        </div>
+                        <div className="max-h-56 overflow-auto px-1.5">
+                          {workPanelBgTasks.map((t) => (
+                            <button
+                              key={t.id}
+                              type="button"
+                              onClick={() => {
+                                setBgTasksOpen(true);
+                                setWorkPanelOpen(false);
+                              }}
+                              className="w-full text-left px-2 py-2 rounded-lg hover:bg-accent/50 transition-colors"
+                              data-tip="在后台任务面板查看详情"
+                            >
+                              <div className="flex items-center gap-2">
+                                {t.status === "running" ? (
+                                  <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
+                                ) : t.status === "completed" ? (
+                                  <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
+                                ) : (
+                                  <XCircle className="size-3.5 text-destructive shrink-0" />
+                                )}
+                                <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/80">
+                                  {t.command}
+                                </span>
+                                <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                                  {t.status}
+                                </span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                    )}
                 </div>
                 </div>,
                 document.body,
@@ -2307,7 +2537,7 @@ export function HelixLayout() {
                                         ? (() => {
                                             const n =
                                               selectedWorkDir
-                                                .split(/[\/\\]/)
+                                                .split(/[/\\]/)
                                                 .pop() || selectedWorkDir;
                                             return n.length > 8
                                               ? n.slice(0, 8) + "…"
@@ -2404,7 +2634,7 @@ export function HelixLayout() {
                   {!codeFullscreen && (
                     <div
                       className="absolute top-0 -left-1 w-2 h-full cursor-col-resize z-30 group"
-                      onMouseDown={handleRightDragStart}
+                      onPointerDown={handleRightDragStart}
                     >
                       <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-transparent group-hover:bg-border/40 transition-colors" />
                     </div>
@@ -2471,6 +2701,10 @@ export function HelixLayout() {
         {restoreReady && <Onboarding />}
         <BootOverlay />
         <GlobalTooltip />
+        {/* Hidden same-origin snapshot iframe used by the pi browser tools
+            (browser_read/click/type/press) — mounted at the layout root so it
+            stays alive regardless of which side panel is open. */}
+        <BrowserExecFrame html={browserExecHtml} />
       </Suspense>
     </div>
   );

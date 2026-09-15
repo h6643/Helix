@@ -35,6 +35,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
+import { looksLikeUnifiedDiff } from "./diff-preview";
 import { HighlightedCode } from "@/components/Helix/shiki-code";
 import { sanitizeLanguageTag } from "@/lib/markdown-code";
 import { preprocessMarkdown } from "@/lib/markdown-preprocess";
@@ -44,6 +45,9 @@ import { useHelixStore } from "@/stores/helix-store";
 interface HelixMarkdownProps {
   text: string;
   className?: string;
+  // 代码卡是否可折叠（长代码块底部「展开全部/收起」按钮）。默认 true；
+  // 思考体等自带限高滚动区的容器传 false —— 内部再折叠是冗余的。
+  foldCode?: boolean;
 }
 
 // ── GFM alerts (`> [!NOTE]` blockquotes) — ported from embeds/alert.tsx ──
@@ -200,14 +204,18 @@ function isBoxDiagram(code: string): boolean {
 // Diff viewer with colored +/-/@@ lines (ported from helix-desktop).
 function DiffView({ code }: { code: string }) {
   const lines = code.split("\n");
-
+  // 非 unified-diff 形态（无 diff 头行）整段按普通文本渲染，避免把
+  // 恰好以 + 开头的普通行（如 ls/命令输出）误染成满屏 + 行。
+  const isRealDiff = looksLikeUnifiedDiff(code);
   return (
     <div className="helix-diff-content">
       {lines.map((line, i) => {
         let cls = "helix-diff-line";
-        if (line.startsWith("+")) cls += " helix-diff-add";
-        else if (line.startsWith("-")) cls += " helix-diff-remove";
-        else if (line.startsWith("@@")) cls += " helix-diff-hunk";
+        if (isRealDiff) {
+          if (line.startsWith("+")) cls += " helix-diff-add";
+          else if (line.startsWith("-")) cls += " helix-diff-remove";
+          else if (line.startsWith("@@")) cls += " helix-diff-hunk";
+        }
         return (
           <div key={i} className={cls}>
             {line || "\u00A0"}
@@ -401,7 +409,10 @@ export function CodeCard({
   };
 
   return (
-    <pre className={className} data-code-card-header="true">
+    <pre
+      className={className ? `${className} helix-code-body-pre` : "helix-code-body-pre"}
+      data-code-card-header={showHeader ? "true" : undefined}
+    >
       {/* 头部：不透明背景，显示语言类型和操作按钮（helix-code-card-header 由
           globals.css 以 !important 压制 .helix-md pre > div 的通用透明规则）。
           showHeader=false（工具结果卡）时整条头部不渲染——去掉那条灰底"大边框"。 */}
@@ -493,6 +504,7 @@ function codeText(children: unknown): string {
 const HelixMarkdown = memo(function HelixMarkdown({
   text,
   className,
+  foldCode = true,
 }: HelixMarkdownProps) {
   const processed = useMemo(
     () => (text ? preprocessMarkdown(text) : ""),
@@ -502,7 +514,11 @@ const HelixMarkdown = memo(function HelixMarkdown({
   const setRightSidebarTab = useHelixStore((s) => s.setRightSidebarTab);
 
   return (
-    <div className={className}>
+    // helix-md 必须自带：多数调用点（agent-flow-panel 历史消息/实时过程段、
+    // inline-tool-group 之外的面板）的外层容器没挂 helix-md，而全部代码卡
+    // 样式（边框/背景/圆角）都以 `.helix-md pre …` 为前缀——缺了它代码
+    // 块裸奔：无背景无边框，与消息气泡糊在一起。
+    <div className={className ? `helix-md ${className}` : "helix-md"}>
       <ReactMarkdown
         remarkPlugins={[
           [remarkMath, { singleDollarTextMath: true }],
@@ -655,7 +671,12 @@ const HelixMarkdown = memo(function HelixMarkdown({
                 : undefined;
 
             return (
-              <CodeCard language={language} code={code} blockId={blockId} />
+              <CodeCard
+                language={language}
+                code={code}
+                blockId={blockId}
+                collapsible={foldCode}
+              />
             );
           },
         }}

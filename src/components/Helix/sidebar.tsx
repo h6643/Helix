@@ -668,6 +668,11 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
             images: msg.images,
             timestamp: msg.timestamp,
             reasoning: msg.reasoning,
+            duration: msg.duration,
+            thinkingTime: msg.thinkingTime,
+            totalTokens: msg.totalTokens,
+            thoughtTokens: msg.thoughtTokens,
+            outputTokens: msg.outputTokens,
             steps: msg.steps,
             fileChanges: msg.fileChanges,
             blocks: msg.blocks,
@@ -675,27 +680,29 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
             // coexist in the store without leaking across the per-session filter.
             sessionId: session.id,
           }));
-        // Preserve in-memory messages of sessions that are STILL RUNNING in the
-        // background — wholesale replacement would drop their user prompt and
-        // leave the eventual `done` commit orphaned in an empty conversation.
+        // 内存合并而非整体覆盖：后台 run 的 done 提交 + persistSessionNow 是
+        // fire-and-forget，磁盘快照可能落后几百 ms——旧逻辑只保留"仍在运行"会话
+        // 的消息，一个刚完成但还没落盘的回复会被磁盘快照覆盖掉（切回来输出消失
+        // 的根因之一）。现在以磁盘快照为基底，本会话仍在内存的消息按 id 覆盖
+        //（内存是 done 刚提交的新鲜副本），其他会话（无论是否还在运行）全部保留。
         const st2 = useHelixStore.getState();
-        const runningSids = new Set(
-          Object.entries(st2.streamingDrafts)
-            .filter(([, d]) => d.isAgentRunning)
-            .map(([k]) => k),
-        );
-        const preserved = st2.chatMessages.filter(
-          (m) =>
-            m.sessionId &&
-            m.sessionId !== session.id &&
-            runningSids.has(m.sessionId),
-        );
-        const loadedIds = new Set(msgs.map((m) => m.id));
+        const byId = new Map<string, (typeof msgs)[number]>();
+        for (const m of msgs) byId.set(m.id, m);
+        for (const m of st2.chatMessages) {
+          if (!m.sessionId || m.sessionId !== session.id) continue;
+          if (typeof m.id === "string" && m.id.startsWith("draft-partial-"))
+            continue;
+          byId.set(m.id, m as (typeof msgs)[number]);
+        }
+        const merged = [
+          ...st2.chatMessages.filter(
+            (m) => m.sessionId && m.sessionId !== session.id,
+          ),
+          ...[...byId.values()],
+        ];
+        merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         useHelixStore.setState({
-          chatMessages: [
-            ...msgs,
-            ...preserved.filter((m) => !loadedIds.has(m.id)),
-          ],
+          chatMessages: merged,
           activeSessionWorkDir: fresh.workDir ?? null,
         });
         if (fresh.workDir) {

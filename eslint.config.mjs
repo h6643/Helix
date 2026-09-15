@@ -24,6 +24,10 @@ export default defineConfig([
     "release/**",
     "src-tauri/**",
     "hermes-agent/**",
+    "**/*.d.ts",
+    "**/*.tmp.mjs",
+    "**/*.tmp.json",
+    "eslint-output.json",
     "*.config.js",
     "*.config.mjs",
     "*.config.ts",
@@ -51,6 +55,15 @@ export default defineConfig([
       // tsc covers undefined-global refs for TS (see note at top of file);
       // core-js no-undef only yields false positives here.
       "no-undef": "off",
+      // Full-width spaces (U+3000) intentionally appear inside Chinese doc
+      // comments; the base rule flags them as "irregular whitespace". Skip
+      // comments so legitimate CJK punctuation in docs isn't an error.
+      "no-irregular-whitespace": ["error", { skipComments: true }],
+      // The base `no-unused-vars` rule does not understand TypeScript syntax
+      // (destructuring, type-only imports, generics, etc.) and double-reports
+      // alongside `@typescript-eslint/no-unused-vars` below. Disable the base
+      // rule for TS files so the TS-aware rule is the single source of truth.
+      "no-unused-vars": "off",
       "@typescript-eslint/no-unused-vars": [
         "warn",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },

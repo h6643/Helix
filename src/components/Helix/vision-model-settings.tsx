@@ -37,7 +37,7 @@ export function VisionModelSettings() {
             setModel(d.model || "");
             setBaseUrl(d.baseUrl || "");
             setApiKey(d.apiKey || "");
-          } catch {}
+          } catch { /* empty */}
         }
         return;
       }

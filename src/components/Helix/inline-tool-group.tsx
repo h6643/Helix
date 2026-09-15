@@ -14,6 +14,70 @@ import type { ExecutionStep } from "@/stores/helix-store";
 
 const TOOL_RESULT_CLAMP = 20_000;
 
+// ── Sub-step grouping ───────────────────────────────────────────────────
+
+const TOOL_CATEGORY: Record<string, string> = {
+  open_browser: "浏览器",
+  browser_navigate: "浏览器导航",
+  browser_read: "浏览器读取",
+  browser_click: "浏览器点击",
+  browser_type: "浏览器输入",
+  browser_scroll: "浏览器滚动",
+  read: "读取",
+  read_file: "读取",
+  write: "写入",
+  write_file: "写入",
+  edit: "编辑",
+  patch: "编辑",
+  bash: "终端",
+  execute_command: "终端",
+  run_command: "终端",
+  terminal: "终端",
+  grep: "搜索",
+  search: "搜索",
+  glob: "搜索",
+  list_directory: "列表",
+  list_files: "列表",
+  web_search: "网页搜索",
+  web_fetch: "获取网页",
+  fetch: "获取网页",
+};
+
+function getToolCategory(toolName: string): string {
+  const name = (toolName || "").toLowerCase().replace(/[^a-z0-9]/g, "_");
+  for (const [key, cat] of Object.entries(TOOL_CATEGORY)) {
+    if (name.includes(key)) return cat;
+  }
+  return toolName || "工具";
+}
+
+interface SubStepGroup {
+  category: string;
+  count: number;
+  items: ExecutionStep[];
+  status: "completed" | "failed" | "running";
+}
+
+function groupSubSteps(steps: ExecutionStep[]): SubStepGroup[] {
+  const groups: SubStepGroup[] = [];
+  for (const step of steps) {
+    const cat = getToolCategory(step.toolName || "");
+    const last = groups[groups.length - 1];
+    if (last && last.category === cat && last.status !== "failed") {
+      last.count++;
+      last.items.push(step);
+    } else {
+      groups.push({
+        category: cat,
+        count: 1,
+        items: [step],
+        status: step.status === "failed" ? "failed" : step.status === "running" ? "running" : "completed",
+      });
+    }
+  }
+  return groups;
+}
+
 // ── ANSI escape code stripper ───────────────────────────────────────────
 
 const ANSI_ESCAPE = String.fromCharCode(27);
@@ -73,23 +137,39 @@ function extractResultCount(
   return "";
 }
 
-// ── Diff stats extraction ────────────────────────────────────────────────
+/** 文本是否含 unified-diff 头行（--- file / +++ file / @@ hunk）。 */
+function hasDiffHeader(line: string): boolean {
+  return /^--- /.test(line) || /^\+\+\+ /.test(line) || /^@@ /.test(line);
+}
 
-function extractDiffStats(content: string): string {
+/** 是否为真正的 unified diff：diff 头行出现在文本前部，
+ *  且后文存在 + / - 改动行。普通命令/ls 输出不满足（无 @@ / ---++++ 头）。 */
+function looksLikeUnifiedDiff(text: string): boolean {
+  const lines = text.split("\n");
+  const firstNonEmpty = lines.findIndex((l) => l.trim());
+  if (firstNonEmpty === -1 || firstNonEmpty > 3) return false;
+  const head = lines.slice(firstNonEmpty, firstNonEmpty + 4);
+  if (!head.some(hasDiffHeader)) return false;
+  return lines.some((l) => l.startsWith("+") || l.startsWith("-"));
+}
+
+// 统计统一 diff 里的 +N/−N：先验「这是 diff」，再逐行计数；
+// 非 diff 文本（ls 结果、JSON、命令输出）返回 0/0 不出徽标。
+function extractDiffStats(content: string): {
+  added: number;
+  removed: number;
+} {
+  if (!looksLikeUnifiedDiff(content)) return { added: 0, removed: 0 };
   let added = 0,
     removed = 0;
   for (const line of content.split("\n")) {
     if (line.startsWith("+") && !line.startsWith("+++")) added++;
     else if (line.startsWith("-") && !line.startsWith("---")) removed++;
   }
-  if (added === 0 && removed === 0) return "";
-  const parts: string[] = [];
-  if (added) parts.push(`+${added}`);
-  if (removed) parts.push(`−${removed}`);
-  return parts.join(" ");
+  return { added, removed };
 }
 
-// ── Content type detection ──────────────────────────────────────────────
+// ── Content type detection ───────────────────────────────────────────────
 
 type ResultKind = "diff" | "image" | "search" | "plain";
 
@@ -100,18 +180,18 @@ function detectResultKind(toolName: string, content: string): ResultKind {
   if (
     name.includes("diff") ||
     name.includes("patch") ||
-    name.includes("git_diff") ||
-    // pi 的 edit 工具：diff 拼在结果文本后段（gateway 从 details.diff 带出）
-    name === "edit"
+    name.includes("git_diff")
   )
     return "diff";
-  // diff 头可能不在第一行（前面有 "Successfully replaced …" 一句），扫前几行。
-  if (
-    /(^|\n)\s*(---|\+\+\+|@@|diff --git)/.test(
-      content.split("\n").slice(0, 6).join("\n"),
-    )
-  )
-    return "diff";
+  // pi 的 edit 工具：真 diff 在 details.diff/patch（网关白名单外不带），
+  // 拼在结果文本后段。必须按「真 diff 形态」验证再按 diff 着色——
+  // 结果文本首行是 "Successfully replaced N block(s)"，若 edit 失败
+  // 或输出被截断时按 diff 渲染会把普通文本行误染成 + 行。
+  if (name === "edit" && looksLikeUnifiedDiff(content)) return "diff";
+  // diff 头可能不在第一行（前面有 "Successfully replaced …" 一句），
+  // 但必须满足「头行靠近开头 + 有 +/− 改动行」才算真 diff —— 普通命令输出
+  // （ls、dir、JSON）里散落的 + 开头行不触发 diff 着色。
+  if (looksLikeUnifiedDiff(content)) return "diff";
   if (
     content.startsWith(`${ANSI_ESCAPE}[`) &&
     /added|removed|modified/i.test(content)
@@ -298,10 +378,9 @@ export function summarizeGroupDiff(
       for (const r of results) {
         const raw = normalizeAcpContent(r.content || "");
         if (detectResultKind(r.toolName || "", raw) !== "diff") continue;
-        for (const line of raw.split("\n")) {
-          if (line.startsWith("+") && !line.startsWith("+++")) added++;
-          else if (line.startsWith("-") && !line.startsWith("---")) removed++;
-        }
+        const s = extractDiffStats(raw);
+        added += s.added;
+        removed += s.removed;
       }
     }
   }
@@ -452,18 +531,23 @@ function ToolCard({
           for (const r of results) {
             const raw = normalizeAcpContent(r.content || "");
             if (detectResultKind(r.toolName || "", raw) !== "diff") continue;
-            for (const line of raw.split("\n")) {
-              if (line.startsWith("+") && !line.startsWith("+++")) added++;
-              else if (line.startsWith("-") && !line.startsWith("---")) removed++;
-            }
+            const s = extractDiffStats(raw);
+            added += s.added;
+            removed += s.removed;
           }
           if (added === 0 && removed === 0) {
-            const fb = step.content ? extractDiffStats(step.content) : "";
-            return fb ? (
-              <span className="text-[0.72em] text-emerald-500/60 shrink-0">
-                {fb}
+            const fb = step.content ? extractDiffStats(step.content) : null;
+            if (!fb || (fb.added === 0 && fb.removed === 0)) return null;
+            return (
+              <span className="text-[0.72em] shrink-0 flex items-center gap-1">
+                {fb.added > 0 && (
+                  <span className="text-emerald-500/70">+{fb.added}</span>
+                )}
+                {fb.removed > 0 && (
+                  <span className="text-rose-500/70">−{fb.removed}</span>
+                )}
               </span>
-            ) : null;
+            );
           }
           return (
             <span className="text-[0.72em] shrink-0 flex items-center gap-1">
@@ -512,48 +596,35 @@ function ToolCard({
           )}
           {/* Sub-agent sub-steps */}
           {hasSubSteps && (
-            <div className="space-y-1.5">
-              {step.subSteps!.map((sub) => {
-                const subRunning = sub.status === "running";
-                const subFailed = sub.status === "failed";
-                return (
-                  <div key={sub.id} className="flex items-center gap-1.5">
-                    {subFailed ? (
-                      <span
-                        className="tool-glyph tool-glyph-failed !text-[0.85em]"
-                        aria-hidden
-                      >
-                        ✕
-                      </span>
-                    ) : (
-                      <span className="tool-glyph !text-[0.85em]" aria-hidden>
-                        ⏺
-                      </span>
-                    )}
-                    <span className="text-[0.85em] text-foreground/50">
-                      {getToolDisplayLabel(
-                        sub.toolName || "",
-                        sub.toolKind,
-                        undefined,
-                        sub.toolParams,
+            <div className="space-y-1">
+              {(() => {
+                const filtered = step.subSteps!.filter((sub) => sub.toolName !== "progress");
+                const groups = groupSubSteps(filtered);
+                return groups.map((g, gi) => {
+                  const isRunning = g.status === "running";
+                  const isFailed = g.status === "failed";
+                  const label = g.count > 1 ? `${g.category} · ${g.count} 次` : g.category;
+                  return (
+                    <div key={gi} className="flex items-center gap-1.5 text-[0.85em]">
+                      {isFailed ? (
+                        <span className="tool-glyph tool-glyph-failed !text-[0.8em]" aria-hidden>✕</span>
+                      ) : (
+                        <span className={`tool-glyph !text-[0.8em]${isRunning ? " tool-glyph-running" : ""}`} aria-hidden>⏺</span>
                       )}
-                    </span>
-                    {subRunning ? (
-                      <span className="text-[0.72em] text-primary/70 shrink-0 flowing-text">
-                        执行中
+                      <span className={`${isRunning ? "text-foreground/70" : "text-foreground/50"}`}>
+                        {label}
                       </span>
-                    ) : sub.status === "completed" ? (
-                      <span className="text-[0.72em] text-muted-foreground/50 shrink-0">
-                        已执行
-                      </span>
-                    ) : subFailed ? (
-                      <span className="text-[0.72em] text-red-500/80 shrink-0">
-                        失败
-                      </span>
-                    ) : null}
-                  </div>
-                );
-              })}
+                      {isRunning ? (
+                        <span className="text-[0.85em] text-primary/70 shrink-0 flowing-text">执行中</span>
+                      ) : isFailed ? (
+                        <span className="text-[0.85em] text-red-500/80 shrink-0">失败</span>
+                      ) : (
+                        <span className="text-[0.85em] text-emerald-500/70 shrink-0">✓</span>
+                      )}
+                    </div>
+                  );
+                });
+              })()}
             </div>
           )}
           {/* 参数与结果合并成同一张卡片：参数作为首部"输入"行，结果紧随其后。

@@ -122,7 +122,7 @@ export function BackgroundTasksPanel({
       try {
         const api = (window as any).electron as any;
         await api?.backgroundTasks?.kill?.(task.id);
-      } catch {}
+      } catch { /* empty */}
       onRefresh();
     },
     [onRefresh],

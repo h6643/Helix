@@ -27,6 +27,7 @@
 //! SESSION_FILES cache). The reaped instance keeps its map entry (with its
 //! cwd + session-file mapping) so the respawn lands in the same project.
 
+use base64::Engine;
 use crate::gateway::emit_helix_event;
 use crate::state::AppState;
 use serde_json::{json, Value};
@@ -38,6 +39,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use tauri::Emitter;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -160,6 +162,16 @@ pub struct PiInstance {
     /// Set when session/cancel releases the waiter so agent_settled (which
     /// still fires after abort) does not double-emit session/complete.
     turn_cancelled: AtomicBool,
+    /// Fire-and-forget turns outstanding (seed history replay, /plan arm).
+    /// These queue NO turn_waiter, but pi serializes them AHEAD of the
+    /// caller's real prompt: the seed turn's agent_settled fires while the
+    /// real prompt's waiter is already registered, releasing it early and
+    /// emitting a premature session/complete — the frontend run then ends
+    /// with empty output while the real turn still executes headless
+    /// ("重启后旧对话一直不输出"). Each queued turn increments the debt;
+    /// agent_settled consumes one before touching the waiter, so settles
+    /// belonging to fire-and-forget turns never release a real turn.
+    turn_debt: AtomicU64,
     /// Buffered tool-call argument deltas, toolCallId → args string.
     tool_args: Mutex<HashMap<String, String>>,
     /// Args of EXECUTING tools, toolCallId → parsed args. tool_execution_start
@@ -212,6 +224,12 @@ pub struct PiInstance {
 struct SubAgentRecord {
     /// Extension-side agent id (stable across resume/steer).
     agent_id: String,
+    /// Full `prompt` the parent Agent tool sent to the child — captured at
+    /// `tool_execution_start`. The extension's terminal `subagents:record`
+    /// carries no prompt, so this is the only copy that lets a re-emitted
+    /// subagent.start (orphans / resume re-arms) re-carry the text and the
+    /// disk manifest persist it.
+    prompt: String,
     /// Set when the parent Agent tool call has returned (background start
     /// acknowledged or foreground result delivered). The terminal record
     /// alone is authoritative for completion.
@@ -233,6 +251,7 @@ impl PiInstance {
             ui_requests: Mutex::new(HashMap::new()),
             turn_waiter: Mutex::new(None),
             turn_cancelled: AtomicBool::new(false),
+            turn_debt: AtomicU64::new(0),
             tool_args: Mutex::new(HashMap::new()),
             exec_tool_args: Mutex::new(HashMap::new()),
             context_window: Mutex::new(None),
@@ -415,8 +434,9 @@ impl PiInstance {
 
     /// Send a prompt and await the turn's settle (agent_settled), with the
     /// same indefinite-wait-while-UI-request-pending semantics as
-    /// session/prompt. Used by the seed-history path, where the session's
-    /// opening turn must fully settle before the caller's real prompt runs.
+    /// session/prompt. No remaining callers since the seed-history path moved
+    /// to fire-and-forget (queued prompt) — kept for future sub-turn needs.
+    #[allow(dead_code)]
     async fn request_turn(&self, message: &str) -> Result<Value, String> {
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         self.turn_cancelled.store(false, Ordering::SeqCst);
@@ -1103,6 +1123,121 @@ fn seed_history_prompt(messages: Option<&Value>) -> String {
     )
 }
 
+/// `image/generate` — 前端 `/image` 斜杠命令走这里。读 config.yaml 的 `image:`
+/// 块（z.ai / CogView-3-Flash 等 OpenAI 兼容生图端点），调 images/generations
+/// 拿图片 URL，再下载成 data URL 返回给前端（前端期望 {success, image_data,
+/// available, error} 形状）。与 vision.rs 同源：同一份 config，同一套 key。
+fn image_generate(params: &Value) -> Result<Value, String> {
+    let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).unwrap_or_default();
+    let block = crate::config::read_yaml_block(&yaml, "image");
+    let get = |k: &str| -> String {
+        block.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+    let base_url = get("baseUrl");
+    let api_key = get("apiKey");
+    let model = get("model");
+    if base_url.is_empty() || model.is_empty() {
+        return Ok(json!({
+            "ok": true,
+            "available": false,
+            "error": "生图模型未配置（请在设置里填写 image baseUrl/model/apiKey）"
+        }));
+    }
+
+    let prompt = params
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if prompt.is_empty() {
+        return Ok(json!({ "ok": true, "available": false, "error": "缺少 prompt" }));
+    }
+
+    // aspect_ratio (square/portrait/landscape …) → OpenAI 尺寸。默认 square。
+    let ratio = params
+        .get("aspect_ratio")
+        .and_then(Value::as_str)
+        .unwrap_or("square");
+    let size = match ratio {
+        "portrait" => "720x1280",
+        "landscape" | "wide" => "1280x720",
+        _ => "1024x1024",
+    };
+
+    let endpoint = format!("{}/images/generations", base_url.trim_end_matches('/'));
+    let body = json!({
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "n": 1
+    });
+
+    // 用 reqwest blocking 客户端：避免把整条 async send() 链改成 async/await，
+    // 且 reqwest blocking 跑在独立线程池上，不会阻塞 tokio 运行时。
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(&endpoint)
+        .json(&body)
+        .bearer_auth(api_key.as_str())
+        .send()
+        .map_err(|e| format!("生图请求失败: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("生图 API 报错: {e}"))?;
+
+    let data: Value = resp.json().map_err(|e| format!("生图响应解析失败: {e}"))?;
+    let url = data["data"][0]["url"]
+        .as_str()
+        .filter(|u| !u.is_empty());
+    let url = match url {
+        Some(u) => u.to_string(),
+        None => {
+            // API 直接返回 base64 就省一次下载。
+            if let Some(b64) = data["data"][0]["b64_json"].as_str() {
+                if !b64.is_empty() {
+                    return Ok(json!({
+                        "ok": true,
+                        "available": true,
+                        "success": true,
+                        "image_data": format!("data:image/png;base64,{b64}")
+                    }));
+                }
+            }
+            return Ok(json!({
+                "ok": true,
+                "available": true,
+                "success": false,
+                "error": "生图 API 未返回图片",
+                "raw": data
+            }));
+        }
+    };
+
+    // 远程 URL → 下载成 data URL（前端只认 dataUrl，不接受裸 http 链接）。
+    let resp2 = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("图片下载失败: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("图片下载报错: {e}"))?;
+    let mime = resp2
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/png")
+        .split(';')
+        .next()
+        .unwrap_or("image/png")
+        .to_string();
+    let bytes = resp2.bytes().map_err(|e| format!("读取图片字节失败: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(json!({
+        "ok": true,
+        "available": true,
+        "success": true,
+        "image_data": format!("data:{mime};base64,{b64}")
+    }))
+}
+
 /// Top-level RPC dispatch (Tauri `helix_send`). Routes session-scoped calls
 /// to the instance owning that session; everything else to the main instance.
 pub async fn send(method: &str, params: Value) -> Result<Value, String> {
@@ -1173,9 +1308,16 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             if initial_mode == "plan" {
-                let _ = instance
+                // Fire-and-forget arm turn: register turn debt so its
+                // agent_settled is not mistaken for the real prompt's.
+                instance.turn_debt.fetch_add(1, Ordering::SeqCst);
+                if let Err(e) = instance
                     .request("prompt", json!({ "message": "/plan start" }), RPC_TIMEOUT)
-                    .await;
+                    .await
+                {
+                    eprintln!("[pi agent] /plan start failed: {e}");
+                    instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
+                }
                 *instance.plan_mode.lock().unwrap() = true;
             }
             let state_data = instance.session_state().await?;
@@ -1193,15 +1335,35 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             rekey_instance(&instance, session_id.clone());
             // seedHistory (gateway restart / reaped conversation rebuild): pi
             // has no RPC to inject prior history into a session, so replay it
-            // as the session-opening user message. The model's brief ack turn
-            // is the cost; losing all context on restart is worse. Only
-            // user/assistant turns are carried — tool noise would hurt more
-            // than help. Wait for the seed turn to settle so its events don't
-            // interleave with the caller's real prompt.
+            // as the session-opening user message. Only user/assistant turns
+            // are carried — tool noise would hurt more than help.
+            //
+            // Fire-and-forget: AWAITING the seed turn (old request_turn call)
+            // held session/new until the model finished digesting the whole
+            // replayed history — meanwhile the frontend's run loop had not yet
+            // subscribed to events or sent the real prompt, so the UI sat in
+            // "工作中" with zero streaming output for minutes (the user saw the
+            // classic "重启后旧对话一直不输出"). Worse, a seed turn that raised
+            // an approval/clarify card deadlocked: the backend waits for the
+            // user, but the card event had no subscriber yet. The seed is now
+            // sent as a plain queued prompt: the ack (session_id) returns
+            // immediately, and pi's queue serializes it ahead of the caller's
+            // real prompt, preserving turn order without blocking the send.
             let seed = seed_history_prompt(params.get("messages"));
             if !seed.is_empty() {
-                if let Err(e) = instance.request_turn(&seed).await {
+                // Fire-and-forget seed turn: register turn debt so the seed's
+                // agent_settled consumes the debt instead of releasing the
+                // real prompt's waiter (registered after this returns) — the
+                // seed settles FIRST because pi serializes the queue, and
+                // without the debt its settle prematurely completes the
+                // caller's run with empty output.
+                instance.turn_debt.fetch_add(1, Ordering::SeqCst);
+                if let Err(e) = instance
+                    .request("prompt", json!({ "message": seed }), RPC_TIMEOUT)
+                    .await
+                {
                     eprintln!("[pi agent] seed history failed: {e}");
+                    instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
                 }
             }
             emit_helix_event(
@@ -1388,20 +1550,28 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             let prev_active = *instance.plan_mode.lock().unwrap();
             if mode == "plan" {
                 if !prev_active {
+                    // Fire-and-forget arm turn (see turn_debt on PiInstance):
+                    // its settle must not release a concurrent session/prompt
+                    // waiter. set_mode is sent on EVERY run, so this can race
+                    // with the run's own prompt even without a seed history.
+                    instance.turn_debt.fetch_add(1, Ordering::SeqCst);
                     if let Err(e) = instance
                         .request("prompt", json!({ "message": "/plan start" }), RPC_TIMEOUT)
                         .await
                     {
                         eprintln!("[pi agent] /plan start failed: {e}");
+                        instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
                     }
                 }
                 *instance.plan_mode.lock().unwrap() = true;
             } else if prev_active && !plan_approved {
+                instance.turn_debt.fetch_add(1, Ordering::SeqCst);
                 if let Err(e) = instance
                     .request("prompt", json!({ "message": "/plan exit" }), RPC_TIMEOUT)
                     .await
                 {
                     eprintln!("[pi agent] /plan exit failed: {e}");
+                    instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
                 }
                 *instance.plan_mode.lock().unwrap() = false;
             }
@@ -1455,15 +1625,21 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .get("tokensBefore")
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
-            let tokens_after = compacted
-                .get("estimatedTokensAfter")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
+            // pi's `compact` result is {summary, firstKeptEntryId, tokensBefore, usage,
+            // details}; the gateway (Helix) can't trust `estimatedTokensAfter` because
+            // it's computed in-memory by pi's agent-session and NOT written back into
+            // the session file — so it's absent from the RPC response in many builds.
+            // Estimate the AFTER size directly from `get_messages` (same chars/4
+            // heuristic pi uses in estimateTokens). This matches what the model
+            // will actually replay next (compaction summary + kept messages).
+            let tokens_after = estimate_messages_tokens(&messages);
             let removed = (tokens_before - tokens_after).max(0);
             Ok(json!({
                 "status": "compressed",
                 "messages": messages,
                 "removed": removed,
+                "before_tokens": tokens_before,
+                "after_tokens": tokens_after,
                 "summary": compacted.get("summary").cloned().unwrap_or(Value::Null),
             }))
         }
@@ -1716,6 +1892,21 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // tell "nothing to do" from an actual failure.
             Ok(json!({ "ok": true, "skipped": true }))
         }
+        // Helix sidebar browser: pi extension's `open_browser` tool routes here
+        // via `helix/app/open_browser` and we emit the Tauri event the renderer
+        // listens for — so the model can drive the in-app webview, not just the
+        // system default browser.
+        "app/open_browser" | "app.open_browser" => {
+            let url = params.get("url").and_then(Value::as_str).unwrap_or("");
+            if url.is_empty() {
+                return Err("open_browser requires a non-empty url".into());
+            }
+            let _ = crate::state::app_handle().emit(
+                "helix:open-browser",
+                json!({ "url": url }),
+            );
+            Ok(json!({ "ok": true, "url": url }))
+        }
         // ── Pi-native pass-through commands ─────────────────────────────────
         // These forward directly to pi's RPC without Helix-specific translation.
         // Session-less UI surfaces (model list, thinking level, plugin
@@ -1739,6 +1930,7 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             let instance = routed_instance(&params, &state).await?;
             instance.request(method, params, RPC_TIMEOUT).await
         }
+        "image/generate" => image_generate(&params),
         _ => Err(format!("pi adapter does not implement {method}")),
     }
 }
@@ -1955,6 +2147,17 @@ pub fn estimate_message_tokens(message: &Value) -> i64 {
         }
     }
     chars / 4
+}
+
+/// Sum `estimate_message_tokens` over a messages array (the `.messages`
+/// value from `get_messages`). Used by session.compress to estimate the
+/// AFTER size when pi's `estimatedTokensAfter` field is absent from the
+/// compact RPC response.
+fn estimate_messages_tokens(messages: &Value) -> i64 {
+    match messages {
+        Value::Array(arr) => arr.iter().map(|m| estimate_message_tokens(m)).sum(),
+        _ => 0,
+    }
 }
 
 /// Split the active branch's replay context into per-content-type buckets.
@@ -2731,6 +2934,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         tool_call_id.clone(),
                         SubAgentRecord {
                             agent_id: agent_id.clone(),
+                            prompt: String::new(),
                             tool_returned: true,
                             status: Some(status.clone()),
                         },
@@ -2765,7 +2969,9 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 let rec = subagents.get_mut(&tool_call_id).unwrap();
                 if status == "running" {
                     // Not terminal after all (resume re-arms the record) —
-                    // flip back to running on the frontend card.
+                    // flip back to running on the frontend card. Re-carry the
+                    // cached prompt (the record's terminal payload has none).
+                    let rec_prompt = rec.prompt.clone();
                     rec.status = None;
                     drop(subagents);
                     emit_helix_event(
@@ -2777,32 +2983,40 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                                 .unwrap_or("执行子任务"),
                             "model": data.get("type").and_then(Value::as_str)
                                 .unwrap_or_default(),
-                            "text": "",
+                            "text": rec_prompt,
                         }),
                     );
                     return;
                 }
                 rec.status = Some(status.clone());
                 let tool_returned = rec.tool_returned;
+                let rec_prompt = rec.prompt.clone();
+                let rec_goal = data.get("description").and_then(Value::as_str)
+                    .unwrap_or("执行子任务").to_string();
                 drop(subagents);
+                // Persist the child's own id to the disk manifest — terminal
+                // records are the last chance to learn it for foreground
+                // children whose tool result carried no agentId.
+                crate::delegations::record_delegation_agent_id(&tool_call_id, &agent_id);
                 // Terminal record → also finish the disk journal (background
                 // children whose parent tool returned long before).
                 let dir = crate::delegations::delegation_live_root().join(&tool_call_id);
                 if dir.is_dir() {
+                    crate::delegations::persist_delegation_prompt(&dir, &rec_prompt);
                     crate::delegations::mark_delegation_finished(&dir, &status, &summary);
                 }
                 if tool_returned {
                     // Parent tool call already returned — the card is still
                     // "running" waiting for this exact moment.
-                    emit_helix_event(
-                        "subagent.complete",
-                        &json!({
-                            "session_id": sid(),
-                            "subagent_id": tool_call_id,
-                            "status": status,
-                            "summary": summary,
-                        }),
-                    );
+                    let payload = json!({
+                        "session_id": sid(),
+                        "subagent_id": tool_call_id,
+                        "status": status,
+                        "summary": summary,
+                        "goal": rec_goal,
+                        "prompt": rec_prompt,
+                    });
+                    emit_helix_event("subagent.complete", &payload);
                 } else {
                     // Terminal record arrived before the parent Agent tool
                     // returned (foreground run completing fast): let the
@@ -3020,9 +3234,26 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             "subagent_id": tool_call_id,
                             "goal": goal,
                             "model": model,
+                            "prompt": prompt,
                             "text": prompt,
                         }),
                     );
+                    // Cache the child's full prompt on the in-memory record:
+                    // the terminal subagents:record carries no prompt, so a
+                    // later re-emitted subagent.start can only recover it
+                    // from here.
+                    instance
+                        .subagents
+                        .lock()
+                        .unwrap()
+                        .entry(tool_call_id.clone())
+                        .or_insert_with(|| SubAgentRecord {
+                            agent_id: tool_call_id.clone(),
+                            prompt: prompt.to_string(),
+                            tool_returned: false,
+                            status: None,
+                        })
+                        .prompt = prompt.to_string();
                     // Mirror the legacy delegate_task disk contract so the
                     // 子Agent 历史记录 (delegations_list) sees this child too.
                     if let Some(dir) = crate::delegations::ensure_delegation_dir(
@@ -3030,6 +3261,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         &sid().as_str().map(str::to_string).unwrap_or_default(),
                         goal,
                     ) {
+                        crate::delegations::persist_delegation_prompt(&dir, &prompt);
                         crate::delegations::append_delegation_log(
                             &dir,
                             &format!("[start] {model} — {goal}"),
@@ -3068,20 +3300,82 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             }
             // pi-subagents `Agent` tool: forward its streamed progress note
             // ("N tool uses…", activity line) as subagent.tool so the live
-            // sub-agent card updates while the child runs.
+            // sub-agent card updates while the child runs. These are
+            // cumulative summaries, NOT individual tool calls — emit them as
+            // `progress` rows and let the frontend update the LAST row
+            // in place instead of appending a new one per note. A real
+            // tool-call row (from `subagent.tool` with a real tool_name)
+            // that arrives between two notes must NOT be clobbered: the
+            // frontend checks `lastRow.toolName === "progress"` before
+            // swapping, so real rows keep their position and the summary
+            // rides above the last real row, mirroring the transcript's
+            // "N tools used" footer.
             if tool_name == "Agent" && !tool_call_id.is_empty() {
+                // Early agent-id binding: the extension's streamUpdate carries
+                // details.agentId (added for this purpose). Recording it NOW —
+                // while the child is still running — lets the live panel map
+                // the card to the child's .output transcript via subagent_map
+                // before the tool call returns (previously the mapping only
+                // existed at tool_execution_end, so a foreground run showed
+                // "正在启动，等待第一个工具调用…" for its whole lifetime).
+                let partial_agent_id = message
+                    .pointer("/partialResult/details/agentId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if let Some(agent_id) = partial_agent_id.filter(|a| !a.is_empty()) {
+                    let mut subagents = instance.subagents.lock().unwrap();
+                    // The exec_args cache holds this call's full args — keep
+                    // the child's prompt here so terminal re-arms can re-carry
+                    // it (a record created only by this early binding has none).
+                    let cached_prompt = instance
+                        .exec_tool_args
+                        .lock()
+                        .unwrap()
+                        .get(&tool_call_id)
+                        .and_then(|a| a.get("prompt"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let rec = subagents
+                        .entry(tool_call_id.clone())
+                        .or_insert_with(|| SubAgentRecord {
+                            agent_id: agent_id.clone(),
+                            prompt: cached_prompt.clone(),
+                            tool_returned: false,
+                            status: None,
+                        });
+                    if rec.agent_id != agent_id {
+                        rec.agent_id = agent_id.clone();
+                    }
+                    if rec.prompt.is_empty() {
+                        rec.prompt = cached_prompt;
+                    }
+                    drop(subagents);
+                    crate::delegations::record_delegation_agent_id(&tool_call_id, &agent_id);
+                }
                 let preview = content_to_text(&partial);
                 if let Some(text) = preview.as_str() {
                     if !text.is_empty() {
-                        emit_helix_event(
-                            "subagent.tool",
-                            &json!({
-                                "session_id": sid(),
-                                "subagent_id": tool_call_id,
-                                "tool_name": "progress",
-                                "tool_preview": text,
-                            }),
-                        );
+                        // agent_id rides along so the renderer can bind the
+                        // card to the child's transcript on the FIRST progress
+                        // note (foreground runs previously had no binding until
+                        // the tool returned — the live panel showed nothing).
+                        let bound_agent_id = instance
+                            .subagents
+                            .lock()
+                            .unwrap()
+                            .get(&tool_call_id)
+                            .map(|r| r.agent_id.clone());
+                        let mut payload = json!({
+                            "session_id": sid(),
+                            "subagent_id": tool_call_id,
+                            "tool_name": "progress",
+                            "tool_preview": text,
+                        });
+                        if let Some(aid) = bound_agent_id {
+                            payload["agent_id"] = json!(aid);
+                        }
+                        emit_helix_event("subagent.tool", &payload);
                         let dir = crate::delegations::delegation_live_root().join(&tool_call_id);
                         if dir.is_dir() {
                             crate::delegations::append_delegation_log(&dir, text);
@@ -3121,18 +3415,43 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 .unwrap()
                 .remove(&tool_call_id)
                 .unwrap_or(Value::Null);
+            // 只有真出 diff 的工具才转发 diff 类 details：edit 工具 result
+            // 自带 details.diff / details.patch；write 工具（全新文件无
+            // details）用 execution_start 缓存的 args 在网关侧合成。
+            // 其它工具（bash/ls/grep…）的 result.details 是各自的业务字段
+            // （truncation、tasks、agentId、memory output 等），按字段名硬捞
+            // diff/patch 会把任意工具的任意 payload 当成 diff 喂给前端
+            // （如 ls 触发 +N 徽标 / DiffView 误着色），白名单外直接不给。
+            let is_diff_tool = tool_name == "edit" || tool_name == "write";
             let diff_details: Value = {
                 let mut picked = serde_json::Map::new();
-                if let Some(details) = message.pointer("/result/details").and_then(Value::as_object) {
-                    for key in ["diff", "patch", "firstChangedLine", "diffSummary", "changes"] {
-                        if let Some(v) = details.get(key) {
-                            let v = match v {
-                                Value::String(s) if s.len() > 16_384 => {
-                                    Value::String(format!("{}…[diff 过长已截断]", s.chars().take(16_384).collect::<String>()))
-                                }
-                                other => other.clone(),
-                            };
-                            picked.insert(key.to_string(), v);
+                if is_diff_tool {
+                    if let Some(details) = message
+                        .pointer("/result/details")
+                        .and_then(Value::as_object)
+                    {
+                        for key in [
+                            "diff",
+                            "patch",
+                            "firstChangedLine",
+                            "diffSummary",
+                            "changes",
+                        ] {
+                            // 只接受文本形态的 diff 字段：非字符串（对象/数组）
+                            // 进前端会走 JSON.stringify 拼进结果文本，形态彻底跑偏。
+                            if let Some(Value::String(v)) = details.get(key) {
+                                picked.insert(
+                                    key.to_string(),
+                                    if v.len() > 16_384 {
+                                        Value::String(format!(
+                                            "{}…[diff 过长已截断]",
+                                            v.chars().take(16_384).collect::<String>()
+                                        ))
+                                    } else {
+                                        Value::String(v.clone())
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -3202,21 +3521,50 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let mut subagents = instance.subagents.lock().unwrap();
+                // This call's full prompt lives in the exec_args cache —
+                // re-carry it into the record so a terminal completion that
+                // outlives the tool return can still surface it.
+                let cached_prompt = instance
+                    .exec_tool_args
+                    .lock()
+                    .unwrap()
+                    .get(&tool_call_id)
+                    .and_then(|a| a.get("prompt"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 let record =
                     subagents
                         .entry(tool_call_id.clone())
                         .or_insert_with(|| SubAgentRecord {
                             agent_id: agent_id.clone(),
+                            prompt: cached_prompt.clone(),
                             tool_returned: false,
                             status: None,
                         });
                 if record.agent_id != agent_id {
                     record.agent_id = agent_id.clone();
                 }
+                if record.prompt.is_empty() {
+                    record.prompt = cached_prompt;
+                }
                 let summary = content.as_str().unwrap_or_default().trim().to_string();
+                let rec_prompt = record.prompt.clone();
+                let rec_goal = instance
+                    .exec_tool_args
+                    .lock()
+                    .unwrap()
+                    .get(&tool_call_id)
+                    .and_then(|a| a.get("description"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let mut completed_status: Option<String> = None;
                 if record_status == "background" {
                     record.tool_returned = true;
+                    // The extension just revealed the child's own id — persist
+                    // it to the disk manifest so the timeline stays locatable
+                    // after a gateway restart kills every in-memory route.
+                    crate::delegations::record_delegation_agent_id(&tool_call_id, &agent_id);
                     if record.status.is_none() {
                         // Still running in the background — surface the start
                         // acknowledgement as a progress line on the live card
@@ -3245,15 +3593,15 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         let status = record.status.clone().unwrap_or_else(|| "completed".into());
                         completed_status = Some(status.clone());
                         drop(subagents);
-                        emit_helix_event(
-                            "subagent.complete",
-                            &json!({
-                                "session_id": sid(),
-                                "subagent_id": tool_call_id,
-                                "status": status,
-                                "summary": summary,
-                            }),
-                        );
+                        let payload = json!({
+                            "session_id": sid(),
+                            "subagent_id": tool_call_id,
+                            "status": status,
+                            "summary": summary,
+                            "goal": rec_goal.unwrap_or_else(|| "执行子任务".to_string()),
+                            "prompt": rec_prompt,
+                        });
+                        emit_helix_event("subagent.complete", &payload);
                     }
                 } else {
                     // Foreground (synchronous) Agent call — the child's real
@@ -3271,22 +3619,24 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     record.status = Some(final_status.clone());
                     completed_status = Some(final_status.clone());
                     drop(subagents);
-                    emit_helix_event(
-                        "subagent.complete",
-                        &json!({
-                            "session_id": sid(),
-                            "subagent_id": tool_call_id,
-                            "status": final_status,
-                            "summary": summary,
-                        }),
-                    );
+                    let payload = json!({
+                        "session_id": sid(),
+                        "subagent_id": tool_call_id,
+                        "status": final_status,
+                        "summary": summary,
+                        "goal": rec_goal.unwrap_or_else(|| "执行子任务".to_string()),
+                        "prompt": rec_prompt,
+                    });
+                    emit_helix_event("subagent.complete", &payload);
                 }
                 // Journal the outcome to the legacy delegation layout (only
                 // terminal outcomes — a background start leaves the manifest
                 // "running" for the child's own terminal event to finish).
                 if let Some(status) = completed_status {
+                    crate::delegations::record_delegation_agent_id(&tool_call_id, &agent_id);
                     let dir = crate::delegations::delegation_live_root().join(&tool_call_id);
                     if dir.is_dir() {
+                        crate::delegations::persist_delegation_prompt(&dir, &rec_prompt);
                         crate::delegations::mark_delegation_finished(&dir, &status, &summary);
                     }
                 }
@@ -3329,15 +3679,32 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             // Turn (including queued steering/follow-ups) fully settled →
             // release the in-flight session/prompt waiter.
             let cancelled = instance.turn_cancelled.swap(false, Ordering::SeqCst);
-            if let Some(waiter) = instance.turn_waiter.lock().unwrap().take() {
-                let _ = waiter.tx.send(if cancelled {
-                    json!({ "cancelled": true })
-                } else {
-                    json!({ "type": "agent_settled" })
-                });
+            // A settle still owed by a fire-and-forget turn (seed history,
+            // /plan arm) belongs to THAT turn, not to session/prompt's —
+            // consume the debt and leave the real turn's waiter armed
+            // (the real turn is still queued/running behind it).
+            if instance.turn_debt.load(Ordering::SeqCst) > 0 {
+                instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
+                instance.streaming.store(false, Ordering::SeqCst);
+                return;
             }
+            // Only a turn initiated by session/prompt registers a waiter.
+            // Seed turns (session/new history replay, fire-and-forget) settle
+            // with NO waiter — forwarding their settle as session/complete
+            // would fabricate a `done` for a run whose real prompt is still
+            // queued behind the seed, ending the view early ("输出消失").
+            let had_waiter = instance.turn_waiter.lock().unwrap().is_some();
+            let release = |waiter: &mut Option<TurnWaiter>| {
+                if let Some(w) = waiter.take() {
+                    let _ = w.tx.send(if cancelled {
+                        json!({ "cancelled": true })
+                    } else {
+                        json!({ "type": "agent_settled" })
+                    });
+                }
+            };
             instance.streaming.store(false, Ordering::SeqCst);
-            if !cancelled {
+            if had_waiter && !cancelled {
                 // Attach the authoritative final text/thinking captured at
                 // message_end. The frontend prefers its streamed buffer when
                 // non-empty and only falls back to these — so a healthy
@@ -3355,6 +3722,11 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         "reasoning": final_thinking,
                     }),
                 );
+            } else {
+                // No session/prompt waiter (seed turn settling before the
+                // real prompt arrives). Release it as cancelled so the
+                // settled state doesn't linger as a stale completion.
+                release(&mut *instance.turn_waiter.lock().unwrap());
             }
         }
         "auto_retry_start" => {

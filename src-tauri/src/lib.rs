@@ -201,6 +201,10 @@ pub fn run() {
             helix::helix_set_config_key_value,
             helix::helix_set_reasoning_effort,
             helix::helix_approval_respond,
+            // embedded sidebar browser
+            helix::open_browser_url,
+            helix::poll_browser_requests,
+            helix::browser_write_result,
             helix::helix_set_model,
             helix::helix_set_agent_config,
             helix::helix_list_memories,

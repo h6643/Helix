@@ -141,6 +141,7 @@ export function FileChangeSummaryCard({
         if (createdEmpty) st.closeEditorTab(absolutePath);
         return;
       }
+// eslint-disable-next-line no-control-regex
       if (/[\u0000-\u0008]/.test(content.slice(0, 4096))) {
         st.showToast({
           type: "error",

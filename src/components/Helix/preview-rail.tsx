@@ -127,17 +127,17 @@ export function BrowserView({
   const goBack = () => {
     try {
       webviewRef.current?.goBack?.();
-    } catch {}
+    } catch { /* empty */}
   };
   const goForward = () => {
     try {
       webviewRef.current?.goForward?.();
-    } catch {}
+    } catch { /* empty */}
   };
   const reload = () => {
     try {
       webviewRef.current?.reload?.();
-    } catch {}
+    } catch { /* empty */}
   };
 
   const commitUrl = (raw?: string) => {

@@ -219,8 +219,28 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
             fileChanges: msg.fileChanges,
             blocks: msg.blocks,
           }));
+        // 内存合并而非整体覆盖：done 提交 + persistSessionNow 是 fire-and-forget，
+        // 磁盘快照可能落后几百 ms——整体替换会让"后台刚完成的回复"三处（内存/
+        // draft/磁盘）同时缺席，切回来输出消失。以磁盘为基底，该会话仍在内存的
+        // 消息按 id 覆盖（内存是 done 刚提交的新鲜副本）；其他会话的消息原样保留。
+        const live = useHelixStore.getState().chatMessages;
+        const byId = new Map<string, (typeof msgs)[number]>();
+        for (const m of msgs) byId.set(m.id, m);
+        for (const m of live) {
+          if (!m.sessionId || m.sessionId !== session.id) continue;
+          if (typeof m.id === "string" && m.id.startsWith("draft-partial-"))
+            continue;
+          byId.set(m.id, m as (typeof msgs)[number]);
+        }
+        const merged = [
+          // 其他会话的消息不动（并发 run 的载体）
+          ...live.filter((m) => m.sessionId && m.sessionId !== session.id),
+          // 本会话：磁盘快照 + 内存覆盖，按时间排序
+          ...[...byId.values()],
+        ];
+        merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         useHelixStore.setState({
-          chatMessages: msgs,
+          chatMessages: merged,
           activeSessionWorkDir: fresh.workDir ?? null,
         });
         // selectedWorkDir 同步到对话所属项目，让 Git 分支选择器等 UI 跟随对话。

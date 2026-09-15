@@ -13,6 +13,25 @@ import {
 import React from "react";
 import type { ExecutionStep } from "@/stores/helix-store";
 
+/**
+ * subagent.* 事件里的「合成工具行」并不是子代理真的调用了某个工具。
+ *
+ * gateway 在后台 spawn 确认时发一条 `tool_name: "background"` 的记录
+ * （preview 为 "Agent started in background. Agent ID: …"），它唯一的用途是
+ * 把扩展自己的子代理 id 带回前端、绑到卡片的 .output 转录上。把它当成工具行
+ * 渲染出来纯属噪声，还会被误读成子代理的动作。
+ *
+ * 写入侧已经拦掉了（agent-flow-panel 的 subagent.tool 分支），但 store 里的
+ * subAgents 是内存态、HMR 不会重置，网关改动之前写入的旧记录会一直残留——
+ * 所以渲染前统一过滤一次，任何来源的合成行都不显示。
+ */
+export function isSyntheticSubAgentToolRow(
+  toolName: string | null | undefined,
+): boolean {
+  const n = (toolName || "").trim().toLowerCase();
+  return n === "background" || n === "progress";
+}
+
 const TOOL_LABELS: Record<string, string> = {
   read_file: "读取文件",
   write_file: "写入文件",

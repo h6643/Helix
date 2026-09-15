@@ -691,7 +691,7 @@ export function ApiSettings({
             messageCount: s.chatMessages.length,
           })),
       );
-    } catch {}
+    } catch { /* empty */}
   }, []);
 
   useEffect(() => {
@@ -842,7 +842,7 @@ export function ApiSettings({
       // profile is forgotten and restoreFromStorage reverts to the old apiConfig).
       try {
         await persistToStorage();
-      } catch {}
+      } catch { /* empty */}
       // Invalidate the cached Helix session so the next prompt rebuilds it with
       // the newly-selected profile's model/key (prevents stale-session 401s).
       useGatewayStore.getState().setHelixSessionId(null);
@@ -867,7 +867,7 @@ export function ApiSettings({
           // Persist the active profile so the next cold start re-asserts it
           // into Helix config.yaml (no hardcoded pin, free switching preserved).
           await window.electron.profile.cacheConfig(cfg);
-        } catch {}
+        } catch { /* empty */}
       }
     },
     [
@@ -1636,7 +1636,7 @@ export function ApiSettings({
                 await helix.setConfig(cfg);
                 await (window as any).electron?.profile?.cacheConfig?.(cfg);
                 useGatewayStore.getState().setHelixSessionId(null);
-              } catch {}
+              } catch { /* empty */}
             }
             showToast({ type: "success", title: `已切换到 ${final.model}` });
           }}

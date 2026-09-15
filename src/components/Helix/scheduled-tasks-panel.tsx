@@ -253,7 +253,7 @@ function TaskItem({
   const workDirName = useMemo(
     () =>
       selectedWorkDir
-        ? selectedWorkDir.split(/[\/\\]/).pop() || selectedWorkDir
+        ? selectedWorkDir.split(/[/\\]/).pop() || selectedWorkDir
         : "",
     [selectedWorkDir],
   );
@@ -372,6 +372,7 @@ function TaskItem({
   );
 }
 
+// eslint-disable-next-line no-empty-pattern
 export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
   const {
     scheduledTasks,

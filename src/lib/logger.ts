@@ -24,7 +24,7 @@ export function debug(...args: unknown[]) {
       });
       while (arr.length > 3000) arr.shift();
       localStorage.setItem(k, JSON.stringify(arr));
-    } catch (e) {}
+    } catch (e) { /* empty */}
   }
 }
 
@@ -48,7 +48,7 @@ export function warn(...args: unknown[]) {
       });
       while (arr.length > 3000) arr.shift();
       localStorage.setItem(k, JSON.stringify(arr));
-    } catch (e) {}
+    } catch (e) { /* empty */}
   }
 }
 

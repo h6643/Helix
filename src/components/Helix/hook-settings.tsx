@@ -59,7 +59,7 @@ export function HookSettings() {
           }
           setSettings({ enabled: r.config.enabled !== false, hooks });
         }
-      } catch {}
+      } catch { /* empty */}
     };
 
     loadConfig().finally(() => setLoaded(true));

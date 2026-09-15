@@ -180,6 +180,16 @@ export interface ElectronAPI {
     }>;
     proxyGet: () => Promise<{ url: string }>;
     proxySet: (url: string) => Promise<{ success: boolean; url: string }>;
+    /** Poll pending pi-extension browser requests (emits helix:browser-request
+     *  events with the full payload; navigate also emits the legacy
+     *  helix:open-browser for the sidebar-open path). */
+    pollBrowserRequests: () => Promise<{ ok: boolean; opened: string[] }>;
+    /** Write a browser automation result (<reqId>.result.json) for the pi
+     *  extension's request-response protocol. */
+    browserWriteResult: (
+      reqId: string,
+      result: unknown,
+    ) => Promise<{ ok: boolean; error?: string }>;
     readEnvKey: (key: string) => Promise<string>;
   };
 
@@ -569,74 +579,6 @@ export interface ElectronAPI {
     onSshList: (cb: (data: string) => void) => () => void;
   };
   isElectron: boolean;
-
-  // ── Email (IMAP inbox / SMTP send / notifications) ─────────────────────────
-  email: {
-    configure: (partial: {
-      user: string;
-      authCode: string;
-      fromName?: string;
-      imapHost?: string;
-      imapPort?: number;
-      imapSecure?: boolean;
-      smtpHost?: string;
-      smtpPort?: number;
-      smtpSecure?: boolean;
-    }) => Promise<
-      {
-        configured: boolean;
-        user?: string;
-        imapHost?: string;
-        smtpHost?: string;
-      } & Record<string, any>
-    >;
-    getConfig: () => Promise<
-      { configured: boolean; hasAuthCode?: boolean } & Record<string, any>
-    >;
-    list: (opts?: { limit?: number }) => Promise<{
-      ok: boolean;
-      messages: Array<{
-        uid: number;
-        from: string;
-        fromAddress: string;
-        subject: string;
-        date: number;
-        seen: boolean;
-      }>;
-      error?: string;
-    }>;
-    get: (uid: number) => Promise<{
-      uid: number;
-      subject: string;
-      from: string;
-      to: string;
-      date: number;
-      text: string;
-      html: string;
-      attachments: Array<{
-        filename: string;
-        size: number;
-        contentType: string;
-      }>;
-    }>;
-    send: (msg: {
-      to: string;
-      subject?: string;
-      text?: string;
-      html?: string;
-    }) => Promise<{ accepted: string[]; messageId: string }>;
-    notify: (msg: {
-      to?: string;
-      subject?: string;
-      text?: string;
-    }) => Promise<{ accepted: string[]; messageId: string }>;
-    test: () => Promise<{
-      ok: boolean;
-      imap: { ok: boolean; message: string };
-      smtp: { ok: boolean; message: string };
-      debug: { user: string; authCodeLength: number };
-    }>;
-  };
 
   // ── Hooks (written into Helix' config.yaml `hooks:` block; backend fires them) ──
   hooks: {

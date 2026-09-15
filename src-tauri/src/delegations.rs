@@ -71,6 +71,59 @@ pub fn ensure_delegation_dir(delegation_id: &str, session_id: &str, goal: &str) 
     Some(dir)
 }
 
+/// Persist the full `prompt` actually sent to the child into the manifest's
+/// first task entry. The pi Agent tool's terminal `subagents:record` carries
+/// no prompt, so this disk copy is what survives a gateway restart: without
+/// it, a rehydrated card can only ever show the short `goal` label.
+///
+/// Best-effort, idempotent (skips when already stored), and never blocks the
+/// spawn path — any IO/parse failure is logged and swallowed.
+pub fn persist_delegation_prompt(dir: &PathBuf, prompt: &str) {
+    if prompt.is_empty() {
+        return;
+    }
+    let manifest_path = dir.join("manifest.json");
+    let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
+        return; // No manifest yet (spawn is still creating it) — nothing to update.
+    };
+    let Ok(mut manifest) = serde_json::from_str::<Value>(&raw) else {
+        eprintln!("[delegations] persist_prompt: parse failed for {manifest_path:?}");
+        return;
+    };
+    if manifest
+        .pointer("/tasks/0/prompt")
+        .and_then(Value::as_str)
+        == Some(prompt)
+    {
+        return; // Already persisted.
+    }
+    if let Some(task) = manifest
+        .get_mut("tasks")
+        .and_then(Value::as_array_mut)
+        .and_then(|t| t.first_mut())
+    {
+        if let Some(obj) = task.as_object_mut() {
+            obj.insert("prompt".to_string(), json!(prompt));
+        }
+    }
+    if let Ok(data) = serde_json::to_string_pretty(&manifest) {
+        if std::fs::write(&manifest_path, data).is_err() {
+            eprintln!("[delegations] persist_prompt: write failed for {manifest_path:?}");
+        }
+    }
+}
+
+/// First task's prompt (the full instruction actually executed by the child),
+/// if persisted. Empty on pre-prompt manifests — callers fall back to `goal`.
+fn delegation_prompt(deleg_dir: &PathBuf) -> Option<String> {
+    read_manifest_tasks(deleg_dir)
+        .first()
+        .and_then(|t| t.get("prompt"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Append one human-readable progress line to `<dir>/task-0.log`.
 ///
 /// The log is streamed line by line as the subagent runs; `delegations_list`
@@ -97,6 +150,36 @@ pub fn append_delegation_log(dir: &PathBuf, line: &str) {
         }
     } else {
         eprintln!("[delegations] log open failed for {:?}", log_path);
+    }
+}
+
+/// Persist the pi-subagents extension's own agent id into the delegation
+/// manifest. `.output` transcripts are named by that id, so it is the only
+/// key that can re-locate a child's timeline after a gateway restart (both
+/// in-memory routes — the card-bound agentId and subagent_map — die with the
+/// process). Called when the id first becomes known (background-start
+/// acknowledgement or the terminal subagents:record).
+pub fn record_delegation_agent_id(delegation_id: &str, agent_id: &str) {
+    if agent_id.is_empty() || agent_id == delegation_id {
+        return;
+    }
+    let manifest_path = delegation_live_root().join(delegation_id).join("manifest.json");
+    let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
+        return; // No manifest (never spawned through this path) — nothing to record.
+    };
+    let Ok(mut manifest) = serde_json::from_str::<Value>(&raw) else {
+        eprintln!("[delegations] record_agent_id: parse failed for {manifest_path:?}");
+        return;
+    };
+    // Idempotent: skip the rewrite when the id is already there.
+    if manifest.get("agent_id").and_then(Value::as_str) == Some(agent_id) {
+        return;
+    }
+    manifest["agent_id"] = json!(agent_id);
+    if let Ok(data) = serde_json::to_string_pretty(&manifest) {
+        if std::fs::write(&manifest_path, data).is_err() {
+            eprintln!("[delegations] record_agent_id: write failed for {manifest_path:?}");
+        }
     }
 }
 
@@ -153,6 +236,44 @@ fn delegation_session_id(deleg_dir: &PathBuf) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Manifest top-level `agent_id` (pi-subagents extension child id), if recorded.
+fn manifest_agent_id(deleg_dir: &PathBuf) -> Option<String> {
+    let manifest_path = deleg_dir.join("manifest.json");
+    let content = std::fs::read_to_string(&manifest_path).ok()?;
+    let manifest: Value = serde_json::from_str(&content).ok()?;
+    manifest
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// First task's goal — the sub-agent card description when rebuilding from disk.
+fn delegation_goal(deleg_dir: &PathBuf) -> Option<String> {
+    read_manifest_tasks(deleg_dir)
+        .first()
+        .and_then(|t| t.get("goal"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// First task's terminal status (running while the child still executes).
+fn delegation_status(deleg_dir: &PathBuf) -> Option<String> {
+    read_manifest_tasks(deleg_dir)
+        .first()
+        .and_then(|t| t.get("status"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// First task's summary (written by mark_delegation_finished).
+fn delegation_summary(deleg_dir: &PathBuf) -> Option<String> {
+    read_manifest_tasks(deleg_dir)
+        .first()
+        .and_then(|t| t.get("summary"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// Read manifest.json `tasks` array for a delegation dir (goal / status per
 /// child task, matched by `task-N` index). Best-effort: empty on any failure.
 fn read_manifest_tasks(deleg_dir: &PathBuf) -> Vec<Value> {
@@ -171,11 +292,25 @@ fn read_manifest_tasks(deleg_dir: &PathBuf) -> Vec<Value> {
 }
 
 #[tauri::command]
-pub fn delegations_list(session_id: Option<String>) -> Value {
+pub fn delegations_list(session_id: Option<Value>) -> Value {
     let root = delegation_live_root();
     if !root.exists() {
         return json!({ "ok": true, "delegations": [] });
     }
+    // Filter key(s): one sid string, or an array of sids — a conversation can
+    // own delegations across several backend sessions (session/new after
+    // /clear, resume-recreate after a restart), so the frontend passes every
+    // sid the conversation has ever used.
+    let wanted_sids: Vec<String> = match &session_id {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let filter = !wanted_sids.is_empty();
 
     let mut delegations = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&root) {
@@ -186,10 +321,10 @@ pub fn delegations_list(session_id: Option<String>) -> Value {
             }
 
             // Filter by session if requested — read manifest.json.
-            if let Some(ref sid) = session_id {
-                if delegation_session_id(&path).as_ref() != Some(sid) {
-                    continue;
-                }
+            if filter
+                && !wanted_sids.contains(&delegation_session_id(&path).unwrap_or_default())
+            {
+                continue;
             }
 
             let dir_name = path
@@ -266,6 +401,17 @@ pub fn delegations_list(session_id: Option<String>) -> Value {
                 "id": dir_name,
                 "path": root.join(&dir_name).to_string_lossy(),
                 "tasks": tasks,
+                // Extension-side child id (.output transcript name) — lets the
+                // frontend locate the timeline across gateway restarts.
+                "agent_id": manifest_agent_id(&path),
+                "session_id": delegation_session_id(&path),
+            // Top-level `prompt` — the full instruction actually executed by
+            // the child (persisted by persist_delegation_prompt). Absent on
+            // old manifests; the frontend falls back to `goal`.
+            "prompt": delegation_prompt(&path),
+            "status": delegation_status(&path),
+            "goal": delegation_goal(&path),
+            "summary": delegation_summary(&path),
             }));
         }
     }
@@ -302,42 +448,71 @@ fn read_tail(path: &PathBuf, lines: usize) -> String {
 // ── pi-subagents .output transcripts ─────────────────────────────────────────
 //
 // The pi-subagents extension streams each child's conversation to
-//   %TEMP%\pi-subagents-0\<encoded-cwd>\<pi session id>\tasks\<agent id>.output
+//   ~/.pi/agent/subagent-tasks/<encoded-cwd>/<pi session id>/tasks/<agent id>.output
 // as JSONL (matching Claude Code's task output format). Background children
 // report nothing back to the parent session (their onUpdate stream ends when
 // the Agent tool returns), so this file is the only live record of what a
 // running sub-agent is doing. The command below turns it into a compact
 // tool-call timeline the sidebar can poll.
 
-/// Mirror of output-file.ts `encodeCwd`: separators → '-', strip Windows drive
-/// prefix and leading dashes.
+/// Mirror of output-file.ts `encodeCwd`: separators → '-', strip the Windows
+/// DRIVE prefix ("D:-") and then leading dashes. The old implementation used a
+/// trim_start_matches character CLASS (alphabetic || ':' || '-'), which for
+/// "D:-Project-Helix" consumed the entire string — every Windows path encoded
+/// to "" and the direct transcript lookup could never hit.
 fn encode_cwd(cwd: &str) -> String {
-    cwd.replace(['/', '\\'], "-")
-        .trim_start_matches(|c: char| c.is_ascii_alphabetic() || c == ':' || c == '-')
-        .trim_start_matches('-')
-        .to_string()
+    let mut s: String = cwd.replace(['/', '\\'], "-");
+    // Strip a drive prefix: exactly one [A-Za-z] + ':' + '-' run, not a class.
+    let bytes: Vec<char> = s.chars().collect();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == ':' && bytes[2] == '-'
+    {
+        s = s.chars().skip(3).collect();
+    }
+    s.trim_start_matches('-').to_string()
+}
+
+/// The extension's transcript roots, newest first. The current root is
+/// ~/.pi/agent/subagent-tasks (moved out of the OS tmp dir so transcripts
+/// survive restarts — the tmp copy only exists for pre-move versions).
+fn subagent_task_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".pi").join("agent").join("subagent-tasks"));
+    }
+    roots.push(std::env::temp_dir().join("pi-subagents-0"));
+    roots
 }
 
 /// Best-effort `.output` path for a pi-subagents child. Direct layout first;
 /// unknown cwd/session falls back to scanning every encoded dir for the id.
-fn find_output_file(agent_id: &str, cwd: Option<&str>, session_id: Option<&str>) -> Option<PathBuf> {
-    let tmp = std::env::temp_dir();
-    let root = tmp.join("pi-subagents-0");
+fn find_output_file(
+    agent_id: &str,
+    cwd: Option<&str>,
+    session_id: Option<&str>,
+) -> Option<PathBuf> {
     let file_name = format!("{agent_id}.output");
-    if let (Some(cwd), Some(sid)) = (cwd, session_id) {
-        let direct = root.join(encode_cwd(cwd)).join(sid).join("tasks").join(&file_name);
-        if direct.is_file() {
-            return Some(direct);
+    for root in subagent_task_roots() {
+        if let (Some(cwd), Some(sid)) = (cwd, session_id) {
+            let direct = root
+                .join(encode_cwd(cwd))
+                .join(sid)
+                .join("tasks")
+                .join(&file_name);
+            if direct.is_file() {
+                return Some(direct);
+            }
         }
-    }
-    // Fallback: search every project dir for this agent's transcript.
-    let entries = std::fs::read_dir(&root).ok()?;
-    for proj in entries.flatten() {
-        let Ok(sessions) = std::fs::read_dir(proj.path()) else { continue };
-        for sess in sessions.flatten() {
-            let candidate = sess.path().join("tasks").join(&file_name);
-            if candidate.is_file() {
-                return Some(candidate);
+        // Fallback: search every project dir for this agent's transcript.
+        let entries = std::fs::read_dir(&root).ok()?;
+        for proj in entries.flatten() {
+            let Ok(sessions) = std::fs::read_dir(proj.path()) else {
+                continue;
+            };
+            for sess in sessions.flatten() {
+                let candidate = sess.path().join("tasks").join(&file_name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -385,7 +560,9 @@ fn preview_of(message: &Value) -> Option<String> {
 
 /// First string value of a toolCall arguments object (command / prompt / path…).
 fn arg_preview(args: Option<&Value>) -> Option<String> {
-    let Value::Object(map) = args? else { return None };
+    let Value::Object(map) = args? else {
+        return None;
+    };
     for v in map.values() {
         if let Value::String(s) = v {
             if !s.is_empty() {
@@ -413,15 +590,16 @@ pub fn subagent_timeline(
 
     let mut timeline: Vec<SubagentTimelineEntry> = Vec::new();
     // toolCallId → index in `timeline`, so a toolResult closes its open call.
-    let mut open_calls: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut open_calls: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for line in content.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         // Skip the initial prompt entry (the raw user prompt) and compaction
         // artifacts — the timeline is tool activity.
-        let Some(message) = entry.get("message") else { continue };
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
         let ts = entry
             .get("timestamp")
             .and_then(Value::as_str)
@@ -469,7 +647,11 @@ pub fn subagent_timeline(
                 let preview = preview_of(message);
                 if let Some(idx) = open_calls.remove(&call_id) {
                     let e = &mut timeline[idx];
-                    e.status = if is_error { "error".into() } else { "success".into() };
+                    e.status = if is_error {
+                        "error".into()
+                    } else {
+                        "success".into()
+                    };
                     if preview.is_some() {
                         e.preview = preview;
                     }
@@ -484,7 +666,11 @@ pub fn subagent_timeline(
                         .and_then(Value::as_str)
                         .map(str::to_string),
                     preview,
-                    status: if is_error { "error".into() } else { "success".into() },
+                    status: if is_error {
+                        "error".into()
+                    } else {
+                        "success".into()
+                    },
                     timestamp: ts,
                 });
             }
@@ -501,4 +687,25 @@ pub fn subagent_timeline(
         "total": total,
         "entries": &timeline[start..],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_cwd;
+
+    #[test]
+    fn encode_cwd_matches_extension_layout() {
+        // Mirror of output-file.ts: separators → '-', strip "D:-" drive prefix,
+        // strip leading dashes. The old char-class trim turned these into "".
+        assert_eq!(encode_cwd(r"D:\Project\Helix"), "Project-Helix");
+        assert_eq!(encode_cwd("D:/Project/Helix"), "Project-Helix");
+        assert_eq!(
+            encode_cwd(r"C:\Users\hyt\.pi\agent\sessions"),
+            "Users-hyt-.pi-agent-sessions"
+        );
+        // POSIX paths: no drive prefix, keep the whole path.
+        assert_eq!(encode_cwd("/home/user/proj"), "home-user-proj");
+        // No separators at all.
+        assert_eq!(encode_cwd("proj"), "proj");
+    }
 }

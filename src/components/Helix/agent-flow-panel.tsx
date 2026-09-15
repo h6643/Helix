@@ -20,6 +20,7 @@ import {
   Hand,
   AlertTriangle,
   GitBranch,
+  GitFork,
   Undo2,
   Archive,
   Link,
@@ -41,6 +42,7 @@ import {
   type PlanReviewRequest,
 } from "./approval-dialog";
 import { ContextUsageIndicator } from "./context-usage";
+import { looksLikeUnifiedDiff } from "./diff-preview";
 import { FileChangeSummary } from "./file-change-summary";
 import { FileChangeSummaryCard } from "./file-change-summary-card";
 import { HelixMarkdown } from "./helix-markdown";
@@ -135,6 +137,21 @@ async function persistSessionMap(map: Map<string, SessionMapEntry>) {
   }
 }
 
+/** Update a conversation's mapping to a (possibly new) backend sid, keeping
+ *  every sid it previously used in `sids`. Disk delegation manifests stay
+ *  filed under the sid that was live when the child ran — without the
+ *  history, /clear or a restart-rebuild switches the conversation to a fresh
+ *  sid and its sub-agent records become unreachable. */
+function rebindSessionSid(
+  map: Map<string, SessionMapEntry>,
+  cid: string,
+  next: Omit<SessionMapEntry, "sids">,
+) {
+  const prev = map.get(cid);
+  const sids = new Set([...(prev?.sids || []), ...(prev ? [prev.sid] : []), next.sid]);
+  map.set(cid, { ...next, sids: [...sids] });
+}
+
 // mergeAdjacentThinking merges runs of consecutive thinking blocks: a
 // cumulative superset replaces the earlier one, disjoint segments are
 // concatenated. Runs only become adjacent when there was no tool/text between
@@ -149,11 +166,24 @@ function mergeAdjacentThinking(
     if (block.type === "thinking" && prev && prev.type === "thinking") {
       const prevC = String(prev.content || "");
       const curC = String(block.content || "");
-      const content = curC.includes(prevC)
-        ? curC
-        : prevC.includes(curC)
-          ? prevC
-          : `${prevC}\n\n${curC}`;
+      const prevN = normalizeForCompare(prevC);
+      const curN = normalizeForCompare(curC);
+      let content: string;
+      if (curC.includes(prevC)) {
+        content = curC;
+      } else if (prevC.includes(curC)) {
+        content = prevC;
+      } else if (
+        prevN.length >= 8 &&
+        curN.length >= 8 &&
+        textSimilarityRatio(prevN, curN) >= 0.7
+      ) {
+        // 归一化后高度相似：视为累积重发或改写，取更长的一份
+        content = curC.length >= prevC.length ? curC : prevC;
+      } else {
+        // 无重叠：真正的独立思考段
+        content = `${prevC}\n\n${curC}`;
+      }
       out[out.length - 1] = { ...prev, content };
     } else {
       out.push(block);
@@ -194,8 +224,11 @@ type ProcessSegment<T extends { type: string }> = {
 // 段内思考文本合并：后端两种流式形态混发时（有的 chunk 是增量、有的是
 // 累积全文重发），相邻块会出现"后块包含前块全文"的重复；steering/重试还会
 // 把整段思考近似原样重发（首尾略改）。直接 join 会把同一段思考渲染 N 遍。
-// 去重三层：① includes（精确累积/重复）② 高相似度（复用文本块的
-// textSimilarityRatio，≥0.85 视为重发，取更长的）③ 独立段才以空行连接。
+// 去重只做两层：① includes（精确累积/重复，取更全的一份）② 独立段以空行连接。
+// 不做模糊相似度合并——"两段话共用了大量措辞"≠"同一段思考的重发"：
+// 模型先想 A 方案再改口想 B 方案、或思考里反复引用同一段需求描述时，
+// 相似度会误判为 1.0（textSimilarityRatio 的 0.6 阈值对思考文本过松），
+// 旧段被新段顶掉，已渲染出来的思考凭空消失。
 function mergeThinkingContents(contents: string[]): string {
   let merged = "";
   for (const raw of contents) {
@@ -207,11 +240,6 @@ function mergeThinkingContents(contents: string[]): string {
     }
     if (cur.includes(merged) || merged.includes(cur)) {
       // 累积重发 / 完全重复 → 取更全的那份
-      merged = cur.length > merged.length ? cur : merged;
-      continue;
-    }
-    if (textSimilarityRatio(merged, cur) >= 0.85) {
-      // 近似重发（steering/重试整段重贴，首尾微改）→ 取更全的那份
       merged = cur.length > merged.length ? cur : merged;
       continue;
     }
@@ -274,15 +302,15 @@ const ThinkingFold = React.memo(function ThinkingFold({
 }) {
   const { status: kaomojiStatus, body: rawBody } = extractKaomojiStatus(content);
   // 空行规整：流式思考里后端/模型常连发多个空行，pre-wrap + markdown
-  // 段落间距叠加会把它们渲染成大片视觉空白。连续空行压成单个，行内
-  // 首尾空白去掉。
+  // 段落间距叠加会把它们渲染成大片视觉空白。连续空行压成单个换行（不保留
+  // 空行），行内首尾空白去掉。
   const body = useMemo(
     () =>
       rawBody
         .split("\n")
         .map((l) => l.trimEnd())
         .join("\n")
-        .replace(/\n{3,}/g, "\n\n")
+        .replace(/\n{2,}/g, "\n")
         .trim(),
     [rawBody],
   );
@@ -300,6 +328,33 @@ const ThinkingFold = React.memo(function ThinkingFold({
   const [userOpen, setUserOpen] = useState(false);
   const open = active || userOpen;
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const userClickedRef = useRef(false);
+
+  // 流式展开时强制打开 <details>（不触发 onToggle）
+  const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  useEffect(() => {
+    const el = detailsRef.current;
+    if (!el) return;
+    if (active && !el.open) {
+      el.open = true;
+    } else if (!active && !userOpen) {
+      el.open = false;
+    }
+  }, [active, userOpen]);
+
+  const handleToggle = useCallback(
+    (e: React.ToggleEvent<HTMLDetailsElement>) => {
+      if (userClickedRef.current) {
+        userClickedRef.current = false;
+        setUserOpen(e.currentTarget.open);
+      }
+    },
+    [],
+  );
+
+  const handleSummaryClick = useCallback(() => {
+    userClickedRef.current = true;
+  }, []);
   // 思考中 + 已展开 → 限高体内自动贴底跟随（用户上翻查看时 scrollTop 由
   // 浏览器保持，effect 只在内容变化时拉到底会打断上翻——所以仅 active 时拉）。
   useEffect(() => {
@@ -310,11 +365,12 @@ const ThinkingFold = React.memo(function ThinkingFold({
 
   return (
     <details
+      ref={detailsRef}
       className="thinking-fold group/details"
       open={open}
-      onToggle={(e) => setUserOpen((e.target as HTMLDetailsElement).open)}
+      onToggle={handleToggle}
     >
-      <summary>
+      <summary onClick={handleSummaryClick}>
         <ThinkGlyph active={active} />
         <span className="think-title" style={{ fontSize }}>
           {active ? status || kaomojiStatus || "思考中" : "思考"}
@@ -329,8 +385,6 @@ const ThinkingFold = React.memo(function ThinkingFold({
             · {formatDuration(duration)}
           </span>
         ) : null}
-
-        <FoldChevron />
       </summary>
       <div
         ref={bodyRef}
@@ -344,7 +398,7 @@ const ThinkingFold = React.memo(function ThinkingFold({
             active={isSearchActive}
           />
         ) : (
-          <HelixMarkdown text={body} />
+          <HelixMarkdown text={body} foldCode={false} />
         )}
       </div>
     </details>
@@ -565,60 +619,6 @@ function isNearDuplicate(aN: string, bN: string): boolean {
   );
 }
 
-// reconcileBlocksWithContent repairs streaming-accumulated text blocks using
-// the authoritative msg.content. The forwarding chain intermittently drops
-// whitespace/newlines inside streamed chunks (e.g. "**加粗** 后" glued into
-// "**加粗**后"), which breaks CommonMark strong rendering (a `**` closer must
-// be followed by whitespace/punctuation). The done handler already repairs
-// msg.content from the backend's final text; here we apply the same fix to the
-// blocks path so rendering matches.
-//
-// CRITICAL FIX (2026-09-02): Always replace text blocks with authoritative
-// content, never skip. Old logic would skip replacement when blocks matched
-// content (normalized comparison), but that left streaming-stage raw text
-// rendered alongside done-stage preprocessed text, causing duplicate display.
-// Now we always consolidate ALL text into a single block at the END of the
-// block list, ensuring only the authoritative (preprocessed) version renders.
-function reconcileBlocksWithContent(
-  blocks: NonNullable<ChatMessage["blocks"]>,
-  content?: string | null,
-): NonNullable<ChatMessage["blocks"]> {
-  if (!content || blocks.length === 0) return blocks;
-  const textBlocks = blocks.filter((b) => b.type === "text");
-  if (textBlocks.length === 0) return blocks;
-  const joined = textBlocks.map((b) => String(b.content || "")).join("");
-  if (!joined) return blocks;
-  const normJoined = normalizeForCompare(joined);
-  const normContent = normalizeForCompare(content);
-  if (!normJoined || !normContent) return blocks;
-  if (
-    normJoined !== normContent &&
-    !normJoined.includes(normContent) &&
-    !normContent.includes(normJoined)
-  )
-    return blocks;
-  if (content.length < joined.length) return blocks;
-  // Same-or-fuller authoritative text: consolidate ALL text into a single
-  // block pinned to the END of the block list, after every thinking /
-  // tool_group / file_change block. Earlier text blocks are blanked
-  // (normalizeTextBlocks filters empty ones).
-  //
-  // Why pin to the end instead of keeping the first/last text block's
-  // original position: this model (and several reasoning providers) emits
-  // thinking chunks AFTER the final answer text, so the block list can be
-  // [text, thinking] or [thinking, text, thinking]. If the consolidated
-  // answer stays at an early position, the renderer's lastTextIndex split
-  // puts the trailing thinking cards into the "answer" zone — the user sees
-  // the conclusion first and a collapsed 思考 card dangling BELOW it
-  // (2026-08-18 bug). The answer text is semantically the final word of the
-  // run, so pinning it last is always correct.
-  const lastTextBlock = textBlocks[textBlocks.length - 1];
-  const rest = blocks.map((b) =>
-    b.type === "text" ? { ...b, content: "" } : b,
-  );
-  return [...rest, { ...lastTextBlock, content }];
-}
-
 function normalizeTextBlocks(
   blocks: NonNullable<ChatMessage["blocks"]>,
 ): NonNullable<ChatMessage["blocks"]> {
@@ -707,9 +707,6 @@ function normalizeTextBlocks(
         }
       }
       if (!matched && curN.length >= 12) {
-        // Not caught by the adjacent-pair rules: test against the FULL
-        // accumulated text for a resend that landed after other blocks in
-        // between (e.g. tool_group / thinking) and differs in bytes.
         const concatN = normalizeForCompare(prevConcat);
         if (
           concatN.length >= 12 &&
@@ -718,18 +715,12 @@ function normalizeTextBlocks(
             curN.includes(concatN) ||
             textSimilarityRatio(concatN, curN) >= 0.6)
         ) {
-          if (curN.length >= concatN.length) {
-            // Newer block contains (a rewrite of) everything so far — it IS
-            // the whole message now: blank all older text, reset accumulators.
-            for (let i = 0; i < rendered.length; i++) {
-              const b = rendered[i];
-              if (b.type === "text") rendered[i] = { ...b, content: "" };
-            }
-            prevConcat = "";
-            lastKept = "";
-          } else {
-            out = "";
-          }
+          // The backend frequently re-sends the full accumulated text after
+          // tool calls. DO NOT blank older text blocks — they represent
+          // distinct paragraphs interleaved with tool calls. Just skip this
+          // duplicate/superset block (out="" → filtered by the empty-text
+          // filter at the end) so only the interleaved originals render.
+          out = "";
           matched = true;
         }
       }
@@ -1446,36 +1437,38 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 // "思考→执行→再思考→再执行"的叙事节奏），段内合并同类块。
                 // 每段一张折叠卡（思考段 / N 个操作），持久化结构不受影响。
                 const normalizedBlocks = mergeAdjacentThinking(
-                  normalizeTextBlocks(
-                    reconcileBlocksWithContent(msg.blocks, msg.content),
-                  ),
+                  normalizeTextBlocks(msg.blocks),
                 );
                 // 保持原始交替顺序：思考/工具/文本按时间序排列，
                 // 不再合并文本到末尾，确保思考→执行→总结的交叉节奏。
                 const consolidatedBlocks = normalizedBlocks;
-                const lastTextIndex = consolidatedBlocks.reduce(
-                  (acc, b, i) =>
-                    b.type === "text" && String(b.content || "").trim()
-                      ? i
-                      : acc,
-                  -1,
-                );
-                const processBlocks =
-                  lastTextIndex >= 0
-                    ? consolidatedBlocks.slice(0, lastTextIndex)
-                    : consolidatedBlocks;
-                const answerBlocks =
-                  lastTextIndex >= 0
-                    ? consolidatedBlocks.slice(lastTextIndex)
-                    : [];
                 const showInlineReasoning = !!(
                   msg.reasoning &&
                   msg.reasoning.trim().length > 0 &&
                   !(msg.blocks && msg.blocks.some((b) => b.type === "thinking"))
                 );
-                // 交替段：思考段一张折叠卡，工具段一张折叠卡。
-                const processSegments = segmentizeProcessBlocks(processBlocks);
-                // 完成态摘要的操作计数：N 个操作。
+                // 完成态：思考+工具折叠，最后总结文本留在外面不折叠。
+                const processBlocks = consolidatedBlocks;
+                const answerBlocks = consolidatedBlocks.slice(0, 0);
+                const allSegments = segmentizeProcessBlocks(processBlocks);
+                // 把最后一个 text 段（总结）提出来放折叠外面；其后的段（模型
+                // 在回答后又发的 thinking / 工具卡）一并折进「已完成」折叠卡，
+                // 不悬挂在结论下方、也不静默丢弃。
+                let lastTextIdx = -1;
+                for (let i = allSegments.length - 1; i >= 0; i--) {
+                  if (allSegments[i].kind === "text") {
+                    lastTextIdx = i;
+                    break;
+                  }
+                }
+                const processSegments =
+                  lastTextIdx >= 0
+                    ? allSegments.slice(0, lastTextIdx).concat(
+                        allSegments.slice(lastTextIdx + 1),
+                      )
+                    : allSegments;
+                const summarySegment =
+                  lastTextIdx >= 0 ? allSegments[lastTextIdx] : null;
                 const processOpCount = summarizeTaskBlocks(processBlocks).total;
                 const hasProcess =
                   processSegments.length > 0 || showInlineReasoning;
@@ -1486,25 +1479,23 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 return (
                   <>
                     {hasProcess && (
-                      // 二级折叠：外层「过程」把本轮所有中间产物（思考 + 任务执行）
-                      // 收成一行；展开后才是原来各自独立的思考/任务执行折叠。
-                      // 流式期间默认展开（能看进度），结束后自动收起。
-                      <details
-                        className="my-2 group/details"
-                        open={isStreaming}
-                      >
-                        <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
-                          <FoldTitle
-                            label={isStreaming ? "" : "已完成"}
-                            active={isStreaming}
-                            fontSize={fontSize}
-                          />
-                          {!isStreaming && processDuration ? (
-                            <span className="tabular-nums text-foreground/25">
-                              {processDuration}
-                            </span>
-                          ) : null}
-                          <FoldChevron />
+                      <details className="my-2 group/details">
+                        <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors mb-1">
+                          {!isStreaming && (
+                            <>
+                              <FoldTitle
+                                label="已完成"
+                                active={false}
+                                fontSize={fontSize}
+                              />
+                              {processDuration ? (
+                                <span className="tabular-nums text-foreground/25">
+                                  {processDuration}
+                                </span>
+                              ) : null}
+                              <FoldChevron />
+                            </>
+                          )}
                         </summary>
                         <div className="mt-1">
                           {showInlineReasoning && (
@@ -1520,8 +1511,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                           )}
                           <div className="my-2 space-y-2">
                             {processSegments.map((seg, si) => {
-                              // 交替段：思考段一张 ThinkingFold，工具段一张
-                              // ToolStreamFold，文本段按原样渲染 markdown。
                               if (seg.kind === "thinking") {
                                 const segContent = mergeThinkingContents(
                                   seg.blocks.map((b) =>
@@ -1611,6 +1600,40 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                           </div>
                         </div>
                       </details>
+                    )}
+                    {summarySegment && (
+                      <div className="my-2" style={{ fontSize }}>
+                        {summarySegment.blocks.map((b, i) => {
+                          if (b.type === "text") {
+                            return (
+                              <div key={i}>
+                                {searchOpen && searchQuery.trim() ? (
+                                  <div className="whitespace-pre-wrap break-words">
+                                    <HighlightText
+                                      text={normalizeAcpContentRaw(b.content)}
+                                      query={searchQuery}
+                                      active={isSearchActive}
+                                    />
+                                  </div>
+                                ) : (
+                                  <HelixMarkdown
+                                    text={normalizeAcpContentRaw(b.content)}
+                                  />
+                                )}
+                              </div>
+                            );
+                          }
+                          if (b.type === "file_change") {
+                            return (
+                              <FileChangeSummary
+                                key={i}
+                                changes={b.changes}
+                              />
+                            );
+                          }
+                          return null;
+                        })}
+                      </div>
                     )}
                     {answerBlocks.length > 0 && (
                       <div
@@ -1717,14 +1740,19 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                 className="p-1 rounded-lg text-muted-foreground/40 hover:text-blue-500 hover:bg-blue-500/10 transition-colors"
                 data-tip="分叉对话"
               >
-                <GitBranch className="size-3" />
+                <GitFork className="size-3" />
               </button>
             </div>
           </div>
         </div>
       ) : (
-        <div className="group max-w-[80%]">
-          {/* Claude Code 终端风用户消息：扁平边框卡，无底色无阴影 */}
+        <div className="group w-fit max-w-[80%]">
+          {/* Claude Code 终端风用户消息：扁平边框卡，无底色无阴影。
+              气泡宽 = w-fit（能多窄多窄）+ max-w-[80%]（封顶）。短消息缩到文字宽 →
+              单行 → 单行即 justify 的末行 → 不拉伸；长消息封顶 80% 换行 → 缝隙多，
+              每缝 <1px，右缘齐平且看不出拉伸。文本 text-justify（两端对齐）消除行尾锯齿，
+              末行仍保持左对齐（justify 的默认行为）。break-words 仍保留，防长
+              token（URL/base64）溢出。改气泡宽只调 80% 这个值。 */}
           <div className="px-4 py-2.5 rounded-xl border border-border bg-transparent text-foreground">
             {msg.images && msg.images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2">
@@ -1767,9 +1795,9 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             )}
             {content && (
-              <div className="leading-normal" style={{ fontSize }}>
+              <div className="leading-normal text-justify" style={{ fontSize }}>
                 {searchOpen && searchQuery.trim() ? (
-                  <div className="whitespace-pre-wrap">
+                  <div className="whitespace-pre-wrap break-words">
                     <HighlightText
                       text={content}
                       query={searchQuery}
@@ -1777,20 +1805,22 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                     />
                   </div>
                 ) : (
-                  <div className="whitespace-pre-wrap">{content}</div>
+                  <div className="whitespace-pre-wrap break-words">{content}</div>
                 )}
               </div>
             )}
           </div>
           {/* Action buttons below user message */}
           <div className="flex justify-end items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
-            <button
-              onClick={() => onUndo?.()}
-              className="p-1 rounded-lg text-muted-foreground/40 hover:text-amber-500 hover:bg-amber-500/10 transition-colors"
-              data-tip="撤回本轮对话"
-            >
-              <Undo2 className="size-3" />
-            </button>
+            {onUndo && (
+              <button
+                onClick={() => onUndo()}
+                className="p-1 rounded-lg text-muted-foreground/40 hover:text-amber-500 hover:bg-amber-500/10 transition-colors"
+                data-tip="撤回本轮对话"
+              >
+                <Undo2 className="size-3" />
+              </button>
+            )}
             <CopyButton text={content} />
           </div>
         </div>
@@ -1844,6 +1874,8 @@ export function AgentFlowPanel() {
   const [showFolderDropdown, setShowFolderDropdown] = useState(false);
   const [showApprovalModeDropdown, setShowApprovalModeDropdown] =
     useState(false);
+  // 历史条悬停时淡出对话内容，避免展开的标题与模型输出重叠
+  const [historyStripHover, setHistoryStripHover] = useState(false);
 
   // 项目选择器状态
   const [projectFolders, setProjectFolders] = useState<string[]>([]);
@@ -1945,7 +1977,6 @@ export function AgentFlowPanel() {
   const synthDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forceDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedSessionRef = useRef(false);
-  const sharedTextBufferRef = useRef<string>("");
   const thoughtBufferRef = useRef<string>("");
   const thinkingStartTimeRef = useRef<number>(0);
   const thinkingDurationRef = useRef<number>(0);
@@ -2013,9 +2044,6 @@ export function AgentFlowPanel() {
   const [streamThinking, setStreamThinking] = useState<string>("");
   const streamThinkingRef = useRef("");
   streamThinkingRef.current = streamThinking;
-  // Anchors the live timer to the moment the USER sends a question, so it keeps
-  // ticking across any sub-runs (agent tool loops) instead of resetting per run.
-  const [questionStartTs, setQuestionStartTs] = useState<number>(0);
   const [streamTotalTokens, setStreamTotalTokens] = useState<number>(0);
 
   const apiConfig = useHelixStore((s) => s.apiConfig);
@@ -2148,8 +2176,8 @@ export function AgentFlowPanel() {
           `${(compressionNotice.beforeTokens / 1000).toFixed(0)}k → ${(compressionNotice.afterTokens / 1000).toFixed(0)}k`,
         );
       }
-      if (compressionNotice.removed != null) {
-        parts.push(`移除 ${compressionNotice.removed} 条`);
+      if (compressionNotice.removed != null && compressionNotice.removed > 0) {
+        parts.push(`减少 ${Math.round(compressionNotice.removed / 1000)}k token`);
       }
       const anchorIndex = compressionNotice.anchorMessageId
         ? items.findIndex(
@@ -2361,6 +2389,28 @@ export function AgentFlowPanel() {
     (isChatLoading &&
       !!runningSessionIdRef.current &&
       runningSessionIdRef.current === currentSessionId);
+
+  // Force re-render every second while streaming so the elapsed timer updates.
+  // 计时锚点按会话取：streamingDrafts[currentSessionId].startedAt 是该会话自己
+  // run 的启动时刻；并发多会话时共享的 runStartedAtRef 已被后启动的 run 覆盖，
+  // 用它会让两个对话显示同一段时长（"切来切去时间一样"根因）。仅在 draft 缺失
+  // （如老快照无 startedAt）时才回退共享 ref。
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  useEffect(() => {
+    if (!streamingActive) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const anchor =
+      (currentSessionId
+        ? streamingDrafts[currentSessionId]?.startedAt
+        : undefined) || runStartedAtRef.current;
+    const tick = () =>
+      setElapsedSeconds(Math.max(0, Math.round((Date.now() - anchor) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [streamingActive, currentSessionId, streamingDrafts]);
   // Defensive trace: log transitions so we can catch silent session drift.
   const prevIsRunningRef = useRef<boolean>(isRunning);
   useEffect(() => {
@@ -2375,26 +2425,6 @@ export function AgentFlowPanel() {
     }
   }, [isRunning, currentSessionId, isRunningSession]);
 
-  // Email notification: when an agent run for the active session finishes and
-  // notifications are enabled + an account is configured, email a short summary.
-  const prevRunningForNotifyRef = useRef(false);
-  useEffect(() => {
-    const wasRunning = prevRunningForNotifyRef.current;
-    prevRunningForNotifyRef.current = isRunning;
-    if (wasRunning && !isRunning && isRunningSession) {
-      const st = useHelixStore.getState();
-      if (st.emailNotifyEnabled && st.emailConfigured) {
-        const lastText =
-          (sharedTextBufferRef.current || "").slice(-800) || "(无文本输出)";
-        window.electron.email
-          .notify({
-            subject: "Helix：Agent 运行已完成",
-            text: `本次对话已完成。\n\n最后输出摘要：\n${lastText}`,
-          })
-          .catch(() => {});
-      }
-    }
-  }, [isRunning, isRunningSession]);
   const displaySteps = useMemo(() => {
     // Only show live state if viewing the run that currently owns it; otherwise
     // fall back to that conversation's own draft so a promoted run that hasn't
@@ -2555,7 +2585,7 @@ export function AgentFlowPanel() {
     helixSessionIdRef.current = helixSid;
     try {
       useGatewayStore.getState().setHelixSessionId(helixSid);
-    } catch {}
+    } catch { /* empty */}
   }, [currentSessionId]);
 
   // Restore persisted per-conversation sessions on mount so the conversation→
@@ -2573,7 +2603,7 @@ export function AgentFlowPanel() {
         helixSessionIdRef.current = sid;
         try {
           useGatewayStore.getState().setHelixSessionId(sid);
-        } catch {}
+        } catch { /* empty */}
       })
       .catch(() => {});
     return () => {
@@ -2604,7 +2634,7 @@ export function AgentFlowPanel() {
     return () => {
       try {
         unsub?.();
-      } catch {}
+      } catch { /* empty */}
     };
   }, []);
 
@@ -2633,9 +2663,10 @@ export function AgentFlowPanel() {
           .then((res: any) => {
             if (!res) return;
             // 重绑成功：刷新映射 epoch 并恢复全局绑定
-            sessionMapRef.current.set(cid, {
+            rebindSessionSid(sessionMapRef.current, cid, {
               sid: entry.sid,
               epoch: useGatewayStore.getState().gatewayEpoch,
+              storedId: entry.storedId,
             });
             persistSessionMap(sessionMapRef.current);
             useGatewayStore.getState().setHelixSessionId(entry.sid);
@@ -2652,7 +2683,7 @@ export function AgentFlowPanel() {
     return () => {
       try {
         unsub?.();
-      } catch {}
+      } catch { /* empty */}
     };
   }, []);
   // 孤儿 usage 事件兜底：usage:prompt-complete 是上下文环（contextUsage）的唯一
@@ -2697,7 +2728,7 @@ export function AgentFlowPanel() {
     return () => {
       try {
         unsubUsage?.();
-      } catch {}
+      } catch { /* empty */}
     };
   }, []);
   // When an SSH connection is established, reload MCP tools for the active
@@ -2721,7 +2752,7 @@ export function AgentFlowPanel() {
     return () => {
       try {
         unsubSsh?.();
-      } catch {}
+      } catch { /* empty */}
     };
   }, [currentSessionId]);
   // Resolve current git branch for the empty-state breadcrumb.
@@ -2889,7 +2920,7 @@ export function AgentFlowPanel() {
     if (isElectron() && currentSid) {
       try {
         electronHelix.notify("session/cancel", { session_id: currentSid });
-      } catch {}
+      } catch { /* empty */}
     }
     // 2) Invalidate the session so the next prompt rebuilds it from config.yaml.
     useGatewayStore.getState().setHelixSessionId(null);
@@ -3157,11 +3188,6 @@ export function AgentFlowPanel() {
         description: "压缩上下文",
         action: "compact" as const,
       },
-      {
-        name: "image",
-        description: "生成一张图片：/image <prompt>",
-        action: "image" as const,
-      },
     ],
     [],
   );
@@ -3363,7 +3389,7 @@ export function AgentFlowPanel() {
             return;
           }
         }
-      } catch {}
+      } catch { /* empty */}
       try {
         // Fallback: scan workspace tree
         const tree = await window.electron.fs.scanTree(".");
@@ -3384,7 +3410,7 @@ export function AgentFlowPanel() {
           walk(tree, "");
           workspaceFilesRef.current = files;
         }
-      } catch {}
+      } catch { /* empty */}
     })();
   }, []);
 
@@ -3736,10 +3762,6 @@ export function AgentFlowPanel() {
 
   // Run agent task
   const handleRun = useCallback(async () => {
-    // Alias of the component-level shared textBufferRef — the run shadows that
-    // name with its own local buffer below, but the finally block still needs to
-    // refresh the shared one for the email-notify effect.
-    const outerTextBufferRef = sharedTextBufferRef;
     const currentInput = inputValueRef.current;
     const cmd = resolveCommand(currentInput.trim());
     const baseTrimmed = currentInput.trim();
@@ -3873,7 +3895,7 @@ export function AgentFlowPanel() {
               // 压缩成功说明 sid 在后端活着（可能刚被透明恢复）：刷新映射 epoch 并
               // 恢复全局绑定，让 handleRun / context-usage 后续都命中同一会话。
               if (currentSessionId) {
-                sessionMapRef.current.set(currentSessionId, {
+                rebindSessionSid(sessionMapRef.current, currentSessionId, {
                   sid,
                   epoch: useGatewayStore.getState().gatewayEpoch,
                 });
@@ -3881,7 +3903,7 @@ export function AgentFlowPanel() {
                 helixSessionIdRef.current = sid;
                 try {
                   useGatewayStore.getState().setHelixSessionId(sid);
-                } catch {}
+                } catch { /* empty */}
               }
               if (result && typeof result === "object") {
                 const r = result as any;
@@ -3958,71 +3980,6 @@ export function AgentFlowPanel() {
             }
             break;
           }
-          case "image": {
-            // /image <prompt> — 调用 image.generate 生成一张图片，作为 assistant 消息
-            // 带 images 挂到当前对话。
-            const imagePrompt = baseTrimmed
-              .replace(/^\/(?:image)\s+/i, "")
-              .trim();
-            if (!imagePrompt) {
-              storeActions.showToast({
-                type: "warning",
-                title: "缺少参数",
-                description: "/image <你的提示>",
-              });
-              break;
-            }
-            try {
-              const r = (await helixApi()!.send("image.generate", {
-                prompt: imagePrompt,
-                aspect_ratio: "square",
-              })) as any;
-              if (r?.available === false) {
-                storeActions.showToast({
-                  type: "warning",
-                  title: "图片生成不可用",
-                  description: r?.error || "后端没有可用的图片生成能力",
-                });
-                break;
-              }
-              if (r?.success !== true || !r?.image_data) {
-                storeActions.showToast({
-                  type: "error",
-                  title: "图片生成失败",
-                  description: r?.error || "未返回图片数据",
-                });
-                break;
-              }
-              const dataUrl: string = r.image_data;
-              const mediaType =
-                (dataUrl.match(/^data:([^;]+)/) || [])[1] || "image/png";
-              useHelixStore.getState().addChatMessage({
-                role: "assistant",
-                content: `已生成 ${imagePrompt}`,
-                sessionId: currentSessionId || undefined,
-                images: [
-                  {
-                    id: generateId(),
-                    dataUrl,
-                    mediaType,
-                    name: imagePrompt.slice(0, 40),
-                  },
-                ],
-              });
-              storeActions.showToast({
-                type: "success",
-                title: "图片已生成",
-                description: imagePrompt.slice(0, 40),
-              });
-            } catch (e) {
-              storeActions.showToast({
-                type: "error",
-                title: "图片生成失败",
-                description: String(e),
-              });
-            }
-            break;
-          }
         }
         // Builtin commands are instant client-side operations — never leave the
         // isChatLoading flag stuck true (it was set before this branch).
@@ -4072,9 +4029,8 @@ export function AgentFlowPanel() {
 
     setInputSynced("");
     resetInputHeight();
-    // questionStartTs (the live timer anchor) is set per-run right after the
-    // per-run shadows are declared, only when THIS run is front — so a parallel
-    // run starting in another conversation never resets the focused timer.
+    // 共享的 runStartedAtRef 只作计时兜底锚点；每会话的真实锚点在下方
+    // setStreamingDraft(startedAt) 里按会话记录（计时渲染优先读 draft）。
     runStartedAtRef.current = Date.now();
     debug("[HelixTrace] handleRun start", {
       input: typeof trimmed === "string" ? trimmed.slice(0, 80) : trimmed,
@@ -4116,7 +4072,10 @@ export function AgentFlowPanel() {
     const pendingTextRef = { current: null as string | null };
     const pendingThinkingRef = { current: null as string | null };
     const pendingBlocksRef = {
-      current: [] as Array<{ type: "thinking" | "text"; content: string }>,
+      current: [] as Array<
+        | { type: "thinking" | "text"; content: string }
+        | { type: "tool_group"; steps: ExecutionStep[] }
+      >,
     };
     const rafPendingRef = { current: false };
     const promptSentAtRef = { current: 0 };
@@ -4251,29 +4210,59 @@ export function AgentFlowPanel() {
     };
     // Per-run stream flush — merges this run's pending text/thinking blocks into
     // its own responseBlocksRef and (when front) the live UI state.
-    const flushStreamRender = () => {
-      rafPendingRef.current = false;
-      debug("[HelixTrace] flush rAF", {
-        pending: pendingBlocksRef.current.length,
-        textLen: (textBufferRef.current || "").length,
-      });
+    // 把 pendingBlocksRef 中积压的分片（text / thinking / tool_group）按事件顺序
+    // 一次性提交到 uiRB。text/thinking 内部合并，tool_group 独立成块、保持顺序。
+    const flushPending = () => {
       const blocks = pendingBlocksRef.current.splice(0);
       if (!blocks.length) return;
-      const lastThinking = [...blocks]
+      const lastThinkingBlock = [...blocks]
         .reverse()
         .find((b) => b.type === "thinking");
       uiRB((prev) => {
         let next = prev;
         for (const b of blocks) {
+          if (b.type === "tool_group") {
+            // 工具卡与其他块共用同一条有序提交队列，保持事件顺序，
+            // 不再被同步插入到句子主体与句末标点分片之间（修复"以 。开头"错位）。
+            next = [...next, { type: "tool_group", steps: b.steps }];
+            continue;
+          }
           const last = next[next.length - 1];
           if (b.type === "thinking") {
-            next =
-              last?.type === "thinking"
-                ? [
-                    ...next.slice(0, -1),
-                    { type: "thinking", content: b.content },
-                  ]
-                : [...next, { type: "thinking", content: b.content }];
+            // 去重累积思考块：当累积 buffer（如 "1,2,3,4"）包含现有块的全文
+            // （如 "1,2,3"）时，替换它而不是在工具段之后追加重复内容。
+            // 纯追加会导致同一思考被渲染两遍（见思考输出累积 bug 分析）。
+            // 补充归一化相似度检测：后端累积重发时可能带微小差异。
+            const lastI = next.length - 1;
+            if (lastI >= 0 && next[lastI].type === "thinking") {
+              const prevC = String(next[lastI].content || "");
+              const curC = String(b.content || "");
+              const prevN = normalizeForCompare(prevC);
+              const curN = normalizeForCompare(curC);
+              if (curC.includes(prevC)) {
+                next = [
+                  ...next.slice(0, lastI),
+                  { type: "thinking", content: curC },
+                ];
+              } else if (prevC.includes(curC)) {
+                // 旧块更长（极少见，可能是旧数据残留），保留旧的
+              } else if (
+                prevN.length >= 8 &&
+                curN.length >= 8 &&
+                textSimilarityRatio(prevN, curN) >= 0.7
+              ) {
+                // 归一化后高度相似：视为累积重发或改写，取更长的一份
+                next = [
+                  ...next.slice(0, lastI),
+                  { type: "thinking", content: curC.length >= prevC.length ? curC : prevC },
+                ];
+              } else {
+                // 无包含关系且相似度低：真正的独立思考段，保留原逻辑追加
+                next = [...next, { type: "thinking", content: b.content }];
+              }
+            } else {
+              next = [...next, { type: "thinking", content: b.content }];
+            }
           } else {
             next =
               last?.type === "text"
@@ -4286,8 +4275,17 @@ export function AgentFlowPanel() {
         }
         return next;
       });
-      if (lastThinking) uiST(lastThinking.content);
+      if (lastThinkingBlock && lastThinkingBlock.type === "thinking")
+        uiST(lastThinkingBlock.content);
       syncDraft();
+    };
+    const flushStreamRender = () => {
+      rafPendingRef.current = false;
+      debug("[HelixTrace] flush rAF", {
+        pending: pendingBlocksRef.current.length,
+        textLen: (textBufferRef.current || "").length,
+      });
+      flushPending();
     };
     const scheduleStreamRender = () => {
       if (rafPendingRef.current) return;
@@ -4309,7 +4307,6 @@ export function AgentFlowPanel() {
     }
     runningSessionIdRef.current = activeSessionId;
     startedAtRef.current = Date.now();
-    if (isFrontRun()) setQuestionStartTs(startedAtRef.current);
     setStreamingDraft(activeSessionId!, {
       isAgentRunning: true,
       responseBlocks: [],
@@ -4317,6 +4314,8 @@ export function AgentFlowPanel() {
       streamThinking: "",
       textBuffer: "",
       thoughtBuffer: "",
+      // 每会话计时锚点：并发 run 各自记录，切回后计时从本会话启动时刻
+      // 继续（计时渲染读 streamingDrafts[cid].startedAt，不再读共享 ref）。
       startedAt: startedAtRef.current,
       totalTokens: 0,
     });
@@ -4412,7 +4411,7 @@ export function AgentFlowPanel() {
           const cleanup = () => {
             try {
               unsub?.();
-            } catch {}
+            } catch { /* empty */}
           };
           check();
           if (
@@ -4469,7 +4468,23 @@ export function AgentFlowPanel() {
             (typeof resumeRes === "object" ? resumeRes.session_id : null) ||
             sessionId;
           sessionId = resumedId;
-          sessionMapRef.current.set(myCid, {
+          // session/resume 成功：后端返回了完整历史，用其更新本地 chatMessages
+          // 否则 UI 会显示空对话（模型实际有上下文，但用户看不到）
+          if (Array.isArray((resumeRes as any).messages)) {
+            const msgs = mapBackendMessages(
+              (resumeRes as any).messages,
+              myCid || currentSessionId || "",
+            );
+            useHelixStore.setState((state) => ({
+              chatMessages: [
+                ...state.chatMessages.filter(
+                  m => m.sessionId && m.sessionId !== myCid,
+                ),
+                ...msgs,
+              ],
+            }));
+          }
+          rebindSessionSid(sessionMapRef.current, myCid, {
             sid: resumedId,
             epoch: liveEpoch,
             storedId: staleEntry.storedId,
@@ -4524,7 +4539,7 @@ export function AgentFlowPanel() {
           (typeof res === "object" && res
             ? (res as any)?.stored_session_id
             : null) || undefined;
-        sessionMapRef.current.set(myCid, {
+        rebindSessionSid(sessionMapRef.current, myCid, {
           sid: sessionId,
           epoch: liveEpoch,
           storedId,
@@ -4820,7 +4835,18 @@ export function AgentFlowPanel() {
           }
         }
         if (method === "session/complete" || method === "session/end") {
-          return { type: "done", content: textBufferRef.current };
+          // 后端在 agent_settled 时取走 last_assistant_thinking 透传到
+          // reasoning 字段（pi_gateway.rs session/complete）。正常流式下本地
+          // thoughtBuffer 已有全文，优先用它；网关中途重启 / 事件丢失导致本地
+          // 缓冲为空时退回这份权威思考，否则「已完成」折叠卡里思考整段消失。
+          const remoteThinking =
+            typeof params?.reasoning === "string" ? params.reasoning : "";
+          return {
+            type: "done",
+            content: textBufferRef.current,
+            reasoning:
+              thoughtBufferRef.current || remoteThinking || undefined,
+          };
         }
         if (method === "error") {
           return { type: "error", content: params?.message || "后端错误" };
@@ -4858,8 +4884,17 @@ export function AgentFlowPanel() {
         if (method === "subagent.start") {
           const existing = useHelixStore
             .getState()
-            .subAgents.some((a) => a.id === subagentId);
-          if (existing) return; // 已存在（thinking 提前建过）——只补描述
+            .subAgents.find((a) => a.id === subagentId);
+          if (existing) {
+            // 磁盘重建的卡片是终态（重启中断）；同一 id 的 Agent 工具再次
+            // 执行说明后端真在跑这个孩子 → 翻回 running。
+            if (existing.status !== "running") {
+              useHelixStore
+                .getState()
+                .reviveSubAgentForRun(subagentId, goal || text);
+            }
+            return; // 已存在（thinking 提前建过）——只补描述
+          }
           useHelixStore
             .getState()
             .spawnSubAgent(
@@ -4868,6 +4903,7 @@ export function AgentFlowPanel() {
               undefined,
               subagentId,
               myCid ?? undefined,
+              text || undefined,
             );
           return;
         }
@@ -4898,16 +4934,18 @@ export function AgentFlowPanel() {
             typeof params.tool_preview === "string" && params.tool_preview
               ? params.tool_preview
               : text;
-          // 后台启动确认带扩展自己的 agent_id（.output 转录文件名）——绑到
-          // 卡片上，侧边栏时间线重启后仍能定位转录，不依赖网关内存映射。
-          if (
-            toolName === "background" &&
-            typeof params.agent_id === "string" &&
-            params.agent_id
-          ) {
+          // 扩展在 streamUpdate 里带回的 agent_id（.output 转录文件名）：
+          // progress / 任意 subagent.tool 事件都可能携带，绑到卡片上。
+          if (typeof params.agent_id === "string" && params.agent_id) {
             useHelixStore
               .getState()
               .setSubAgentAgentId(subagentId, params.agent_id);
+          }
+          // progress 行是 "N tool uses…" 汇总通知，不是真实工具调用；
+          // background 是后台 spawn 确认行。两者都不计入 toolCalls，避免
+          // 卡片底部被大量重复进度消息刷屏。
+          if (toolName === "background" || toolName === "progress") {
+            return;
           }
           useHelixStore.getState().addSubAgentToolCall(subagentId, {
             toolName,
@@ -4925,6 +4963,34 @@ export function AgentFlowPanel() {
           const filesWritten = Array.isArray(params.files_written)
             ? params.files_written.map((f: unknown) => String(f)).slice(0, 20)
             : undefined;
+          // complete 可能比 start 后补带上 goal/prompt（Rust 终态路径）。若卡片
+          // 的 description 仍是占位（"思考中"/空）或 prompt 缺失，回填之。
+          const card = useHelixStore
+            .getState()
+            .subAgents.find((a) => a.id === subagentId);
+          if (card) {
+            const goalStr = goal || undefined;
+            const needsDesc =
+              !goalStr
+                ? false
+                : !card.description || card.description === "思考中";
+            const needsPrompt = !card.text && !!text;
+            if (needsDesc || needsPrompt) {
+              useHelixStore.setState((s) => ({
+                subAgents: s.subAgents.map((a) =>
+                  a.id === subagentId
+                    ? {
+                        ...a,
+                        ...(needsDesc && goalStr
+                          ? { description: goalStr, name: goalStr }
+                          : {}),
+                        ...(needsPrompt ? { text } : {}),
+                      }
+                    : a,
+                ),
+              }));
+            }
+          }
           if (status === "failed" || status === "error") {
             useHelixStore
               .getState()
@@ -5288,7 +5354,7 @@ export function AgentFlowPanel() {
                 params.newId,
               );
               sessionId = params.newId;
-              sessionMapRef.current.set(myCid, {
+              rebindSessionSid(sessionMapRef.current, myCid, {
                 sid: params.newId,
                 epoch: useGatewayStore.getState().gatewayEpoch,
               });
@@ -5531,7 +5597,14 @@ export function AgentFlowPanel() {
                 const diff = raw
                   .replace(/\r\n/g, "\n")
                   .replace(/\r/g, "\n")
-                  .replace(/\u001b\[[0-9;]*m/g, "");
+                // eslint-disable-next-line no-control-regex
+                  .replace(/\[[0-9;]*m/g, "");
+                // 严格形态校验：diff 头行（---/+++/@@）须出现在开头附近且有
+                // +/− 改动行。后端误发的非 diff 文本（如普通命令输出）不进
+                // pendingChanges，避免回复末尾「已修改」卡片把它渲染成整列 +。
+                if (!looksLikeUnifiedDiff(diff)) {
+                  return;
+                }
                 const filePath = inferDiffPath(diff);
                 if (filePath) {
                   const fileName = filePath.split(/[/\\]/).pop() || filePath;
@@ -5693,7 +5766,7 @@ export function AgentFlowPanel() {
               result.session_id,
             );
             sessionId = result.session_id;
-            sessionMapRef.current.set(myCid, {
+            rebindSessionSid(sessionMapRef.current, myCid, {
               sid: result.session_id,
               epoch: useGatewayStore.getState().gatewayEpoch,
             });
@@ -5702,14 +5775,30 @@ export function AgentFlowPanel() {
         })
         .catch((err: any) => {
           console.error("[Helix] session/prompt error", err);
-          enqueue(
-            "data: " +
-              JSON.stringify({
-                type: "error",
-                content: err?.message || "请求失败",
-              }),
-          );
-          queueDone = true;
+          // 会话被 rebind（serve-gateway 自动重建 + session/prompt 会话替换）后，
+          // 旧 session 的 turn 事件通道可能提前关闭（"pi turn event channel
+          // closed"），但新 session 的 prompt 仍在跑、事件流会继续推 run_complete
+          // 和子 agent 结果——此时不能把 queueDone 置 true 杀掉事件队列，否则
+          // UI 会提前显示"完成"而子 agent 实际还在跑。只有当前 run 的会话仍是
+          // active session（未被替换）时，才按真实失败终止；否则交给
+          // scheduleSynthDone(5min) 兜底 + 事件流的真实终结信号。
+          const stillActive = runningSessionIdRef.current === myCid;
+          if (stillActive) {
+            enqueue(
+              "data: " +
+                JSON.stringify({
+                  type: "error",
+                  content: err?.message || "请求失败",
+                }),
+            );
+            queueDone = true;
+          } else {
+            debug(
+              "[HelixTrace] session/prompt error but session was rebound; " +
+                "keeping event queue open (sub-agent may still be running)",
+              err?.message,
+            );
+          }
         });
 
       // 提交后立即武装超长兜底：即使后端迟迟不流式（agent 构建/纯思考），
@@ -5797,7 +5886,7 @@ export function AgentFlowPanel() {
                       break;
                     }
                   }
-                } catch {}
+                } catch { /* empty */}
               }
               if (filePath) {
                 const dir =
@@ -5900,11 +5989,20 @@ export function AgentFlowPanel() {
 
               // 每个工具调用独立成块，不再与上一个 tool_group 合并，
               // 这样连续多个工具调用也会各自独立、可与文本交叉显示。
-              uiRB((prev) => [...prev, { type: "tool_group", steps: [step] }]);
+              // 改走 pendingBlocksRef 有序队列：与 text/thinking 分片共用同一次
+              // rAF 提交，使工具卡严格按事件顺序落在文本之间，避免被同步插入到
+              // 句子主体与句末标点分片之间、造成文本块以 "。" 开头的错位。
+              pendingBlocksRef.current.push({ type: "tool_group", steps: [step] });
+              scheduleStreamRender();
             } else if (parsed.type === "thinking") {
               if (!thinkingStartTimeRef.current)
                 thinkingStartTimeRef.current = Date.now();
-              const inc = normalizeAcpContent(parsed.content);
+              // 规整模型侧思考流自带的空行：连发的多个 \n 压成单个，
+              // 与正文侧的空白规整保持一致，避免思考块里渲染出大段空白。
+              const inc = normalizeAcpContent(parsed.content).replace(
+                /\n{3,}/g,
+                "\n\n",
+              );
               const cur = thoughtBufferRef.current;
               if (cur.length >= MAX_STREAM_CHARS) {
                 if (!thinkingCappedRef.current) {
@@ -5921,15 +6019,35 @@ export function AgentFlowPanel() {
               }
               const curTrim = cur.trim();
               const incTrim = inc.trim();
-              const isCumulative = curTrim && incTrim.startsWith(curTrim);
-
-              if (isCumulative) {
-                // The backend sent cumulative content - replace, don't append
-                thoughtBufferRef.current = inc;
+              let next: string;
+              if (incTrim.startsWith(curTrim)) {
+                // 后端发来「完整累积文本」（超集）：替换而非追加。带长度守卫——
+                // 若重发丢了空白（字节更少但归一化内容相同）不要覆盖已累积副本，
+                // 空白丢失会破坏 Markdown 表格/加粗（"**加粗** 后"→"**加粗**后"）。
+                next = inc.length >= cur.length ? inc : cur;
+              } else if (curTrim && curTrim.startsWith(incTrim)) {
+                // 传入是已累积的子集（重试发了更短文本）：保留更完整的缓冲，避免截断。
+                // `curTrim &&` 守卫：纯空白分片 trim 为 "" 时 startsWith("") 恒真会误删
+                // 空白（粘连词/破表的根因），空白分片必须走追加。
+                next = cur;
+              } else if (
+                curTrim &&
+                incTrim &&
+                textSimilarityRatio(curTrim, incTrim) >= 0.6
+              ) {
+                // 归一化后高度相似：后端全文重发微差版 / 模型改写。仅当传入达到
+                // 「全文重发」尺度（≥ 累积一半）才替换——否则它只是与某段相关的
+                // 独立新段落，替换会把已累积内容截断。
+                if (inc.length >= cur.length * 0.5) {
+                  next = inc.length >= cur.length ? inc : cur;
+                } else {
+                  next = cur + inc;
+                }
               } else {
-                // The backend sent incremental content - append
-                thoughtBufferRef.current = cur + inc;
+                // 无重叠：直接拼接（避免全文重发时 500 字符上限漏判真实重叠而误判重复）。
+                next = cur + inc;
               }
+              thoughtBufferRef.current = next;
               pendingThinkingRef.current = thoughtBufferRef.current;
               pendingBlocksRef.current.push({
                 type: "thinking",
@@ -5994,6 +6112,10 @@ export function AgentFlowPanel() {
               // 同时把该块中 status==='running' 的 tool_call 标记 completed/failed——
               // 否则工具已完成但卡片仍显示"执行"（tool_group 块的状态只在
               // 这里维护，done 分支只更新独立的 steps 数组，不动 responseBlocks）。
+              // 先把可能延迟提交（走 pendingBlocksRef + rAF）的工具卡落盘，
+              // 避免同批内 tool_result 早于工具卡渲染而被误判为"无匹配组"、
+              // 进而新建出与本应对应的工具卡脱节的结果块。
+              flushPending();
               uiRB((prev) => {
                 const idx = prev.findIndex((b) => {
                   if (b.type !== "tool_group") return false;
@@ -6038,7 +6160,8 @@ export function AgentFlowPanel() {
                   if (
                     next[i].type === "tool_call" &&
                     next[i].status !== "completed" &&
-                    next[i].status !== "failed"
+                    next[i].status !== "failed" &&
+                    !next[i].subSteps
                   ) {
                     next[i] = {
                       ...next[i],
@@ -6060,7 +6183,8 @@ export function AgentFlowPanel() {
                       (s) =>
                         s.type === "tool_call" &&
                         s.status !== "completed" &&
-                        s.status !== "failed",
+                        s.status !== "failed" &&
+                        !s.subSteps,
                     );
                   if (lastToolCall) {
                     const nb = prev.slice();
@@ -6193,7 +6317,7 @@ export function AgentFlowPanel() {
               let newText: string;
               if (!curTrim) {
                 // 新内容以 ** 开头时，不能丢弃开头的 **（否则 Markdown 加粗不渲染）
-                // 保留原始内容，让 reconcileBlocksWithContent 在 done 时处理
+                // 保留原始内容；done 时权威全文自愈只修正 msg.content
                 newText = incRaw;
               } else if (incTrim.startsWith(curTrim)) {
                 // New text is a superset of accumulated text (backend full resend).
@@ -6335,8 +6459,19 @@ export function AgentFlowPanel() {
                   content = finalText;
                 }
               }
-              let reasoning = thoughtBufferRef.current;
+              // 思考正文优先取本地流式累积（thoughtBuffer），它随 thinking_delta
+              // 增量拼接最完整；本地为空（网关中途重启、事件丢失、只走了
+              // message.complete 的兜底通路）时退回事件透传的权威 reasoning。
+              let reasoning =
+                thoughtBufferRef.current ||
+                (typeof parsed.reasoning === "string"
+                  ? parsed.reasoning
+                  : "");
               const completedSteps = stepsRef.current;
+              // done 可能和最后一个 text 分片同批到达（rAF 还没触发），
+              // 先把积压的 pending 块冲刷进 responseBlocksRef，再清空——
+              // 否则 finalBlocks 缺最后一段文本（"总结中途截断"的根因）。
+              flushPending();
               textBufferRef.current = "";
               thoughtBufferRef.current = "";
               streamCappedRef.current = false;
@@ -6420,23 +6555,15 @@ export function AgentFlowPanel() {
                 ) {
                   finalBlocks = [...finalBlocks, { type: "text", content }];
                 }
-                // 权威全文自愈（见 reconcileBlocksWithContent）：流式转发链会间歇丢
-                // 空白/换行，done 时 content 已被 finalText 修复；把同样的权威文本写回
-                // blocks 的 text 块，让 blocks 渲染路径与 msg.content 一致——否则
-                // "**加粗** 后"黏成 "**加粗**后" 时 strong 闭合符后紧跟非空白字符，
-                // CommonMark 不渲染加粗（用户可见症状：** 原样显示）。
-                //
-                // 修复重复显示 bug：始终用权威全文替换 text blocks，而不是跳过。
-                // 旧逻辑在"内容匹配"时跳过替换，但跳过时没有重新应用 Markdown 预处理，
-                // 导致流式阶段渲染的原始文本和 done 阶段渲染的预处理后文本同时存在。
-                if (finalBlocks && content) {
-                  finalBlocks = reconcileBlocksWithContent(
-                    finalBlocks,
-                    content,
-                  );
-                }
+                // 权威全文自愈（msg.content 侧）：流式转发链会间歇丢空白/换行，
+                // done 时 content 已被 finalText 修复；但 blocks 渲染路径优先于
+                // content，因此这里不重排/写回 text 块（旧版会把全部 text 合并钉到
+                // 末尾，破坏 思考→工具→文本 交替顺序），msg.blocks 保留流式时的原始
+                // 交替结构，渲染时直接用 normalizeTextBlocks 去重。若存在"整段无
+                // text 块"的情况（全部正文压在未冲刷的 pending 里、或模型只发工具
+                // 不发文本），上面的末位追加会把权威全文补进末尾。
                 // 本次运行的文件改动统一挂在最终消息的 fileChanges 上，只由
-                // 回复末尾的“已修改”汇总卡片渲染，不混进流式过程块。
+                // 回复末尾的"已修改"汇总卡片渲染，不混进流式过程块。
                 const runFileChanges = runFileChangesRef.current;
                 const byFile = new Map<string, PendingChange>();
                 for (const c of runFileChanges) byFile.set(c.fileId, c);
@@ -6939,9 +7066,6 @@ export function AgentFlowPanel() {
           clearStreamingDraft(sid);
         }, 0);
       }
-      // Keep the shared textBufferRef populated for the focused run so the
-      // email-notify effect can still summarize the finished reply.
-      outerTextBufferRef.current = textBufferRef.current;
       // This run is done. Only touch the shared "current run" bookkeeping when
       // THIS run is the one the UI considers current — a parallel run in another
       // conversation may still be streaming.
@@ -7717,22 +7841,31 @@ export function AgentFlowPanel() {
           onPaste={handlePaste}
           placeholder={"随心输入..."}
           rows={2}
-          className="chat-input w-full resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 text-[length:var(--helix-transcript-size)] min-h-[38px] max-h-[300px] px-2.5 pt-2 pb-0.5 leading-relaxed  [overflow-wrap:anywhere] overflow-x-hidden overflow-y-auto text-foreground"
+          className="chat-input w-full min-w-0 resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 text-[length:var(--helix-transcript-size)] min-h-[38px] max-h-[300px] px-2.5 pt-2 pb-0.5 leading-[1.45] break-all overflow-x-hidden overflow-y-auto text-foreground"
           style={{
             overflowX: "hidden",
             overflowY: "auto",
             height: "38px",
+            wordBreak: "break-all",
+            overflowWrap: "anywhere",
           }}
           onInput={(e) => {
             const target = e.target as HTMLTextAreaElement;
-            const prevHeight = parseInt(target.style.height || "38", 10);
-            target.style.height = "38px";
+            const prevHeight = target.style.height || "38px";
+            // 先让 textarea 恢复自然高度（auto）再量 scrollHeight：
+            // 若固定 38px 去量，长而不带换行符的内容会全部计入 scrollHeight，
+            // 使输入框顶到 300px 上限、行距看着拉得很大。auto 下浏览器按真实
+            // 行高折行，scrollHeight 才是准确的当前内容高度。
+            target.style.height = "auto";
             const ch = target.scrollHeight;
             const min = 38;
             const nextHeight = ch > min ? Math.min(ch, 300) : min;
             target.style.height = nextHeight + "px";
+            const grew =
+              parseFloat(target.style.height) >
+              parseFloat(prevHeight.replace("px", "") || "38");
             // 输入框长高时自动把视口滚到底，防止输入框跑到可见区域下方
-            if (nextHeight > prevHeight && scrollRef.current) {
+            if (grew && scrollRef.current) {
               const vp = scrollRef.current;
               if (vp) {
                 requestAnimationFrame(() => {
@@ -8023,7 +8156,9 @@ export function AgentFlowPanel() {
     <div className="h-full flex flex-col bg-transparent text-foreground relative">
       {/* 历史对话竖条：消息区左侧边缘，点击弹出最近对话列表并跳转。
           覆盖面板（看板/定时任务/技能）打开时隐藏，避免竖条与面板抢焦点。 */}
-      {!overlayPanelOpen && <HistoryStrip />}
+      {!overlayPanelOpen && (
+        <HistoryStrip onHoverChange={setHistoryStripHover} />
+      )}
       {/* Header bar - removed */}
 
       {/* Conversation search bar (Ctrl+F) */}
@@ -8081,7 +8216,7 @@ export function AgentFlowPanel() {
           只保留确认弹窗，让用户专注审批；审批结束后聊天恢复显示。 */}
       <div
         ref={scrollRef}
-        className={`flex-1 min-h-0 overflow-y-auto msg-scroll-viewport ${sessionMessages.length === 0 && !hasSteps ? "hide-scrollbar" : ""}`}
+        className={`flex-1 min-h-0 overflow-y-auto msg-scroll-viewport transition-opacity duration-200 ${sessionMessages.length === 0 && !hasSteps ? "hide-scrollbar" : ""} ${historyStripHover ? "opacity-0" : "opacity-100"}`}
       >
         <div className="max-w-[700px] mx-auto px-5 py-4 pb-12 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (
@@ -8442,7 +8577,7 @@ export function AgentFlowPanel() {
               {/* Chat messages (input/output)  — completed messages only.
                   Each row is memoized (TranscriptMessage) so streamed chunks
                   don't re-render the whole transcript. */}
-              {displayMessages.map((item) =>
+              {displayMessages.map((item, index) =>
                 item.kind === "summary" ? (
                   <SummarizedHistoryBlock
                     key={item.id}
@@ -8504,7 +8639,18 @@ export function AgentFlowPanel() {
                     isSearchMatch={searchMatchIds.has(item.msg.id)}
                     isSearchActive={item.msg.id === conversationSearchActiveId}
                     onFork={storeActions.forkConversation}
-                    onUndo={handleUndoChat}
+                    onUndo={
+                      item.msg.role === "user" &&
+                      displayMessages.reduce(
+                        (acc, m, i) =>
+                          m.kind === "message" && m.msg.role === "user"
+                            ? i
+                            : acc,
+                        -1,
+                      ) === index
+                        ? handleUndoChat
+                        : undefined
+                    }
                   />
                 ),
               )}
@@ -8525,16 +8671,12 @@ export function AgentFlowPanel() {
                         style={{ fontSize: transcriptFontSize + 2 }}
                       >
                         <span className="font-medium">{streamingActive ? "工作中" : "已结束"}</span>
-                        {runStartedAtRef.current > 0 && (
+                        {((currentSessionId
+                          ? streamingDrafts[currentSessionId]?.startedAt
+                          : undefined) ||
+                          runStartedAtRef.current) > 0 && (
                           <span className="tabular-nums text-foreground/35">
-                            {formatDuration(
-                              Math.max(
-                                0,
-                                Math.round(
-                                  (Date.now() - runStartedAtRef.current) / 1000,
-                                ),
-                              ),
-                            )}
+                            {formatDuration(elapsedSeconds)}
                           </span>
                         )}
                       </div>
@@ -8558,31 +8700,32 @@ export function AgentFlowPanel() {
                         // 保持原始交替顺序：思考/工具/文本按时间序排列，
                         // 不再合并文本到末尾，确保思考→执行→总结的交叉节奏。
                         const consolidatedBlocks = normalizedBlocks;
-                        const lastTextIndex = consolidatedBlocks.reduce(
-                          (acc, b, i) =>
-                            b.type === "text" && String(b.content || "").trim()
-                              ? i
-                              : acc,
-                          -1,
-                        );
-                        const processBlocks =
-                          lastTextIndex >= 0
-                            ? consolidatedBlocks.slice(0, lastTextIndex)
-                            : consolidatedBlocks;
-                        const answerBlocks =
-                          lastTextIndex >= 0
-                            ? consolidatedBlocks.slice(lastTextIndex)
-                            : [];
-                        // 交替段：思考段一张折叠卡、工具段一张折叠卡，按时间序
-                        // 交替（保住"思考→执行→再思考→再执行"的节奏）。
-                        const processSegments =
-                          segmentizeProcessBlocks(processBlocks);
-                        const answerSegments =
-                          buildProcessSegments(answerBlocks);
                         const showStreamThinking =
                           streamingActive &&
                           !!thinkingBody &&
                           !normalizedBlocks.some((b) => b.type === "thinking");
+                        const processBlocks = consolidatedBlocks;
+                        const answerBlocks = consolidatedBlocks.slice(0, 0);
+                        const allSegments =
+                          segmentizeProcessBlocks(processBlocks);
+                        let lastTextIdx = -1;
+                        for (let i = allSegments.length - 1; i >= 0; i--) {
+                          if (allSegments[i].kind === "text") {
+                            lastTextIdx = i;
+                            break;
+                          }
+                        }
+                        // 同完成态：最后 text 段之后的段保留进折叠区，不丢弃。
+                        const processSegments =
+                          lastTextIdx >= 0
+                            ? allSegments.slice(0, lastTextIdx).concat(
+                                allSegments.slice(lastTextIdx + 1),
+                              )
+                            : allSegments;
+                        const summarySegment =
+                          lastTextIdx >= 0 ? allSegments[lastTextIdx] : null;
+                        const answerSegments =
+                          buildProcessSegments(answerBlocks);
                         // 「思考中」脉冲只在该状态真实成立时亮：最后一个非
                         // 文本/非文件更改块是 thinking 才算（工具执行/收尾时
                         // 思考卡仅保持展开可读，不冒充思考中）。
@@ -8595,23 +8738,11 @@ export function AgentFlowPanel() {
                           thinkingActiveNow = b.type === "thinking";
                           break;
                         }
-                        // 实时操作计数：流式期间也显示已完成的操作数。
                         const processOpCount = summarizeTaskBlocks(processBlocks).total;
                         return (
                           <>
-                            {/* 二级折叠：外层「过程」收纳本轮全部中间产物（思考 +
-                                任务执行），流式期间展开看进度、结束后自动收起。 */}
-                            <details
-                              className="my-2 group/details"
-                              open={streamingActive}
-                            >
-                              {/* 流式期间折叠行留空（不渲染 FoldTitle / 箭头，免得在
-                                  「工作中」下方挂一个孤立箭头）。但 <summary> 元素本身
-                                  必须始终存在：一旦整个删掉，浏览器会按 HTML 规范
-                                  "if there is no child summary element, the user agent
-                                  should provide its own legend" 自行补一个本地化图例，
-                                  zh-CN 下就渲染成「详细信息」，反而多出一行文字。 */}
-                              <summary className="cursor-pointer hover:text-foreground/60 flex items-center gap-1.5 list-none transition-colors">
+                            <details className="my-2 group/details" open={streamingActive}>
+                              <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors mb-1">
                                 {!streamingActive && (
                                   <>
                                     <FoldTitle
@@ -8641,14 +8772,6 @@ export function AgentFlowPanel() {
                                     searchQuery={conversationSearchQuery}
                                     isSearchActive={false}
                                   />
-                                )}
-                                {isReconnecting && streamingActive && (
-                                  <div className="flex items-center gap-1.5 px-1 py-1 text-amber-500/90 text-xs">
-                                    <div className="h-0.5 flex-1 rounded-full overflow-hidden bg-amber-500/15">
-                                      <div className="h-full w-1/3 rounded-full bg-amber-500/70 animate-[reconnect-slide_1.2s_ease-in-out_infinite]" />
-                                    </div>
-                                    <span className="shrink-0">限流重试中</span>
-                                  </div>
                                 )}
                                 {processSegments.map((seg, si) => {
                                   // 交替段渲染：思考段一张 ThinkingFold，工具段
@@ -8741,6 +8864,48 @@ export function AgentFlowPanel() {
                                 })}
                               </ProcessWindow>
                             </details>
+                            {summarySegment && (
+                              <div
+                                className="my-2"
+                                style={{ fontSize: transcriptFontSize }}
+                              >
+                                {summarySegment.blocks.map((b, i) => {
+                                  if (b.type === "text") {
+                                    return (
+                                      <div key={i}>
+                                        {conversationSearchOpen &&
+                                        conversationSearchQuery.trim() ? (
+                                          <div className="whitespace-pre-wrap break-words">
+                                            <HighlightText
+                                              text={normalizeAcpContentRaw(
+                                                b.content,
+                                              )}
+                                              query={conversationSearchQuery}
+                                              active={false}
+                                            />
+                                          </div>
+                                        ) : (
+                                          <HelixMarkdown
+                                            text={normalizeAcpContentRaw(
+                                              b.content,
+                                            )}
+                                          />
+                                        )}
+                                      </div>
+                                    );
+                                  }
+                                  if (b.type === "file_change") {
+                                    return (
+                                      <FileChangeSummary
+                                        key={i}
+                                        changes={b.changes}
+                                      />
+                                    );
+                                  }
+                                  return null;
+                                })}
+                              </div>
+                            )}
                             <div className="helix-answer mt-3">
                               {answerSegments.map((seg, si) => {
                                 return (
@@ -8827,7 +8992,18 @@ export function AgentFlowPanel() {
                 </div>
               )}
               {/* 执行中扫描线：跟在模型输出最底部 */}
-              {streamingActive && <div className="conversation-scan-line" />}
+              {streamingActive && (
+                isReconnecting ? (
+                  <div className="flex items-center gap-1.5 px-1 py-1 text-amber-500/90 text-xs">
+                    <div className="h-0.5 flex-1 rounded-full overflow-hidden bg-amber-500/15">
+                      <div className="h-full w-1/3 rounded-full bg-amber-500/70 animate-[reconnect-slide_1.2s_ease-in-out_infinite]" />
+                    </div>
+                    <span className="shrink-0">限流重试中</span>
+                  </div>
+                ) : (
+                  <div className="conversation-scan-line" />
+                )
+              )}
             </div>
           )}
         </div>

@@ -320,6 +320,14 @@ function buildTauriAPI(): ElectronAPI {
     // HTTP 代理（修改后需重启应用生效）
     proxyGet: () => invoke("proxy_get"),
     proxySet: (url: string) => invoke("proxy_set", { url }),
+    // Poll pending pi-extension browser requests (emits helix:browser-request
+    // events carrying the full request payload; navigate also emits the legacy
+    // helix:open-browser for the sidebar-open path).
+    pollBrowserRequests: () => invoke("poll_browser_requests"),
+    // Write a browser automation result file for the pi extension's
+    // request-response protocol (<reqId>.result.json).
+    browserWriteResult: (reqId: string, result: unknown) =>
+      invoke("browser_write_result", { reqId, result }),
   };
 
   // ── helix ──────────────────────────────────────────────────────────────
@@ -467,38 +475,6 @@ function buildTauriAPI(): ElectronAPI {
     sshDisconnect: (conn_id: string) => invoke("ssh_disconnect", { conn_id }),
     onSshConnected: () => () => {},
     onSshList: () => () => {},
-  };
-
-  // ── email (not ported) ──────────────────────────────────────────────────
-  api.email = {
-    configure: () => Promise.resolve({ configured: false }),
-    getConfig: () => Promise.resolve({ configured: false }),
-    list: () =>
-      Promise.resolve({
-        ok: false,
-        messages: [],
-        error: "Email 功能在 Linux Tauri 版暂不可用",
-      }),
-    get: () =>
-      Promise.resolve({
-        uid: 0,
-        subject: "",
-        from: "",
-        to: "",
-        date: 0,
-        text: "",
-        html: "",
-        attachments: [],
-      }),
-    send: () => Promise.resolve({ accepted: [], messageId: "" }),
-    notify: () => Promise.resolve({ accepted: [], messageId: "" }),
-    test: () =>
-      Promise.resolve({
-        ok: false,
-        imap: { ok: false, message: "Email 功能暂不可用" },
-        smtp: { ok: false, message: "Email 功能暂不可用" },
-        debug: { user: "", authCodeLength: 0 },
-      }),
   };
 
   // ── hooks ───────────────────────────────────────────────────────────────

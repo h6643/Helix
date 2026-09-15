@@ -20,8 +20,16 @@ interface PanelPage {
   title?: string;
 }
 
-let pageSeq = 0;
-const newPageId = () => `pg-${++pageSeq}`;
+// 挂在 globalThis 上：HMR 重新求值本模块时模块作用域的计数器会归零，
+// 但 React Fast Refresh 保留 pages state（旧 id 还在），两者错位会让新页
+// 拿到与旧页重复的 id → pages 里出现两条相同 id → isActive 同时命中两块
+// → flex-1 平分高度 → 侧边栏上下分栏。挂 globalThis 后计数器跨 HMR 持久，
+// id 不会再重复。
+const newPageId = () => {
+  const g = globalThis as unknown as { __helixPageSeq?: number };
+  if (g.__helixPageSeq === undefined) g.__helixPageSeq = 0;
+  return `pg-${++g.__helixPageSeq}`;
+};
 
 /**
  * Right-hand sidebar as a tabbed workspace. The single header tab strip holds:
@@ -430,9 +438,14 @@ export function RightSidebar() {
           where +/- counts live. */}
       <div className="flex-1 min-h-0 min-w-0 flex">
         <div className="flex-1 min-h-0 min-w-0 flex flex-col">
-          {pages.map((p) => {
-            const isActive = p.id === activePageId;
-            return (
+          {/* 用 findIndex 取“第一个”命中 activePageId 的下标：即使 pages 里
+              出现两条相同 id（HMR 计数器错位的历史遗留），也只会有一块进
+              active 分支，物理上不可能再上下分栏。 */}
+          {(() => {
+            const activeIdx = pages.findIndex((p) => p.id === activePageId);
+            return pages.map((p, i) => {
+              const isActive = i === activeIdx;
+              return (
               <div
                 key={p.id}
                 className={
@@ -451,7 +464,8 @@ export function RightSidebar() {
                 {p.kind === "agent" && <AgentWorkPanel />}
               </div>
             );
-          })}
+            });
+          })()}
           {editorTabs.length > 0 && codeViewActive && (
             <div className="flex-1 min-h-0 min-w-0 flex flex-col">
               <CodeEditorPanel onClose={closeCodeView} />

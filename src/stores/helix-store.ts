@@ -213,9 +213,9 @@ interface HelixState
   setBrowserHomeUrl: (url: string) => void;
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: "browser" | "code" | "email" | "diff" | "agent" | null;
+  rightSidebarTab: "browser" | "code" | "diff" | "agent" | null;
   setRightSidebarTab: (
-    tab: "browser" | "code" | "email" | "diff" | "agent" | null,
+    tab: "browser" | "code" | "diff" | "agent" | null,
   ) => void;
   // 右侧栏的「子 Agent 工作内容」视图：点击工作面板里的某个 agent 时写入，
   // RightSidebar 据此渲染该 agent 的任务 / live 日志。null = 未选中。
@@ -239,14 +239,6 @@ interface HelixState
   setSessionPendingApproval: (patch: Record<string, boolean>) => void;
   startupGreeting: string;
   setStartupGreeting: (v: string) => void;
-
-  // Email integration state (secrets live in the Electron main process; only
-  // non-sensitive flags/identifiers are mirrored here for UI rendering).
-  emailConfigured: boolean;
-  emailAccount: string;
-  emailNotifyEnabled: boolean;
-  setEmailConfigured: (configured: boolean, account?: string) => void;
-  setEmailNotifyEnabled: (v: boolean) => void;
 
   // MCP Servers
   mcpServers: Record<string, McpServerConfig>;
@@ -594,6 +586,7 @@ interface HelixState
     parentId?: string,
     agentId?: string,
     sessionId?: string,
+    text?: string,
   ) => string;
   completeSubAgent: (
     agentId: string,
@@ -611,18 +604,25 @@ interface HelixState
       status: "running" | "success" | "error";
     },
   ) => void;
-  updateSubAgentToolCall: (
-    agentId: string,
-    index: number,
-    toolCall: {
-      toolName?: string;
-      params?: string;
-      status?: "running" | "success" | "error";
-    },
-  ) => void;
   /** 把扩展的子代理 id（.output 转录文件名）绑到卡片上 —— 后台启动确认
    *  （subagent.tool background 事件）带回，供侧边栏时间线定位转录。 */
   setSubAgentAgentId: (agentId: string, extAgentId: string) => void;
+  /** 磁盘重建的终态卡片在同一 id 的 subagent.start 到达时翻回 running
+   *  （后端确认该孩子真在跑——重启后同工具调用 id 复用）。 */
+  reviveSubAgentForRun: (agentId: string, description?: string) => void;
+  /** 重启后从磁盘 delegation manifest 重建子 Agent 卡片（按 id 去重，磁盘
+   *  running 的孩子已随进程死亡 → 标记中断）。事件驱动的实时卡片优先。 */
+  rehydrateSubAgentsFromDisk: (
+    sessionId: string | null,
+    diskAgents: Array<{
+      id: string;
+      agentId?: string;
+      goal?: string;
+      prompt?: string;
+      status?: string;
+      summary?: string;
+    }>,
+  ) => void;
 
   // Git — see slices/git-slice.ts
 
@@ -1276,10 +1276,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   approvalModeBySession: {},
   startupGreeting: "有什么可以帮你的？",
 
-  emailConfigured: false,
-  emailAccount: "",
-  emailNotifyEnabled: false,
-
   // MCP Servers
   mcpServers: {
     tavily: {
@@ -1554,12 +1550,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           showPreviewRail: false,
           editorOpen: true,
         };
-      if (tab === "email")
-        return {
-          rightSidebarTab: "email",
-          showPreviewRail: false,
-          editorOpen: false,
-        };
       if (tab === "diff")
         return {
           rightSidebarTab: "diff",
@@ -1612,13 +1602,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       sessionPendingApproval: { ...s.sessionPendingApproval, ...patch },
     })),
   setStartupGreeting: (v: string) => set((s) => ({ startupGreeting: v })),
-  setEmailConfigured: (configured: boolean, account?: string) =>
-    set((s) => ({
-      emailConfigured: configured,
-      emailAccount: account !== undefined ? account : s.emailAccount,
-    })),
-  setEmailNotifyEnabled: (v: boolean) =>
-    set((s) => ({ emailNotifyEnabled: v })),
 
   toggleRuntimePanel: () =>
     set((s) => ({ showRuntimePanel: !s.showRuntimePanel })),
@@ -1858,6 +1841,30 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
     // Switch to the new session
     state.setCurrentSessionId(newSessionId);
+
+    // Load forked messages into chatMessages so handleRun's seedHistory filter
+    // (m.sessionId === activeSessionId) finds them. Without this the forked
+    // session would start with an empty context.
+    try {
+      const existingSession = allSessions.find((s) => s.id === newSessionId);
+      if (existingSession?.chatMessages && existingSession.chatMessages.length > 0) {
+        const existingIds = new Set(
+          state.chatMessages.map((m) => m.id),
+        );
+        const loadedMsgs = existingSession.chatMessages.filter(
+          (m: any) => !existingIds.has(m.id),
+        );
+        if (loadedMsgs.length > 0) {
+          set({
+            chatMessages: [
+              ...state.chatMessages,
+              ...loadedMsgs.map((m) => m as unknown as ChatMessage),
+            ],
+          });
+        }
+      }
+    } catch { /* best-effort; the persist timer will catch up */ }
+
     // Increment session save version so sidebar refreshes
     useHelixStore.setState((st) => ({
       sessionSaveVersion: st.sessionSaveVersion + 1,
@@ -2455,6 +2462,27 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           blocks: msg.blocks,
         }));
 
+      // 内存合并而非整体覆盖：后台 run 完成时 done 提交 + persistSessionNow
+      // 是 fire-and-forget（动态 import + 全量读盘 + 落盘，数百 ms），若此刻
+      // 用磁盘快照整体替换 chatMessages，回复可能内存（被覆盖）、draft（已清）、
+      // 磁盘（还没写完）三处同时缺席——切回来输出就"消失"了。以磁盘快照为基底，
+      // 该会话仍在内存里的消息按 id 覆盖回来（内存是 done 刚提交的新鲜副本，
+      // 磁盘可能落后），其他会话的消息原样保留。
+      const live = get().chatMessages;
+      const byId = new Map<string, ChatMessage>();
+      for (const m of msgs) byId.set(m.id, { ...m, sessionId: target });
+      for (const m of live) {
+        if (!m.sessionId || m.sessionId !== target) continue;
+        if (typeof m.id === "string" && m.id.startsWith("draft-partial-"))
+          continue;
+        byId.set(m.id, m);
+      }
+      const merged = [
+        ...live.filter((m) => m.sessionId && m.sessionId !== target),
+        ...[...byId.values()],
+      ];
+      merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
       useHelixStore.getState().clearExecutionFlow();
       useGatewayStore.getState().setHelixSessionId(null);
 
@@ -2467,7 +2495,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
 
       set({
-        chatMessages: msgs,
+        chatMessages: merged,
         activeSessionWorkDir: session.workDir ?? null,
         currentSessionId: target,
         sessionHistoryIndex: newIndex,
@@ -3120,7 +3148,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // API Config — in slices/api-config-slice.ts
 
   // Actions - Sub-agents
-  spawnSubAgent: (name, description, parentId, agentId, sessionId) => {
+  spawnSubAgent: (name, description, parentId, agentId, sessionId, text) => {
     // 外部传入 agentId（serve 后端 subagent_id）时沿用，保证后续 subagent.*
     // 事件（tool/complete）能按同一 id 命中；无则本地生成。
     const id = agentId || generateId();
@@ -3135,6 +3163,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // 会话归属快照：spawn 后切换会话不会改变归属；缺省记为当前会话，
       // 供面板按 currentSessionId 过滤（见 helix-layout 工作面板）。
       sessionId: sessionId ?? get().currentSessionId ?? undefined,
+      ...(text ? { text } : {}),
     };
     set((s) => ({ subAgents: [...s.subAgents, agent] }));
     return id;
@@ -3209,26 +3238,61 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       ),
     })),
 
-  // 覆盖某子 Agent 的第 index 条工具记录（状态行原地刷新，见
-  // agent-flow-panel 对 background/progress 事件的处理）。
-  updateSubAgentToolCall: (agentId, index, toolCall) =>
-    set((s) => ({
-      subAgents: s.subAgents.map((a) => {
-        if (a.id !== agentId) return a;
-        const calls = a.toolCalls || [];
-        if (index < 0 || index >= calls.length) return a;
-        const next = [...calls];
-        next[index] = { ...next[index], ...toolCall, timestamp: Date.now() };
-        return { ...a, toolCalls: next };
-      }),
-    })),
-
   setSubAgentAgentId: (agentId, extAgentId) =>
     set((s) => ({
       subAgents: s.subAgents.map((a) =>
         a.id === agentId && !a.agentId ? { ...a, agentId: extAgentId } : a,
       ),
     })),
+
+  reviveSubAgentForRun: (agentId, description) =>
+    set((s) => ({
+      subAgents: s.subAgents.map((a) =>
+        a.id === agentId
+          ? {
+              ...a,
+              status: "running" as const,
+              completedAt: undefined,
+              result: undefined,
+              description: description || a.description,
+            }
+          : a,
+      ),
+    })),
+
+  rehydrateSubAgentsFromDisk: (sessionId, diskAgents) => {
+    if (diskAgents.length === 0) return;
+    set((s) => {
+      const known = new Set(s.subAgents.map((a) => a.id));
+      const rebuilt = diskAgents
+        .filter((d) => !known.has(d.id))
+        .map((d) => {
+          // Disk "running" means the manifest never saw a terminal record —
+          // after a restart that child process is dead, not still working.
+          const interrupted = !d.status || d.status === "running";
+          return {
+            id: d.id,
+            name: d.goal || d.id,
+            description: d.goal || d.id,
+            status: (interrupted
+              ? "cancelled"
+              : d.status === "failed" || d.status === "error"
+                ? "failed"
+                : "completed") as SubAgent["status"],
+            parentId: null,
+            chatMessageId: null,
+            createdAt: Date.now(),
+            completedAt: interrupted ? Date.now() : undefined,
+            result: d.summary || (interrupted ? "重启时中断" : undefined),
+            sessionId: sessionId ?? undefined,
+            agentId: d.agentId,
+            ...(d.prompt ? { text: d.prompt } : {}),
+          };
+        });
+      if (rebuilt.length === 0) return {};
+      return { subAgents: [...s.subAgents, ...rebuilt] };
+    });
+  },
 
   // Actions - Persistence
   persistToStorage: async () => {

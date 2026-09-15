@@ -45,8 +45,14 @@ export default defineConfig({
         }
       : undefined,
     watch: {
-      // tell vite to ignore watching `src-tauri`
-      ignored: ['**/src-tauri/**', '**/hermes-agent/**'],
+      // tell vite to ignore watching `src-tauri` and cargo target dirs —
+      // watching locked build artifacts (e.g. running build_script *.exe)
+      // crashes the watcher with EBUSY on Windows
+      ignored: [
+        '**/src-tauri/**',
+        '**/hermes-agent/**',
+        '**/.pi-verify-target/**',
+      ],
     },
   },
   build: {

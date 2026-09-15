@@ -10,6 +10,7 @@ import {
   Download,
   Loader2,
   Check,
+  Wrench,
 } from "lucide-react";
 import React, {
   useState,
@@ -26,8 +27,8 @@ interface SkillPanelProps {}
 
 interface InstalledItem {
   name: string;
-  type: "extension" | "skill" | "prompt" | "package";
-  source: "pi" | "pi-rpc" | "pi-package" | "pi-npm" | "helix";
+  type: "extension" | "skill" | "prompt" | "tool" | "package";
+  source: "pi" | "pi-rpc" | "pi-package" | "pi-npm" | "pi-tool" | "helix";
   description?: string;
   version?: string;
   path?: string;
@@ -86,6 +87,11 @@ const typeLabels: Record<
     color: "bg-amber-500/10 text-amber-500",
     icon: <FileText className="size-3" />,
   },
+  tool: {
+    label: "工具",
+    color: "bg-sky-500/10 text-sky-500",
+    icon: <Wrench className="size-3" />,
+  },
   package: {
     label: "包",
     color: "bg-blue-500/10 text-blue-500",
@@ -93,6 +99,7 @@ const typeLabels: Record<
   },
 };
 
+// eslint-disable-next-line no-empty-pattern
 export function SkillPanel({}: SkillPanelProps) {
   const [activeTab, setActiveTab] = useState<TabKey>("plugins");
   const [searchQuery, setSearchQuery] = useState("");
@@ -373,8 +380,8 @@ export function SkillPanel({}: SkillPanelProps) {
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return items.filter((item) => {
-      // Only show extensions, hide skills and prompts
-      if (item.type !== "extension") return false;
+      // Show extensions and registerTool tools; hide skills and prompts.
+      if (item.type !== "extension" && item.type !== "tool") return false;
       if (!q) return true;
       return (
         item.name.toLowerCase().includes(q) ||
@@ -395,6 +402,7 @@ export function SkillPanel({}: SkillPanelProps) {
   }, [skills, searchQuery]);
 
   const extensions = filteredItems.filter((i) => i.type === "extension");
+  const tools = filteredItems.filter((i) => i.type === "tool");
 
   // ── Browse: filtered + sorted results ──
   const filteredResults = useMemo(() => {
@@ -423,12 +431,14 @@ export function SkillPanel({}: SkillPanelProps) {
       !!latest &&
       latest !== item.version;
     // 启停开关：npm 包（pi-npm）与本地扩展（pi/pi-package）支持；
-    // pi-rpc（提示模板）与 helix 源不支持。
+    // pi-rpc（提示模板）、helix 源与 tool（registerTool 静态声明）不支持——
+    // 工具的开关等同于关闭宿主扩展本身。
     const canToggle =
       item.type === "extension" &&
       (item.source === "pi-npm" ||
         item.source === "pi-package" ||
         (item.source === "pi" && !!item.path));
+    const isTool = item.type === "tool";
     const isEnabled = item.enabled !== false;
     const isToggling = togglingName === item.name;
     return (
@@ -491,6 +501,7 @@ export function SkillPanel({}: SkillPanelProps) {
             </button>
           )}
           {item.source !== "helix" &&
+            !isTool &&
             item.type !== "skill" &&
             item.type !== "prompt" && (
               <button
@@ -794,6 +805,8 @@ export function SkillPanel({}: SkillPanelProps) {
                 ) : (
                   <div className="space-y-5">
                     {renderSection("扩展", extensions, null)}
+                    {tools.length > 0 &&
+                      renderSection("工具", tools, <Wrench className="size-3.5" />)}
                   </div>
                 )}
               </>

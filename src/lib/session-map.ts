@@ -6,7 +6,15 @@
  * 压缩自愈）通过 resolveBackendSid 读取映射。
  */
 
-export type SessionMapEntry = { sid: string; epoch: number; storedId?: string };
+export type SessionMapEntry = {
+  sid: string;
+  epoch: number;
+  storedId?: string;
+  /** 本对话历史上用过的全部后端 sid（含当前 sid）。/clear、重启重建会让
+   *  对话换新 sid，但旧 sid 名下的磁盘委托记录仍属于这个对话——rehydrate
+   *  按整个列表查询，子 Agent 历史才不会随会话重置消失。 */
+  sids?: string[];
+};
 
 export const SESSION_MAP_KEY = "conversationSessions";
 
@@ -28,6 +36,20 @@ export async function loadSessionMap(): Promise<Map<string, SessionMapEntry>> {
   } catch {
     return new Map();
   }
+}
+
+/** Resolve every backend sid a conversation has ever used (oldest first,
+ *  current sid included) — delegations_list matches disk manifests against
+ *  this whole set. */
+export async function resolveBackendSids(
+  conversationId: string | null | undefined,
+): Promise<string[]> {
+  if (!conversationId) return [];
+  const map = await loadSessionMap();
+  const entry = map.get(conversationId);
+  if (!entry) return [];
+  const all = new Set([...(entry.sids || []), entry.sid]);
+  return [...all].filter(Boolean);
 }
 
 /** 供会话恢复逻辑（/resync、压缩自愈）读取 conversation→后端会话映射：

@@ -351,6 +351,21 @@ interface DiffPreviewProps {
   onOpenFile?: (change: DiffChange) => void;
 }
 
+/** 是否为真正的 unified diff：diff 头行（---/+++/@@）出现在文本前部，
+ *  且后文存在 + / - 改动行。普通命令/ls 输出不满足（无 diff 头行）。 */
+export function looksLikeUnifiedDiff(text: string): boolean {
+  const lines = text.split("\n");
+  const firstNonEmpty = lines.findIndex((l) => l.trim());
+  if (firstNonEmpty === -1 || firstNonEmpty > 3) return false;
+  const head = lines.slice(firstNonEmpty, firstNonEmpty + 4);
+  const headerNearStart =
+    head.some((l) => /^--- /.test(l)) ||
+    head.some((l) => /^\+\+\+ /.test(l)) ||
+    head.some((l) => /^@@ /.test(l));
+  if (!headerNearStart) return false;
+  return lines.some((l) => l.startsWith("+") || l.startsWith("-"));
+}
+
 // Renders a backend-provided unified diff string directly (Helix inline_diff).
 // Lines carry their own +/-/context markers, so we colorize them instead of
 // recomputing a diff from old/new content.
@@ -360,11 +375,26 @@ function UnifiedDiffTextViewer({ diff }: { diff: string }) {
     () => diff.replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
     [diff],
   );
+  // 非 diff 形态（diff 头行缺失）时不逐行着色：整段按普通文本渲染，
+  // 防止后端误发的非 diff 内容（如命令输出）被染成满屏 + 行。
+  const isRealDiff = useMemo(() => looksLikeUnifiedDiff(normalizedDiff), [
+    normalizedDiff,
+  ]);
   const lines = useMemo(() => normalizedDiff.split("\n"), [normalizedDiff]);
   return (
     <div className="font-mono text-[calc(var(--helix-font-size,13px)*0.9231)]">
       <div className="max-h-[500px] overflow-y-auto">
         {lines.map((line, idx) => {
+          // 非 diff 形态时整段按普通文本渲染，不做逐行着色。
+          if (!isRealDiff) {
+            return (
+              <div key={idx} className="flex hover:bg-accent/20">
+                <span className="px-2 flex-1 whitespace-pre-wrap text-muted-foreground/80">
+                  {line}
+                </span>
+              </div>
+            );
+          }
           if (line.startsWith("+++") || line.startsWith("---")) {
             return (
               <div
@@ -427,7 +457,9 @@ export function countDiffLines(change: DiffChange): {
   added: number;
   removed: number;
 } {
-  if (change.unifiedDiff) {
+  // unifiedDiff 须通过严格形态校验才逐行数 +/−；异常注入的非 diff 文本
+  // 回退到 old/new 内容重算（都缺时 0/0），避免把命令输出里的 + 行误计。
+  if (change.unifiedDiff && looksLikeUnifiedDiff(change.unifiedDiff)) {
     let added = 0,
       removed = 0;
     for (const line of change.unifiedDiff.split("\n")) {
@@ -436,11 +468,14 @@ export function countDiffLines(change: DiffChange): {
     }
     return { added, removed };
   }
-  const diff = computeDiff(change.oldContent, change.newContent);
-  return {
-    added: diff.filter((l) => l.type === "add").length,
-    removed: diff.filter((l) => l.type === "remove").length,
-  };
+  if (change.oldContent || change.newContent) {
+    const diff = computeDiff(change.oldContent, change.newContent);
+    return {
+      added: diff.filter((l) => l.type === "add").length,
+      removed: diff.filter((l) => l.type === "remove").length,
+    };
+  }
+  return { added: 0, removed: 0 };
 }
 
 export function DiffPreview({

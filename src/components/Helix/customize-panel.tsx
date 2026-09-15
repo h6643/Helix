@@ -289,7 +289,7 @@ function applyTheme(mode: "light" | "dark") {
   document.documentElement.classList.toggle("dark", mode === "dark");
   try {
     localStorage.setItem("helix-theme", mode);
-  } catch {}
+  } catch { /* empty */}
 }
 
 function useCurrentTheme(): "light" | "dark" {
