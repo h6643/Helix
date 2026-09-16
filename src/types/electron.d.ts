@@ -190,7 +190,6 @@ export interface ElectronAPI {
       reqId: string,
       result: unknown,
     ) => Promise<{ ok: boolean; error?: string }>;
-    readEnvKey: (key: string) => Promise<string>;
   };
 
   helix: {
@@ -277,6 +276,17 @@ export interface ElectronAPI {
       message?: string;
       error?: string;
     }>;
+    // Subagent global settings (config.yaml `subagents:` block, read/write;
+    // mirrored into the pi-subagents extension's subagents.json on save).
+    listSubagentSettings: () => Promise<{
+      ok: boolean;
+      settings?: Record<string, unknown>;
+      error?: string;
+    }>;
+    saveSubagentSettings: (settings: Record<string, unknown>) => Promise<{
+      ok: boolean;
+      error?: string;
+    }>;
     // pi-subagents agent types, merged the way the extension resolves them:
     // compiled defaults (general-purpose/Explore/Plan) overlaid by
     // <work_dir>/.pi/agents, <work_dir>/.agents/agents and ~/.pi/agent/agents
@@ -299,6 +309,9 @@ export interface ElectronAPI {
     // Enable/disable an agent by writing/removing `enabled: false` in its
     // frontmatter — the same edit the extension's own /agents command makes.
     setSubagentEnabled: (name: string, enabled: boolean) => Promise<void>;
+    // Set the `model:` frontmatter field on an agent's .md.
+    // Empty string clears the field (inherit parent model).
+    setSubagentModel: (name: string, model: string) => Promise<void>;
     // Delete a custom agent's .md (the extension's Delete unlinks the file).
     deleteSubagent: (name: string) => Promise<void>;
     // Pi agent commands (extensions / skills / prompts / models)

@@ -18,23 +18,14 @@ pub fn emit_helix_event(method: &str, params: &Value) {
     );
 }
 
-/// Kill every backend child process (main + per-conversation instances).
-pub fn kill_current(state: &AppState) {
-    let _ = state; // instances track their own children
-    crate::pi_gateway::kill_all();
-}
-
-/// Stop all backend instances while holding the lifecycle lock. Unlike
-/// `kill_current`, this cannot race a startup/restart handshake and kill the
-/// fresh child before `get_state` completes.
+/// Stop all backend instances while holding the lifecycle lock, so it cannot
+/// race a startup/restart handshake and kill a fresh child before `get_state`
+/// completes. Config-driven respawns must NOT use this: go through
+/// `restart_gateway_now` / `restart_gateway_soon` (overlapping handover). This
+/// is for shutdown, where killing everything is the point.
 pub fn stop_current(state: &AppState) {
     let _ = state;
     crate::pi_gateway::stop_all();
-}
-
-/// Spawn (or respawn) the backend child process.
-pub fn spawn_gateway(state: &Arc<AppState>) -> Result<(), String> {
-    crate::pi_gateway::spawn(state)
 }
 
 /// Debounced restart: pi snapshots its settings/model at process start, so

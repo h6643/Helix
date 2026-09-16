@@ -26,17 +26,6 @@ fn pi_user_skills_dir() -> PathBuf {
         .join("skills")
 }
 
-/// `~/.pi/agent/pi-hermes-memory/skills/` — skills the pi-hermes-memory
-/// extension registers at runtime (created via its skill_manage tool).
-fn pi_memory_skills_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".pi")
-        .join("agent")
-        .join("pi-hermes-memory")
-        .join("skills")
-}
-
 /// `~/.pi/agent/npm/` — pi's package store (`pi install` target).
 fn pi_npm_dir() -> PathBuf {
     dirs::home_dir()
@@ -84,9 +73,8 @@ pub struct SkillEntry {
     pub description: String,
     #[serde(rename = "isBuiltin")]
     pub is_builtin: bool,
-    /// Where the skill is loaded from: "pi" (user root ~/.pi/agent/skills),
-    /// "memory" (pi-hermes-memory extension managed), or the bundling npm package
-    /// name (e.g. "pi-subagents").
+    /// Where the skill is loaded from: "pi" (user root ~/.pi/agent/skills) or
+    /// the bundling npm package name (e.g. "pi-subagents").
     pub source: String,
     pub path: String,
     #[serde(rename = "callCount")]
@@ -149,7 +137,6 @@ pub fn helix_delete_dir(dir_path: String) -> bool {
 
 /// List every SKILL.md directory pi actually loads:
 ///   ~/.pi/agent/skills/<skill>/ (and <category>/<skill>/) — user root
-///   ~/.pi/agent/pi-hermes-memory/skills/… — memory-extension managed
 ///   ~/.pi/agent/npm/node_modules/<pkg>/<pi.skills paths>/… — package-bundled
 /// Directories starting with `.` are listed with `isBuiltin: true`.
 #[tauri::command]
@@ -160,11 +147,6 @@ pub fn helix_list_skills() -> Vec<SkillEntry> {
     // ── Pi user skills (~/.pi/agent/skills/) ──
     if let Ok(top) = std::fs::read_dir(skills_dir()) {
         collect_skills_from_dir(top, &mut out, &usage, "pi", false);
-    }
-
-    // ── Memory-extension managed skills ──
-    if let Ok(top) = std::fs::read_dir(pi_memory_skills_dir()) {
-        collect_skills_from_dir(top, &mut out, &usage, "memory", true);
     }
 
     // ── Skills bundled with pi npm packages ──
@@ -265,7 +247,7 @@ fn collect_skills_from_dir(
 /// Build a SkillEntry if `dir` contains a SKILL.md.
 /// `id` — stable identifier (relative path); `fallback_name` — dir name used
 /// when frontmatter has no `name:`; `builtin` — non-user-managed flag (dot
-/// directory, memory-managed, or package-bundled).
+/// directory, or package-bundled).
 fn read_skill_dir(
     dir: &Path,
     id: &str,
@@ -414,35 +396,43 @@ fn subagents_work_dir() -> PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
 }
 
-/// Merged pi-subagents settings: global `~/.pi/agent/subagents.json` overlaid
-/// by `<work_dir>/.pi/subagents.json` (src/settings.ts `loadSettings`).
+/// Merged pi-subagents settings: Helix's config.yaml `subagents:` block
+/// (canonical, via `crate::subagents`) overlaid by `<work_dir>/.pi/subagents.json`
+/// (the extension's own project-level file, highest precedence).
 fn merged_subagents_settings(cwd: &Path) -> HashMap<String, serde_json::Value> {
-    let mut out: HashMap<String, serde_json::Value> = HashMap::new();
-    let global = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".pi")
-        .join("agent")
-        .join("subagents.json");
-    for p in [global, cwd.join(".pi").join("subagents.json")] {
-        if let Ok(raw) = std::fs::read_to_string(&p) {
-            if let Ok(serde_json::Value::Object(o)) = serde_json::from_str(&raw) {
-                for (k, v) in o {
-                    out.insert(k, v);
-                }
+    let mut out: HashMap<String, serde_json::Value> =
+        crate::subagents::load_subagents_settings().into_iter().collect();
+    let project = cwd.join(".pi").join("subagents.json");
+    if let Ok(raw) = std::fs::read_to_string(&project) {
+        if let Ok(serde_json::Value::Object(o)) = serde_json::from_str(&raw) {
+            for (k, v) in o {
+                out.insert(k, v);
             }
         }
     }
     out
 }
 
-/// The three agent dirs in load precedence order (project highest).
+/// The three agent dirs in load precedence order (project highest), plus the
+/// extension's own bundled agents dir (lowest precedence — these are fallback
+/// agent types shipped with pi-subagents, e.g. claude.md / codex.md in
+/// `~/.pi/agent/extensions/pi-subagents-master/agents/`).
 fn subagent_agent_roots() -> Vec<PathBuf> {
     let cwd = subagents_work_dir();
-    vec![
+    let ext = plugins_dir();
+    let ext_dir = ext
+        .join("pi-subagents-master")
+        .join("agents")
+        .clone();
+    let mut roots = vec![
         cwd.join(".pi").join("agents"),
         cwd.join(".agents").join("agents"),
         global_agents_dir(),
-    ]
+    ];
+    if ext_dir.is_dir() {
+        roots.push(ext_dir);
+    }
+    roots
 }
 
 struct ParsedAgent {
@@ -596,15 +586,6 @@ fn default_agent_presets() -> Vec<SubagentPreset> {
     };
     vec![
         mk(
-            "general-purpose",
-            "Agent",
-            "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find a good match in the first few times use this agent to perform the search.",
-            vec!["read", "bash", "edit", "write", "grep", "find", "ls"],
-            "",
-            "append",
-            "",
-        ),
-        mk(
             "Explore",
             "Explore",
             "Fast read-only agent for targeted code and file searches.",
@@ -612,15 +593,6 @@ fn default_agent_presets() -> Vec<SubagentPreset> {
             "anthropic/claude-haiku-4-5",
             "replace",
             "READ-ONLY: never create, modify, move, copy, or delete files, and never run commands that change system state.\nSearch code with grep, find files with find, and read files with read; use bash only for read-only commands.\nUse absolute paths, make independent searches in parallel, and report precise findings.",
-        ),
-        mk(
-            "Plan",
-            "Plan",
-            "Read-only planning agent for implementation strategy and critical files.",
-            vec!["read", "bash", "grep", "find", "ls"],
-            "",
-            "replace",
-            "READ-ONLY: never create, modify, move, copy, or delete files, and never run commands that change system state.\nUnderstand requirements, inspect relevant files, and follow existing patterns.\nProduce an ordered implementation plan with trade-offs, dependencies, risks, and absolute paths.\nEnd with \"Critical Files:\" and up to five file-path/reason bullets.",
         ),
     ]
 }
@@ -661,12 +633,29 @@ pub fn helix_list_subagents() -> Vec<SubagentPreset> {
         }
     }
     // Highest-precedence dir first; later entries are dropped on id clash.
-    for (dir, source) in [
+    let ext_dir = plugins_dir()
+        .join("pi-subagents-master")
+        .join("agents");
+    let dirs: Vec<(std::path::PathBuf, &str)> = vec![
         (cwd.join(".pi").join("agents"), "project"),
         (cwd.join(".agents").join("agents"), "workspace"),
         (global_agents_dir(), "global"),
-    ] {
-        for p in scan_agent_dir(&dir, source) {
+    ]
+    .into_iter()
+    .filter(|(dir, _)| dir.is_dir())
+    .collect();
+    for (dir, source) in &dirs {
+        for p in scan_agent_dir(dir, source) {
+            push(p, &mut out, &mut seen);
+        }
+    }
+    // The extension's bundled agents (claude.md, codex.md, …) act as
+    // built-in defaults: source "default" so the UI treats them the same as
+    // the compiled presets, but their definitions live in the .md files so
+    // they can be updated without recompiling.
+    if ext_dir.is_dir() {
+        for mut p in scan_agent_dir(&ext_dir, "extension") {
+            p.source = "default".to_string();
             push(p, &mut out, &mut seen);
         }
     }
@@ -744,6 +733,87 @@ pub fn helix_set_subagent_enabled(name: String, enabled: bool) -> Result<(), Str
         return Ok(());
     }
     Err(format!("预设 {name} 不存在"))
+}
+
+/// Set the `model:` field in an agent's `.md` frontmatter.
+/// Pass an empty string to clear the model (inherit parent).
+#[tauri::command]
+pub fn helix_set_subagent_model(name: String, model: String) -> Result<(), String> {
+    if !subagents_extension_installed() {
+        return Err("pi-subagents 扩展未安装".to_string());
+    }
+    let name = name.trim().to_string();
+    if name.is_empty()
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err("非法的预设名".to_string());
+    }
+    let path = find_agent_file(&name).ok_or_else(|| format!("预设 {name} 不存在"))?;
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+
+    let updated = if model.trim().is_empty() {
+        upsert_model_line(&content, None)
+    } else {
+        upsert_model_line(&content, Some(model.trim()))
+    }
+    .ok_or_else(|| format!("无法修改 {name} 的 frontmatter"))?;
+
+    std::fs::write(&path, updated).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Replace or insert a `model:` line in the frontmatter of a `.md` agent file.
+/// Returns the new file content, or None if the file has no parseable frontmatter block.
+fn upsert_model_line(content: &str, model: Option<&str>) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    // Find frontmatter end (the closing ---)
+    let mut fm_end: Option<usize> = None;
+    let mut in_fm = false;
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        if t == "---" {
+            if i == 0 || in_fm {
+                in_fm = !in_fm;
+                if !in_fm {
+                    fm_end = Some(i);
+                    break;
+                }
+            }
+        }
+    }
+    let fm_end = fm_end?;
+
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut model_replaced = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        if i <= fm_end {
+            let t = line.trim_start();
+            if t.starts_with("model:") {
+                if let Some(m) = model {
+                    out.push(format!("model: \"{m}\""));
+                } else {
+                    continue; // drop the line
+                }
+                model_replaced = true;
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    if !model_replaced && model.is_some() {
+        // Insert `model: "..."` right after the opening `---`
+        let mut out2: Vec<String> = Vec::with_capacity(out.len() + 1);
+        for (i, line) in out.iter().enumerate() {
+            out2.push(line.clone());
+            if i == 0 {
+                out2.push(format!("model: \"{}\"", model.unwrap()));
+            }
+        }
+        out = out2;
+    }
+
+    Some(out.join("\n"))
 }
 
 /// Permanently remove a custom agent's .md file (the extension's Delete does
@@ -862,8 +932,6 @@ mod tests {
     fn list_skills_matches_pi_load_roots() {
         let skills = helix_list_skills();
         for s in &skills {
-            // No phantom ~/.codex entries may leak through
-            assert!(!s.path.contains(".codex"), "phantom skill: {}", s.path);
             assert!(std::path::Path::new(&s.path).join("SKILL.md").exists());
         }
         // The pi user root (~/.pi/agent/skills) is machine-specific — only

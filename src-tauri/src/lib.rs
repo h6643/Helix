@@ -32,11 +32,11 @@ mod proxy;
 mod scheduled_tasks;
 mod security;
 mod skills;
+mod subagents;
 pub mod ssh;
 mod state;
 mod terminal;
 mod vision;
-mod web_search;
 mod window;
 
 use crate::state::{AppState, APP_HANDLE};
@@ -71,7 +71,7 @@ pub fn run() {
             // gateway spawns.
             let _ = crate::state::APP_STATE.set(app_state.clone());
 
-            // One-time migration: legacy ~/.codex / ~/.helix → ~/.pi/agent/helix
+            // One-time migration: legacy ~/.helix → ~/.pi/agent/helix
             // (rename/copy, best effort, only when no override is configured).
             crate::paths::migrate_legacy_data_dir();
 
@@ -115,6 +115,10 @@ pub fn run() {
                     eprintln!("[Helix] pi agent failed to start: {e}");
                 }
             });
+            // Consume scheduled-task events emitted by the pi extension
+            // (~/.pi/agent/cron-events/). Spawned after the
+            // gateway so the pi child is ready before the first dispatch.
+            scheduled_tasks::start_scheduled_events_poller();
 
             // ── System tray ──────────────────────
             use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -237,6 +241,7 @@ pub fn run() {
             skills::helix_list_skills,
             skills::helix_list_subagents,
             skills::helix_set_subagent_enabled,
+            skills::helix_set_subagent_model,
             skills::helix_delete_subagent,
             skills::helix_track_skill_call,
             // auxiliary vision model (image → description)
@@ -253,9 +258,6 @@ pub fn run() {
             // hooks (hooks: block in config.yaml)
             hooks::hooks_list,
             hooks::hooks_save,
-            // web search (web: block + provider API keys in .env)
-            web_search::web_search_list,
-            web_search::web_search_save,
             // delegations (subagent live transcript browser)
             delegations::delegations_list,
             delegations::delegations_read_log,
@@ -318,7 +320,6 @@ pub fn run() {
             // app
             app::get_info,
             app::get_sessions_dir,
-            app::read_env_key,
             app::get_helix_version,
             app::get_status,
             app::helix_get_raw_config,
@@ -369,6 +370,10 @@ pub fn run() {
             // gateway MCP servers (config.yaml mcp_servers, read/write)
             mcp::mcp_config_list,
             mcp::mcp_config_save,
+            // subagents settings (config.yaml `subagents:` block, read/write,
+            // mirrored into the extension's subagents.json on save)
+            subagents::subagents_settings_list,
+            subagents::subagents_settings_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

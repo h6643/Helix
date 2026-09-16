@@ -1,13 +1,32 @@
 //! Scheduled tasks (cron jobs.json) IPC.
 //! Port of `electron/ipc/scheduled-tasks.js`.
+//!
+//! Paths mirror the pi-scheduled-tasks extension (pi-scheduled-tasks.ts):
+//!   jobs:  ~/.pi/agent/pi-cron/cron/jobs.json
+//!   events: ~/.pi/agent/cron-events/<jobId>.json
+//! so the Helix「计划」panel and the pi `schedule_*` tools read/write the
+//! same files.
 
-use crate::paths::helix_data_dir;
 use chrono::{SecondsFormat, Utc};
 use rand::Rng;
 use serde_json::{json, Value};
 
+fn pi_agent_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".pi").join("agent"))
+        .unwrap_or_default()
+}
+
+/// Root dir of the pi-scheduled-tasks extension's event files.
+/// Mirrors pi-scheduled-tasks.ts EVENTS_DIR (`~/.pi/agent/cron-events`).
+fn events_dir() -> std::path::PathBuf {
+    pi_agent_dir().join("cron-events")
+}
+
+/// Shared jobs registry written by the pi-scheduled-tasks extension
+/// (`~/.pi/agent/pi-cron/cron/jobs.json`).
 fn cron_jobs_path() -> std::path::PathBuf {
-    helix_data_dir().join("cron").join("jobs.json")
+    pi_agent_dir().join("pi-cron").join("cron").join("jobs.json")
 }
 
 fn atomic_write_jobs(data: &Value) -> Result<(), String> {
@@ -189,8 +208,8 @@ pub fn create(params: Option<Value>) -> Value {
         "skill": null,
         "model": null,
         "provider": null,
-        "provider_snapshot": "ant-ling",
-        "model_snapshot": "Ling-2.6-1T",
+        "provider_snapshot": "",
+        "model_snapshot": "",
         "base_url": null,
         "script": null,
         "no_agent": false,
@@ -326,7 +345,7 @@ pub fn helix_cron_delete(params: Option<Value>) -> Value {
     remove(params)
 }
 
-/// Execute a cron job by ID
+/// Execute a cron job by ID — triggers a one-shot dispatch of the stored prompt.
 #[tauri::command]
 pub fn helix_cron_run(params: Option<Value>) -> Value {
     let p = params.unwrap_or(json!({}));
@@ -338,6 +357,191 @@ pub fn helix_cron_run(params: Option<Value>) -> Value {
     if id.is_empty() {
         return json!({ "ok": false, "error": "missing id" });
     }
-    // Trigger immediate execution (simplified - would need job runner integration)
-    json!({ "ok": true, "message": format!("Job {} triggered", id) })
+    // Look up the job's prompt and label, then dispatch via the same path the
+    // event poller uses.
+    let data = load_jobs();
+    let empty: Vec<Value> = vec![];
+    let jobs = data.get("jobs").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let found = jobs.iter().find(|j| j.get("id").and_then(Value::as_str) == Some(id.as_str()));
+    match found {
+        Some(job) => {
+            let prompt = job.get("prompt").and_then(Value::as_str).unwrap_or("");
+            let label = job.get("name").and_then(Value::as_str).unwrap_or("unnamed");
+            dispatch_scheduled_task(&id, label, prompt, "manual");
+            json!({ "ok": true, "message": format!("Job {id} triggered") })
+        }
+        None => json!({ "ok": false, "error": format!("job {id} not found") }),
+    }
+}
+
+/// Start a background thread that polls the extension event dir every 5 s.
+/// Call once at setup, after `pi_gateway::spawn` has finished.
+pub fn start_scheduled_events_poller() {
+    std::thread::Builder::new()
+        .name("scheduled-events-poller".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            poll_scheduled_events();
+        })
+        .ok();
+}
+///
+/// Reads every unconsumed `.json` file, dispatches `task_fired` events to a
+/// dedicated pi session, and renames consumed files to `.done` so they are
+/// never processed twice.
+pub fn poll_scheduled_events() {
+    let dir = events_dir();
+    if !dir.exists() {
+        return;
+    }
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+        .collect();
+
+    for file in files {
+        let raw = match std::fs::read_to_string(&file) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let event: Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = std::fs::remove_file(&file);
+                continue;
+            }
+        };
+        let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let job_id = event.get("jobId").and_then(Value::as_str).unwrap_or("").to_string();
+        let label = event.get("label").and_then(Value::as_str).unwrap_or("");
+
+        match event_type {
+            "task_fired" => {
+                let prompt = event.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
+                let trigger = event.get("trigger").and_then(Value::as_str).unwrap_or("auto");
+                dispatch_scheduled_task(&job_id, label, &prompt, trigger);
+            }
+            "task_created" | "task_deleted" | "task_toggled" => {
+                // Informational only — the frontend picks up the change on its
+                // next 30 s refreshFromBackend() call.
+                eprintln!("[scheduled-events] {} job={job_id} label={label}", event_type);
+            }
+            _ => {}
+        }
+        // Mark consumed before the next file so a crash doesn't re-dispatch.
+        let done = file.with_extension("json.done");
+        let _ = std::fs::rename(&file, &done);
+    }
+}
+
+/// Fire-and-forget: spawn a dedicated pi session, send the task prompt, then
+/// close the session so the process doesn't linger.
+fn dispatch_scheduled_task(job_id: &str, label: &str, prompt: &str, trigger: &str) {
+    eprintln!(
+        "[scheduled-events] dispatching task_fired job={job_id} label={label} trigger={trigger}"
+    );
+    let prompt = prompt.to_string();
+    let label = label.to_string();
+    let job_id = job_id.to_string();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
+    let rt = match rt {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[scheduled-events] failed to build runtime: {e}");
+            return;
+        }
+    };
+    rt.block_on(async {
+        // session/new without cwd → falls back to home dir (neutral default).
+        let new_res = crate::pi_gateway::send(
+            "session/new",
+            json!({ "cwd": "" }),
+        )
+        .await;
+        let session_id = match new_res {
+            Ok(v) => {
+                let sid = v
+                    .get("session_id")
+                    .or_else(|| v.get("sessionID"))
+                    .or_else(|| v.get("_meta").and_then(|m| m.get("helix")).and_then(|h| h.get("sessionProvenance")).and_then(|s| s.get("acpSessionId")))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                if sid.is_empty() {
+                    eprintln!("[scheduled-events] session/new returned no session_id: {v}");
+                    return;
+                }
+                sid
+            }
+            Err(e) => {
+                eprintln!("[scheduled-events] session/new failed: {e}");
+                return;
+            }
+        };
+        let prompt_res = crate::pi_gateway::send(
+            "session/prompt",
+            json!({
+                "session_id": session_id,
+                "prompt": [{ "type": "text", "text": prompt }],
+            }),
+        )
+        .await;
+        match prompt_res {
+            Ok(_) => {
+                mark_job_fired_in_jobs(&job_id);
+                eprintln!("[scheduled-events] task {job_id} ({label}) dispatched to session {session_id}");
+            }
+            Err(e) => {
+                eprintln!("[scheduled-events] session/prompt failed for job {job_id}: {e}");
+            }
+        }
+        // Best-effort cleanup: don't block the poller on this.
+        let _ = crate::pi_gateway::send(
+            "session/close",
+            json!({ "session_id": session_id }),
+        )
+        .await;
+    });
+}
+
+/// Update jobs.json for the fired job: set last_run_at=now, disable once-tasks,
+/// advance cron-tasks next_run_at to now+60 s.
+fn mark_job_fired_in_jobs(job_id: &str) {
+    if job_id.is_empty() {
+        return;
+    }
+    let mut data = load_jobs();
+    let jobs = match data.get_mut("jobs") {
+        Some(j) if j.is_array() => j.as_array_mut().unwrap(),
+        _ => return,
+    };
+    for job in jobs.iter_mut() {
+        if job.get("id").and_then(Value::as_str) != Some(job_id) {
+            continue;
+        }
+        job["last_run_at"] = json!(now_iso());
+        let kind = job
+            .get("schedule")
+            .and_then(|s| s.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if kind == "once" {
+            job["enabled"] = json!(false);
+            job["next_run_at"] = Value::Null;
+        } else {
+            let advanced = (Utc::now() + chrono::Duration::seconds(60))
+                .to_rfc3339_opts(SecondsFormat::Millis, false);
+            job["next_run_at"] = json!(advanced);
+        }
+        job["updated_at"] = json!(now_iso());
+        break;
+    }
+    data["updated_at"] = json!(now_iso());
+    if let Err(e) = atomic_write_jobs(&data) {
+        eprintln!("[scheduled-events] failed to update jobs.json: {e}");
+    }
 }

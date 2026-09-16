@@ -487,7 +487,6 @@ function ToolCard({
         }}
         className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${expandable ? "" : "cursor-default"}`}
       >
-        {/* Claude Code 终端风工具符号：⏺（失败态 × 变红）替代彩色图标 */}
         {failed ? (
           <span className="tool-glyph tool-glyph-failed" aria-hidden>
             ✕

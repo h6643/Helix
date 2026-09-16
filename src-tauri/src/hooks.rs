@@ -6,7 +6,7 @@
 //! the config file is preserved untouched.
 
 use crate::config::config_yaml_path;
-use crate::gateway::{kill_current, spawn_gateway};
+use crate::gateway::restart_gateway_soon;
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -225,6 +225,21 @@ pub fn hooks_save(state: State<'_, Arc<AppState>>, config: Value) -> Value {
 
     let yaml_path = config_yaml_path();
     let text = std::fs::read_to_string(&yaml_path).unwrap_or_default();
+
+    // No-op guard: hooks are only read at gateway startup, so an unnecessary
+    // save restarts the whole backend — killing the in-flight turns of every
+    // conversation. Compare what is already persisted with what was sent and
+    // bail out before touching the file or the gateway.
+    let current_map = parse_hooks(&text);
+    let current_auto_accept = text
+        .split('\n')
+        .find_map(|line| line.strip_prefix("hooks_auto_accept:"))
+        .map(|rest| rest.trim() == "true")
+        .unwrap_or(false);
+    if current_auto_accept == enabled && current_map == hooks_map {
+        return json!({ "ok": true, "changed": false });
+    }
+
     let mut merged = strip_top_level(&text, "hooks");
     merged = strip_top_level(&merged, "hooks_auto_accept");
     let block = serialize_hooks(&hooks_map, enabled);
@@ -237,9 +252,11 @@ pub fn hooks_save(state: State<'_, Arc<AppState>>, config: Value) -> Value {
         return json!({ "ok": false, "error": "rename failed" });
     }
     // Hooks are registered at gateway startup — restart so the save applies.
-    kill_current(&state);
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let _ = spawn_gateway(&state);
+    // Debounced overlapping restart: the replacement is handshaked while the
+    // old main keeps serving, so nothing is killed mid-handshake and rapid
+    // successive saves coalesce into one restart.
+    let arc: Arc<AppState> = Arc::clone(&state);
+    restart_gateway_soon(&arc);
     json!({ "ok": true })
 }
 

@@ -348,7 +348,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
   );
 }
 
-// ── 计划审查浮条（Claude 式两阶段）─────────────────────────────────────
+// ── 计划审查浮条（─────────────────────────────────────
 // 计划模式下模型产完计划（本轮 run 结束）后弹出：用户批准后才开始真正执行。
 // 批准 → 前端切到 accept_edits 并续发一条"请执行"指令触发新一轮 run；
 // 继续调整 → 关闭浮条，保持计划模式，用户可继续对话修改方案。
@@ -415,7 +415,7 @@ export function PlanReviewBar({
 
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
-      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-2">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border-2 border-primary/40 rounded-2xl shadow-2xl p-2">
         <div className="flex items-center justify-between gap-3 mb-1.5">
           <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
             计划已生成

@@ -6,7 +6,7 @@
 //! (message_update / tool_execution_* / agent_settled) into the `session/update`
 //! shapes the frontend already consumes. No frontend changes required.
 //!
-//! Differences from the legacy ACP (codex app-server) adapter:
+//! Differences from the legacy ACP adapter:
 //! - pi has a single active session per process → each Helix conversation
 //!   gets its OWN pi child process (`PiInstance`), so conversations run in
 //!   parallel without clobbering each other's active session.
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -47,7 +47,7 @@ use std::os::windows::process::CommandExt;
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 /// Handshake (get_state on a fresh spawn) allowance. pi answers get_state
 /// only after ALL extensions finish initializing; heavyweight extensions
-/// (e.g. pi-hermes-memory's SQLite backfill) may legitimately block for
+/// (e.g. the memory extension's SQLite backfill) may legitimately block for
 /// minutes under lock contention (its own busy_timeout is 120s, lock
 /// takeover 300s). Killing at RPC_TIMEOUT loses that wait and restarts it
 /// from scratch, so the handshake gets a longer budget than a normal RPC.
@@ -180,6 +180,14 @@ pub struct PiInstance {
     exec_tool_args: Mutex<HashMap<String, Value>>,
     /// Model context window (get_state's model.contextWindow) for usage ring.
     context_window: Mutex<Option<i64>>,
+    /// Last REAL context figure we saw for this instance: pi's per-call
+    /// `totalTokens` (input+output+cache, i.e. what the provider actually
+    /// loaded). The session-file estimate counts message text only (chars/4)
+    /// and lands far below the real prompt size, so any path that can only
+    /// compute the estimate must floor it with this — otherwise restoring a
+    /// conversation reports a number far below what the last turn really used
+    /// ("对话中 50k → 对话后 20.7k").
+    last_context_used: AtomicI64,
     initialized: AtomicBool,
     /// Serializes (re)spawns of this instance so concurrent callers can't
     /// kill each other's fresh child.
@@ -255,6 +263,7 @@ impl PiInstance {
             tool_args: Mutex::new(HashMap::new()),
             exec_tool_args: Mutex::new(HashMap::new()),
             context_window: Mutex::new(None),
+            last_context_used: AtomicI64::new(0),
             initialized: AtomicBool::new(false),
             spawn_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
@@ -353,12 +362,26 @@ impl PiInstance {
         self.touch();
         let (id, line) = request_frame(cmd, params)?;
         let (tx, rx) = mpsc::channel::<Value>();
+        let submit_gen = self.generation.load(Ordering::SeqCst);
         self.submit(id.clone(), line, Responder::Sync(tx))?;
+        let start = std::time::Instant::now();
         let message = rx.recv_timeout(timeout).map_err(|e| match e {
             mpsc::RecvTimeoutError::Disconnected => {
-                format!("pi request {cmd} failed: process exited (no response channel)")
+                let now_gen = self.generation.load(Ordering::SeqCst);
+                format!(
+                    "pi request {cmd} failed: process exited (no response channel) [waited {}ms, submit_gen={} now_gen={}]",
+                    start.elapsed().as_millis(),
+                    submit_gen,
+                    now_gen
+                )
             }
-            mpsc::RecvTimeoutError::Timeout => format!("pi request {cmd} timed out"),
+            mpsc::RecvTimeoutError::Timeout => {
+                format!(
+                    "pi request {cmd} timed out [{}] (submit_gen={})",
+                    timeout.as_millis(),
+                    submit_gen
+                )
+            }
         })?;
         Self::decode_response(message, cmd)
     }
@@ -423,6 +446,19 @@ impl PiInstance {
     /// The model's context window, when known from get_state.
     fn context_window(&self) -> Option<i64> {
         *self.context_window.lock().unwrap()
+    }
+
+    /// Remember the last real context figure (see the field docs). Only
+    /// overwritten by a fresh real number — never by an estimate.
+    fn set_last_context_used(&self, tokens: i64) {
+        if tokens > 0 {
+            self.last_context_used.store(tokens, Ordering::SeqCst);
+        }
+    }
+
+    /// Last real context figure; 0 when nothing has been measured yet.
+    fn last_context_used(&self) -> i64 {
+        self.last_context_used.load(Ordering::SeqCst)
     }
 
     /// get_state + stamp. Returns the state `data`.
@@ -770,7 +806,31 @@ fn spawn_instance(
         spawn_process(&instance, state)?;
 
         // Pi has no handshake — get_state succeeding proves the RPC is live.
+        // A transient child death during the cold-start window (node boot +
+        // extension init + the memory extension's SQLite backfill) can kill
+        // the process before get_state answers; the reader thread's death
+        // bookkeeping then drops the pending channel ("process exited").
+        // Respawn + retry ONCE — a second failure is a genuine crash loop
+        // (bad config, leaked sibling holding the SQLite lock, …) and is
+        // surfaced as an error rather than looped.
         match instance.request_sync("get_state", Value::Null, HANDSHAKE_TIMEOUT) {
+            Err(e) if e.contains("process exited") => {
+                eprintln!("[pi agent] get_state failed ({e}); respawning and retrying once");
+                instance.kill();
+                spawn_process(&instance, state)?;
+                match instance.request_sync("get_state", Value::Null, HANDSHAKE_TIMEOUT) {
+                    Ok(data) => {
+                        instance.stamp_session_from_state(Some(&data));
+                        instance.initialized.store(true, Ordering::SeqCst);
+                        return Ok(Arc::clone(&instance));
+                    }
+                    Err(e2) => {
+                        eprintln!("[pi agent] get_state retry failed: {e2}");
+                        instance.kill();
+                        return Err(e2);
+                    }
+                }
+            }
             Ok(data) => {
                 instance.stamp_session_from_state(Some(&data));
                 instance.initialized.store(true, Ordering::SeqCst);
@@ -873,6 +933,22 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
         return Err("Failed to open pi agent stdout".into());
     };
     let stderr = child.stderr.take();
+    if let Some(stderr) = stderr {
+        thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        eprintln!("[pi agent] stderr: {}", line.trim_end());
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
     let stdin = child
         .stdin
         .take()
@@ -907,6 +983,28 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
             let record = line.trim_end_matches(['\n', '\r']);
             if !record.is_empty() {
                 handle_line(&instance_clone, record);
+            }
+        }
+        {
+            let mut child_guard = instance_clone.child.lock().unwrap();
+            if let Some(child) = child_guard.as_mut() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        eprintln!(
+                            "[pi agent] child exited: gen={} key={} status={:?}",
+                            _generation,
+                            instance_clone.key(),
+                            status
+                        );
+                    }
+                    _ => {
+                        eprintln!(
+                            "[pi agent] stdout EOF on live child: gen={} key={}",
+                            _generation,
+                            instance_clone.key()
+                        );
+                    }
+                }
             }
         }
         // Only do death bookkeeping if THIS thread's child is the current
@@ -946,15 +1044,6 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
             }
         }
     });
-
-    if let Some(stderr) = stderr {
-        thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
-                eprintln!("[pi agent] {line}");
-            }
-        });
-    }
     Ok(())
 }
 
@@ -1069,7 +1158,7 @@ fn parse_image_data(url: Option<&str>) -> Option<Value> {
         let mime = meta
             .split(';')
             .next()
-            .filter(|m| !m.is_empty())
+            .filter(|m| !m.is_empty() && m.starts_with("image/"))
             .unwrap_or("image/png");
         Some(json!({ "type": "image", "data": data, "mimeType": mime }))
     } else if url.starts_with("http://") || url.starts_with("https://") {
@@ -1262,11 +1351,16 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // No project picked: the conversation must NOT inherit the last
             // used project (persisted workdir.json — the global work_dir).
             // That's how a brand-new chat landed in e.g. the LangGraph dir
-            // just because a previous conversation ran there. Home dir is the
-            // neutral default; a warm spare (spawned in the global dir) is
-            // never claimed for such a conversation either.
+            // just because a previous conversation ran there. The sessions
+            // default dir (`~/.pi/agent/sessions/default`) is the neutral
+            // home; a warm spare (spawned in the global dir) is never
+            // claimed for such a conversation either.
             let spawn_cwd = cwd.clone().or_else(|| {
-                dirs::home_dir().map(|d| d.to_string_lossy().into_owned())
+                Some(
+                    crate::state::pi_sessions_default_dir()
+                        .to_string_lossy()
+                        .into_owned(),
+                )
             });
             let instance = match take_warm_spare(spawn_cwd.as_deref()) {
                 Some(spare) => {
@@ -1437,6 +1531,45 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // Respawns the instance (switch_session restores the reaped
             // conversation from its session file) if it is not live.
             let instance = instance_for_session(&session_id, &state).await?;
+            // Restore-time context read for the frontend's context ring:
+            // session/new's seed-history replay can re-shape the active
+            // branch, so estimate AFTER the switch has landed. `context_max`
+            // comes from the model's window when stamped; a restored instance
+            // whose stamp predates the model config carries no window, so
+            // fetch it from the config fallback table (same source as the
+            // ring's pre-prompt estimate).
+            let (jsonl_estimate, jsonl_categories, jsonl_anchor) =
+                jsonl_active_branch_estimate(&instance);
+            let estimated = jsonl_estimate;
+            let ctx_max = instance
+                .context_window()
+                .unwrap_or(crate::config::model_context_window_fallback());
+            // Floor the estimate with the last REAL per-call figure. Priority:
+            // chars/4 estimate → persisted jsonl usage anchor (last provider
+            // `totalTokens` written into the session file, survives a gateway
+            // restart) → volatile in-process last_context_used. Without the
+            // anchor, a respawn reports 0 → estimate-only ("对话中 50k →
+            // 对话后 20.7k" or straight to 0).
+            let resumed_context_used =
+                estimated.max(jsonl_anchor).max(instance.last_context_used()).max(0);
+            let resumed_context_max = ctx_max;
+            let resumed_context_percent = if resumed_context_max > 0 {
+                (resumed_context_used as f64 / resumed_context_max as f64) * 100.0
+            } else {
+                0.0
+            };
+            // Carried buckets as-is; fall back to the aggregate lump so the
+            // panel shows a stable single row instead of an empty set.
+            let mut categories: Value = jsonl_categories.unwrap_or(Value::Array(Vec::new()));
+            if resumed_context_used > 0 && categories == Value::Array(Vec::new()) {
+                categories = json!({
+                    "id": "conversation",
+                    "label": "整体上下文占用",
+                    "tokens": resumed_context_used,
+                    "color": "var(--context-usage-conversation)",
+                    "aggregate": true,
+                });
+            }
             let resumed_id = instance
                 .current_session
                 .lock()
@@ -1521,6 +1654,10 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 "session_id": resumed_id,
                 "threadId": resumed_id,
                 "messages": messages,
+                "context_used": resumed_context_used,
+                "context_max": resumed_context_max,
+                "context_percent": resumed_context_percent,
+                "categories": categories,
             }))
         }
         "session/set_mode" => {
@@ -1739,7 +1876,9 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 let sleep = tokio::time::sleep_until(deadline);
                 tokio::select! {
                     result = &mut rx => {
-                        break result.map_err(|_| "pi turn event channel closed")?;
+                        let v = result.map_err(|_| "pi turn event channel closed".to_string())?;
+                        instance.streaming.store(false, Ordering::SeqCst);
+                        break v;
                     }
                     _ = tokio::time::sleep(WATCHDOG_TICK) => {
                         let pending_ui = instance.ui_requests.lock().unwrap().len();
@@ -2260,6 +2399,38 @@ fn estimate_active_branch_by_kind(lines: &[String]) -> (i64, Vec<(&'static str, 
     (tokens, parts)
 }
 
+/// Persisted floor anchor for the active branch's next-prompt size: the
+/// largest provider-reported `usage` total on the branch. Assistant message
+/// records carry pi's per-call usage and are written into the jsonl, so the
+/// figure survives a gateway restart — unlike the volatile
+/// `last_context_used` (0 after every respawn). The max over the branch —
+/// not just the last record — keeps the anchor high when a trim/compaction
+/// replay shrank a later request; it is always ≤ the true next-prompt
+/// replay, so it is a safe floor. Returns 0 when the branch has no usage
+/// records yet.
+fn jsonl_usage_anchor(lines: &[String], start: usize) -> i64 {
+    let parse = |line: &str| serde_json::from_str::<Value>(line).ok();
+    let mut anchor = 0i64;
+    for line in lines.iter().skip(start) {
+        let Some(v) = parse(line) else { continue };
+        if v.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(usage) = v.pointer("/message/usage") else { continue };
+        let total = usage
+            .get("totalTokens")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| {
+                let get = |k: &str| usage.get(k).and_then(Value::as_i64).unwrap_or(0);
+                get("input") + get("output") + get("cacheRead") + get("cacheWrite")
+            });
+        if total > anchor {
+            anchor = total;
+        }
+    }
+    anchor
+}
+
 /// Estimate the context the NEXT prompt will replay: pi sends the active
 /// branch to the model — the latest compaction summary replaces everything
 /// before it, followed by every message after its firstKeptEntryId. When
@@ -2620,20 +2791,14 @@ fn scan_session_files<T>(mut visit: impl FnMut(&str, &std::path::Path) -> Option
 /// remains the fallback for a cache miss).
 fn warm_session_file_index() {
     thread::spawn(|| {
-        let mut indexed = 0usize;
         let mut map = SESSION_FILES.lock().unwrap();
         scan_session_files(|id, path| {
             // Don't clobber entries added meanwhile by live instances — those
             // are fresher than whatever this scan finds.
             map.entry(id.to_string())
                 .or_insert_with(|| path.to_string_lossy().into_owned());
-            indexed += 1;
             None::<()>
         });
-        drop(map);
-        if indexed > 0 {
-            eprintln!("[pi agent] session file index warmed: {indexed} files");
-        }
     });
 }
 
@@ -2672,8 +2837,54 @@ async fn routed_instance_or_ui_owner(
     instance_for_session(&owner_key, state).await
 }
 
-/// get_session_stats → Helix context-breakdown shape (same as the legacy
-/// codex app-server adapter).
+/// Read + active-branch estimate of the instance's live session jsonl. The
+/// trimmed file (if newer by mtime) is what pi is actually appending to, so
+/// mtime picks the live file even when a restore-time trim's switch failed and
+/// pi stayed on the original. Shared by the `context_breakdown` RPC and the
+/// per-message usage ring so both report the same "what the NEXT prompt will
+/// replay" figure instead of the last request's (often far smaller)
+/// `contextUsage`. Returns `(0, null, 0)` when the live file is unknown/unread.
+/// The second return value is the per-kind breakdown as a JSON array (the same
+/// shape `context_breakdown` returns as `categories`) — or `Null` when no
+/// buckets were produced — so the usage ring can carry real categories instead
+/// of the "会话上下文" aggregate lump, which made the panel's label set
+/// appear to change on its own. The third return value is the persisted usage
+/// anchor (`jsonl_usage_anchor`) — a restart-proof floor the callers take the
+/// max with, so a fresh respawn no longer reports 0→chars/4 estimate and
+/// the ring "resets" before the next real call re-calibrates.
+fn jsonl_active_branch_estimate(
+    instance: &Arc<PiInstance>,
+) -> (i64, Option<Value>, i64) {
+    let Value::String(sid) = instance.current_session_id() else {
+        return (0, None, 0);
+    };
+    let cached_file = SESSION_FILES.lock().unwrap().get(&sid).cloned();
+    let Some(session_file) = cached_file.or_else(|| find_session_file(&sid)) else {
+        return (0, None, 0);
+    };
+    let estimate_target = trimmed_path_for(&session_file)
+        .filter(|t| mtime_of(t) >= mtime_of(&session_file))
+        .unwrap_or(session_file);
+    let Ok(raw) = std::fs::read_to_string(&estimate_target) else {
+        return (0, None, 0);
+    };
+    let lines: Vec<String> = raw
+        .split('\n')
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    let (estimated, parts) = estimate_active_branch_by_kind(&lines);
+    let categories = if parts.is_empty() || estimated == 0 {
+        None
+    } else {
+        Some(resume_category_payload(&parts))
+    };
+    let anchor = jsonl_usage_anchor(&lines, 0);
+    (estimated, categories, anchor)
+}
+
+/// get_session_stats → Helix context-breakdown shape.
 ///
 /// `context_used` is NOT pi's `contextUsage.tokens` (that is what the LAST
 /// request consumed — after a trim/restore it lags far behind what the NEXT
@@ -2697,35 +2908,24 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
     let mut context_used = context.get("tokens").and_then(Value::as_i64).unwrap_or(0);
     // True next-prompt replay size from the session file — same estimator the
     // restore-time trim uses. Cheaper than a stale 2k figure hiding a 276k
-    // replay behind a 128k window.
-    let mut by_kind: Vec<(&'static str, i64)> = Vec::new();
-    if let Value::String(sid) = instance.current_session_id() {
-        // Scope the guard: it must not ride across the read_to_string await.
-        let cached_file = SESSION_FILES.lock().unwrap().get(&sid).cloned();
-        if let Some(session_file) = cached_file.or_else(|| find_session_file(&sid)) {
-            // After a restore-time trim, pi switched to `<file>.trimmed.jsonl`
-            // and appends THERE — the original never grows again. Whichever
-            // file pi is on stays the newer one, so the mtime picks the live
-            // file even when the trim's switch failed and pi stayed put.
-            let estimate_target = trimmed_path_for(&session_file)
-                .filter(|t| mtime_of(t) >= mtime_of(&session_file))
-                .unwrap_or(session_file);
-            if let Ok(raw) = tokio::fs::read_to_string(&estimate_target).await {
-                let lines: Vec<String> = raw
-                    .split('\n')
-                    .map(str::trim_end)
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_string)
-                    .collect();
-                let (estimated, parts) = estimate_active_branch_by_kind(&lines);
-                if estimated > 0 {
-                    by_kind = parts;
-                }
-                if estimated > context_used {
-                    context_used = estimated;
-                }
-            }
-        }
+    // replay behind a 128k window. Shared with the per-message usage ring so
+    // the ring and this breakdown never disagree.
+    let (jsonl_estimate, jsonl_categories, jsonl_anchor) =
+        jsonl_active_branch_estimate(instance);
+    let mut categories: Value = jsonl_categories.unwrap_or(Value::Array(Vec::new()));
+    if jsonl_estimate > context_used {
+        context_used = jsonl_estimate;
+    }
+    // Persisted floor: the last provider-reported total on the active branch,
+    // written into the session jsonl — survives a gateway restart, unlike
+    // the volatile `last_context_used` (0 after every respawn).
+    if jsonl_anchor > context_used {
+        context_used = jsonl_anchor;
+    }
+    // In-process floor with the last REAL per-call figure (pi's totalTokens):
+    // fresh measurements between the persisted anchor and now.
+    if instance.last_context_used() > context_used {
+        context_used = instance.last_context_used();
     }
     let context_percent = if context_max > 0 {
         (context_used as f64 / context_max as f64) * 100.0
@@ -2733,10 +2933,50 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
         0.0
     };
 
-    // Composition categories: what the next prompt actually replays, split
-    // by content type. The billing fields (input/cachedRead/cachedWrite/
-    // output) are LIFETIME counters — drawing them as segments of the usage
-    // bar was misleading, so they moved to the payload as a stats reference.
+    // No session-file breakdown yet (fresh instance, file not written):
+    // fall back to the provider's current context figure as one lump so the
+    // bar still shows something honest. Marked `aggregate` so the UI can
+    // render a stable single row instead of a set of labels that appear to
+    // change on its own once buckets land.
+    if context_used > 0 && categories == Value::Array(Vec::new()) {
+        categories = json!({
+            "id": "conversation",
+            "label": "整体上下文占用",
+            "tokens": context_used,
+            "color": "var(--context-usage-conversation)",
+            "aggregate": true,
+        });
+    }
+    let estimated_total = match &categories {
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|c| c.get("tokens").and_then(Value::as_i64))
+            .sum(),
+        _ => 0,
+    };
+
+    Ok(json!({
+        "context_max": context_max,
+        "context_used": context_used,
+        "context_percent": context_percent,
+        "estimated_total": estimated_total,
+        "categories": categories,
+        // Lifetime billing counters (not composition) — the panel shows them
+        // as a reference row, not as usage-bar segments.
+        "usage_stats": {
+            "input": input_tokens,
+            "output": output_tokens,
+            "cache_read": cached_read,
+            "cache_write": cached_write,
+        },
+    }))
+}
+
+/// Build the `categories` payload from a `by_kind` breakdown the way
+/// `context_breakdown` does — shared by `session.context_breakdown` and
+/// `session.resume` (which must populate the frontend's context ring the
+/// moment a reaped conversation is restored, before any prompt runs).
+fn resume_category_payload(by_kind: &[(&'static str, i64)]) -> Value {
     let mut categories = Vec::new();
     let mut push_category = |id: &str, label: &str, tokens: i64, color: &str| {
         if tokens > 0 {
@@ -2748,7 +2988,7 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
             }));
         }
     };
-    for (kind, tokens) in &by_kind {
+    for (kind, tokens) in by_kind {
         match *kind {
             "user" => push_category(
                 "user",
@@ -2780,37 +3020,7 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
             _ => {}
         }
     }
-    // No session-file breakdown yet (fresh instance, file not written):
-    // fall back to the provider's current context figure as one lump so the
-    // bar still shows something honest.
-    if context_used > 0 && by_kind.is_empty() {
-        push_category(
-            "conversation",
-            "会话上下文",
-            context_used,
-            "var(--context-usage-conversation)",
-        );
-    }
-    let estimated_total = categories
-        .iter()
-        .filter_map(|c| c.get("tokens").and_then(Value::as_i64))
-        .sum::<i64>();
-
-    Ok(json!({
-        "context_max": context_max,
-        "context_used": context_used,
-        "context_percent": context_percent,
-        "estimated_total": estimated_total,
-        "categories": categories,
-        // Lifetime billing counters (not composition) — the panel shows them
-        // as a reference row, not as usage-bar segments.
-        "usage_stats": {
-            "input": input_tokens,
-            "output": output_tokens,
-            "cache_read": cached_read,
-            "cache_write": cached_write,
-        },
-    }))
+    Value::Array(categories)
 }
 
 fn handle_line(instance: &Arc<PiInstance>, line: &str) {
@@ -3722,12 +3932,16 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         "reasoning": final_thinking,
                     }),
                 );
-            } else {
-                // No session/prompt waiter (seed turn settling before the
-                // real prompt arrives). Release it as cancelled so the
-                // settled state doesn't linger as a stale completion.
-                release(&mut *instance.turn_waiter.lock().unwrap());
             }
+            // Always settle the waiter (no-op when none is armed). The turn is
+            // over, so the session/prompt RPC waiting on it must not stay
+            // pending: leaving it armed made the call end as
+            // "pi turn event channel closed" — the waiter was dropped later by
+            // the next prompt (:1802) or by kill() / process death. The
+            // no-waiter case (seed turn settling before the real prompt
+            // arrives) releases as cancelled so the settled state doesn't
+            // linger as a stale completion.
+            release(&mut *instance.turn_waiter.lock().unwrap());
         }
         "auto_retry_start" => {
             let message_text = message
@@ -3915,8 +4129,7 @@ fn content_to_text(content: &Value) -> Value {
 }
 
 /// `message_update` carries the cumulative `usage` field → emit the context
-/// ring event in the shape the frontend's addSessionUsageStats expects
-/// (carried over from the legacy codex app-server adapter).
+/// ring event in the shape the frontend's addSessionUsageStats expects.
 fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
     let usage = message.get("usage").cloned().unwrap_or(Value::Null);
     if usage.is_null() {
@@ -3937,12 +4150,40 @@ fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
     // alone badly under-reports cached sessions (cacheRead is often 80%+ of the
     // real context).
     let context_max = instance.context_window.lock().unwrap().unwrap_or(0);
-    let context_used = total;
+    // pi's last-reported totalTokens under-counts a cached/long session — it is
+    // a single request's usage, not what the NEXT prompt will replay. Take the
+    // jsonl active-branch estimate (same basis as context_breakdown) so the ring
+    // stays honest instead of being washed back down on every message_update.
+    // Carry the per-kind buckets too (as `categories` in the usage payload) so
+    // the frontend's snapshot writes real breakdowns instead of the aggregate
+    // "会话上下文" lump, which made the panel's label set appear to change on
+    // its own.
+    let (jsonl_estimate, jsonl_categories, jsonl_anchor) =
+        jsonl_active_branch_estimate(instance);
+    let context_used = total.max(jsonl_estimate).max(jsonl_anchor);
+    // Remember the REAL per-call figure (not the estimate) so restore paths can
+    // floor their estimate-only numbers with it.
+    instance.set_last_context_used(total);
     let context_percent = if context_max > 0 {
         (context_used as f64 / context_max as f64) * 100.0
     } else {
         0.0
     };
+    let mut categories: Value = Value::Array(Vec::new());
+    if jsonl_estimate > 0 {
+        if let Some(cats) = jsonl_categories {
+            categories = cats;
+        }
+    }
+    if context_used > 0 && categories == Value::Array(Vec::new()) {
+        categories = json!({
+            "id": "conversation",
+            "label": "整体上下文占用",
+            "tokens": context_used,
+            "color": "var(--context-usage-conversation)",
+            "aggregate": true,
+        });
+    }
     emit_helix_event(
         "usage:prompt-complete",
         &json!({
@@ -3955,6 +4196,7 @@ fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
                 "context_max": context_max,
                 "context_used": context_used,
                 "context_percent": context_percent,
+                "categories": categories,
             },
             "session_id": instance.current_session_id(),
             "raw": usage,
@@ -3965,7 +4207,8 @@ fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
 /// Locate the pi CLI's bundled cli.js + the node that runs it. Never goes
 /// through `pi.cmd`: CreateProcess would spawn cmd.exe as OUR child and node
 /// as cmd's grandchild — `child.kill()` then kills only the cmd wrapper and
-/// leaks the node/pi process. A leaked pi holds the hermes SQLite lock and
+/// leaks the node/pi process. A leaked pi holds the memory extension's
+/// SQLite lock and
 /// makes every later spawn block on it ("process exited" cascades).
 ///
 /// Resolution order:
@@ -3976,12 +4219,13 @@ fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
 /// different npm prefix (or none found) only in exotic setups.
 #[cfg(windows)]
 fn resolve_pi_cli() -> Option<(PathBuf, PathBuf)> {
-    const REL_CLI: &str = "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js";
-    // 1. npm global prefix under the data dir.
-    if let Some(npm_dir) = dirs::data_dir().map(|home| home.join("npm")) {
-        let cli_js = npm_dir.join(REL_CLI);
+    // 1. npm global prefix under the data dir. On Windows npm's default
+    // global prefix lives in %APPDATA%\npm (Roaming), not %LOCALAPPDATA%\npm,
+    // so probe both (and the generic data_dir) before falling back to PATH.
+    for candidate in npm_global_prefixes() {
+        let cli_js = candidate.join("node_modules").join("@earendil-works/pi-coding-agent").join("dist/bundle/cli.js");
         if cli_js.is_file() {
-            return Some((pi_node(&npm_dir), cli_js));
+            return Some((pi_node(&candidate), cli_js));
         }
     }
     // 2. Walk PATH for a pi shim; read the cli.js path out of it.
@@ -4011,6 +4255,19 @@ fn resolve_pi_cli() -> Option<(PathBuf, PathBuf)> {
         }
     }
     None
+}
+
+/// Candidate npm global prefix dirs: data_dir/npm (Linux/macOS style) and
+/// %APPDATA%/npm on Windows, which is npm's actual default there.
+fn npm_global_prefixes() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(dir) = std::env::var("APPDATA") {
+        out.push(PathBuf::from(dir).join("npm"));
+    }
+    if let Some(dir) = dirs::data_dir() {
+        out.push(dir.join("npm"));
+    }
+    out
 }
 
 /// The node binary to run pi under: prefer a node.exe sitting next to the

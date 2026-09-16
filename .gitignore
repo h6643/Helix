@@ -101,7 +101,6 @@ auth.json.bak
 auth.lock
 agent-extra/
 audio_cache/
-cron/
 desktop/
 hooks/
 # 上条规则会误伤前端源码目录 src/hooks（前端 React hooks），这里显式放行。
@@ -125,10 +124,13 @@ gateway-starts.log
 .skills_prompt_snapshot.json
 .update_check
 
+# pi gateway debug dumps (manual spawn captures at repo root)
+pi-err.txt
+pi-out.txt
+
 # KaTeX fonts copied to repo root by vite build
 KaTeX_*
 
-# codex CLI temp dir
-.codex-tmp/
+
 *.log
 nul

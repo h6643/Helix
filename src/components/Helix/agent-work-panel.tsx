@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  ChevronRight,
   Loader2,
   Users,
 } from "lucide-react";
@@ -15,6 +14,7 @@ import {
   extractCommandSnippet,
 } from "@/lib/tool-display-utils";
 import { cn } from "@/lib/utils";
+import { classifyTool } from "@/lib/tool-merge";
 import { useHelixStore } from "@/stores/helix-store";
 import { HelixMarkdown } from "@/components/Helix/helix-markdown";
 
@@ -51,36 +51,8 @@ interface MergedStep {
   items: RawStep[];
 }
 
-// 工具名 → 「类目动词 + 细分类目」。顺序敏感：特异规则必须排在通用词之前
-// （browser_read 先于 read、memory_read 先于 read、run_task 先于 run）。
-const STEP_RULES: Array<{ test: RegExp; verb: string; kind: string }> = [
-  { test: /browser_navigate|browser_go|open_browser|navigate/i, verb: "浏览器", kind: "导航" },
-  { test: /browser_click/i, verb: "浏览器", kind: "点击" },
-  { test: /browser_type|browser_input/i, verb: "浏览器", kind: "输入" },
-  { test: /browser_scroll/i, verb: "浏览器", kind: "滚动" },
-  { test: /browser_screenshot/i, verb: "浏览器", kind: "截图" },
-  { test: /browser_read|browser_get_html|browser_extract|browser_snapshot/i, verb: "浏览器", kind: "读取" },
-  { test: /memory/i, verb: "记忆", kind: "记忆" },
-  { test: /sub_agent|spawn_agent|delegation/i, verb: "子代理", kind: "子代理" },
-  { test: /task_|todo_|plan_|run_task/i, verb: "任务", kind: "任务" },
-  { test: /skill/i, verb: "技能", kind: "技能" },
-  { test: /websearch|web_search|search_web/i, verb: "查阅", kind: "搜索" },
-  { test: /web_fetch|webfetch|fetch|web_extractor/i, verb: "查阅", kind: "网页" },
-  { test: /grep|search|glob|find|query/i, verb: "查阅", kind: "搜索" },
-  { test: /list_directory|list_files|list|dir/i, verb: "查阅", kind: "列表" },
-  { test: /read|view/i, verb: "查阅", kind: "文件" },
-  { test: /write|create|artifact/i, verb: "编辑", kind: "写入" },
-  { test: /edit|patch|modify|replace/i, verb: "编辑", kind: "编辑" },
-  { test: /bash|terminal|shell|run_|execute|command|cmd/i, verb: "终端", kind: "命令" },
-];
-
-function classifyStep(toolName: string): { verb: string; kind: string } {
-  const name = toolName || "";
-  for (const r of STEP_RULES) {
-    if (r.test.test(name)) return { verb: r.verb, kind: r.kind };
-  }
-  return { verb: "工具", kind: getToolLabel(name) || name || "工具" };
-}
+// 工具名 → 「类目动词 + 细分类目」的权威判定已抽到 @/lib/tool-merge 的
+// classifyTool（与子 Agent 面板、主对话区共用同一份规则，避免动词表漂移）。
 
 function oneLine(s: string, max: number): string {
   const t = (s || "").replace(/\s+/g, " ").trim();
@@ -94,7 +66,7 @@ function oneLine(s: string, max: number): string {
 function mergeSteps(raw: RawStep[]): MergedStep[] {
   const groups: Array<{ verb: string; items: RawStep[] }> = [];
   for (const s of raw) {
-    const { verb } = classifyStep(s.toolName);
+    const { verb } = classifyTool(s.toolName);
     const last = groups[groups.length - 1];
     const lastFailed = !!last && last.items.some((i) => i.status === "error");
     if (last && last.verb === verb && !lastFailed) last.items.push(s);
@@ -103,7 +75,7 @@ function mergeSteps(raw: RawStep[]): MergedStep[] {
   return groups.map((g) => {
     const counts = new Map<string, number>();
     for (const i of g.items) {
-      const { kind } = classifyStep(i.toolName);
+      const { kind } = classifyTool(i.toolName);
       counts.set(kind, (counts.get(kind) || 0) + 1);
     }
     const status: StepStatus = g.items.some((i) => i.status === "error")
@@ -180,7 +152,9 @@ export function AgentWorkPanel() {
         /* silent */
       }
     },
-    [agent],
+    // key 用 agent.id（原始值）而非 agent 对象引用，避免 sub-agent 状态刷新
+    // 导致 agent 对象换新引用 → load/pollTimeline 重建 → effect 反复重建定时器
+    [agent?.id],
   );
 
   useEffect(() => {
@@ -250,7 +224,8 @@ export function AgentWorkPanel() {
         /* silent */
       }
     },
-    [agent, live?.agentId, subAgents, delegation?.agent_id],
+    // 同上：subAgents 数组随 sub-agent 事件频繁换引用，key 到原始值避免定时器反复重建
+    [agent?.id, live?.agentId, delegation?.agent_id],
   );
 
   useEffect(() => {
@@ -405,12 +380,6 @@ export function AgentWorkPanel() {
                       }
                       className="flex items-center gap-2 w-full text-left py-1 px-1 -mx-1 rounded-sm hover:bg-muted/40 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)]"
                     >
-                      <ChevronRight
-                        className={cn(
-                          "size-3.5 shrink-0 text-muted-foreground/60 transition-transform",
-                          open && "rotate-90",
-                        )}
-                      />
                       <span
                         className={cn(
                           "shrink-0 mt-0.5",

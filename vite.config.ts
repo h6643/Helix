@@ -50,7 +50,6 @@ export default defineConfig({
       // crashes the watcher with EBUSY on Windows
       ignored: [
         '**/src-tauri/**',
-        '**/hermes-agent/**',
         '**/.pi-verify-target/**',
       ],
     },

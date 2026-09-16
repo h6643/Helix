@@ -19,8 +19,6 @@ const REASONING_BLOCK_RE =
   /<(think|thinking|reasoning|scratchpad|analysis)>[\s\S]*?<\/\1>\s*/gi;
 
 const FENCE_LINE_RE = /^([ \t]*)(`{3,}|~{3,})([^\n]*)$/;
-const EMPTY_FENCE_BLOCK_RE =
-  /(^|\n)[ \t]*(?:`{3,}|~{3,})[^\n]*\n[ \t]*(?:`{3,}|~{3,})[ \t]*(?=\n|$)/g;
 const CODE_FENCE_SPLIT_RE = /((?:```|~~~)[\s\S]*?(?:```|~~~))/g;
 const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g;
 const LATEX_DISPLAY_OPEN_LINE_RE =
@@ -73,9 +71,42 @@ function hasCloseFenceLine(body: string, marker: string): boolean {
   return false;
 }
 
+/**
+ * True when a fence line's trailing text looks like the START OF PROSE rather
+ * than a language tag — i.e. the model glued the closing fence to the next
+ * paragraph (`…err)\n```错误字符串只有一处能产生：…`) instead of giving the
+ * fence a line of its own. CommonMark only accepts a closing fence whose line
+ * holds nothing but the fence characters (an info string is an OPENING-fence
+ * feature), so such a line neither closes the block nor opens a new one: the
+ * fence stays open until the next bare ``` and every line in between — prose,
+ * ATX headings, even an inner ```rust opener — is swallowed into one giant code
+ * block (user-visible: a single CODE card containing literal ``` markers).
+ *
+ * Only NON-Latin trailing text qualifies: ```` ```rust ```` / ```` ```tsx ````
+ * are legitimate openers (and ```` ```tsxul: … ```` — language glued to body —
+ * is already split by scrubBacktickNoise's merged-fence repair), while CJK or
+ * punctuation right after the marker is unambiguous prose intent.
+ */
+function isGluedCloseFence(info: string): boolean {
+  const token = info.split(/\s+/, 1)[0] || "";
+
+  if (!token) {
+    return false;
+  }
+
+  return !sanitizeLanguageTag(token) && !/^[A-Za-z0-9]/.test(token);
+}
+
 function scrubBacktickNoise(text: string): string {
+  // 闭合围栏粘行（```错误字符串…）也算"平衡"：模型确实闭合了围栏，只是把闭合
+  // 标记和下一段正文写在同一行。若不把这种形状纳入保护，fenceNoiseRe 会把两个
+  // 围栏标记一起当噪声删掉（后面没有别的独占围栏时），代码块直接退化成段落。
+  // 尾部字符类**严格对齐 isGluedCloseFence**：只认"标记后紧跟非空白、且不是拉丁
+  // 字母/数字"的正文。拉丁开头的 ` ```rust ` / ` ```tsxul:… ` 仍按语言 info 走原
+  // 路径——放任它们在这里当闭合，会让保护区间提前结束、把后面真正的独占闭合行
+  // 当噪声删掉（多个代码块被并成一个）。`[ \t]*` 允许"``` 正文"这种带空格写法。
   const balancedFenceRe =
-    /(^|\n)([ \t]*)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g;
+    /(^|\n)([ \t]*)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n[ \t]*\3[ \t]*(?:[^ \t\nA-Za-z0-9][^\n]*)?(?=\n|$)/g;
   const protectedRanges: { end: number; start: number }[] = [];
   let match: RegExpExecArray | null;
 
@@ -154,8 +185,80 @@ function scrubBacktickNoise(text: string): string {
   return out;
 }
 
+/** 闭合围栏行（可有缩进，除围栏标记外只允许横向空白——info 只属于开围栏） */
+const FENCE_CLOSE_LINE_RE = /^[ \t]*(`{3,}|~{3,})[ \t]*$/;
+
+/**
+ * Drop empty fenced blocks — an opener whose very next line closes it
+ * (` ```bash ` immediately followed by ` ``` `). LLMs emit these as leftovers
+ * and they'd render as an empty code card.
+ *
+ * Two rules the old one-regex version got wrong:
+ *   1. Only a line that could legally CLOSE the opener may be eaten: same
+ *      marker character and at least as long (CommonMark). A 4-backtick fence
+ *      used to DEMO a 3-backtick block (` ```` ` / ` ``` `) therefore keeps
+ *      its lines instead of collapsing into a paragraph.
+ *   2. The pair must be at top level: scanning is fence-state aware, so the
+ *      inner ` ``` ` of that nested demo is never mistaken for an empty block.
+ */
 function stripEmptyFenceBlocks(text: string): string {
-  return text.replace(EMPTY_FENCE_BLOCK_RE, "$1");
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index] || "";
+    const open = line.match(FENCE_LINE_RE);
+    const marker = open ? open[2] || "" : "";
+    const close = open
+      ? (lines[index + 1] || "").match(FENCE_CLOSE_LINE_RE)
+      : null;
+    const closeMarker = close ? close[1] || "" : "";
+
+    if (
+      open &&
+      close &&
+      closeMarker[0] === marker[0] &&
+      closeMarker.length >= marker.length
+    ) {
+      // 与旧 replace("$1") 等价：块前有内容时留一行空行，块在开头则不留。
+      if (index > 0) {
+        out.push("");
+      }
+      index += 2;
+
+      continue;
+    }
+
+    if (!open) {
+      out.push(line);
+      index += 1;
+
+      continue;
+    }
+
+    // 非空围栏：连同块体一起照抄，直到它自己的闭合行（不足长的围栏行=块体内容）。
+    out.push(line);
+    index += 1;
+    while (index < lines.length) {
+      const body = lines[index] || "";
+      const bodyClose = body.match(FENCE_CLOSE_LINE_RE);
+      const bodyMarker = bodyClose ? bodyClose[1] || "" : "";
+
+      out.push(body);
+      index += 1;
+
+      if (
+        bodyClose &&
+        bodyMarker[0] === marker[0] &&
+        bodyMarker.length >= marker.length
+      ) {
+        break;
+      }
+    }
+  }
+
+  return out.join("\n");
 }
 
 function autoLinkRawUrls(text: string): string {
@@ -379,7 +482,7 @@ function findClosingFence(
   lines: string[],
   start: number,
   marker: string,
-): number {
+): { index: number; leftover: string } | null {
   for (let cursor = start + 1; cursor < lines.length; cursor += 1) {
     const closeMatch = (lines[cursor] || "").match(FENCE_LINE_RE);
 
@@ -391,15 +494,24 @@ function findClosingFence(
     const closeInfo = (closeMatch[3] || "").trim();
 
     if (
-      !closeInfo &&
-      closeMarker[0] === marker[0] &&
-      closeMarker.length >= marker.length
+      closeMarker[0] !== marker[0] ||
+      closeMarker.length < marker.length
     ) {
-      return cursor;
+      continue;
+    }
+
+    if (!closeInfo) {
+      return { index: cursor, leftover: "" };
+    }
+
+    // 闭合围栏粘行（```错误字符串…）：按"模型意图"当成闭合，围栏后的正文
+    // 由调用方作为独立一行续在后头。见 isGluedCloseFence。
+    if (isGluedCloseFence(closeInfo)) {
+      return { index: cursor, leftover: closeInfo };
     }
   }
 
-  return -1;
+  return null;
 }
 
 function normalizeFenceBlocks(text: string): string {
@@ -442,7 +554,9 @@ function normalizeFenceBlocks(text: string): string {
       continue;
     }
 
-    const closeIndex = findClosingFence(sourceLines, index, marker);
+    const close = findClosingFence(sourceLines, index, marker);
+    const closeIndex = close ? close.index : -1;
+    const leftover = close ? close.leftover : "";
     const rawBodyLines = sourceLines.slice(
       index + 1,
       closeIndex === -1 ? sourceLines.length : closeIndex,
@@ -469,6 +583,9 @@ function normalizeFenceBlocks(text: string): string {
 
     if (isLikelyProseFence(infoRaw, body)) {
       pushProseFence(out, indent, infoRaw, bodyLines);
+      if (leftover) {
+        out.push(leftover);
+      }
       index = closeIndex + 1;
 
       continue;
@@ -477,6 +594,10 @@ function normalizeFenceBlocks(text: string): string {
     out.push(`${indent}${marker}${language}`);
     extend(out, bodyLines);
     out.push(`${indent}${marker}`);
+    // 粘在闭合围栏同一行的正文回退成独立一行，避免它继续当代码字面量。
+    if (leftover) {
+      out.push(leftover);
+    }
     index = closeIndex + 1;
   }
 
@@ -865,8 +986,16 @@ export function preprocessMarkdown(text: string): string {
         return part;
       }
 
+      // Pass only the CORE to the prose transforms and re-emit the surrounding
+      // whitespace once. Handing them the whole part (old behaviour) counted the
+      // whitespace twice — `leading + transformed + trailing` — because none of
+      // these transforms strip it: blank lines after a fence were duplicated,
+      // and inside a nested-fence demo (4 backticks showing a 3-backtick block,
+      // which CODE_FENCE_SPLIT_RE fragments into prose + fence pieces) the
+      // duplicate landed INSIDE the code block as visible blank lines.
       const leading = part.match(/^\s*/)?.[0] ?? "";
       const trailing = part.match(/\s*$/)?.[0] ?? "";
+      const core = part.slice(leading.length, part.length - trailing.length);
 
       const transformed = normalizeGluedListItems(
         normalizeSpacedEmphasis(
@@ -875,7 +1004,7 @@ export function preprocessMarkdown(text: string): string {
               padTableDelimiterRows(
                 normalizeAtxHeadings(
                   normalizeVisibleProse(
-                    normalizeProseMath(neutralizeSetextUnderlines(part)),
+                    normalizeProseMath(neutralizeSetextUnderlines(core)),
                   ),
                 ),
               ),

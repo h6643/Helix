@@ -83,6 +83,10 @@ function mapUsage(u: any): any {
   const lastUsage = u.last && typeof u.last === "object" ? u.last : undefined;
   const contextWindow = num(u, "modelContextWindow", "model_context_window");
   const totalTokens = num(totalUsage, "totalTokens", "total_tokens", "total");
+  // 远端网关（api_gateway.rs emit_usage）报来的 context_used 已按
+  // max(totalTokens, jsonl 活跃分支估算) 计算，优先保留；没有时退回本地 totalTokens。
+  const remoteContextUsed = num(u, "context_used") ?? 0;
+  const contextUsed = Math.max(totalTokens ?? 0, remoteContextUsed);
   return {
     totalTokens,
     inputTokens: num(
@@ -123,8 +127,12 @@ function mapUsage(u: any): any {
       "cache_write_tokens",
       "cache_creation_input_tokens",
     ),
+    // 展开顺序：先铺本地兜底（context_used 用本地算好的 contextUsed），
+    // 再铺远端 payload——远端若带 context_used（api_gateway.rs emit_usage 已按
+    // max(totalTokens, jsonl 活跃分支估算) 算过，更权威）则胜出；没带则保留本地值。
+    // 注：本地裸 totalTokens 绝不能反向覆盖远端值（那正是本地环偏低 2.7× 的根因）。
     context_max: contextWindow,
-    context_used: totalTokens,
+    context_used: contextUsed,
     ...(lastUsage ? { lastUsage } : {}),
     ...u,
   };
@@ -1129,10 +1137,6 @@ export class ServeGatewayClient {
           ")",
         );
         // 建会话前强制同步一次前端模型配置（本客户端生命周期内一次）。
-        // 原因：聊天主路径（agent-flow-panel）直接 session/new，不经过
-        // use-helix 的 setHelixModel；而 ~/.helix 下 config.yaml 里
-        // 可能残留旧 IPC 直写的 provider（如 'agnes-ai'），serve 的模型解析
-        // 不认识 → base_url 被丢弃 → agent 构建 30s 超时 → error 事件。
         const res = await this.createSession(params);
         debug("[ServeGateway] ✓ session/new OK →", res?.session_id);
         return res; // 已含 session_id，调用点的提取链兼容
@@ -1427,7 +1431,7 @@ export class ServeGatewayClient {
    * （applyProfile 走 pushModelConfig；输入栏走 pushModelConfig；设置页保存走
    * helix:setConfig，serve 下同样写 config.yaml），一旦某入口没触发 setModel，
    * modelSynced 会停留 true，网关将一直使用旧 config.yaml
-   * （如 deepseek+Ling 错配 → 400 无输出）。
+   * （如 deepseek+Kimi 错配 → 400 无输出）。
    * 因此每次都读取 store 的实时 apiConfig 写回，代价只是一次文件写。
    * 前端没配模型（无 apiConfig）时跳过——尊重后端自己的 config。
    * 同步失败不阻塞建会话：只告警，让后端用现有配置尝试（可能仍能工作）。
@@ -1482,7 +1486,7 @@ export class ServeGatewayClient {
    * 不走浏览器直接 fetch /api/model/set：渲染层跑在 localhost:3000，而 serve
    * 网关在 127.0.0.1:<port>，跨域请求会被浏览器 CORS 拦截 → "Failed to fetch"。
    * 走 IPC 是主进程侧发起，无此限制。主进程 helix:setModel 内部已做 isBadConfig
-   * 校验，死端点会被自动回落成 live（ant-ling），从根上杜绝"每次重启变回死配置"。
+   * 校验，死端点会被自动回落成 live，从根上杜绝"每次重启变回死配置"。
    * serve 模式下 restartGatewayDebounced 已被守卫短路，写盘后网关在下次
    * session.create 重读 config.yaml，无需重启。
    */

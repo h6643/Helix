@@ -2,7 +2,7 @@
 //! Port of `electron/main.js` (app:getInfo / syncWorkDir / setWorkDir / quit)
 //! and the workdir.json persistence helpers.
 
-use crate::gateway::{kill_current, shutdown, spawn_gateway};
+use crate::gateway::shutdown;
 use crate::paths::{
     data_root_pointer_path, default_helix_data_dir, helix_data_dir, strip_verbatim_prefix,
 };
@@ -186,9 +186,14 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
 /// Kill + respawn the backend.
 #[tauri::command]
 pub fn restart_gateway(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    kill_current(&state);
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    spawn_gateway(&state)
+    // Overlapping (non-blocking) restart: the replacement is spawned and
+    // handshaked while the old main keeps serving, then promoted atomically.
+    // The old kill-first flow (kill_all → sleep(300ms) → cold spawn) dropped
+    // the pending responders of every instance still handshaking (surfacing as
+    // "process exited (no response channel)") and left the app with no backend
+    // for the whole cold-start window.
+    crate::gateway::restart_gateway_now(&state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -197,12 +202,6 @@ pub fn quit(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let handle = crate::state::app_handle();
     handle.exit(0);
     Ok(())
-}
-
-/// Read a key value from the helix .env file (e.g. TAVILY_API_KEY).
-#[tauri::command]
-pub fn read_env_key(key: String) -> String {
-    crate::config::read_env_key(&key)
 }
 
 /// The Pi agent's default sessions working directory (`~/.pi/agent/sessions`).
@@ -413,13 +412,11 @@ pub async fn helix_set_raw_config(config: Value) -> Result<(), String> {
 pub async fn helix_doctor() -> Result<Value, String> {
     let data_dir = helix_data_dir();
     let config_ok = std::fs::read_to_string(data_dir.join("config.yaml")).is_ok();
-    let env_ok = std::fs::read_to_string(data_dir.join(".env")).is_ok();
     let runtime_ok = which::which("python3").is_ok() || which::which("python").is_ok();
 
     Ok(json!({
         "dataDir": data_dir.display().to_string(),
         "configYaml": if config_ok { "ok" } else { "missing" },
-        "envFile": if env_ok { "ok" } else { "missing" },
         "python": if runtime_ok { "ok" } else { "not found" },
         "version": env!("CARGO_PKG_VERSION"),
     }))

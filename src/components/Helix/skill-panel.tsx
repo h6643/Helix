@@ -47,8 +47,8 @@ interface HelixSkill {
   name: string;
   description: string;
   isBuiltin: boolean;
-  /** Where pi loads the skill from: "pi" (user root), "memory"
-   * (pi-hermes-memory extension managed), or the bundling npm package name. */
+  /** Where pi loads the skill from: "pi" (user root ~/.pi/agent/skills)
+   * or the bundling npm package name. */
   source?: string;
   path: string;
   callCount: number;
@@ -380,8 +380,8 @@ export function SkillPanel({}: SkillPanelProps) {
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return items.filter((item) => {
-      // Show extensions and registerTool tools; hide skills and prompts.
-      if (item.type !== "extension" && item.type !== "tool") return false;
+      // Only extensions are listed here; skills, prompts and registerTool tools are hidden.
+      if (item.type !== "extension") return false;
       if (!q) return true;
       return (
         item.name.toLowerCase().includes(q) ||
@@ -402,7 +402,6 @@ export function SkillPanel({}: SkillPanelProps) {
   }, [skills, searchQuery]);
 
   const extensions = filteredItems.filter((i) => i.type === "extension");
-  const tools = filteredItems.filter((i) => i.type === "tool");
 
   // ── Browse: filtered + sorted results ──
   const filteredResults = useMemo(() => {
@@ -707,14 +706,14 @@ export function SkillPanel({}: SkillPanelProps) {
         </div>
 
         {!showBrowse && (
-          <div className="relative mt-3">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+          <div className="relative mt-3 flex justify-center">
+            <Search className="absolute left-[calc(2.5%+12px)] top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="搜索插件..."
-              className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
+              className="w-[95%] h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
             />
           </div>
         )}
@@ -727,14 +726,14 @@ export function SkillPanel({}: SkillPanelProps) {
               <>
                 {/* Browse view */}
                 <div className="flex items-center gap-2 mb-4">
-                  <div className="relative flex-1">
-                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                  <div className="relative flex-1 flex justify-center">
+                    <Search className="absolute left-[calc(2.5%+12px)] top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
                     <input
                       type="text"
                       value={browseQuery}
                       onChange={(e) => handleBrowseSearchChange(e.target.value)}
                       placeholder="搜索 npm 上的 Pi 插件..."
-                      className="w-full h-10 pl-10 pr-4 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
+                      className="w-[95%] h-10 pl-10 pr-4 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
                     />
                     {searchLoading && (
                       <Loader2 className="absolute right-3.5 top-1/2 -translate-y-1/2 size-4 animate-spin text-muted-foreground" />
@@ -805,8 +804,6 @@ export function SkillPanel({}: SkillPanelProps) {
                 ) : (
                   <div className="space-y-5">
                     {renderSection("扩展", extensions, null)}
-                    {tools.length > 0 &&
-                      renderSection("工具", tools, <Wrench className="size-3.5" />)}
                   </div>
                 )}
               </>

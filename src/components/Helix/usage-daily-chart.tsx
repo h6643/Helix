@@ -6,7 +6,6 @@ import { formatTokens } from "@/lib/format";
 export interface DailyUsagePoint {
   day: string;
   totalTokens: number;
-  totalCost: number;
   requestCount: number;
 }
 
@@ -121,7 +120,7 @@ export function DailyUsageChart({
               className={onSelect ? "cursor-pointer" : undefined}
               onClick={onSelect ? () => onSelect(d.day) : undefined}
             >
-              <title>{`${d.day} · ${formatTokens(d.totalTokens)} Tokens · $${d.totalCost.toFixed(4)}`}</title>
+              <title>{`${d.day} · ${formatTokens(d.totalTokens)} Tokens · $`}</title>
             </rect>
             {h > 26 && (
               <text

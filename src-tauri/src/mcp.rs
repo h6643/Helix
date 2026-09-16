@@ -1,31 +1,31 @@
 //! Gateway MCP servers — read/write view of the pi MCP adapter's config.
 //!
 //! The pi agent has no built-in MCP; the user-installed `pi-mcp-adapter`
-//! package loads servers from `~/.pi/agent/mcp.json` (`{ "mcpServers": {...} }`,
-//! ServerEntry schema: command/args/env/cwd/url/headers/disabled/...). This
-//! module reads and writes that file so the settings page manages what the
-//! agent actually runs.
+//! package reads servers from `~/.pi/agent/mcp.json` (`{ "mcpServers":
+//! {...} }`, ServerEntry schema: command/args/env/cwd/url/headers/disabled).
+//! Helix keeps the canonical copy of the server list in the top-level
+//! `mcp_servers:` block of `~/.pi/agent/config.yaml` (the shared user config
+//! file, alongside vision/web_search/image/agent blocks), and mirrors it into
+//! mcp.json on every save so the adapter picks up the change on respawn.
 //!
-//! The renderer speaks the old config.yaml shape: `{ name: { enabled?, ... } }`.
-//! `enabled: false` is translated to the adapter's `disabled: true` on write
-//! and back on read; every other field passes through verbatim.
+//! The renderer speaks the old shape: `{ name: { enabled?, ... } }`.
+//! `enabled: false` is written as `disabled: true` on disk and translated
+//! back on read; every other field passes through verbatim.
 //!
-//! One-time migration: a `mcp_servers:` block in the legacy config.yaml (the
-//! pre-pi gateway's source of truth) is carried over into mcp.json when
-//! mcp.json doesn't exist yet. Once created, mcp.json is authoritative — an
-//! empty file means "no servers", not "migrate again". The YAML block is left
-//! in place untouched.
+//! Reads prefer the config.yaml block; when it's absent, they fall back to
+//! legacy `~/.pi/agent/mcp.json` written by older builds.
 //!
-//! `list(include_env=false)` strips `env` values from every entry (secrets stay
-//! out of the renderer's display path); `save` preserves each server's
-//! existing env when the incoming config omits it, so a save never silently
-//! drops secrets.
+//! `list(include_env=false)` strips `env` values from every entry (secrets
+//! stay out of the renderer's display path); `save` preserves each
+//! server's existing env when the incoming config omits it, so a save
+//! never silently drops secrets.
 
+use crate::config::{atomic_write, config_yaml_path};
 use crate::paths::pi_agent_dir;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
-fn mcp_json_path() -> std::path::PathBuf {
+fn legacy_mcp_json_path() -> std::path::PathBuf {
     pi_agent_dir().join("mcp.json")
 }
 
@@ -233,20 +233,11 @@ fn renderer_to_adapter(mut entry: Value) -> Value {
     entry
 }
 
-/// Read the servers map from mcp.json. `include_env=false` strips `env`
-/// (display path keeps secrets out of the renderer).
-fn read_mcp_json(include_env: bool) -> Map<String, Value> {
-    let servers: Map<String, Value> = std::fs::read_to_string(mcp_json_path())
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| {
-            v.get("mcpServers")
-                .or_else(|| v.get("mcp_servers").or_else(|| v.get("mcp-servers")))
-                .and_then(Value::as_object)
-                .cloned()
-        })
-        .unwrap_or_default();
-
+/// Read the `mcp_servers:` block from config.yaml (full form, env included
+/// for the display path). Unknown keys under the block pass through.
+fn read_yaml_mcp_servers(include_env: bool) -> Map<String, Value> {
+    let text = std::fs::read_to_string(config_yaml_path()).unwrap_or_default();
+    let servers = parse_legacy_mcp_servers(&text);
     let mut out: Map<String, Value> = Map::new();
     for (name, entry) in servers {
         let mut entry = adapter_to_renderer(entry);
@@ -260,49 +251,170 @@ fn read_mcp_json(include_env: bool) -> Map<String, Value> {
     out
 }
 
-/// Load servers for the renderer; runs the one-time legacy migration when
-/// mcp.json doesn't exist yet and config.yaml carries an `mcp_servers:` block.
-/// An existing mcp.json is authoritative even when empty — deleting all
-/// servers in the UI must not resurrect them from the legacy YAML.
-fn load_servers() -> Map<String, Value> {
-    if mcp_json_path().exists() {
-        return read_mcp_json(true);
+/// Read the legacy `~/.pi/agent/mcp.json` (adapter schema `{ "mcpServers": ... }`).
+/// Non-zero only when the file exists.
+fn read_legacy_mcp_json() -> Option<Map<String, Value>> {
+    let path = legacy_mcp_json_path();
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let servers = v
+        .get("mcpServers")
+        .or_else(|| v.get("mcp_servers").or_else(|| v.get("mcp-servers")))
+        .and_then(Value::as_object)?
+        .clone();
+    let mut out: Map<String, Value> = Map::new();
+    for (name, entry) in servers {
+        out.insert(name, adapter_to_renderer(entry.clone()));
     }
-    let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).unwrap_or_default();
-    let legacy = parse_legacy_mcp_servers(&yaml);
-    if legacy.is_empty() {
-        return Map::new();
-    }
-    let migrated: Map<String, Value> = legacy
-        .into_iter()
-        .map(|(name, entry)| (name, renderer_to_adapter(entry)))
-        .collect();
-    let _ = write_mcp_json(&migrated);
-    migrated
-        .into_iter()
-        .map(|(name, entry)| (name, adapter_to_renderer(entry)))
-        .collect()
+    Some(out)
 }
 
-/// Serialize the servers map into the adapter's `{ "mcpServers": {...} }`
-/// document and write it. `old` (full env parse) supplies env values the
-/// incoming config omits, so a display-only round trip can't drop secrets.
-fn write_mcp_json(servers: &Map<String, Value>) -> Result<(), String> {
-    let mut doc: Map<String, Value> = std::fs::read_to_string(mcp_json_path())
+/// Load servers for the renderer: prefer config.yaml; when it has no
+/// `mcp_servers:` block yet, fall back to the legacy mcp.json (adapter
+/// schema). The legacy file is never modified.
+fn load_servers() -> Map<String, Value> {
+    let yaml = read_yaml_mcp_servers(true);
+    if !yaml.is_empty() {
+        return yaml;
+    }
+    read_legacy_mcp_json().unwrap_or_default()
+}
+
+/// Write the full server map into config.yaml's `mcp_servers:` block, replacing
+/// the whole block in place and preserving every other part of the file
+/// (vision/web_search/image/... blocks, inline data-root comments, etc.).
+/// Per-server `env` is carried over from the previous config (yaml or legacy
+/// mcp.json) when the incoming entry omits it (display round trips don't
+/// carry secrets).
+fn save_mcp_servers(
+    servers: &Map<String, Value>,
+    legacy_env: &Map<String, Value>,
+) -> Result<(), String> {
+    let mut merged: Map<String, Value> = Map::new();
+    for (name, entry) in servers {
+        let mut entry = entry.clone();
+        // Carry over env when the incoming entry omits it.
+        let missing_env = entry
+            .get("env")
+            .and_then(Value::as_object)
+            .map(|e| e.is_empty())
+            .unwrap_or(true);
+        if missing_env {
+            if let Some(old_env) = legacy_env
+                .get(name)
+                .and_then(|o| o.get("env"))
+                .and_then(Value::as_object)
+            {
+                if !old_env.is_empty() {
+                    if let Some(e) = entry.as_object_mut() {
+                        e.insert("env".into(), Value::Object(old_env.clone()));
+                    }
+                }
+            }
+        }
+        merged.insert(name.clone(), renderer_to_adapter(entry));
+    }
+    let path = config_yaml_path();
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let lines: Vec<&str> = existing.lines().collect();
+    let mut block_end = lines
+        .iter()
+        .position(|l| {
+            !l.starts_with(' ') && l.starts_with("mcp_servers") && l["mcp_servers".len()..]
+                .trim_start()
+                .starts_with(':')
+        })
+        .unwrap_or(lines.len());
+    if block_end < lines.len() {
+        let mut i = block_end + 1;
+        while i < lines.len() && lines[i].starts_with(' ') && !lines[i].trim().is_empty() {
+            i += 1;
+        }
+        block_end = i;
+    }
+    let body = if merged.is_empty() {
+        // Empty map: drop the block entirely so the file stays clean.
+        let before = &lines[..block_end];
+        let after = &lines[block_end.min(lines.len())..];
+        let mut all: Vec<String> = before.iter().map(|s| s.to_string()).collect();
+        all.extend(after.iter().map(|s| s.to_string()));
+        all.join("\n")
+    } else {
+        let mut out: Vec<String> = lines[..block_end]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        out.push("mcp_servers:".into());
+        for (name, entry) in &merged {
+            if let Some(obj) = entry.as_object() {
+                let keys: Vec<String> = obj.keys().cloned().collect();
+                // command first, then the rest alphabetically (stable display).
+                let mut ordered: Vec<String> = keys;
+                ordered.sort();
+                if let Some(ci) = ordered.iter().position(|k| k == "command") {
+                    ordered.swap_remove(ci);
+                    ordered.insert(0, "command".to_string());
+                }
+                out.push(format!("  {name}:"));
+                for k in &ordered {
+                    let v = &obj[k.as_str()];
+                    match v {
+                        Value::Object(map) => {
+                            let mut ks: Vec<String> = map.keys().cloned().collect();
+                            ks.sort();
+                            out.push(format!("    {k}:"));
+                            for sk in &ks {
+                                out.push(format!(
+                                    "      {sk}: {:?}",
+                                    map[sk.as_str()].to_string()
+                                ));
+                            }
+                        }
+                        Value::Array(arr) => {
+                            out.push(format!("    {k}:"));
+                            for item in arr {
+                                out.push(format!("      - {:?}", item.to_string()));
+                            }
+                        }
+                        Value::String(s) => out.push(format!("    {k}: {s}")),
+                        _ => out.push(format!("    {k}: {}", v.to_string())),
+                    }
+                }
+            } else {
+                out.push(format!("  {name}: {}", entry.to_string()));
+            }
+        }
+        out.extend(lines[block_end..].iter().map(|s| s.to_string()));
+        out.join("\n")
+    };
+    atomic_write(&path, &(body + "\n")).map_err(|e| e.to_string())
+}
+
+/// Mirror the adapter-shape server map into `~/.pi/agent/mcp.json` so the
+/// pi-mcp-adapter picks up the change on the next gateway respawn.
+/// The adapter only reads mcp.json — config.yaml is the user-facing source
+/// of truth and mcp.json is its runtime mirror.
+fn mirror_to_mcp_json(servers_adapter_shape: &Map<String, Value>) {
+    let path = legacy_mcp_json_path();
+    if servers_adapter_shape.is_empty() {
+        // Empty map: drop the mirror file so no server lingers in the adapter.
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let mut doc: Map<String, Value> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    // Preserve unknown top-level keys (adapter settings etc.); only the
-    // mcpServers block is rewritten.
-    doc.insert("mcpServers".into(), Value::Object(servers.clone()));
-    let path = mcp_json_path();
+    // Preserve unknown top-level keys (adapter settings etc.).
+    doc.insert("mcpServers".into(), Value::Object(servers_adapter_shape.clone()));
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    serde_json::to_string_pretty(&Value::Object(doc))
-        .map_err(|e| e.to_string())
-        .and_then(|text| std::fs::write(&path, text + "\n").map_err(|e| e.to_string()))
+    let doc = serde_json::to_string_pretty(&Value::Object(doc)).ok();
+    if let Some(text) = doc {
+        let _ = std::fs::write(&path, text + "\n");
+    }
 }
 
 #[tauri::command]
@@ -319,14 +431,13 @@ pub fn mcp_config_list(include_env: Option<bool>) -> Value {
                 }
                 (name, entry)
             })
-            .collect()
+            .collect::<Map<String, Value>>()
     };
     json!({ "ok": true, "servers": Value::Object(servers) })
 }
 
-/// Write the full server map ({ name: cfg }) into `~/.pi/agent/mcp.json`.
-/// Per-server `env` is carried over from the current file when the incoming
-/// config omits it (display round trips never clobber secrets).
+/// Write the full server map ({ name: cfg }) into config.yaml's `mcp_servers:`
+/// block, and drop the legacy mcp.json.
 #[tauri::command]
 pub fn mcp_config_save(
     state: tauri::State<'_, Arc<crate::state::AppState>>,
@@ -348,36 +459,49 @@ pub fn mcp_config_save(
         }
     }
 
-    let current = read_mcp_json(true); // full parse incl. env
-    let mut out: Map<String, Value> = Map::new();
-    for (name, entry) in obj {
-        let mut entry = entry.clone();
-        // Carry over env when the incoming entry omits it.
-        if entry
-            .get("env")
-            .and_then(Value::as_object)
-            .map(|e| e.is_empty())
-            .unwrap_or(true)
-        {
-            if let Some(old_env) = current
-                .get(name)
-                .and_then(|o| o.get("env"))
+    // env-carry-over source: current config.yaml block first, then legacy mcp.json
+    // (both in adapter shape — the carry-over only looks at `env` keys).
+    let current = read_yaml_mcp_servers(true);
+    let legacy = read_legacy_mcp_json().unwrap_or_default();
+    let mut merged_env: Map<String, Value> = current.clone();
+    for (k, v) in &legacy {
+        merged_env.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+
+    if let Err(e) = save_mcp_servers(obj, &merged_env) {
+        return json!({ "ok": false, "error": format!("write failed: {e}") });
+    }
+    // Mirror into mcp.json so the pi-mcp-adapter (which only reads mcp.json)
+    // picks up the server list on the next gateway respawn. Build the adapter-
+    // shaped server map from the merged view (env carried over, enabled
+    // translated to disabled).
+    let adapter_map: Map<String, Value> = obj
+        .iter()
+        .map(|(name, entry)| {
+            let mut entry = entry.clone();
+            if entry
+                .get("env")
                 .and_then(Value::as_object)
+                .map(|e| e.is_empty())
+                .unwrap_or(true)
             {
-                if !old_env.is_empty() {
-                    if let Some(e) = entry.as_object_mut() {
-                        e.insert("env".into(), Value::Object(old_env.clone()));
+                if let Some(old_env) = merged_env
+                    .get(name)
+                    .and_then(|o| o.get("env"))
+                    .and_then(Value::as_object)
+                {
+                    if !old_env.is_empty() {
+                        if let Some(e) = entry.as_object_mut() {
+                            e.insert("env".into(), Value::Object(old_env.clone()));
+                        }
                     }
                 }
             }
-        }
-        out.insert(name.clone(), renderer_to_adapter(entry));
-    }
-
-    if let Err(e) = write_mcp_json(&out) {
-        return json!({ "ok": false, "error": format!("write failed: {e}") });
-    }
-    // The adapter reads mcp.json at process start — respawn pi so the change
+            (name.clone(), renderer_to_adapter(entry))
+        })
+        .collect();
+    mirror_to_mcp_json(&adapter_map);
+    // The adapter reads config.yaml at process start — respawn pi so the change
     // takes effect for the running agent.
     crate::gateway::restart_gateway_soon(&Arc::clone(&state));
     json!({ "ok": true })

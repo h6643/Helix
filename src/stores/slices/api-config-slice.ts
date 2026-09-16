@@ -5,7 +5,6 @@ import type { StateCreator } from "zustand";
 import type { ApiConfig, ApiProfile, ProviderConfig } from "../helix-types";
 import { generateId } from "@/lib/format";
 import { warn } from "@/lib/logger";
-import { isModelProviderMismatch } from "@/lib/provider-match";
 
 /** Provider ids currently auto-fetching their model lists (in-flight guard). */
 const fetchingProviderModels = new Set<string>();
@@ -25,7 +24,7 @@ export interface ApiConfigSlice {
   providerModels: Record<string, string[]>;
   /** Multi-provider config backing the flattened model selector. */
   providers: ProviderConfig[];
-  /** Currently selected model name (flat list item), e.g. "Ling-2.6-1T". */
+  /** Currently selected model name (flat list item), */
   activeModel: string | null;
   /** The provider currently active in the model selector. The model dropdown
    *  shows ONLY this provider's models (requirement: no cross-provider mixing).
@@ -168,47 +167,11 @@ export const createApiConfigSlice: StateCreator<
 
   setApiConfig: (config) =>
     set((state) => {
-      let apiConfig = { ...state.apiConfig, ...config };
-      // Guard against storing a model/baseUrl mismatch (e.g. a poisoned
-      // apiHistory entry that says model=Ling but baseUrl=deepseek). If the
-      // requested model does not belong to the requested endpoint, snap to the
-      // endpoint's first available model so the backend never receives the
-      // wrong model name and the dropdown never shows one supplier's models
-      // while the button shows another supplier's name. Uses the shared
-      // classifier so ALL families are covered (k3/Kimi, glm/Zhipu, ...),
-      // not just the Ling↔DeepSeek pair the old inline check handled.
-      if (apiConfig.baseUrl && apiConfig.model) {
-        if (isModelProviderMismatch(apiConfig.model, apiConfig.baseUrl)) {
-          const owner = state.providers.find(
-            (p) => p.baseUrl === apiConfig.baseUrl,
-          );
-          const ownerModels = owner
-            ? [
-                ...new Set([
-                  ...(owner.models || []),
-                  ...(state.providerModels?.[owner.id] || []),
-                ]),
-              ]
-            : [];
-          const fallback =
-            ownerModels[0] || owner?.defaultModel || apiConfig.model;
-          if (fallback && fallback !== apiConfig.model) {
-            warn(
-              "[api-config-slice] setApiConfig: model/baseUrl mismatch, snapping",
-              apiConfig.model,
-              "→",
-              fallback,
-              "for",
-              apiConfig.baseUrl,
-            );
-            apiConfig = { ...apiConfig, model: fallback };
-          }
-        }
-      }
+      const apiConfig = { ...state.apiConfig, ...config };
       // Keep the target endpoint's provider credentials in sync with manual
       // edits from settings. We match by apiConfig.baseUrl, NOT by the previous
       // activeModel. Using activeModel would rewrite the provider that owns the
-      // old model (e.g. Ling provider) to the new endpoint URL, polluting its
+      // old model  to the new endpoint URL, polluting its
       // baseUrl and causing the dropdown to keep showing the old supplier's
       // models while the button shows the new model name.
       let providers = state.providers;
@@ -231,19 +194,6 @@ export const createApiConfigSlice: StateCreator<
 
   addApiHistory: (config) =>
     set((state) => {
-      // Refuse to record a poisoned entry where the model name clearly belongs
-      // to a different supplier than the endpoint (e.g. k3/Kimi under a DeepSeek
-      // base URL). Such records are exactly the "脏数据" that previously showed
-      // one supplier's model under another's config group. We drop it before it
-      // ever enters apiHistory; the user keeps using their current selection.
-      if (isModelProviderMismatch(config.model, config.baseUrl)) {
-        warn(
-          "[api-config-slice] addApiHistory: 跳过模型/端点不匹配的记录",
-          config.model,
-          config.baseUrl,
-        );
-        return state;
-      }
       // A history entry represents one CONFIG = baseUrl + apiKey (the list is
       // grouped by baseUrl, with entries inside a group differing by apiKey).
       // Switching models on the SAME connection must NOT create a new entry —

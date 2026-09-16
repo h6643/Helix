@@ -94,11 +94,6 @@ pub fn poll_browser_requests() -> Value {
             }
             let consumed = dir.join(format!("{}.consumed", name));
             let _ = std::fs::rename(&path, &consumed);
-            eprintln!(
-                "[browser-requests] forwarded op={op} url={} reqId={req_id} (navigate result written={})",
-                url,
-                op == "navigate"
-            );
             opened.push(url.to_string());
         }
     }
@@ -130,18 +125,8 @@ pub fn browser_write_result(req_id: String, result: Value) -> Value {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0) });
     match std::fs::write(&path, serde_json::to_string(&payload).unwrap_or_default()) {
-        Ok(_) => {
-            eprintln!(
-                "[browser_write_result] reqId={} result={}",
-                safe,
-                serde_json::to_string(&result).unwrap_or_default()
-            );
-            json!({ "ok": true })
-        }
-        Err(e) => {
-            eprintln!("[browser_write_result] write failed reqId={safe}: {e}");
-            json!({ "ok": false, "error": e.to_string() })
-        }
+        Ok(_) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "error": e.to_string() })
     }
 }
 
@@ -701,12 +686,18 @@ fn set_local_extension_enabled(
     pattern: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    // Normalize: strip any existing prefix chars, drop leading "./".
-    let target = pattern
-        .trim_start_matches(['+', '-', '!'])
-        .trim_start_matches("./")
-        .replace('\\', "/");
-    if target.is_empty() {
+    // Normalize the incoming identifier to a canonical core path: strip a
+    // single leading override prefix (+ / - / !) and a leading "./", then
+    // normalize separators. We deliberately do NOT strip trailing glob
+    // wildcards here — the caller may pass either the bare resource path
+    // ("extensions/pi-cron") or an existing override pattern
+    // ("!extensions/pi-cron/**"); both collapse to the same core below.
+    let mut target = pattern.trim_start_matches(['+', '-', '!']);
+    if let Some(rest) = target.strip_prefix("./") {
+        target = rest;
+    }
+    let target = target.replace('\\', "/");
+    if target.trim_end_matches(|c: char| c == '*' || c == '?' || c == '/').is_empty() {
         return Err("extension pattern cannot be empty".into());
     }
 
@@ -716,40 +707,42 @@ fn set_local_extension_enabled(
         .cloned()
         .unwrap_or_default();
 
-    // Drop any existing pattern that targets the same path (with or without
-    // a prefix), so toggling never accumulates stale +pattern/-pattern pairs.
+    // Core of any entry: drop one leading override prefix, a leading "./",
+    // normalize backslashes, and trim trailing glob/slash characters. This
+    // lets `!target/**`, `+target`, `-target` and a bare `target` all
+    // collapse to `target` for matching, regardless of which shape the
+    // identifier arrived in.
+    let core = |s: &str| -> String {
+        let mut c = s.trim_start_matches(['+', '-', '!']);
+        if let Some(rest) = c.strip_prefix("./") {
+            c = rest;
+        }
+        c.replace('\\', "/")
+            .trim_end_matches(|ch: char| ch == '*' || ch == '?' || ch == '/')
+            .to_string()
+    };
+    let target_core = core(&target);
+
+    // Drop every override that points at the same resource so toggling never
+    // accumulates stale `+`/`-`/`!` pairs.
     let mut updated: Vec<Value> = entries
         .into_iter()
         .filter(|e| {
             let s = e.as_str().unwrap_or("");
-            let stripped = s
-                .trim_start_matches(['+', '-', '!'])
-                .trim_start_matches("./")
-                .replace('\\', "/");
-            stripped != target
+            core(s) != target_core
         })
         .collect();
 
     if !enabled {
-        // Directory (a local extension package): disable every file inside it
-        // with a `!` glob pattern — pi evaluates overrides per resolved file, so
-        // a bare directory path would never force-exclude its contents.
-        // Single-file extensions (`.ts`/`.js`) need no glob suffix.
-        let is_dir = crate::paths::pi_agent_dir().join(&target).is_dir();
-        let pattern = if is_dir {
-            format!("!{target}/**")
-        } else {
-            format!("!{target}")
-        };
-        updated.push(Value::String(pattern));
+        // pi config writes a `-<path>` force-exclude for a disabled resource.
+        // Mirror that exact shape so a later enable (which just removes it)
+        // round-trips, and the next toggle's core-equality filter finds it.
+        updated.push(Value::String(format!("-{target}")));
     }
-    // enable: removing the `-` pattern restores default (auto-discovered = on).
-    // We still write `+target` when a bare (non-pattern) exclusion could exist,
-    // but auto-discovery defaults to enabled, so plain removal is correct.
+    // enable: removing the override restores the auto-discovered default (on).
 
     if updated.is_empty() {
-        // Keep the key present-but-empty only if it existed before; removing it
-        // entirely is cleaner and matches pi's default (`[]`).
+        // No overrides left — remove the key entirely to match pi's default.
         if let Some(obj) = settings.as_object_mut() {
             obj.remove("extensions");
         }
@@ -994,6 +987,10 @@ fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &
         }
         if path.is_file() && (file_name.ends_with(".ts") || file_name.ends_with(".js")) {
             let ext_name = file_name.trim_end_matches(".ts").trim_end_matches(".js");
+            let rel = path
+                .strip_prefix(&crate::paths::pi_agent_dir())
+                .map(|r| r.display().to_string())
+                .unwrap_or_else(|_| "extensions".to_string());
             items.push(json!({
                 "name": ext_name,
                 "type": "extension",
@@ -1002,6 +999,9 @@ fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &
                 "path": path.display().to_string(),
                 "location": "user",
                 "enabled": enabled_for(&path, &[]),
+                // Toggle identifier: the file relative to the agent dir — the
+                // exact key `set_local_extension_enabled` writes `-<file>` for.
+                "packageId": rel,
             }));
         } else if path.is_dir() {
             let entry_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -1028,6 +1028,7 @@ fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &
                             let version = pkg.get("version").and_then(Value::as_str).unwrap_or("");
                             let description =
                                 pkg.get("description").and_then(Value::as_str).unwrap_or("");
+                            let entry_rel = format!("extensions/{entry_name}");
                             items.push(json!({
                                 "name": pkg_name,
                                 "type": "extension",
@@ -1040,6 +1041,10 @@ fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &
                                     &path,
                                     &[&format!("extensions/{entry_name}/index.ts")],
                                 ),
+                                // Toggle identifier: dir relative to the agent dir;
+                                // `set_local_extension_enabled` resolves it to the
+                                // concrete index entry when it exists.
+                                "packageId": entry_rel,
                             }));
                             emitted_manifest = true;
                         }
@@ -1051,6 +1056,7 @@ fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &
                 let index_ts = path.join("index.ts");
                 let index_js = path.join("index.js");
                 if index_ts.exists() || index_js.exists() {
+                    let entry_rel = format!("extensions/{entry_name}");
                     items.push(json!({
                         "name": entry_name,
                         "type": "extension",
@@ -1062,6 +1068,7 @@ fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &
                             &path,
                             &[&format!("extensions/{entry_name}/index.ts")],
                         ),
+                        "packageId": entry_rel,
                     }));
                 }
             }
@@ -1188,7 +1195,15 @@ fn ingest_extension_source_named(
             search_from = idx + "registerTool(".len();
             continue;
         }
-        let window_end = (idx + 300).min(search_text.len());
+        // 结束位置必须回退到 char 边界：idx + 300 是**字节**偏移，扩展源码通常
+        // 是含中文的 UTF-8（一个汉字 3 字节），落在多字节字符中间时按 str 切片
+        // 会 panic（"end byte index N is not a char boundary"）。
+        // 起点 idx 由 ASCII 模式 "registerTool(" 的 find 得到，天然是边界，只需
+        // 把终点往回退到最近的边界（退到 idx 为止，退化成一个短窗口也不 panic）。
+        let mut window_end = (idx + 300).min(search_text.len());
+        while window_end > idx && !search_text.is_char_boundary(window_end) {
+            window_end -= 1;
+        }
         let window = &search_text[idx..window_end];
         let after_call = &window["registerTool(".len()..];
         // Skip to the first `{` (the tool object argument).
@@ -1838,7 +1853,7 @@ pub async fn pi_package_latest(name: String) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{glob_match, ingest_extension_source, merge_lite_wrappers};
+    use super::{glob_match, ingest_extension_source, merge_lite_wrappers, set_local_extension_enabled};
     use serde_json::Value;
 
     fn m(pattern: &str, text: &str) -> bool {
@@ -1888,6 +1903,42 @@ mod tests {
         assert!(m("", ""));
         assert!(!m("", "x"));
         assert!(m("*", "anything"));
+    }
+
+    #[test]
+    fn set_local_extension_enabled_removes_disable_override() {
+        // pi-cron scenario: a dir-based local extension is currently disabled by
+        // a `!extensions/pi-cron/**` glob. Enabling it must remove that entry
+        // (restoring the auto-discovered default = on), leaving the rest intact.
+        let mut settings = serde_json::json!({
+            "extensions": [
+                "!extensions/pi-cron/**",
+                "!extensions/pi-web-access/**",
+                "!extensions/pi-verify/**"
+            ]
+        });
+        // Frontend computes the identifier as the path relative to the agent
+        // dir (dir form: "extensions/pi-cron"), not a glob.
+        set_local_extension_enabled(&mut settings, "extensions/pi-cron", true).unwrap();
+        assert_eq!(
+            settings["extensions"],
+            serde_json::json!(["!extensions/pi-web-access/**", "!extensions/pi-verify/**"]),
+            "enabling must drop the pi-cron glob only"
+        );
+
+        // Disabling it writes an exact `-<file>` override (pi config style),
+        // not a glob. The dir has no index on the filesystem in this test, so
+        // the concrete target stays the dir path.
+        set_local_extension_enabled(&mut settings, "extensions/pi-cron", false)
+            .unwrap();
+        assert!(
+            settings["extensions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e == "-extensions/pi-cron" || e == "!extensions/pi-cron/**"),
+            "disabling must add an override entry for pi-cron"
+        );
     }
 
     #[test]
@@ -1968,5 +2019,36 @@ mod tests {
         assert!(!names.iter().any(|n| n.contains("tool")), "{names:?}");
         assert!(items.iter().all(|i| i["type"] == "tool"));
         assert!(items.iter().all(|i| i["source"] == "pi-tool"));
+    }
+
+    /// Regression: CJK (3-byte UTF-8) inside the 300-byte tool window used to
+    /// make `(idx + 300)` land mid-character and panic on the str slice. The
+    /// user's pi-helix-browser.ts has this exact shape (Chinese tool
+    /// descriptions), which crashed `pi_list_installed` and kept the plugin
+    /// manager panel from opening.
+    #[test]
+    fn extract_register_tool_cjk_window_does_not_panic() {
+        let dir = std::env::temp_dir().join(format!(
+            "helix-test-ext-cjk-{}-{}",
+            std::process::id(),
+            2
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pi-cjk-ext.ts");
+        // ~300 bytes of ASCII before the call, then a CJK description so the
+        // `idx + 300` byte offset lands inside a 3-byte char.
+        let pad = "a".repeat(280);
+        let body = format!(
+            "{pad}\n  registerTool(pi, {{\n    name: \"cjk_tool\",\n    \
+             description: \"中文字段：在侧边栏打开页面并读取内容\",\n  }});\n"
+        );
+        std::fs::write(&file, body).unwrap();
+        let mut items: Vec<Value> = Vec::new();
+        ingest_extension_source(&file, &mut items);
+        let names: Vec<String> = items
+            .iter()
+            .filter_map(|i| i.get("name").and_then(Value::as_str).map(String::from))
+            .collect();
+        assert!(names.contains(&"cjk_tool".to_string()), "{names:?}");
     }
 }

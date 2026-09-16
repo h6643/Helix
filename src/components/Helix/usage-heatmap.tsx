@@ -4,11 +4,10 @@ import React, { useState, useEffect, useRef } from "react";
 
 interface DailyUsage {
   totalTokens: number;
-  totalCost: number;
   requestCount: number;
   models?: Record<
     string,
-    { totalTokens: number; totalCost: number; requestCount: number }
+    { totalTokens: number; requestCount: number }
   >;
 }
 

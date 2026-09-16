@@ -140,8 +140,6 @@ const solarizedLight: CtpPalette = P({
   crust: "224, 215, 184",
 });
 
-// Claude Code 桌面版终端风格 — 暖炭底 + 陶土橙强调
-// (取自设计稿 "Helix · Claude Code 桌面版风格" 的 token 系统)
 const terracottaLight: CtpPalette = P({
   rosewater: "217, 119, 87",
   flamingo: "215, 111, 92",
@@ -447,7 +445,7 @@ export const THEME_SELECT_GROUPS: {
       { value: DEFAULT_THEME_STYLE, label: "默认（奶油）" },
       { value: "ctp-everforest-light", label: "Everforest 淡绿" },
       { value: "ctp-solarized-light", label: "Solarized 橙红" },
-      { value: "ctp-terracotta-light", label: "陶土晨光（Claude Code）" },
+      { value: "ctp-terracotta-light", label: "陶土晨光" },
     ],
   },
   {
@@ -456,7 +454,7 @@ export const THEME_SELECT_GROUPS: {
       { value: "ctp-dracula", label: "Dracula 暗紫" },
       { value: "ctp-generic-dark", label: "Grayscale 灰黑" },
       { value: "ctp-royal-velvet", label: "Royal Velvet 紫绒" },
-      { value: "ctp-terracotta-dark", label: "陶土终端（Claude Code）" },
+      { value: "ctp-terracotta-dark", label: "陶土终" },
     ],
   },
 ];

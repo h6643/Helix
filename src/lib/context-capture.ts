@@ -25,6 +25,8 @@ interface ContextBreakdownData {
     label: string;
     tokens: number;
     color: string;
+    /** 后端"整块占用"兜底项（会话文件未落盘时），落快照时一并保留 */
+    aggregate?: boolean;
   }>;
   toolsets?: Array<{
     toolset: string;
@@ -37,7 +39,8 @@ interface ContextBreakdownData {
  * 拉取某对话的上下文分类并写入本地快照（contextUsage[conversationId]）。
  *
  * - conversationId: Helix 会话 id（跨重启稳定），本地记录键。draft（null）时
- *   退化为用后端 sid 作键——与旧行为一致。
+ *   退化为用后端 sid 作键（此时没有别的可选项）；读侧两键都查，并在拿到 cid
+ *   后把落在 sid 键上的旧快照搬到 cid 键（见 context-usage.tsx 的键统一注释）。
  * - backendSid: 调用方已知的后端 sid（如 handleRun 刚 session/new 出来的）；
  *   省略时按 session-map（epoch 校验）解析。绝不兜底到全局 helixSessionId
  *   ——那是「最后一个跑过的对话」的后端会话，用它查询会把别的对话的
@@ -87,6 +90,7 @@ export async function captureContextBreakdown(
         label: c.label,
         tokens: c.tokens,
         color: c.color,
+        ...(c.aggregate ? { aggregate: true } : {}),
       })),
       data.toolsets?.map((t) => ({
         toolset: t.toolset,

@@ -593,7 +593,9 @@ export const persistence = {
     const savedAt = lastMsgAt || data.savedAt || now;
     const session: PersistedSession = {
       id,
-      label: dataLabel || new Date().toLocaleString("zh-CN"),
+      // 保留已存 label（含用户改名）：只有调用方显式传了 label 才覆盖，
+      // 否则回退到现有值——避免任何自动保存把改名静默写回派生名。
+      label: dataLabel || existing?.label || new Date().toLocaleString("zh-CN"),
       savedAt,
       createdAt,
       workDir: data.workDir ?? null,

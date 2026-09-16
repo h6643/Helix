@@ -64,14 +64,12 @@ export interface ExternalService {
 /** Per-model usage within a single day. */
 export interface DailyModelUsage {
   totalTokens: number;
-  totalCost: number;
   requestCount: number;
 }
 
 /** Per-day token/cost usage, keyed by local date string `YYYY-MM-DD`. */
 export interface DailyUsageEntry {
   totalTokens: number;
-  totalCost: number;
   requestCount: number;
   models: Record<string, DailyModelUsage>;
 }
@@ -111,7 +109,6 @@ import {
 } from "@/lib/electron-bridge";
 import { generateId, truncateString } from "@/lib/format";
 import { debug, warn, error as logError } from "@/lib/logger";
-import { isModelProviderMismatch } from "@/lib/provider-match";
 import { defaultFiles } from "@/lib/seed-data";
 import { applyHelixPalette } from "@/lib/themes";
 import { useGatewayStore } from "@/stores/gateway-store";
@@ -364,6 +361,8 @@ interface HelixState
         label: string;
         tokens: number;
         color: string;
+        /** 后端在会话文件未落盘时给的"整块占用"兜底项（不可按内容拆分） */
+        aggregate?: boolean;
       }>;
       toolsets?: Array<{
         toolset: string;
@@ -381,6 +380,7 @@ interface HelixState
       label: string;
       tokens: number;
       color: string;
+      aggregate?: boolean;
     }>,
     toolsets?: Array<{
       toolset: string;
@@ -400,7 +400,6 @@ interface HelixState
     thoughtTokens: number;
     cachedReadTokens: number;
     cachedWriteTokens: number;
-    totalCost: number;
   };
   dailyUsage: Record<string, DailyUsageEntry>;
   addSessionUsageStats: (
@@ -819,9 +818,6 @@ async function persistCurrentSessionNow(): Promise<void> {
     // Never auto-create a session when there's no active session context.
     // persistCurrentSessionNow's job is to save the CURRENT session, not invent new ones.
     if (!sessionId) return;
-    const label = firstUser
-      ? firstUser.content.slice(0, 50)
-      : new Date().toLocaleString("zh-CN");
 
     // If a stream is mid-flight for this session, also persist its buffered
     // partial text so quitting / reloading mid-generation doesn't silently
@@ -847,6 +843,20 @@ async function persistCurrentSessionNow(): Promise<void> {
     const existing = (await persistence.loadSessions()).find(
       (s) => s.id === sessionId,
     );
+
+    // Label: preserve whatever is already stored — including a user rename
+    // (updateSessionLabel). Re-deriving from the first user message on every
+    // auto-save would silently clobber a rename the moment the next flush
+    // fires (the "对话名称自动改变" bug). Only re-derive when the stored
+    // label is still the "新对话" placeholder (empty session before its first
+    // message) or absent.
+    const savedLabel = existing?.label?.trim() || "";
+    const label =
+      savedLabel && savedLabel !== "新对话"
+        ? savedLabel
+        : firstUser
+          ? firstUser.content.slice(0, 50)
+          : new Date().toLocaleString("zh-CN");
 
     // Concurrency guard: only persist messages that belong to THIS session
     // (or legacy untagged ones). The in-memory array may also hold messages of
@@ -1013,11 +1023,16 @@ async function persistSessionById(sessionId: string): Promise<void> {
     const firstUser = merged.find((m) => m.role === "user");
     await persistence.saveSession({
       id: sessionId,
-      label:
-        existing?.label ||
-        (firstUser
-          ? String(firstUser.content).slice(0, 50)
-          : new Date().toLocaleString("zh-CN")),
+      label: (() => {
+        const stored = existing?.label?.trim() || "";
+        // 与 persistCurrentSessionNow 同一规则：保留已存 label（含用户改名），
+        // 仅在还是「新对话」占位名时重新派生。
+        return stored && stored !== "新对话"
+          ? stored
+          : firstUser
+            ? String(firstUser.content).slice(0, 50)
+            : new Date().toLocaleString("zh-CN");
+      })(),
       workDir: resolveSessionWorkDir(
         existing,
         state.activeSessionWorkDir,
@@ -1230,7 +1245,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     thoughtTokens: 0,
     cachedReadTokens: 0,
     cachedWriteTokens: 0,
-    totalCost: 0,
   },
   dailyUsage: {},
   showSessionManager: false,
@@ -1277,24 +1291,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   startupGreeting: "有什么可以帮你的？",
 
   // MCP Servers
-  mcpServers: {
-    tavily: {
-      type: "local",
-      command: ["npx", "-y", "tavily-mcp"],
-      enabled: true,
-      environment: {
-        TAVILY_API_KEY: "",
-      },
-    },
-    github: {
-      type: "local",
-      command: ["npx", "-y", "@modelcontextprotocol/server-github"],
-      enabled: true,
-      environment: {
-        GITHUB_PERSONAL_ACCESS_TOKEN: "",
-      },
-    },
-  },
+  mcpServers: {},
 
   // Custom Shortcuts
   customShortcuts: { ...DEFAULT_SHORTCUTS },
@@ -1598,9 +1595,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   },
   sessionPendingApproval: {},
   setSessionPendingApproval: (patch: Record<string, boolean>) =>
-    set((s) => ({
-      sessionPendingApproval: { ...s.sessionPendingApproval, ...patch },
-    })),
+    set((s) => {
+      const next: Record<string, boolean> = { ...s.sessionPendingApproval };
+      for (const k of Object.keys(patch)) next[k] = patch[k];
+      // 相等则跳过 set，避免无谓的全局订阅者重渲染（防止 Maximum update depth）
+      if (Object.keys(next).length === Object.keys(s.sessionPendingApproval).length &&
+        Object.keys(next).every((k) => next[k] === s.sessionPendingApproval[k])) {
+        return {};
+      }
+      return { sessionPendingApproval: next };
+    }),
   setStartupGreeting: (v: string) => set((s) => ({ startupGreeting: v })),
 
   toggleRuntimePanel: () =>
@@ -2129,6 +2133,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           label: string;
           tokens: number;
           color: string;
+          aggregate?: boolean;
         }>;
         toolsets?: Array<{
           toolset: string;
@@ -2136,9 +2141,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           schema_tokens: number;
         }>;
       } = { size, used };
-      if (categories) next.categories = categories;
+      // Only a non-empty categories/toolsets array overrides the snapshot — an
+      // empty array is a "backend couldn't produce a breakdown" marker, and
+      // treating `[]` as authoritative (truthy) permanently destroyed real
+      // persisted categories (「重启后所有分类都没了」根因).
+      if (categories && categories.length > 0) next.categories = categories;
       else if (prev?.categories) next.categories = prev.categories;
-      if (toolsets) next.toolsets = toolsets;
+      if (toolsets && toolsets.length > 0) next.toolsets = toolsets;
       else if (prev?.toolsets) next.toolsets = prev.toolsets;
       return { contextUsage: { ...s.contextUsage, [sessionId]: next } };
     });
@@ -2176,125 +2185,17 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // 4-tier pricing aligned with backend usage_pricing.py. Reasoning tokens
       // are billed as output by every thinking-capable provider, so they enter
       // the output bucket; cache reads/writes use their discounted tiers.
-      const rates: Record<
-        string,
-        { input: number; output: number; cacheRead: number; cacheWrite: number }
-      > = {
-        "claude-opus-4-8": {
-          input: 5.0,
-          output: 25.0,
-          cacheRead: 0.5,
-          cacheWrite: 6.25,
-        },
-        "claude-opus-4-7": {
-          input: 5.0,
-          output: 25.0,
-          cacheRead: 0.5,
-          cacheWrite: 6.25,
-        },
-        "claude-opus-4-6": {
-          input: 5.0,
-          output: 25.0,
-          cacheRead: 0.5,
-          cacheWrite: 6.25,
-        },
-        "claude-sonnet-5": {
-          input: 2.0,
-          output: 10.0,
-          cacheRead: 0.2,
-          cacheWrite: 2.5,
-        },
-        "claude-sonnet-4-6": {
-          input: 3.0,
-          output: 15.0,
-          cacheRead: 0.3,
-          cacheWrite: 3.75,
-        },
-        "claude-sonnet-4": {
-          input: 3.0,
-          output: 15.0,
-          cacheRead: 0.3,
-          cacheWrite: 3.75,
-        },
-        "claude-sonnet-4-20250514": {
-          input: 3.0,
-          output: 15.0,
-          cacheRead: 0.3,
-          cacheWrite: 3.75,
-        },
-        "gpt-5.6-sol": {
-          input: 5.0,
-          output: 30.0,
-          cacheRead: 0.5,
-          cacheWrite: 6.25,
-        },
-        "gpt-5.6-terra": {
-          input: 2.5,
-          output: 15.0,
-          cacheRead: 0.25,
-          cacheWrite: 3.125,
-        },
-        "gpt-5.6-luna": {
-          input: 1.0,
-          output: 6.0,
-          cacheRead: 0.1,
-          cacheWrite: 1.25,
-        },
-        "gpt-4o": {
-          input: 2.5,
-          output: 10.0,
-          cacheRead: 1.25,
-          cacheWrite: 5.0,
-        },
-        "gpt-4o-mini": {
-          input: 0.15,
-          output: 0.6,
-          cacheRead: 0.075,
-          cacheWrite: 0.3,
-        },
-        "deepseek-chat": {
-          input: 0.14,
-          output: 0.28,
-          cacheRead: 0.014,
-          cacheWrite: 0.14,
-        },
-        "deepseek-reasoner": {
-          input: 0.55,
-          output: 2.19,
-          cacheRead: 0.055,
-          cacheWrite: 0.55,
-        },
-        "custom:step-router-v1": {
-          input: 0.5,
-          output: 2.0,
-          cacheRead: 0.05,
-          cacheWrite: 0.25,
-        },
-      };
-      const rate = rates[model] || {
-        input: 1.0,
-        output: 5.0,
-        cacheRead: 0.1,
-        cacheWrite: 1.0,
-      };
-      const cost =
-        (input * rate.input +
-          (output + thought) * rate.output +
-          cachedRead * rate.cacheRead +
-          cachedWrite * rate.cacheWrite) /
-        1_000_000;
+    
       // Accumulate into the current local day (used by the daily-usage treemap).
       const dayKey = dayKeyOf(new Date());
       const prevDay = state.dailyUsage[dayKey] || {
         totalTokens: 0,
-        totalCost: 0,
         requestCount: 0,
         models: {},
       };
       const prevModels = prevDay.models || {};
       const prevModel = prevModels[model] || {
         totalTokens: 0,
-        totalCost: 0,
         requestCount: 0,
       };
       // Prune entries older than 90 days so the record stays bounded.
@@ -2306,13 +2207,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }
       prunedDaily[dayKey] = {
         totalTokens: prevDay.totalTokens + total,
-        totalCost: prevDay.totalCost + cost,
         requestCount: prevDay.requestCount + 1,
         models: {
           ...prevModels,
           [model]: {
             totalTokens: prevModel.totalTokens + total,
-            totalCost: prevModel.totalCost + cost,
             requestCount: prevModel.requestCount + 1,
           },
         },
@@ -2328,7 +2227,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             state.sessionUsageStats.cachedReadTokens + cachedRead,
           cachedWriteTokens:
             state.sessionUsageStats.cachedWriteTokens + cachedWrite,
-          totalCost: state.sessionUsageStats.totalCost + cost,
         },
         dailyUsage: prunedDaily,
       };
@@ -3502,7 +3400,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             thoughtTokens: number;
             cachedReadTokens: number;
             cachedWriteTokens: number;
-            totalCost: number;
           }>("sessionUsageStats"),
           "sessionUsageStats",
         ),
@@ -3691,21 +3588,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // without needing the user to clear data. When no fetched list exists for a
       // profile, we leave its declared models untouched (can't verify), but the
       // fixed write path (handleSaveApi) will no longer re-pollute it.
-      // Heuristic guard against cross-endpoint pollution in persisted history:
-      // a model name that obviously cannot belong to the configured endpoint
-      // (e.g. "Ling-*" on a deepseek base URL, or "deepseek-*" on an ant-ling
-      // base URL) is treated as poisoned and dropped from the provider's model
-      // pool, so it can never be silently selected as the active model.
-      // Helpers for scrubbing cross-endpoint model pollution. The narrow
-      // Ling↔DeepSeek check used to let model/endpoint mismatches from other
-      // suppliers (e.g. `k3`/Kimi saved under a DeepSeek base URL) slip through.
-      // We now delegate to the shared classifier, which recognizes all major
-      // families and only flags when BOTH sides are clearly owned by DIFFERENT
-      // suppliers (custom endpoints / custom model names are never flagged).
-      const isModelEndpointMismatch = (
-        model: string,
-        baseUrl?: string,
-      ): boolean => isModelProviderMismatch(model, baseUrl);
       const deriveProviderName = (
         baseUrl?: string,
         fallback?: string,
@@ -3713,7 +3595,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         if (!baseUrl) return fallback || "配置";
         try {
           const host = new URL(baseUrl).hostname.toLowerCase();
-          if (/ant-ling|agnes|ant-/.test(host)) return "Ling";
           if (host.includes("deepseek")) return "DeepSeek";
           if (host.includes("openai")) return "OpenAI";
           if (host.includes("anthropic")) return "Anthropic";
@@ -3723,48 +3604,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           return fallback || "配置";
         }
       };
-      // Build id -> baseUrl authority from declared apiProfiles so we can scrub
-      // each provider's *fetched* model list (providerModels[pid]) of models that
-      // don't belong to that endpoint. This is what removes the kimi models a past
-      // bug wrote into the deepseek profile's fetched list — `cleanProfileModels`
-      // alone couldn't fix it because `mergedProviders` later re-merged the
-      // un-filtered providerModels back in.
-      const profileBaseByPid: Record<string, string> = {};
-      for (const p of apiProfiles || []) {
-        if (p.id && p.config?.baseUrl)
-          profileBaseByPid[p.id] = p.config.baseUrl;
-      }
       const cleanedProviderModels: Record<string, string[]> = {};
       for (const [pid, models] of Object.entries(providerModels || {})) {
-        const baseUrl = profileBaseByPid[pid];
-        if (baseUrl) {
-          const scrubbed = (models || []).filter(
-            (m) => !isModelEndpointMismatch(m, baseUrl),
-          );
-          if (scrubbed.length) cleanedProviderModels[pid] = scrubbed;
-        } else if (models && models.length) {
-          // Unknown owner (custom runtime provider) — keep as-is; don't risk
-          // dropping a legit fetched list we can't attribute.
-          cleanedProviderModels[pid] = models;
-        }
+        if (models && models.length) cleanedProviderModels[pid] = models;
       }
       const cleanProfileModels = (p: ApiProfile): string[] => {
-        const own = (p.config?.model ? [p.config.model] : []).filter(
-          (m) => !isModelEndpointMismatch(m, p.config?.baseUrl),
-        );
-        const fetched = (cleanedProviderModels[p.id] || []).filter(
-          (m) => !isModelEndpointMismatch(m, p.config?.baseUrl),
-        );
+        const own = p.config?.model ? [p.config.model] : [];
+        const fetched = cleanedProviderModels[p.id] || [];
         if (fetched.length > 0) {
-          // Authoritative: this endpoint's own fetched list wins (after scrubbing).
           return Array.from(new Set([...own, ...fetched].filter(Boolean)));
         }
-        // No fetched list available → we CANNOT verify that p.models is clean.
-        // Historical builds unioned other endpoints' models into this array
-        // (the "一堆放一起" bug), so trusting it would re-introduce pollution.
-        // Trust ONLY the explicitly-configured model. The user can click
-        // "获取模型列表" in settings, which populates providerModels[pid] and
-        // then this branch switches to the clean fetched list.
         return Array.from(new Set(own.filter(Boolean)));
       };
       const builtProviders: ProviderConfig[] =
@@ -3781,10 +3630,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
                   new Set(
                     (apiHistory || [])
                       .filter((h) => h.baseUrl === p.config!.baseUrl && h.model)
-                      .map((h) => h.model as string)
-                      .filter(
-                        (m) => !isModelEndpointMismatch(m, p.config!.baseUrl),
-                      ),
+                      .map((h) => h.model as string),
                   ),
                 );
                 if (histModels.length) models = histModels;
@@ -3864,35 +3710,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         }
       }
       const allBuiltProviders = [...builtProviders, ...historyProviders];
-      // Heal persisted provider baseUrl pollution: if a provider's models all
-      // clearly belong to a different endpoint than its baseUrl (e.g. Ling/Ring
-      // models but a deepseek URL), its baseUrl was overwritten by an old bug.
-      // Clear it so activeProvider matching falls back to model-based lookup
-      // instead of anchoring to the wrong provider and showing the wrong list.
-      const healedProviders = allBuiltProviders.map((p) => {
-        if (!p.baseUrl || p.models.length === 0) return p;
-        const validModels = p.models.filter(
-          (m) => !isModelEndpointMismatch(m, p.baseUrl),
-        );
-        if (validModels.length === 0) {
-          warn(
-            "[restoreFromStorage] provider baseUrl polluted:",
-            p.name,
-            p.baseUrl,
-            "models:",
-            p.models,
-            "-> clearing baseUrl",
-          );
-          return { ...p, baseUrl: "", apiKey: "" };
-        }
-        return p;
-      });
       // Merge the persisted per-provider fetched model lists (providerModels)
       // into each provider's candidate `models` pool. This keeps a single source
       // of truth so a model selected from "获取模型列表" survives a cold restart:
       // without it, `activeModel` would be rejected by the check below (not in
       // `providers[].models`) and silently fall back to the default model.
-      const mergedProviders: ProviderConfig[] = healedProviders.map((p) => {
+      const mergedProviders: ProviderConfig[] = allBuiltProviders.map((p) => {
         const fetched = cleanedProviderModels[p.id];
         if (fetched && fetched.length > 0) {
           const models = Array.from(new Set([...p.models, ...fetched]));
@@ -3908,9 +3731,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // e.g. a model picked from "获取模型列表". The previous logic dropped it
       // back to the default provider's `models[0]` (deepseek-v4-pro) whenever
       // the fetched list hadn't hydrated at restore time, which reverted every
-      // launch to pro. The mismatch guard below (isModelEndpointMismatch) still
-      // catches genuinely bad model/endpoint pairings, so keeping the user's
-      // explicit choice here is safe.
+      // launch to pro. Keeping the user's explicit choice here is safe.
       const builtActiveModel: string | null =
         // 以用户最后选择的 activeModel 为准；profile 只在没有 activeModel 时兜底，
         // 避免“手动选了新模型，重启后又被 profile 里的旧模型覆盖”。
@@ -3938,8 +3759,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         // Re-anchor to the active model's OWNER first. A saved activeProviderId
         // can be stale — handleSaveApi/applyProfile used to sync activeModel
         // without re-anchoring it, leaving the id pointing at an older provider
-        // (e.g. Ling) while the active model belongs to another endpoint (e.g.
-        // DeepSeek). The stale id then scoped providerModels writes and the chat
+        // (e.g. an older provider) while the active model belongs to another
+        // endpoint (e.g. DeepSeek). The stale id then scoped providerModels writes and the chat
         // dropdown's open-refetch to the WRONG endpoint, collapsing the fetched
         // list to the single declared model. Trusting the saved id only when it
         // points at the same endpoint as the model owner keeps them in lockstep.
@@ -4064,23 +3885,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
               return { ...defaults };
             }
             const merged = { ...defaults, ...cfg };
-            // Heal model/baseUrl mismatch: a persisted entry can pair a Ling
-            // model with a deepseek baseUrl (old pollution / provider-switch
-            // fallout). Drop the poisoned endpoint so it never surfaces in the
-            // model selector (defaults are now empty — no Ling default).
-            if (isModelEndpointMismatch(merged.model, merged.baseUrl)) {
-              warn(
-                "[restoreFromStorage] apiConfig model/baseUrl mismatch → drop endpoint:",
-                merged.model,
-                merged.baseUrl,
-              );
-              return {
-                ...merged,
-                provider: "custom",
-                baseUrl: defaults.baseUrl,
-                apiKey: defaults.apiKey,
-              };
-            }
             return merged;
           };
           // Prefer the active provider built from providers/activeModel — this is
@@ -4116,19 +3920,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         })(),
         apiHistory: (() => {
           const raw = apiHistory || [];
-          // Drop poisoned history entries where the model name clearly belongs to
-          // a DIFFERENT supplier than the endpoint it was saved against (e.g.
-          // `k3`/Kimi under a DeepSeek base URL). We no longer "heal" these by
-          // rewriting the model — rewriting kept a misleading entry under the
-          // wrong supplier; the user wants them removed outright. Entries whose
-          // model or URL cannot be confidently attributed (custom endpoints /
-          // custom model names) are left untouched to avoid deleting legit configs.
-          const kept = raw.filter(
-            (h) =>
-              !h.model ||
-              !h.baseUrl ||
-              !isModelEndpointMismatch(h.model, h.baseUrl),
-          );
           // Deduplicate by baseUrl + apiKey: one CONFIG is one history entry
           // (the list groups by baseUrl and entries within a group differ by
           // apiKey). Model changes on the same connection update that entry in
@@ -4138,7 +3929,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           // is the newest model for that config.
           const seen = new Set<string>();
           const normKey = (k?: string) => (k ?? "").trim();
-          return kept.filter((h) => {
+          return raw.filter((h) => {
             if (!h.model || !h.baseUrl) return false;
             const key = `${h.baseUrl}|${normKey(h.apiKey)}`;
             if (seen.has(key)) return false;
@@ -4162,7 +3953,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           if (apiHistory && apiHistory.length > 0) {
             // Group history entries by baseUrl so each endpoint becomes its own
             // provider. This prevents a single "配置 · xxx" profile from owning
-            // models that clearly belong to different endpoints (e.g. Ling and
+            // models that clearly belong to different endpoints (e.g. Kimi and
             // DeepSeek models mixed together after repeated saves).
             const groups = new Map<string, typeof apiHistory>();
             for (const h of apiHistory) {
@@ -4259,7 +4050,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
                 thoughtTokens: 0,
                 cachedReadTokens: 0,
                 cachedWriteTokens: 0,
-                totalCost: 0,
               },
         // Rehydrate the last persisted context-window usage snapshot so the
         // indicator no longer resets to zero on every cold start. The backend
@@ -4429,39 +4219,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         "--helix-transcript-size",
         `${s.transcriptFontSize}px`,
       );
-      // Auto-populate MCP server env vars from .env file (e.g. TAVILY_API_KEY)
-      if (isElectron()) {
-        try {
-          const envKey = await (window as any).electron?.app?.readEnvKey(
-            "TAVILY_API_KEY",
-          );
-          if (envKey) {
-            const current = get().mcpServers;
-            const tavily = current?.tavily;
-            if (
-              tavily?.type === "local" &&
-              (!tavily.environment?.TAVILY_API_KEY ||
-                tavily.environment.TAVILY_API_KEY === "")
-            ) {
-              const updated = {
-                ...current,
-                tavily: {
-                  ...tavily,
-                  environment: {
-                    ...tavily.environment,
-                    TAVILY_API_KEY: envKey,
-                  },
-                },
-              };
-              set({ mcpServers: updated });
-              const { persistence } = await import("@/lib/persist");
-              await persistence.saveSetting("mcpServers", updated);
-            }
-          }
-        } catch {
-          /* ignore */
-        }
-      }
     } catch (e) {
       logError("Failed to restore:", e);
       get().showToast({

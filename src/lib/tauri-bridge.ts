@@ -311,7 +311,6 @@ function buildTauriAPI(): ElectronAPI {
   // ── app ─────────────────────────────────────────────────────────────────
   api.app = {
     getInfo: () => invoke("get_info"),
-    readEnvKey: (key: string) => invoke("read_env_key", { key }),
     setWorkDir: (dir: string) => invoke("set_work_dir", { dir }),
     syncWorkDir: (dir: string) => invoke("sync_work_dir", { dir }),
     getHelixVersion: () => invoke("get_helix_version"),
@@ -383,6 +382,8 @@ function buildTauriAPI(): ElectronAPI {
     listSubagents: () => invoke("helix_list_subagents"),
     setSubagentEnabled: (name: string, enabled: boolean) =>
       invoke("helix_set_subagent_enabled", { name, enabled }),
+    setSubagentModel: (name: string, model: string) =>
+      invoke("helix_set_subagent_model", { name, model }),
     deleteSubagent: (name: string) => invoke("helix_delete_subagent", { name }),
     // Pi agent commands (extensions / skills / prompts / models)
     piGetCommands: () => invoke("pi_get_commands"),
@@ -483,12 +484,6 @@ function buildTauriAPI(): ElectronAPI {
     setConfig: (config: unknown) => invoke("hooks_save", { config }),
   };
 
-  // ── web search ─────────────────────────────────────────────────────────
-  api.webSearch = {
-    getConfig: () => invoke("web_search_list"),
-    setConfig: (config: unknown) => invoke("web_search_save", { config }),
-  };
-
   // ── vision model (auxiliary.vision) ───────────────────────────────────
   api.vision = {
     getConfig: () => invoke("vision_config_list"),
@@ -507,6 +502,13 @@ function buildTauriAPI(): ElectronAPI {
   api.mcpConfig = {
     list: () => invoke("mcp_config_list"),
     save: (servers: unknown) => invoke("mcp_config_save", { servers }),
+  };
+
+  // ── subagent settings (config.yaml `subagents:` block, read/write,
+  //     mirrored into the extension's subagents.json on save) ─────────
+  api.subagentsConfig = {
+    list: () => invoke("subagents_settings_list"),
+    save: (settings: unknown) => invoke("subagents_settings_save", { settings }),
   };
 
   // ── delegations ─────────────────────────────────────────────────────────

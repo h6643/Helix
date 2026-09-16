@@ -13,6 +13,15 @@ pub fn pi_sessions_dir() -> PathBuf {
     super::paths::strip_verbatim_prefix(&dir)
 }
 
+/// The no-project default work dir: `~/.pi/agent/sessions/default`.
+/// Created once at startup so both the backend `session/new` and the
+/// frontend terminal can use it as a stable, project-independent cwd.
+pub fn pi_sessions_default_dir() -> PathBuf {
+    let dir = pi_sessions_dir().join("default");
+    let _ = std::fs::create_dir_all(&dir);
+    super::paths::strip_verbatim_prefix(&dir)
+}
+
 /// Global AppHandle set once during setup — lets background threads and sync
 /// commands emit Tauri events / resolve paths without threading a handle
 /// through every function.

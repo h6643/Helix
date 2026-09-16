@@ -81,7 +81,6 @@ function deriveProviderName(baseUrl?: string, fallback?: string): string {
   if (!baseUrl) return fallback || "配置";
   try {
     const host = new URL(baseUrl).hostname.toLowerCase();
-    if (/ant-ling|agnes|ant-/.test(host)) return "Ling";
     if (host.includes("deepseek")) return "DeepSeek";
     if (host.includes("openai")) return "OpenAI";
     if (host.includes("anthropic")) return "Anthropic";
@@ -353,7 +352,8 @@ export function ApiSettings({
   // shows what Helix is really using.
   //
   // CRITICAL: the backend's helix:getConfig does NOT return the API key — the
-  // key lives in Helix's .env and is never echoed back over IPC (security).
+  // key lives in config.yaml (vision.apiKey / image.apiKey) or pi's auth.json
+  // and is never echoed back over IPC (security).
   // So we must PRESERVE the key already in the store instead of clobbering it
   // with ''. And we must NOT call persistToStorage() here: this is a read-only
   // mirror. Persisting would overwrite the saved profile with an empty key and
@@ -373,15 +373,12 @@ export function ApiSettings({
         // ★ Critical: if the user has explicitly selected a different model in the
         // chat input (activeModel), do NOT let the backend config.yaml overwrite it.
         // Without this guard, opening Settings would revert apiConfig.model to the
-        // backend default (e.g. Ling-3.0-flash) even though the chat is actively
+        // backend default (e.g. deepseek-v4-flash) even though the chat is actively
         // using a different model — causing the settings list to highlight the wrong
         // entry and creating a visual/actual mismatch.
         const frontendModel = store.activeModel || cur.model;
         const effectiveModel = frontendModel || r.model;
-        // Reject the broken ant-ling endpoint if it ever surfaces in the backend.
-        const baseUrl = /ant-ling/i.test(r.baseUrl || "")
-          ? cur.baseUrl
-          : r.baseUrl || cur.baseUrl;
+        const baseUrl = r.baseUrl || cur.baseUrl;
         setApiConfig({
           provider: r.provider || cur.provider,
           apiKey: cur.apiKey, // never overwrite the saved key with ''
@@ -725,7 +722,7 @@ export function ApiSettings({
           piForProvider.find((m) => m.baseUrl)?.baseUrl ||
           getBaseUrl(providerId) ||
           prev.baseUrl,
-        model: piForProvider[0]?.id || provider?.models[0] || prev.model,
+        model: piForProvider[0]?.id  || prev.model,
       }));
     },
     [piModels],
@@ -745,7 +742,7 @@ export function ApiSettings({
           ...prev,
           provider: match.id,
           baseUrl: getBaseUrl(match.id) || prev.baseUrl,
-          model: match.models[0] || prev.model,
+          model: prev.model,
         }));
       }
     }
@@ -861,7 +858,7 @@ export function ApiSettings({
           // 必须走 pushModelConfigWithKey —— 内部按模式分流：serve → setModel 写
           // config.yaml（生效）；acp → setConfig + cacheConfig（行为不变）。
           // 否则在设置里切换 profile 永远到不了网关，config.yaml 残留旧配置
-          // （如 deepseek+Ling 错配 → 400 无输出）。这是用户显式切换 profile 的
+          // （如 deepseek+Kimi 错配 → 400 无输出）。这是用户显式切换 profile 的
           // 动作，key 走一次性通道（cacheConfig 落盘时会剥掉 key）。
           pushModelConfigWithKey(cfg);
           // Persist the active profile so the next cold start re-asserts it
@@ -941,7 +938,7 @@ export function ApiSettings({
     // Store ONLY the single chosen model — NOT the full fetched list. The model
     // list is fetched live when the selector is opened (renderModelSelector), so
     // persisting the fetched list here would only create a stale cache that hides
-    // newly-added models (e.g. ling-pro) until the next manual refresh.
+    // newly-added models (e.g. a freshly added DeepSeek variant) until the next manual refresh.
     const profileModels = [localConfig.model].filter(Boolean) as string[];
     // Bind to current profile: update the active one, otherwise reuse a matching
     // profile or create a new named one.
@@ -976,9 +973,9 @@ export function ApiSettings({
     // Keep activeModel in sync with the saved model. Without this the chat
     // dropdown highlight (activeModel-first) and the settings backend mirror
     // (which guards on activeModel || cur.model) would keep pinning the
-    // PREVIOUS model — e.g. after saving Ling-2.6-1T while flash was active,
-    // the dropdown would never highlight Ling and the mirror would revert the
-    // backend model back to flash. Use the POST-snap apiConfig.model (setApiConfig
+    // PREVIOUS model — e.g. after saving deepseek-v4-flash while a different
+    // model was active, the dropdown would never highlight it and the mirror
+    // would revert the backend model back. Use the POST-snap apiConfig.model (setApiConfig
     // may correct a model/baseUrl mismatch), so activeModel can't drift from it.
     // Also re-anchor activeProviderId to the endpoint just saved: leaving it at
     // the PREVIOUS provider makes the chat dropdown's open-refetch hit the wrong
@@ -1561,14 +1558,14 @@ export function ApiSettings({
             // entry's endpoint. Don't use setActiveModel here: its model-name-based
             // resolution can pick the wrong provider when a model name also exists
             // in another provider's fetched list (e.g. cross-endpoint pollution),
-            // causing an explicit deepseek click to snap back to Ling.
+            // causing an explicit deepseek click to snap back to a different provider.
             const state = useHelixStore.getState();
             let match = state.providers.find((p) => p.baseUrl === h.baseUrl);
             if (!match) {
               // This endpoint lives only in history (no saved Profile). Upsert a
               // runtime provider so the input-bar model list can resolve to it and
               // the active model stays pinned instead of snapping to the default
-              // provider (Ling) after a refresh.
+              // provider (a runtime-synthesized entry) after a refresh.
               const exists = state.providers.some(
                 (p) => p.baseUrl === h.baseUrl,
               );
@@ -1986,8 +1983,7 @@ export function ApiSettings({
                               model: e.target.value,
                             }))
                           }
-                          placeholder="gpt-4o-mini"
-                          className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
+                          className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground font-mono"
                         />
                       )}
                     </div>

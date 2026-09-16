@@ -270,7 +270,7 @@ function TaskItem({
 
   return (
     <div
-      className={`group flex items-start gap-3 p-4 rounded-xl border transition-colors ${isSelected ? "border-primary/50 bg-primary/5" : "border-border/30 bg-card/40 hover:bg-card/70"}`}
+      className={`group flex items-start gap-3 p-4 rounded-xl border-2 transition-colors ${isSelected ? "border-primary/30 bg-primary/5" : "border-primary/20 bg-card/40 hover:bg-card/70"}`}
     >
       {onToggleSelect && (
         <input
@@ -295,10 +295,10 @@ function TaskItem({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[length:var(--helix-transcript-size)] font-medium text-foreground/90">
-            {task.label}
+            {task.label.replace(/\s*Helix$/, '')}
           </span>
           <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
-            {workDirName ? `心跳 • ${workDirName}` : task.scheduleText}
+            {workDirName ? workDirName : task.scheduleText}
           </span>
         </div>
         <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-0.5 line-clamp-2">
@@ -586,14 +586,14 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
           </button>
         </div>
 
-        <div className="relative mt-3">
-          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+        <div className="relative mt-3 flex justify-center">
+          <Search className="absolute left-[calc(2.5%+12px)] top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索计划任务"
-            className="w-full h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
+            className="w-[95%] h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
           />
         </div>
       </div>

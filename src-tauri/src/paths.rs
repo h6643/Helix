@@ -3,8 +3,8 @@
 //! Uses `~/.pi/agent/helix/` on all platforms as the Helix data directory
 //! (config, auth, sessions, skills, memories, logs…) — colocated with the
 //! Pi agent's own config root so everything Helix-related lives under one
-//! `~/.pi` tree. Legacy `~/.codex` / `~/.helix` directories (retired
-//! backends) are migrated automatically on first launch.
+//! `~/.pi` tree. Legacy `~/.helix` directories (retired interim layout)
+//! are migrated automatically on first launch.
 
 use std::path::{Path, PathBuf};
 
@@ -46,8 +46,8 @@ pub fn default_helix_data_dir() -> PathBuf {
     pi_agent_dir().join("helix")
 }
 
-/// One-time migration from legacy data directories (`~/.codex` from the
-/// retired codex era, `~/.helix` from the interim layout). Runs at startup:
+/// One-time migration from the legacy data directory (`~/.helix` from the
+/// interim layout). Runs at startup:
 /// when a legacy dir exists but the new default does not, move it (rename
 /// when possible — cheap on the same volume; fall back to copy on
 /// cross-volume / locked-file cases) so the user keeps all data. When the
@@ -67,7 +67,7 @@ pub fn migrate_legacy_data_dir() {
     }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let target = default_helix_data_dir();
-    let legacies = [home.join(".codex"), home.join(".helix")];
+    let legacies = [home.join(".helix")];
     migrate_data_dir_at(&target, &legacies);
 }
 
@@ -178,17 +178,6 @@ pub fn pi_agent_dir() -> PathBuf {
         .join("agent")
 }
 
-/// Portable standalone Python interpreter bundled with the data dir.
-/// `python/python.exe` on Windows, `python/bin/python3` on Unix.
-pub fn standalone_python() -> PathBuf {
-    let base = helix_data_dir().join("python");
-    if cfg!(windows) {
-        base.join("python.exe")
-    } else {
-        base.join("bin").join("python3")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,11 +194,11 @@ mod tests {
         dir
     }
 
-    /// ~/.codex exists → moved to target, breadcrumb left behind.
+    /// ~/.helix exists → moved to target, breadcrumb left behind.
     #[test]
-    fn migrates_codex_dir() {
-        let root = temp_root("codex");
-        let legacy = root.join(".codex");
+    fn migrates_helix_dir() {
+        let root = temp_root("helix");
+        let legacy = root.join(".helix");
         std::fs::create_dir_all(legacy.join("skills")).unwrap();
         std::fs::write(legacy.join("config.yaml"), "model: x").unwrap();
 
@@ -219,35 +208,15 @@ mod tests {
         assert!(target.is_dir(), "target created");
         assert!(!legacy.exists(), "legacy dir gone");
         assert!(target.join("config.yaml").is_file(), "data moved");
-        assert!(root.join(".codex.migrated").is_file(), "breadcrumb");
+        assert!(root.join(".helix.migrated").is_file(), "breadcrumb");
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// Both legacy dirs exist → the first one in the list wins.
-    #[test]
-    fn prefers_first_legacy() {
-        let root = temp_root("both");
-        for name in [".codex", ".helix"] {
-            std::fs::create_dir_all(root.join(name)).unwrap();
-            std::fs::write(root.join(name).join("marker.txt"), name).unwrap();
-        }
-        let target = root.join(".pi").join("agent").join("helix");
-        let legacies = [root.join(".codex"), root.join(".helix")];
-        migrate_data_dir_at(&target, &legacies);
-
-        assert!(target.join("marker.txt").is_file());
-        assert_eq!(
-            std::fs::read_to_string(target.join("marker.txt")).unwrap(),
-            ".codex"
-        );
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Target already exists → legacy dirs must NOT be touched.
+    /// Target already exists → legacy dir must NOT be touched.
     #[test]
     fn skips_when_target_exists() {
         let root = temp_root("exists");
-        let legacy = root.join(".codex");
+        let legacy = root.join(".helix");
         std::fs::create_dir_all(&legacy).unwrap();
         let target = root.join(".pi").join("agent").join("helix");
         std::fs::create_dir_all(&target).unwrap();

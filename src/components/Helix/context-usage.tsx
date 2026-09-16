@@ -20,27 +20,61 @@ interface ContextBreakdown {
   label: string;
   tokens: number;
   color: string;
+  /** 后端"整块占用"兜底项（会话文件还没落盘时给不出按内容的拆分） */
+  aggregate?: boolean;
+}
+
+/** 兜底的"整块占用"：id/label 都对得上，或后端显式标了 aggregate。 */
+function isAggregateCategory(c: ContextBreakdown): boolean {
+  return (
+    c.aggregate === true ||
+    (c.id === "conversation" &&
+      (c.label === "会话上下文" || c.label === "整体上下文占用"))
+  );
+}
+
+/**
+ * 选哪一套分类来渲染。
+ *
+ * 之前这里是「RPC categories 非空就顶替本地快照」，于是三套形态互相顶：
+ * 分桶快照（上次 run 存的）→ 首轮里 RPC 的整块兜底 → 会话文件落盘后的分桶，
+ * 每一步看着都像"分类自己变了"。现在按信息量排序：**分桶 > 整块兜底**，
+ * 同级里实时数据优先；只有当两边都拿不出分桶时才显示整块兜底。
+ */
+function pickCategories(
+  backend: ContextBreakdown[] | undefined,
+  local: ContextBreakdown[] | undefined,
+): ContextBreakdown[] {
+  const live = backend?.length ? backend : undefined;
+  const snap = local?.length ? local : undefined;
+  const liveBuckets = live?.some((c) => !isAggregateCategory(c)) ? live : undefined;
+  const snapBuckets = snap?.some((c) => !isAggregateCategory(c)) ? snap : undefined;
+  // Prefer live buckets, then snapshot buckets, then any live data, then any
+  // snapshot data. Within each tier, bucket data beats a single aggregate lump
+  // so the panel never swaps between 分桶 and 整块 fallback in the same window.
+  return liveBuckets ?? snapBuckets ?? live ?? snap ?? [];
 }
 
 function normalizeCategories(
   used: number,
   categories: ContextBreakdown[],
 ): Array<ContextBreakdown & { estimatedTokens: number }> {
-  const estimatedTotal = categories.reduce(
-    (sum, category) => sum + category.tokens,
-    0,
-  );
-  if (!used || estimatedTotal <= 0) return [];
-  return categories
-    .filter((category) => category.tokens > 0)
-    .map((category) => ({
-      ...category,
-      estimatedTokens: category.tokens,
-      tokens: Math.max(
-        1,
-        Math.round((category.tokens / estimatedTotal) * used),
-      ),
-    }));
+  if (!used || categories.length === 0) return [];
+  const visible = categories.filter((c) => c.tokens > 0);
+  const estimatedTotal = visible.reduce((s, c) => s + c.tokens, 0);
+  // The jsonl chars/4 estimate only counts message text blocks, not the
+  // system prompt / tool schemas that dominate the real `used` figure. When
+  // the estimate collapses to a tiny number (e.g. "回复 ~22" against a
+  // 15.2K ring), the display looks broken. Floor each bucket's share of
+  // `used` at its proportional estimate: display = max(estimate, used × share),
+  // which keeps the bucket sum close to `used` while preserving the relative
+  // split the estimate actually measured.
+  return visible.map((category) => {
+    const share = estimatedTotal > 0 ? category.tokens / estimatedTotal : 0;
+    const proportional = Math.round(used * share);
+    const displayTokens = Math.max(category.tokens, proportional);
+    return { ...category, estimatedTokens: category.tokens, tokens: displayTokens };
+  });
 }
 
 interface ContextUsageData {
@@ -136,6 +170,11 @@ function ContextUsagePanel({
   // provider token cost, so they remain unnormalized.
   const toolsetList = toolsets ?? [];
   const normalizedCategories = normalizeCategories(used, categories);
+  // 后端在会话文件落盘前只能给出"整块占用"这一项 —— 明确说明，别让它看起来
+  // 像某个内容分类（"对话中分类变成会话上下文"的观感来源）。
+  const aggregateOnly =
+    normalizedCategories.length > 0 &&
+    normalizedCategories.every(isAggregateCategory);
 
   return (
     <div className="absolute bottom-full right-0 mb-2 w-72 bg-card border border-border/60 rounded-xl shadow-lg p-3 z-50">
@@ -171,6 +210,11 @@ function ContextUsagePanel({
           })
         )}
       </div>
+      {aggregateOnly && (
+        <div className="mt-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/80 leading-snug">
+          整体占用：本轮会话记录尚未落盘，暂时拿不到按内容拆分的分类
+        </div>
+      )}
       {toolsetList.length > 0 && (
         <div className="mt-3 pt-2 border-t border-border/40">
           <button
@@ -385,14 +429,36 @@ export function ContextUsageIndicator() {
   // （"重启后有的会话分类消失"根因之一）。留空可在下次 dep 变化（新 run 换
   // sid / 切换会话）时重试；run 结束的兜底捕获在 agent-flow-panel finally 里。
   const quietFetchedSidRef = useRef<string | null>(null);
+  // 本对话映射到的后端 sid。用途是**统一本地快照的键**：历史上
+  // captureContextBreakdown 在还没有 cid（draft）时会用 sid 作键，而读侧只按
+  // cid 查 → 会话换绑/重启后环读到空值就显示 0（"有时候自动清零"）。这里记下
+  // sid，读侧两键都查，并把落在 sid 键上的旧快照一次性搬到 cid 键。
+  const [backendSid, setBackendSid] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     const capture = async () => {
       // 与 fetchContextData 同口径：只认本对话映射到的 sid，绝不兜底全局
       // helixSessionId（跨会话污染）。
       const sid = await resolveBackendSid(currentSessionId);
-      const key = `${currentSessionId ?? ""}:${sid ?? ""}`;
-      if (!sid || quietFetchedSidRef.current === key || cancelled) return;
+      if (cancelled) return;
+      setBackendSid(sid ?? null);
+      if (!sid) return;
+      // 键统一：sid 键上的旧快照搬到 cid 键（只在 cid 键还空着时，不覆盖更新的值）
+      if (currentSessionId) {
+        const st = useHelixStore.getState();
+        const legacy = st.contextUsage[sid];
+        if (legacy && !st.contextUsage[currentSessionId]) {
+          st.setContextUsage(
+            currentSessionId,
+            legacy.size,
+            legacy.used,
+            legacy.categories,
+            legacy.toolsets,
+          );
+        }
+      }
+      const key = `${currentSessionId ?? ""}:${sid}`;
+      if (quietFetchedSidRef.current === key) return;
       const written = await captureContextBreakdown(currentSessionId, sid);
       if (written) quietFetchedSidRef.current = key;
     };
@@ -409,9 +475,12 @@ export function ContextUsageIndicator() {
   // restart. The snapshot is written by usage_prompt_complete (实测) AND
   // captureContextBreakdown (max 合并下一条 prompt 的真实估算).
   // (No client-side estimation - real saved values.)
-  const localCtx = useHelixStore((s) =>
-    s.currentSessionId ? s.contextUsage[s.currentSessionId] : undefined,
-  );
+  // 快照键可能是 cid（常规）或 sid（历史遗留 / draft 期写入）——两键都查。
+  const localCtx = useHelixStore((s) => {
+    const cid = s.currentSessionId;
+    if (!cid) return backendSid ? s.contextUsage[backendSid] : undefined;
+    return s.contextUsage[cid] ?? (backendSid ? s.contextUsage[backendSid] : undefined);
+  });
   const estimatedTokens = useHelixStore((s) =>
     s.currentSessionId ? s.estimatedTokens[s.currentSessionId] : undefined,
   );
@@ -430,11 +499,13 @@ export function ContextUsageIndicator() {
       : undefined;
   const used = estimated ?? (localCtx?.used || 0);
 
-  const categories: ContextBreakdown[] = backendData?.categories?.length
-    ? backendData.categories.map((c) => ({ ...c }))
-    : localCtx?.categories?.length
-      ? localCtx.categories.map((c) => ({ ...c }))
-      : [];
+  // 分桶优先于"整块占用"兜底（见 pickCategories）：RPC 非空不再无条件顶替本地
+  // 快照，否则首轮里后端只给得出「会话上下文」一块时，原本的分桶会被它顶掉，
+  // 看起来就像分类自己变了。
+  const categories: ContextBreakdown[] = pickCategories(
+    backendData?.categories,
+    localCtx?.categories,
+  ).map((c) => ({ ...c }));
 
   const toolsets: Array<{
     toolset: string;

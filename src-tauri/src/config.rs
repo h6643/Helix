@@ -1,4 +1,4 @@
-//! Helix config.yaml / .env read-write helpers.
+//! Helix config.yaml read-write helpers.
 //! Port of `electron/lib/config.js` (pure string manipulation) plus the
 //! getConfig / writeHelixConfig / setModel logic from `electron/main.js`.
 //!
@@ -64,8 +64,47 @@ fn pi_provider_entry(provider: &str) -> Option<serde_json::Value> {
         .cloned()
 }
 
+/// The context window (in tokens) of the currently selected model, resolved
+/// from `~/.pi/agent/models.json` (the custom-endpoint entries Helix writes)
+/// or the `defaultProvider`/`defaultModel` settings. Used to populate the
+/// context-usage ring when a resumed session's pi instance has not yet been
+/// told the window by `get_state`. Returns `None` when the model is
+/// unknown — the ring stays at 0 instead of inventing a number.
+pub fn model_context_window_fallback() -> i64 {
+    let settings = read_pi_settings();
+    let provider = settings
+        .get("defaultProvider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let model = settings
+        .get("defaultModel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if provider.is_empty() && model.is_empty() {
+        return 0;
+    }
+    let models_doc = read_pi_models();
+    let entry = models_doc
+        .pointer(&format!("/providers/{provider}/models"))
+        .and_then(|v| v.as_array());
+    let found = entry
+        .map(|arr| {
+            arr.iter()
+                .find(|m| {
+                    m.get("id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| id == model || id.contains(&model))
+                })
+                .cloned()
+        })
+        .flatten();
+    found
+        .and_then(|m| m.get("contextWindow").and_then(|v| v.as_i64()))
+        .unwrap_or(0)
+}
+
 /// Read the effective API key for a provider: models.json inline key, or
-/// Pi's auth.json credential store, or the legacy .env fallback.
+/// Pi's auth.json credential store.
 fn pi_provider_api_key(provider: &str) -> String {
     if let Some(entry) = pi_provider_entry(provider) {
         if let Some(key) = entry.get("apiKey").and_then(|v| v.as_str()) {
@@ -87,29 +126,8 @@ fn pi_provider_api_key(provider: &str) -> String {
 }
 use std::path::PathBuf;
 
-/// Known-good fallback endpoint used when the frontend supplies a dead/bad
-/// config (mirror of electron/lib/security.js APIHUB_DEFAULT). No api_key
-/// field: credentials never travel through the profile cache — pi's own
-/// files (models.json / auth.json) are the single source of truth for keys.
-#[derive(Debug, Clone)]
-pub struct ApiHubDefault {
-    pub provider: &'static str,
-    pub base_url: &'static str,
-    pub model: &'static str,
-}
-
-pub const APIHUB_DEFAULT: ApiHubDefault = ApiHubDefault {
-    provider: "ant-ling",
-    base_url: "https://api.ant-ling.com/v1",
-    model: "Ling-2.6-1T",
-};
-
 pub fn config_yaml_path() -> PathBuf {
     helix_data_dir().join("config.yaml")
-}
-
-pub fn env_path() -> PathBuf {
-    helix_data_dir().join(".env")
 }
 
 fn norm_lines(yaml: &str) -> Vec<String> {
@@ -188,23 +206,6 @@ pub fn set_yaml_key(yaml: &str, dotted: &str, value: &serde_json::Value) -> Stri
     lines.join("\n")
 }
 
-fn provider_name_from_url(base_url: &str) -> Option<String> {
-    let host = base_url
-        .split("://")
-        .nth(1)?
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .to_string();
-    let mut host = host.as_str();
-    for p in ["api.", "apihub.", "gateway."] {
-        if let Some(rest) = host.strip_prefix(p) {
-            host = rest;
-            break;
-        }
-    }
-    host.split('.').next().map(|s| s.to_string())
-}
 /// Read the effective config (mirror of main.js `helix:getConfig`).
 #[derive(Serialize, Default)]
 pub struct HelixConfig {
@@ -309,20 +310,12 @@ fn apply_pi_model_config(
         .unwrap_or("")
         .to_string();
 
-    // Resolve the target provider: explicit name, else derived from the base
-    // URL (apihub.agnes-ai.com → agnes-ai), else keep the current one.
+    // Resolve the target provider: explicit name wins; otherwise keep the stored one.
     let pi_provider = match provider {
         Some(p) if !p.trim().is_empty() && p.trim() != "__custom__" && p.trim() != "custom" => {
             p.trim().to_string()
         }
-        _ => match base_url
-            .map(|b| b.trim())
-            .filter(|b| !b.is_empty())
-            .and_then(provider_name_from_url)
-        {
-            Some(derived) => derived,
-            None => old_provider.clone(),
-        },
+        _ => old_provider.clone(),
     };
 
     // settings.json — defaultProvider / defaultModel (preserve everything else).
@@ -333,10 +326,7 @@ fn apply_pi_model_config(
     }
 
     // models.json — register the custom endpoint when a baseUrl is given.
-    // maxTokens caps at 65536: gateway-style providers (Agnes) reject pi's
-    // 128k default with "max_tokens exceeds the limit of 65536" (HTTP 500),
-    // which surfaces as an empty reply.
-    // Helix overrides Pi's 128k context fallback with 256k for custom endpoints.
+    // maxTokens caps at 65536:Helix overrides Pi's 128k context fallback with 256k for custom endpoints.
     let mut new_key = api_key.map(|k| k.trim().to_string()).unwrap_or_default();
     let mut models_doc = read_pi_models();
     if let Some(b) = base_url.map(str::trim).filter(|b| !b.is_empty()) {
@@ -447,19 +437,6 @@ pub fn set_model(
     apply_pi_model_config(model, provider, base_url, api_key, context_window)
 }
 
-/// Read a key from the helix .env (OPENAI_API_KEY / OPENAI_BASE_URL / …).
-#[allow(dead_code)]
-pub fn read_env_key(key: &str) -> String {
-    let Ok(env) = std::fs::read_to_string(env_path()) else {
-        return String::new();
-    };
-    let needle = format!("{key}=");
-    env.lines()
-        .find(|l| l.starts_with(&needle))
-        .map(|l| l[needle.len()..].trim().to_string())
-        .unwrap_or_default()
-}
-
 /// Set `delegation_identities` in config.yaml, returning the updated YAML.
 pub fn set_delegation_identities(yaml: &str, identities: &serde_json::Value) -> String {
     set_yaml_key(yaml, "delegation_identities", identities)
@@ -517,27 +494,10 @@ pub fn atomic_write(path: &std::path::Path, contents: &str) -> std::io::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+        use super::*;
 
-    #[test]
-    fn provider_name_from_url_strips_gateway_prefixes() {
-        // gateway hosts derive clean provider ids
-        assert_eq!(
-            provider_name_from_url("https://apihub.agnes-ai.com/v1"),
-            Some("agnes-ai".to_string())
-        );
-        assert_eq!(
-            provider_name_from_url("https://api.tokenrouter.com/v1"),
-            Some("tokenrouter".to_string())
-        );
-        assert_eq!(
-            provider_name_from_url("https://api.deepseek.com"),
-            Some("deepseek".to_string())
-        );
-    }
-
-    #[test]
-    fn pi_settings_and_models_paths_are_in_agent_dir() {
+        #[test]
+        fn pi_settings_and_models_paths_are_in_agent_dir() {
         // Both live directly under ~/.pi/agent — the single config root.
         let settings = pi_settings_path();
         let models = pi_models_path();

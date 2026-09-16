@@ -23,7 +23,6 @@ export default defineConfig([
     "build/**",
     "release/**",
     "src-tauri/**",
-    "hermes-agent/**",
     "**/*.d.ts",
     "**/*.tmp.mjs",
     "**/*.tmp.json",

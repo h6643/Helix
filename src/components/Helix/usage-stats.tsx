@@ -12,7 +12,7 @@ export function ModelUsageStats() {
 
   if (entries.length === 0) return null;
 
-  const totalCost = entries.reduce((sum, [, u]) => sum + u.cost, 0);
+
 
   return (
     <section className="space-y-3">
@@ -55,7 +55,6 @@ export function ModelUsageStats() {
           <span className="text-right font-mono">
             {formatTokens(entries.reduce((s, [, u]) => s + u.completion, 0))}
           </span>
-          <span className="text-right font-mono">${totalCost.toFixed(4)}</span>
         </div>
       </div>
     </section>
@@ -98,7 +97,6 @@ export function UsageSummary() {
     if (usages.length > 0) setUsageHistory(usages);
   }, [agentSteps]);
 
-  const totalCost = usageHistory.reduce((sum, u) => sum + u.cost, 0);
   const callCount = usageHistory.length;
 
   if (callCount === 0) return null;
@@ -117,20 +115,7 @@ export function UsageSummary() {
             {callCount}
           </p>
         </div>
-        <div className="p-3 rounded-xl border border-border/50 bg-card/50 shadow-sm">
-          <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground uppercase tracking-wider">
-            预估成本
-          </p>
-          <p className="text-[calc(var(--helix-transcript-size)*1.7143)] font-semibold text-foreground mt-1">
-            ${totalCost.toFixed(4)}
-          </p>
-        </div>
       </div>
-      {totalCost > 1 && (
-        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-amber-500">
-          本次会话成本已超过 $1.00
-        </p>
-      )}
     </section>
   );
 }
@@ -245,7 +230,6 @@ export function TokenUsagePanel() {
     days.push({
       day: key,
       totalTokens: v?.totalTokens ?? 0,
-      totalCost: v?.totalCost ?? 0,
       requestCount: v?.requestCount ?? 0,
     });
   }
@@ -305,8 +289,7 @@ export function TokenUsagePanel() {
           </div>
           {today.totalTokens > 0 && (
             <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
-              今日 {formatBig(today.totalTokens)} Tokens · $
-              {today.totalCost.toFixed(4)}
+              今日 {formatBig(today.totalTokens)} Tokens
             </span>
           )}
         </div>
@@ -354,8 +337,6 @@ export function TokenUsagePanel() {
                 <tr className="border-b border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
                   <th className="text-left font-medium px-4 py-2">模型</th>
                   <th className="text-right font-medium px-4 py-2">Tokens</th>
-                  <th className="text-right font-medium px-4 py-2">成本</th>
-                  <th className="text-right font-medium px-4 py-2">请求数</th>
                 </tr>
               </thead>
               <tbody>
@@ -369,12 +350,6 @@ export function TokenUsagePanel() {
                     </td>
                     <td className="px-4 py-2 text-right font-mono tabular-nums">
                       {formatTokens(m.totalTokens)}
-                    </td>
-                    <td className="px-4 py-2 text-right font-mono tabular-nums">
-                      ${m.totalCost.toFixed(4)}
-                    </td>
-                    <td className="px-4 py-2 text-right font-mono tabular-nums">
-                      {m.requestCount}
                     </td>
                   </tr>
                 ))}

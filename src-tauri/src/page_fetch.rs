@@ -22,7 +22,6 @@ fn is_http_url(raw: &str) -> bool {
 
 #[tauri::command]
 pub async fn page_fetch(url: String) -> Result<Value, String> {
-    eprintln!("[page_fetch] called url={url}");
     if !is_http_url(&url) {
         return Err("仅支持 http/https 地址".into());
     }
@@ -49,13 +48,20 @@ pub async fn page_fetch(url: String) -> Result<Value, String> {
         let body = resp.text().map_err(|e| format!("读取响应失败: {e}"))?;
         let mut text = body;
         if text.len() > MAX_BODY_BYTES {
-            text.truncate(MAX_BODY_BYTES);
+            // String::truncate panics when the byte index lands inside a
+            // multi-byte char ("not a char boundary"). 5MB+ pages are almost
+            // always UTF-8 with non-ASCII text, so walk back to the previous
+            // boundary — same crash class as the helix.rs extension scanner.
+            let mut end = MAX_BODY_BYTES;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
         }
         Ok(text)
     })
     .await
     .map_err(|e| e.to_string())??;
-    eprintln!("[page_fetch] got html len={}", html.len());
 
     // Inject a <base href> so relative resources in the fetched HTML resolve
     // against the original site (images / css / links just work).

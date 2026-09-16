@@ -243,12 +243,12 @@ export interface ApiProfile {
  */
 export interface ProviderConfig {
   id: string;
-  /** Display name, e.g. "Ling" */
+  // Display name
   name: string;
-  /** Base URL, e.g. "https://api.ant-ling.com/v1" */
+  // Base URL,
   baseUrl: string;
   apiKey: string;
-  /** Models offered by this provider, e.g. ["Ling-2.6-1T", "Ling-2.6-Pro"] */
+  /** Models offered by this provider, */
   models: string[];
   /** Default model for this provider (falls back to models[0]). */
   defaultModel?: string;

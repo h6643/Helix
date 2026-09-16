@@ -1,7 +1,7 @@
 "use client";
 
-import { Trash2 } from "lucide-react";
-import React, { useState, useEffect } from "react";
+import { Trash2, ChevronDown, ChevronUp } from "lucide-react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { SettingRow, SettingGroup, PopupSelect } from "./settings-ui";
 import { Button } from "@/components/ui/button";
 import { useHelixStore } from "@/stores/helix-store";
@@ -32,6 +32,115 @@ interface SubagentDraft {
 
 const truncate = (s: string, n: number) =>
   s.length > n ? s.slice(0, n) + "…" : s;
+
+const SubagentModelPicker = ({
+  id,
+  current,
+  onModelChange,
+}: {
+  id: string;
+  current: string;
+  onModelChange: (id: string, model: string) => void;
+}) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const providers = useHelixStore((s) => s.providers);
+  const providerModels = useHelixStore((s) => s.providerModels);
+  const activeProviderId = useHelixStore((s) => s.activeProviderId);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    if (open) document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  // Build the flat list from all configured providers (declared + fetched models)
+  const allModels = useMemo(() => {
+    const seen = new Set<string>();
+    const out: Array<{ providerLabel: string; modelId: string; key: string }> = [];
+    for (const p of providers) {
+      const models = Array.from(
+        new Set([...p.models, ...(providerModels[p.id] ?? [])]),
+      );
+      for (const m of models) {
+        const key = `${p.id}/${m}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ providerLabel: p.name || p.id, modelId: m, key });
+      }
+    }
+    return out;
+  }, [providers, providerModels]);
+
+  const display = current
+    ? (() => {
+        // current is stored as "<providerId>/<modelId>"; show model part only
+        const slash = current.indexOf("/");
+        return slash > 0 ? current.slice(slash + 1) : current;
+      })()
+    : "继承主模型";
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70 hover:text-foreground transition-colors"
+      >
+        <span className="max-w-[120px] truncate">{display}</span>
+        {open ? (
+          <ChevronUp className="size-3 shrink-0" />
+        ) : (
+          <ChevronDown className="size-3 shrink-0" />
+        )}
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] max-h-56 overflow-y-auto rounded-md border border-border/30 bg-popover shadow-md">
+          <button
+            type="button"
+            onClick={() => {
+              onModelChange(id, "");
+              setOpen(false);
+            }}
+            className={`w-full text-left px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-muted/30 transition-colors ${
+              !current ? "text-primary font-medium" : "text-muted-foreground/70"
+            }`}
+          >
+            继承主模型（默认）
+          </button>
+          {allModels.length === 0 && (
+            <p className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
+              请先在「模型配置」中添加提供方
+            </p>
+          )}
+          {allModels.map((m) => (
+            <button
+              key={m.key}
+              type="button"
+              onClick={() => {
+                onModelChange(id, m.key);
+                setOpen(false);
+              }}
+              className={`w-full text-left px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-muted/30 transition-colors ${
+                current === m.key
+                  ? "text-primary font-medium"
+                  : "text-foreground/80"
+              }`}
+            >
+              <span>{m.modelId}</span>
+              <span className="ml-1.5 text-muted-foreground/50 text-[calc(var(--helix-transcript-size)*0.7143)]">
+                {m.providerLabel}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const SubagentItem = ({
   i,
@@ -71,28 +180,22 @@ const SubagentItem = ({
 ///   `helix_set_subagent_enabled`.
 /// - Delete unlinks a custom agent's .md — handled by `helix_delete_subagent`.
 ///   A two-step confirm prevents accidents.
-const SOURCE_LABEL: Record<string, string> = {
-  default: "内置默认",
-  project: "项目",
-  workspace: "工作区",
-  global: "全局",
-};
 
 const PresetSubagentItem = ({
   p,
   onToggle,
   onDelete,
+  onModelChange,
 }: {
   p: any;
   onToggle: (id: string, enabled: boolean) => void;
   onDelete: (id: string) => void;
+  onModelChange: (id: string, model: string) => void;
 }) => {
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [toggling, setToggling] = useState(false);
   const disabled = p.disabled === true;
-  const source = typeof p.source === "string" ? p.source : "global";
-  const sourceLabel = SOURCE_LABEL[source] ?? source;
   return (
     <div
       className={
@@ -110,17 +213,16 @@ const PresetSubagentItem = ({
           {p.name?.trim() || p.id}
         </p>
         <div className="flex items-center gap-2 shrink-0">
+          <SubagentModelPicker
+            id={p.id}
+            current={p.model}
+            onModelChange={onModelChange}
+          />
           {disabled && (
             <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-amber-500/80 border border-amber-500/30 rounded px-1.5 py-0.5">
               已禁用
             </span>
           )}
-          <span
-            className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50 border border-border/20 rounded px-1.5 py-0.5"
-            data-tip={p.path || "扩展内置，无对应文件"}
-          >
-            {sourceLabel}
-          </span>
           <button
             type="button"
             disabled={toggling}
@@ -196,9 +298,8 @@ const PresetSubagentItem = ({
             </span>
           ))}
       </div>
-      {(p.model || p.thinking) && (
+      {(p.thinking) && (
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">
-          {p.model && <span>模型：{p.model}</span>}
           {p.thinking && <span>思考强度：{p.thinking}</span>}
         </div>
       )}
@@ -230,6 +331,64 @@ export function AgentsSettings() {
     { id: string; name: string; system_prompt: string }[]
   >([]);
   const [adding, setAdding] = useState(false);
+
+  // ── Subagent global settings (config.yaml `subagents:` block) ───────
+  type SubagentSettings = {
+    workflowsEnabled?: boolean;
+    schedulingEnabled?: boolean;
+    toolDescriptionMode?: "full" | "compact" | "custom";
+    worktreeIsolation?: boolean;
+    maxConcurrent?: number;
+    maxSubagentDepth?: number;
+    disableDefaultAgents?: boolean;
+  };
+  const [saSettings, setSaSettings] = useState<SubagentSettings>({});
+  const [saLoading, setSaLoading] = useState(false);
+  const [saSaving, setSaSaving] = useState(false);
+  const [saSaved, setSaSaved] = useState(false);
+  const [saErr, setSaErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const api = (window as any).electron?.subagentsConfig;
+    if (!api?.list) {
+      // Tauri bridge not available — fall back silently.
+      return;
+    }
+    api
+      .list()
+      .then((r: any) => {
+        if (!alive) return;
+        if (r?.ok && r.settings) {
+          setSaSettings(r.settings);
+        }
+      })
+      .catch((e) => alive && setSaErr(String(e)))
+      .finally(() => alive && setSaLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const saveSubagentSettings = async () => {
+    const api = (window as any).electron?.subagentsConfig;
+    if (!api?.save) {
+      setSaErr("网关未连接，无法保存子智能体设置");
+      return;
+    }
+    setSaSaving(true);
+    setSaErr(null);
+    try {
+      const r = await api.save(saSettings);
+      if (!r?.ok) throw new Error(r?.error ?? "保存失败");
+      setSaSaved(true);
+      setTimeout(() => setSaSaved(false), 2000);
+    } catch (e: any) {
+      setSaErr(String(e?.message || e));
+    } finally {
+      setSaSaving(false);
+    }
+  };
 
   // pi-subagents agent types (extension defaults + project/workspace/global
   // .md files), with reversible enable/disable + delete.
@@ -417,6 +576,24 @@ export function AgentsSettings() {
     }
   };
 
+  // Set the model on a preset: writes `model: "<provider/modelId>"` into the
+  // agent's .md frontmatter. Empty string clears the field (inherit parent).
+  const handleModelChange = async (id: string, model: string) => {
+    const fn = (window as any).electron?.helix?.setSubagentModel;
+    if (typeof fn !== "function") {
+      setErr("网关未连接，无法设置模型");
+      return;
+    }
+    try {
+      await fn(id, model);
+      setPresets((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, model } : p)),
+      );
+    } catch (e: any) {
+      setErr(String(e?.message || e));
+    }
+  };
+
   const field = (
     label: string,
     key: keyof DelegationConfig,
@@ -565,6 +742,155 @@ export function AgentsSettings() {
                   </SettingRow>
                 </SettingGroup>
 
+                {/* ── Subagent global settings (config.yaml subagents block) ── */}
+                <SettingGroup
+                  title="子智能体行为（pi-subagents）"
+                  description="写入 ~/.pi/agent/config.yaml 的 subagents: 块，保存时同步到扩展的 subagents.json 并重启网关。"
+                >
+                  <SettingRow
+                    label="工具描述模式"
+                    hint="compact 缩短工具描述以节省上下文。"
+                  >
+                    <select
+                      value={saSettings.toolDescriptionMode ?? "full"}
+                      onChange={(e) =>
+                        setSaSettings((s) => ({
+                          ...s,
+                          toolDescriptionMode: e.target.value as
+                            | "full"
+                            | "compact"
+                            | "custom",
+                        }))
+                      }
+                      className="w-32 px-2 py-1 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground"
+                    >
+                      <option value="full">full</option>
+                      <option value="compact">compact</option>
+                      <option value="custom">custom</option>
+                    </select>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="并发上限（maxConcurrent）"
+                    hint="同时运行的子智能体数量上限。0 = 不限。"
+                  >
+                    <input
+                      type="number"
+                      min={0}
+                      value={saSettings.maxConcurrent ?? 0}
+                      onChange={(e) =>
+                        setSaSettings((s) => ({
+                          ...s,
+                          maxConcurrent: Number(e.target.value),
+                        }))
+                      }
+                      className="w-24 px-2 py-1 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground"
+                    />
+                  </SettingRow>
+
+                  <SettingRow
+                    label="最大嵌套深度（maxSubagentDepth）"
+                    hint="子智能体再派生子智能体的层数上限。"
+                  >
+                    <input
+                      type="number"
+                      min={1}
+                      value={saSettings.maxSubagentDepth ?? 1}
+                      onChange={(e) =>
+                        setSaSettings((s) => ({
+                          ...s,
+                          maxSubagentDepth: Number(e.target.value),
+                        }))
+                      }
+                      className="w-24 px-2 py-1 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground"
+                    />
+                  </SettingRow>
+
+                  <SettingRow
+                    label="启用调度（schedulingEnabled）"
+                    hint="允许子智能体使用 schedule 工具。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={saSettings.schedulingEnabled ?? false}
+                      onChange={(e) =>
+                        setSaSettings((s) => ({
+                          ...s,
+                          schedulingEnabled: e.target.checked,
+                        }))
+                      }
+                      className="size-4 accent-primary"
+                    />
+                  </SettingRow>
+
+                  <SettingRow
+                    label="启用工作流（workflowsEnabled）"
+                    hint="开启工作流编排（多步骤协作）。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={saSettings.workflowsEnabled ?? false}
+                      onChange={(e) =>
+                        setSaSettings((s) => ({
+                          ...s,
+                          workflowsEnabled: e.target.checked,
+                        }))
+                      }
+                      className="size-4 accent-primary"
+                    />
+                  </SettingRow>
+
+                  <SettingRow
+                    label="工作树隔离（worktreeIsolation）"
+                    hint="为每个子智能体创建独立 git worktree。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={saSettings.worktreeIsolation ?? false}
+                      onChange={(e) =>
+                        setSaSettings((s) => ({
+                          ...s,
+                          worktreeIsolation: e.target.checked,
+                        }))
+                      }
+                      className="size-4 accent-primary"
+                    />
+                  </SettingRow>
+
+                  <SettingRow
+                    label="隐藏内置默认 agent（disableDefaultAgents）"
+                    hint="设为 true 时不显示 general-purpose / Explore / Plan 等内置预设。"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={saSettings.disableDefaultAgents ?? false}
+                      onChange={(e) =>
+                        setSaSettings((s) => ({
+                          ...s,
+                          disableDefaultAgents: e.target.checked,
+                        }))
+                      }
+                      className="size-4 accent-primary"
+                    />
+                  </SettingRow>
+
+                  <div className="flex items-center justify-end gap-3 pt-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={saveSubagentSettings}
+                      disabled={saSaving}
+                    >
+                      {saSaving ? "保存中…" : saSaved ? "已保存" : "保存行为设置"}
+                    </Button>
+                  </div>
+                  {saErr && (
+                    <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400">
+                      {saErr}
+                    </p>
+                  )}
+                </SettingGroup>
+
                 <div className="flex items-center justify-end gap-3 pt-4">
                   <Button
                     size="sm"
@@ -608,6 +934,7 @@ export function AgentsSettings() {
                       p={p}
                       onToggle={togglePreset}
                       onDelete={deletePreset}
+                      onModelChange={handleModelChange}
                     />
                   ))}
                 </div>

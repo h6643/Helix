@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { Plus, Terminal, X } from "lucide-react";
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { isElectron, electronTerminal } from "@/lib/electron-bridge";
+import { isElectron, electronTerminal, helixApi } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 import "@xterm/xterm/css/xterm.css";
 
@@ -23,7 +23,22 @@ function stripVerbatimPrefix(
   return p;
 }
 
-// Light theme matching the app chrome (white bg / dark text, standard ANSI).
+// ── No-project terminal default ────────────────────────────────────────────
+// Fetched once from the backend (getSessionsDir → ~/.pi/agent/sessions),
+// then "/default" is appended. This is the stable cwd for project-less chats.
+let _noProjectDefaultDir: string | null = null;
+async function getNoProjectDefaultDir(): Promise<string> {
+  if (_noProjectDefaultDir) return _noProjectDefaultDir;
+  try {
+    const { electronApp } = await import("@/lib/electron-bridge");
+    const { sessionsDir } = await electronApp.getSessionsDir();
+    const dir = sessionsDir ? sessionsDir.replace(/[/\\]$/, "") + "/default" : "";
+    if (dir) _noProjectDefaultDir = dir;
+    return dir;
+  } catch {
+    return "C:\\Users\\hyt\\.pi\\agent\\sessions\\default";
+  }
+}
 const LIGHT_THEME = {
   background: "#ffffff",
   foreground: "#333333",
@@ -85,7 +100,19 @@ interface TerminalTabViewProps {
  * first becomes visible, and is killed when the tab is closed.
  */
 function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
-  const { selectedWorkDir, isTerminalOpen } = useHelixStore();
+  const { activeSessionWorkDir, isTerminalOpen } =
+    useHelixStore();
+  // No-project conversations pin to ~/.pi/agent/sessions/default — resolved
+  // asynchronously from the backend; falls back to null until loaded.
+  const [noProjectDefaultDir, setNoProjectDefaultDir] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getNoProjectDefaultDir().then((d) => {
+      if (!cancelled && d) setNoProjectDefaultDir(d);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const terminalCwd = activeSessionWorkDir ?? noProjectDefaultDir;
   const [electronReady, setElectronReady] = useState(false);
   const [terminalError, setTerminalError] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
@@ -290,10 +317,13 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Start the PTY + fit whenever this tab becomes visible. Hidden tabs have a
-  // 0-size container, so the shell is only spawned once the tab shows.
+  // Start the PTY + fit whenever this tab becomes visible or the default dir
+  // has resolved. Hidden tabs have a 0-size container, so the shell is only
+  // spawned once the tab shows AND we know the right cwd.
   useEffect(() => {
     if (!isActive || !isTerminalOpen) return;
+    // Don't start yet if we still need the no-project default and haven't got it.
+    if (!terminalCwd) return;
     const term = termRef.current;
     const fitAddon = fitRef.current;
     if (!term || !fitAddon) return;
@@ -308,7 +338,10 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
       startedRef.current = true;
       // Start the PTY with the current dimensions + the project path as cwd.
       // Never use a bare drive root as cwd; fall back to the main process workDir.
-      const dir = stripVerbatimPrefix(selectedWorkDir);
+      // When no project is active, use the fixed no-project default dir.
+      const raw = stripVerbatimPrefix(terminalCwd);
+      const dir =
+        raw && typeof raw === "string" ? raw : undefined;
       const isDriveRoot =
         typeof dir === "string" && /^[a-zA-Z]:[\\/]?$/.test(dir);
       const cwd = dir && !isDriveRoot ? dir : undefined;
@@ -326,7 +359,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
     });
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, isActive, isTerminalOpen]);
+  }, [id, isActive, isTerminalOpen, terminalCwd]);
 
   // Pipe backend output for THIS tab into its xterm instance.
   useEffect(() => {
@@ -342,8 +375,8 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
   // When the project directory changes, tell the running shell to cd there.
   // This keeps the terminal in sync with the conversation/project context.
   useEffect(() => {
-    if (!isActive || !isTerminalOpen || !selectedWorkDir) return;
-    const dir = stripVerbatimPrefix(selectedWorkDir);
+    if (!isActive || !isTerminalOpen || !terminalCwd) return;
+    const dir = stripVerbatimPrefix(terminalCwd);
     if (!dir) return;
     const isDriveRoot = /^[a-zA-Z]:[\\/]?$/.test(dir);
     if (isDriveRoot) return;
@@ -358,7 +391,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
     }
     electronTerminal.write(id, `cd "${safeDir}"\r\n`);
     lastCwdRef.current = dir;
-  }, [id, isActive, isTerminalOpen, selectedWorkDir]);
+  }, [id, isActive, isTerminalOpen, terminalCwd]);
 
   return (
     <div className={`flex-1 min-h-0 flex flex-col ${isActive ? "" : "hidden"}`}>

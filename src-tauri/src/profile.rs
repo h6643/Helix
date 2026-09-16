@@ -2,7 +2,7 @@
 //! Port of `electron/ipc/security.js` (profile:cacheConfig) and the
 //! `applyActiveProfileCache` / writeHelixConfig logic from `electron/main.js`.
 
-use crate::config::{write_helix_config, APIHUB_DEFAULT};
+use crate::config::write_helix_config;
 use crate::state::user_data_dir;
 use serde_json::{json, Value};
 
@@ -89,13 +89,13 @@ pub fn cache_config(cfg: Value) -> Value {
         }
     }
     if is_bad_config(&cfg) {
-        // Fall back to the known-good apihub default (mirror Electron).
-        cfg = json!({
-            "provider": APIHUB_DEFAULT.provider,
-            "baseUrl": APIHUB_DEFAULT.base_url,
-            "model": APIHUB_DEFAULT.model,
-        });
-    } else if cfg.get("apiKey").is_some() || cfg.get("api_key").is_some() {
+        // 空 baseUrl 的配置拒绝落盘：写进去也不会被 apply/activate 采用（它们
+        // 同样按 is_bad_config 跳过），而静默替换成硬编码默认 provider 会在
+        // 下次冷启动时悄悄顶掉用户真实在用的 provider。直接报错，让调用方
+        // 感知保存失败。
+        return json!({ "success": false, "error": "baseUrl is empty" });
+    }
+    if cfg.get("apiKey").is_some() || cfg.get("api_key").is_some() {
         cfg.as_object_mut().map(|o| {
             o.remove("apiKey");
             o.remove("api_key");

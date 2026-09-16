@@ -48,6 +48,7 @@ import { FileChangeSummaryCard } from "./file-change-summary-card";
 import { HelixMarkdown } from "./helix-markdown";
 import { HistoryStrip } from "./history-strip";
 import { InlineToolGroup, summarizeGroupDiff } from "./inline-tool-group";
+import { formatMergedSummary } from "@/lib/tool-merge";
 import { ScheduledTaskConfirm } from "./scheduled-task-confirm";
 import { Button } from "@/components/ui/button";
 import { pushModelConfig } from "@/lib/config-sync";
@@ -248,20 +249,6 @@ function mergeThinkingContents(contents: string[]): string {
   return merged;
 }
 
-// 过程区折叠标题:轻量一行(chevron + 标题词),完成后不再是高权重大标题,
-// 正在进行时标题词略强以示意当前阶段。三处(thinking / 任务执行)共用。
-const FoldChevron = ({ className = "" }: { className?: string }) => (
-  <svg
-    className={`size-3.5 shrink-0 text-foreground/45 transition-transform group-open/details:rotate-90 ${className}`}
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2"
-  >
-    <path d="m9 18 6-6-6-6" />
-  </svg>
-);
-
 // Claude Code 终端风的思考符号：✻ 按扇区拆成同一个雪花的六个部分，
 // 激活时各部分向外散开，再同步聚拢回中心。
 const ThinkGlyph = ({ active = false }: { active?: boolean }) => (
@@ -284,7 +271,6 @@ const ThinkingFold = React.memo(function ThinkingFold({
   active = false,
   streaming = false,
   status,
-  duration,
   searchOpen,
   searchQuery,
   isSearchActive,
@@ -295,7 +281,6 @@ const ThinkingFold = React.memo(function ThinkingFold({
   /** 本轮仍在流式（合并思考卡在过程窗口内保持展开可读，但不脉冲） */
   streaming?: boolean;
   status?: string;
-  duration?: number;
   searchOpen: boolean;
   searchQuery: string;
   isSearchActive: boolean;
@@ -377,12 +362,7 @@ const ThinkingFold = React.memo(function ThinkingFold({
         </span>
         {summary ? (
           <span className="think-time" style={{ fontSize }}>
-            {duration ? `· ${formatDuration(duration)} · ` : "· "}
-            {summary}
-          </span>
-        ) : duration ? (
-          <span className="think-time" style={{ fontSize }}>
-            · {formatDuration(duration)}
+            · {summary}
           </span>
         ) : null}
       </summary>
@@ -450,35 +430,39 @@ const ToolStreamFold = React.memo(function ToolStreamFold({
   blocks,
   fontSize,
   children,
+  forceFold = false,
 }: {
   blocks: Array<{ type: string; steps?: ExecutionStep[] }>;
   fontSize: number;
   children: React.ReactNode;
+  /** 流式过程区强制折叠（即使只有 1 个工具），避免实时逐条刷屏 */
+  forceFold?: boolean;
 }) {
-  const { verbs, total } = useMemo(() => summarizeTaskBlocks(blocks), [blocks]);
+  // 收集整段所有工具名，交给共用合并逻辑生成与子 Agent 面板同款的
+  // 「查阅 · 3 搜索, 2 文件」摘要；total 用于决定是否需要折叠。
+  const { names, total } = useMemo(() => {
+    const ns: string[] = [];
+    for (const b of blocks) {
+      if (b.type !== "tool_group" || !b.steps) continue;
+      for (const s of b.steps) {
+        if (s.type !== "tool_call") continue;
+        ns.push(s.toolName || "");
+      }
+    }
+    return { names: ns, total: ns.length };
+  }, [blocks]);
   const diff = useMemo(() => summarizeGroupDiff(blocks), [blocks]);
-  if (total <= 1) return <>{children}</>;
-  // 动词去重统计：读取 5 · 执行 2 · 编辑 1
-  const counts = new Map<string, number>();
-  for (const v of verbs) counts.set(v, (counts.get(v) || 0) + 1);
-  const verbStats = [...counts.entries()].map(([v, n]) => `${v} ${n}`);
+  if (total <= 1 && !forceFold) return <>{children}</>;
+  const summary = formatMergedSummary(names);
   return (
     <details className="group/details">
       <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
         <span
-          className="text-foreground/40 font-normal select-none"
+          className="text-foreground/40 font-normal select-none truncate"
           style={{ fontSize }}
         >
-          {total} 个操作
+          {summary || `${total} 个操作`}
         </span>
-        {verbStats.length > 0 && (
-          <span
-            className="text-foreground/25 select-none truncate"
-            style={{ fontSize }}
-          >
-            · {verbStats.join(" · ")}
-          </span>
-        )}
         {/* 整组 diff 汇总：+N −n 贴摘要行最右侧，收起时也能看出这轮改了多少行 */}
         {(diff.added > 0 || diff.removed > 0) && (
           <span
@@ -493,7 +477,6 @@ const ToolStreamFold = React.memo(function ToolStreamFold({
             )}
           </span>
         )}
-        <FoldChevron />
       </summary>
       <div className="mt-1">{children}</div>
     </details>
@@ -528,34 +511,6 @@ function buildProcessSegments<T extends { type: string }>(
 ): ProcessSegment<T>[] {
   if (blocks.length === 0) return [];
   return [{ kind: "tasks", blocks }];
-}
-
-// 已完成 execution group 折叠态的摘要行:从 tasks 段里的 tool_call 提取
-// 「动词 · 动词 · 共 N 个操作」。动词直接复用 inline-tool-group 的 toolVerb
-// 逻辑(按工具名推断),不逐项展示参数,保持一行克制摘要。
-export function summarizeTaskBlocks(
-  blocks: Array<{ type: string; steps?: ExecutionStep[] }>,
-): { verbs: string[]; total: number } {
-  const verbs: string[] = [];
-  let total = 0;
-  for (const b of blocks) {
-    if (b.type !== "tool_group" || !b.steps) continue;
-    for (const s of b.steps) {
-      if (s.type !== "tool_call") continue;
-      total++;
-      const name = (s.toolName || "").toLowerCase();
-      let verb: string;
-      if (/(grep|search|glob|find)/.test(name)) verb = "搜索";
-      else if (/(read|view|list|directory)/.test(name)) verb = "读取";
-      else if (/(write|create|edit|patch)/.test(name)) verb = "编辑";
-      else if (/(fetch|web)/.test(name)) verb = "获取网页";
-      else if (/(bash|terminal|shell|run|execute|command)/.test(name))
-        verb = "执行";
-      else verb = "调用";
-      verbs.push(verb);
-    }
-  }
-  return { verbs, total };
 }
 
 // Older streamed messages may store cumulative text per block. Convert those
@@ -1170,8 +1125,7 @@ function ReasoningEffortControl({
 
 // ── 内存守卫：摘要化 + 截断 ──────────────────────────────────────────────
 // 长期会话把完整历史（含工具输出/思考/steps）堆在渲染进程，normalized +
-// markdown + DOM 多份副本最终会顶爆 V8 堆。策略与 Claude Code / 官方 the backend
-// 一致：旧消息折叠为摘要、超长单条截断、流式缓冲设上限，把内存压成
+// markdown + DOM 多份副本最终会顶爆 V8 堆。旧消息折叠为摘要、超长单条截断、流式缓冲设上限，把内存压成
 // 「近期限定」而不是「随时长无界增长」。持久化数据不受影响，搜索仍基于完整内容。
 const DISPLAY_LIMIT = 80; // 最近 N 条消息完整渲染
 const SUMMARY_CHUNK = 10; // 更早的消息每 N 条折叠为一个摘要块
@@ -1469,7 +1423,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                     : allSegments;
                 const summarySegment =
                   lastTextIdx >= 0 ? allSegments[lastTextIdx] : null;
-                const processOpCount = summarizeTaskBlocks(processBlocks).total;
                 const hasProcess =
                   processSegments.length > 0 || showInlineReasoning;
                 const processDuration =
@@ -1493,7 +1446,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                                   {processDuration}
                                 </span>
                               ) : null}
-                              <FoldChevron />
                             </>
                           )}
                         </summary>
@@ -1503,7 +1455,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                               content={reasoning}
                               fontSize={fontSize}
                               active={isStreaming}
-                              duration={messageDuration}
                               searchOpen={searchOpen}
                               searchQuery={searchQuery}
                               isSearchActive={isSearchActive}
@@ -1525,7 +1476,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
                                     key={si}
                                     content={segContent}
                                     fontSize={fontSize}
-                                    duration={msg.thinkingTime}
                                     searchOpen={searchOpen}
                                     searchQuery={searchQuery}
                                     isSearchActive={isSearchActive}
@@ -1747,12 +1697,6 @@ const TranscriptMessage = React.memo(function TranscriptMessage({
         </div>
       ) : (
         <div className="group w-fit max-w-[80%]">
-          {/* Claude Code 终端风用户消息：扁平边框卡，无底色无阴影。
-              气泡宽 = w-fit（能多窄多窄）+ max-w-[80%]（封顶）。短消息缩到文字宽 →
-              单行 → 单行即 justify 的末行 → 不拉伸；长消息封顶 80% 换行 → 缝隙多，
-              每缝 <1px，右缘齐平且看不出拉伸。文本 text-justify（两端对齐）消除行尾锯齿，
-              末行仍保持左对齐（justify 的默认行为）。break-words 仍保留，防长
-              token（URL/base64）溢出。改气泡宽只调 80% 这个值。 */}
           <div className="px-4 py-2.5 rounded-xl border border-border bg-transparent text-foreground">
             {msg.images && msg.images.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-2">
@@ -1908,14 +1852,6 @@ export function AgentFlowPanel() {
     Array<{ name: string; path: string }>
   >([]);
   const [selectedAtFileIndex, setSelectedAtFileIndex] = useState(0);
-  // Git branch picker popover (empty-state breadcrumb).
-  const [branchPopoverOpen, setBranchPopoverOpen] = useState(false);
-  const [branchList, setBranchList] = useState<string[]>([]);
-  const [branchSearch, setBranchSearch] = useState("");
-  const [branchDirtyCount, setBranchDirtyCount] = useState(0);
-  const [branchCreating, setBranchCreating] = useState(false);
-  const [branchNewName, setBranchNewName] = useState("");
-  const branchPopoverRef = useRef<HTMLDivElement>(null);
   const externalServices = useHelixStore((s) => s.externalServices);
   const addExternalService = useHelixStore((s) => s.addExternalService);
   const setExternalServiceConnected = useHelixStore(
@@ -1973,16 +1909,9 @@ export function AgentFlowPanel() {
   // Per-conversation AbortControllers so stopping one conversation's run never
   // aborts a parallel run in another conversation.
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
-  const doneProcessedRef = useRef(false);
   const synthDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const forceDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedSessionRef = useRef(false);
-  const thoughtBufferRef = useRef<string>("");
-  const thinkingStartTimeRef = useRef<number>(0);
-  const thinkingDurationRef = useRef<number>(0);
-  const promptSentAtRef = useRef<number>(0);
   const runStartedAtRef = useRef<number>(0);
-  const firstContentAtRef = useRef<number>(0);
   const stepsRef = useRef<ExecutionStep[]>([]);
   const helixSessionIdRef = useRef<string | null>(null);
   // The gateway epoch (bumped on every restart) at the moment our current
@@ -2010,8 +1939,6 @@ export function AgentFlowPanel() {
   // showing a promoted-but-not-yet-flushed run's own draft instead of another
   // run's stale live state right after switching conversations.
   const liveStateOwnerRef = useRef<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const skillUploadRef = useRef<HTMLInputElement>(null);
   const uploadFileInputRef = useRef<HTMLInputElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const folderDropdownRef = useRef<HTMLDivElement>(null);
@@ -2044,15 +1971,10 @@ export function AgentFlowPanel() {
   const [streamThinking, setStreamThinking] = useState<string>("");
   const streamThinkingRef = useRef("");
   streamThinkingRef.current = streamThinking;
-  const [streamTotalTokens, setStreamTotalTokens] = useState<number>(0);
 
   const apiConfig = useHelixStore((s) => s.apiConfig);
   const skills = useHelixStore((s) => s.skills);
-  const availableCommands = useHelixStore((s) => s.availableCommands);
   const agentExecutionSteps = useHelixStore((s) => s.agentExecutionSteps);
-  const tabInputs = useHelixStore((s) => s.tabInputs);
-  const setTabInput = useHelixStore((s) => s.setTabInput);
-  const clearTabInput = useHelixStore((s) => s.clearTabInput);
   const chatMessages = useHelixStore((s) => s.chatMessages);
   // Link cards picked from the in-app browser ("选取网页元素加入聊天") live in the
   // store (not local state) so preview-rail can append them from another surface.
@@ -2091,7 +2013,6 @@ export function AgentFlowPanel() {
     clarifyQueue,
     pendingTaskCreations,
     currentSessionId,
-    setSessionPendingApproval,
   ]);
   // 切换会话时清空上一次的自动压缩内联提示，避免把旧提示带进新对话；
   // 同时清掉不属于当前会话的待审批计划（切走即作废，防止串到别的会话）。
@@ -2470,66 +2391,25 @@ export function AgentFlowPanel() {
   // Detect whether this session already has a completed assistant message.
   const transcriptFontSize = useHelixStore((s) => s.transcriptFontSize);
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
-  const activeSessionWorkDir = useHelixStore((s) => s.activeSessionWorkDir);
   const activeProviderId = useHelixStore((s) => s.activeProviderId);
   const activeModel = useHelixStore((s) => s.activeModel);
   const reasoningEffort = useHelixStore((s) => s.reasoningEffort);
-  const personality = useHelixStore((s) => s.personality);
   const providers = useHelixStore((s) => s.providers);
-  const availableModels = useHelixStore((s) => s.availableModels);
   const providerModels = useHelixStore((s) => s.providerModels);
   const [currentBranch, setCurrentBranch] = useState("main");
   // Whether the currently-selected project is a git repo. null = unknown (still probing).
   // When false, the branch picker button is hidden (no git → nothing to show).
   const [gitAvailable, setGitAvailable] = useState<boolean | null>(null);
-  // Stable action references — these never change so getState() is safe
-  const storeActions = useMemo(() => useHelixStore.getState(), []);
+  // Stable handle to the store's action set. The zustand action closures are
+  // created once in the store factory and never replaced, so the references
+  // captured at mount stay valid for the component's lifetime; state reads done
+  // through these actions always go through get() internally and are fresh.
+  // Stable action set (created once by the zustand factory, safe to capture
+  // into dep arrays).
+  const storeActions = useHelixStore((s) => s);
 
   // （撤回统一走 handleUndoChat / /undo：后端 session.undo 截断 + 前端本地删除，
   //  不再保留按 row_id 的 message.delete 消息级撤回路径。）
-
-  const handleCreateBranch = async (name: string) => {
-    if (!name || !isElectron()) return;
-    const res = await electronGit.branchCreate(name, selectedWorkDir);
-    if (res.ok) {
-      setCurrentBranch(name);
-      setBranchCreating(false);
-      setBranchNewName("");
-      setBranchPopoverOpen(false);
-      // Refresh list so the new branch shows up next time
-      electronGit
-        .branchList(selectedWorkDir)
-        .then((r: { ok: boolean; branches?: string[] }) => {
-          if (r.ok && r.branches) setBranchList(r.branches);
-        })
-        .catch(() => {});
-      storeActions.showToast({
-        type: "success",
-        title: `已创建并切换到 ${name}`,
-      });
-    } else {
-      storeActions.showToast({
-        type: "error",
-        title: "创建分支失败",
-        description: res.error,
-      });
-    }
-  };
-
-  // Close the branch picker popover on outside click.
-  useEffect(() => {
-    if (!branchPopoverOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (
-        branchPopoverRef.current &&
-        !branchPopoverRef.current.contains(e.target as Node)
-      ) {
-        setBranchPopoverOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [branchPopoverOpen]);
 
   // Clear stale connection notices on mount
   useEffect(() => {
@@ -2563,7 +2443,6 @@ export function AgentFlowPanel() {
     setResponseBlocks([]);
     setSteps([]);
     setStreamThinking("");
-    setStreamTotalTokens(0);
     // live UI state 的所有者重置：切换会话后，responseBlocks/steps/streamThinking
     // 这些组件 state 已被清空，若 liveStateOwnerRef 仍指向旧会话，切回来时会命中
     // displayResponseBlocks 的 "owner === currentSessionId" 分支而返回空数组——
@@ -3048,7 +2927,7 @@ export function AgentFlowPanel() {
                 // Always refresh the active provider's model list on open. The
                 // dropdown is scoped to this provider, so a single endpoint probe
                 // is enough. Forcing a re-fetch (rather than only when the cache is
-                // empty) means newly-added models (e.g. a fresh ling-pro) show up
+                // empty) means newly-added models (e.g. a freshly added DeepSeek variant) show up
                 // immediately, and we never rely on a possibly-stale persisted list.
                 // Use the baseUrl-resolved activeProvider, NOT the raw
                 // activeProviderId — the latter can be stale after saving a
@@ -3483,7 +3362,11 @@ export function AgentFlowPanel() {
     storeActions.clearSelectedFiles();
     storeActions.setSelectedWorkDir(null);
     storeActions.clearExecutionFlow();
-  }, [storeActions.clearExecutionFlow, storeActions.clearSelectedFiles]);
+  }, [
+    storeActions.clearExecutionFlow,
+    storeActions.clearSelectedFiles,
+    storeActions.setSelectedWorkDir,
+  ]);
 
   // Select project directory. Must go through setWorkDir (not just
   // setSelectedWorkDir) so the Electron main process workDir is synced AND
@@ -3648,7 +3531,6 @@ export function AgentFlowPanel() {
   }, [currentSessionId, storeActions.showToast, setInputSynced]);
 
   // File picker handler
-  const addSelectedFile = useHelixStore((s) => s.addSelectedFile);
   const handleFileSelect = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = e.target.files;
@@ -3665,28 +3547,6 @@ export function AgentFlowPanel() {
       e.target.value = "";
     },
     [],
-  );
-
-  // Handle skill file upload
-  const handleSkillUpload = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      try {
-        const form = new FormData();
-        form.append("file", file);
-        const res = await fetch("/api/skills", { method: "POST", body: form });
-        if (!res.ok) throw new Error("上传失败");
-      } catch (err) {
-        storeActions.showToast({
-          type: "error",
-          title: "技能上传失败",
-          description: String(err),
-        });
-      }
-      e.target.value = "";
-    },
-    [storeActions.showToast],
   );
 
   // Handle new project creation
@@ -4059,6 +3919,25 @@ export function AgentFlowPanel() {
     // state to its own per-session draft (syncDraft) for switch-back.
     const textBufferRef = { current: "" };
     const thoughtBufferRef = { current: "" };
+    // 「思考阶段」基准：thoughtBufferRef 是**整个 run** 的累积缓冲（done 时还
+    // 要拿它当权威 reasoning 兜底，所以不能按阶段清空），但落块渲染需要的是
+    // **本阶段**的思考文本。否则 思考→工具→再思考 时，工具后的 thinking 块
+    // content 仍是 run 级全文，而 flushPending/mergeAdjacentThinking 只在相邻
+    // thinking 之间去重、不会跨 tool_group 合并 → 第二个思考折叠卡里会把第一
+    // 个折叠卡的正文再渲染一遍（"每轮思考都叠加了之前的思考"的根因）。
+    // 规则：每个非思考块（tool_group / text）落块即视为阶段边界，把基准推进
+    // 到当前缓冲长度；thinking 落块时只取 slice(基准)。
+    // 缓冲只在 run/done/error 时被清成 ""（永不变短），所以 slice 时用
+    // Math.min 兜住"基准 > 缓冲长度"的清空瞬间，无需在每个重置点同步重置基准。
+    const thinkingPhaseBaseRef = { current: 0 };
+    const phaseThinkingText = () =>
+      thoughtBufferRef.current.slice(
+        Math.min(thinkingPhaseBaseRef.current, thoughtBufferRef.current.length),
+      );
+    // 非思考块落块 = 思考阶段边界。
+    const markThinkingPhaseBoundary = () => {
+      thinkingPhaseBaseRef.current = thoughtBufferRef.current.length;
+    };
     const lastStreamedTextRef = { current: "" };
     const stepsRef = { current: [] as ExecutionStep[] };
     const responseBlocksRef = { current: [] as ResponseBlock[] };
@@ -4165,19 +4044,6 @@ export function AgentFlowPanel() {
         setStreamThinking(streamThinkingRef.current);
       }
       setStreamThinking(u);
-      liveStateOwnerRef.current = activeSessionId;
-    };
-    const uiTotalTokens = (u: any) => {
-      totalTokensRef.current = u;
-      if (!isFrontRun()) {
-        wasFront = false;
-        return;
-      }
-      if (!wasFront) {
-        wasFront = true;
-        setStreamTotalTokens(totalTokensRef.current);
-      }
-      setStreamTotalTokens(u);
       liveStateOwnerRef.current = activeSessionId;
     };
     // Push this run's accumulated state into its own per-session draft so the
@@ -4331,7 +4197,7 @@ export function AgentFlowPanel() {
     thinkingStartTimeRef.current = 0;
     thinkingDurationRef.current = 0;
     promptSentAtRef.current = 0;
-    uiTotalTokens(0);
+    totalTokensRef.current = 0;
     firstContentAtRef.current = 0;
     usageReceivedRef.current = false;
     // Add user message to store with images
@@ -4362,11 +4228,9 @@ export function AgentFlowPanel() {
 
     let unsubscribe: (() => void) | null = null;
     const queueDone = false;
-    // ä
     let idleTimerRef: ReturnType<typeof setTimeout> | null = null;
 
     try {
-      const state = useHelixStore.getState();
       const isElectron =
         typeof window !== "undefined" && !!window.electron?.isElectron;
 
@@ -4376,7 +4240,7 @@ export function AgentFlowPanel() {
 
       // Config is synced by handleModelSelect (setConfig) and by handleProfileSelect
       // (profile:cacheConfig) — both already restart the gateway if needed.  Calling
-      // setModel AGAIN here would race with those restarts and corrupt .env.
+      // setModel AGAIN here would race with those restarts and corrupt config.yaml.
       // session/new will pick up whatever config.yaml has on disk, so skip it.
 
       // Wait for the gateway to be ready only if it's actually disconnected.
@@ -4445,7 +4309,6 @@ export function AgentFlowPanel() {
       // 建 sid：新会话下旧 sid 的 "no session file" 错误把对话判成"不可用"，
       // 且每次重启上下文重放一次（seedHistory 全量进新会话）。
       let sessionId: string | null = existing?.sid || null;
-      let wasCreated = false;
       if (sessionId && (epochStale || existing!.epoch !== liveEpoch)) {
         const staleEntry = existing!;
         let resumeRes = await helixApi()!
@@ -4491,6 +4354,31 @@ export function AgentFlowPanel() {
           });
           persistSessionMap(sessionMapRef.current);
           sessionEpochRef.current = liveEpoch;
+          // 重启/刷新后 resume 成功：立即把后端算好的 context_used/max 写进
+          // 本地快照，环不再卡在 0 等到下一条 prompt 的 usage 事件才恢复
+          // （"重启后上下文显示为 0"的根因——ring 唯一写入源是
+          // usage:prompt-complete / context_breakdown，resume 路径两者都
+          // 不经过）。字段缺失（旧后端）时整段跳过。
+          const resumeCtxMax = Number((resumeRes as any)?.context_max) || 0;
+          const resumeCtxUsed = Number((resumeRes as any)?.context_used) || 0;
+          const resumeCategories = Array.isArray((resumeRes as any)?.categories)
+            ? (resumeRes as any).categories
+            : undefined;
+          if (resumeCtxMax && resumeCtxUsed && myCid) {
+            // max 合并（与 captureContextBreakdown 同口径）：resume 的
+            // context_used 后端只能拿会话文件 chars/4 估算垫底，会远低于最近一次
+            // 真实请求（"对话中 50k → 对话后 20.7k"）。只允许抬升，不允许被估算
+            // 值冲小；真正的下降（压缩）由下一次 usage 事件覆盖。
+            const prevCtx = useHelixStore.getState().contextUsage[myCid];
+            useHelixStore
+              .getState()
+              .setContextUsage(
+                myCid,
+                Math.max(prevCtx?.size || 0, resumeCtxMax),
+                Math.max(prevCtx?.used || 0, resumeCtxUsed),
+                resumeCategories,
+              );
+          }
           if (isFrontRun()) {
             helixSessionIdRef.current = resumedId;
             try {
@@ -4506,7 +4394,6 @@ export function AgentFlowPanel() {
         }
       }
       if (!sessionId) {
-        wasCreated = true;
         const st0 = useHelixStore.getState();
         // 重建 session 时把当前对话历史带回去，否则模型不知道之前的对话内容，
         // 等于每次都是新对话。
@@ -5438,6 +5325,8 @@ export function AgentFlowPanel() {
             if (phase === "error") {
               textBufferRef.current = "";
               thoughtBufferRef.current = "";
+              // 缓冲被清空，阶段基准必须同步归零（否则重连后新思考会被 slice 掉）。
+              thinkingPhaseBaseRef.current = 0;
               lastStreamedTextRef.current = "";
               streamCappedRef.current = false;
               thinkingCappedRef.current = false;
@@ -5466,6 +5355,8 @@ export function AgentFlowPanel() {
             } else if (phase === "retrying") {
               textBufferRef.current = "";
               thoughtBufferRef.current = "";
+              // 缓冲被清空，阶段基准必须同步归零（否则重试后新思考会被 slice 掉）。
+              thinkingPhaseBaseRef.current = 0;
               lastStreamedTextRef.current = "";
               streamCappedRef.current = false;
               thinkingCappedRef.current = false;
@@ -5992,6 +5883,9 @@ export function AgentFlowPanel() {
               // 改走 pendingBlocksRef 有序队列：与 text/thinking 分片共用同一次
               // rAF 提交，使工具卡严格按事件顺序落在文本之间，避免被同步插入到
               // 句子主体与句末标点分片之间、造成文本块以 "。" 开头的错位。
+              // 工具卡落块 = 思考阶段边界：此后的思考属于新阶段，不该再带上
+              // 工具之前那段思考（否则工具后的思考折叠卡会重复渲染前一段）。
+              markThinkingPhaseBoundary();
               pendingBlocksRef.current.push({ type: "tool_group", steps: [step] });
               scheduleStreamRender();
             } else if (parsed.type === "thinking") {
@@ -6012,7 +5906,7 @@ export function AgentFlowPanel() {
                 pendingThinkingRef.current = thoughtBufferRef.current;
                 pendingBlocksRef.current.push({
                   type: "thinking",
-                  content: thoughtBufferRef.current,
+                  content: phaseThinkingText(),
                 });
                 scheduleStreamRender();
                 return;
@@ -6051,7 +5945,10 @@ export function AgentFlowPanel() {
               pendingThinkingRef.current = thoughtBufferRef.current;
               pendingBlocksRef.current.push({
                 type: "thinking",
-                content: thoughtBufferRef.current,
+                // 只落「本阶段」文本（见 thinkingPhaseBaseRef 注释）：run 级累积
+                // 缓冲仍完整保留在 thoughtBufferRef 里供 done 兜底，但块内容不能
+                // 带上前几段思考，否则会跨工具重复渲染。
+                content: phaseThinkingText(),
               });
               scheduleStreamRender();
             } else if (parsed.type === "reasoning") {
@@ -6306,6 +6203,8 @@ export function AgentFlowPanel() {
                     ? capped.slice(lastStreamedTextRef.current.length)
                     : capped;
                   lastStreamedTextRef.current = capped;
+                  // 正文落块 = 思考阶段边界（正文之后的思考是新阶段）。
+                  markThinkingPhaseBoundary();
                   pendingBlocksRef.current.push({
                     type: "text",
                     content: delta,
@@ -6413,6 +6312,8 @@ export function AgentFlowPanel() {
                 delta = renderText;
               }
               lastStreamedTextRef.current = renderText;
+              // 正文落块 = 思考阶段边界（正文之后的思考是新阶段）。
+              markThinkingPhaseBoundary();
               pendingBlocksRef.current.push({ type: "text", content: delta });
 
               scheduleStreamRender();
@@ -6810,7 +6711,6 @@ export function AgentFlowPanel() {
                 thoughtTokensRef.current = Number(u.thoughtTokens) || 0;
                 outputTokensRef.current = Number(u.outputTokens) || 0;
                 totalTokensRef.current = Number(u.totalTokens) || 0;
-                uiTotalTokens(totalTokensRef.current);
                 // 只用后端 message.complete 携带的真实 context_used/context_max，
                 // 不再用客户端估算。无后端数据时上下文环显示空态。
                 // pi 口径：一次 run（带工具循环）产生多条 assistant 消息，每条
@@ -6835,9 +6735,31 @@ export function AgentFlowPanel() {
                   ? store.contextUsage[activeSessionId]?.used
                   : undefined;
                 if (ctxMax && ctxUsed && activeSessionId) {
+                  // Carry per-kind buckets (from jsonl active-branch estimate)
+                  // so the snapshot gets a real breakdown instead of the
+                  // aggregate "整体上下文占用" lump. `setContextUsage` merges
+                  // non-empty arrays; an empty/missing array falls through to
+                  // the prev snapshot's categories, which is safe.
+                  const cats: Array<{
+                    id: string;
+                    label: string;
+                    tokens: number;
+                    color: string;
+                    aggregate?: boolean;
+                  }> | undefined = Array.isArray(u.categories)
+                    ? u.categories
+                        .filter((c: any) => c && c.tokens > 0)
+                        .map((c: any) => ({
+                          id: String(c.id ?? ""),
+                          label: String(c.label ?? ""),
+                          tokens: Number(c.tokens) || 0,
+                          color: String(c.color ?? "var(--context-usage-conversation)"),
+                          ...(c.aggregate ? { aggregate: true } : {}),
+                        }))
+                    : undefined;
                   useHelixStore
                     .getState()
-                    .setContextUsage(activeSessionId, ctxMax, ctxUsed);
+                    .setContextUsage(activeSessionId, ctxMax, ctxUsed, cats);
                   // Clear estimated tokens once real usage arrives
                   useHelixStore
                     .getState()
@@ -7490,35 +7412,6 @@ export function AgentFlowPanel() {
     }
   }, [approvalQueue]);
 
-  const handleRejectAll = useCallback(async () => {
-    if (approvalQueue.length === 0) return;
-    // 先清空队列（fail-closed），弹条立即消失；逐个发 deny 让 agent 侧拒绝。
-    bumpPendingUserRequests(-approvalQueue.length);
-    setApprovalQueue([]);
-    try {
-      const cid = useHelixStore.getState().currentSessionId;
-      const sid =
-        (cid && sessionMapRef.current.get(cid)?.sid) ||
-        helixSessionIdRef.current;
-      if (sid) {
-        for (const req of approvalQueue) {
-          await helixApi()!.send("approval.respond", {
-            session_id: sid,
-            choice: "deny",
-            request_id: req.id,
-          });
-        }
-      }
-    } catch (err) {
-      console.error("Reject all error:", err);
-      storeActions.showToast({
-        type: "error",
-        title: "全部拒绝失败",
-        description: String(err),
-      });
-    }
-  }, [approvalQueue]);
-
   // Listen for keyboard shortcut approve/decline events
   useEffect(() => {
     const handler = (e: Event) => {
@@ -7582,9 +7475,6 @@ export function AgentFlowPanel() {
   const hasSteps = displaySteps.length > 0;
 
   const renderChatInput = ({ isEmpty }: { isEmpty?: boolean } = {}) => {
-    const projectName = selectedWorkDir
-      ? selectedWorkDir.split(/[/\\]/).pop() || selectedWorkDir
-      : "选择项目";
     const approvalModeButton = (
       <div className="relative min-w-0" ref={approvalModeDropdownRef}>
         <button
@@ -8738,7 +8628,6 @@ export function AgentFlowPanel() {
                           thinkingActiveNow = b.type === "thinking";
                           break;
                         }
-                        const processOpCount = summarizeTaskBlocks(processBlocks).total;
                         return (
                           <>
                             <details className="my-2 group/details" open={streamingActive}>
@@ -8750,7 +8639,6 @@ export function AgentFlowPanel() {
                                       active={false}
                                       fontSize={transcriptFontSize}
                                     />
-                                    <FoldChevron />
                                   </>
                                 )}
                               </summary>
@@ -8807,58 +8695,80 @@ export function AgentFlowPanel() {
                                   }
                                   return (
                                     <div key={si} className="space-y-1">
-                                      {seg.blocks.map((b, i) => {
-                                        if (b.type === "text") {
-                                          return (
-                                            <div
-                                              key={i}
-                                              style={{
-                                                fontSize: transcriptFontSize,
-                                              }}
-                                            >
-                                              {conversationSearchOpen &&
-                                              conversationSearchQuery.trim() ? (
-                                                <div className="whitespace-pre-wrap break-words">
-                                                  <HighlightText
-                                                    text={normalizeAcpContentRaw(
-                                                      b.content,
-                                                    )}
-                                                    query={
-                                                      conversationSearchQuery
-                                                    }
-                                                    active={false}
+                                      {(() => {
+                                        // 整段工具收成一个折叠行（与完成态同款），避免
+                                        // 流式过程区里多条工具逐条平铺刷屏。展开才看各工具卡。
+                                        const toolBlocks = seg.blocks.filter(
+                                          (b) => b.type === "tool_group",
+                                        );
+                                        return (
+                                          <>
+                                            {seg.blocks
+                                              .filter(
+                                                (b) => b.type !== "tool_group",
+                                              )
+                                              .map((b, i) => {
+                                                if (b.type === "text") {
+                                                  return (
+                                                    <div
+                                                      key={i}
+                                                      style={{
+                                                        fontSize:
+                                                          transcriptFontSize,
+                                                      }}
+                                                    >
+                                                      {conversationSearchOpen &&
+                                                      conversationSearchQuery.trim() ? (
+                                                        <div className="whitespace-pre-wrap break-words">
+                                                          <HighlightText
+                                                            text={normalizeAcpContentRaw(
+                                                              b.content,
+                                                            )}
+                                                            query={
+                                                              conversationSearchQuery
+                                                            }
+                                                            active={false}
+                                                          />
+                                                        </div>
+                                                      ) : (
+                                                        <HelixMarkdown
+                                                          text={normalizeAcpContentRaw(
+                                                            b.content,
+                                                          )}
+                                                        />
+                                                      )}
+                                                    </div>
+                                                  );
+                                                }
+                                                if (b.type === "file_change") {
+                                                  return (
+                                                    <FileChangeSummary
+                                                      key={i}
+                                                      changes={b.changes}
+                                                    />
+                                                  );
+                                                }
+                                                return null;
+                                              })}
+                                            {toolBlocks.length > 0 && (
+                                              <ToolStreamFold
+                                                blocks={toolBlocks}
+                                                fontSize={transcriptFontSize}
+                                                forceFold
+                                              >
+                                                {toolBlocks.map((tb, tbi) => (
+                                                  <InlineToolGroup
+                                                    key={`tb-${tbi}`}
+                                                    steps={tb.steps}
+                                                    isRunning={isRunning}
+                                                    fontSize={transcriptFontSize}
                                                   />
-                                                </div>
-                                              ) : (
-                                                <HelixMarkdown
-                                                  text={normalizeAcpContentRaw(
-                                                    b.content,
-                                                  )}
-                                                />
-                                              )}
-                                            </div>
-                                          );
-                                        }
-                                        if (b.type === "tool_group") {
-                                          return (
-                                            <InlineToolGroup
-                                              key={i}
-                                              steps={b.steps}
-                                              isRunning={isRunning}
-                                              fontSize={transcriptFontSize}
-                                            />
-                                          );
-                                        }
-                                        if (b.type === "file_change") {
-                                          return (
-                                            <FileChangeSummary
-                                              key={i}
-                                              changes={b.changes}
-                                            />
-                                          );
-                                        }
-                                        return null;
-                                      })}
+                                                ))}
+                                              </ToolStreamFold>
+                                            )}
+                                          </>
+                                        );
+                                      })()}
                                     </div>
                                   );
                                 })}
@@ -9105,7 +9015,7 @@ export function AgentFlowPanel() {
         />
       )}
 
-      {/* 计划审批浮条（plan 模式）：模型产出方案（Claude 只读规划返回）后先弹给
+      {/* 计划审批浮条（plan 模式）：模型产出方案后先弹给
           用户审阅，批准才切换 accept_edits 重新执行，调整则关闭浮条让用户改输入。 */}
       {pendingPlanReview && pendingPlanReview.sessionId === approvalKey && (
         <PlanReviewBar

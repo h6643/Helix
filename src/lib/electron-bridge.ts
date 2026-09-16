@@ -405,14 +405,6 @@ export const electronApp = {
     }
     return { ok: false };
   },
-
-  async readEnvKey(key: string): Promise<string> {
-    const api = getElectronAPI();
-    if (api) {
-      return api.app.readEnvKey(key);
-    }
-    return "";
-  },
 };
 
 /**

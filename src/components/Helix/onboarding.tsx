@@ -8,7 +8,7 @@ const STEPS = [
   {
     icon: Settings2,
     title: "配置提供方与模型",
-    desc: "在设置中选择你的 AI 提供方（OpenAI / Anthropic / 本地模型等）并填入 API Key。",
+    desc: "在设置中选择你的 AI 提供方（OpenAI / Anthropic）并填入 API Key。",
   },
   {
     icon: MessageSquare,
