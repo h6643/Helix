@@ -23,6 +23,7 @@
 import { warn, error as logError, debug } from "@/lib/logger";
 import { buildAcpMcpServers } from "@/lib/mcp";
 import { installTauriBridge } from "@/lib/tauri-bridge";
+import type { ElectronAPI } from "@/types/electron";
 
 // ── 类型 ────────────────────────────────────────────────────────────────
 
@@ -35,7 +36,123 @@ export interface ServeGatewayInfo {
   wsUrl?: string;
 }
 
-type EventCallback = (event: string, params?: any) => void;
+export type EventCallback = (
+  event: string,
+  params?: ServeEventPayload & { session_id?: string; [k: string]: unknown },
+) => void;
+
+// ── serve 事件 payload 形状（按事件 type 判别）──────────────────────────
+// 远端网关 WS 帧的 params = { type, session_id?, payload? }。payload 形状随
+// type 而变；这里只声明 translateEvent 实际读取的字段，避免全链路 any。
+
+/** 远端 emit_usage 报来的 usage 形状（驼峰/蛇形字段混用，运行期探测）。 */
+export interface GatewayUsage {
+  totalTokens?: number;
+  total_tokens?: number;
+  inputTokens?: number;
+  input_tokens?: number;
+  prompt_tokens?: number;
+  outputTokens?: number;
+  output_tokens?: number;
+  completion_tokens?: number;
+  thoughtTokens?: number;
+  thought_tokens?: number;
+  reasoningOutputTokens?: number;
+  reasoning_output_tokens?: number;
+  cachedReadTokens?: number;
+  cachedInputTokens?: number;
+  cache_read_tokens?: number;
+  cachedWriteTokens?: number;
+  cacheWriteInputTokens?: number;
+  cache_write_tokens?: number;
+  total?: GatewayUsage & Record<string, unknown>;
+  last?: GatewayUsage & Record<string, unknown>;
+  modelContextWindow?: number;
+  model_context_window?: number;
+  context_used?: number;
+  /** 远端可能附加的任意字段（透传给前端，不在此处枚举）。 */
+  [key: string]: unknown;
+}
+
+/** serve 事件（WS 帧 params.payload）的形状。未知事件走直通，字段可含任意。 */
+/** serve 事件（WS 帧 params.payload）的形状。未知事件走直通，字段可含任意。 */
+export interface ServeEvent {
+  method: string;
+  params?: { type?: string; session_id?: string; payload?: ServeEventPayload };
+}
+
+export interface ServeEventPayload {
+  /** 文本类（message.delta / message.interim / reasoning.* / thinking.delta / run.*） */
+  text?: string;
+  rendered?: string;
+  already_streamed?: boolean;
+  status?: string;
+  output?: string;
+  final_response?: string;
+  delta?: string;
+  content?: string;
+  /** 错误类 */
+  error?: string | Record<string, unknown>;
+  message?: string;
+  /** 工具类（tool.*） */
+  tool_id?: string;
+  name?: string;
+  args?: unknown;
+  args_text?: string;
+  context?: string;
+  result_text?: string;
+  result?: unknown;
+  summary?: string;
+  inline_diff?: string;
+  todos?: Array<{ id?: number; subject?: string; status?: string }>;
+  is_error?: boolean;
+  /** 审批类（approval.request） */
+  pattern_key?: string;
+  command?: string;
+  description?: string;
+  reason?: string;
+  choices?: string[] | null;
+  smart_denied?: boolean;
+  /** 阻塞输入类（clarify/sudo/secret.request） */
+  request_id?: string;
+  question?: string;
+  env_var?: string;
+  prompt?: string;
+  /** 会话类 */
+  title?: string;
+  /** usage（message.complete / run.completed） */
+  usage?: GatewayUsage;
+  /** 未知附加字段（直通场景保留）。 */
+  [key: string]: unknown;
+}
+
+/** session.create 返回形状（内存态 ui_session + 持久化 DB key）。 */
+export interface SessionCreateResult {
+  session_id?: string;
+  stored_session_id?: string;
+  [key: string]: unknown;
+}
+
+/** setModel 的响应 */
+export interface SetModelResult {
+  skipped?: boolean;
+  success?: boolean;
+  error?: string;
+  [key: string]: unknown;
+}
+
+/** session.resume 的响应 */
+export interface SessionResumeResult {
+  session_id?: string;
+  running?: boolean;
+  messages?: Array<{
+    role?: string;
+    text?: string;
+    content?: string;
+    [k: string]: unknown;
+  }>;
+  [k: string]: unknown;
+}
 
 // ── gateway 身份记忆 ────────────────────────────────────────────────────
 // 前端 WebView2 崩溃/整页重载后 React 重挂载，会新建 ServeGatewayClient，
@@ -62,25 +179,34 @@ function lastGatewayWsUrl(): string | null {
 }
 
 interface PendingRpc {
-  resolve: (v: any) => void;
+  resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
 // ── usage 映射（serve payload → Helix 期望的驼峰字段）──────────────────
 
-function num(u: any, ...keys: string[]): number | undefined {
+function num(
+  u: GatewayUsage | Record<string, unknown> | undefined,
+  ...keys: string[]
+): number | undefined {
+  if (!u) return undefined;
   for (const k of keys) {
-    const v = Number(u?.[k]);
+    const v = Number((u as Record<string, unknown>)[k]);
     if (Number.isFinite(v) && v >= 0) return v;
   }
   return undefined;
 }
 
-function mapUsage(u: any): any {
+/** 远端 usage → Helix 期望的驼峰/下划线字段。 */
+function mapUsage(
+  u: GatewayUsage | undefined | null,
+): Record<string, unknown> | null {
   if (!u || typeof u !== "object") return null;
-  const totalUsage = u.total && typeof u.total === "object" ? u.total : u;
-  const lastUsage = u.last && typeof u.last === "object" ? u.last : undefined;
+  const totalUsage =
+    u.total && typeof u.total === "object" ? (u.total as GatewayUsage) : u;
+  const lastUsage =
+    u.last && typeof u.last === "object" ? (u.last as GatewayUsage) : undefined;
   const contextWindow = num(u, "modelContextWindow", "model_context_window");
   const totalTokens = num(totalUsage, "totalTokens", "total_tokens", "total");
   // 远端网关（api_gateway.rs emit_usage）报来的 context_used 已按
@@ -127,30 +253,35 @@ function mapUsage(u: any): any {
       "cache_write_tokens",
       "cache_creation_input_tokens",
     ),
-    // 展开顺序：先铺本地兜底（context_used 用本地算好的 contextUsed），
-    // 再铺远端 payload——远端若带 context_used（api_gateway.rs emit_usage 已按
-    // max(totalTokens, jsonl 活跃分支估算) 算过，更权威）则胜出；没带则保留本地值。
-    // 注：本地裸 totalTokens 绝不能反向覆盖远端值（那正是本地环偏低 2.7× 的根因）。
+    // 展开顺序：先铺本地兜底（context_max），再铺远端 payload（远端若带
+    // context_used，api_gateway.rs emit_usage 已按 max(totalTokens, jsonl
+    // 活跃分支估算) 算过，更权威），最后铺算好的 context_used——避免本地
+    // 裸 totalTokens 反向覆盖远端值（那正是本地环偏低 2.7× 的根因）。
     context_max: contextWindow,
-    context_used: contextUsed,
     ...(lastUsage ? { lastUsage } : {}),
     ...u,
+    context_used: contextUsed,
   };
 }
 
-function promptBlocksToText(prompt: any): string {
+/** 提示词可能是字符串或块数组（ACP session/prompt 语义） */
+type PromptBlocks = string | Array<string | { text?: string } | null | undefined>;
+
+function promptBlocksToText(prompt: PromptBlocks | undefined | null): string {
   if (typeof prompt === "string") return prompt;
   if (Array.isArray(prompt)) {
     return prompt
-      .map((b: any) => (typeof b === "string" ? b : (b?.text ?? "")))
+      .map((b) => (typeof b === "string" ? b : b?.text ?? ""))
       .filter(Boolean)
       .join("\n");
   }
   return String(prompt ?? "");
 }
 
-/** 从 session.resume 返回的 messages（{role, text, ...}）提取最后一条可见正文 */
-function lastAssistantText(messages: any): string {
+/** 从 session.resume 返回的 messages 提取最后一条可见正文 */
+function lastAssistantText(
+  messages: SessionResumeResult["messages"] | undefined | null,
+): string {
   if (!Array.isArray(messages)) return "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -254,6 +385,11 @@ export class ServeGatewayClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private approvalSeq = 0;
+  /** 单调递增的请求序列，兜底生成 clarify/sudo/secret 的 requestId。
+   *  旧实现用 `gw-${type}-${Date.now()}`，同毫秒并发（同一 run 内多个阻塞
+   *  输入请求）会撞 id，导致 inputRoutes 路由键覆盖、respond 解锁错端点。
+   *  改用序列号保证唯一。 */
+  private requestSeq = 0;
   /** 等待 WS 首次 OPEN 的挂起者（修 CONNECTING 窗口内 rpc 被误拒的竞态） */
   private openWaiters: Array<() => void> = [];
   /** 已把哪个阻塞式输入请求（clarify/sudo/secret）映射为 clarify_request 浮条。
@@ -280,7 +416,7 @@ export class ServeGatewayClient {
     if (!next?.wsUrl || !next?.baseUrl) return;
     const changed =
       next.wsUrl !== this.info.wsUrl || next.baseUrl !== this.info.baseUrl;
-    this.info = { ...this.info, ...next } as any;
+    this.info = { ...this.info, ...next };
     debug(
       "[ServeGateway] ⟳ serveInfo received port=",
       next.port,
@@ -312,7 +448,7 @@ export class ServeGatewayClient {
   /** 重连前向主进程拉最新网关信息，防止对已死端口无限重试 */
   private async refreshInfoFromMain(): Promise<void> {
     try {
-      const ipc = (window as any).electron?.helix;
+      const ipc = window.electron?.helix;
       const info = await ipc?.getGatewayInfo?.();
       if (
         info?.mode === "serve" &&
@@ -484,13 +620,14 @@ export class ServeGatewayClient {
     };
     for (const sessionId of sessionIds) {
       this.rpc("session.resume", { session_id: sessionId }, 20_000)
-        .then((res: any) => {
+        .then((res) => {
+          const resumeRes = res as SessionResumeResult | undefined;
           if (!this.inflightSessions.has(sessionId)) return;
-          if (res?.running) {
+          if (resumeRes?.running) {
             debug("[ServeGateway] 会话仍在运行，等待事件流恢复:", sessionId);
             return;
           }
-          finish(sessionId, lastAssistantText(res?.messages));
+          finish(sessionId, lastAssistantText(resumeRes?.messages));
         })
         .catch((e: Error) => {
           debug(
@@ -524,9 +661,9 @@ export class ServeGatewayClient {
 
   async rpc(
     method: string,
-    params?: any,
+    params?: Record<string, unknown>,
     timeoutMs = RPC_TIMEOUT_MS,
-  ): Promise<any> {
+  ): Promise<unknown> {
     // 修竞态：initServeGateway 在 connect() 发起后立即返回 client，此时 WS
     // 还在 CONNECTING；启动后第一批调用（session/new 等）若直接拒绝，会表现为
     // "模型不输出"。这里等 OPEN（含重连窗口）再发。
@@ -567,7 +704,10 @@ export class ServeGatewayClient {
     };
   }
 
-  private emit(event: string, params?: any): void {
+  private emit(
+    event: string,
+    params?: Parameters<EventCallback>[1],
+  ): void {
     for (const cb of this.listeners) {
       try {
         cb(event, params);
@@ -577,31 +717,43 @@ export class ServeGatewayClient {
     }
   }
 
-  private handleFrame(msg: any): void {
+  private handleFrame(msg: unknown): void {
+    const frame = msg as {
+      id?: number | string;
+      method?: string;
+      error?: { message?: string; code?: number };
+      result?: unknown;
+      params?: {
+        type?: string;
+        session_id?: string;
+        payload?: ServeEventPayload;
+      };
+    };
+    if (!frame) return;
     // 响应帧
-    if (msg && msg.id !== undefined && msg.id !== null && !msg.method) {
-      const p = this.pending.get(msg.id);
+    if (frame.id !== undefined && frame.id !== null && !frame.method) {
+      const p = this.pending.get(frame.id);
       if (p) {
-        this.pending.delete(msg.id);
+        this.pending.delete(frame.id);
         clearTimeout(p.timer);
-        if (msg.error) {
+        if (frame.error) {
           // "session not found" 等 RPC 错误：防御性兜底。正常并发下后端不挤
           // 会话，但网关重启/会话被回收时旧 id 会失效，这里 warn 后正常 reject，
           // 调用方（session/prompt 的 catch）会自动重建会话并重放 prompt。
-          const errMsg = msg.error.message || "RPC 错误";
+          const errMsg = frame.error.message || "RPC 错误";
           if (/session.*not.*found|not found/i.test(errMsg)) {
             warn("[ServeGateway] RPC session 错误:", errMsg);
           }
           p.reject(new Error(errMsg));
         } else {
-          p.resolve(msg.result);
+          p.resolve(frame.result ?? null);
         }
       }
       return;
     }
     // 事件帧
-    if (msg && msg.method === "event" && msg.params) {
-      const { type, session_id: sessionId, payload } = msg.params;
+    if (frame.method === "event" && frame.params) {
+      const { type, session_id: sessionId, payload } = frame.params;
       this.translateEvent(String(type || ""), sessionId, payload ?? {});
     }
   }
@@ -609,7 +761,10 @@ export class ServeGatewayClient {
   /** 完成事件（run.completed/cancelled/failed/message.complete）到达时把该会话从
    *  in-flight 集合移除。ack-only 模型下完成由 translateEvent 发出的 run_complete 事件
    *  驱动，这里只做清理——不再有挂起 Promise 要 resolve。 */
-  private resolvePending(sessionId: string | undefined, _result?: any): void {
+  private resolvePending(
+    sessionId: string | undefined,
+    _result?: Record<string, unknown>,
+  ): void {
     if (sessionId) this.inflightSessions.delete(sessionId);
   }
 
@@ -618,7 +773,7 @@ export class ServeGatewayClient {
   private translateEvent(
     type: string,
     sessionId: string | undefined,
-    payload: any,
+    payload: ServeEventPayload,
   ): void {
     const base = { session_id: sessionId, ...payload };
 
@@ -734,8 +889,9 @@ export class ServeGatewayClient {
         };
         if (sessionId && text) {
           this.rpc("session.resume", { session_id: sessionId }, 5_000)
-            .then((res: any) => {
-              const authoritative = lastAssistantText(res?.messages);
+            .then((res) => {
+              const resumeRes = res as SessionResumeResult | undefined;
+              const authoritative = lastAssistantText(resumeRes?.messages);
               if (
                 authoritative &&
                 authoritative.trim() &&
@@ -795,8 +951,9 @@ export class ServeGatewayClient {
         };
         if (sessionId && text) {
           this.rpc("session.resume", { session_id: sessionId }, 5_000)
-            .then((res: any) => {
-              const authoritative = lastAssistantText(res?.messages);
+            .then((res) => {
+              const resumeRes = res as SessionResumeResult | undefined;
+              const authoritative = lastAssistantText(resumeRes?.messages);
               if (
                 authoritative &&
                 authoritative.trim() &&
@@ -989,7 +1146,7 @@ export class ServeGatewayClient {
         const requestId =
           typeof payload?.request_id === "string" && payload.request_id
             ? payload.request_id
-            : `gw-clarify-${Date.now()}`;
+            : `gw-clarify-${++this.requestSeq}`;
         this.inputRoutes.set(requestId, "clarify.respond");
         this.emit("session/update", {
           session_id: sessionId,
@@ -1020,7 +1177,7 @@ export class ServeGatewayClient {
         const requestId =
           typeof payload?.request_id === "string" && payload.request_id
             ? payload.request_id
-            : `gw-${type}-${Date.now()}`;
+            : `gw-${type}-${++this.requestSeq}`;
         const isSudo = type === "sudo.request";
         const envVar =
           typeof payload?.env_var === "string" ? payload.env_var : "";
@@ -1091,16 +1248,21 @@ export class ServeGatewayClient {
    * "true-concurrency" 设计）。断连重连后 resumeInflightSessions 会逐个
    * 恢复所有 in-flight 会话的事件流。
    */
-  private async createSession(params?: any): Promise<any> {
+
+  /** session.create 返回形状（内存态 ui_session + 持久化 DB key）。 */
+  private async createSession(
+    params?: Record<string, unknown>,
+  ): Promise<SessionCreateResult> {
     await this.ensureModelSynced();
     // 会话自动重建（session not found）等路径可能没带 mcpServers，此时回退到
     // 应用当前保存的 MCP 列表，避免重建后的会话丢失工具。
-    let mcpServers = params?.mcpServers;
+    const mcpServers = params?.mcpServers;
+    let resolvedMcpServers: unknown[] | undefined;
     if (!Array.isArray(mcpServers)) {
       const { useHelixStore } = await import("@/stores/helix-store");
-      mcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers);
+      resolvedMcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers);
     }
-    const res = await this.rpc("session.create", {
+    const res = (await this.rpc("session.create", {
       source: "helix",
       // 会话重建/恢复时必须把前端保存的本对话历史带回去，否则后端会话像是
       // 新建的一样，模型读不到之前的对话内容。
@@ -1109,24 +1271,24 @@ export class ServeGatewayClient {
         : {}),
       // 应用内维护的 MCP 服务器列表随会话一起注册；serve 模式下后端不会
       // 像 ACP 模式那样自动收到 session/new 的 mcpServers，必须在这里带上。
-      ...(Array.isArray(mcpServers) ? { mcpServers } : {}),
+      ...(resolvedMcpServers ? { mcpServers: resolvedMcpServers } : {}),
       // serve 模式的工作目录是 per-session 的（见 main.rs setWorkDir 注释：
       // "serve mode: cwd applied per-session via explicit_cwd"）。前端选中的项目
       // 必须随 session.create 传给后端，否则会话 cwd 落到配置/TERMINAL_CWD/
       // 启动目录，模型读到的目录和界面显示的项目脱节。
       ...(params?.cwd ? { cwd: params.cwd } : {}),
-    });
+    }) as SessionCreateResult);
     // 记住持久化 DB key：后端 session.create 同时返回 session_id（内存态
     // ui_session，进程重启即失效）和 stored_session_id（state.db 主键，跨
     // 重启存活）。prompt 遇 not-found 时 resume 用后者才能从磁盘恢复。
-    if (res?.session_id && res?.stored_session_id) {
+    if (res.session_id && res.stored_session_id) {
       this.storedSessionIds.set(res.session_id, res.stored_session_id);
     }
     return res;
   }
 
   /** ACP send(method, params) → serve RPC 翻译 */
-  async send(method: string, params?: any): Promise<any> {
+  async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
     switch (method) {
       case "session/new": {
         debug(
@@ -1138,7 +1300,7 @@ export class ServeGatewayClient {
         );
         // 建会话前强制同步一次前端模型配置（本客户端生命周期内一次）。
         const res = await this.createSession(params);
-        debug("[ServeGateway] ✓ session/new OK →", res?.session_id);
+        debug("[ServeGateway] ✓ session/new OK →", res.session_id);
         return res; // 已含 session_id，调用点的提取链兼容
       }
 
@@ -1151,7 +1313,7 @@ export class ServeGatewayClient {
       case "session/prompt": {
         const sessionId = String(params?.session_id ?? "");
         if (!sessionId) throw new Error("session/prompt 缺少 session_id");
-        const text = promptBlocksToText(params?.prompt);
+        const text = promptBlocksToText(params?.prompt as PromptBlocks);
         // 官方语义：prompt.submit 只回 ack（{"status":"streaming"}），真正的回复走事件流
         // （message.delta → … → run.completed）。这里不再挂起 Promise、不再设超时——完成
         // 由 run.completed/cancelled/failed 事件驱动（translateEvent 发 run_complete 事件，
@@ -1194,7 +1356,8 @@ export class ServeGatewayClient {
               if (resumeRes) {
                 // resume 成功后会话注册在 resumeId 名下，事件也以它发出：
                 // 若与原 sid 不同，发 sessionReplaced 让前端改绑；prompt 用恢复后的 id 重发。
-                const restoredId = resumeRes?.session_id || resumeId;
+                const restoredId =
+                  (resumeRes as { session_id?: string }).session_id || resumeId;
                 debug(
                   "[ServeGateway] resumed session, retrying prompt with sid:",
                   restoredId,
@@ -1228,7 +1391,7 @@ export class ServeGatewayClient {
               .filter((m) => m.sessionId === st.currentSessionId)
               .map((m) => ({ role: m.role, content: m.content }));
             const res = await this.createSession({ messages: history });
-            const newId = res?.session_id;
+            const newId = res.session_id;
             if (newId) {
               debug("[ServeGateway] recreated session for retry:", newId);
               this.emit("gateway.sessionReplaced", { oldId: sessionId, newId });
@@ -1245,7 +1408,7 @@ export class ServeGatewayClient {
 
       case "session/cancel":
       case "session/interrupt": {
-        const sessionId = params?.session_id;
+        const sessionId = params?.session_id as string | undefined;
         const res = await this.rpc("session.interrupt", {
           session_id: sessionId,
         });
@@ -1341,23 +1504,24 @@ export class ServeGatewayClient {
         // 参数对齐官方桌面端（clarify-tool.tsx:344）：{ request_id, answer }。
         // sudo.request / secret.request 也复用该浮条；其 request_id 已登记在
         // inputRoutes，此处路由到 sudo.respond / secret.respond 解锁对应端点。
-        const rid = params?.request_id;
+        const rid = typeof params?.request_id === "string" ? params.request_id : undefined;
         const route =
           typeof rid === "string" ? this.inputRoutes.get(rid) : undefined;
         if (route && route !== "clarify.respond") {
+          if (rid === undefined) break;
           this.inputRoutes.delete(rid);
           return this.rpc(route, {
-            session_id: params?.session_id,
+            session_id: params?.session_id as string | undefined,
             request_id: rid,
             ...(route === "sudo.respond"
               ? { password: params?.answer ?? "" }
               : { value: params?.answer ?? "" }),
           });
         }
-        if (typeof rid === "string") this.inputRoutes.delete(rid);
+        if (rid) this.inputRoutes.delete(rid);
         return this.rpc("clarify.respond", {
-          session_id: params?.session_id,
-          request_id: params?.request_id,
+          session_id: params?.session_id as string | undefined,
+          request_id: rid ?? "",
           answer: params?.answer ?? "",
         });
       }
@@ -1375,11 +1539,12 @@ export class ServeGatewayClient {
       }
 
       case "tools/list": {
-        const res = await this.rpc("tools.list", {
-          session_id: params?.session_id,
+        const resRaw = await this.rpc("tools.list", {
+          session_id: String(params?.session_id ?? ""),
         });
+        const res = resRaw as { toolsets?: Array<{ name?: string; tools?: Array<string | Record<string, unknown>> }> } | undefined;
         // toolsets → 拍平成 ACP 期望的 { tools: [] }
-        const tools: any[] = [];
+        const tools: Array<Record<string, unknown>> = [];
         for (const ts of res?.toolsets ?? []) {
           for (const t of ts?.tools ?? []) {
             tools.push(
@@ -1401,7 +1566,7 @@ export class ServeGatewayClient {
   }
 
   /** ACP notify（无响应通知）→ serve 没有通知语义，转为 fire-and-forget RPC */
-  notify(method: string, params?: any): void {
+  notify(method: string, params?: Record<string, unknown>): void {
     this.send(method, params).catch((e) => {
       // session/cancel on a run that already finished is a benign race (the
       // session is gone server-side); don't log it as a scary failure.
@@ -1411,7 +1576,7 @@ export class ServeGatewayClient {
     });
   }
 
-  async interrupt(sessionId: string): Promise<any> {
+  async interrupt(sessionId: string): Promise<unknown> {
     return this.send("session/interrupt", { session_id: sessionId });
   }
 
@@ -1495,15 +1660,14 @@ export class ServeGatewayClient {
     baseUrl?: string;
     apiKey?: string;
     provider?: string;
-  }): Promise<any> {
+  }): Promise<SetModelResult> {
     // 必须直取原始 IPC 桥（window.electron.helix），绝不能经 getElectronAPI()：
     // serve 模式下它返回门面 Proxy，`.helix` 会被分流回 routerFacade.setModel →
     // 再次调用本方法 → 无限递归（modelSynced 永不置位，首次 session/new 永久
     // 挂起在 ensureModelSynced，WS 零消息）。这里只需要主进程写 config.yaml
     // （helix:setModel），serve 模式 restartGatewayDebounced 是 no-op，不会重启网关。
-    const helix = (
-      typeof window !== "undefined" ? (window as any).electron?.helix : null
-    ) as any;
+    const helix =
+      typeof window !== "undefined" ? window.electron?.helix : null;
     if (!helix?.setModel) {
       // 纯浏览器（无 Electron 桥）：没有本地网关可写，静默跳过。
       debug("[ServeGateway] 无 Electron 桥，跳过 setModel（纯浏览器环境）");
@@ -1530,7 +1694,7 @@ export class ServeGatewayClient {
 
 let client: ServeGatewayClient | null = null;
 let initPromise: Promise<ServeGatewayClient | null> | null = null;
-let routerFacade: any | null = null;
+let routerFacade: HelixFacade | null = null;
 
 export function isServeActive(): boolean {
   return !!client;
@@ -1550,7 +1714,7 @@ export function getGatewayMode(): Promise<"acp" | "serve"> {
     try {
       if (typeof window === "undefined") return "acp";
       installTauriBridge(); // 惰性桥：先装再读，避免误判 acp
-      const ipc = (window as any).electron?.helix;
+      const ipc = window.electron?.helix;
       if (!ipc?.getGatewayInfo) return "acp";
       const info = await ipc.getGatewayInfo();
       return info?.mode === "serve" ? "serve" : "acp";
@@ -1577,17 +1741,42 @@ export function getServeClient(): ServeGatewayClient | null {
  * - 未覆盖方法（setConfig/setYamlKey/listPersonalities/... 配置面）→
  *   透传原 IPC（渐进迁移，任务65 处理）
  */
-function buildRouterFacade(ipc: any): any {
+/**
+ * 网关身份接口：serve 网关客户端 + 主进程 helix IPC 都实现它，供
+ * buildRouterFacade 在两种模式下做同形路由（send/notify/interrupt/status/
+ * setModel/onEvent），其余方法按原样透传 IPC。
+ */
+/**
+ * 网关身份接口：serve 网关客户端 + 主进程 helix IPC 都实现它，供
+ * buildRouterFacade 在两种模式下做同形路由（send/notify/interrupt/status/
+ * setModel/onEvent），其余方法按原样透传 IPC。直接取 ElectronAPI["helix"]
+ * 保证与 IPC 形状完全同形，Proxy 透传分支不破坏类型。
+ */
+/**
+ * 网关身份接口：serve 网关客户端 + 主进程 helix IPC 都实现它，供
+ * buildRouterFacade 在两种模式下做同形路由（send/notify/interrupt/status/
+ * setModel/onEvent），其余方法按原样透传 IPC。直接取 ElectronAPI["helix"]
+ * 保证与 IPC 形状完全同形，Proxy 透传分支不破坏类型。
+ */
+export type HelixFacade = ElectronAPI["helix"];
+
+function buildRouterFacade(ipc: ElectronAPI["helix"]): HelixFacade {
   const ensure = () => initServeGateway();
-  const overrides: Record<string, any> = {
-    send: async (m: string, p?: any) => {
+  // 显式声明要覆盖的面（send/notify/interrupt/status/setModel/onEvent）；
+  // 其余方法（setConfig/setYamlKey/listPersonalities/...）走 Proxy 透传 ipc，
+  // 渐进迁移。overrides 本身只列出一部分方法，最终返回类型靠 Proxy 补齐
+  // 到完整 ElectronAPI["helix"]，所以用 as HelixFacade 收口。
+  const overrides = {
+    send: async (m: string, p?: unknown) => {
       const c = await ensure();
-      return c ? c.send(m, p) : ipc.send(m, p);
+      return c
+        ? c.send(m, p as Record<string, unknown>)
+        : ipc.send(m, p as Record<string, unknown>);
     },
-    notify: (m: string, p?: any) => {
+    notify: (m: string, p?: unknown) => {
       ensure()
         .then((c) => {
-          if (c) c.notify(m, p);
+          if (c) c.notify(m, p as Record<string, unknown>);
           else ipc.notify?.(m, p);
         })
         .catch((e) => warn("[ServeGateway] notify 路由失败:", m, e));
@@ -1600,11 +1789,12 @@ function buildRouterFacade(ipc: any): any {
       const c = await ensure();
       return c ? c.status() : ipc.status();
     },
-    setModel: async (p: any) => {
+    setModel: async (p: unknown) => {
       const c = await ensure();
+      const mp = p as { model: string; baseUrl?: string; apiKey?: string; provider?: string };
       if (c) {
         try {
-          return await c.setModel(p);
+          return await c.setModel(mp);
         } catch (e) {
           // 千万不能回落 IPC：IPC setModel 会 restartGatewayDebounced 杀掉
           // 当前 serve 实例（WS 断、端口变、内存会话全灭）——比设置失败破坏大。
@@ -1612,7 +1802,7 @@ function buildRouterFacade(ipc: any): any {
           return { success: false, error: String((e as Error)?.message ?? e) };
         }
       }
-      return ipc.setModel?.(p);
+      return ipc.setModel?.(mp);
     },
     onEvent: (cb: EventCallback) => {
       let cancelled = false;
@@ -1646,27 +1836,27 @@ function buildRouterFacade(ipc: any): any {
     },
   };
   return new Proxy(overrides, {
-    get(target, prop: string) {
-      if (prop in target) return target[prop];
-      return ipc?.[prop];
+    get(target, prop: string | symbol) {
+      if (prop in target) return (target as Record<symbol, unknown>)[prop];
+      return ipc?.[prop as keyof ElectronAPI["helix"]];
     },
-    has(target, prop: string) {
+    has(target, prop: string | symbol) {
       return prop in target || (ipc && prop in ipc);
     },
-  });
+  }) as HelixFacade;
 }
 
 /**
  * 返回模式感知门面。Electron + 新 preload（有 getGatewayInfo）时恒返回
  * 路由器（acp 模式内部自动落回 IPC）；旧 preload / 浏览器返回 null。
  */
-export function getServeHelixFacade(): any | null {
+export function getServeHelixFacade(): HelixFacade | null {
   if (typeof window === "undefined") return null;
   // 确保 Tauri invoke 桥已装好（window.electron 是惰性安装的）。若模块加载
   // 顺序导致本函数先于任何 isElectron()/installTauriBridge() 执行，直接读
   // window.electron 会拿到 undefined → 错误地走 acp/null 分支。
   installTauriBridge();
-  const ipc = (window as any).electron?.helix;
+  const ipc = window.electron?.helix;
   if (!ipc?.getGatewayInfo) return null;
   if (!routerFacade) routerFacade = buildRouterFacade(ipc);
   return routerFacade;
@@ -1686,7 +1876,7 @@ export function initServeGateway(): Promise<ServeGatewayClient | null> {
     // initPromise 永久缓存 → 之后桥装好也不重试 → serve 网关永不连接。
     // 这里先强制装桥（幂等），保证下面能读到 getGatewayInfo。
     installTauriBridge();
-    const ipc = (window as any).electron?.helix;
+    const ipc = window.electron?.helix;
     if (!ipc?.getGatewayInfo) return null;
     try {
       // serve 冷启动最长 90s：pending 时以 2s 间隔轮询
@@ -1696,14 +1886,17 @@ export function initServeGateway(): Promise<ServeGatewayClient | null> {
           return null; // acp 模式
         }
         if (!info.pending && info.wsUrl && info.baseUrl) {
-          client = new ServeGatewayClient(info as any);
+          client = new ServeGatewayClient(
+        info as unknown as Required<Pick<ServeGatewayInfo, "baseUrl" | "wsUrl">> &
+          ServeGatewayInfo,
+      );
           client.connect();
           // 主进程每次 respawn serve 都会推 gateway.serveInfo（新端口）——
           // 订阅它保证网关重启后 WS 自动切到新地址，而不是死磕旧端口
           try {
-            ipc.onEvent?.((event: string, params?: any) => {
+            ipc.onEvent?.((event: string, params?: unknown) => {
               if (event === "gateway.serveInfo" && params)
-                client?.updateInfo(params);
+                client?.updateInfo(params as ServeGatewayInfo);
             });
           } catch {
             /* noop */

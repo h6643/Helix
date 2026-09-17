@@ -245,6 +245,10 @@ struct SubAgentRecord {
     /// Terminal status from the extension (completed / failed / …). Absent
     /// while the child still runs.
     status: Option<String>,
+    /// Set once the child's terminal result has been auto-injected back into
+    /// the parent session as a new prompt. Guards against re-injection when a
+    /// resume/re-arm re-arms the record and it goes terminal again.
+    injected: bool,
 }
 
 impl PiInstance {
@@ -1206,10 +1210,18 @@ fn seed_history_prompt(messages: Option<&Value>) -> String {
     if turns.is_empty() {
         return String::new();
     }
-    format!(
-        "（系统注入：以下是本次会话恢复的先前对话记录，供你恢复上下文。无需重新执行其中已完成的工作，直接基于这些上下文继续后续对话即可。）\n\n{}",
-        turns.join("\n\n")
-    )
+    // Only prepend the "（系统注入…）" marker when a real prior-conversation
+    // replay is being re-established (multiple turns). A brand-new
+    // conversation (0–1 turn) is returned raw, so a clean session/new no
+    // longer bakes the marker into the file's first user message — that
+    // was the root cause of it showing on every restart.
+    if turns.len() > 1 {
+        return format!(
+            "（系统注入：以下是本次会话恢复的先前对话记录，供你恢复上下文。无需重新执行其中已完成的工作，直接基于这些上下文继续后续对话即可。）\n\n{}",
+            turns.join("\n\n")
+        );
+    }
+    turns.join("\n\n")
 }
 
 /// `image/generate` — 前端 `/image` 斜杠命令走这里。读 config.yaml 的 `image:`
@@ -1659,6 +1671,27 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 "context_percent": resumed_context_percent,
                 "categories": categories,
             }))
+        }
+        "session/latest_for_cwd" => {
+            // Recover the newest on-disk pi session file for a conversation's
+            // project dir WITHOUT needing a persisted sid. The frontend's
+            // conversation→sid mapping (conversationSessions) can be empty
+            // after a user wipes it or a wipe-on-restart — in that case the
+            // resume branch is skipped and handleRun falls through to
+            // session/new + seedHistory, re-injecting "系统注入" every time.
+            // pi CLI's `resume` sidesteps this by scanning the sessions dir;
+            // this RPC gives Helix the same locate-and-resume behavior: find
+            // the newest jsonl whose header `cwd` matches, hand its uuid back,
+            // and the caller resumes it (switch_session, no new file, no
+            // replay). Reads only the 4KB header of each candidate — O(files).
+            let cwd = params
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+                .ok_or("session/latest_for_cwd is missing cwd")?;
+            let best = find_session_file_by_cwd(&cwd);
+            Ok(json!({ "session_id": best }))
         }
         "session/set_mode" => {
             let instance = routed_instance(&params, &state).await?;
@@ -2729,6 +2762,57 @@ fn find_session_file(session_id: &str) -> Option<String> {
     best.map(|(_, path)| path)
 }
 
+/// Pick, among all on-disk sessions sharing a `cwd`, the one with the
+/// most message lines (the most complete conversation), breaking ties by
+/// newest mtime. This is the "true" conversation the user is working on —
+/// not the shortest re-seed replay that a restart produced. Used by
+/// session/latest_for_cwd when the frontend's conversation→sid mapping is
+/// empty (user wiped conversationSessions / a wipe-on-restart), so the
+/// resume target is the longest chain, not the latest stub.
+///
+/// Reads each candidate's jsonl line count (O(file-size); session files
+/// for this user run 9–194 lines, so a full read is a few KB at most).
+fn find_session_file_by_cwd(target_cwd: &str) -> Option<String> {
+    let target_norm = normalize_path(target_cwd);
+    // (line_count, mtime, sid) — we want the max line_count, then max mtime.
+    let mut best: Option<(u64, std::time::SystemTime, String)> = None;
+    scan_session_files(|id, path| {
+        let Some(file_cwd) = read_session_cwd(&path.to_string_lossy()) else {
+            return None;
+        };
+        if normalize_path(&file_cwd) != target_norm {
+            return None;
+        }
+        // Count newlines in the file — pi writes one JSON record per line.
+        let lines = std::fs::read(path).map(|b| b.iter().filter(|&&c| c == b'\n').count()).unwrap_or(0);
+        let modified = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if best
+            .as_ref()
+            .is_none_or(|(bl, bm, _)| (lines as u64, modified) > (*bl, *bm))
+        {
+            best = Some((lines as u64, modified, id.to_string()));
+        }
+        None::<()>
+    });
+    best.map(|(_, _, id)| id)
+}
+
+/// Lowercase + collapse path separators to '/' + strip a trailing slash, for
+/// cross-platform path equality. The jsonl header stores the exact cwd pi was
+/// spawned with (e.g. a Windows `D:\Project\Helix`) while the frontend sends
+/// its own copy — normalizing both sides so case/separator drift can't defeat
+/// the match.
+fn normalize_path(p: &str) -> String {
+    p.to_lowercase()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
+}
+
 /// Read the conversation's real project dir from the jsonl header record
 /// (`{"type":"session",...,"cwd":"D:\\Project\\Helix"}`). Only the first line
 /// is read, so cost is O(1) even for multi-MB session files.
@@ -3147,6 +3231,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             prompt: String::new(),
                             tool_returned: true,
                             status: Some(status.clone()),
+                            injected: false,
                         },
                     );
                     drop(subagents);
@@ -3214,6 +3299,68 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 if dir.is_dir() {
                     crate::delegations::persist_delegation_prompt(&dir, &rec_prompt);
                     crate::delegations::mark_delegation_finished(&dir, &status, &summary);
+                }
+                // Auto-return the child's successful result to the parent
+                // session: when the parent is idle and the child finished
+                // successfully, queue a follow-up prompt carrying the summary
+                // so the parent agent runs another turn instead of sitting
+                // idle. Gated on the extension's own status, the parent being
+                // idle (no in-flight turn), the instance still live, and a
+                // one-shot guard so a resume/re-arm can't re-inject.
+                if status == "done"
+                    && !summary.is_empty()
+                    && instance.initialized.load(Ordering::SeqCst)
+                    && !instance.streaming.load(Ordering::SeqCst)
+                    && instance.turn_waiter.lock().unwrap().is_none()
+                {
+                    // Claim the one-shot guard before dispatching. `rec` still
+                    // borrows the map lock we just dropped, so re-lock briefly
+                    // to flip it; if a re-arm already reset the record to
+                    // running, the guards above would have skipped this anyway.
+                    let already_injected = {
+                        let mut subs = instance.subagents.lock().unwrap();
+                        if let Some(r) = subs.get_mut(&tool_call_id) {
+                            if r.injected {
+                                true
+                            } else {
+                                r.injected = true;
+                                false
+                            }
+                        } else {
+                            true
+                        }
+                    };
+                    if !already_injected {
+                        let summary_text: String = if summary.chars().count() > 8000 {
+                            format!(
+                                "{}…[结果过长已截断]",
+                                summary.chars().take(8000).collect::<String>()
+                            )
+                        } else {
+                            summary.clone()
+                        };
+                        let goal = rec_goal.clone();
+                        let instance_clone = Arc::clone(instance);
+                        let agent_id_clone = agent_id.clone();
+                        tokio::task::spawn(async move {
+                            let inject_text = format!(
+                                "你派发的子 agent「{goal}」已完成。执行结果：\n{summary_text}\n请基于此结果继续。"
+                            );
+                            // Fire-and-forget queued prompt: register turn debt so
+                            // the resulting agent_settled consumes the debt instead
+                            // of fabricating a session/complete for a user turn.
+                            instance_clone.turn_debt.fetch_add(1, Ordering::SeqCst);
+                            if let Err(e) = instance_clone
+                                .request("prompt", json!({ "message": inject_text }), RPC_TIMEOUT)
+                                .await
+                            {
+                                eprintln!(
+                                    "[pi agent] subagent auto-inject failed for {agent_id_clone}: {e}"
+                                );
+                                instance_clone.turn_debt.fetch_sub(1, Ordering::SeqCst);
+                            }
+                        });
+                    }
                 }
                 if tool_returned {
                     // Parent tool call already returned — the card is still
@@ -3392,6 +3539,31 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         },
                     }),
                 );
+                // Forward real tool calls to the running sub-agent's card so
+                // the dropdown shows activity instead of "等待第一个工具调用…".
+                // Only attribute to sub-agents for foreground (synchronous)
+                // runs where tool_returned is still false — background runs
+                // let the parent continue, making attribution ambiguous.
+                if tool_name != "Agent" && !tool_call_id.is_empty() {
+                    let subagents = instance.subagents.lock().unwrap();
+                    if let Some((sa_id, _)) = subagents.iter().find(|(_, rec)| !rec.tool_returned) {
+                        let sa_id = sa_id.clone();
+                        drop(subagents);
+                        emit_helix_event(
+                            "subagent.tool",
+                            &json!({
+                                "session_id": sid(),
+                                "subagent_id": sa_id,
+                                "tool_name": tool_name,
+                                "tool_preview": args.get("command")
+                                    .or_else(|| args.get("query"))
+                                    .or_else(|| args.get("path"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(tool_name),
+                            }),
+                        );
+                    }
+                }
             }
             // Plan-mode extension (@narumitw/pi-plan-mode): the model calls
             // plan_mode_complete to hand its decision-ready plan to the UI.
@@ -3462,6 +3634,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             prompt: prompt.to_string(),
                             tool_returned: false,
                             status: None,
+                            injected: false,
                         })
                         .prompt = prompt.to_string();
                     // Mirror the legacy delegate_task disk contract so the
@@ -3553,6 +3726,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             prompt: cached_prompt.clone(),
                             tool_returned: false,
                             status: None,
+                            injected: false,
                         });
                     if rec.agent_id != agent_id {
                         rec.agent_id = agent_id.clone();
@@ -3710,6 +3884,24 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         },
                     }),
                 );
+                // Forward completed tool calls to the running sub-agent's card.
+                if tool_name != "Agent" && !tool_call_id.is_empty() {
+                    let subagents = instance.subagents.lock().unwrap();
+                    if let Some((sa_id, _)) = subagents.iter().find(|(_, rec)| !rec.tool_returned) {
+                        let sa_id = sa_id.clone();
+                        drop(subagents);
+                        emit_helix_event(
+                            "subagent.tool",
+                            &json!({
+                                "session_id": sid(),
+                                "subagent_id": sa_id,
+                                "tool_name": tool_name,
+                                "tool_preview": content.as_str().unwrap_or_default(),
+                                "status": if is_error { "error" } else { "success" },
+                            }),
+                        );
+                    }
+                }
             }
             // pi-subagents `Agent` tool result. TWO shapes arrive here:
             //  - details.status == "background": the tool returned "Agent
@@ -3751,6 +3943,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             prompt: cached_prompt.clone(),
                             tool_returned: false,
                             status: None,
+                            injected: false,
                         });
                 if record.agent_id != agent_id {
                     record.agent_id = agent_id.clone();

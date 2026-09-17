@@ -53,10 +53,10 @@ function wrapWithServeProxy(api: ElectronAPI): ElectronAPI {
         const facade = getServeHelixFacade();
         if (facade) return facade;
       }
-      return (api as any)[prop as any];
+      return (api as unknown as Record<string | symbol, unknown>)[prop];
     },
     has(_target, prop: string | symbol) {
-      return prop in (api as any);
+      return prop in (api as unknown as Record<string | symbol, unknown>);
     },
   }) as unknown as ElectronAPI;
   return serveProxyCache;
@@ -173,7 +173,7 @@ export const electronFS = {
   async scanTree(
     dirPath?: string,
   ): Promise<
-    Array<{ id: string; name: string; type: string; children?: any[] }>
+    Array<{ id: string; name: string; type: string; children?: unknown[] }>
   > {
     const api = getElectronAPI();
     if (api && typeof api.fs.scanTree === "function") {
@@ -418,7 +418,7 @@ export const electronApp = {
  * crashing, so the app keeps working until the user restarts Helix.
  */
 export const electronHelix = {
-  async send(method: string, params?: any): Promise<any> {
+  async send(method: string, params?: unknown): Promise<unknown> {
     const api = getElectronAPI();
     if (api?.helix) {
       return api.helix.send(method, params);
@@ -426,9 +426,9 @@ export const electronHelix = {
     return null;
   },
 
-  notify(method: string, params?: any): void {
+  notify(method: string, params?: unknown): void {
     const api = getElectronAPI();
-    const h = api?.helix as any;
+    const h = api?.helix as { notify?: (m: string, p?: unknown) => void };
     if (h?.notify) {
       h.notify(method, params);
       return;
@@ -440,7 +440,7 @@ export const electronHelix = {
 
   async interrupt(sessionId: string): Promise<void> {
     const api = getElectronAPI();
-    const h = api?.helix as any;
+    const h = api?.helix as { interrupt?: (id: string) => Promise<unknown> };
     if (h?.interrupt) {
       await h.interrupt(sessionId);
     }
@@ -448,7 +448,9 @@ export const electronHelix = {
 
   async update(): Promise<{ ok: boolean; message: string }> {
     const api = getElectronAPI();
-    const h = api?.helix as any;
+    const h = api?.helix as {
+      update?: () => Promise<{ ok: boolean; message: string }>;
+    };
     if (h?.update) {
       return h.update();
     }
@@ -458,11 +460,13 @@ export const electronHelix = {
   /** Live config push: set a single key/value pair without gateway restart */
   async setConfigKeyValue(
     key: string,
-    value: any,
+    value: unknown,
     sessionId?: string,
   ): Promise<void> {
     const api = getElectronAPI();
-    const h = api?.helix as any;
+    const h = api?.helix as {
+      setConfigKeyValue?: (p: { key: string; value: unknown; session_id?: string }) => Promise<unknown>;
+    };
     if (h?.setConfigKeyValue) {
       await h.setConfigKeyValue({ key, value, session_id: sessionId });
     }
@@ -475,7 +479,9 @@ export const electronHelix = {
     choice: string;
   }): Promise<void> {
     const api = getElectronAPI();
-    const h = api?.helix as any;
+    const h = api?.helix as {
+      approvalRespond?: (p: { sessionId?: string; tool_call_id?: string; choice: string }) => Promise<unknown>;
+    };
     if (h?.approvalRespond) {
       await h.approvalRespond(params);
     }
@@ -590,7 +596,16 @@ export const electronGit = {
   // Worktree operations
   async worktreeList(): Promise<{
     ok: boolean;
-    worktrees?: any[];
+    worktrees?: Array<{
+      path: string;
+      head?: string;
+      branch?: string;
+      bare?: boolean;
+      detached?: boolean;
+      locked?: boolean;
+      prunable?: boolean;
+      isMain?: boolean;
+    }>;
     error?: string;
   }> {
     const api = getElectronAPI();

@@ -155,6 +155,7 @@ export interface ElectronAPI {
   app: {
     getInfo: () => Promise<{
       version: string;
+      piVersion?: string;
       platform: string;
       workDir: string;
     }>;
@@ -212,6 +213,11 @@ export interface ElectronAPI {
         }
     >;
     setConfig: (config: any) => Promise<any>;
+    setConfigKeyValue: (payload: {
+      key: string;
+      value: unknown;
+      session_id?: string;
+    }) => Promise<any>;
     getConfig: () => Promise<any>;
     // Raw config.yaml read/write via the gateway REST API (memory/compression settings).
     getRawConfig: () => Promise<{

@@ -1,7 +1,4 @@
 ﻿import { create } from "zustand";
-import type { StateCreator } from "zustand";
-import { cleanUrl } from "@/lib/url-utils";
-export type { McpServerConfig } from "@/stores/helix-types";
 
 // 未选择项目目录时的默认工作目录：~/.pi/agent/sessions（pi agent 的会话目录）。
 // 由后端 Tauri 命令 get_sessions_dir 返回（~/.pi/agent/sessions）。
@@ -26,21 +23,17 @@ import type {
   ChatMessage,
   EditorTab,
   CursorPosition,
-  ToastMessage,
   PendingChange,
-  ApiProvider,
-  AgentEngine,
   ApiConfig,
   ApiProfile,
-  Skill,
   MemoryCategory,
   MemoryEntry,
   TaskNode,
   SessionCheckpoint,
   ScheduledTask,
-  ToolCallEntry,
   SubAgent,
   ProviderConfig,
+  McpServerConfig,
   ApprovalMode,
 } from "./helix-types";
 import { DEFAULT_SHORTCUTS } from "./helix-types";
@@ -109,10 +102,11 @@ import {
 } from "@/lib/electron-bridge";
 import { generateId, truncateString } from "@/lib/format";
 import { debug, warn, error as logError } from "@/lib/logger";
+import type { PersistedChatMessage } from "@/lib/persist";
 import { defaultFiles } from "@/lib/seed-data";
 import { applyHelixPalette } from "@/lib/themes";
+import { cleanUrl } from "@/lib/url-utils";
 import { useGatewayStore } from "@/stores/gateway-store";
-import type { McpServerConfig } from "@/stores/helix-types";
 
 export type {
   FileNode,
@@ -603,6 +597,11 @@ interface HelixState
       status: "running" | "success" | "error";
     },
   ) => void;
+  updateSubAgentToolCallStatus: (
+    agentId: string,
+    toolName: string,
+    status: "success" | "error",
+  ) => void;
   /** 把扩展的子代理 id（.output 转录文件名）绑到卡片上 —— 后台启动确认
    *  （subagent.tool background 事件）带回，供侧边栏时间线定位转录。 */
   setSubAgentAgentId: (agentId: string, extAgentId: string) => void;
@@ -753,17 +752,6 @@ function removeTaskFromTree(tasks: TaskNode[], taskId: string): TaskNode[] {
         ? { ...t, children: removeTaskFromTree(t.children, taskId) }
         : t,
     );
-}
-
-function collectAllFileIds(nodes: FileNode[]): string[] {
-  const ids: string[] = [];
-  for (const node of nodes) {
-    if (node.type === "folder") {
-      ids.push(node.id);
-      if (node.children) ids.push(...collectAllFileIds(node.children));
-    }
-  }
-  return ids;
 }
 
 // Debounced chat persistence: saves to IndexedDB after messages change
@@ -995,7 +983,7 @@ async function persistSessionById(sessionId: string): Promise<void> {
     const all = await persistence.loadSessions();
     const existing = all.find((s) => s.id === sessionId);
     // Merge by message id: keep everything already on disk, overlay in-memory.
-    const byId = new Map<string, any>();
+    const byId = new Map<string, PersistedChatMessage>();
     for (const m of existing?.chatMessages || []) byId.set(m.id, m);
     for (const m of msgs) {
       byId.set(m.id, {
@@ -3136,6 +3124,22 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       ),
     })),
 
+  updateSubAgentToolCallStatus: (agentId, toolName, status) =>
+    set((s) => ({
+      subAgents: s.subAgents.map((a) =>
+        a.id === agentId
+          ? {
+              ...a,
+              toolCalls: (a.toolCalls || []).map((tc) =>
+                tc.toolName === toolName && tc.status === "running"
+                  ? { ...tc, status }
+                  : tc,
+              ),
+            }
+          : a,
+      ),
+    })),
+
   setSubAgentAgentId: (agentId, extAgentId) =>
     set((s) => ({
       subAgents: s.subAgents.map((a) =>
@@ -3158,7 +3162,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       ),
     })),
 
-  rehydrateSubAgentsFromDisk: (sessionId, diskAgents) => {
+  rehydrateSubAgentsFromDisk: (_sessionId, diskAgents) => {
     if (diskAgents.length === 0) return;
     set((s) => {
       const known = new Set(s.subAgents.map((a) => a.id));
@@ -3182,7 +3186,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             createdAt: Date.now(),
             completedAt: interrupted ? Date.now() : undefined,
             result: d.summary || (interrupted ? "重启时中断" : undefined),
-            sessionId: sessionId ?? undefined,
+            // 故意不 stamp 会话键（旧值 `sessionId ?? undefined` 会把重探时
+            // 的 currentSessionId 写进卡片，导致重启恢复到另一个会话时全部
+            // 被 helix-layout 的会话过滤清掉 → 「子 Agent」胶囊消失）。
+            // 无键的卡片对每个会话可见，重启后「已中断/已完成」的历史卡保留。
             agentId: d.agentId,
             ...(d.prompt ? { text: d.prompt } : {}),
           };

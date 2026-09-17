@@ -50,10 +50,13 @@ const SubagentModelPicker = ({
   const activeProviderId = useHelixStore((s) => s.activeProviderId);
 
   useEffect(() => {
+    if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
     };
-    if (open) document.addEventListener("mousedown", handler);
+    document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
@@ -343,7 +346,7 @@ export function AgentsSettings() {
     disableDefaultAgents?: boolean;
   };
   const [saSettings, setSaSettings] = useState<SubagentSettings>({});
-  const [saLoading, setSaLoading] = useState(false);
+  const [, setSaLoading] = useState(false);
   const [saSaving, setSaSaving] = useState(false);
   const [saSaved, setSaSaved] = useState(false);
   const [saErr, setSaErr] = useState<string | null>(null);

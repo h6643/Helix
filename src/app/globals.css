@@ -199,8 +199,6 @@
 }
 
 
-/* Thinking block — Claude Code 终端风 "✻ Thinking"：无面板底色，
-   左侧 2px 折角引出线 + 低对比文字，标题行强调色脉冲。 */
 .thinking-fold {
   position: relative;
   isolation: isolate;
@@ -415,8 +413,6 @@
   margin: 0;
 }
 
-/* ── 工具块 — Claude Code 终端风：⏺ 强调色工具符号 + ⎿ 左折角引出结果 ──
-   与 thinking-fold 同一套视觉语言：无面板底、2px 折角线、等宽内联。 */
 .tool-glyph {
   color: var(--primary);
   flex-shrink: 0;

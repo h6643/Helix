@@ -22,7 +22,7 @@ function electronSecure(): null | {
   decrypt: (b: string) => Promise<string | null>;
 } {
   const e =
-    typeof window !== "undefined" ? (window as any).electron : undefined;
+    typeof window !== "undefined" ? window.electron : undefined;
   if (e?.secure) return e.secure;
   return null;
 }

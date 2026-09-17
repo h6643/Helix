@@ -1,11 +1,11 @@
 import "@/env-shim";
-import { installTauriBridge } from "@/lib/tauri-bridge";
 import React from "react";
 import { lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import "@/app/globals.css";
 import "@/app/reconnect-keyframes.css";
 import { ErrorBoundary } from "@/components/Helix/error-boundary";
+import { installTauriBridge } from "@/lib/tauri-bridge";
 
 // The old Next.js entry (app/page.tsx) dynamically imported the layout with
 // ssr:false. In a static Vite SPA every module is client-only, so React.lazy is

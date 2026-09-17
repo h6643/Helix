@@ -52,14 +52,14 @@ import { getCurrentVersion } from "@/hooks/use-check-update";
 import { useCheckUpdate } from "@/hooks/use-check-update";
 import { useGitChangeStat } from "@/hooks/use-git-change-stat";
 import {
+  BrowserExecFrame,
+  useBrowserAutomation,
+} from "@/lib/browser-automation";
+import {
   pushModelConfig,
   pushAgentConfigLive,
   pushConfigKeyValue,
 } from "@/lib/config-sync";
-import {
-  BrowserExecFrame,
-  useBrowserAutomation,
-} from "@/lib/browser-automation";
 import {
   isElectron,
   electronHelix,
@@ -174,7 +174,7 @@ const HEALTHY_HEARTBEAT_MS = 10_000;
 // Right sidebar (code editor / browser)
 const RIGHT_SIDEBAR_MIN = 280;
 const RIGHT_SIDEBAR_MAX = 400;
-const RIGHT_SIDEBAR_DEFAULT = 240;
+const RIGHT_SIDEBAR_DEFAULT = 280;
 // The chat/dialogue column must always keep a readable width. Cap the right
 // sidebar so the dialogue area never shrinks into awkwardly short line wraps.
 // (440 would over-constrain the drag range — 400 still keeps lines readable.)
@@ -835,22 +835,24 @@ export function HelixLayout() {
           setDelegations(res.delegations || []);
           setHasDelegations((res.delegations || []).length > 0);
           const before = useHelixStore.getState().subAgents.length;
+          const diskAgents = (res.delegations || []).map((d: any) => ({
+            id: d.id,
+            agentId: d.agent_id || undefined,
+            goal: d.goal || undefined,
+            prompt: d.prompt || undefined,
+            status: d.status || undefined,
+            summary: d.summary || undefined,
+          }));
           useHelixStore
             .getState()
-            .rehydrateSubAgentsFromDisk(
-              currentSessionId,
-              (res.delegations || []).map((d: any) => ({
-                id: d.id,
-                agentId: d.agent_id || undefined,
-                goal: d.goal || undefined,
-                prompt: d.prompt || undefined,
-                status: d.status || undefined,
-                summary: d.summary || undefined,
-              })),
-            );
+            .rehydrateSubAgentsFromDisk(currentSessionId, diskAgents);
+          // 重启后 pi 网关会话会换新 sid：本对话的旧 sid 名下磁盘子 agent
+          // 记录（含 completed）必须重新挂到当前会话，否则「子 Agent」胶囊
+          // 只在切换会话时才出现。上面的 rehydrate 已做这件事；这里只是
+          // 补一个诊断，方便日后排查。
           console.info(
             "[SubAgentRehydrate] session-switch: disk=",
-            (res.delegations || []).length,
+            diskAgents.length,
             "cards before=",
             before,
             "after=",
@@ -1210,6 +1212,11 @@ export function HelixLayout() {
         useGatewayStore.getState().setHelixConnected(true);
         useGatewayStore.getState().setHelixError(null);
         useHelixStore.getState().setGatewayStatus("ready");
+        // 新网关进程（非同进程重连）：旧缓存的后端 sid 全部失效，bump epoch
+        // 让 handleRun 的 session/resume 分支真正触发，而不是静默走缓存路径。
+        if (params?.sameGateway !== true) {
+          useGatewayStore.getState().bumpGatewayEpoch();
+        }
         if (startupTimer) {
           clearTimeout(startupTimer);
           startupTimer = null;

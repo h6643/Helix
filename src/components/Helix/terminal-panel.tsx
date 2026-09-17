@@ -358,7 +358,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
         .catch((e) => setTerminalError(String(e)));
     });
     return () => cancelAnimationFrame(raf);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [id, isActive, isTerminalOpen, terminalCwd]);
 
   // Pipe backend output for THIS tab into its xterm instance.

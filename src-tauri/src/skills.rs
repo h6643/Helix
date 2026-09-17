@@ -590,7 +590,7 @@ fn default_agent_presets() -> Vec<SubagentPreset> {
             "Explore",
             "Fast read-only agent for targeted code and file searches.",
             vec!["read", "bash", "grep", "find", "ls"],
-            "anthropic/claude-haiku-4-5",
+            "",
             "replace",
             "READ-ONLY: never create, modify, move, copy, or delete files, and never run commands that change system state.\nSearch code with grep, find files with find, and read files with read; use bash only for read-only commands.\nUse absolute paths, make independent searches in parallel, and report precise findings.",
         ),

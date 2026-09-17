@@ -52,9 +52,9 @@ export function normalizeAcpContent(
   if (typeof content === "string") text = content;
   else if (content === null || content === undefined) text = "";
   else if (Array.isArray(content))
-    text = content.map((block: any) => normalizeAcpContent(block)).join("");
+    text = content.map((block: unknown) => normalizeAcpContent(block)).join("");
   else if (typeof content === "object") {
-    const obj = content as any;
+    const obj = content as { text?: string; content?: string };
     if (typeof obj.text === "string") text = obj.text;
     else if (typeof obj.content === "string") text = obj.content;
     else text = JSON.stringify(obj);

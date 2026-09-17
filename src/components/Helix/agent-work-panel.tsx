@@ -4,19 +4,18 @@ import {
   Loader2,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { HelixMarkdown } from "@/components/Helix/helix-markdown";
 import { isElectron } from "@/lib/electron-bridge";
 import { resolveBackendSids } from "@/lib/session-map";
 import {
   isSyntheticSubAgentToolRow,
-  getToolIcon,
   getToolLabel,
   extractCommandSnippet,
 } from "@/lib/tool-display-utils";
-import { cn } from "@/lib/utils";
 import { classifyTool } from "@/lib/tool-merge";
+import { cn } from "@/lib/utils";
 import { useHelixStore } from "@/stores/helix-store";
-import { HelixMarkdown } from "@/components/Helix/helix-markdown";
 
 interface Delegation {
   id: string;
@@ -43,7 +42,6 @@ interface RawStep {
 
 /** 合并同类后的一行：`查阅 · 2 搜索, 1 文件`。items 保留组内原始工具行，供展开。 */
 interface MergedStep {
-  icon: ReactNode;
   label: string;
   detail: string;
   status: StepStatus;
@@ -95,7 +93,6 @@ function mergeSteps(raw: RawStep[]): MergedStep[] {
           : `${g.items.length} 个命令`
         : [...counts.entries()].map(([k, n]) => `${n} ${k}`).join(", ");
     return {
-      icon: getToolIcon(g.items[0].toolName),
       label: g.verb,
       detail,
       status,
@@ -129,7 +126,7 @@ export function AgentWorkPanel() {
   }, [agent?.id]);
 
   const load = useCallback(
-    async (silent = false) => {
+    async (_silent = false) => {
       if (!isElectron() || !agent) return;
       try {
         const api = (window as any).electron as any;
@@ -164,7 +161,7 @@ export function AgentWorkPanel() {
   }, [load]);
 
   const pollTimeline = useCallback(
-    async (silent = true) => {
+    async (_silent = true) => {
       if (!isElectron() || !agent) return;
       try {
         const api = (window as any).electron as any;
@@ -271,16 +268,19 @@ export function AgentWorkPanel() {
   // 取原始工具行（timeline 优先，回退 store）。明细只喂给悬停提示，
   // 渲染统一走 mergeSteps 的「合并同类」，不再逐条摊开参数 JSON。
   const rawSteps: RawStep[] = timelineFound
-    ? timeline.slice(-20).map((tc) => ({
-        toolName: tc.tool_name || tc.kind,
-        detail: tc.preview || "",
-        status:
-          tc.status === "error"
-            ? "error"
-            : tc.status === "success"
-              ? "success"
-              : "running",
-      }))
+    ? timeline
+        .slice(-20)
+        .filter((tc) => !isSyntheticSubAgentToolRow(tc.tool_name || tc.kind))
+        .map((tc) => ({
+          toolName: tc.tool_name || tc.kind,
+          detail: tc.preview || "",
+          status:
+            tc.status === "error"
+              ? "error"
+              : tc.status === "success"
+                ? "success"
+                : "running",
+        }))
     : storeRows
         .filter((tc) => tc.toolName !== "progress")
         .slice(-20)
@@ -378,60 +378,41 @@ export function AgentWorkPanel() {
                           return next;
                         })
                       }
-                      className="flex items-center gap-2 w-full text-left py-1 px-1 -mx-1 rounded-sm hover:bg-muted/40 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)]"
+                      className="w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 hover:bg-muted/40 rounded-sm py-0.5 px-1 -mx-1 cursor-pointer transition-colors"
                     >
-                      <span
-                        className={cn(
-                          "shrink-0 mt-0.5",
-                          step.status === "error"
-                            ? "text-destructive"
-                            : step.status === "running"
-                              ? "text-primary"
-                              : "text-muted-foreground",
-                        )}
-                      >
-                        {step.icon}
-                      </span>
-                      <div className="flex-1 min-w-0 flex items-baseline gap-1">
-                        <span className="text-foreground/80 shrink-0">
-                          {step.label}
+                      {step.status === "error" ? (
+                        <span className="tool-glyph tool-glyph-failed" aria-hidden>
+                          ✕
                         </span>
-                        {step.detail && (
-                          <span className="text-muted-foreground/70 min-w-0 truncate">
-                            · {step.detail}
-                          </span>
-                        )}
-                      </div>
+                      ) : (
+                        <span className={`tool-glyph${step.status === "running" ? " tool-glyph-running" : ""}`} aria-hidden>
+                          ⏺
+                        </span>
+                      )}
+                      <span className="flex-1 min-w-0 truncate text-foreground/60">
+                        {step.label} {step.detail}
+                      </span>
                     </button>
                     {open && (
                       <div className="ml-5 mt-0.5 space-y-0.5">
                         {step.items.map((it, j) => (
                           <div
                             key={j}
-                            className="flex items-start gap-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.7857)]"
+                            className="flex items-center gap-1.5 py-0.5 text-[0.85em]"
                           >
-                            <span
-                              className={cn(
-                                "shrink-0 mt-0.5",
-                                it.status === "error"
-                                  ? "text-destructive"
-                                  : it.status === "running"
-                                    ? "text-primary"
-                                    : "text-muted-foreground/60",
-                              )}
-                            >
-                              {getToolIcon(it.toolName)}
+                            {it.status === "error" ? (
+                              <span className="tool-glyph tool-glyph-failed !text-[0.8em]" aria-hidden>✕</span>
+                            ) : (
+                              <span className={`tool-glyph !text-[0.8em]${it.status === "running" ? " tool-glyph-running" : ""}`} aria-hidden>⏺</span>
+                            )}
+                            <span className={`${it.status === "running" ? "text-foreground/70" : "text-foreground/50"}`}>
+                              {getToolLabel(it.toolName) || it.toolName}
                             </span>
-                            <div className="flex-1 min-w-0">
-                              <span className="text-foreground/70 shrink-0">
-                                {getToolLabel(it.toolName) || it.toolName}
+                            {it.detail && (
+                              <span className="text-muted-foreground/60 min-w-0 truncate">
+                                {oneLine(it.detail, 90)}
                               </span>
-                              {it.detail && (
-                                <span className="text-muted-foreground/60 ml-1.5 min-w-0 truncate">
-                                  {oneLine(it.detail, 90)}
-                                </span>
-                              )}
-                            </div>
+                            )}
                           </div>
                         ))}
                       </div>

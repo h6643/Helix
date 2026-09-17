@@ -3,7 +3,7 @@
 //!
 //! Paths mirror the pi-scheduled-tasks extension (pi-scheduled-tasks.ts):
 //!   jobs:  ~/.pi/agent/pi-cron/cron/jobs.json
-//!   events: ~/.pi/agent/cron-events/<jobId>.json
+//!   events: ~/.pi/agent/pi-cron/events/<jobId>.json
 //! so the Helix「计划」panel and the pi `schedule_*` tools read/write the
 //! same files.
 
@@ -18,9 +18,9 @@ fn pi_agent_dir() -> std::path::PathBuf {
 }
 
 /// Root dir of the pi-scheduled-tasks extension's event files.
-/// Mirrors pi-scheduled-tasks.ts EVENTS_DIR (`~/.pi/agent/cron-events`).
+/// Mirrors pi-scheduled-tasks.ts EVENTS_DIR (`~/.pi/agent/pi-cron/events`).
 fn events_dir() -> std::path::PathBuf {
-    pi_agent_dir().join("cron-events")
+    pi_agent_dir().join("pi-cron").join("events")
 }
 
 /// Shared jobs registry written by the pi-scheduled-tasks extension

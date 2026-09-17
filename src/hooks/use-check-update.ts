@@ -10,7 +10,7 @@ let checked = false;
  */
 export async function getCurrentVersion(): Promise<string | null> {
   try {
-    const info = await (window as any).electron?.app?.getInfo?.();
+    const info = await window.electron?.app?.getInfo?.();
     const v = info?.piVersion || info?.version;
     if (v) return String(v);
   } catch { /* empty */}
@@ -28,7 +28,7 @@ export function useCheckUpdate() {
 
     const check = async () => {
       try {
-        const res = await (window as any).electron?.helix?.piCheckUpdates?.();
+        const res = await window.electron?.helix?.piCheckUpdates?.();
         const pi = res?.pi;
         if (pi?.hasUpdate && pi.latest) {
           const state = useHelixStore.getState();

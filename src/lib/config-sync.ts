@@ -35,7 +35,7 @@ export function pushConfigKeyValue(
 ) {
   // Tauri mode: use tauri bridge via window.electron.helix
   if (!isElectron()) {
-    const helix = (window as any).electron?.helix;
+    const helix = window.electron?.helix;
     if (helix?.setConfigKeyValue) {
       const payload = { key, value, session_id: sessionId };
       const json = JSON.stringify(payload);
@@ -52,7 +52,7 @@ export function pushConfigKeyValue(
   }
 
   const serve = isServeActive() ? getServeClient() : null;
-  const helix = window.electron?.helix as any;
+  const helix = window.electron?.helix;
   if (!serve && !helix?.setConfigKeyValue) return;
 
   const payload = { key, value, session_id: sessionId };
@@ -116,7 +116,7 @@ export function pushModelConfig(payload: {
 
   // Tauri mode: use tauri bridge via window.electron.helix
   if (!isElectron()) {
-    const helix = (window as any).electron?.helix;
+    const helix = window.electron?.helix;
     if (helix?.setConfig) {
       helix.setConfig(modelPayload).catch((e: unknown) => {
         console.warn("[config-sync] tauri setConfig 失败:", e);
@@ -174,7 +174,7 @@ export function pushModelConfigWithKey(payload: {
   if (!isElectron()) {
     // Tauri mode: setConfig carries the key once (backend keeps it in
     // models.json / auth.json from here on).
-    const helix = (window as any).electron?.helix;
+    const helix = window.electron?.helix;
     if (helix?.setConfig) {
       helix.setConfig(payload).catch((e: unknown) => {
         console.warn("[config-sync] tauri setConfig(key) 失败:", e);
@@ -237,7 +237,7 @@ export function pushAgentConfigLive(payload: {
   reasoningEffort?: string;
   fastMode?: boolean;
 }) {
-  const helix = (window as any).electron?.helix as any;
+  const helix = window.electron?.helix;
   const isTauri = !isElectron() && !!helix?.setConfigKeyValue;
 
   if (!isElectron() && !isTauri) return;

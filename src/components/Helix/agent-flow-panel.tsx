@@ -48,7 +48,6 @@ import { FileChangeSummaryCard } from "./file-change-summary-card";
 import { HelixMarkdown } from "./helix-markdown";
 import { HistoryStrip } from "./history-strip";
 import { InlineToolGroup, summarizeGroupDiff } from "./inline-tool-group";
-import { formatMergedSummary } from "@/lib/tool-merge";
 import { ScheduledTaskConfirm } from "./scheduled-task-confirm";
 import { Button } from "@/components/ui/button";
 import { pushModelConfig } from "@/lib/config-sync";
@@ -96,6 +95,7 @@ import {
 } from "@/lib/text-utils";
 
 import { getToolDisplayLabel } from "@/lib/tool-display-utils";
+import { formatMergedSummary } from "@/lib/tool-merge";
 import { useGatewayStore } from "@/stores/gateway-store";
 import {
   useHelixStore,
@@ -249,8 +249,6 @@ function mergeThinkingContents(contents: string[]): string {
   return merged;
 }
 
-// Claude Code 终端风的思考符号：✻ 按扇区拆成同一个雪花的六个部分，
-// 激活时各部分向外散开，再同步聚拢回中心。
 const ThinkGlyph = ({ active = false }: { active?: boolean }) => (
   <span
     className={`think-glyph shrink-0${active ? " think-glyph-active" : ""}`}
@@ -1807,8 +1805,6 @@ export function AgentFlowPanel() {
       sessionId?: string;
     }>
   >([]);
-  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
-
   // 计划审批（plan 模式）：模型产出方案后先弹浮条让用户决定“批准执行”或“继续调整”，
   // 用户批准后才以 accept_edits 模式真正跑 handleRun（done 时由它触发 + handleApprovePlan）。
   const [pendingPlanReview, setPendingPlanReview] =
@@ -1822,8 +1818,8 @@ export function AgentFlowPanel() {
   const [historyStripHover, setHistoryStripHover] = useState(false);
 
   // 项目选择器状态
-  const [projectFolders, setProjectFolders] = useState<string[]>([]);
   const [projectFoldersLoaded, setProjectFoldersLoaded] = useState(false);
+  const [projectFolders, setProjectFolders] = useState<string[]>([]);
   const [showRemoteServers, setShowRemoteServers] = useState(false);
   const [showAddServerForm, setShowAddServerForm] = useState(false);
   const [newServerHost, setNewServerHost] = useState("");
@@ -2428,7 +2424,13 @@ export function AgentFlowPanel() {
       useHelixStore.getState().isAgentRunning ||
       !!useHelixStore.getState().streamingDrafts?.[currentSessionId];
     if (!running) {
-      sessionMapRef.current.delete(currentSessionId);
+      // 只清 live sid，保留条目（sids/storedId/epoch 历史）——resume 的
+      // storedId 兜底和子 Agent 磁盘 rehydrate 还要用它；无条件 delete 会把
+      // 这些一起丢掉。
+      const entry = sessionMapRef.current.get(currentSessionId);
+      if (entry) {
+        entry.sid = "";
+      }
       persistSessionMap(sessionMapRef.current);
     }
   }, [selectedWorkDir]);
@@ -2501,9 +2503,21 @@ export function AgentFlowPanel() {
   useEffect(() => {
     const unsub = window.electron?.helix?.onEvent?.((event: string) => {
       if (event === "gateway.sessionInvalidated") {
-        // All backend sessions are destroyed on restart — drop every cached id.
-        sessionMapRef.current.clear();
-        persistSessionMap(sessionMapRef.current);
+        // All backend sessions are destroyed on restart — but the pi session
+        // files on disk (~/.pi/agent/sessions/...) are NOT destroyed: they
+        // outlive the gateway process. Bumping the epoch sentinel alone is
+        // enough — the run path (handleRun) already checks
+        // `epochStale` and, when true, tries `session/resume` FIRST (pi's
+        // transparent restore from the on-disk session file, no history
+        // replay) and only falls back to `session/new` + seedHistory if that
+        // genuinely fails (file deleted, etc.).
+        //
+        // The old code here used to wipe `entry.sid = ""` for every
+        // conversation and persist it: that turned a recoverable situation
+        // (sid still valid on disk) into a forced full-history replay on
+        // every single gateway restart, because `existing?.sid || null`
+        // collapses an empty string to null and skips the resume branch
+        // entirely. Just bump the epoch and leave the sids alone.
         // Force the next run to re-verify the gateway is fully up (it may still
         // be recycling) rather than trusting helixConnected which is already
         // true after a prior restart.
@@ -3295,79 +3309,6 @@ export function AgentFlowPanel() {
 
   // Clear flow
 
-  // Tab management
-  const handleNewTab = useCallback(() => {
-    const state = useHelixStore.getState();
-    // Save current input before switching
-    if (state.currentSessionId) {
-      state.setTabInput(state.currentSessionId, inputValueRef.current);
-    }
-    state.clearChat();
-    state.setCurrentSessionId(null);
-  }, []);
-
-  const handleCloseTab = useCallback((sessionId: string) => {
-    const state = useHelixStore.getState();
-    const history = state.sessionHistory;
-    if (history.length <= 1 && sessionId === state.currentSessionId) return; // Don't close last tab
-    state.clearTabInput(sessionId);
-    state.clearStreamingDraft?.(sessionId);
-    // Remove from both stacks. sessionHistoryIndex must follow the removal —
-    // 否则索引悬在已删条目上，后退会加载已关会话。
-    const removedAt = history.indexOf(sessionId);
-    const newHistory = history.filter((id) => id !== sessionId);
-    useHelixStore.setState((s) => {
-      let newIndex = s.navigationIndex;
-      if (removedAt >= 0 && removedAt < s.sessionHistoryIndex) {
-        newIndex = s.sessionHistoryIndex - 1;
-      }
-      const clamped = Math.min(newIndex, newHistory.length - 1);
-      const navHistory = s.navigationHistory.filter(
-        (e) => !(e.type === "chat" && e.sessionId === sessionId),
-      );
-      return {
-        sessionHistory: newHistory,
-        sessionHistoryIndex: clamped,
-        navigationHistory: navHistory,
-      };
-    });
-    // If closing active tab, switch to another one
-    if (sessionId === state.currentSessionId) {
-      const next = newHistory[newHistory.length - 1] || null;
-      state.setCurrentSessionId(next);
-    }
-  }, []);
-
-  const handleSwitchTab = useCallback(
-    (sessionId: string) => {
-      const state = useHelixStore.getState();
-      // Save current input
-      if (state.currentSessionId) {
-        state.setTabInput(state.currentSessionId, inputValueRef.current);
-      }
-      // Restore input for target session
-      const savedInput = state.tabInputs[sessionId] || "";
-      setInputSynced(savedInput);
-      debug("[HelixTrace] switchTab", {
-        from: useHelixStore.getState().currentSessionId,
-        to: sessionId,
-      });
-      state.setCurrentSessionId(sessionId);
-    },
-    [setInputSynced],
-  );
-
-  const handleClear = useCallback(() => {
-    setSteps([]);
-    storeActions.clearSelectedFiles();
-    storeActions.setSelectedWorkDir(null);
-    storeActions.clearExecutionFlow();
-  }, [
-    storeActions.clearExecutionFlow,
-    storeActions.clearSelectedFiles,
-    storeActions.setSelectedWorkDir,
-  ]);
-
   // Select project directory. Must go through setWorkDir (not just
   // setSelectedWorkDir) so the Electron main process workDir is synced AND
   // workDirEpoch bumps — otherwise the hook keeps reusing the stale
@@ -3486,16 +3427,17 @@ export function AgentFlowPanel() {
       // ② 后端同步（后台、尽力而为，不阻塞 UI）。
       const liveEpoch = useGatewayStore.getState().gatewayEpoch;
       const entry = cid ? sessionMapRef.current.get(cid) : null;
-      if (entry && (entry.epoch !== liveEpoch || !entry.sid)) {
-        // epoch 过期 = 网关已重启，后端会话必死：直接删条目（省一次注定
-        // 失败的 RPC），下次 handleRun 用截断后的 seedHistory 重建。
-        sessionMapRef.current.delete(cid!);
+      const storedSid = entry?.sid;
+      if (entry && entry.epoch !== liveEpoch) {
+        // epoch 过期 = 网关重启过：保留条目（handleRun 的 resume 分支会透明
+        // 恢复旧会话，sid 不变、历史不重放），只清 live sid 标记——本次 undo
+        // 跳过（后端会话刚重启，状态不确定），但绝不能删条目，否则下次
+        // handleRun 丢 mapping 走 session/new + seedHistory 重建，对话分裂。
+        entry.sid = "";
         persistSessionMap(sessionMapRef.current);
       }
-      const sid =
-        (cid && sessionMapRef.current.get(cid)?.sid) ||
-        helixSessionIdRef.current;
-      if (sid) {
+      const sid = storedSid || helixSessionIdRef.current;
+      if (sid && entry?.sid) {
         helixApi()!
           .send("session.undo", { session_id: sid })
           .then((r: any) => {
@@ -3515,9 +3457,9 @@ export function AgentFlowPanel() {
               persistSessionMap(sessionMapRef.current);
             }
           });
-      } else if (cid) {
-        // 无可用 sid（重启后 / 草稿会话）：删掉残留条目即可，下次 handleRun
-        // 的 seedHistory 本来就是截断后的历史，无需现在重建。
+      } else if (cid && entry?.sid) {
+        // 无可用 sid（草稿会话从未建立后端会话）：删掉残留条目即可，
+        // 下次 handleRun 的 seedHistory 本来就是截断后的历史。
         sessionMapRef.current.delete(cid);
         persistSessionMap(sessionMapRef.current);
       }
@@ -4308,93 +4250,152 @@ export function AgentFlowPanel() {
       // （带 seedHistory，不丢上下文）。旧逻辑 epoch 不匹配直接删映射 + 新
       // 建 sid：新会话下旧 sid 的 "no session file" 错误把对话判成"不可用"，
       // 且每次重启上下文重放一次（seedHistory 全量进新会话）。
-      let sessionId: string | null = existing?.sid || null;
-      if (sessionId && (epochStale || existing!.epoch !== liveEpoch)) {
-        const staleEntry = existing!;
-        let resumeRes = await helixApi()!
-          .send("session/resume", { session_id: sessionId })
-          .catch(() => null); // resume 失败（会话已死/文件丢失）→ 走 session/new 重建
-        if (
-          !resumeRes ||
-          (typeof resumeRes === "object" && resumeRes.error)
-        ) {
-          // Migration fallback: older serve-gateway records may carry a DB key
-          // in storedId while sid remains the current pi session id.
-          if (staleEntry.storedId && staleEntry.storedId !== sessionId) {
-            resumeRes = await helixApi()!
-              .send("session/resume", { session_id: staleEntry.storedId })
-              .catch(() => null);
-          }
-        }
-        if (resumeRes && !(typeof resumeRes === "object" && resumeRes.error)) {
-          const resumedId =
-            (typeof resumeRes === "object" ? resumeRes.session_id : null) ||
-            sessionId;
-          sessionId = resumedId;
-          // session/resume 成功：后端返回了完整历史，用其更新本地 chatMessages
-          // 否则 UI 会显示空对话（模型实际有上下文，但用户看不到）
-          if (Array.isArray((resumeRes as any).messages)) {
-            const msgs = mapBackendMessages(
-              (resumeRes as any).messages,
-              myCid || currentSessionId || "",
-            );
-            useHelixStore.setState((state) => ({
-              chatMessages: [
-                ...state.chatMessages.filter(
-                  m => m.sessionId && m.sessionId !== myCid,
-                ),
-                ...msgs,
-              ],
-            }));
-          }
-          rebindSessionSid(sessionMapRef.current, myCid, {
-            sid: resumedId,
-            epoch: liveEpoch,
-            storedId: staleEntry.storedId,
-          });
-          persistSessionMap(sessionMapRef.current);
-          sessionEpochRef.current = liveEpoch;
-          // 重启/刷新后 resume 成功：立即把后端算好的 context_used/max 写进
-          // 本地快照，环不再卡在 0 等到下一条 prompt 的 usage 事件才恢复
-          // （"重启后上下文显示为 0"的根因——ring 唯一写入源是
-          // usage:prompt-complete / context_breakdown，resume 路径两者都
-          // 不经过）。字段缺失（旧后端）时整段跳过。
-          const resumeCtxMax = Number((resumeRes as any)?.context_max) || 0;
-          const resumeCtxUsed = Number((resumeRes as any)?.context_used) || 0;
-          const resumeCategories = Array.isArray((resumeRes as any)?.categories)
-            ? (resumeRes as any).categories
-            : undefined;
-          if (resumeCtxMax && resumeCtxUsed && myCid) {
-            // max 合并（与 captureContextBreakdown 同口径）：resume 的
-            // context_used 后端只能拿会话文件 chars/4 估算垫底，会远低于最近一次
-            // 真实请求（"对话中 50k → 对话后 20.7k"）。只允许抬升，不允许被估算
-            // 值冲小；真正的下降（压缩）由下一次 usage 事件覆盖。
-            const prevCtx = useHelixStore.getState().contextUsage[myCid];
-            useHelixStore
-              .getState()
-              .setContextUsage(
-                myCid,
-                Math.max(prevCtx?.size || 0, resumeCtxMax),
-                Math.max(prevCtx?.used || 0, resumeCtxUsed),
-                resumeCategories,
-              );
-          }
-          if (isFrontRun()) {
-            helixSessionIdRef.current = resumedId;
-            try {
-              useGatewayStore.getState().setHelixSessionId(resumedId);
-            } catch {
-              /* store setHelixSessionId 不应抛错；防御性忽略 */
+        let liveSid: string | null = null; // 仅当 epoch 匹配（未过期）时非 null
+        let staleSid: string | null = null; // 本次走过 stale 路径（尝试过 resume）
+        let sessionId: string | null = existing?.sid || null;
+        if (sessionId && (epochStale || existing!.epoch !== liveEpoch)) {
+          const staleEntry = existing!;
+          staleSid = sessionId;
+          sessionId = null;
+          let resumeRes = await helixApi()!
+            .send("session/resume", { session_id: staleSid })
+            .catch(() => null); // resume 失败（会话已死/文件丢失）→ 走 session/new 重建
+          if (
+            !resumeRes ||
+            (typeof resumeRes === "object" && resumeRes.error)
+          ) {
+            // Migration fallback: older serve-gateway records may carry a DB key
+            // in storedId while sid remains the current pi session id.
+            if (staleEntry.storedId && staleEntry.storedId !== staleSid) {
+              resumeRes = await helixApi()!
+                .send("session/resume", { session_id: staleEntry.storedId })
+                .catch(() => null);
             }
           }
+          if (resumeRes && !(typeof resumeRes === "object" && resumeRes.error)) {
+            const resumedId =
+              (typeof resumeRes === "object" ? resumeRes.session_id : null) ||
+              staleSid;
+            sessionId = resumedId;
+            liveSid = resumedId; // 成功 resume 的会话可作发送目标
+            // session/resume 成功：后端返回了完整历史，用其更新本地 chatMessages
+            // 否则 UI 会显示空对话（模型实际有上下文，但用户看不到）
+            if (Array.isArray((resumeRes as any).messages)) {
+              const msgs = mapBackendMessages(
+                (resumeRes as any).messages,
+                myCid || currentSessionId || "",
+              );
+              useHelixStore.setState((state) => ({
+                chatMessages: [
+                  ...state.chatMessages.filter(
+                    m => m.sessionId && m.sessionId !== myCid,
+                  ),
+                  ...msgs,
+                ],
+              }));
+            }
+            rebindSessionSid(sessionMapRef.current, myCid, {
+              sid: resumedId,
+              epoch: liveEpoch,
+              storedId: staleEntry.storedId,
+            });
+            persistSessionMap(sessionMapRef.current);
+            sessionEpochRef.current = liveEpoch;
+            // 重启/刷新后 resume 成功：立即把后端算好的 context_used/max 写进
+            // 本地快照，环不再卡在 0 等到下一条 prompt 的 usage 事件才恢复
+            // （"重启后上下文显示为 0"的根因——ring 唯一写入源是
+            // usage:prompt-complete / context_breakdown，resume 路径两者都
+            // 不经过）。字段缺失（旧后端）时整段跳过。
+            const resumeCtxMax = Number((resumeRes as any)?.context_max) || 0;
+            const resumeCtxUsed =
+              Number((resumeRes as any)?.context_used) || 0;
+            const resumeCategories =
+              Array.isArray((resumeRes as any)?.categories)
+                ? ((resumeRes as any).categories as Array<{
+                    id: string;
+                    label: string;
+                    tokens: number;
+                    color: string;
+                    aggregate?: boolean;
+                  }>)
+                : undefined;
+            if (resumeCtxMax && resumeCtxUsed && myCid) {
+              // max 合并（与 captureContextBreakdown 同口径）：resume 的
+              // context_used 后端只能拿会话文件 chars/4 估算垫底，会远低于最近一次
+              // 真实请求（"对话中 50k → 对话后 20.7k"）。只允许抬升，不允许被估算
+              // 值冲小；真正的下降（压缩）由下一次 usage 事件覆盖。
+              const prevCtx = useHelixStore.getState().contextUsage[myCid];
+              useHelixStore
+                .getState()
+                .setContextUsage(
+                  myCid,
+                  Math.max(prevCtx?.size || 0, resumeCtxMax),
+                  Math.max(prevCtx?.used || 0, resumeCtxUsed),
+                  resumeCategories,
+                );
+            }
+            if (isFrontRun()) {
+              helixSessionIdRef.current = resumedId;
+              try {
+                useGatewayStore.getState().setHelixSessionId(resumedId);
+              } catch {
+                /* store setHelixSessionId 不应抛错；防御性忽略 */
+              }
+            }
+          } else {
+            // resume 失败（会话文件不存在/被清理）：删映射，本次直接走 session/new
+            // 重建 + seedHistory。必须把 sessionId 置空，否则下方 if (!sessionId)
+            // 判断不到、拿这个已经失效的旧 sid 继续发 session/prompt / set_mode，
+            // 触发后端隐性重建或下一轮重复失败循环——主对话反复出新 pi sid 的根因。
+            sessionMapRef.current.delete(myCid);
+            persistSessionMap(sessionMapRef.current);
+            sessionId = null;
+          }
         } else {
-          // resume 失败（会话文件不存在/被清理）：删映射，走 session/new 重建。
-          sessionMapRef.current.delete(myCid);
-          persistSessionMap(sessionMapRef.current);
+          // epoch 匹配：沿用已有 live sid，不重建。
+          liveSid = sessionId;
         }
-      }
-      if (!sessionId) {
+        // 只有 sessionId 为空（stale 且 resume 失败 / 从未建会话 / 草稿）才走
+        // session/new + seedHistory 重建。liveSid 非 null 时必然 sessionId 也
+        // 非 null，此条件等价于"没有可用会话"。
+        if (!sessionId) {
         const st0 = useHelixStore.getState();
+        // 映射丢失（用户清过 conversationSessions / 重启被抹）但磁盘上还有
+        // 这个项目的 pi 会话文件时，先像 pi CLI 的 resume 那样按 cwd 找回
+        // 最近一个磁盘会话并透明恢复（不新建文件、不重放历史），直接跳到
+        // 下方 send 流程；只有彻底找不到才走 session/new + seedHistory。
+        const cwdForRecover =
+          st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined;
+        if (cwdForRecover) {
+          const latest = await helixApi()!
+            .send("session/latest_for_cwd", { cwd: cwdForRecover })
+            .catch(() => null);
+          const recoveredSid =
+            (latest as any)?.session_id &&
+            typeof (latest as any).session_id === "string"
+              ? ((latest as any).session_id as string)
+              : null;
+          if (recoveredSid) {
+            const recRes = await helixApi()!
+              .send("session/resume", { session_id: recoveredSid })
+              .catch(() => null);
+            if (
+              recRes &&
+              !(typeof recRes === "object" && (recRes as any).error)
+            ) {
+              sessionId = recoveredSid;
+              liveSid = recoveredSid;
+              rebindSessionSid(sessionMapRef.current, myCid, {
+                sid: recoveredSid,
+                epoch: liveEpoch,
+              });
+              persistSessionMap(sessionMapRef.current);
+              sessionEpochRef.current = liveEpoch;
+            }
+          }
+        }
+        // 找回失败（没有磁盘会话，或 resume 报错）才重建 + seedHistory。
+        if (!sessionId) {
         // 重建 session 时把当前对话历史带回去，否则模型不知道之前的对话内容，
         // 等于每次都是新对话。
         const seedHistory = useHelixStore
@@ -4437,6 +4438,7 @@ export function AgentFlowPanel() {
         // 改成后台会话的 sid，让 ContextUsageIndicator（读全局）查错会话 → 空
         // 分类。全局只由「前台 run」（下方 isFrontRun 分支）和「切换对话时的
         // sync effect」写入。
+        }
       }
       // Auto-approve edits for this session (no manual approval UI): switch
       // the backend into "don"t ask" mode. Sent on EVERY run (not just
@@ -4832,6 +4834,14 @@ export function AgentFlowPanel() {
           // background 是后台 spawn 确认行。两者都不计入 toolCalls，避免
           // 卡片底部被大量重复进度消息刷屏。
           if (toolName === "background" || toolName === "progress") {
+            return;
+          }
+          // 后端可能发送带 status 的完成事件（success/error），更新已有工具行状态
+          const toolStatus = typeof params.status === "string" ? params.status : "";
+          if (toolStatus === "success" || toolStatus === "error") {
+            useHelixStore
+              .getState()
+              .updateSubAgentToolCallStatus(subagentId, toolName, toolStatus);
             return;
           }
           useHelixStore.getState().addSubAgentToolCall(subagentId, {
@@ -6757,9 +6767,23 @@ export function AgentFlowPanel() {
                           ...(c.aggregate ? { aggregate: true } : {}),
                         }))
                     : undefined;
-                  useHelixStore
-                    .getState()
-                    .setContextUsage(activeSessionId, ctxMax, ctxUsed, cats);
+                  // 单调合并（与 resume / captureContextBreakdown 同口径）：provider
+                  // totalTokens 在工具循环内不单调（cache miss、in-turn
+                  // compaction、anchor 尚未写回 jsonl），直接覆盖会把环从
+                  // 44k 冲到 20k。只允许抬升；真正的下降由下方 compressions
+                  // 分支 + 压缩后的 usage 事件处理。
+                  const storeForUsage = useHelixStore.getState();
+                  const prevCtx = activeSessionId
+                    ? storeForUsage.contextUsage[activeSessionId]
+                    : undefined;
+                  const nextSize = Math.max(prevCtx?.size || 0, ctxMax);
+                  const nextUsed = Math.max(prevCtx?.used || 0, ctxUsed);
+                  storeForUsage.setContextUsage(
+                    activeSessionId,
+                    nextSize,
+                    nextUsed,
+                    cats,
+                  );
                   // Clear estimated tokens once real usage arrives
                   useHelixStore
                     .getState()
