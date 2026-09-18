@@ -13,11 +13,17 @@ pub fn pi_sessions_dir() -> PathBuf {
     super::paths::strip_verbatim_prefix(&dir)
 }
 
-/// The no-project default work dir: `~/.pi/agent/sessions/default`.
+/// The no-project default work dir: `~/.pi/agent/scratch`.
 /// Created once at startup so both the backend `session/new` and the
 /// frontend terminal can use it as a stable, project-independent cwd.
+///
+/// Lives OUTSIDE `sessions/` on purpose. A cwd inside the pi sessions dir
+/// (`sessions/default`) made pi encode it into yet another sessions bucket
+/// (`--C--...-sessions-default--`), so "no project" conversations kept
+/// spawning new buckets under `sessions/` over time. A sibling dir has no
+/// such self-reference.
 pub fn pi_sessions_default_dir() -> PathBuf {
-    let dir = pi_sessions_dir().join("default");
+    let dir = super::paths::pi_agent_dir().join("scratch");
     let _ = std::fs::create_dir_all(&dir);
     super::paths::strip_verbatim_prefix(&dir)
 }

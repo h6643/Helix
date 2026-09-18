@@ -111,7 +111,30 @@ pub fn run() {
             // BEFORE the gateway spawns so the webview fetches already honor it.
             crate::proxy::apply_webview_proxy();
             std::thread::spawn(move || {
-                if let Err(e) = pi_gateway::spawn(&app_state) {
+                // File-based startup diagnostic: eprintln goes to the terminal
+                // running `tauri:dev`, which is invisible when the app is
+                // launched from the tray / a release build. Append every
+                // outcome to ~/.pi/agent/helix-spawn-debug.log so a stuck
+                // "连接中" badge is reproducible and inspectable.
+                let result = pi_gateway::spawn(&app_state);
+                let log_path = crate::paths::pi_agent_dir().join("helix-spawn-debug.log");
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let line = match &result {
+                    Ok(()) => format!("[{stamp}] spawn OK\n"),
+                    Err(e) => format!("[{stamp}] spawn FAILED: {e}\n"),
+                };
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                {
+                    let _ = f.write_all(line.as_bytes());
+                }
+                if let Err(e) = &result {
                     eprintln!("[Helix] pi agent failed to start: {e}");
                 }
             });

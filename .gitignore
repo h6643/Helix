@@ -128,6 +128,10 @@ gateway-starts.log
 pi-err.txt
 pi-out.txt
 
+# Local pi fork checkout used as the dev gateway backend (own project, own
+# build output — never part of Helix source)
+pi/
+
 # KaTeX fonts copied to repo root by vite build
 KaTeX_*
 

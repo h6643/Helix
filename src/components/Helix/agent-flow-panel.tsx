@@ -1132,6 +1132,10 @@ const MAX_REASONING_CHARS = 40_000;
 const MAX_STEP_CHARS = 60_000; // 单步工具输出上限
 const MAX_STREAM_CHARS = 400_000; // 流式正文缓冲上限（防单次 run 失控）
 const TRUNC_MARK = "…[内容过长已截断]";
+// 网关重建会话时注入的历史重放块的固定前缀，与 Rust 侧 seed_history_prompt
+// （src-tauri/src/pi_gateway.rs）里的标记一致。本地历史里如果躺着上一轮注入
+// 的这段文本，再把它当历史重放一次就是"系统注入被反复叠加"的来源。
+const SEED_MARKER = "（系统注入：";
 
 type DisplayItem =
   | {
@@ -1835,7 +1839,10 @@ export function AgentFlowPanel() {
   // 压缩进行中标记：手动 /compact 与自动压缩共用。用它驱动对话流里的
   // 「压缩中…」动画行，让用户知道压缩正在发生（之前该标记只做并发保护，
   // UI 无任何反馈，表现为"点了压缩却什么都没发生"）。
-  const compressionBusy = useHelixStore((s) => s.compressionBusy);
+  // 按会话取——原先是全局单值，A 会话压缩时切到 B 会话，动画会跟着跑到 B 上。
+  const compressionBusy = useHelixStore(
+    (s) => s.compressionBusyBySession[currentSessionId ?? DRAFT_SESSION_KEY],
+  );
   const [showNewProjectForm, setShowNewProjectForm] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [fileSkills, setFileSkills] = useState<
@@ -2126,6 +2133,7 @@ export function AgentFlowPanel() {
     autoCompressNotices,
     compressionNotice,
     compressionBusy,
+    currentSessionId,
   ]);
 
   // ── Conversation content search (Ctrl+F) ──────────────────────────────
@@ -3629,11 +3637,13 @@ export function AgentFlowPanel() {
         resetInputHeight();
         switch (builtin.action) {
           case "compact": {
+            // 忙标记键提升到 case 块：finally 也要按它清标记，不能包在 try 里。
+            const busySessionKey = currentSessionId ?? DRAFT_SESSION_KEY;
             // Compact: call backend session.compress RPC and update frontend messages
             try {
-              // 并发保护：后端压缩有全局锁，第二次调用会被拒（lock_held），
-              // 表现为"点了压缩但什么都没发生"。手动/自动共用 busy 标记。
-              if (useHelixStore.getState().compressionBusy) {
+              // 并发保护：忙标记按会话隔离（compressionBusyBySession），
+              // 切换对话后其他会话的压缩状态不再跟着当前 UI 走。
+              if (useHelixStore.getState().compressionBusyBySession[busySessionKey]) {
                 storeActions.showToast({
                   type: "warning",
                   title: "压缩进行中",
@@ -3641,7 +3651,7 @@ export function AgentFlowPanel() {
                 });
                 break;
               }
-              useHelixStore.getState().setCompressionBusy(true);
+              useHelixStore.getState().setCompressionBusyForSession(busySessionKey, true);
               // session.compress 的 session_id 必须是后端 sid，不能直接传前端对话 id
               // （currentSessionId）——后端会话表里没有这个 id，必报 4001 "session not
               // found"。与 context-usage 的自动压缩路径保持一致：先解析映射拿 sid。
@@ -3778,7 +3788,7 @@ export function AgentFlowPanel() {
                 description: String(e),
               });
             } finally {
-              useHelixStore.getState().setCompressionBusy(false);
+              useHelixStore.getState().clearCompressionBusyForSession(busySessionKey);
             }
             break;
           }
@@ -3800,12 +3810,14 @@ export function AgentFlowPanel() {
     // new conversation (currentSessionId === null) has no draft of its own, so
     // it must NEVER stop another session's run; it always starts a fresh
     // concurrent run instead.
-    // 独立的压缩闸门：压缩走自己的 compressionBusy 标志，与下方的 isAgentRunning
-    // （agent 流式输出中）是**两个不同状态**，互不复用、互不覆盖。此前发送路径只
-    // 认 isAgentRunning，压缩期间仍能发消息，会与后端 session.compress 改写同一会话
-    // transcript 产生竞态（新消息被卷走 / prompt 与 compress 交错）。这里独立拦截——
-    // 不调用 handleStop，因为压缩不占 running 槽位，无需"先停"，只拦住这一发即可。
-    if (useHelixStore.getState().compressionBusy) {
+    // 独立的压缩闸门：忙标记按会话隔离（compressionBusyBySession），只拦当前
+    // 会话正在压缩的情况，其他会话的压缩不阻挡本会话发送。与下方的
+    // isAgentRunning（agent 流式输出中）是**两个不同状态**，互不复用、互不覆盖。
+    // 此前发送路径只认 isAgentRunning，压缩期间仍能发消息，会与后端
+    // session.compress 改写同一会话 transcript 产生竞态（新消息被卷走 /
+    // prompt 与 compress 交错）。这里独立拦截——不调用 handleStop，因为
+    // 压缩不占 running 槽位，无需"先停"，只拦住这一发即可。
+    if (useHelixStore.getState().isSessionCompressionBusy(currentSessionId ?? undefined)) {
       storeActions.showToast({
         type: "warning",
         title: "上下文压缩中",
@@ -4320,17 +4332,19 @@ export function AgentFlowPanel() {
                   }>)
                 : undefined;
             if (resumeCtxMax && resumeCtxUsed && myCid) {
-              // max 合并（与 captureContextBreakdown 同口径）：resume 的
-              // context_used 后端只能拿会话文件 chars/4 估算垫底，会远低于最近一次
-              // 真实请求（"对话中 50k → 对话后 20.7k"）。只允许抬升，不允许被估算
-              // 值冲小；真正的下降（压缩）由下一次 usage 事件覆盖。
-              const prevCtx = useHelixStore.getState().contextUsage[myCid];
+              // 用后端 restore 后返回的真实用量**直接覆盖**，不做 max 合并。
+              // resume 的 context_used 来自 switch_session 之后的会话文件估算，
+              // 已是"恢复后当前会话"的权威值；若再与本地旧快照取 max，会把上一次
+              // （可能更大的）会话峰值带进来——于是"新会话很小却环显示高占用、
+              // 而 /compact 报 session too small"的错位（见 2026-09-18 Q2）。
+              // 运行期 usage 事件的防抖动 max 合并留在 per-run 路径，这里只负责
+              // 把环初始化成恢复会话的真实起点。
               useHelixStore
                 .getState()
                 .setContextUsage(
                   myCid,
-                  Math.max(prevCtx?.size || 0, resumeCtxMax),
-                  Math.max(prevCtx?.used || 0, resumeCtxUsed),
+                  resumeCtxMax,
+                  resumeCtxUsed,
                   resumeCategories,
                 );
             }
@@ -4347,6 +4361,12 @@ export function AgentFlowPanel() {
             // 重建 + seedHistory。必须把 sessionId 置空，否则下方 if (!sessionId)
             // 判断不到、拿这个已经失效的旧 sid 继续发 session/prompt / set_mode，
             // 触发后端隐性重建或下一轮重复失败循环——主对话反复出新 pi sid 的根因。
+            console.warn("[HelixRecover] 已知 sid resume 失败 → 删映射", {
+              myCid: myCid?.slice(0, 24),
+              staleSid,
+              storedId: staleEntry.storedId,
+              resumeRes,
+            });
             sessionMapRef.current.delete(myCid);
             persistSessionMap(sessionMapRef.current);
             sessionId = null;
@@ -4360,25 +4380,103 @@ export function AgentFlowPanel() {
         // 非 null，此条件等价于"没有可用会话"。
         if (!sessionId) {
         const st0 = useHelixStore.getState();
-        // 映射丢失（用户清过 conversationSessions / 重启被抹）但磁盘上还有
-        // 这个项目的 pi 会话文件时，先像 pi CLI 的 resume 那样按 cwd 找回
-        // 最近一个磁盘会话并透明恢复（不新建文件、不重放历史），直接跳到
-        // 下方 send 流程；只有彻底找不到才走 session/new + seedHistory。
+        // 这个对话自己的本地历史（下面两处都要用）。注意它**不含**刚加进来的
+        // 那条用户消息：新建对话时为 0 条。
+        const ownMessages = useHelixStore
+          .getState()
+          .chatMessages.filter(
+            (m) => m.sessionId === activeSessionId && m.id !== newUserMsgId,
+          );
+        // sessionId 为空时（已知 sid 但 resume 失败、文件已丢 / 映射被清 / 从未
+        // 建会话），且本对话已有本地历史、且绑定了项目，就尝试按"cwd + 首条用户
+        // 消息指纹"从磁盘找回自己的 pi 会话文件并透明 resume——不新建文件、不
+        // 重放历史。后端只在 cwd 匹配**且**首条用户消息指纹一致时才返回 sid，
+        // 因此同项目下多个对话也不会串台（旧逻辑用"行数最多"匹配，才会抢到别人
+        // 的老会话）。指纹无命中则回退到 session/new 重建。
+        //
+        // 前置条件：① `cwdForRecover` 有值（只对**有项目**的对话）；②
+        // `ownMessages.length > 0`（只对**已在续聊**的对话——全新对话没有历史，
+        // 不该认领任何磁盘会话）。两者满足才找回，否则老实重建。
         const cwdForRecover =
           st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined;
-        if (cwdForRecover) {
+        // 反向保护：同一个项目下可能有好几个对话，cwd 匹配出来的可能是**别人**
+        // 的会话。只有这个 sid 没被别的对话占用才认。
+        const claimedByOthers = new Set<string>();
+        sessionMapRef.current.forEach((e, cid) => {
+          if (cid === myCid) return;
+          if (e.sid) claimedByOthers.add(e.sid);
+          for (const s of e.sids || []) claimedByOthers.add(s);
+        });
+        // 本对话首条用户消息——作为"对话指纹"传给 latest_for_cwd。后端只认
+        // cwd + 首条用户消息都匹配的会话文件，精确找回自己的文件，绝不串台。
+        // （旧逻辑用"行数最多"匹配，会在同项目多对话时抢到别人的老会话。）
+        const firstUserMsg = ownMessages.find((m) => m.role === "user");
+        const firstUserText = firstUserMsg
+          ? normalizeAcpContent(firstUserMsg.content).trim()
+          : undefined;
+        // 只要 sessionId 为空（从未建会话 / 已知 sid 但 resume 失败、文件已丢 /
+        // 映射被清）且本对话已有本地历史、且绑定了项目，就尝试按"cwd + 首条用户
+        // 消息指纹"从磁盘找回自己的会话文件并透明 resume——不再无脑 session/new
+        // 重建（那是"续聊同一对话却每次新建文件"的根因：已知 sid 失效后既删了
+        // 映射又跳过 cwd 找回，只能重建）。
+        console.warn("[HelixRecover] sessionId 为空 → 尝试 cwd 找回", {
+          myCid,
+          hadExisting: !!existing,
+          existing,
+          cwdForRecover,
+          ownMessagesLen: ownMessages.length,
+          firstMsgRole: ownMessages[0]?.role,
+          firstMsgHead: normalizeAcpContent(ownMessages[0]?.content ?? "").slice(
+            0,
+            50,
+          ),
+          fpLen: firstUserText?.length ?? 0,
+          fpHead: firstUserText?.slice(0, 50),
+          claimedByOthers: [...claimedByOthers],
+          mapSummary: [...sessionMapRef.current.entries()].map(([k, v]) => ({
+            cid: k,
+            sid: v.sid,
+            sids: v.sids,
+          })),
+        });
+        if (cwdForRecover && ownMessages.length > 0) {
           const latest = await helixApi()!
-            .send("session/latest_for_cwd", { cwd: cwdForRecover })
+            .send("session/latest_for_cwd", {
+              cwd: cwdForRecover,
+              first_user_message: firstUserText,
+            })
             .catch(() => null);
           const recoveredSid =
             (latest as any)?.session_id &&
             typeof (latest as any).session_id === "string"
               ? ((latest as any).session_id as string)
               : null;
-          if (recoveredSid) {
+          console.warn("[HelixRecover] latest_for_cwd →", {
+            raw: latest,
+            recoveredSid,
+            blockedByOthers: recoveredSid
+              ? claimedByOthers.has(recoveredSid)
+              : false,
+          });
+          // 有指纹时不再需要"别人占用"这层守卫——指纹（cwd + 首条用户消息包含）
+          // 已经保证找到的就是**本对话自己**的文件，claimedByOthers 只会在
+          // 同一对话存在多个 cid（历史遗留）时误伤、把合法恢复挡掉。仅当没传
+          // 指纹（退化为旧"行数最多"逻辑）时才保留这层守卫。
+          const allowedByFp = !!firstUserText;
+          if (
+            recoveredSid &&
+            (allowedByFp || !claimedByOthers.has(recoveredSid))
+          ) {
             const recRes = await helixApi()!
               .send("session/resume", { session_id: recoveredSid })
               .catch(() => null);
+            console.warn("[HelixRecover] resume 找回 →", {
+              recoveredSid,
+              ok:
+                !!recRes &&
+                !(typeof recRes === "object" && (recRes as any).error),
+              recRes,
+            });
             if (
               recRes &&
               !(typeof recRes === "object" && (recRes as any).error)
@@ -4391,19 +4489,58 @@ export function AgentFlowPanel() {
               });
               persistSessionMap(sessionMapRef.current);
               sessionEpochRef.current = liveEpoch;
+              // 找回成功也要把上下文环刷新成**恢复后**的真实用量——与上面
+              // "已知 sid" 的 resume 分支保持一致。此前这条找回路径漏了这一步，
+              // 环会一直停在持久化的旧快照（表现为"压缩后环仍显示压缩前的 187K"，
+              // 因为恢复是走 latest_for_cwd + resume 这条线、不会经过上面那段）。
+              const recCtxMax = Number((recRes as any)?.context_max) || 0;
+              const recCtxUsed = Number((recRes as any)?.context_used) || 0;
+              const recCategories = Array.isArray((recRes as any)?.categories)
+                ? ((recRes as any).categories as Array<{
+                    id: string;
+                    label: string;
+                    tokens: number;
+                    color: string;
+                    aggregate?: boolean;
+                  }>)
+                : undefined;
+              if (recCtxMax && recCtxUsed && myCid) {
+                useHelixStore
+                  .getState()
+                  .setContextUsage(
+                    myCid,
+                    recCtxMax,
+                    recCtxUsed,
+                    recCategories,
+                  );
+              }
             }
           }
         }
         // 找回失败（没有磁盘会话，或 resume 报错）才重建 + seedHistory。
         if (!sessionId) {
         // 重建 session 时把当前对话历史带回去，否则模型不知道之前的对话内容，
-        // 等于每次都是新对话。
-        const seedHistory = useHelixStore
-          .getState()
-          .chatMessages.filter(
-            (m) => m.sessionId === activeSessionId && m.id !== newUserMsgId,
-          )
-          .map((m) => ({ role: m.role, content: m.content }));
+        // 等于每次都是新对话。ownMessages 见上方（复用，别重复求值）。
+        // 剔除历史里**上一次重建留下的注入块**及其确认语。后端会把会话消息
+        // 回灌进本地 chatMessages，所以上一次的"（系统注入…[用户]/[助手]…）"
+        // 会作为一条 user 消息躺在历史里；不过滤就把它当历史再重放一次，
+        // 逐次叠加（曾观察到 seed 正文里嵌着上一轮注入产生的「已恢复上下文」）。
+        // 紧跟种子的那一轮 assistant 是模型对种子的确认，同样没有重放价值。
+        const seedHistory: Array<{ role: string; content: unknown }> = [];
+        let prevWasSeed = false;
+        for (const m of ownMessages) {
+          const text = normalizeAcpContent(m.content);
+          if (text.trimStart().startsWith(SEED_MARKER)) {
+            prevWasSeed = true;
+            continue;
+          }
+          if (prevWasSeed && m.role === "assistant") {
+            prevWasSeed = false;
+            continue;
+          }
+          prevWasSeed = false;
+          seedHistory.push({ role: m.role, content: m.content });
+        }
         const res = (await helixApi()!.send("session/new", {
           mcpServers: buildAcpMcpServers(st0.mcpServers),
           messages: seedHistory,
@@ -4434,6 +4571,11 @@ export function AgentFlowPanel() {
         });
         persistSessionMap(sessionMapRef.current);
         sessionEpochRef.current = liveEpoch;
+        // 重建（session/new）成功后，本对话的上下文环必须归零到新会话的真实
+        // 起点，不能继承上一会话（可能更大）的历史峰值——否则"新会话很小却环
+        // 显示高占用、而 /compact 报 session too small"的错位。下一次 usage
+        // 事件会用真实值覆盖（per-run 路径对 0 取 max 即真实值）。
+        useHelixStore.getState().setContextUsage(myCid, 0, 0, []);
         // 不要在这里无条件写全局 helixSessionId：后台 run 建会话时会把全局
         // 改成后台会话的 sid，让 ContextUsageIndicator（读全局）查错会话 → 空
         // 分类。全局只由「前台 run」（下方 isFrontRun 分支）和「切换对话时的
@@ -5575,8 +5717,12 @@ export function AgentFlowPanel() {
         }
       });
 
-      // Build a multimodal prompt: inline text files + image attachments,
-      // then the user's text. Lets the Agent actually process dropped files.
+      // Build a multimodal prompt: image attachments + inline text files, then the
+      // user's text. Images are routed through the auxiliary vision model when one is
+      // configured (image → text description, so a text-only main model can still
+      // "see"); otherwise they pass through as native image_url blocks. The Rust
+      // gateway (`prompt_parts`) turns image_url data-URLs into pi ImageContent and
+      // concatenates the text blocks into the message.
       const promptItems: Array<Record<string, any>> = [];
       const allImages = [
         ...(imagesSnapshot || []).map((i) => i.dataUrl).filter(Boolean),
@@ -5584,9 +5730,26 @@ export function AgentFlowPanel() {
           .filter((f) => f.kind === "image" && f.dataUrl)
           .map((f) => f.dataUrl as string),
       ];
-      for (const url of allImages) {
-        promptItems.push({ type: "image_url", image_url: { url } });
-      }
+      const visionApi = (window as any).electron?.vision;
+      const imageBlocks: Array<Record<string, any>> = await Promise.all(
+        allImages.map(async (url) => {
+          if (url && visionApi?.describe) {
+            try {
+              const desc = await visionApi.describe(url);
+              if (typeof desc === "string" && desc.trim()) {
+                return {
+                  type: "text",
+                  text: `[图片内容（视觉模型转述，供无法直接看图的模型参考）]\n${desc.trim()}`,
+                } as Record<string, any>;
+              }
+            } catch {
+              // 视觉模型未配置或调用失败 → 回退原生 image_url
+            }
+          }
+          return { type: "image_url", image_url: { url } } as Record<string, any>;
+        }),
+      );
+      for (const block of imageBlocks) promptItems.push(block);
       let fileContext = "";
       for (const f of filesSnapshot || []) {
         // 只要有可解码的文本内容就 inline，不依赖 kind（覆盖扩展名未识别的文本文件）
@@ -5644,7 +5807,10 @@ export function AgentFlowPanel() {
       helixApi()!
         .send("session/prompt", {
           session_id: sessionId,
-          prompt: [{ type: "text", text: finalPromptText }],
+          // Multimodal blocks: vision-model descriptions and/or native image_url
+          // for attachments, followed by the text block. Rust `prompt_parts`
+          // splits this back into (message, images) for pi.
+          prompt: promptItems,
         })
         .then((result: any) => {
           // session/prompt is now ack-only (official model): result == {status:'streaming'}.
@@ -5675,29 +5841,58 @@ export function AgentFlowPanel() {
           }
         })
         .catch((err: any) => {
+          const errMsg: string =
+            (typeof err === "string" ? err : err?.message) || "请求失败";
           console.error("[Helix] session/prompt error", err);
-          // 会话被 rebind（serve-gateway 自动重建 + session/prompt 会话替换）后，
-          // 旧 session 的 turn 事件通道可能提前关闭（"pi turn event channel
-          // closed"），但新 session 的 prompt 仍在跑、事件流会继续推 run_complete
-          // 和子 agent 结果——此时不能把 queueDone 置 true 杀掉事件队列，否则
-          // UI 会提前显示"完成"而子 agent 实际还在跑。只有当前 run 的会话仍是
-          // active session（未被替换）时，才按真实失败终止；否则交给
-          // scheduleSynthDone(5min) 兜底 + 事件流的真实终结信号。
+          // B: 「可恢复的中断」识别——以下三种情形都说明 prompt 的等待方被
+          // 外部清掉了（网关 kill/respawn、切项目、会话 rebind），而**不是**
+          // 模型真的失败：
+          //   1. "pi turn event channel closed" —— turn_waiter 的 sender 被
+          //      kill() drop（C 修后 kill 会发 cancelled，但旧后端/非 kill
+          //      路径仍可能裸关）；
+          //   2. errMsg / err 含 "cancelled" —— C 修后 kill() 发出的结构化
+          //      取消（后端把 session/prompt 结束为 {cancelled:true} 时
+          //      serve 层/前端可能转成带 cancel 字样的错误）；
+          //   3. 会话已 rebind（runningSessionIdRef !== myCid）——旧 session
+          //      的通道提前关闭，新 session 的事件流还在推。
+          // 这些情形下不能把 queueDone 置 true 杀掉事件队列，否则 UI 提前
+          // 显示"完成"而子 agent / 重连后的真实终结信号被丢弃。交给
+          // scheduleSynthDone(5min) 兜底 + 事件流的真实终结信号收尾。
+          const channelClosed = /turn event channel closed/i.test(errMsg);
+          const cancelled =
+            /cancel/i.test(errMsg) ||
+            (err && typeof err === "object" && ("cancelled" in err || err.cancelled));
           const stillActive = runningSessionIdRef.current === myCid;
-          if (stillActive) {
+          const recoverable =
+            channelClosed || cancelled || !stillActive;
+          if (stillActive && !recoverable) {
             enqueue(
               "data: " +
                 JSON.stringify({
                   type: "error",
-                  content: err?.message || "请求失败",
+                  content: errMsg,
                 }),
             );
             queueDone = true;
           } else {
+            // 可恢复中断：不杀事件队列。若会话仍是 active 且是通道关闭，
+            // 给用户一条轻量提示（非 error 卡死态），其余交给事件流/兜底。
+            if (stillActive && channelClosed) {
+              enqueue(
+                "data: " +
+                  JSON.stringify({
+                    type: "info",
+                    content:
+                      "连接中断，正在重连/恢复…（网关重启或会话切换导致）",
+                  }),
+              );
+            }
             debug(
-              "[HelixTrace] session/prompt error but session was rebound; " +
-                "keeping event queue open (sub-agent may still be running)",
-              err?.message,
+              "[HelixTrace] session/prompt error is recoverable (channelClosed=" +
+                channelClosed +
+                ", cancelled=" + cancelled +
+                ", stillActive=" + stillActive +
+                "); keeping event queue open: " + errMsg,
             );
           }
         });

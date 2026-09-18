@@ -4,6 +4,7 @@
  * 渲染为消息流中的横线提示，持久化显示直到切换会话或下次压缩覆盖。
  */
 import type { StateCreator } from "zustand";
+import { useHelixStore } from "@/stores/helix-store";
 
 export interface CompressionNotice {
   ts: number;
@@ -20,10 +21,15 @@ export interface CompactNoticeSlice {
   compressionNotices: Record<string, CompressionNotice>;
   setCompressionNotice: (notice: CompressionNotice) => void;
   clearCompressionNotice: (sessionId?: string) => void;
-  /** 压缩进行中标记：手动 /compact 与自动压缩共用，防止并发触发
-   *  （后端压缩锁冲突会让第二次调用返回 lock_held，看起来像"没压缩"）。 */
-  compressionBusy: boolean;
-  setCompressionBusy: (busy: boolean) => void;
+  /** 压缩进行中标记：按会话 key（后端 sid，缺失时用前端会话 id）记录。手动
+   *  /compact 与自动压缩共用，防止同一会话并发触发（后端压缩锁冲突会让第二次
+   *  调用返回 lock_held，看起来像"没压缩"）。后端压缩锁本身是每会话的，所以
+   *  这里也必须按会话——原先的全局单值会让 spinner 在切换对话后仍跟着显示，
+   *  并且 A 会话压缩时误挡 B 会话的发送。 */
+  compressionBusyBySession: Record<string, boolean>;
+  setCompressionBusyForSession: (sessionId: string, busy: boolean) => void;
+  clearCompressionBusyForSession: (sessionId: string) => void;
+  isSessionCompressionBusy: (sessionId?: string) => boolean;
   /** 每对话的后端 compressions 累计计数快照（usage 载荷透传）。计数器增长
    *  = 后端在工具循环中途自发压缩（前端不可见），agent-flow-panel 据此显示
    *  divider 提示（"上下文数量无故变小"的可见化）。网关重启后后端计数从 0
@@ -52,8 +58,24 @@ export const createCompactNoticeSlice: StateCreator<
       const { [sessionId]: _, ...rest } = state.compressionNotices;
       return { compressionNotices: rest };
     }),
-  compressionBusy: false,
-  setCompressionBusy: (busy) => set({ compressionBusy: busy }),
+  compressionBusyBySession: {},
+  setCompressionBusyForSession: (sessionId, busy) =>
+    set((state) => ({
+      compressionBusyBySession: {
+        ...state.compressionBusyBySession,
+        [sessionId]: busy,
+      },
+    })),
+  clearCompressionBusyForSession: (sessionId) =>
+    set((state) => {
+      if (!(sessionId in state.compressionBusyBySession)) return {};
+      const { [sessionId]: _, ...rest } = state.compressionBusyBySession;
+      return { compressionBusyBySession: rest };
+    }),
+  isSessionCompressionBusy: (sessionId) => {
+    const s = useHelixStore.getState();
+    return !!s.compressionBusyBySession[sessionId ?? "__draft__"];
+  },
   backendCompressionCounts: {},
   setBackendCompressionCount: (sessionId, count) =>
     set((state) => ({

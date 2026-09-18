@@ -1694,8 +1694,16 @@ nav::-webkit-scrollbar-thumb:hover {
   -webkit-app-region: no-drag;
 }
 
-/* Tauri window drag region */
+/* Tauri window drag region. The attribute selector is Tauri's documented
+   mechanism (the runtime also turns `data-tauri-drag-region` into this
+   declaration), so the explicit `.helix-app-titlebar` rule below is a fallback
+   for runtimes that only resolve the declaration from the stylesheet. Both
+   forms are harmless — an element carrying the attribute matches both. */
 [data-tauri-drag-region] {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.helix-app-titlebar {
   -webkit-app-region: drag;
   app-region: drag;
 }
@@ -1992,4 +2000,236 @@ nav::-webkit-scrollbar-thumb:hover {
   .chat-toolbar-label {
     display: none;
   }
+}
+
+
+/* ── Boot splash（全屏毛玻璃启动画面）───────────────────────────────
+   BootOverlay 用：深色底 + 白色半透明元素 + 毛玻璃面板。
+   所有颜色统一走 rgba(255,255,255,α)，想整体调亮/调暗只改 α。
+   backdrop-filter 需要真实可模糊的背景（射线/光束/粒子），所以玻璃面板
+   必须放在这些背景层之上。 */
+.helix-splash {
+  background:
+    radial-gradient(120% 90% at 50% -10%, rgba(42, 46, 58, 0.55) 0%, rgba(12, 13, 18, 0.9) 46%, #07080b 100%);
+  transition: opacity 0.8s ease, transform 0.8s ease, filter 0.8s ease;
+}
+.helix-splash.helix-splash-out {
+  opacity: 0;
+  transform: scale(1.06);
+  filter: blur(6px);
+  pointer-events: none;
+}
+/* 中心呼吸光晕 */
+.helix-splash-veil {
+  background: radial-gradient(58% 44% at 50% 48%, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0) 72%);
+  animation: helix-splash-veil 4.6s ease-in-out infinite;
+}
+@keyframes helix-splash-veil {
+  0%, 100% { opacity: 0.55; transform: scale(0.94); }
+  50% { opacity: 1; transform: scale(1.06); }
+}
+/* 从中心发散的双层射线（mask 收成圆形扇面） */
+.helix-splash-rays {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 150vmax;
+  height: 150vmax;
+  margin-left: -75vmax;
+  margin-top: -75vmax;
+  -webkit-mask-image: radial-gradient(closest-side, #000 0%, rgba(0, 0, 0, 0.5) 42%, rgba(0, 0, 0, 0) 70%);
+  mask-image: radial-gradient(closest-side, #000 0%, rgba(0, 0, 0, 0.5) 42%, rgba(0, 0, 0, 0) 70%);
+}
+.helix-splash-rays-a {
+  background: repeating-conic-gradient(from 0deg, rgba(255, 255, 255, 0.1) 0deg 6deg, rgba(255, 255, 255, 0) 6deg 24deg);
+  opacity: 0.7;
+  animation: helix-splash-rotate 44s linear infinite;
+}
+.helix-splash-rays-b {
+  background: repeating-conic-gradient(from 11deg, rgba(255, 255, 255, 0.06) 0deg 4deg, rgba(255, 255, 255, 0) 4deg 31deg);
+  opacity: 0.55;
+  animation: helix-splash-rotate 76s linear infinite reverse;
+}
+@keyframes helix-splash-rotate { to { transform: rotate(360deg); } }
+/* 斜向光束扫过全屏 */
+.helix-splash-beam {
+  position: absolute;
+  top: -25%;
+  left: -35%;
+  width: 30%;
+  height: 170%;
+  background: linear-gradient(100deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.1) 44%,
+    rgba(255, 255, 255, 0.2) 50%,
+    rgba(255, 255, 255, 0.1) 56%,
+    rgba(255, 255, 255, 0) 100%);
+  transform: rotate(16deg);
+  filter: blur(2px);
+  mix-blend-mode: screen;
+  animation: helix-splash-beam 6s cubic-bezier(0.45, 0.05, 0.35, 0.95) infinite;
+}
+.helix-splash-beam-2 {
+  animation-duration: 8.2s;
+  animation-delay: 3.1s;
+  opacity: 0.7;
+}
+@keyframes helix-splash-beam {
+  0% { transform: translateX(-40vw) rotate(16deg); opacity: 0; }
+  20% { opacity: 1; }
+  60% { opacity: 1; }
+  100% { transform: translateX(210vw) rotate(16deg); opacity: 0; }
+}
+/* 暗角，把注意力压向中心 */
+.helix-splash-vignette {
+  background: radial-gradient(120% 90% at 50% 50%, rgba(0, 0, 0, 0) 40%, rgba(0, 0, 0, 0.7) 100%);
+}
+/* 上升粒子 */
+.helix-splash-particle {
+  position: absolute;
+  bottom: -4vh;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 7px rgba(255, 255, 255, 0.7);
+  opacity: 0;
+  animation: helix-splash-float linear infinite;
+}
+@keyframes helix-splash-float {
+  0% { transform: translate3d(0, 0, 0); opacity: 0; }
+  12% { opacity: var(--p, 0.8); }
+  75% { opacity: calc(var(--p, 0.8) * 0.55); }
+  100% { transform: translate3d(var(--drift, 0px), -108vh, 0); opacity: 0; }
+}
+/* 四角取景框 */
+.helix-splash-corner {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  border-color: rgba(255, 255, 255, 0.22);
+  opacity: 0;
+  animation: helix-splash-corner 0.7s ease 0.2s forwards;
+}
+@keyframes helix-splash-corner { to { opacity: 1; } }
+
+/* ── 毛玻璃面板 ────────────────────────────────────────────────────
+   玻璃质感三件套：半透明白填充 + backdrop-filter 模糊 + 顶边内高光。
+   内高光是玻璃最容易忽略但最有质感的细节。 */
+.helix-splash-card {
+  background: rgba(255, 255, 255, 0.07);
+  -webkit-backdrop-filter: blur(28px) saturate(1.5);
+  backdrop-filter: blur(28px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+}
+/* 面板斜向反光，制造曲面玻璃感 */
+.helix-splash-card-shine {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(135deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(255, 255, 255, 0) 36%,
+    rgba(255, 255, 255, 0) 62%,
+    rgba(255, 255, 255, 0.07) 100%);
+}
+.helix-splash-emblem { animation: helix-splash-pop 0.85s cubic-bezier(0.2, 0.85, 0.25, 1) both; }
+.helix-splash-mark {
+  background: conic-gradient(from 210deg,
+    rgba(255, 255, 255, 0.14),
+    rgba(255, 255, 255, 0.7) 22%,
+    rgba(255, 255, 255, 0.32) 40%,
+    rgba(255, 255, 255, 0.92) 55%,
+    rgba(255, 255, 255, 0.28) 72%,
+    rgba(255, 255, 255, 0.1) 88%,
+    rgba(255, 255, 255, 0.14));
+  -webkit-mask-image: radial-gradient(closest-side, rgba(0, 0, 0, 0) 60%, #000 61%);
+  mask-image: radial-gradient(closest-side, rgba(0, 0, 0, 0) 60%, #000 61%);
+  filter: drop-shadow(0 0 14px rgba(255, 255, 255, 0.35));
+  animation: helix-splash-rotate 8s linear infinite;
+}
+@keyframes helix-splash-pop {
+  0% { opacity: 0; transform: scale(0.5); filter: blur(10px); }
+  100% { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+.helix-splash-rise { animation: helix-splash-rise 0.8s cubic-bezier(0.2, 0.8, 0.25, 1) both; }
+@keyframes helix-splash-rise {
+  0% { opacity: 0; transform: translateY(18px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+/* 透明白字 + 流光 */
+.helix-splash-title {
+  background: linear-gradient(180deg,
+    rgba(255, 255, 255, 1) 0%,
+    rgba(255, 255, 255, 0.82) 45%,
+    rgba(255, 255, 255, 0.5) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  letter-spacing: 0.3em;
+  text-shadow: 0 0 30px rgba(255, 255, 255, 0.22);
+}
+.helix-splash-sheen {
+  background: linear-gradient(105deg,
+    rgba(255, 255, 255, 0) 32%,
+    rgba(255, 255, 255, 0.9) 50%,
+    rgba(255, 255, 255, 0) 68%);
+  background-size: 240% 100%;
+  background-position: 140% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: helix-splash-sheen 3.4s ease-in-out 1s infinite;
+}
+@keyframes helix-splash-sheen {
+  0% { background-position: 140% 0; }
+  55% { background-position: -70% 0; }
+  100% { background-position: -70% 0; }
+}
+/* 装饰分隔线 */
+.helix-splash-rule {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.5) 50%, rgba(255, 255, 255, 0) 100%);
+  transform-origin: center;
+  animation: helix-splash-rule 0.95s cubic-bezier(0.2, 0.8, 0.25, 1) both;
+}
+@keyframes helix-splash-rule {
+  0% { opacity: 0; transform: scaleX(0.08); }
+  100% { opacity: 1; transform: scaleX(1); }
+}
+/* 玻璃状态胶囊 */
+.helix-splash-chip {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+/* 进度条 */
+.helix-splash-bar-track {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.35);
+}
+.helix-splash-bar-fill {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.85));
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.35);
+}
+.helix-splash-bar-flow {
+  background: linear-gradient(90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.45) 42%,
+    rgba(255, 255, 255, 0.9) 50%,
+    rgba(255, 255, 255, 0.45) 58%,
+    rgba(255, 255, 255, 0) 100%);
+  background-size: 46% 100%;
+  background-repeat: no-repeat;
+  background-position: -60% 0;
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.4);
+  animation: helix-splash-flow 1.7s ease-in-out infinite;
+}
+@keyframes helix-splash-flow {
+  0% { background-position: -60% 0; }
+  100% { background-position: 180% 0; }
 }

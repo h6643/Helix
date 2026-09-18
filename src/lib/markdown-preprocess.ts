@@ -459,6 +459,52 @@ function normalizeProseMath(text: string): string {
   );
 }
 
+/**
+ * Splits `text` into code-fence / inline-code segments (protected, untouched)
+ * and prose segments. Prose segments are run through `fn`, then re-joined with
+ * the fence/inline-code segments restored verbatim. Prevents math / autolink /
+ * table normalization from corrupting `$$` or `\[` that live inside fenced
+ * code blocks or inline backticks.
+ */
+function applyOutsideCode(text: string, fn: (s: string) => string): string {
+  // Fence blocks (``` / ~~~) — the entire fenced region including its markers.
+  const fenceRe = /(^|\n)([ \t]*)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n[ \t]*\3[ \t]*(?:\n|$)/g;
+  const parts: { start: number; end: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(text)) !== null) {
+    parts.push({ end: m.index + m[0].length, start: m.index });
+  }
+
+  // Inline code spans — exact backtick-pair matching, same regex as
+  // INLINE_CODE_SPLIT_RE.
+  const inlineRe = /(`[^`\n]+`)/g;
+  while ((m = inlineRe.exec(text)) !== null) {
+    parts.push({ end: m.index + m[0].length, start: m.index });
+  }
+
+  // Merge overlaps so prose spans don't cross fence boundaries.
+  parts.sort((a, b) => a.start - b.start);
+  const merged: { end: number; start: number }[] = [];
+  for (const p of parts) {
+    const last = merged[merged.length - 1];
+    if (last && p.start <= last.end) {
+      last.end = Math.max(last.end, p.end);
+    } else {
+      merged.push({ ...p });
+    }
+  }
+
+  let out = "";
+  let cursor = 0;
+  for (const { end, start } of merged) {
+    out += fn(text.slice(cursor, start));
+    out += text.slice(start, end);
+    cursor = end;
+  }
+  out += fn(text.slice(cursor));
+  return out;
+}
+
 function extend(out: string[], lines: string[]) {
   for (const line of lines) {
     out.push(line);
@@ -1004,7 +1050,9 @@ export function preprocessMarkdown(text: string): string {
               padTableDelimiterRows(
                 normalizeAtxHeadings(
                   normalizeVisibleProse(
-                    normalizeProseMath(neutralizeSetextUnderlines(core)),
+                    neutralizeSetextUnderlines(
+                      applyOutsideCode(core, normalizeProseMath),
+                    ),
                   ),
                 ),
               ),

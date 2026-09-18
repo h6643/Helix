@@ -300,7 +300,6 @@ export function ContextUsageIndicator() {
         if (data.context_percent >= 80 && !autoCompactCooldownRef.current) {
           const {
             autoCompactContext,
-            compressionBusy,
             showToast,
             streamingDrafts,
             isChatLoading,
@@ -313,14 +312,24 @@ export function ContextUsageIndicator() {
           const runInFlight =
             isChatLoading ||
             Object.values(streamingDrafts || {}).some((d) => d?.isAgentRunning);
-          if (autoCompactContext && !compressionBusy && !runInFlight) {
+          // 闸门按会话判断：后端压缩锁是每会话的，别的会话在压缩不该挡住本会话
+          // 的自动压缩（全局单值时会被误挡）。key 沿用 compressionNotices 的
+          // 约定——有后端 sid 就用 sid，没有就落回前端会话 id。
+          const busySessionKey = sessionId || currentSessionId || "__draft__";
+          if (
+            autoCompactContext &&
+            !useHelixStore.getState().compressionBusyBySession[busySessionKey] &&
+            !runInFlight
+          ) {
             autoCompactCooldownRef.current = true;
             // Cooldown: don't trigger again for 60 seconds
             setTimeout(() => {
               autoCompactCooldownRef.current = false;
             }, 60_000);
             // 与手动 /compact 共用 busy 标记：避免后端压缩锁冲突
-            useHelixStore.getState().setCompressionBusy(true);
+            useHelixStore
+              .getState()
+              .setCompressionBusyForSession(busySessionKey, true);
             try {
               const result = await helixApi()?.send("session.compress", {
                 session_id: sessionId,
@@ -398,7 +407,9 @@ export function ContextUsageIndicator() {
                 description: String((e as Error)?.message ?? e),
               });
             } finally {
-              useHelixStore.getState().setCompressionBusy(false);
+              useHelixStore
+                .getState()
+                .clearCompressionBusyForSession(busySessionKey);
             }
           }
         }

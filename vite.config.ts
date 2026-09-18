@@ -51,6 +51,10 @@ export default defineConfig({
       ignored: [
         '**/src-tauri/**',
         '**/.pi-verify-target/**',
+        // The local pi fork checkout (dev gateway backend) lives at pi/ — a
+        // full source tree + its own build output. Watching it would add
+        // thousands of watchers and every fork rebuild would reload the app.
+        '**/pi/**',
       ],
     },
   },

@@ -23,6 +23,9 @@ export default defineConfig([
     "build/**",
     "release/**",
     "src-tauri/**",
+    // Local pi fork checkout (dev gateway backend) — its own project with its
+    // own lint setup; never linted as part of Helix.
+    "pi/**",
     "**/*.d.ts",
     "**/*.tmp.mjs",
     "**/*.tmp.json",

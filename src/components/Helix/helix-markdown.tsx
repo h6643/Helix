@@ -370,10 +370,18 @@ export function CodeCard({
     blockId ? !expandedCodeBlocks.has(blockId) : true,
   );
   const isDiff = language === "diff";
+  // 流式半截围栏（未闭合）：代码文本以 ``` 或 ~~~ 结尾，或块本身刚被开围栏
+  // 创建、语言标签还是空串（"..." fence，no info string）。这些形状意味着
+  // 围栏还没闭合，shiki 重新高亮会让整张卡"段落→代码卡"反复横跳。静默期
+  // 走纯文本渲染；闭合围栏到达后（下一帧语言标签有了 + 内容不以 ``` 结尾）
+  // 自动切回 shiki，闪烁窗口被压到一帧。
+  const isStreamingUnclosed =
+    (language === "" && trimmed.length > 0) ||
+    /(^|\n)(`{3,}|~{3,})\s*$/.test(trimmed);
   // Diffs win over the box-diagram check: DiffView is already a plain
   // per-line renderer (no shiki), so a patch touching a tree diagram must
   // keep its colored +/- view.
-  const boxDiagram = !isDiff && isBoxDiagram(trimmed);
+  const boxDiagram = !isDiff && !isStreamingUnclosed && isBoxDiagram(trimmed);
   const lineCount = trimmed.split("\n").length;
   const isLong = lineCount > 15 || trimmed.length > 800;
   // collapsible=false 时（如工具卡片里的命令/结果代码）永不折叠：内容全量显示，
@@ -382,7 +390,7 @@ export function CodeCard({
 
   const body = isDiff ? (
     <DiffView code={trimmed} />
-  ) : boxDiagram ? (
+  ) : isStreamingUnclosed || boxDiagram ? (
     <code dir="ltr" className="helix-box-diagram block">
       {trimmed}
     </code>
@@ -510,8 +518,22 @@ const HelixMarkdown = memo(function HelixMarkdown({
     () => (text ? preprocessMarkdown(text) : ""),
     [text],
   );
+  // remark-math 的 streaming 选项：true 时未闭合的 $$ / \[ 不产出 math 节点，
+  // 保留原始文本——流式中途不会先闪"原始 LaTeX"再突变成 KaTeX；下一帧闭合
+  // 到达后才切到渲染公式。
   const setPreviewRailUrl = useHelixStore((s) => s.setPreviewRailUrl);
   const setRightSidebarTab = useHelixStore((s) => s.setRightSidebarTab);
+
+  const isStreaming = useMemo(
+    () => {
+      // 未闭合的 $$ / \[ 展示公式 → 还在流式输出中。
+      const openDollar = (processed.match(/(?<!\$)\$$(?!\$)/g) || []).length;
+      const openBrackets = (processed.match(/\\\[/g) || []).length;
+      const closeBrackets = (processed.match(/\\\]/g) || []).length;
+      return openDollar % 2 === 1 || openBrackets > closeBrackets;
+    },
+    [processed],
+  );
 
   return (
     // helix-md 必须自带：多数调用点（agent-flow-panel 历史消息/实时过程段、
@@ -521,7 +543,7 @@ const HelixMarkdown = memo(function HelixMarkdown({
     <div className={className ? `helix-md ${className}` : "helix-md"}>
       <ReactMarkdown
         remarkPlugins={[
-          [remarkMath, { singleDollarTextMath: true }],
+          [remarkMath, { singleDollarTextMath: true, streaming: isStreaming }],
           remarkGfm,
         ]}
         rehypePlugins={[rehypeKatex]}

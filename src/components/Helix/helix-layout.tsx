@@ -144,7 +144,7 @@ import { useProviderStore } from "@/stores/slices/provider-store";
 
 // Local Suspense for the always-visible panel areas. Without a boundary the
 // lazy panels' chunk load bubbles up to the root Suspense in main.tsx, which
-// swaps the WHOLE app for "Loading Helix..." and unmounts every component.
+// blanks the WHOLE app for its fallback and unmounts every component.
 // An in-panel spinner keeps the UI alive while the chunk + data load.
 function PanelSuspense({ children }: { children: React.ReactNode }) {
   return (
@@ -1646,10 +1646,15 @@ export function HelixLayout() {
       <div
         className={`flex flex-col overflow-hidden bg-sidebar ${showSettings ? "hidden" : ""}`}
       >
-        {/* Title bar — head of the left sidebar region */}
+        {/* Title bar — head of the left sidebar region. The whole bar is the
+             window drag handle: the child buttons are covered by the
+             `#helix-titlebar button` / `[role="button"]` no-drag rules, and the
+             help/window menus are portal-rendered into <body> so they never sit
+             inside this region. */}
         <div
           id="helix-titlebar"
           className="helix-app-titlebar flex items-center justify-between h-10 px-3 shrink-0 select-none"
+          data-tauri-drag-region=""
           style={{ width: titlebarPixelWidth }}
         >
           {/* Left: navigation buttons */}
@@ -1848,11 +1853,6 @@ export function HelixLayout() {
                 document.body,
               )}
           </div>
-
-          {/* Center: drag region (Tauri uses data-tauri-drag-region; the Electron
-            -webkit-app-region CSS is a no-op on Tauri and leaves the window
-            undraggable) */}
-          <div className="flex-1 self-stretch" data-tauri-drag-region="" />
         </div>
 
         {/* Sidebar — hidden in settings mode (owned by ApiSettings there). */}
@@ -2706,7 +2706,11 @@ export function HelixLayout() {
           />
         )}
         {restoreReady && <Onboarding />}
-        <BootOverlay />
+        {/* BootOverlay 单独包一层：它自己的 chunk 到之前先铺黑底，
+            避免主界面先露出来、全屏玻璃面板后突然出现。 */}
+        <Suspense fallback={<div className="fixed inset-0 z-[10000] bg-[#07080b]" />}>
+          <BootOverlay />
+        </Suspense>
         <GlobalTooltip />
         {/* Hidden same-origin snapshot iframe used by the pi browser tools
             (browser_read/click/type/press) — mounted at the layout root so it

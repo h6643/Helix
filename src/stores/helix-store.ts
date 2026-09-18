@@ -3162,7 +3162,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       ),
     })),
 
-  rehydrateSubAgentsFromDisk: (_sessionId, diskAgents) => {
+  rehydrateSubAgentsFromDisk: (sessionId, diskAgents) => {
     if (diskAgents.length === 0) return;
     set((s) => {
       const known = new Set(s.subAgents.map((a) => a.id));
@@ -3186,10 +3186,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             createdAt: Date.now(),
             completedAt: interrupted ? Date.now() : undefined,
             result: d.summary || (interrupted ? "重启时中断" : undefined),
-            // 故意不 stamp 会话键（旧值 `sessionId ?? undefined` 会把重探时
-            // 的 currentSessionId 写进卡片，导致重启恢复到另一个会话时全部
-            // 被 helix-layout 的会话过滤清掉 → 「子 Agent」胶囊消失）。
-            // 无键的卡片对每个会话可见，重启后「已中断/已完成」的历史卡保留。
+            // 必须 stamp 会话键：这些磁盘记录是经「当前会话的 backend sid」查出来的
+            // （checkDelegations 用 resolveBackendSids(currentSessionId)），天然归属
+            // 当前对话。不 stamp 的话卡片对每个会话都可见 → 工作面板会把所有会话的
+            // 历史子 Agent 混在一起（全局共享），正是要修的 bug。stamp 后由
+            // helix-layout 的 `a.sessionId === currentSessionId` 过滤，只在所属对话出现。
+            sessionId: sessionId ?? undefined,
             agentId: d.agentId,
             ...(d.prompt ? { text: d.prompt } : {}),
           };

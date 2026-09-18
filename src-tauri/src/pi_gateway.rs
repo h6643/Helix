@@ -395,29 +395,59 @@ impl PiInstance {
     /// `cwd`, `current_session` and the SESSION_FILES mapping survive so a
     /// respawn lands in the same project and can restore the session.
     fn kill(&self) {
+        log_spawn_diag(&format!("kill({}): entry", self.key()));
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        log_spawn_diag(&format!("kill({}): child cleared", self.key()));
         *self.writer.lock().unwrap() = None;
         self.pending.lock().unwrap().clear();
-        let dead_ids: Vec<String> = self
-            .ui_requests
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for id in dead_ids {
-            UI_REQUEST_OWNERS.lock().unwrap().remove(&id);
-        }
+        let dead_ids: Vec<String> = self.ui_requests.lock().unwrap().keys().cloned().collect();
         self.ui_requests.lock().unwrap().clear();
-        *self.turn_waiter.lock().unwrap() = None;
+        log_spawn_diag(&format!("kill({}): ui_requests cleared", self.key()));
+        // Clean up UI_REQUEST_OWNERS in a separate lock scope — the RPC
+        // paths (extension_ui_request handlers) take ui_requests first,
+        // then UI_REQUEST_OWNERS, so kill() must release ui_requests
+        // before acquiring UI_REQUEST_OWNERS to avoid a lock-ordering
+        // inversion that deadlocks against the reaper thread.
+        log_spawn_diag(&format!("kill({}): acquiring UI_REQUEST_OWNERS", self.key()));
+        {
+            let mut owners = UI_REQUEST_OWNERS.lock().unwrap();
+            for id in &dead_ids {
+                owners.remove(id);
+            }
+        }
+        log_spawn_diag(&format!("kill({}): UI_REQUEST_OWNERS cleared", self.key()));
+        // C: don't silently drop an armed turn waiter — the in-flight
+        // session/prompt would otherwise surface as "pi turn event channel
+        // closed" (raw channel drop) instead of a structured cancellation.
+        // Send a cancelled marker so the RPC waiter gets a clean cancel and
+        // the frontend can treat it as recoverable (reconnect / respawn) rather
+        // than a hard failure. No-op when no waiter is armed.
+        log_spawn_diag(&format!("kill({}): acquiring turn_waiter", self.key()));
+        // 先把 guard 取出来放进 `let`，再对**已拥有**的 Option 做分支。
+        // 不能写成 `if let Some(w) = self.turn_waiter.lock().unwrap().take() { }
+        // else { *self.turn_waiter.lock().unwrap() = None; }` —— 在 edition 2021
+        // 下 `if let` 的 scrutinee 临时值（这里的 MutexGuard）会一直活到整个
+        // `if let` 表达式结束（含 else 块），于是 else 里的第二次 lock() 变成
+        // 对同一把非重入 std::sync::Mutex 的重入 → 自死锁。kill() 卡住 →
+        // spawn_process 走不下去 → get_state 握手永不执行 → initialized 恒 false
+        // → 前端 status() 永远 connected:false → 启动后一直"正在连接网关"。
+        let armed = self.turn_waiter.lock().unwrap().take();
+        if let Some(w) = armed {
+            let _ = w.tx.send(json!({ "cancelled": true }));
+            log_spawn_diag(&format!("kill({}): cancelled armed turn waiter", self.key()));
+        } else {
+            // take() 已经把它变成 None，这里无需再写一次（原本那次冗余写入正是死锁点）。
+            log_spawn_diag(&format!("kill({}): turn_waiter was None", self.key()));
+        }
         self.tool_args.lock().unwrap().clear();
         self.exec_tool_args.lock().unwrap().clear();
         self.executing_tools.lock().unwrap().clear();
         self.initialized.store(false, Ordering::SeqCst);
         self.streaming.store(false, Ordering::SeqCst);
+        log_spawn_diag(&format!("kill({}): exit", self.key()));
     }
 
     /// Stamp `sessionId`/`sessionFile` from a get_state-shaped `data` payload
@@ -519,6 +549,19 @@ impl PiInstance {
                 }
             }
         }
+    }
+}
+
+/// Append a line to the file-based startup diagnostic log (~/.pi/agent/
+/// helix-spawn-debug.log). eprintln goes to the `tauri:dev` terminal, which
+/// is invisible when the app runs from the tray or a release build — this is
+/// the only way a stuck "连接中" badge is reproducible.
+fn log_spawn_diag(message: &str) {
+    use std::io::Write;
+    let path = crate::paths::pi_agent_dir().join("helix-spawn-debug.log");
+    let stamp = now_ms();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "[{stamp}] {message}");
     }
 }
 
@@ -668,9 +711,14 @@ pub fn drop_session_instance(session_id: &str) {
 /// from lib.rs setup, gateway.rs restarts, and the reader-thread self-heal.
 pub fn spawn(state: &Arc<AppState>) -> Result<(), String> {
     let _guard = LIFECYCLE_LOCK.lock().unwrap();
+    log_spawn_diag("spawn: acquired LIFECYCLE_LOCK, spawning main instance");
     start_reaper();
     warm_session_file_index();
     let result = spawn_instance(String::new(), None, state).map(|_| ());
+    log_spawn_diag(&match &result {
+        Ok(()) => "spawn: main instance initialized, gateway ready".to_string(),
+        Err(e) => format!("spawn: main instance FAILED: {e}"),
+    });
     // (Re)fill the warm-spare pool after the main instance is up — its spawn
     // cost is paid off the user's critical path.
     rearm_warm_spares(state);
@@ -802,12 +850,22 @@ fn spawn_instance(
     if instance.initialized.load(Ordering::SeqCst) {
         return Ok(instance);
     }
+    let key = instance.key();
     {
         let _guard = instance.spawn_lock.lock().unwrap();
         if instance.initialized.load(Ordering::SeqCst) {
             return Ok(Arc::clone(&instance));
         }
+        log_spawn_diag(&format!(
+            "spawn_instance({}): start spawn_process",
+            key,
+        ));
         spawn_process(&instance, state)?;
+        log_spawn_diag(&format!(
+            "spawn_instance({}): child up, awaiting get_state ({}s)",
+            key,
+            HANDSHAKE_TIMEOUT.as_secs(),
+        ));
 
         // Pi has no handshake — get_state succeeding proves the RPC is live.
         // A transient child death during the cold-start window (node boot +
@@ -819,6 +877,7 @@ fn spawn_instance(
         // surfaced as an error rather than looped.
         match instance.request_sync("get_state", Value::Null, HANDSHAKE_TIMEOUT) {
             Err(e) if e.contains("process exited") => {
+                let reason = e.clone();
                 eprintln!("[pi agent] get_state failed ({e}); respawning and retrying once");
                 instance.kill();
                 spawn_process(&instance, state)?;
@@ -830,12 +889,19 @@ fn spawn_instance(
                     }
                     Err(e2) => {
                         eprintln!("[pi agent] get_state retry failed: {e2}");
+                        log_spawn_diag(&format!(
+                            "get_state retry failed (initial: {reason}): {e2}"
+                        ));
                         instance.kill();
                         return Err(e2);
                     }
                 }
             }
             Ok(data) => {
+                log_spawn_diag(&format!(
+                    "spawn_instance({}): get_state OK, initializing",
+                    key,
+                ));
                 instance.stamp_session_from_state(Some(&data));
                 instance.initialized.store(true, Ordering::SeqCst);
                 // Pi has no persistent thinking-level config key — re-apply the
@@ -862,6 +928,7 @@ fn spawn_instance(
             }
             Err(e) => {
                 eprintln!("[pi agent] get_state failed: {e}");
+                log_spawn_diag(&format!("get_state failed: {e}"));
                 instance.kill();
                 return Err(e);
             }
@@ -888,6 +955,11 @@ fn get_or_create_instance(key: String, cwd: Option<String>) -> Arc<PiInstance> {
 fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<(), String> {
     let _generation = instance.generation.fetch_add(1, Ordering::SeqCst) + 1;
     instance.kill();
+    log_spawn_diag(&format!(
+        "spawn_process({}): kill done, resolving pi cli -> {}",
+        instance.key(),
+        pi_cli_debug_summary(),
+    ));
 
     // Per-conversation cwd when set; otherwise the global work dir. A stale
     // persisted work dir (folder deleted/moved) falls back to the home dir.
@@ -930,14 +1002,28 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Failed to start pi agent: {e}"))?;
+    let mut child = command.spawn().map_err(|e| {
+        format!(
+            "Failed to start pi agent: {e} — {}. Configure pi.cli_path in config.yaml \
+             (or HELIX_PI_CLI) if Helix should use a specific pi install.",
+            pi_cli_debug_summary()
+        )
+    })?;
+    log_spawn_diag(&format!(
+        "spawn_process({}): child spawned, wiring stdio",
+        instance.key(),
+    ));
     let Some(stdout) = child.stdout.take() else {
         return Err("Failed to open pi agent stdout".into());
     };
     let stderr = child.stderr.take();
     if let Some(stderr) = stderr {
+        // Main-instance stderr is the only place pi's real startup errors
+        // (bad config, provider errors, SQLite lock) surface. Mirror it to
+        // the file diagnostic log so a stuck "连接中" badge is reproducible
+        // even when the app runs from the tray / a release build.
+        let key = instance.key();
+        let is_main = key.is_empty();
         thread::spawn(move || {
             let mut reader = std::io::BufReader::new(stderr);
             let mut line = String::new();
@@ -946,7 +1032,11 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
                 match reader.read_line(&mut line) {
                     Ok(0) => break,
                     Ok(_) => {
-                        eprintln!("[pi agent] stderr: {}", line.trim_end());
+                        let trimmed = line.trim_end();
+                        eprintln!("[pi agent] stderr: {trimmed}");
+                        if is_main {
+                            log_spawn_diag(&format!("child stderr: {trimmed}"));
+                        }
                     }
                     Err(_) => break,
                 }
@@ -1174,6 +1264,11 @@ fn parse_image_data(url: Option<&str>) -> Option<Value> {
     }
 }
 
+/// 重放历史的条数上限（只保留最近 N 轮）。
+const SEED_MAX_TURNS: usize = 40;
+/// 重放历史的字符预算（超了就从最早处丢整轮）。
+const SEED_MAX_CHARS: usize = 24_000;
+
 /// seedHistory → the session-opening user message that re-establishes context
 /// after a session rebuild (session/new {messages: [{role, content}, …]}).
 /// Renders as a transcript the model can continue from; asks for no response
@@ -1210,6 +1305,23 @@ fn seed_history_prompt(messages: Option<&Value>) -> String {
     if turns.is_empty() {
         return String::new();
     }
+    // 上限：只重放**最近**的若干轮，再按字符预算从头丢整轮。前端传的是对话
+    // 全部本地历史（没有截断），长对话一次重建就会把几万 token 灌进新会话，
+    // 既贵又会把模型带偏。近期上下文才是恢复的重点，所以从最早处裁。
+    // 注意**按整轮裁、不做字节切片**——切字节要处理 char 边界（多字节字符
+    // 中间切会 panic），丢整轮天然安全。
+    if turns.len() > SEED_MAX_TURNS {
+        turns.drain(0..turns.len() - SEED_MAX_TURNS);
+    }
+    let mut body_len: usize = turns.iter().map(|t| t.len() + 2).sum();
+    let mut cut = 0usize;
+    while cut + 1 < turns.len() && body_len > SEED_MAX_CHARS {
+        body_len -= turns[cut].len() + 2;
+        cut += 1;
+    }
+    if cut > 0 {
+        turns.drain(0..cut);
+    }
     // Only prepend the "（系统注入…）" marker when a real prior-conversation
     // replay is being re-established (multiple turns). A brand-new
     // conversation (0–1 turn) is returned raw, so a clean session/new no
@@ -1217,7 +1329,7 @@ fn seed_history_prompt(messages: Option<&Value>) -> String {
     // was the root cause of it showing on every restart.
     if turns.len() > 1 {
         return format!(
-            "（系统注入：以下是本次会话恢复的先前对话记录，供你恢复上下文。无需重新执行其中已完成的工作，直接基于这些上下文继续后续对话即可。）\n\n{}",
+            "（系统注入：以下是本次会话恢复的先前对话记录，供你恢复上下文。无需重新执行其中已完成的工作，直接基于这些上下文继续后续对话即可。请只回复一个「好」，不要复述、不要解释这段记录。）\n\n{}",
             turns.join("\n\n")
         );
     }
@@ -1350,6 +1462,15 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
 
     match method {
         "session/new" => {
+            log_spawn_diag(&format!(
+                "session/new: cwd={:?} msgs={}",
+                params.get("cwd").and_then(Value::as_str),
+                params
+                    .get("messages")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0),
+            ));
             // Dedicated instance per conversation: pi keeps ONE active
             // session per process, so a fresh conversation gets a fresh pi
             // child, in the conversation's own project dir. A warm spare
@@ -1363,10 +1484,10 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // No project picked: the conversation must NOT inherit the last
             // used project (persisted workdir.json — the global work_dir).
             // That's how a brand-new chat landed in e.g. the LangGraph dir
-            // just because a previous conversation ran there. The sessions
-            // default dir (`~/.pi/agent/sessions/default`) is the neutral
-            // home; a warm spare (spawned in the global dir) is never
-            // claimed for such a conversation either.
+            // just because a previous conversation ran there. The scratch dir
+            // (`~/.pi/agent/scratch`, outside sessions/) is the neutral home;
+            // a warm spare (spawned in the global dir) is never claimed for
+            // such a conversation either.
             let spawn_cwd = cwd.clone().or_else(|| {
                 Some(
                     crate::state::pi_sessions_default_dir()
@@ -1542,7 +1663,16 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .to_string();
             // Respawns the instance (switch_session restores the reaped
             // conversation from its session file) if it is not live.
-            let instance = instance_for_session(&session_id, &state).await?;
+            log_spawn_diag(&format!("session/resume: sid={session_id}"));
+            let instance = match instance_for_session(&session_id, &state).await {
+                Ok(i) => i,
+                Err(e) => {
+                    log_spawn_diag(&format!(
+                        "session/resume FAILED sid={session_id}: {e}"
+                    ));
+                    return Err(e);
+                }
+            };
             // Restore-time context read for the frontend's context ring:
             // session/new's seed-history replay can re-shape the active
             // branch, so estimate AFTER the switch has landed. `context_max`
@@ -1680,17 +1810,41 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // resume branch is skipped and handleRun falls through to
             // session/new + seedHistory, re-injecting "系统注入" every time.
             // pi CLI's `resume` sidesteps this by scanning the sessions dir;
-            // this RPC gives Helix the same locate-and-resume behavior: find
-            // the newest jsonl whose header `cwd` matches, hand its uuid back,
-            // and the caller resumes it (switch_session, no new file, no
-            // replay). Reads only the 4KB header of each candidate — O(files).
+            // this RPC gives Helix the same locate-and-resume behavior, handing
+            // back the uuid of the matching jsonl so the caller resumes it
+            // (switch_session, no new file, no replay). Reads only the 4KB
+            // header of each candidate — O(files).
+            //
+            // Selection is **行数最多者优先**（见 find_session_file_by_cwd），
+            // 所以这个 RPC 只在 cwd 能唯一圈定对话时才成立。
+            //
+            // 缺 cwd **必须拒绝**，绝不能回退到中立兜底目录
+            // (~/.pi/agent/scratch)：
+            // 有项目的对话 cwd 唯一、语义成立；而所有**无项目**的对话共用同一
+            // 个兜底目录，那个共享桶里"行数最多"= "历史上最长的一条无关对话"。
+            // 一旦回退过去，新建对话会认领别人的老会话、把自己的消息续写进去；
+            // 更糟的是被续写的文件此后永远行数最多 → 每次都抢同一个文件，形成
+            // 不可逆劫持。（2026-09-18 踩过：一次"无项目时也去 resume"的改动让
+            // 新对话挂到了两天前那条含 120KB base64 图片的会话上。）
             let cwd = params
                 .get("cwd")
                 .and_then(Value::as_str)
                 .filter(|c| !c.is_empty())
                 .map(str::to_string)
                 .ok_or("session/latest_for_cwd is missing cwd")?;
-            let best = find_session_file_by_cwd(&cwd);
+            // Optional conversation fingerprint: the caller's first user message.
+            // When present we match by fingerprint (precise, no hijack); otherwise
+            // the legacy "longest chain in this cwd" fallback is used.
+            let first_user_message = params
+                .get("first_user_message")
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty());
+            let best = find_session_file_by_cwd(&cwd, first_user_message);
+            log_spawn_diag(&format!(
+                "latest_for_cwd: cwd={cwd:?} fp={:?} -> {:?}",
+                first_user_message.map(|f| f.chars().take(40).collect::<String>()),
+                best
+            ));
             Ok(json!({ "session_id": best }))
         }
         "session/set_mode" => {
@@ -1960,7 +2114,13 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // cancelled marker; agent_settled will still fire — flag it so
             // the reader thread skips the duplicate session/complete.
             instance.turn_cancelled.store(true, Ordering::SeqCst);
-            if let Some(waiter) = instance.turn_waiter.lock().unwrap().take() {
+            let waiter = {
+                let mut guard = instance.turn_waiter.lock().unwrap();
+                let w = guard.take();
+                drop(guard);
+                w
+            };
+            if let Some(waiter) = waiter {
                 let _ = waiter.tx.send(json!({ "cancelled": true }));
             }
             instance.streaming.store(false, Ordering::SeqCst);
@@ -2433,18 +2593,35 @@ fn estimate_active_branch_by_kind(lines: &[String]) -> (i64, Vec<(&'static str, 
 }
 
 /// Persisted floor anchor for the active branch's next-prompt size: the
-/// largest provider-reported `usage` total on the branch. Assistant message
-/// records carry pi's per-call usage and are written into the jsonl, so the
-/// figure survives a gateway restart — unlike the volatile
-/// `last_context_used` (0 after every respawn). The max over the branch —
-/// not just the last record — keeps the anchor high when a trim/compaction
-/// replay shrank a later request; it is always ≤ the true next-prompt
-/// replay, so it is a safe floor. Returns 0 when the branch has no usage
-/// records yet.
+/// largest provider-reported `usage` total recorded **after the most recent
+/// compaction**. Assistant message records carry pi's per-call usage and are
+/// written into the jsonl, so the figure survives a gateway restart — unlike
+/// the volatile `last_context_used` (0 after every respawn).
+///
+/// Scoped to post-compaction records deliberately: a compaction RESETS the
+/// live context (the summarized messages are replaced by a summary), so a
+/// usage recorded *before* it is a stale PEAK, not a floor. Taking the max
+/// over the whole branch made the ring stick at the pre-compaction high —
+/// observed 186,974 shown while the live branch's newest request was 44,883,
+/// i.e. the "ring says 73% but /compact says session-too-small" paradox.
+/// Returns 0 when there is no usage record after the last compaction yet
+/// (callers fall back to the chars/4 estimate).
 fn jsonl_usage_anchor(lines: &[String], start: usize) -> i64 {
     let parse = |line: &str| serde_json::from_str::<Value>(line).ok();
+    // Everything at or before the newest compaction row belongs to a context
+    // that compaction already replaced → not a valid anchor for THIS branch.
+    // (firstKeptEntryId points to the kept *boundary* which sits before the
+    // compaction row; scanning from the row+1 keeps only genuinely new turns.)
+    let mut from = start;
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(v) = parse(line) {
+            if v.get("type").and_then(Value::as_str) == Some("compaction") {
+                from = from.max(i + 1);
+            }
+        }
+    }
     let mut anchor = 0i64;
-    for line in lines.iter().skip(start) {
+    for line in lines.iter().skip(from) {
         let Some(v) = parse(line) else { continue };
         if v.get("type").and_then(Value::as_str) != Some("message") {
             continue;
@@ -2762,20 +2939,32 @@ fn find_session_file(session_id: &str) -> Option<String> {
     best.map(|(_, path)| path)
 }
 
-/// Pick, among all on-disk sessions sharing a `cwd`, the one with the
-/// most message lines (the most complete conversation), breaking ties by
-/// newest mtime. This is the "true" conversation the user is working on —
-/// not the shortest re-seed replay that a restart produced. Used by
-/// session/latest_for_cwd when the frontend's conversation→sid mapping is
-/// empty (user wiped conversationSessions / a wipe-on-restart), so the
-/// resume target is the longest chain, not the latest stub.
+/// Pick the on-disk pi session file for a conversation's project dir.
 ///
-/// Reads each candidate's jsonl line count (O(file-size); session files
-/// for this user run 9–194 lines, so a full read is a few KB at most).
-fn find_session_file_by_cwd(target_cwd: &str) -> Option<String> {
+/// Two selection modes, chosen by `first_user_message`:
+/// - **None** (legacy / no hint): pick the file with the most message lines
+///   (the most complete conversation), breaking ties by newest mtime. Only
+///   safe when the cwd uniquely identifies the conversation — it would grab a
+///   *different* conversation's file if several share the same cwd.
+/// - **Some(fp)**: match by **conversation fingerprint** — the caller's real
+///   first user message. A cwd-matching file matches when its own first user
+///   message (normalized) **contains** `fp` (normalized); among matches pick the
+///   newest mtime. Containment — not equality — because a rebuilt session's
+///   first user message is the SEED wrapping the real message, so the real
+///   message is a substring, never equal. This recovers a conversation precisely
+///   even when its conversation→sid map entry was lost or its recorded sid died,
+///   WITHOUT hijacking another conversation in the same project dir. Returns
+///   None when no file's first user message contains `fp`, so the caller falls
+///   back to session/new rather than grabbing the wrong conversation.
+///
+/// In fingerprint mode each candidate's header (cwd, O(1)) plus its first user
+/// record (O(file), bounded by that record's position) is read. The legacy mode
+/// reads each candidate's line count (O(file-size)).
+fn find_session_file_by_cwd(target_cwd: &str, first_user_message: Option<&str>) -> Option<String> {
     let target_norm = normalize_path(target_cwd);
-    // (line_count, mtime, sid) — we want the max line_count, then max mtime.
-    let mut best: Option<(u64, std::time::SystemTime, String)> = None;
+    let fp = first_user_message.map(normalize_fingerprint);
+    let mut fp_best: Option<(std::time::SystemTime, String)> = None;
+    let mut longest: Option<(u64, std::time::SystemTime, String)> = None;
     scan_session_files(|id, path| {
         let Some(file_cwd) = read_session_cwd(&path.to_string_lossy()) else {
             return None;
@@ -2783,22 +2972,100 @@ fn find_session_file_by_cwd(target_cwd: &str) -> Option<String> {
         if normalize_path(&file_cwd) != target_norm {
             return None;
         }
-        // Count newlines in the file — pi writes one JSON record per line.
-        let lines = std::fs::read(path).map(|b| b.iter().filter(|&&c| c == b'\n').count()).unwrap_or(0);
         let modified = path
             .metadata()
             .and_then(|m| m.modified())
             .ok()
             .unwrap_or(std::time::UNIX_EPOCH);
-        if best
-            .as_ref()
-            .is_none_or(|(bl, bm, _)| (lines as u64, modified) > (*bl, *bm))
-        {
-            best = Some((lines as u64, modified, id.to_string()));
+        if let Some(fp) = &fp {
+            if let Some(first) = read_first_user_message(&path.to_string_lossy()) {
+                // CONTAINMENT, not equality: the caller's fingerprint is the
+                // conversation's *real* first user message, but a rebuilt
+                // session's first user message is the whole SEED — the marker
+                // "（系统注入…）" + "[用户]\n{real message}" + "[助手]…". The real
+                // first message is therefore a SUBSTRING of the file's first
+                // user message, and exact equality never matches (that was the
+                // bug: recovery always fell through to session/new, minting a
+                // fresh .jsonl on every restart). Require ≥3 normalized chars so
+                // a 1–2 char first message can't spuriously match everything.
+                if fp.chars().count() >= 3
+                    && normalize_fingerprint(&first).contains(fp.as_str())
+                    && fp_best
+                        .as_ref()
+                        .is_none_or(|(m, _)| *m < modified)
+                {
+                    fp_best = Some((modified, id.to_string()));
+                }
+            }
+        } else {
+            // Count newlines in the file — pi writes one JSON record per line.
+            let lines =
+                std::fs::read(path).map(|b| b.iter().filter(|&&c| c == b'\n').count()).unwrap_or(0);
+            if longest
+                .as_ref()
+                .is_none_or(|(bl, bm, _)| (lines as u64, modified) > (*bl, *bm))
+            {
+                longest = Some((lines as u64, modified, id.to_string()));
+            }
         }
         None::<()>
     });
-    best.map(|(_, _, id)| id)
+    fp_best
+        .map(|(_, id)| id)
+        .or_else(|| longest.map(|(_, _, id)| id))
+}
+
+/// Normalize a message into a comparison key: lowercase + collapse all
+/// whitespace (incl. newlines) to single spaces. Two first-user messages count
+/// as "the same conversation" when their normalized forms match, regardless of
+/// incidental whitespace / casing drift between the local chat store and the
+/// pi session jsonl.
+fn normalize_fingerprint(s: &str) -> String {
+    s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Read the first user turn's text from a pi session jsonl. Returns None if the
+/// file has no user turn yet, or can't be read. Stops at the first user record
+/// (O(file) but bounded by that record's position).
+fn read_first_user_message(session_file: &str) -> Option<String> {
+    let Ok(content) = std::fs::read_to_string(session_file) else {
+        return None;
+    };
+    for line in content.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let role = v
+            .get("message")
+            .and_then(|m| m.get("role"))
+            .and_then(Value::as_str)
+            .or_else(|| v.get("role").and_then(Value::as_str));
+        if role != Some("user") {
+            continue;
+        }
+        let content = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .or_else(|| v.get("content"));
+        let text = match content {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(blocks)) => {
+                let mut t = String::new();
+                for b in blocks {
+                    if let Some(Value::String(s)) = b.get("text") {
+                        t.push_str(s);
+                    }
+                }
+                t
+            }
+            _ => continue,
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        return Some(text);
+    }
+    None
 }
 
 /// Lowercase + collapse path separators to '/' + strip a trailing slash, for
@@ -4097,15 +4364,6 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             // would fabricate a `done` for a run whose real prompt is still
             // queued behind the seed, ending the view early ("输出消失").
             let had_waiter = instance.turn_waiter.lock().unwrap().is_some();
-            let release = |waiter: &mut Option<TurnWaiter>| {
-                if let Some(w) = waiter.take() {
-                    let _ = w.tx.send(if cancelled {
-                        json!({ "cancelled": true })
-                    } else {
-                        json!({ "type": "agent_settled" })
-                    });
-                }
-            };
             instance.streaming.store(false, Ordering::SeqCst);
             if had_waiter && !cancelled {
                 // Attach the authoritative final text/thinking captured at
@@ -4126,15 +4384,23 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     }),
                 );
             }
-            // Always settle the waiter (no-op when none is armed). The turn is
-            // over, so the session/prompt RPC waiting on it must not stay
-            // pending: leaving it armed made the call end as
-            // "pi turn event channel closed" — the waiter was dropped later by
-            // the next prompt (:1802) or by kill() / process death. The
-            // no-waiter case (seed turn settling before the real prompt
-            // arrives) releases as cancelled so the settled state doesn't
-            // linger as a stale completion.
-            release(&mut *instance.turn_waiter.lock().unwrap());
+            // Settle the waiter. The guard must be DROPPED before calling
+            // w.tx.send() — send() can block on tokio runtime contention,
+            // and holding the guard across it wedges kill()'s turn_waiter
+            // lock (deadlock at startup).
+            let waiter = {
+                let mut guard = instance.turn_waiter.lock().unwrap();
+                let w = guard.take();
+                drop(guard);
+                w
+            };
+            if let Some(w) = waiter {
+                let _ = w.tx.send(if cancelled {
+                    json!({ "cancelled": true })
+                } else {
+                    json!({ "type": "agent_settled" })
+                });
+            }
         }
         "auto_retry_start" => {
             let message_text = message
@@ -4405,20 +4671,28 @@ fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
 /// makes every later spawn block on it ("process exited" cascades).
 ///
 /// Resolution order:
+///  0. an explicit override — `HELIX_PI_CLI` (dev escape hatch) or
+///     `pi.cli_path` in config.yaml (persistent). This is how Helix runs a
+///     local pi fork instead of the npm-installed upstream package, and it is
+///     the ONLY way to keep the gateway working after the npm package is
+///     uninstalled;
 ///  1. `<data_dir>/npm/node_modules/.../cli.js` (npm global prefix);
 ///  2. any `pi.cmd` / `pi` shim on PATH — parse it for its cli.js path
 ///     (same file npm's shim invokes) and run that under node directly.
 /// A `pi.cmd`-style shim references the SAME install as (1), so (2) is a
 /// different npm prefix (or none found) only in exotic setups.
 #[cfg(windows)]
-fn resolve_pi_cli() -> Option<(PathBuf, PathBuf)> {
+fn resolve_pi_cli() -> Option<(PathBuf, PathBuf, &'static str)> {
+    if let Some(hit) = pi_cli_override() {
+        return Some(hit);
+    }
     // 1. npm global prefix under the data dir. On Windows npm's default
     // global prefix lives in %APPDATA%\npm (Roaming), not %LOCALAPPDATA%\npm,
     // so probe both (and the generic data_dir) before falling back to PATH.
     for candidate in npm_global_prefixes() {
         let cli_js = candidate.join("node_modules").join("@earendil-works/pi-coding-agent").join("dist/bundle/cli.js");
         if cli_js.is_file() {
-            return Some((pi_node(&candidate), cli_js));
+            return Some((pi_node(&candidate), cli_js, "npm-global"));
         }
     }
     // 2. Walk PATH for a pi shim; read the cli.js path out of it.
@@ -4443,11 +4717,78 @@ fn resolve_pi_cli() -> Option<(PathBuf, PathBuf)> {
                 .replace('\\', "/");
             let cli_js = PathBuf::from(dir).join(rel);
             if cli_js.is_file() {
-                return Some((pi_node(&PathBuf::from(dir)), cli_js));
+                return Some((pi_node(&PathBuf::from(dir)), cli_js, "path-shim"));
             }
         }
     }
     None
+}
+
+/// Trim an env/config supplied path: whitespace and one layer of quotes
+/// (Windows users paste `"D:\path\cli.js"` straight out of Explorer).
+fn clean_override_path(raw: &str) -> String {
+    let t = raw.trim();
+    let t = t.strip_prefix('"').unwrap_or(t);
+    let t = t.strip_suffix('"').unwrap_or(t);
+    t.trim().to_string()
+}
+
+/// `pi.cli_path` / `pi.node_path` from config.yaml (Helix data dir). Read with
+/// the same hand-rolled block parser the `vision:` block uses — config.yaml is
+/// deliberately never parsed with a real YAML library.
+fn pi_cli_from_config() -> Option<(PathBuf, Option<PathBuf>)> {
+    let read = |key: &str| -> Option<String> {
+        let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).ok()?;
+        let block = crate::config::read_yaml_block(&yaml, "pi");
+        let v = clean_override_path(block.get(key)?.as_str()?);
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    };
+    let cli = PathBuf::from(read("cli_path")?);
+    if !cli.is_file() {
+        return None;
+    }
+    Some((cli, read("node_path").map(PathBuf::from)))
+}
+
+/// The explicit pi CLI override, highest priority in `resolve_pi_cli`.
+/// Returns `(node, cli_js, source)`. Source is only used for the spawn log.
+///
+/// A configured-but-missing path does NOT hard-fail: it is logged and the
+/// normal npm/PATH discovery runs instead, so a typo can never brick the
+/// gateway — the spawn log line always names the source actually used, which
+/// is what makes the fallback visible rather than silent.
+fn pi_cli_override() -> Option<(PathBuf, PathBuf, &'static str)> {
+    if let Ok(raw) = std::env::var("HELIX_PI_CLI") {
+        let cli = clean_override_path(&raw);
+        if !cli.is_empty() {
+            let cli = PathBuf::from(cli);
+            if cli.is_file() {
+                let node = std::env::var("HELIX_PI_NODE")
+                    .ok()
+                    .map(|v| clean_override_path(&v))
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("node"));
+                return Some((node, cli, "env:HELIX_PI_CLI"));
+            }
+            log_spawn_diag(&format!(
+                "pi_cli_override: HELIX_PI_CLI={} is not a file, falling through",
+                raw
+            ));
+        }
+    }
+    match pi_cli_from_config() {
+        Some((cli, node)) => Some((
+            node.unwrap_or_else(|| PathBuf::from("node")),
+            cli,
+            "config:pi.cli_path",
+        )),
+        None => None,
+    }
 }
 
 /// Candidate npm global prefix dirs: data_dir/npm (Linux/macOS style) and
@@ -4478,7 +4819,7 @@ fn pi_node(install_dir: &PathBuf) -> PathBuf {
 #[cfg(windows)]
 pub fn pi_cli_args() -> (Command, Vec<String>) {
     match resolve_pi_cli() {
-        Some((node, cli_js)) => {
+        Some((node, cli_js, _source)) => {
             let mut command = Command::new(&node);
             let cli_js = cli_js.to_string_lossy().into_owned();
             command.arg(&cli_js);
@@ -4491,9 +4832,47 @@ pub fn pi_cli_args() -> (Command, Vec<String>) {
     }
 }
 
+/// One line naming what the next spawn will actually run, and where that
+/// answer came from (`config:pi.cli_path` / `env:HELIX_PI_CLI` /
+/// `npm-global` / `path-shim`). Written to the spawn log on every spawn so
+/// "which pi am I running?" is never a guessing game again.
+#[cfg(windows)]
+pub fn pi_cli_debug_summary() -> String {
+    match resolve_pi_cli() {
+        Some((node, cli_js, source)) => format!(
+            "pi cli = {} [source: {}; node: {}]",
+            cli_js.display(),
+            source,
+            node.display()
+        ),
+        None => "pi cli = NOT FOUND (tried HELIX_PI_CLI, config.yaml pi.cli_path, \
+                 npm global prefix, PATH shim)"
+            .to_string(),
+    }
+}
+
 #[cfg(not(windows))]
 pub fn pi_cli_args() -> (Command, Vec<String>) {
+    if let Some((node, cli_js, _source)) = pi_cli_override() {
+        let mut command = Command::new(&node);
+        let cli_js = cli_js.to_string_lossy().into_owned();
+        command.arg(&cli_js);
+        return (command, vec![cli_js]);
+    }
     (Command::new("pi"), vec![])
+}
+
+#[cfg(not(windows))]
+pub fn pi_cli_debug_summary() -> String {
+    match pi_cli_override() {
+        Some((node, cli_js, source)) => format!(
+            "pi cli = {} [source: {}; node: {}]",
+            cli_js.display(),
+            source,
+            node.display()
+        ),
+        None => "pi cli = `pi` from PATH".to_string(),
+    }
 }
 
 /// pi CLI program + base argv as plain strings, for tokio::process::Command

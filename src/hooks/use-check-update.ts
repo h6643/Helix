@@ -18,8 +18,7 @@ export async function getCurrentVersion(): Promise<string | null> {
 }
 
 /**
- * 启动时静默检查 pi agent 更新（npm registry）。后端 agent 是外部的
- * pi 包（@earendil-works/pi-coding-agent）
+ * 启动时静默检查 pi agent 更新（npm registry）
  */
 export function useCheckUpdate() {
   useEffect(() => {
