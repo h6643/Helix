@@ -440,22 +440,20 @@ fn merged_subagents_settings(cwd: &Path) -> HashMap<String, serde_json::Value> {
 
 /// The three agent dirs in load precedence order (project highest), plus the
 /// extension's own bundled agents dir (lowest precedence — these are fallback
-/// agent types shipped with pi-subagents, e.g. claude.md / codex.md in
-/// `~/.pi/agent/extensions/pi-subagents-master/agents/`).
+/// agent types shipped with pi-subagents, e.g. claude.md / codex.md under
+/// `~/.pi/agent/extensions/<variant>/agents/`).
 fn subagent_agent_roots() -> Vec<PathBuf> {
     let cwd = subagents_work_dir();
-    let ext = plugins_dir();
-    let ext_dir = ext
-        .join("pi-subagents-master")
-        .join("agents")
-        .clone();
     let mut roots = vec![
         cwd.join(".pi").join("agents"),
         cwd.join(".agents").join("agents"),
         global_agents_dir(),
     ];
-    if ext_dir.is_dir() {
-        roots.push(ext_dir);
+    if let Some(ext_dir) = find_subagents_ext_dir() {
+        let bundled = ext_dir.join("agents");
+        if bundled.is_dir() {
+            roots.push(bundled);
+        }
     }
     roots
 }

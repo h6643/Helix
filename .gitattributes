@@ -2,15 +2,43 @@
 # Stops Git's autocrlf=true from rewriting LF->CRLF on checkout (which emits
 # "LF will be replaced by CRLF" warnings) and keeps line endings consistent
 # across Windows / Linux / macOS contributors.
+# ============================================================
+# 默认：Git 自动识别文本，检出时统一用 LF（跨平台一致）
+# 这是最安全的基础规则，二进制会被自动跳过，无需逐个声明
+# ============================================================
 * text=auto eol=lf
 
-# Explicit binary guards so Git never tries to normalize them.
-*.png binary
-*.jpg binary
-*.jpeg binary
-*.ico binary
-*.gif binary
-*.woff binary
+# ============================================================
+# 显式二进制守卫（防止 Git 误判某些二进制为文本）
+# 虽然 text=auto 通常能识别，但显式声明更保险
+# ============================================================
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.gif   binary
+*.woff  binary
 *.woff2 binary
-*.ttf binary
-*.eot binary
+*.ttf   binary
+*.eot   binary
+
+# ============================================================
+# 文本文件：明确用 LF
+# ============================================================
+*.rs    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+
+# ============================================================
+# Windows 专用脚本：保持 CRLF
+# ============================================================
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
