@@ -87,11 +87,6 @@ pub fn helix_get_skills_dir() -> Option<String> {
 }
 
 #[tauri::command]
-pub fn helix_get_plugins_dir() -> Option<String> {
-    plugins_dir().to_str().map(str::to_string)
-}
-
-#[tauri::command]
 pub fn helix_read_dir(dir_path: String) -> Vec<DirEntryInfo> {
     let Ok(entries) = std::fs::read_dir(&dir_path) else {
         return vec![];
@@ -376,16 +371,46 @@ fn global_agents_dir() -> PathBuf {
 }
 
 /// The extension is installed under one of these roots (this machine uses
-/// `extensions/pi-subagents-master`). Without it the Agent tool doesn't
-/// exist, so the settings section stays hidden.
+/// Candidate directory names the pi-subagents extension is known to install
+/// under `~/.pi/agent/extensions/` (and npm-global). Different install paths
+/// (git clone vs `pi install npm:pi-subagents` vs local dev checkout) land under
+/// different folder names, so probe all of them instead of a single hard-coded
+/// one — otherwise the extension's own bundled agents (claude.md / codex.md)
+/// stay invisible to `helix_list_subagents`.
+const SUBAGENTS_EXT_DIR_NAMES: &[&str] = &[
+    "pi-subagents",
+    "pi-subagents-master",
+    "subagents",
+];
+
+/// `extensions/pi-subagents-master` (or any known variant). Without it the Agent
+/// tool doesn't exist, so the settings section stays hidden.
 fn subagents_extension_installed() -> bool {
     let ext = plugins_dir();
-    ext.join("pi-subagents").is_dir()
-        || ext.join("pi-subagents-master").is_dir()
-        || pi_npm_dir()
-            .join("node_modules")
-            .join("pi-subagents")
-            .is_dir()
+    if SUBAGENTS_EXT_DIR_NAMES
+        .iter()
+        .any(|name| ext.join(name).is_dir())
+    {
+        return true;
+    }
+    pi_npm_dir()
+        .join("node_modules")
+        .join("pi-subagents")
+        .is_dir()
+}
+
+/// Resolve which of the candidate extension dir names actually exists on disk,
+/// so the bundled `agents/` folder can be located regardless of how the
+/// extension was installed. Returns `None` when none of them exist.
+fn find_subagents_ext_dir() -> Option<std::path::PathBuf> {
+    let ext = plugins_dir();
+    for name in SUBAGENTS_EXT_DIR_NAMES {
+        let dir = ext.join(name);
+        if dir.is_dir() {
+            return Some(dir);
+        }
+    }
+    None
 }
 
 /// Helix's current work dir — the cwd pi instances run with, and therefore
@@ -633,9 +658,6 @@ pub fn helix_list_subagents() -> Vec<SubagentPreset> {
         }
     }
     // Highest-precedence dir first; later entries are dropped on id clash.
-    let ext_dir = plugins_dir()
-        .join("pi-subagents-master")
-        .join("agents");
     let dirs: Vec<(std::path::PathBuf, &str)> = vec![
         (cwd.join(".pi").join("agents"), "project"),
         (cwd.join(".agents").join("agents"), "workspace"),
@@ -653,10 +675,13 @@ pub fn helix_list_subagents() -> Vec<SubagentPreset> {
     // built-in defaults: source "default" so the UI treats them the same as
     // the compiled presets, but their definitions live in the .md files so
     // they can be updated without recompiling.
-    if ext_dir.is_dir() {
-        for mut p in scan_agent_dir(&ext_dir, "extension") {
-            p.source = "default".to_string();
-            push(p, &mut out, &mut seen);
+    if let Some(ext_dir) = find_subagents_ext_dir() {
+        let bundled = ext_dir.join("agents");
+        if bundled.is_dir() {
+            for mut p in scan_agent_dir(&bundled, "extension") {
+                p.source = "default".to_string();
+                push(p, &mut out, &mut seen);
+            }
         }
     }
     out

@@ -1,14 +1,6 @@
 import type { HooksConfig } from "@/lib/hooks-config";
 import type { ScheduledTask } from "@/stores/helix-store";
 
-export interface MemoryProviderInfo {
-  name: string;
-  description?: string;
-  available: boolean;
-  configured: boolean;
-  status: "missing" | "unavailable" | "needs_config" | "ready";
-}
-
 export interface ElectronAPI {
   fs: {
     read: (filePath: string) => Promise<string>;
@@ -43,7 +35,6 @@ export interface ElectronAPI {
 
   helixSkills: {
     getDir: () => Promise<string | null>;
-    getPluginsDir: () => Promise<string | null>;
     readdir: (
       dirPath: string,
     ) => Promise<Array<{ name: string; isDirectory: boolean }>>;
@@ -163,7 +154,6 @@ export interface ElectronAPI {
     syncWorkDir: (
       dir: string,
     ) => Promise<{ success: boolean; workDir: string }>;
-    getHelixVersion: () => Promise<string | null>;
     getDataRoot: () => Promise<{
       dataRoot: string;
       dataRootDefault: string;
@@ -219,44 +209,16 @@ export interface ElectronAPI {
       session_id?: string;
     }) => Promise<any>;
     getConfig: () => Promise<any>;
-    // Raw config.yaml read/write via the gateway REST API (memory/compression settings).
-    getRawConfig: () => Promise<{
-      ok: boolean;
-      config?: Record<string, any>;
-      error?: string;
-    }>;
-    setRawConfig: (
-      patch: Record<string, any>,
-    ) => Promise<{ ok: boolean; error?: string }>;
-    // External memory provider config (serve gateway /api/memory/*).
-    getMemoryStatus: () => Promise<{
-      ok: boolean;
-      status?: {
-        active: string;
-        providers: Array<MemoryProviderInfo>;
-        builtin_files: Record<string, number>;
-      };
-      error?: string;
-    }>;
     setYamlKey: (key: string, value: any) => Promise<any>;
     setDelegationIdentities: (
       identities: Array<{ name: string; system_prompt: string }>,
     ) => Promise<{ success: boolean; changed?: boolean; error?: string }>;
-    listPersonalities: () => Promise<any>;
-    setPersonality: (params: { name: string; prompt?: string }) => Promise<any>;
     setModel: (params: {
       model: string;
       baseUrl?: string;
       apiKey?: string;
       provider?: string;
     }) => Promise<any>;
-    setAgentConfig: (params: {
-      reasoningEffort?: string;
-      personality?: string;
-      fastMode?: boolean;
-    }) => Promise<any>;
-    // Fast path: persist agent.reasoning_effort without a gateway restart.
-    setReasoningEffort: (params: { reasoningEffort: string }) => Promise<any>;
     fetchModels: (params: any) => Promise<any>;
     onEvent: (callback: (method: any, params: any) => void) => () => void;
     // ── Memory sync (Helix backend memory_manager: MEMORY.md / USER.md) ──
@@ -273,17 +235,8 @@ export interface ElectronAPI {
       target: "memory" | "user",
       text: string,
     ) => Promise<{ ok: boolean; entries?: string[] }>;
-    // External memory provider auto-install (spawns `helix plugins install`).
-    installPlugin: (
-      identifier: string,
-      force?: boolean,
-    ) => Promise<{
-      ok: boolean;
-      message?: string;
-      error?: string;
-    }>;
     // Subagent global settings (config.yaml `subagents:` block, read/write;
-    // mirrored into the pi-subagents extension's subagents.json on save).
+    // mirrored into the pi-subagents extension's settings.json on save).
     listSubagentSettings: () => Promise<{
       ok: boolean;
       settings?: Record<string, unknown>;
@@ -321,15 +274,6 @@ export interface ElectronAPI {
     // Delete a custom agent's .md (the extension's Delete unlinks the file).
     deleteSubagent: (name: string) => Promise<void>;
     // Pi agent commands (extensions / skills / prompts / models)
-    piGetCommands: () => Promise<{
-      commands: Array<{
-        name: string;
-        description?: string;
-        source: "extension" | "prompt" | "skill";
-        location?: "user" | "project" | "path";
-        path?: string;
-      }>;
-    }>;
     piListInstalled: () => Promise<{
       items: Array<{
         name: string;
@@ -374,44 +318,7 @@ export interface ElectronAPI {
         };
       }>;
     }>;
-    piGetState: () => Promise<{
-      model: {
-        id: string;
-        name: string;
-        provider: string;
-        contextWindow: number;
-      } | null;
-      thinkingLevel: string;
-      isStreaming: boolean;
-      sessionFile: string | null;
-      sessionId: string | null;
-    }>;
-    piSetModel: (
-      provider: string,
-      modelId: string,
-    ) => Promise<{ model: unknown }>;
-    piSetThinkingLevel: (level: string) => Promise<{ success: boolean }>;
     piSetThinkingLevelAll: (level: string) => Promise<{ success: boolean }>;
-    piCompact: () => Promise<{
-      summary: string;
-      tokensBefore: number;
-      estimatedTokensAfter: number;
-    }>;
-    piGetSessionStats: () => Promise<{
-      tokens: {
-        input: number;
-        output: number;
-        cacheRead: number;
-        cacheWrite: number;
-        totalTokens: number;
-      };
-      cost: number;
-      contextUsage: {
-        tokens: number;
-        contextWindow: number;
-        percent: number;
-      };
-    }>;
     piSearchPackages: (query: string) => Promise<{
       packages: Array<{
         name: string;
@@ -447,28 +354,6 @@ export interface ElectronAPI {
         latest: string | null;
         hasUpdate?: boolean;
       }>;
-    }>;
-    piPackageLatest: (name: string) => Promise<{ latest: string | null }>;
-    cronList: () => Promise<{
-      success: boolean;
-      jobs?: unknown;
-      error?: string;
-    }>;
-    cronCreate: (
-      schedule: string,
-      command: string,
-      name?: string,
-    ) => Promise<{ success: boolean; output?: string; error?: string }>;
-    cronDelete: (
-      jobId: string,
-    ) => Promise<{ success: boolean; output?: string; error?: string }>;
-    cronRun: (
-      jobId: string,
-    ) => Promise<{ success: boolean; output?: string; error?: string }>;
-    doctor: () => Promise<{
-      success: boolean;
-      output?: string;
-      error?: string;
     }>;
   };
 
@@ -565,11 +450,6 @@ export interface ElectronAPI {
 
   // ── External services (server / VM TCP reachability probe) ──
   external: {
-    testConnection: (
-      host: string,
-      port: number | string,
-      timeoutMs?: number,
-    ) => Promise<{ ok: boolean; error?: string; latencyMs?: number }>;
     // Real SSH session management (ssh2 in main process; secret decrypted in main).
     sshConnect: (params: {
       host: string;
@@ -579,23 +459,9 @@ export interface ElectronAPI {
       secretEncrypted?: boolean;
       secret: string;
     }) => Promise<{ ok: boolean; error?: string; banner?: string }>;
-    sshExec: (params: { command: string; cwd?: string }) => Promise<{
-      ok: boolean;
-      stdout?: string;
-      stderr?: string;
-      code?: number;
-      error?: string;
-    }>;
-    sshStatus: () => Promise<{
-      connected: boolean;
-      host?: string;
-      username?: string;
-    }>;
-    sshDisconnect: () => Promise<{ ok: boolean }>;
     onSshConnected: (
       cb: (data: { host: string; username: string }) => void,
     ) => () => void;
-    onSshList: (cb: (data: string) => void) => () => void;
   };
   isElectron: boolean;
 

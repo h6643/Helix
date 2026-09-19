@@ -25,71 +25,6 @@ export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-/**
- * Open a URL in a real in-app browser window (Tauri `WebviewWindow`).
- *
- * WHY this is needed: Tauri's main webview cannot embed external sites via
- * `<iframe>` (the OS webview engine blocks cross-origin framing / navigation the
- * way Electron's `<webview>` guest tag does). So the embedded sidebar browser is
- * dead for external links in Tauri. A `WebviewWindow` is a SEPARATE, fully
- * functional browser instance that loads any URL — this is the Tauri-native
- * equivalent of "open the link in the in-app browser".
- *
- * One reusable window is kept: re-clicking a link navigates the existing window
- * instead of spawning a new one each time.
- */
-let tauriBrowserLabel = "helix-browser";
-export async function openTauriBrowser(url: string): Promise<void> {
-  if (!isTauri()) return;
-  const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-  // Tauri's JS API has no runtime "navigate to URL" method on an existing
-  // webview, so to reuse one browser window we close any existing one first and
-  // open a fresh window at the target URL (keyed by a stable label).
-  try {
-    const existing = await WebviewWindow.getByLabel(tauriBrowserLabel);
-    if (existing) await existing.close().catch(() => {});
-  } catch {
-    /* fall through to create */
-  }
-
-  // Position the new window to the right of the main window, sized to ~60% width.
-  let x = 140;
-  let y = 80;
-  let w = 1000;
-  let h = 760;
-  try {
-    const win = getCurrentWindow();
-    const outer = await win.outerPosition(); // PhysicalPosition (device px)
-    const sf = await win.scaleFactor();
-    const size = await win.innerSize(); // PhysicalSize (device px)
-    const lx = outer.x / sf;
-    const ly = outer.y / sf;
-    const lw = size.width / sf;
-    const lh = size.height / sf;
-    w = Math.max(640, Math.min(1280, Math.round(lw * 0.62)));
-    h = Math.max(480, Math.round(lh * 0.9));
-    x = Math.round(lx + lw - w - 24);
-    y = Math.round(ly + 36);
-  } catch {
-    /* use defaults */
-  }
-
-  const win = new WebviewWindow(tauriBrowserLabel, {
-    url,
-    title: "Helix 浏览器",
-    width: w,
-    height: h,
-    x,
-    y,
-    resizable: true,
-    decorations: true,
-    focus: true,
-  });
-  win.once("tauri://error", (e: unknown) => {
-    console.error("[helix] browser window failed to open:", e);
-  });
-}
-
 async function subscribeHelixEvents(): Promise<void> {
   if (unlistenPromise) return;
   unlistenPromise = (async () => {
@@ -242,7 +177,6 @@ function buildTauriAPI(): ElectronAPI {
   // ── helixSkills ────────────────────────────────────────────────────────
   api.helixSkills = {
     getDir: () => invoke("helix_get_skills_dir"),
-    getPluginsDir: () => invoke("helix_get_plugins_dir"),
     readdir: (dirPath: string) => invoke("helix_read_dir", { dirPath }),
     readFile: (filePath: string) => invoke("helix_read_file", { filePath }),
     deleteDir: (dirPath: string) => invoke("helix_delete_dir", { dirPath }),
@@ -313,7 +247,6 @@ function buildTauriAPI(): ElectronAPI {
     getInfo: () => invoke("get_info"),
     setWorkDir: (dir: string) => invoke("set_work_dir", { dir }),
     syncWorkDir: (dir: string) => invoke("sync_work_dir", { dir }),
-    getHelixVersion: () => invoke("get_helix_version"),
     getDataRoot: () => invoke("get_data_root"),
     setDataRoot: (path: string) => invoke("set_data_root", { path }),
     // HTTP 代理（修改后需重启应用生效）
@@ -341,23 +274,11 @@ function buildTauriAPI(): ElectronAPI {
     getGatewayInfo: () => invoke("helix_get_gateway_info"),
     setConfig: (config: unknown) => invoke("helix_set_config", { config }),
     getConfig: () => invoke("helix_get_config"),
-    getRawConfig: () => invoke("helix_get_raw_config"),
-    setRawConfig: (patch: unknown) => invoke("helix_set_raw_config", { patch }),
-    getMemoryStatus: () => invoke("helix_get_memory_status"),
-    // Memory provider config commands were serve-backend stubs; removed with
-    // the pi migration (no backend implementation, no UI callers).
     setYamlKey: (key: string, value: unknown) =>
       invoke("helix_set_yaml_key", { key, value }),
     setDelegationIdentities: (identities: unknown) =>
       invoke("helix_set_delegation_identities", { identities }),
-    listPersonalities: () => invoke("helix_list_personalities"),
-    setPersonality: (params: unknown) =>
-      invoke("helix_set_personality", { params }),
     setModel: (params: unknown) => invoke("helix_set_model", { params }),
-    setAgentConfig: (params: unknown) =>
-      invoke("helix_set_agent_config", { params }),
-    setReasoningEffort: (params: unknown) =>
-      invoke("helix_set_reasoning_effort", { params }),
     fetchModels: (params: { baseUrl: string; apiKey: string }) =>
       invoke("helix_fetch_models", {
         baseUrl: params.baseUrl,
@@ -374,8 +295,6 @@ function buildTauriAPI(): ElectronAPI {
     approvalRespond: (params: unknown) =>
       invoke("helix_approval_respond", { params }),
     update: () => invoke("helix_update"),
-    installPlugin: (identifier: string, force?: boolean) =>
-      invoke("helix_install_plugin", { identifier, force: force ?? false }),
     // Subagent presets bundled with the pi-subagents extension (surfaced in the
     // Subagent settings page alongside user identities). deleteSubagent moves
     // the preset's agents/<name>.md out of the scanned dir (recoverable backup).
@@ -386,18 +305,10 @@ function buildTauriAPI(): ElectronAPI {
       invoke("helix_set_subagent_model", { name, model }),
     deleteSubagent: (name: string) => invoke("helix_delete_subagent", { name }),
     // Pi agent commands (extensions / skills / prompts / models)
-    piGetCommands: () => invoke("pi_get_commands"),
     piListInstalled: () => invoke("pi_list_installed"),
     piGetAvailableModels: () => invoke("pi_get_available_models"),
-    piGetState: () => invoke("pi_get_state"),
-    piSetModel: (provider: string, modelId: string) =>
-      invoke("pi_set_model", { provider, modelId }),
-    piSetThinkingLevel: (level: string) =>
-      invoke("pi_set_thinking_level", { level }),
     piSetThinkingLevelAll: (level: string) =>
       invoke("pi_set_thinking_level_all", { level }),
-    piCompact: () => invoke("pi_compact"),
-    piGetSessionStats: () => invoke("pi_get_session_stats"),
     piSearchPackages: (query: string) =>
       invoke("pi_search_packages", { query }),
     piInstallPackage: (pkg: string) =>
@@ -407,13 +318,6 @@ function buildTauriAPI(): ElectronAPI {
     piSetPackageEnabled: (pkg: string, enabled: boolean) =>
       invoke("pi_set_package_enabled", { package: pkg, enabled }),
     piCheckUpdates: () => invoke("pi_check_updates"),
-    piPackageLatest: (name: string) => invoke("pi_package_latest", { name }),
-    cronList: () => invoke("helix_cron_list"),
-    cronCreate: (schedule: string, command: string, name?: string) =>
-      invoke("helix_cron_create", { schedule, command, name: name ?? null }),
-    cronDelete: (jobId: string) => invoke("helix_cron_delete", { jobId }),
-    cronRun: (jobId: string) => invoke("helix_cron_run", { jobId }),
-    doctor: () => invoke("helix_doctor"),
   };
 
   // ── profile ─────────────────────────────────────────────────────────────
@@ -461,8 +365,6 @@ function buildTauriAPI(): ElectronAPI {
 
   // ── external (TCP probe + SSH implemented) ──────────────────────────────
   api.external = {
-    testConnection: (host: string, port: number | string, timeoutMs?: number) =>
-      invoke("test_connection", { host, port, timeoutMs: timeoutMs ?? null }),
     sshConnect: (params: {
       host: string;
       port: number;
@@ -470,12 +372,7 @@ function buildTauriAPI(): ElectronAPI {
       authType: string;
       secret: string;
     }) => invoke("ssh_connect", params),
-    sshExec: (params: { conn_id: string; command: string }) =>
-      invoke("ssh_exec", params),
-    sshStatus: (conn_id: string) => invoke("ssh_status", { conn_id }),
-    sshDisconnect: (conn_id: string) => invoke("ssh_disconnect", { conn_id }),
     onSshConnected: () => () => {},
-    onSshList: () => () => {},
   };
 
   // ── hooks ───────────────────────────────────────────────────────────────
@@ -505,7 +402,7 @@ function buildTauriAPI(): ElectronAPI {
   };
 
   // ── subagent settings (config.yaml `subagents:` block, read/write,
-  //     mirrored into the extension's subagents.json on save) ─────────
+  //     mirrored into the extension's settings.json on save) ─────────
   api.subagentsConfig = {
     list: () => invoke("subagents_settings_list"),
     save: (settings: unknown) => invoke("subagents_settings_save", { settings }),
@@ -565,7 +462,6 @@ function buildTauriAPI(): ElectronAPI {
     isMaximized: () => invoke("is_maximized"),
     toggleDevTools: () => invoke("toggle_devtools"),
     newWindow: () => invoke("new_window"),
-    startDrag: () => invoke("start_drag"),
     onMaximizedChange,
   };
 

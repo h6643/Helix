@@ -85,7 +85,7 @@ export function normalizeAcpContentRaw(content: unknown): string {
 // Remove control characters that cause line overlap in WebKitGTK (Tauri on Linux):
 //  - CR not followed by LF -> LF (prevents "carriage return to line start" overlap)
 //  - ANSI CSI escape sequences (\x1b[...m / cursor moves) -> removed (rendered as garbage)
-export function sanitizeControlChars(s: string): string {
+function sanitizeControlChars(s: string): string {
   return s
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -102,13 +102,6 @@ const EMOJI_RE =
  */
 export function stripEmoji(text: string): string {
   return text.replace(EMOJI_RE, "");
-}
-
-/**
- * Strip <system-reminder> tags from output text.
- */
-export function stripSystemReminders(text: string): string {
-  return text.replace(SYSTEM_REMINDER_RE, "");
 }
 
 // Matches kaomoji status lines like "(¬_¬) reasoning..." / "_( ˘˘) computing..." etc.

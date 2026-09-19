@@ -1,26 +1,28 @@
 //! Subagent settings — canonical storage in `~/.pi/agent/config.yaml`.
 //!
-//! The `pi-subagents` extension only reads `~/.pi/agent/subagents.json`
-//! (global, never written by the extension itself — it writes project-level
-//! `<cwd>/.pi/subagents.json` via its own `/agents → Settings` UI) and
-//! `loadSettings` merges project over global.
+//! The `pi-subagents` extension only reads `~/.pi/agent/settings.json`
+//! (global, merged into the pi-native settings file; never written by the
+//! extension itself — it writes project-level `<cwd>/.pi/subagents.json` via
+//! its own `/agents → Settings` UI) and `loadSettings` merges project over
+//! global.
 //!
 //! Helix owns the global settings copy in the `subagents:` block of
 //! `~/.pi/agent/config.yaml` (the same file as vision/web_search/image/
 //! mcp_servers). On every read and on every save this module mirrors that
-//! block into `~/.pi/agent/subagents.json` so the running extension picks
+//! block into `~/.pi/agent/settings.json` so the running extension picks
 //! the values up on respawn without Helix having to patch the extension.
 //!
 //! One-time migration: when config.yaml has no `subagents:` block yet and
-//! `subagents.json` does, its contents are imported into config.yaml and
-//! the file is deleted (config.yaml becomes the single source of truth).
+//! `settings.json` has legacy subagent keys, those keys are imported into
+//! config.yaml. The shared `settings.json` is never deleted (it also holds
+//! pi-native settings such as `defaultModel`/`packages`/`theme`).
 //!
 //! Renderer contract (same as `mcp_config_save`):
 //! - `list` returns the effective global settings (yaml block → legacy json
 //!   → empty), stripping `env`-style secrets is irrelevant here — every
 //!   subagent settings key is a plain number/bool/enum.
 //! - `save` replaces the whole `subagents:` block, mirrors it to
-//!   `subagents.json`, and restarts the gateway so the extension re-reads.
+//!   `settings.json`, and restarts the gateway so the extension re-reads.
 
 use crate::config::{atomic_write, config_yaml_path};
 use crate::gateway;
@@ -29,7 +31,7 @@ use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
 fn legacy_subagents_json_path() -> std::path::PathBuf {
-    pi_agent_dir().join("subagents.json")
+    pi_agent_dir().join("settings.json")
 }
 
 /// Read the `subagents:` block from config.yaml (full form, JSON value for
@@ -40,7 +42,7 @@ fn read_yaml_subagents(include_legacy_fallback: bool) -> Map<String, Value> {
     if !map.is_empty() {
         return map;
     }
-    // Fallback: legacy subagents.json (adapter shape = same JSON object the
+    // Fallback: legacy settings.json (adapter shape = same JSON object the
     // extension writes; keys are flat).
     if include_legacy_fallback {
         read_legacy_subagents_json().unwrap_or_default()
@@ -49,11 +51,50 @@ fn read_yaml_subagents(include_legacy_fallback: bool) -> Map<String, Value> {
     }
 }
 
-/// Read the legacy `~/.pi/agent/subagents.json` as-is (flat JSON object).
+/// Keys that belong to the subagents extension's settings object. Used to
+/// filter the shared `settings.json` (which also carries pi-native keys like
+/// `defaultModel`/`packages`/`theme`) down to just the subagent-relevant ones
+/// when reading legacy/global defaults.
+const SUBAGENT_KEYS: &[&str] = &[
+    "maxConcurrent",
+    "maxConcurrentForeground",
+    "defaultMaxTurns",
+    "graceTurns",
+    "maxSubagentDepth",
+    "defaultJoinMode",
+    "backgroundByDefault",
+    "schedulingEnabled",
+    "scopeModels",
+    "strictAgentFiles",
+    "disableDefaultAgents",
+    "toolDescriptionMode",
+    "fleetView",
+    "agentMentions",
+    "rememberAgents",
+    "widgetMode",
+    "outputTranscript",
+    "worktreeIsolation",
+    "reportUsage",
+    "showCost",
+    "showModel",
+    "viewerMarkdown",
+    "workflowsEnabled",
+    "fallbackSubagent",
+];
+
+/// Read the legacy global subagents settings as a flat JSON object, keeping
+/// only recognised subagent keys. The global file is now `settings.json`, which
+/// also holds pi-native settings we must not treat as subagent config.
 fn read_legacy_subagents_json() -> Option<Map<String, Value>> {
     let text = std::fs::read_to_string(legacy_subagents_json_path()).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
-    Some(v.as_object()?.clone())
+    let obj = v.as_object()?;
+    let filtered: Map<String, Value> = obj
+        .iter()
+        .filter(|(k, _)| SUBAGENT_KEYS.contains(&k.as_str()))
+        .map(|(k, val)| ((*k).clone(), (*val).clone()))
+        .collect();
+    Some(filtered)
 }
 
 /// Load the effective global subagent settings for the renderer: prefer the
@@ -87,8 +128,14 @@ fn load_subagents_migrate() -> Map<String, Value> {
     }
     // Write into config.yaml now; config.yaml is authoritative from here on.
     let _ = save_yaml_block(&legacy);
-    // Delete the legacy file — config.yaml now holds the data.
-    let _ = std::fs::remove_file(legacy_subagents_json_path());
+    // The legacy global file used to be a dedicated `subagents.json` that we
+    // could safely delete. It is now `settings.json` (shared with pi-native
+    // settings), so we never delete it — only clean up a stray old
+    // `subagents.json` if one is somehow still present.
+    let legacy_path = legacy_subagents_json_path();
+    if legacy_path.file_name().map(|n| n != "settings.json").unwrap_or(false) {
+        let _ = std::fs::remove_file(&legacy_path);
+    }
     legacy
 }
 
@@ -370,15 +417,30 @@ fn parse_yaml_top_block_nested(
 
 /// Mirror the canonical settings (yaml shape, flat) into the extension's
 /// `subagents.json` so the running extension sees them on respawn.
+/// Mirror the canonical settings (yaml shape, flat) into the extension's
+/// global settings file so the running extension sees them on respawn.
+/// The global file is now `~/.pi/agent/settings.json`, which also carries
+/// pi-native settings (defaultModel/packages/theme/...). We MERGE the
+/// subagent keys in rather than overwriting the whole file.
 fn mirror_to_subagents_json(settings: &Map<String, Value>) {
     let path = legacy_subagents_json_path();
+    // Preserve any pi-native keys already present in settings.json.
+    let mut merged: Map<String, Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
     if settings.is_empty() {
-        // Empty settings: drop the mirror file so no server lingers.
-        let _ = std::fs::remove_file(&path);
+        // No subagent block configured in Helix: leave settings.json untouched
+        // (it may still hold pi-native keys and extension-managed defaults like
+        // `rememberAgents`). The shared file must NOT be deleted.
         return;
     }
-    let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
-    if let Ok(text) = serde_json::to_string_pretty(&Value::Object(settings.clone())) {
+    for (k, v) in settings {
+        merged.insert(k.to_string(), v.to_owned());
+    }
+    if let Ok(text) = serde_json::to_string_pretty(&Value::Object(merged)) {
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
         let _ = std::fs::write(&path, text + "\n");
     }
 }
@@ -410,9 +472,9 @@ pub fn subagents_settings_save(
     if let Err(e) = save_yaml_block(obj) {
         return json!({ "ok": false, "error": format!("write failed: {e}") });
     }
-    // Mirror into subagents.json so the extension picks the values up.
+    // Mirror into settings.json so the extension picks the values up.
     mirror_to_subagents_json(obj);
-    // The extension reads subagents.json at process start — respawn pi so
+    // The extension reads settings.json at process start — respawn pi so
     // the change takes effect for the running agent.
     gateway::restart_gateway_soon(&Arc::clone(&state));
     json!({ "ok": true })

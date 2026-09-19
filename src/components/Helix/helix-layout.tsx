@@ -1665,6 +1665,7 @@ export function HelixLayout() {
             {!showSettings && (
               <button
                 onClick={() => setShowSidebar((v) => !v)}
+                data-tauri-drag-region="false"
                 className={`p-1.5 rounded-lg transition-colors ${showSidebar ? "text-primary bg-primary/10" : "text-foreground/40 hover:text-foreground/80 hover:bg-accent/50"}`}
                 data-tip="侧边栏"
               >
@@ -1674,6 +1675,7 @@ export function HelixLayout() {
             {!showSettings && (
               <button
                 onClick={() => storeActions.navigateHistory("back")}
+                data-tauri-drag-region="false"
                 disabled={navigationIndex <= 0}
                 className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-30"
                 data-tip="后退"
@@ -1683,6 +1685,7 @@ export function HelixLayout() {
             )}
             <button
               onClick={() => storeActions.navigateHistory("forward")}
+              data-tauri-drag-region="false"
               disabled={navigationIndex >= navigationHistory.length - 1}
               className="p-1.5 text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors disabled:opacity-30"
               data-tip="前进"
@@ -1692,6 +1695,7 @@ export function HelixLayout() {
             <button
               ref={windowMenuButtonRef}
               onClick={toggleWindowMenu}
+              data-tauri-drag-region="false"
               className="px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
               data-tip="窗口"
             >
@@ -1700,6 +1704,7 @@ export function HelixLayout() {
             <button
               ref={helpMenuButtonRef}
               onClick={() => setHelpMenuOpen((v) => !v)}
+              data-tauri-drag-region="false"
               className="px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
               data-tip="帮助"
             >
@@ -1893,7 +1898,10 @@ export function HelixLayout() {
           后台任务) + window controls (终端 / 更多操作 / min / max / close) all in
           ONE evenly-spaced flex. Conversation actions share the same gating as
           终端/更多操作 — hidden in settings & full-screen panel modes. */}
-      <div className="absolute top-[2px] right-2 z-40 h-10 flex items-center gap-3">
+      <div
+        className="absolute top-[2px] right-2 z-40 h-10 flex items-center gap-3"
+        data-tauri-drag-region=""
+      >
         {!showSettings && !hideConversationActions && (
           <>
             {/* 统一工作面板：更改（含提交/推送）、任务清单、子 Agent 收进同一个下拉。仅在有内容时显示。 */}
@@ -1903,11 +1911,12 @@ export function HelixLayout() {
               subAgents.length > 0 ||
               helixTodos.length > 0 ||
               gitChangeStat) && (
-            <div className="relative" ref={workPanelRef}>
-              <button
-                type="button"
-                ref={workPanelBtnRef}
-                onClick={() => setWorkPanelOpen((o) => !o)}
+              <div className="relative" ref={workPanelRef}>
+                <button
+                  type="button"
+                  ref={workPanelBtnRef}
+                  onClick={() => setWorkPanelOpen((o) => !o)}
+                  data-tauri-drag-region="false"
                 className={`relative flex items-center gap-1.5 h-7 pl-2 pr-2.5 rounded-full border bg-card text-card-foreground shadow-sm select-none transition-colors ${
                   workPanelOpen
                     ? "border-primary/60 ring-1 ring-primary/20"
@@ -2422,6 +2431,7 @@ export function HelixLayout() {
               <div className="relative" ref={bgTasksRef}>
                 <button
                   onClick={() => setBgTasksOpen((v) => !v)}
+                  data-tauri-drag-region="false"
                   className={`relative p-1.5 rounded-lg transition-colors ${bgTasksOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
                   data-tip="后台任务"
                 >
@@ -2444,6 +2454,7 @@ export function HelixLayout() {
             )}
             <button
               onClick={() => storeActions.toggleTerminal()}
+              data-tauri-drag-region="false"
               className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
               data-tip="终端"
             >
@@ -2452,6 +2463,7 @@ export function HelixLayout() {
             <button
               ref={browserMenuButtonRef}
               onClick={() => setBrowserMenuOpen((v) => !v)}
+              data-tauri-drag-region="false"
               className={`p-1.5 rounded-lg transition-colors ${browserMenuOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
               data-tip="更多操作"
             >
@@ -2461,6 +2473,7 @@ export function HelixLayout() {
         )}
         <button
           onClick={() => (window as any).electron?.window?.minimize()}
+          data-tauri-drag-region="false"
           className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
           data-tip="最小化"
         >
@@ -2468,6 +2481,7 @@ export function HelixLayout() {
         </button>
         <button
           onClick={handleMaximizeToggle}
+          data-tauri-drag-region="false"
           className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-accent/60 rounded-lg transition-colors"
           data-tip={isMaximized ? "还原" : "最大化"}
         >
@@ -2479,6 +2493,7 @@ export function HelixLayout() {
         </button>
         <button
           onClick={() => (window as any).electron?.window?.close()}
+          data-tauri-drag-region="false"
           className="p-1.5 text-foreground/40 hover:text-foreground hover:bg-destructive/10 hover:text-destructive rounded-lg transition-colors"
           data-tip="关闭"
         >
@@ -2706,9 +2721,9 @@ export function HelixLayout() {
           />
         )}
         {restoreReady && <Onboarding />}
-        {/* BootOverlay 单独包一层：它自己的 chunk 到之前先铺黑底，
+        {/* BootOverlay 单独包一层：它自己的 chunk 到之前先铺主题底色，
             避免主界面先露出来、全屏玻璃面板后突然出现。 */}
-        <Suspense fallback={<div className="fixed inset-0 z-[10000] bg-[#07080b]" />}>
+        <Suspense fallback={<div className="fixed inset-0 z-[10000] bg-background" />}>
           <BootOverlay />
         </Suspense>
         <GlobalTooltip />

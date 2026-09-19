@@ -283,44 +283,6 @@ pub fn helix_set_config_key_value(params: Option<Value>) -> Value {
     json!({ "success": true })
 }
 
-/// Persist agent config (reasoning effort / personality) to config.yaml.
-#[tauri::command]
-pub fn helix_set_agent_config(state: State<'_, Arc<AppState>>, params: Option<Value>) -> Value {
-    let params = params.unwrap_or_default();
-    let yaml_path = crate::config::config_yaml_path();
-    let mut yaml = std::fs::read_to_string(&yaml_path).unwrap_or_default();
-    let mut changed = false;
-    if let Some(re) = params.get("reasoningEffort").and_then(|v| v.as_str()) {
-        yaml = set_yaml_key(&yaml, "agent.reasoning_effort", &json!(re));
-        changed = true;
-    }
-    if let Some(p) = params.get("personality").and_then(|v| v.as_str()) {
-        yaml = set_yaml_key(&yaml, "display.personality", &json!(p));
-        changed = true;
-    }
-    if changed {
-        let _ = atomic_write(&yaml_path, &yaml);
-        let arc: Arc<AppState> = Arc::clone(&state);
-        restart_gateway_soon(&arc);
-    }
-    json!({ "success": true })
-}
-
-#[tauri::command]
-pub fn helix_set_reasoning_effort(params: Option<Value>) -> Value {
-    let params = params.unwrap_or_default();
-    let Some(re) = params.get("reasoningEffort").and_then(|v| v.as_str()) else {
-        return json!({ "success": false });
-    };
-    let path = crate::config::config_yaml_path();
-    let yaml = std::fs::read_to_string(&path).unwrap_or_default();
-    let updated = set_yaml_key(&yaml, "agent.reasoning_effort", &json!(re));
-    if updated != yaml {
-        let _ = atomic_write(&path, &updated);
-    }
-    json!({ "success": true })
-}
-
 /// Approve/deny a pending tool call. Approvals flow through
 /// `pi/approval/respond` via helix_send; the legacy shape is translated
 /// here for older renderer call sites.
@@ -438,95 +400,15 @@ pub fn helix_remove_memory_entry(target: String, text: String) -> Value {
 }
 
 // ── Personality Management ──────────────────────
-
-#[tauri::command]
-pub fn helix_list_personalities() -> Result<Vec<serde_json::Value>, String> {
-    // Return default personalities; actual storage could be extended
-    Ok(vec![
-        json!({ "name": "default", "label": "默认", "system_prompt": "" }),
-        json!({
-            "name": "code",
-            "label": "代码专家",
-            "system_prompt": "你是一位专业的代码助手...",
-        }),
-        json!({
-            "name": "explain",
-            "label": "解释模式",
-            "system_prompt": "请详细解释代码和概念...",
-        }),
-    ])
-}
-
-#[tauri::command]
-pub fn helix_set_personality(name: String) -> Result<(), String> {
-    // Store selected personality (can be extended to persist to config)
-    eprintln!("[helix] set_personality: {}", name);
-    Ok(())
-}
-
-// ── Plugin Installation ───────────────────────
-
-#[tauri::command]
-pub async fn helix_install_plugin(identifier: String) -> Result<Value, String> {
-    // Use `helix plugins install` via shell
-    let output = tokio::process::Command::new("helix")
-        .args(["plugins", "install", &identifier])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to spawn: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if output.status.success() {
-        Ok(json!({ "ok": true, "message": stdout }))
-    } else {
-        Ok(json!({ "ok": false, "error": stderr }))
-    }
-}
-
-// ── Memory Status ─────────────────────────
-
-#[tauri::command]
-pub fn helix_get_memory_status() -> Value {
-    let dir = crate::memory::helix_memories_dir();
-    let memory_md = dir.join("MEMORY.md");
-    let user_md = dir.join("USER.md");
-
-    let memory_count = if memory_md.exists() {
-        std::fs::read_to_string(&memory_md)
-            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let user_count = if user_md.exists() {
-        std::fs::read_to_string(&user_md)
-            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    json!({
-        "enabled": memory_md.exists() || user_md.exists(),
-        "memoryEntries": memory_count,
-        "userEntries": user_count,
-        "memoryPath": memory_md.display().to_string(),
-        "userPath": user_md.display().to_string(),
-    })
-}
+// (helix_list_personalities / helix_set_personality removed — the renderer
+// persists display.personality via helix_set_config_key_value through
+// config-sync's pushConfigKeyValue.)
 
 // ── Pi Commands (extensions / skills / prompts) ─────────────────────
 
-/// Query Pi's `get_commands` RPC to list installed extensions, skills, and
-/// prompt templates. The plugin-manager UI uses this to populate the
-/// extension / skill list.
-#[tauri::command]
-pub async fn pi_get_commands() -> Result<Value, String> {
-    pi_gateway::send("get_commands", Value::Null).await
-}
+// (pi_get_commands removed — slash commands are now a client-side registry in
+// src/components/Helix/slash-commands.ts. The `get_commands` RPC itself stays:
+// helix.rs uses it internally to seed hook/skill metadata.)
 
 /// Read the enabled/disabled state of each package from pi's settings.json
 /// `packages` list. A plain string entry ("npm:foo") means fully enabled.
@@ -1500,28 +1382,6 @@ pub async fn pi_get_available_models() -> Result<Value, String> {
     pi_gateway::send("get_available_models", Value::Null).await
 }
 
-/// Query Pi's `get_state` RPC for session info (model, thinking level, etc.).
-#[tauri::command]
-pub async fn pi_get_state() -> Result<Value, String> {
-    pi_gateway::send("get_state", Value::Null).await
-}
-
-/// Switch Pi's active model via `set_model` RPC.
-#[tauri::command]
-pub async fn pi_set_model(provider: String, model_id: String) -> Result<Value, String> {
-    pi_gateway::send(
-        "set_model",
-        json!({ "provider": provider, "modelId": model_id }),
-    )
-    .await
-}
-
-/// Set Pi's thinking level via `set_thinking_level` RPC.
-#[tauri::command]
-pub async fn pi_set_thinking_level(level: String) -> Result<Value, String> {
-    pi_gateway::send("set_thinking_level", json!({ "level": level })).await
-}
-
 /// Broadcast a thinking level to every live Pi instance (live, no restart).
 #[tauri::command]
 pub async fn pi_set_thinking_level_all(level: String) -> Result<Value, String> {
@@ -1529,17 +1389,10 @@ pub async fn pi_set_thinking_level_all(level: String) -> Result<Value, String> {
     Ok(json!({ "success": true }))
 }
 
-/// Trigger Pi compaction via `compact` RPC.
-#[tauri::command]
-pub async fn pi_compact() -> Result<Value, String> {
-    pi_gateway::send("compact", Value::Null).await
-}
-
-/// Query Pi's `get_session_stats` RPC for token usage.
-#[tauri::command]
-pub async fn pi_get_session_stats() -> Result<Value, String> {
-    pi_gateway::send("get_session_stats", Value::Null).await
-}
+// (pi_get_state / pi_set_model / pi_set_thinking_level / pi_compact /
+// pi_get_session_stats removed — the renderer reaches the same data through
+// helix_status / helix_set_model (config-backed) / session.compress (which
+// also returns before/after token counts) / session.context_breakdown.)
 
 // ── Pi Package Manager ─────────────────────────────────────────────
 
@@ -1836,19 +1689,6 @@ pub async fn pi_check_updates() -> Result<Value, String> {
     }
 
     Ok(json!({ "pi": Value::Object(pi_entry), "packages": packages }))
-}
-
-/// Latest npm version for one installed plugin (click-to-check in the
-/// plugin manager). Registry failures degrade to `latest: null`.
-#[tauri::command]
-pub async fn pi_package_latest(name: String) -> Result<Value, String> {
-    if name.trim().is_empty() {
-        return Err("package name cannot be empty".into());
-    }
-    match npm_latest_version(name.trim()).await {
-        Ok(latest) => Ok(json!({ "latest": latest })),
-        Err(_) => Ok(json!({ "latest": Value::Null })),
-    }
 }
 
 #[cfg(test)]

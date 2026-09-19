@@ -206,7 +206,7 @@ export function ApprovalDialog(props: LegacyProps) {
 // 模型调用 clarify 工具反问你（给几个选项让你挑，或自由输入）。样式/位置与
 // ApprovalDialog 的底部浮条一致。点选项或提交输入后 onRespond(requestId, answer)。
 
-export interface ClarifyRequest {
+interface ClarifyRequest {
   id: string;
   question: string;
   choices: string[] | null;

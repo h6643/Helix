@@ -1,100 +1,18 @@
 /**
- * Global scheduled task runner — runs independently of any component mount.
- * Checks every 30 seconds for due tasks and dispatches them to a DEDICATED
- * Helix session so they never interrupt or pollute the active conversation.
+ * Global scheduled task state refresher — runs independently of any component
+ * mount. Re-reads ~/.pi/agent/pi-cron/cron/jobs.json (the shared source of
+ * truth written by the pi-scheduled-tasks extension and the Rust backend)
+ * every 30 s so the 计划 panel / store stay current even when never opened.
  *
- * Also re-reads ~/.pi/agent/helix/cron/jobs.json (the shared source of truth
- * that the pi-scheduled-tasks extension writes) so tasks created by the agent
- * are picked up and dispatched here even when the 计划 panel isn't open.
+ * NOTE: this runner deliberately does NOT dispatch tasks. Dispatch is owned
+ * exclusively by the Rust backend (scheduled_tasks.rs poll_due_jobs, 5 s
+ * tick), which advances next_run_at correctly before firing. An earlier
+ * version dispatched from here as well, which double-fired every due task
+ * (once from this loop, once via the extension's event files → Rust poller).
  */
-import { helixApi } from "@/lib/electron-bridge";
-import { parseScheduleForTask } from "@/lib/schedule-utils";
 import { useHelixStore, type ScheduledTask } from "@/stores/helix-store";
 
 let _started = false;
-// Cached Helix session ID for scheduled tasks (separate from any conversation).
-let _taskSessionId: string | null = null;
-
-async function getOrCreateTaskSession(): Promise<string | null> {
-  if (_taskSessionId) return _taskSessionId;
-  try {
-    const res = (await helixApi()!.send("session/new", {
-      cwd: useHelixStore.getState().selectedWorkDir || "",
-      mcpServers: [],
-    })) as any;
-    const sid =
-      res?._meta?.helix?.sessionProvenance?.acpSessionId ||
-      res?.session_id ||
-      res?.sessionID ||
-      (typeof res === "string" ? res : null);
-    if (sid) {
-      _taskSessionId = sid;
-      return sid;
-    }
-  } catch (e) {
-    console.error("[ScheduledTask] Failed to create task session:", e);
-  }
-  return null;
-}
-
-async function runTask(task: {
-  id: string;
-  label: string;
-  prompt: string;
-  scheduleText?: string;
-}) {
-  const { updateScheduledTask, showToast } = useHelixStore.getState();
-
-  // Create / reuse a DEDICATED Helix session for background tasks — NEVER the
-  // active conversation's session.  This prevents the task from polluting the
-  // user's current conversation context or interrupting a running agent.
-  const taskSid = await getOrCreateTaskSession();
-  if (!taskSid) {
-    showToast({
-      type: "error",
-      title: `定时任务 "${task.label}" 失败`,
-      description: "无法创建后台会话",
-    });
-    updateScheduledTask(task.id, { lastRunAt: Date.now() });
-    return;
-  }
-
-  // Send the prompt to the DEDICATED session — NOT the active conversation.
-  // The response events arrive with this session_id, which no active conversation's
-  // onEvent handler claims (they filter by their own session_id), so the UI stays
-  // untouched.  The task runs silently in the background.
-  try {
-    await helixApi()!.send("session/prompt", {
-      session_id: taskSid,
-      prompt: [{ type: "text", text: task.prompt }],
-    });
-  } catch (e) {
-    console.error("[ScheduledTask] Failed to dispatch:", e);
-    // Session may have been invalidated (gateway restart) — reset and retry next cycle.
-    _taskSessionId = null;
-  }
-
-  updateScheduledTask(task.id, { lastRunAt: Date.now() });
-
-  const taskState = useHelixStore.getState().scheduledTasks.find((t) => t.id === task.id);
-  const storedNextRunAt = taskState?.nextRunAt ?? null;
-
-  // Trust the backend/extension-advanced nextRunAt when present.
-  // Only recompute from scheduleText when the stored value is absent or
-  // already in the past (meaning the task fired but the backend didn't
-  // advance it — e.g. a frontend-created task that has no cron expr).
-  if (storedNextRunAt && storedNextRunAt > Date.now()) {
-    // Already advanced by Rust poller / extension — keep it.
-  } else {
-    const parsed = parseScheduleForTask(task.scheduleText || task.label || "");
-    if (parsed.nextRun) {
-      updateScheduledTask(task.id, { nextRunAt: parsed.nextRun });
-    }
-  }
-
-  // NOTE: intentionally NO per-run info toast. It fired every 30s and was pure
-  // noise. Failures still surface via the error toast in the session branch above.
-}
 
 /**
  * Re-read jobs.json from the Rust backend and merge any NEW backend tasks into
@@ -151,19 +69,9 @@ async function refreshFromBackend() {
 export function startScheduledTaskRunner() {
   if (_started) return;
   _started = true;
-
   // Immediate first read so tasks created before this session are visible.
   void refreshFromBackend();
-
   setInterval(() => {
-    void refreshFromBackend().then(() => {
-      const state = useHelixStore.getState();
-      const now = Date.now();
-      for (const task of state.scheduledTasks) {
-        if (task.enabled && task.nextRunAt && task.nextRunAt <= now) {
-          runTask(task);
-        }
-      }
-    });
-  }, 30_000); // Check every 30 seconds
+    void refreshFromBackend();
+  }, 30_000); // Refresh every 30 seconds
 }

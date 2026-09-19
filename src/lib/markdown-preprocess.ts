@@ -804,6 +804,118 @@ function closeDanglingStrongEmphasis(text: string): string {
   );
 }
 
+// LLMs (and the upstream pi fork when it drops a backtick while streaming /
+// merging sub-chunks) sometimes lose the CLOSING backtick of an inline-code
+// span. The reported case: ``.mjs 本身不是"测试文件"`` lost its close, AND the
+// model opened a SECOND code span (`` `js``) without a close either — so the
+// stored text carries only two OPENING backticks (before `.mjs` and before
+// `js`) and no closes at all. CommonMark toggles on the first, then treats the
+// second as its "close", swallowing the entire paragraph between them into one
+// giant code block. (This is the "后面还有一个开不在关" case — multiple
+// independently-unclosed openings, which a naive parity check can't fix because
+// the total count is even.)
+//
+// Fix by detecting the dropped-close SIGNATURE: an opening backtick whose
+// immediately-following token is a code-like atom (a filename / extension /
+// keyword like `.mjs`, `js`, `*.test.mjs`) and whose continuation runs straight
+// into CJK prose. That only happens when the intended closing backtick was
+// dropped — a real, balanced code span either closes promptly or contains code,
+// not CJK prose. When the signature matches we close the span right after the
+// token, so each `` `token`` becomes `` `token` `` and the bleed is contained.
+//
+// Note on a known limitation: a *correctly-closed* inline span that itself
+// contains CJK (e.g. `` `.mjs 本身不是"测试文件"` `` with its close present)
+// shares the same byte signature and will also be split after the leading token.
+// Such spans are rare in LLM output and the result stays readable, so we accept
+// it to fix the far more damaging bleed. Fenced blocks are excluded by the
+// caller, so `` ``` `` markers inside code blocks are never touched.
+function isSingleBacktickAt(seg: string, i: number): boolean {
+  return seg[i] === "`" && seg[i - 1] !== "`" && seg[i + 1] !== "`";
+}
+
+function closeDanglingInlineCode(text: string): string {
+  // Operate per-paragraph (blank-line separated) so a dangling span in one
+  // paragraph can never bleed into the next.
+  return text
+    .split(/(\n{2,})/)
+    .map((seg, i) => {
+      // Odd indices are the blank-line separators — leave untouched.
+      if (i % 2 === 1 || !seg.includes("`")) {
+        return seg;
+      }
+
+      let out = "";
+      let cursor = 0;
+      let inCode = false;
+
+      while (cursor < seg.length) {
+        const ch = seg[cursor];
+
+        if (ch === "`" && isSingleBacktickAt(seg, cursor)) {
+          if (!inCode) {
+            // Opening — inspect the token that follows.
+            let j = cursor + 1;
+            while (
+              j < seg.length &&
+              seg[j] !== "`" &&
+              seg[j] !== "\n" &&
+              !/\s/.test(seg[j])
+            ) {
+              j += 1;
+            }
+
+            const token = seg.slice(cursor + 1, j);
+            // Remainder after the token (skip one run of whitespace).
+            let k = j;
+            while (k < seg.length && /\s/.test(seg[k])) {
+              k += 1;
+            }
+            let m = k;
+            while (m < seg.length && seg[m] !== "`") {
+              m += 1;
+            }
+            const remainder = seg.slice(k, m);
+
+            const codeLike = /^[A-Za-z0-9_./\-*]+$/.test(token);
+
+            if (codeLike && /[一-鿿]/.test(remainder)) {
+              // Dropped closing backtick — close right after the token.
+              out += "`" + token + "`";
+              cursor = j; // consume opening backtick + token; continue in prose
+              inCode = false;
+
+              continue;
+            }
+
+            out += "`";
+            inCode = true;
+            cursor += 1;
+
+            continue;
+          }
+
+          // Closing backtick (balanced span).
+          out += "`";
+          inCode = false;
+          cursor += 1;
+
+          continue;
+        }
+
+        out += ch;
+        cursor += 1;
+      }
+
+      // Any span still open at paragraph end gets closed here.
+      if (inCode) {
+        out += "`";
+      }
+
+      return out;
+    })
+    .join("");
+}
+
 // LLMs emit GFM tables whose header row has MORE columns than the separator
 // row: `证据|检查项 |结果 |含义 |` over `|---|---|---|` renders nothing — GFM
 // needs the separator to have exactly as many cells as the header. When the
@@ -1051,7 +1163,9 @@ export function preprocessMarkdown(text: string): string {
                 normalizeAtxHeadings(
                   normalizeVisibleProse(
                     neutralizeSetextUnderlines(
-                      applyOutsideCode(core, normalizeProseMath),
+                      closeDanglingInlineCode(
+                        applyOutsideCode(core, normalizeProseMath),
+                      ),
                     ),
                   ),
                 ),

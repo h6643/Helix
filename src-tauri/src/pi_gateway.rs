@@ -45,6 +45,13 @@ use tauri::Emitter;
 use std::os::windows::process::CommandExt;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
+/// Compaction is a synchronous wait for the model to summarize the ENTIRE
+/// context — and it only ever runs when the context is at its largest, so the
+/// generic 60s budget times out on big sessions (the "压缩超时" seen from
+/// /compact and auto-compaction). 5 min leaves ~60s of the frontend's
+/// COMPRESS_RPC_TIMEOUT_MS (360s, serve-gateway.ts) for the trailing
+/// get_session_stats / get_messages round-trips in session.compress.
+const COMPACT_RPC_TIMEOUT: Duration = Duration::from_secs(300);
 /// Handshake (get_state on a fresh spawn) allowance. pi answers get_state
 /// only after ALL extensions finish initializing; heavyweight extensions
 /// (e.g. the memory extension's SQLite backfill) may legitimately block for
@@ -552,17 +559,11 @@ impl PiInstance {
     }
 }
 
-/// Append a line to the file-based startup diagnostic log (~/.pi/agent/
-/// helix-spawn-debug.log). eprintln goes to the `tauri:dev` terminal, which
-/// is invisible when the app runs from the tray or a release build — this is
-/// the only way a stuck "连接中" badge is reproducible.
-fn log_spawn_diag(message: &str) {
-    use std::io::Write;
-    let path = crate::paths::pi_agent_dir().join("helix-spawn-debug.log");
-    let stamp = now_ms();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "[{stamp}] {message}");
-    }
+/// Startup diagnostic logging to ~/.pi/agent/helix-spawn-debug.log was removed
+/// after the "连接中" spawn-deadlock was fixed. Kept as a no-op so the ~25
+/// call sites don't need to be touched; the file is no longer written.
+fn log_spawn_diag(_message: &str) {
+    // intentionally disabled
 }
 
 fn now_ms() -> u64 {
@@ -700,7 +701,8 @@ pub fn restart_overlapping(state: &Arc<AppState>) -> Result<(), String> {
 }
 
 /// Kill and remove one session's instance outright (conversation deleted).
-#[allow(dead_code)]
+/// Used by the scheduled-task dispatcher to reap a one-shot task's instance as
+/// soon as its turn settles, instead of letting it idle for IDLE_REAP_MS.
 pub fn drop_session_instance(session_id: &str) {
     if let Some(instance) = INSTANCES.lock().unwrap().remove(session_id) {
         instance.kill();
@@ -1906,6 +1908,43 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             }
             Ok(json!({ "status": "mode-applied", "mode_id": mode }))
         }
+        // ── 无损分叉（pi 原生 fork / clone）────────────────────────────
+        // pi 的 fork 在目标 entry 处创建 branched session 文件（完整条目树：
+        // 工具调用/结果/思考块全部保留），并把这个实例 rebind 到新会话。
+        // - 带 entryId：fork（pi 固定 position "before"，即 branch 到该
+        //   user entry 的 parent——前端用"分叉点之后第一条 user 消息"的
+        //   entryId 来表达"保留到分叉点为止"）。
+        // - 不带 entryId：clone（leaf 全量副本），用于分叉点在会话末尾。
+        // rekey_instance 把实例的注册键从父 sid 换成 branched sid：新会话
+        // 的后续 RPC 直连本实例；父 sid 失去存活实例，下次使用走
+        // restore_session_instance 从其自身文件（未被 fork 改动）透明恢复。
+        "session/fork" => {
+            let instance = routed_instance(&params, &state).await?;
+            let entry_id = params
+                .get("entryId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let fork_resp = match entry_id {
+                Some(eid) => {
+                    instance
+                        .request("fork", json!({ "entryId": eid }), RPC_TIMEOUT)
+                        .await?
+                }
+                None => instance.request("clone", Value::Null, RPC_TIMEOUT).await?,
+            };
+            let state_data = instance.session_state().await?;
+            let new_sid = state_data
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_default();
+            if new_sid.is_empty() {
+                return Err("pi fork returned no sessionId".into());
+            }
+            rekey_instance(&instance, new_sid.clone());
+            Ok(json!({ "session_id": new_sid, "fork": fork_resp }))
+        }
         "session/context_breakdown" => {
             let instance = routed_instance(&params, &state).await?;
             let stats = instance
@@ -1920,7 +1959,8 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
         // reads role/text), so fetch them after compacting.
         "session.compress" | "session/compress" => {
             let instance = routed_instance(&params, &state).await?;
-            let compacted = instance.request("compact", Value::Null, RPC_TIMEOUT).await?;
+            let compacted =
+                instance.request("compact", Value::Null, COMPACT_RPC_TIMEOUT).await?;
             let stats = instance
                 .request("get_session_stats", Value::Null, RPC_TIMEOUT)
                 .await?;
@@ -2010,6 +2050,32 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
         }
         "session/prompt" => {
             let (message, images) = prompt_parts(&params)?;
+            // 粘贴的图片先过视觉模型转成文字描述，拼进 prompt——主模型（agnes 等
+            // 非多模态）看不见原图，只有描述能进上下文。视觉模型未配置/失败时
+            // 静默跳过（不阻断普通文字提问），仍透传 images 给 pi（多模态主模型可直接读）。
+            let message = if images.is_empty() {
+                message
+            } else {
+                let mut descriptions = Vec::new();
+                for img in &images {
+                    if let Some(data_url) = crate::vision::image_to_data_url(img) {
+                        if let Ok(desc) = crate::vision::vision_describe_core(data_url, None).await {
+                            descriptions.push(desc);
+                        }
+                    }
+                }
+                if descriptions.is_empty() {
+                    message
+                } else {
+                    let combined = descriptions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, d)| format!("[图片 {} 描述]\n{}", i + 1, d))
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    format!("{message}\n\n{combined}")
+                }
+            };
             let instance = routed_instance(&params, &state).await?;
             let session_id = instance
                 .current_session
@@ -2260,7 +2326,14 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
         | "get_fork_messages"
         | "get_last_assistant_text" => {
             let instance = routed_instance(&params, &state).await?;
-            instance.request(method, params, RPC_TIMEOUT).await
+            // Bare `compact`（pi_compact 命令）与 session.compress 里的是同一
+            // 个长 LLM 总结调用，同样吃扩展预算；其余保持通用超时。
+            let timeout = if method == "compact" {
+                COMPACT_RPC_TIMEOUT
+            } else {
+                RPC_TIMEOUT
+            };
+            instance.request(method, params, timeout).await
         }
         "image/generate" => image_generate(&params),
         _ => Err(format!("pi adapter does not implement {method}")),
@@ -3389,12 +3462,35 @@ fn handle_line(instance: &Arc<PiInstance>, line: &str) {
             };
             if let Some(pending) = instance.pending.lock().unwrap().remove(id) {
                 pending.tx.deliver(message);
+            } else {
+                // 响应帧找不到等待者：多半是请求侧已超时（RPC_TIMEOUT）后
+                // pending 被移除。这是「session/prompt 挂满超时但 pi 其实早
+                // 就回完了」的直接证据，打一行便于和前端轨迹对时间线。
+                eprintln!(
+                    "[pi agent] response without waiter: sid={} id={}",
+                    instance.current_session_id(),
+                    id
+                );
             }
         }
         _ => {
             // Any pi event (stream delta, tool update, …) proves the model
             // stream is alive — heartbeat for the turn watchdog.
             instance.last_event_ms.store(now_ms(), Ordering::SeqCst);
+            // 回合生命周期标记（低频，每回合 2-5 行）：「前端整回合收不到任何
+            // 流式事件」时，这几行能立刻二分定位——网关侧完全没打 = pi 的输出
+            // 没到 reader；网关打了但前端没内容 = 丢在 emit → Tauri → 前端过滤
+            // 这一段。只挑回合边界事件，delta 不打（否则刷屏）。
+            if matches!(
+                event_type,
+                "agent_start" | "agent_end" | "agent_settled" | "turn_start" | "turn_end"
+            ) {
+                eprintln!(
+                    "[pi agent] turn event: type={} sid={}",
+                    event_type,
+                    instance.current_session_id()
+                );
+            }
             emit_pi_event(instance, event_type, &message);
         }
     }

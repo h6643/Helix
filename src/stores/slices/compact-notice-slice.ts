@@ -6,7 +6,7 @@
 import type { StateCreator } from "zustand";
 import { useHelixStore } from "@/stores/helix-store";
 
-export interface CompressionNotice {
+interface CompressionNotice {
   ts: number;
   sessionId?: string;
   source: "auto" | "manual";

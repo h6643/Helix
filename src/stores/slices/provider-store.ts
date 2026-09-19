@@ -4,7 +4,7 @@
 
 import { create } from "zustand";
 
-export interface ProviderConfig {
+interface ProviderConfig {
   id: string;
   name: string;
   baseUrl: string;

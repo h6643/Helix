@@ -278,7 +278,7 @@ function ImageRenderer({ content }: { content: string }) {
 
 // The tool's concrete action: the command/script for bash, the path for
 // file tools, etc. — shown WITHOUT the Chinese action prefix.
-export function toolActionText(step: ExecutionStep): string {
+function toolActionText(step: ExecutionStep): string {
   // 非命令工具（GUI/浏览器/MCP 等）的参数经常把正文/代码/错误说明塞在 text/input
   // 里，直接拿它当标题会显示 "Clear the draft's responseBlocks" 这类内容。非命令
   // 工具只显示工具名，不拿参数当标题。
@@ -316,7 +316,7 @@ export function toolActionText(step: ExecutionStep): string {
 // Action verb shown before the concrete action, derived from the tool type:
 // a command shows "执行", a search shows "搜索", a read shows "读取" — NOT a
 // generic "执行中" that doesn't describe what the tool does.
-export function toolVerb(toolName: string): string {
+function toolVerb(toolName: string): string {
   const name = (toolName || "").toLowerCase();
   if (
     name.includes("grep") ||

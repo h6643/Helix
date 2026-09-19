@@ -46,7 +46,7 @@ export type EventCallback = (
 // type 而变；这里只声明 translateEvent 实际读取的字段，避免全链路 any。
 
 /** 远端 emit_usage 报来的 usage 形状（驼峰/蛇形字段混用，运行期探测）。 */
-export interface GatewayUsage {
+interface GatewayUsage {
   totalTokens?: number;
   total_tokens?: number;
   inputTokens?: number;
@@ -72,13 +72,6 @@ export interface GatewayUsage {
   context_used?: number;
   /** 远端可能附加的任意字段（透传给前端，不在此处枚举）。 */
   [key: string]: unknown;
-}
-
-/** serve 事件（WS 帧 params.payload）的形状。未知事件走直通，字段可含任意。 */
-/** serve 事件（WS 帧 params.payload）的形状。未知事件走直通，字段可含任意。 */
-export interface ServeEvent {
-  method: string;
-  params?: { type?: string; session_id?: string; payload?: ServeEventPayload };
 }
 
 export interface ServeEventPayload {
@@ -142,7 +135,7 @@ export interface SetModelResult {
 }
 
 /** session.resume 的响应 */
-export interface SessionResumeResult {
+interface SessionResumeResult {
   session_id?: string;
   running?: boolean;
   messages?: Array<{
@@ -367,6 +360,12 @@ function stripAnsi(s: unknown): string {
 // ── 网关客户端 ──────────────────────────────────────────────────────────
 
 const RPC_TIMEOUT_MS = 60_000;
+// 压缩（/compact 与自动压缩共用 session.compress）：同步等模型把整个上下文
+// 总结完才返回——上下文越大越慢，而压缩恰恰发生在上下文最大的时候，默认 60s
+// 在大会话上必撞「session.compress 超时」。给 6 分钟：覆盖 Rust 侧 compact 的
+// COMPACT_RPC_TIMEOUT（300s，见 pi_gateway.rs）+ 收尾的 get_session_stats /
+// get_messages。压缩锁在后端仍按会话持有，超时放大不会引发并发压缩。
+const COMPRESS_RPC_TIMEOUT_MS = 360_000;
 const RECONNECT_DELAYS = [1000, 2000, 5000, 10_000];
 
 export class ServeGatewayClient {
@@ -1556,6 +1555,13 @@ export class ServeGatewayClient {
         }
         return { tools, toolsets: res?.toolsets ?? [] };
       }
+
+      // 压缩：显式长超时（见 COMPRESS_RPC_TIMEOUT_MS 注释），不走默认 60s。
+      // 手动 /compact（slash-commands）与自动压缩（context-usage）都发
+      // "session.compress"，两种写法一并接住。
+      case "session.compress":
+      case "session/compress":
+        return this.rpc("session.compress", params, COMPRESS_RPC_TIMEOUT_MS);
 
       default:
         // 未映射方法：透传（serve 侧同名注册的直接可用）。

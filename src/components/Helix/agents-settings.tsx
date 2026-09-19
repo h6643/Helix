@@ -455,19 +455,27 @@ export function AgentsSettings() {
             })),
           );
         }
-        // Bridge: surface pi-subagents agent types (the extension's registry:
-        // defaults + .pi/agents files).
-        const listSubagents = (window as any).electron?.helix?.listSubagents;
-        if (typeof listSubagents === "function") {
-          listSubagents()
-            .then((ps: any[]) => {
-              if (alive && Array.isArray(ps)) setPresets(ps);
-            })
-            .catch(() => {});
-        }
       })
       .catch((e: any) => alive && setErr(String(e?.message || e)))
       .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Fetch the extension's registered agent types independently of
+  // `getConfig` — the two are unrelated calls and one failing should not
+  // block the other from populating `presets` (the pi-subagents registry
+  // section).
+  useEffect(() => {
+    let alive = true;
+    const listSubagents = (window as any).electron?.helix?.listSubagents;
+    if (typeof listSubagents !== "function") return;
+    listSubagents()
+      .then((ps: any[]) => {
+        if (alive && Array.isArray(ps)) setPresets(ps);
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -745,10 +753,31 @@ export function AgentsSettings() {
                   </SettingRow>
                 </SettingGroup>
 
+
+                <div className="flex items-center justify-end gap-3 pt-4">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setCfg(DEFAULTS)}
+                  >
+                    重置
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={save}
+                    disabled={loading || saving}
+                  >
+                    {saving ? "保存中…" : saved ? "已保存" : "保存"}
+                  </Button>
+                </div>
+              </>
+            )}
+
                 {/* ── Subagent global settings (config.yaml subagents block) ── */}
                 <SettingGroup
                   title="子智能体行为（pi-subagents）"
-                  description="写入 ~/.pi/agent/config.yaml 的 subagents: 块，保存时同步到扩展的 subagents.json 并重启网关。"
+                  description="写入 ~/.pi/agent/config.yaml 的 subagents: 块，保存时同步到扩展的 settings.json 并重启网关。"
                 >
                   <SettingRow
                     label="工具描述模式"
@@ -894,25 +923,6 @@ export function AgentsSettings() {
                   )}
                 </SettingGroup>
 
-                <div className="flex items-center justify-end gap-3 pt-4">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setCfg(DEFAULTS)}
-                  >
-                    重置
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={save}
-                    disabled={loading || saving}
-                  >
-                    {saving ? "保存中…" : saved ? "已保存" : "保存"}
-                  </Button>
-                </div>
-              </>
-            )}
 
             {identities
               .slice(0, adding ? identities.length - 1 : undefined)
@@ -926,10 +936,20 @@ export function AgentsSettings() {
               </p>
             )}
 
-            {presets.length > 0 && (
-              <div className="pt-2 space-y-3">
-                <div className="flex items-center gap-2">
-                </div>
+            <div className="pt-2 space-y-3">
+              <div className="flex items-center gap-2">
+                <h4 className="ui-text font-semibold text-foreground/80">
+                  已注册的 Agent 类型（pi-subagents）
+                </h4>
+                <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
+                  {presets.length}
+                </span>
+              </div>
+              {presets.length === 0 ? (
+                <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
+                  当前未检测到 pi-subagents 扩展注册的 agent 类型。安装扩展并重启网关后，这里会列出内置默认和自定义的 agent。
+                </p>
+              ) : (
                 <div className="space-y-2.5">
                   {presets.map((p) => (
                     <PresetSubagentItem
@@ -941,8 +961,8 @@ export function AgentsSettings() {
                     />
                   ))}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </>
         )}
       </div>

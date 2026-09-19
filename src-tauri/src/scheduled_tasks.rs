@@ -7,9 +7,82 @@
 //! so the Helix「计划」panel and the pi `schedule_*` tools read/write the
 //! same files.
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{Datelike, Local, SecondsFormat, TimeZone, Timelike, Utc};
 use rand::Rng;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
+
+// ── Minimal cron engine ──────────────────────────────────────────────────────
+// Supports the 5-field syntax the extension / frontend generate:
+// minute hour dom month dow with `*`, `n`, `a-b`, lists, and `*/step`.
+
+fn parse_cron_field(field: &str, min: u32, max: u32) -> Option<BTreeSet<u32>> {
+    let mut out = BTreeSet::new();
+    for part in field.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        let (range, step) = match part.split_once('/') {
+            Some((r, s)) => (r, s.trim().parse::<u32>().ok().filter(|n| *n >= 1)?),
+            None => (part, 1),
+        };
+        let (lo, hi) = if range == "*" {
+            (min, max)
+        } else if let Some((a, b)) = range.split_once('-') {
+            (
+                a.trim().parse::<u32>().ok()?,
+                b.trim().parse::<u32>().ok()?,
+            )
+        } else {
+            let v = range.trim().parse::<u32>().ok()?;
+            if step > 1 { (v, max) } else { (v, v) }
+        };
+        if lo < min || hi > max || lo > hi {
+            return None;
+        }
+        let mut v = lo;
+        while v <= hi {
+            out.insert(v);
+            v += step;
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// First local-time occurrence strictly after `after_ms` for a 5-field cron
+/// expression, scanning minute by minute (≤ 366 days). Returns None for
+/// unparsable expressions so callers can disable the job instead of refiring
+/// it every tick.
+fn next_cron_occurrence(expr: &str, after_ms: i64) -> Option<i64> {
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    if fields.len() != 5 {
+        return None;
+    }
+    let minutes = parse_cron_field(fields[0], 0, 59)?;
+    let hours = parse_cron_field(fields[1], 0, 23)?;
+    let doms = parse_cron_field(fields[2], 1, 31)?;
+    let months = parse_cron_field(fields[3], 1, 12)?;
+    let dows = parse_cron_field(fields[4], 0, 7)?;
+
+    let start = Local.timestamp_millis_opt(after_ms).single()?;
+    let mut cur = start.with_second(0)?;
+    cur = cur.with_nanosecond(0)?;
+    for _ in 0..(366 * 24 * 60) {
+        cur += chrono::Duration::minutes(1);
+        // cron dow: 0/7=Sun, 1=Mon … 6=Sat; chrono: Mon=0 … Sun=6
+        let dow_cron = (cur.weekday().num_days_from_monday() + 1) % 7;
+        if minutes.contains(&cur.minute())
+            && hours.contains(&cur.hour())
+            && months.contains(&cur.month())
+            && doms.contains(&cur.day())
+            && dows.contains(&dow_cron)
+        {
+            return Some(cur.timestamp_millis());
+        }
+    }
+    None
+}
 
 fn pi_agent_dir() -> std::path::PathBuf {
     dirs::home_dir()
@@ -325,65 +398,114 @@ fn format_iso(ms: i64) -> String {
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-// ── Cron Commands (alias for scheduled_tasks) ────────────────
+// (helix_cron_list/create/delete/run removed — they were thin aliases of
+// scheduled_tasks_list/create/remove; the renderer talks to the
+// `scheduledTasks` bridge surface only. helix_cron_run's manual one-shot
+// dispatch has no UI either — the poller below is the single dispatcher.)
 
-/// Alias for scheduled_tasks_list
-#[tauri::command]
-pub fn helix_cron_list() -> Value {
-    scheduled_tasks_list()
-}
-
-/// Alias for scheduled_tasks create
-#[tauri::command]
-pub fn helix_cron_create(params: Option<Value>) -> Value {
-    create(params)
-}
-
-/// Alias for scheduled_tasks remove
-#[tauri::command]
-pub fn helix_cron_delete(params: Option<Value>) -> Value {
-    remove(params)
-}
-
-/// Execute a cron job by ID — triggers a one-shot dispatch of the stored prompt.
-#[tauri::command]
-pub fn helix_cron_run(params: Option<Value>) -> Value {
-    let p = params.unwrap_or(json!({}));
-    let id = p
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if id.is_empty() {
-        return json!({ "ok": false, "error": "missing id" });
-    }
-    // Look up the job's prompt and label, then dispatch via the same path the
-    // event poller uses.
-    let data = load_jobs();
-    let empty: Vec<Value> = vec![];
-    let jobs = data.get("jobs").and_then(|v| v.as_array()).unwrap_or(&empty);
-    let found = jobs.iter().find(|j| j.get("id").and_then(Value::as_str) == Some(id.as_str()));
-    match found {
-        Some(job) => {
-            let prompt = job.get("prompt").and_then(Value::as_str).unwrap_or("");
-            let label = job.get("name").and_then(Value::as_str).unwrap_or("unnamed");
-            dispatch_scheduled_task(&id, label, prompt, "manual");
-            json!({ "ok": true, "message": format!("Job {id} triggered") })
-        }
-        None => json!({ "ok": false, "error": format!("job {id} not found") }),
-    }
-}
-
-/// Start a background thread that polls the extension event dir every 5 s.
+/// Start a background thread that polls for due jobs in jobs.json and consumes
+/// the extension's event files every 5 s. This thread is the SINGLE dispatcher
+/// for scheduled tasks — the frontend runner only refreshes UI state and the
+/// extension's old auto-fire tick was removed — so nothing double-fires.
 /// Call once at setup, after `pi_gateway::spawn` has finished.
 pub fn start_scheduled_events_poller() {
     std::thread::Builder::new()
         .name("scheduled-events-poller".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(5));
+            poll_due_jobs();
             poll_scheduled_events();
         })
         .ok();
+}
+
+/// Scan jobs.json for enabled jobs whose next_run_at has passed, claim them by
+/// advancing next_run_at BEFORE dispatching (so a concurrent tick can never
+/// refire), then dispatch to a dedicated pi session. Cron jobs advance to the
+/// real next occurrence of their expression; once-jobs are disabled. Cron jobs
+/// with a missing next_run_at are seeded with their next occurrence instead of
+/// being skipped forever.
+fn poll_due_jobs() {
+    let now = now_ms();
+    let mut data = load_jobs();
+    let jobs = match data.get_mut("jobs") {
+        Some(j) if j.is_array() => j.as_array_mut().unwrap(),
+        _ => return,
+    };
+    let mut due: Vec<(String, String, String)> = Vec::new();
+    let mut changed = false;
+    for job in jobs.iter_mut() {
+        if !job.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let schedule = job.get("schedule").cloned().unwrap_or_else(|| json!({}));
+        let kind = schedule
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let expr = schedule
+            .get("expr")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
+        let id = job
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        match parse_ts(job.get("next_run_at")) {
+            Some(t) if t <= now => {
+                let next = if kind == "cron" {
+                    expr.as_deref().and_then(|e| next_cron_occurrence(e, now))
+                } else {
+                    None
+                };
+                match next {
+                    Some(ms) => job["next_run_at"] = json!(format_iso(ms)),
+                    None => {
+                        // once-task, or unparsable cron expr — disable so it
+                        // can't refire every tick.
+                        job["enabled"] = json!(false);
+                        job["next_run_at"] = Value::Null;
+                    }
+                }
+                job["last_run_at"] = json!(now_iso());
+                job["updated_at"] = json!(now_iso());
+                changed = true;
+                let label = job
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unnamed")
+                    .to_string();
+                let prompt = job
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !id.is_empty() && !prompt.is_empty() {
+                    due.push((id, label, prompt));
+                }
+            }
+            None if kind == "cron" => {
+                // next_run_at absent (e.g. UI-created cron job) — seed it.
+                if let Some(ms) = expr.as_deref().and_then(|e| next_cron_occurrence(e, now)) {
+                    job["next_run_at"] = json!(format_iso(ms));
+                    job["updated_at"] = json!(now_iso());
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if changed {
+        data["updated_at"] = json!(now_iso());
+        if let Err(e) = atomic_write_jobs(&data) {
+            eprintln!("[scheduled-events] failed to advance due jobs: {e}");
+        }
+    }
+    for (id, label, prompt) in due {
+        dispatch_scheduled_task(&id, &label, &prompt, "auto");
+    }
 }
 ///
 /// Reads every unconsumed `.json` file, dispatches `task_fired` events to a
@@ -499,17 +621,20 @@ fn dispatch_scheduled_task(job_id: &str, label: &str, prompt: &str, trigger: &st
                 eprintln!("[scheduled-events] session/prompt failed for job {job_id}: {e}");
             }
         }
-        // Best-effort cleanup: don't block the poller on this.
-        let _ = crate::pi_gateway::send(
-            "session/close",
-            json!({ "session_id": session_id }),
-        )
-        .await;
+        // Reap the session's pi instance now that its turn has settled — the
+        // scheduled task is one-shot and its conversation should not linger in
+        // memory for IDLE_REAP_MS. `drop_session_instance` is a no-op when the
+        // instance is already gone. The pi `send` surface has no `session/close`
+        // method (that path used to error on every dispatch), so we drop the
+        // in-memory instance directly instead.
+        crate::pi_gateway::drop_session_instance(&session_id);
     });
 }
 
 /// Update jobs.json for the fired job: set last_run_at=now, disable once-tasks,
-/// advance cron-tasks next_run_at to now+60 s.
+/// advance cron-tasks next_run_at to the real next occurrence of their
+/// expression (previously this was a flat now+60 s, which made hourly jobs
+/// fire every minute).
 fn mark_job_fired_in_jobs(job_id: &str) {
     if job_id.is_empty() {
         return;
@@ -524,18 +649,20 @@ fn mark_job_fired_in_jobs(job_id: &str) {
             continue;
         }
         job["last_run_at"] = json!(now_iso());
-        let kind = job
-            .get("schedule")
-            .and_then(|s| s.get("kind"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if kind == "once" {
+        let schedule = job.get("schedule").cloned().unwrap_or_else(|| json!({}));
+        let kind = schedule.get("kind").and_then(Value::as_str).unwrap_or("");
+        let expr = schedule.get("expr").and_then(Value::as_str);
+        if kind == "cron" {
+            match expr.and_then(|e| next_cron_occurrence(e, now_ms())) {
+                Some(ms) => job["next_run_at"] = json!(format_iso(ms)),
+                None => {
+                    job["enabled"] = json!(false);
+                    job["next_run_at"] = Value::Null;
+                }
+            }
+        } else {
             job["enabled"] = json!(false);
             job["next_run_at"] = Value::Null;
-        } else {
-            let advanced = (Utc::now() + chrono::Duration::seconds(60))
-                .to_rfc3339_opts(SecondsFormat::Millis, false);
-            job["next_run_at"] = json!(advanced);
         }
         job["updated_at"] = json!(now_iso());
         break;

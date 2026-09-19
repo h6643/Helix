@@ -4,7 +4,6 @@ mod app;
 mod background_tasks;
 mod config;
 mod delegations;
-mod external;
 mod fs;
 mod gateway;
 mod git;
@@ -95,6 +94,12 @@ pub fn run() {
                         builder = builder.proxy_url(url);
                     }
                 }
+                // On Windows the webview's native drag-drop handler (on by
+                // default) swallows every drag, so the frontend's HTML5 DnD —
+                // dropping files into the chat and reordering sessions in the
+                // sidebar — never fires. `tauri.conf.json`'s `dragDropEnabled`
+                // is not read by the builder path, so it must be set per window.
+                builder = builder.disable_drag_drop_handler();
                 builder.build()?;
             }
 
@@ -111,35 +116,11 @@ pub fn run() {
             // BEFORE the gateway spawns so the webview fetches already honor it.
             crate::proxy::apply_webview_proxy();
             std::thread::spawn(move || {
-                // File-based startup diagnostic: eprintln goes to the terminal
-                // running `tauri:dev`, which is invisible when the app is
-                // launched from the tray / a release build. Append every
-                // outcome to ~/.pi/agent/helix-spawn-debug.log so a stuck
-                // "连接中" badge is reproducible and inspectable.
-                let result = pi_gateway::spawn(&app_state);
-                let log_path = crate::paths::pi_agent_dir().join("helix-spawn-debug.log");
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0);
-                let line = match &result {
-                    Ok(()) => format!("[{stamp}] spawn OK\n"),
-                    Err(e) => format!("[{stamp}] spawn FAILED: {e}\n"),
-                };
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                {
-                    let _ = f.write_all(line.as_bytes());
-                }
-                if let Err(e) = &result {
+                if let Err(e) = pi_gateway::spawn(&app_state) {
                     eprintln!("[Helix] pi agent failed to start: {e}");
                 }
             });
-            // Consume scheduled-task events emitted by the pi extension
-            // (~/.pi/agent/cron-events/). Spawned after the
+            // Spawned after the
             // gateway so the pi child is ready before the first dispatch.
             scheduled_tasks::start_scheduled_events_poller();
 
@@ -226,24 +207,18 @@ pub fn run() {
             helix::helix_set_yaml_key,
             helix::helix_set_delegation_identities,
             helix::helix_set_config_key_value,
-            helix::helix_set_reasoning_effort,
             helix::helix_approval_respond,
             // embedded sidebar browser
             helix::open_browser_url,
             helix::poll_browser_requests,
             helix::browser_write_result,
             helix::helix_set_model,
-            helix::helix_set_agent_config,
             helix::helix_list_memories,
             helix::helix_add_memory_entry,
             helix::helix_remove_memory_entry,
             // Memory status
-            helix::helix_get_memory_status,
             // Personality management
-            helix::helix_list_personalities,
-            helix::helix_set_personality,
             // Plugin installation
-            helix::helix_install_plugin,
             // fs
             fs::read,
             fs::write,
@@ -257,7 +232,6 @@ pub fn run() {
             fs::helix_memory_dir,
             // file-based skills (slash-command picker / skill panel)
             skills::helix_get_skills_dir,
-            skills::helix_get_plugins_dir,
             skills::helix_read_dir,
             skills::helix_read_file,
             skills::helix_delete_dir,
@@ -275,9 +249,6 @@ pub fn run() {
             image_model::image_config_save,
             // SSH connections
             ssh::ssh_connect,
-            ssh::ssh_exec,
-            ssh::ssh_status,
-            ssh::ssh_disconnect,
             // hooks (hooks: block in config.yaml)
             hooks::hooks_list,
             hooks::hooks_save,
@@ -298,7 +269,6 @@ pub fn run() {
             window::is_maximized,
             window::toggle_devtools,
             window::new_window,
-            window::start_drag,
             // shell / dialog / security
             security::open,
             security::show_item_in_folder,
@@ -343,14 +313,8 @@ pub fn run() {
             // app
             app::get_info,
             app::get_sessions_dir,
-            app::get_helix_version,
             app::get_status,
-            app::helix_get_raw_config,
-            app::helix_set_raw_config,
-            app::helix_doctor,
             app::helix_update,
-            // external (TCP probe, SSH)
-            external::test_connection,
             app::sync_work_dir,
             app::set_work_dir,
             app::get_data_root,
@@ -358,43 +322,28 @@ pub fn run() {
             // proxy
             proxy::proxy_get,
             proxy::proxy_set,
-            app::restart_gateway,
-            app::quit,
             // profile
             profile::cache_config,
-            profile::activate_profile,
-            profile::profile_list,
             // scheduled tasks
             scheduled_tasks::scheduled_tasks_list,
             scheduled_tasks::create,
             scheduled_tasks::update,
             scheduled_tasks::remove,
             // cron aliases
-            scheduled_tasks::helix_cron_list,
-            scheduled_tasks::helix_cron_create,
-            scheduled_tasks::helix_cron_delete,
-            scheduled_tasks::helix_cron_run,
             // Pi agent commands (extensions/skills/prompts listing)
-            helix::pi_get_commands,
             helix::pi_list_installed,
             helix::pi_set_package_enabled,
             helix::pi_get_available_models,
-            helix::pi_get_state,
-            helix::pi_set_model,
-            helix::pi_set_thinking_level,
             helix::pi_set_thinking_level_all,
-            helix::pi_compact,
-            helix::pi_get_session_stats,
             helix::pi_search_packages,
             helix::pi_install_package,
             helix::pi_uninstall_package,
             helix::pi_check_updates,
-            helix::pi_package_latest,
             // gateway MCP servers (config.yaml mcp_servers, read/write)
             mcp::mcp_config_list,
             mcp::mcp_config_save,
             // subagents settings (config.yaml `subagents:` block, read/write,
-            // mirrored into the extension's subagents.json on save)
+            // mirrored into the extension's settings.json on save)
             subagents::subagents_settings_list,
             subagents::subagents_settings_save,
         ])

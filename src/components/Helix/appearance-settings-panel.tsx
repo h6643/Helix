@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, X } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import {
   SettingRow,
@@ -226,6 +226,38 @@ export function AppearanceSettingsPanel({
   const setInterfaceFont = useHelixStore((s) => s.setInterfaceFont);
   const transcriptFontSize = useHelixStore((s) => s.transcriptFontSize);
   const setTranscriptFontSize = useHelixStore((s) => s.setTranscriptFontSize);
+  const bootBackgroundImage = useHelixStore((s) => s.bootBackgroundImage);
+  const setBootBackgroundImage = useHelixStore(
+    (s) => s.setBootBackgroundImage,
+  );
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Check file type
+    if (!file.type.startsWith("image/")) {
+      return;
+    }
+
+    // Check file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const base64 = event.target?.result as string;
+      setBootBackgroundImage(base64);
+    };
+    reader.readAsDataURL(file);
+
+    // Reset input so the same file can be selected again
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -270,6 +302,65 @@ export function AppearanceSettingsPanel({
           >
             {stepper(transcriptFontSize, 10, 28, setTranscriptFontSize)}
           </SettingRow>
+        </SettingGroup>
+      </div>
+
+      {/* 启动画面 */}
+      <div className="pt-1">
+        <div className="px-4 pt-3 pb-2">
+          <h4 className="ui-subtitle font-semibold text-foreground">
+            启动画面
+          </h4>
+        </div>
+        <SettingGroup>
+          <SettingRow
+            label="背景图片"
+            hint="自定义启动画面的背景图片，推荐尺寸 1920x1080 或更大。"
+          >
+            <div className="flex items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handleImageUpload}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 transition-colors hover:bg-muted/40"
+              >
+                选择图片
+              </button>
+              {bootBackgroundImage && (
+                <button
+                  type="button"
+                  onClick={() => setBootBackgroundImage(null)}
+                  className="ui-text-sm2 text-muted-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 transition-colors hover:bg-muted/40"
+                >
+                  恢复默认
+                </button>
+              )}
+            </div>
+          </SettingRow>
+          {bootBackgroundImage && (
+            <div className="px-4 pb-3">
+              <div className="relative w-full h-32 rounded-lg overflow-hidden border border-border">
+                <img
+                  src={bootBackgroundImage}
+                  alt="启动画面背景预览"
+                  className="w-full h-full object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => setBootBackgroundImage(null)}
+                  className="absolute top-2 right-2 p-1 rounded-full bg-background/80 text-foreground hover:bg-background transition-colors"
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+            </div>
+          )}
         </SettingGroup>
       </div>
     </div>

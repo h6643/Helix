@@ -32,7 +32,7 @@ const SHIKI_COLOR_REPLACEMENTS: Record<string, Record<string, string>> = {
 const MAX_HIGHLIGHT_CHARS = 150_000;
 const MAX_HIGHLIGHT_LINES = 3_000;
 
-export function exceedsHighlightBudget(code: string): boolean {
+function exceedsHighlightBudget(code: string): boolean {
   if (code.length > MAX_HIGHLIGHT_CHARS) {
     return true;
   }

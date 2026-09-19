@@ -96,8 +96,10 @@ pub fn vision_config_save(config: Value) -> Value {
 /// Turn an image (data URL) into a text description using the configured
 /// vision model. Returns the description string, or an error the frontend
 /// treats as "fall back to native image_url".
-#[tauri::command]
-pub async fn vision_describe(image: String, prompt: Option<String>) -> Result<String, String> {
+///
+/// Core logic — callable directly from Rust (e.g. pi_gateway) or via the
+/// tauri command `vision_describe_command` below.
+pub async fn vision_describe_core(image: String, prompt: Option<String>) -> Result<String, String> {
     let c = read_config();
     let base_url = c
         .get("baseUrl")
@@ -164,4 +166,19 @@ pub async fn vision_describe(image: String, prompt: Option<String>) -> Result<St
         return Err("vision API returned empty content".into());
     }
     Ok(content.to_string())
+}
+
+/// Tauri command wrapper — keeps the old command name `vision_describe`
+/// for the frontend.
+#[tauri::command]
+pub async fn vision_describe(image: String, prompt: Option<String>) -> Result<String, String> {
+    vision_describe_core(image, prompt).await
+}
+
+/// Convert a pi ImageContent value (`{type:"image", data, mimeType}`) back to
+/// a `data:` URL for the vision model. Returns None for non-image values.
+pub fn image_to_data_url(img: &serde_json::Value) -> Option<String> {
+    let data = img.get("data")?.as_str()?;
+    let mime = img.get("mimeType").and_then(Value::as_str).unwrap_or("image/png");
+    Some(format!("data:{mime};base64,{data}"))
 }

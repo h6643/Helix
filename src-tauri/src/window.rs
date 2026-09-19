@@ -59,6 +59,9 @@ pub fn new_window() {
     .min_inner_size(800.0, 600.0)
     .decorations(false)
     .visible(false)
+    // Keep HTML5 DnD alive (chat file drops, sidebar session reorder) — see the
+    // same call in lib.rs where the main window is created.
+    .disable_drag_drop_handler()
     .build()
     .map(|win| {
         let _ = win.maximize();
@@ -66,10 +69,4 @@ pub fn new_window() {
         let _ = win.set_focus();
         ()
     });
-}
-
-#[tauri::command]
-pub fn start_drag(window: Window) {
-    // No-op: handled by CSS -webkit-app-region: drag (mirror electron behavior).
-    let _ = window.start_dragging();
 }

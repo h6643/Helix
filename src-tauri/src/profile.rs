@@ -113,25 +113,5 @@ pub fn cache_config(cfg: Value) -> Value {
     }
 }
 
-/// Apply a profile immediately: write config + persist cache. The api_key, if
-/// given, is applied to pi's files right away (one-time write) — the cache
-/// copy strips it, so restarts never re-assert a stale key.
-#[tauri::command]
-pub fn activate_profile(cfg: Value) -> Value {
-    if is_bad_config(&cfg) {
-        return json!({ "success": false, "error": "invalid profile config" });
-    }
-    let model = cfg_str(&cfg, "model", "model");
-    let provider = cfg_str(&cfg, "provider", "provider");
-    let base_url = cfg_str(&cfg, "baseUrl", "base_url");
-    let api_key = cfg_str(&cfg, "apiKey", "api_key");
-    write_helix_config(model, provider, base_url, api_key, None);
-    let _ = cache_config(cfg);
-    json!({ "success": true })
-}
-
-/// List known profiles (placeholder — profile storage lives in the renderer).
-#[tauri::command]
-pub fn profile_list() -> Value {
-    json!({ "ok": true, "profiles": [] })
-}
+// (activate_profile / profile_list removed — the renderer never called them;
+// profile application happens through helix_set_config / cache_config.)

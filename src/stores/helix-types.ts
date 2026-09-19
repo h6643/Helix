@@ -194,8 +194,8 @@ export interface PendingChange {
   unifiedDiff?: string;
 }
 
-export type ApiProvider = string;
-export type AgentEngine = "helix";
+type ApiProvider = string;
+type AgentEngine = "helix";
 
 // Helix native reasoning scale (none/minimal/low/medium/high/xhigh/max/ultra).
 export type ReasoningEffortLevel =
@@ -205,6 +205,26 @@ export type ApprovalMode = "default" | "accept_edits" | "dont_ask" | "plan";
 
 // Tool approval choices written back to the backend approval state machine.
 export type ApprovalLevel = "once" | "session" | "always" | "deny";
+
+/**
+ * /btw 旁路问答的会话记录，按**主线会话 id** 索引。
+ *
+ * 旁路会话（btw- 前缀）不进左侧对话列表、不落盘；它的整段对话（多轮追问）
+ * 由右侧边栏「旁路问答」面板渲染：消息读 chatMessages 里 sessionId ===
+ * bylineSessionId 的条目，运行中的流式草稿读 streamingDrafts[bylineSessionId]。
+ * 答案文本额外留一份在 answer 里（finalize 时写入），作为面板的兜底。
+ */
+export interface BylineReply {
+  /** 旁路会话的前端 cid（bylineSessionId）。 */
+  sessionId: string;
+  /** 第一条问题（不含 /btw 前缀）——面板页签/标题用它做标签。 */
+  question: string;
+  /** 最近一次模型回复（多轮追问时是最新一轮的）；运行中可能为空。 */
+  answer: string;
+  status: "running" | "done" | "error";
+  /** 最近一次回复完成时刻（运行中为发问时刻）。 */
+  ts: number;
+}
 
 export interface McpServerConfig {
   name?: string;
@@ -290,17 +310,6 @@ export interface MemoryEntry {
 export interface AvailableCommand {
   name: string;
   description?: string;
-}
-
-// A plugin managed by the Helix backend (serve gateway `plugins.manage` /
-// `helix plugins` / Plugins Hub). Mirrors the backend row shape.
-export interface BackendPlugin {
-  name: string;
-  key?: string;
-  version: string;
-  description: string;
-  source: "bundled" | "user";
-  status: "enabled" | "disabled" | "not enabled";
 }
 
 export interface TaskNode {

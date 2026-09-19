@@ -87,7 +87,7 @@ function normalizeUrl(raw: string): string {
   return `https://${t}`;
 }
 
-export function summarizeUrl(url: string): string {
+function summarizeUrl(url: string): string {
   if (!url) return "";
   try {
     const u = new URL(url);

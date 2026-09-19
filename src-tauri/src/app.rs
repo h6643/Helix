@@ -1,8 +1,7 @@
 //! `app:*` Tauri commands + work-dir persistence.
-//! Port of `electron/main.js` (app:getInfo / syncWorkDir / setWorkDir / quit)
+//! Port of `electron/main.js` (app:getInfo / syncWorkDir / setWorkDir)
 //! and the workdir.json persistence helpers.
 
-use crate::gateway::shutdown;
 use crate::paths::{
     data_root_pointer_path, default_helix_data_dir, helix_data_dir, strip_verbatim_prefix,
 };
@@ -183,27 +182,6 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
     json!({ "success": true, "workDir": display_path(&canonical) })
 }
 
-/// Kill + respawn the backend.
-#[tauri::command]
-pub fn restart_gateway(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    // Overlapping (non-blocking) restart: the replacement is spawned and
-    // handshaked while the old main keeps serving, then promoted atomically.
-    // The old kill-first flow (kill_all → sleep(300ms) → cold spawn) dropped
-    // the pending responders of every instance still handshaking (surfacing as
-    // "process exited (no response channel)") and left the app with no backend
-    // for the whole cold-start window.
-    crate::gateway::restart_gateway_now(&state);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn quit(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    shutdown(&state);
-    let handle = crate::state::app_handle();
-    handle.exit(0);
-    Ok(())
-}
-
 /// The Pi agent's default sessions working directory (`~/.pi/agent/sessions`).
 /// Tauri command for the frontend fallback (未选择项目目录时默认工作目录).
 #[tauri::command]
@@ -376,11 +354,6 @@ mod tests {
 // ── Version & Status ────────────────────────
 
 #[tauri::command]
-pub fn get_helix_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
-}
-
-#[tauri::command]
 pub fn get_status() -> Value {
     json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -392,35 +365,8 @@ pub fn get_status() -> Value {
 
 // ── Raw Config ──────────────────────────
 
-#[tauri::command]
-pub async fn helix_get_raw_config() -> Result<Value, String> {
-    crate::config::read_raw_config()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn helix_set_raw_config(config: Value) -> Result<(), String> {
-    crate::config::write_raw_config(config)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// ── Doctor / Diagnostic ───────────────────────
-
-#[tauri::command]
-pub async fn helix_doctor() -> Result<Value, String> {
-    let data_dir = helix_data_dir();
-    let config_ok = std::fs::read_to_string(data_dir.join("config.yaml")).is_ok();
-    let runtime_ok = which::which("python3").is_ok() || which::which("python").is_ok();
-
-    Ok(json!({
-        "dataDir": data_dir.display().to_string(),
-        "configYaml": if config_ok { "ok" } else { "missing" },
-        "python": if runtime_ok { "ok" } else { "not found" },
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
-}
+// (helix_get/set_raw_config removed — config edits go through
+// helix_set_config / helix_set_yaml_key / helix_set_config_key_value.)
 
 // ── Update Check ─────────────────────────
 

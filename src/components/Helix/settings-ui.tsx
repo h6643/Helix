@@ -158,7 +158,7 @@ export function NumberField({
   );
 }
 
-export interface PopupSelectOption {
+interface PopupSelectOption {
   label: string;
   value: string | number;
   hint?: string;

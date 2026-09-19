@@ -41,7 +41,7 @@ interface CtpPalette {
   crust: string;
 }
 
-export interface HelixThemeDef {
+interface HelixThemeDef {
   id: string;
   label: string;
   mode: ThemeMode;
@@ -338,7 +338,7 @@ const THEMES: Record<string, HelixThemeDef> = {
 const DEFAULT_THEME_STYLE = "default";
 
 /** Returns the theme definition, or null for the built-in cream default. */
-export function getThemeMeta(
+function getThemeMeta(
   styleId: string | null | undefined,
 ): HelixThemeDef | null {
   if (!styleId || styleId === DEFAULT_THEME_STYLE) return null;

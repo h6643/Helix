@@ -508,38 +508,8 @@ mod tests {
     }
 }
 
-// ── Raw Config (full YAML/JSON read-write) ───────────
-
-/// Read the raw config.yaml as a JSON Value.
-pub async fn read_raw_config() -> Result<serde_json::Value, String> {
-    let path = config_yaml_path();
-    let yaml = tokio::task::spawn_blocking({
-        let path = path.clone();
-        move || std::fs::read_to_string(&path)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
-
-    let value: serde_json::Value =
-        serde_yaml::from_str(&yaml).map_err(|e| format!("YAML parse error: {}", e))?;
-    Ok(value)
-}
-
-/// Write a JSON Value back to config.yaml.
-pub async fn write_raw_config(config: serde_json::Value) -> Result<(), String> {
-    let yaml =
-        serde_yaml::to_string(&config).map_err(|e| format!("YAML serialize error: {}", e))?;
-
-    tokio::task::spawn_blocking(move || {
-        atomic_write(&config_yaml_path(), &yaml).map_err(|e| e.to_string())?;
-        Ok::<(), String>(())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    Ok(())
-}
+// (read_raw_config / write_raw_config removed with the tauri-bridge methods
+// that called them — config edits go through set_yaml_key / set_config paths.)
 
 #[cfg(test)]
 mod pi_roundtrip_tests {

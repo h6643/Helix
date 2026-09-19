@@ -537,6 +537,20 @@ export function ApiSettings({
   );
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const [modelSearch, setModelSearch] = useState("");
+  const [modelSort, setModelSort] = useState<"asc" | "desc" | "none">("asc");
+
+  // Search-filtered + sorted view of the model list (the dropdown renders this,
+  // not the raw availableModels, so the search box and sort buttons compose).
+  const sortedModelOptions = useMemo(() => {
+    const q = modelSearch.trim().toLowerCase();
+    const filtered = q
+      ? availableModels.filter((m) => m.toLowerCase().includes(q))
+      : availableModels;
+    const copy = [...filtered];
+    copy.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    return modelSort === "desc" ? copy.reverse() : copy;
+  }, [availableModels, modelSearch, modelSort]);
 
   useEffect(() => {
     if (!showModelDropdown) return;
@@ -1940,36 +1954,145 @@ export function ApiSettings({
                             </svg>
                           </button>
                           {showModelDropdown && (
-                            <div className="absolute bottom-full left-0 right-0 mb-1 max-h-48 overflow-y-auto bg-card border border-border/50 rounded-lg shadow-lg z-50 p-1">
-                              {availableModels.map((model) => (
-                                <button
-                                  key={model}
-                                  type="button"
-                                  onClick={() => {
-                                    const metadata = piModels.find(
-                                      (m) =>
-                                        m.id === model &&
-                                        m.provider ===
-                                          localConfig.provider
-                                            .trim()
-                                            .replace(/^custom:/, ""),
-                                    );
-                                    setLocalConfig((prev) => ({
-                                      ...prev,
-                                      model,
-                                      contextWindow: metadata?.contextWindow,
-                                    }));
-                                    setShowModelDropdown(false);
-                                  }}
-                                  className={`w-full text-left px-3 py-2 rounded-md text-[length:var(--helix-transcript-size)] font-mono transition-colors ${
-                                    localConfig.model === model
-                                      ? "bg-primary/10 text-primary"
-                                      : "text-foreground/70 hover:bg-muted"
-                                  }`}
+                            <div className="absolute bottom-full left-0 right-0 mb-1.5 z-50 rounded-lg border border-border/60 bg-card/95 backdrop-blur-sm shadow-lg shadow-black/10 overflow-hidden">
+                              {/* Toolbar: search + sort, fixed above the list */}
+                              <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border/40 bg-card/80">
+                                <svg
+                                  className="size-3.5 shrink-0 text-muted-foreground/50"
+                                  xmlns="http://www.w3.org/2000/svg"
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
                                 >
-                                  {model}
-                                </button>
-                              ))}
+                                  <circle cx="11" cy="11" r="8" />
+                                  <path d="m21 21-4.3-4.3" />
+                                </svg>
+                                <input
+                                  type="text"
+                                  value={modelSearch}
+                                  onChange={(e) => setModelSearch(e.target.value)}
+                                  placeholder="筛选模型…"
+                                  className="flex-1 min-w-0 bg-transparent outline-none border-none text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground placeholder:text-muted-foreground/40"
+                                />
+                                {modelSearch && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setModelSearch("")}
+                                    className="shrink-0 text-muted-foreground/50 hover:text-foreground transition-colors"
+                                    title="清除筛选"
+                                  >
+                                    <svg
+                                      className="size-3.5"
+                                      xmlns="http://www.w3.org/2000/svg"
+                                      width="14"
+                                      height="14"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                    >
+                                      <path d="M18 6 6 18" />
+                                      <path d="m6 6 12 12" />
+                                    </svg>
+                                  </button>
+                                )}
+                                {availableModels.length > 1 && (
+                                  <div className="flex items-center shrink-0 rounded-md border border-border/50 overflow-hidden">
+                                    {(["asc", "desc"] as const).map((dir) => (
+                                      <button
+                                        key={dir}
+                                        type="button"
+                                        onClick={() =>
+                                          setModelSort((prev) =>
+                                            prev === dir ? "none" : dir
+                                          )
+                                        }
+                                        title={
+                                          dir === "asc" ? "升序（A→Z）" : "降序（Z→A）"
+                                        }
+                                        className={`px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] leading-none transition-colors ${
+                                          dir === "asc" ? "border-r border-border/50" : ""
+                                        } ${
+                                          modelSort === dir
+                                            ? "bg-muted text-foreground"
+                                            : "text-muted-foreground/60 hover:text-foreground hover:bg-muted/60"
+                                        }`}
+                                      >
+                                        {dir === "asc" ? "A→Z" : "Z→A"}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              {/* List */}
+                              <div className="max-h-52 overflow-y-auto p-1">
+                                {sortedModelOptions.length === 0 ? (
+                                  <p className="px-3 py-3 text-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50">
+                                    无匹配模型
+                                  </p>
+                                ) : (
+                                  sortedModelOptions.map((model) => {
+                                    const selected = localConfig.model === model;
+                                    return (
+                                      <button
+                                        key={model}
+                                        type="button"
+                                        onClick={() => {
+                                          const metadata = piModels.find(
+                                            (m) =>
+                                              m.id === model &&
+                                              m.provider ===
+                                                localConfig.provider
+                                                  .trim()
+                                                  .replace(/^custom:/, ""),
+                                          );
+                                          setLocalConfig((prev) => ({
+                                            ...prev,
+                                            model,
+                                            contextWindow: metadata?.contextWindow,
+                                          }));
+                                          setShowModelDropdown(false);
+                                          setModelSearch("");
+                                        }}
+                                        className={`w-full flex items-center justify-between gap-2 text-left px-2.5 py-1.5 rounded-md text-[length:var(--helix-transcript-size)] font-mono transition-colors ${
+                                          selected
+                                            ? "bg-primary/10 text-primary"
+                                            : "text-foreground/70 hover:bg-muted/70 hover:text-foreground"
+                                        }`}
+                                      >
+                                        <span className="truncate">{model}</span>
+                                        {selected && (
+                                          <svg
+                                            className="size-3.5 shrink-0"
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            width="14"
+                                            height="14"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2.5"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                          >
+                                            <path d="M20 6 9 17l-5-5" />
+                                          </svg>
+                                        )}
+                                      </button>
+                                    );
+                                  })
+                                )}
+                              </div>
+                              {/* Footer: count */}
+                              <div className="px-2.5 py-1 border-t border-border/40 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
+                                {sortedModelOptions.length}/{availableModels.length} 个模型
+                              </div>
                             </div>
                           )}
                         </div>

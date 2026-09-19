@@ -15,37 +15,6 @@ const NON_CODE_FENCE_LANGUAGES = new Set([
   "md",
   "markdown",
 ]);
-const COMMON_CODE_LANGUAGES = new Set([
-  "bash",
-  "c",
-  "cpp",
-  "css",
-  "diff",
-  "go",
-  "html",
-  "java",
-  "javascript",
-  "js",
-  "json",
-  "jsx",
-  "markdown",
-  "md",
-  "php",
-  "python",
-  "py",
-  "ruby",
-  "rust",
-  "rs",
-  "sh",
-  "sql",
-  "swift",
-  "tsx",
-  "ts",
-  "typescript",
-  "xml",
-  "yaml",
-  "yml",
-]);
 
 export function sanitizeLanguageTag(tag: string): string {
   const trimmed = tag.trim();
@@ -150,35 +119,5 @@ export function isLikelyProseFence(info: string, body: string): boolean {
     (signals.proseLines >= 3 &&
       signals.codeSignals === 0 &&
       signals.hasMarkdown)
-  );
-}
-
-/** Rendered-blocks classifier: would react-markdown render this fence as prose anyway? */
-export function isLikelyProseCodeBlock(
-  language: string | undefined,
-  code: string | undefined,
-): boolean {
-  const cleanLanguage = sanitizeLanguageTag(language || "");
-  const signals = codeSignals(code || "");
-
-  if (!signals.trimmed || signals.codeSignals >= 3) {
-    return false;
-  }
-
-  if (
-    signals.bulletLines >= 1 &&
-    (signals.hasMarkdown || signals.proseLines >= 2)
-  ) {
-    return true;
-  }
-
-  if (NON_CODE_FENCE_LANGUAGES.has(cleanLanguage)) {
-    return signals.proseLines >= 3 && signals.codeSignals === 0;
-  }
-
-  return (
-    !COMMON_CODE_LANGUAGES.has(cleanLanguage) &&
-    signals.proseLines >= 2 &&
-    signals.codeSignals <= 1
   );
 }

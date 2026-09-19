@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { electronGit, isElectron } from "@/lib/electron-bridge";
 
 /** 单个文件在 `git diff --numstat` 里的增减行数；二进制文件无法计数。 */
-export interface GitChangeFile {
+interface GitChangeFile {
   path: string;
   added: number;
   removed: number;

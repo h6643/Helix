@@ -70,13 +70,6 @@ const PROVIDERS: ProviderConfig[] = [
     envKey: "OPENCODE_GO_API_KEY",
     website: "https://opencode.ai",
   },
-  {
-    id: "kilo",
-    name: "KiloCode",
-    baseUrl: "https://api.kilocode.ai/v1",
-    envKey: "KILOCODE_API_KEY",
-    website: "https://kilocode.ai",
-  },
   // ── European / Other ─────────────────────────────────────────────────────
   {
     id: "mistral",
@@ -84,13 +77,6 @@ const PROVIDERS: ProviderConfig[] = [
     baseUrl: "https://api.mistral.ai/v1",
     envKey: "MISTRAL_API_KEY",
     website: "https://console.mistral.ai",
-  },
-  {
-    id: "nvidia",
-    name: "NVIDIA NIM",
-    baseUrl: "https://integrate.api.nvidia.com/v1",
-    envKey: "NVIDIA_API_KEY",
-    website: "https://build.nvidia.com",
   },
   // ── China ────────────────────────────────────────────────────────────────
   {
@@ -162,8 +148,3 @@ export function getBaseUrl(providerID: string): string | undefined {
   return getProvider(providerID)?.baseUrl;
 }
 
-function getEnvApiKey(providerID: string): string | undefined {
-  const provider = getProvider(providerID);
-  if (!provider?.envKey) return;
-  return process.env[provider.envKey] || undefined;
-}

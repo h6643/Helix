@@ -1690,7 +1690,8 @@ nav::-webkit-scrollbar-thumb:hover {
   animation: pulse-glow 2.5s ease-in-out infinite;
 }
 #helix-titlebar button,
-#helix-titlebar [role="button"] {
+#helix-titlebar [role="button"],
+[data-tauri-drag-region="false"] {
   -webkit-app-region: no-drag;
 }
 
@@ -2004,14 +2005,37 @@ nav::-webkit-scrollbar-thumb:hover {
 
 
 /* ── Boot splash（全屏毛玻璃启动画面）───────────────────────────────
-   BootOverlay 用：深色底 + 白色半透明元素 + 毛玻璃面板。
-   所有颜色统一走 rgba(255,255,255,α)，想整体调亮/调暗只改 α。
-   backdrop-filter 需要真实可模糊的背景（射线/光束/粒子），所以玻璃面板
-   必须放在这些背景层之上。 */
+   与应用整体主题解耦：无论用户选择浅色/深色皮肤，启动画面始终走同一套
+   深色基调（--splash-bg-*），只有点缀色跟随 --primary 走主题，保持品牌一致。
+
+   关键改动：局部覆盖 --foreground 为近白色。浅色主题下 --foreground 是
+   深棕色，射线/光束/粒子这类"发光"效果如果直接用它，在深色底上会
+   看起来正常，但组件内其余的 text-foreground/xx、border-foreground/xx、
+   bg-foreground/xx 这些 Tailwind 工具类也都引用同一个 --foreground——
+   所以只要在 .helix-splash 上覆盖这一个变量，下面所有沿用 foreground
+   的文字/边框/填充就会自动变亮，不需要逐个类名去改 TSX。 */
 .helix-splash {
+  --foreground: oklch(0.97 0.008 260);
+  --splash-bg-top: oklch(0.16 0.025 262);
+  --splash-bg-bottom: oklch(0.085 0.018 264);
+  --splash-glow: var(--primary);
   background:
-    radial-gradient(120% 90% at 50% -10%, rgba(42, 46, 58, 0.55) 0%, rgba(12, 13, 18, 0.9) 46%, #07080b 100%);
+    radial-gradient(85% 60% at 50% 8%,
+      color-mix(in oklch, var(--splash-glow) 26%, transparent) 0%,
+      transparent 60%),
+    linear-gradient(175deg, var(--splash-bg-top), var(--splash-bg-bottom));
+  color: var(--foreground);
   transition: opacity 0.8s ease, transform 0.8s ease, filter 0.8s ease;
+}
+
+/* 自定义背景图片 */
+.helix-splash-bg-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 0;
 }
 .helix-splash.helix-splash-out {
   opacity: 0;
@@ -2019,16 +2043,20 @@ nav::-webkit-scrollbar-thumb:hover {
   filter: blur(6px);
   pointer-events: none;
 }
-/* 中心呼吸光晕 */
+
+/* 中心呼吸光晕 — 带主题强调色，比纯灰"雾团"更有仪式感 */
 .helix-splash-veil {
-  background: radial-gradient(58% 44% at 50% 48%, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0) 72%);
+  background: radial-gradient(56% 42% at 50% 46%,
+    color-mix(in oklch, var(--splash-glow) 30%, transparent),
+    transparent 72%);
   animation: helix-splash-veil 4.6s ease-in-out infinite;
 }
 @keyframes helix-splash-veil {
-  0%, 100% { opacity: 0.55; transform: scale(0.94); }
-  50% { opacity: 1; transform: scale(1.06); }
+  0%, 100% { opacity: 0.5; transform: scale(0.94); }
+  50% { opacity: 1; transform: scale(1.05); }
 }
-/* 从中心发散的双层射线（mask 收成圆形扇面） */
+
+/* 从中心发散的射线：深底 + 浅色描边，看起来是光丝而不是灰斑 */
 .helix-splash-rays {
   position: absolute;
   left: 50%;
@@ -2037,42 +2065,42 @@ nav::-webkit-scrollbar-thumb:hover {
   height: 150vmax;
   margin-left: -75vmax;
   margin-top: -75vmax;
-  -webkit-mask-image: radial-gradient(closest-side, #000 0%, rgba(0, 0, 0, 0.5) 42%, rgba(0, 0, 0, 0) 70%);
-  mask-image: radial-gradient(closest-side, #000 0%, rgba(0, 0, 0, 0.5) 42%, rgba(0, 0, 0, 0) 70%);
+  -webkit-mask-image: radial-gradient(closest-side, #000 0%, rgba(0,0,0,0.5) 42%, rgba(0,0,0,0) 70%);
+  mask-image: radial-gradient(closest-side, #000 0%, rgba(0,0,0,0.5) 42%, rgba(0,0,0,0) 70%);
 }
 .helix-splash-rays-a {
-  background: repeating-conic-gradient(from 0deg, rgba(255, 255, 255, 0.1) 0deg 6deg, rgba(255, 255, 255, 0) 6deg 24deg);
-  opacity: 0.7;
-  animation: helix-splash-rotate 44s linear infinite;
+  background: repeating-conic-gradient(from 0deg,
+    color-mix(in oklch, white 9%, transparent) 0deg 5deg,
+    transparent 5deg 24deg);
+  opacity: 0.5;
+  animation: helix-splash-rotate 48s linear infinite;
 }
 .helix-splash-rays-b {
-  background: repeating-conic-gradient(from 11deg, rgba(255, 255, 255, 0.06) 0deg 4deg, rgba(255, 255, 255, 0) 4deg 31deg);
-  opacity: 0.55;
-  animation: helix-splash-rotate 76s linear infinite reverse;
+  background: repeating-conic-gradient(from 11deg,
+    color-mix(in oklch, var(--splash-glow) 14%, transparent) 0deg 3deg,
+    transparent 3deg 30deg);
+  opacity: 0.4;
+  animation: helix-splash-rotate 80s linear infinite reverse;
 }
 @keyframes helix-splash-rotate { to { transform: rotate(360deg); } }
-/* 斜向光束扫过全屏 */
+
+/* 斜向光束——深底上用 screen 混合来"提亮"，而不是像旧版那样用 multiply 压暗 */
 .helix-splash-beam {
   position: absolute;
   top: -25%;
   left: -35%;
-  width: 30%;
+  width: 26%;
   height: 170%;
   background: linear-gradient(100deg,
-    rgba(255, 255, 255, 0) 0%,
-    rgba(255, 255, 255, 0.1) 44%,
-    rgba(255, 255, 255, 0.2) 50%,
-    rgba(255, 255, 255, 0.1) 56%,
-    rgba(255, 255, 255, 0) 100%);
+    transparent 0%,
+    color-mix(in oklch, white 14%, transparent) 46%,
+    color-mix(in oklch, white 24%, transparent) 50%,
+    color-mix(in oklch, white 14%, transparent) 54%,
+    transparent 100%);
   transform: rotate(16deg);
   filter: blur(2px);
   mix-blend-mode: screen;
-  animation: helix-splash-beam 6s cubic-bezier(0.45, 0.05, 0.35, 0.95) infinite;
-}
-.helix-splash-beam-2 {
-  animation-duration: 8.2s;
-  animation-delay: 3.1s;
-  opacity: 0.7;
+  animation: helix-splash-beam 6.4s cubic-bezier(0.45, 0.05, 0.35, 0.95) infinite;
 }
 @keyframes helix-splash-beam {
   0% { transform: translateX(-40vw) rotate(16deg); opacity: 0; }
@@ -2080,103 +2108,127 @@ nav::-webkit-scrollbar-thumb:hover {
   60% { opacity: 1; }
   100% { transform: translateX(210vw) rotate(16deg); opacity: 0; }
 }
-/* 暗角，把注意力压向中心 */
+
+/* 暗角，收紧四周注意力 */
 .helix-splash-vignette {
-  background: radial-gradient(120% 90% at 50% 50%, rgba(0, 0, 0, 0) 40%, rgba(0, 0, 0, 0.7) 100%);
+  background: radial-gradient(120% 90% at 50% 50%,
+    rgba(0,0,0,0) 40%,
+    rgba(0,0,0,0.55) 100%);
 }
+
 /* 上升粒子 */
 .helix-splash-particle {
   position: absolute;
   bottom: -4vh;
   border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: 0 0 7px rgba(255, 255, 255, 0.7);
+  background: color-mix(in oklch, white 92%, transparent);
+  box-shadow: 0 0 7px color-mix(in oklch, var(--splash-glow) 65%, white 20%);
   opacity: 0;
   animation: helix-splash-float linear infinite;
 }
 @keyframes helix-splash-float {
-  0% { transform: translate3d(0, 0, 0); opacity: 0; }
+  0% { transform: translate3d(0,0,0); opacity: 0; }
   12% { opacity: var(--p, 0.8); }
-  75% { opacity: calc(var(--p, 0.8) * 0.55); }
+  75% { opacity: calc(var(--p, 0.8) * 0.5); }
   100% { transform: translate3d(var(--drift, 0px), -108vh, 0); opacity: 0; }
 }
+
 /* 四角取景框 */
 .helix-splash-corner {
   position: absolute;
-  width: 34px;
-  height: 34px;
-  border-color: rgba(255, 255, 255, 0.22);
+  width: 30px;
+  height: 30px;
+  border-color: color-mix(in oklch, white 30%, transparent);
   opacity: 0;
   animation: helix-splash-corner 0.7s ease 0.2s forwards;
 }
 @keyframes helix-splash-corner { to { opacity: 1; } }
 
-/* ── 毛玻璃面板 ────────────────────────────────────────────────────
-   玻璃质感三件套：半透明白填充 + backdrop-filter 模糊 + 顶边内高光。
-   内高光是玻璃最容易忽略但最有质感的细节。 */
+/* ── 毛玻璃面板 ── */
 .helix-splash-card {
-  background: rgba(255, 255, 255, 0.07);
-  -webkit-backdrop-filter: blur(28px) saturate(1.5);
-  backdrop-filter: blur(28px) saturate(1.5);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: color-mix(in oklch, white 6%, transparent);
+  -webkit-backdrop-filter: blur(30px) saturate(1.4);
+  backdrop-filter: blur(30px) saturate(1.4);
+  border: 1px solid color-mix(in oklch, white 14%, transparent);
   box-shadow:
-    0 24px 70px rgba(0, 0, 0, 0.45),
-    inset 0 1px 0 rgba(255, 255, 255, 0.26),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+    0 30px 80px rgba(0,0,0,0.45),
+    inset 0 1px 0 rgba(255,255,255,0.16),
+    inset 0 -1px 0 rgba(0,0,0,0.25);
 }
-/* 面板斜向反光，制造曲面玻璃感 */
 .helix-splash-card-shine {
   position: absolute;
   inset: 0;
   border-radius: inherit;
   pointer-events: none;
   background: linear-gradient(135deg,
-    rgba(255, 255, 255, 0.16) 0%,
-    rgba(255, 255, 255, 0) 36%,
-    rgba(255, 255, 255, 0) 62%,
-    rgba(255, 255, 255, 0.07) 100%);
+    rgba(255,255,255,0.14) 0%,
+    rgba(255,255,255,0) 36%,
+    rgba(255,255,255,0) 62%,
+    rgba(255,255,255,0.06) 100%);
 }
-.helix-splash-emblem { animation: helix-splash-pop 0.85s cubic-bezier(0.2, 0.85, 0.25, 1) both; }
+
+/* 全屏变体 */
+.helix-splash-card-full {
+  border: 0;
+  border-radius: 0;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.12),
+    inset 0 -1px 0 rgba(0,0,0,0.3);
+  animation: helix-splash-fade 0.8s cubic-bezier(0.2,0.8,0.25,1) both;
+}
+@keyframes helix-splash-fade { from { opacity: 0; } to { opacity: 1; } }
+.helix-splash-card-full .helix-splash-card-shine {
+  background: linear-gradient(135deg,
+    rgba(255,255,255,0.08) 0%,
+    rgba(255,255,255,0) 40%,
+    rgba(255,255,255,0) 64%,
+    rgba(255,255,255,0.04) 100%);
+}
+
+/* 徽标：光环改用主题强调色，比灰阶更有品牌辨识度 */
+.helix-splash-emblem { animation: helix-splash-pop 0.85s cubic-bezier(0.2,0.85,0.25,1) both; }
 .helix-splash-mark {
   background: conic-gradient(from 210deg,
-    rgba(255, 255, 255, 0.14),
-    rgba(255, 255, 255, 0.7) 22%,
-    rgba(255, 255, 255, 0.32) 40%,
-    rgba(255, 255, 255, 0.92) 55%,
-    rgba(255, 255, 255, 0.28) 72%,
-    rgba(255, 255, 255, 0.1) 88%,
-    rgba(255, 255, 255, 0.14));
-  -webkit-mask-image: radial-gradient(closest-side, rgba(0, 0, 0, 0) 60%, #000 61%);
-  mask-image: radial-gradient(closest-side, rgba(0, 0, 0, 0) 60%, #000 61%);
-  filter: drop-shadow(0 0 14px rgba(255, 255, 255, 0.35));
-  animation: helix-splash-rotate 8s linear infinite;
+    color-mix(in oklch, var(--splash-glow) 20%, transparent),
+    color-mix(in oklch, var(--splash-glow) 95%, white 15%) 22%,
+    color-mix(in oklch, var(--splash-glow) 35%, transparent) 40%,
+    white 55%,
+    color-mix(in oklch, var(--splash-glow) 35%, transparent) 72%,
+    color-mix(in oklch, var(--splash-glow) 15%, transparent) 88%,
+    color-mix(in oklch, var(--splash-glow) 20%, transparent));
+  -webkit-mask-image: radial-gradient(closest-side, rgba(0,0,0,0) 60%, #000 61%);
+  mask-image: radial-gradient(closest-side, rgba(0,0,0,0) 60%, #000 61%);
+  filter: drop-shadow(0 0 16px color-mix(in oklch, var(--splash-glow) 55%, transparent));
+  animation: helix-splash-rotate 9s linear infinite;
 }
 @keyframes helix-splash-pop {
   0% { opacity: 0; transform: scale(0.5); filter: blur(10px); }
   100% { opacity: 1; transform: scale(1); filter: blur(0); }
 }
-.helix-splash-rise { animation: helix-splash-rise 0.8s cubic-bezier(0.2, 0.8, 0.25, 1) both; }
+
+.helix-splash-rise { animation: helix-splash-rise 0.8s cubic-bezier(0.2,0.8,0.25,1) both; }
 @keyframes helix-splash-rise {
   0% { opacity: 0; transform: translateY(18px); }
   100% { opacity: 1; transform: translateY(0); }
 }
-/* 透明白字 + 流光 */
+
+/* 标题：近白渐变字 + 强调色辉光 */
 .helix-splash-title {
   background: linear-gradient(180deg,
-    rgba(255, 255, 255, 1) 0%,
-    rgba(255, 255, 255, 0.82) 45%,
-    rgba(255, 255, 255, 0.5) 100%);
+    white 0%,
+    color-mix(in oklch, white 85%, transparent) 45%,
+    color-mix(in oklch, var(--splash-glow) 60%, white 20%) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  letter-spacing: 0.3em;
-  text-shadow: 0 0 30px rgba(255, 255, 255, 0.22);
+  letter-spacing: 0.28em;
+  text-shadow: 0 0 36px color-mix(in oklch, var(--splash-glow) 45%, transparent);
 }
 .helix-splash-sheen {
   background: linear-gradient(105deg,
-    rgba(255, 255, 255, 0) 32%,
-    rgba(255, 255, 255, 0.9) 50%,
-    rgba(255, 255, 255, 0) 68%);
+    rgba(255,255,255,0) 32%,
+    rgba(255,255,255,0.95) 50%,
+    rgba(255,255,255,0) 68%);
   background-size: 240% 100%;
   background-position: 140% 0;
   -webkit-background-clip: text;
@@ -2189,47 +2241,70 @@ nav::-webkit-scrollbar-thumb:hover {
   55% { background-position: -70% 0; }
   100% { background-position: -70% 0; }
 }
-/* 装饰分隔线 */
+
 .helix-splash-rule {
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.5) 50%, rgba(255, 255, 255, 0) 100%);
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in oklch, white 45%, transparent) 50%,
+    transparent 100%);
   transform-origin: center;
-  animation: helix-splash-rule 0.95s cubic-bezier(0.2, 0.8, 0.25, 1) both;
+  animation: helix-splash-rule 0.95s cubic-bezier(0.2,0.8,0.25,1) both;
 }
 @keyframes helix-splash-rule {
   0% { opacity: 0; transform: scaleX(0.08); }
   100% { opacity: 1; transform: scaleX(1); }
 }
-/* 玻璃状态胶囊 */
+
 .helix-splash-chip {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: color-mix(in oklch, white 7%, transparent);
+  border: 1px solid color-mix(in oklch, white 16%, transparent);
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
 }
-/* 进度条 */
+
+/* 进度条：强调色渐变填充，比纯灰更有"正在启动"的仪式感 */
 .helix-splash-bar-track {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.35);
+  background: color-mix(in oklch, white 7%, transparent);
+  border: 1px solid color-mix(in oklch, white 14%, transparent);
+  box-shadow: inset 0 0 12px rgba(0,0,0,0.3);
 }
 .helix-splash-bar-fill {
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.85));
-  box-shadow: 0 0 14px rgba(255, 255, 255, 0.35);
+  background: linear-gradient(90deg,
+    color-mix(in oklch, var(--splash-glow) 55%, transparent),
+    color-mix(in oklch, var(--splash-glow) 95%, white 15%));
+  box-shadow: 0 0 14px color-mix(in oklch, var(--splash-glow) 55%, transparent);
 }
 .helix-splash-bar-flow {
   background: linear-gradient(90deg,
-    rgba(255, 255, 255, 0) 0%,
-    rgba(255, 255, 255, 0.45) 42%,
-    rgba(255, 255, 255, 0.9) 50%,
-    rgba(255, 255, 255, 0.45) 58%,
-    rgba(255, 255, 255, 0) 100%);
+    transparent 0%,
+    color-mix(in oklch, var(--splash-glow) 55%, transparent) 42%,
+    color-mix(in oklch, var(--splash-glow) 95%, white 25%) 50%,
+    color-mix(in oklch, var(--splash-glow) 55%, transparent) 58%,
+    transparent 100%);
   background-size: 46% 100%;
   background-repeat: no-repeat;
   background-position: -60% 0;
-  box-shadow: 0 0 14px rgba(255, 255, 255, 0.4);
+  box-shadow: 0 0 14px color-mix(in oklch, var(--splash-glow) 45%, transparent);
   animation: helix-splash-flow 1.7s ease-in-out infinite;
 }
 @keyframes helix-splash-flow {
   0% { background-position: -60% 0; }
   100% { background-position: 180% 0; }
+}
+
+/* 重试按钮：玻璃胶囊 + 悬停时主色发光，替代原来的灰底灰字 */
+.helix-splash-btn {
+  border-radius: 999px;
+  color: color-mix(in oklch, white 92%, transparent);
+  background: color-mix(in oklch, white 8%, transparent);
+  border: 1px solid color-mix(in oklch, white 18%, transparent);
+}
+.helix-splash-btn:hover {
+  background: color-mix(in oklch, white 14%, transparent);
+  border-color: color-mix(in oklch, var(--splash-glow) 55%, white 20%);
+  box-shadow: 0 0 18px color-mix(in oklch, var(--splash-glow) 35%, transparent);
+}
+
+.helix-splash-success {
+  animation: helix-splash-rise 0.5s ease both;
 }

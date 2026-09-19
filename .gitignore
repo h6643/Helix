@@ -135,6 +135,11 @@ pi/
 # KaTeX fonts copied to repo root by vite build
 KaTeX_*
 
+# Lint / one-off inspection artifacts (never commit)
+eslint-report.json
+parse-eslint.mjs
+watch-log.ps1
+
 
 *.log
 nul

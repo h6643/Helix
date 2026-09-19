@@ -35,8 +35,11 @@ import type {
   ProviderConfig,
   McpServerConfig,
   ApprovalMode,
+  BylineReply,
 } from "./helix-types";
 import { DEFAULT_SHORTCUTS } from "./helix-types";
+import { helixApi } from "@/lib/electron-bridge";
+import { normalizeAcpContent } from "@/lib/text-utils";
 
 /** A server / virtual machine the user can connect to from the breadcrumb. */
 export interface ExternalService {
@@ -55,7 +58,7 @@ export interface ExternalService {
 }
 
 /** Per-model usage within a single day. */
-export interface DailyModelUsage {
+interface DailyModelUsage {
   totalTokens: number;
   requestCount: number;
 }
@@ -67,7 +70,7 @@ export interface DailyUsageEntry {
   models: Record<string, DailyModelUsage>;
 }
 
-export function dayKeyOf(date: Date): string {
+function dayKeyOf(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
@@ -116,7 +119,6 @@ export type {
   ExecutionStep,
   ChatMessage,
   StreamingResponseBlock,
-  PendingChange,
   ApiConfig,
   ApiProfile,
   TaskNode,
@@ -204,9 +206,9 @@ interface HelixState
   setBrowserHomeUrl: (url: string) => void;
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: "browser" | "code" | "diff" | "agent" | null;
+  rightSidebarTab: "browser" | "code" | "diff" | "agent" | "byline" | null;
   setRightSidebarTab: (
-    tab: "browser" | "code" | "diff" | "agent" | null,
+    tab: "browser" | "code" | "diff" | "agent" | "byline" | null,
   ) => void;
   // 右侧栏的「子 Agent 工作内容」视图：点击工作面板里的某个 agent 时写入，
   // RightSidebar 据此渲染该 agent 的任务 / live 日志。null = 未选中。
@@ -225,6 +227,35 @@ interface HelixState
   approvalMode: ApprovalMode;
   approvalModeBySession: Record<string, ApprovalMode>;
   setApprovalMode: (v: ApprovalMode) => void;
+  // 仅写单条会话的覆盖值（不动全局默认）：旁路面板的审批模式下拉用，
+  // 只影响那条旁路会话；主线 setApprovalMode 保持「全局 + 当前对话」语义。
+  setApprovalModeForSession: (sessionId: string, mode: ApprovalMode) => void;
+  // 按会话的模型覆盖：cid → { provider, model }（pi 侧身份）。旁路面板的
+  // 模型下拉写这里；handleRun 每轮经 set_model 透传到该会话的 pi 实例，
+  // 不写全局 config.yaml（全局默认仍由设置页/主线模型切换管理）。
+  modelBySession: Record<string, { provider: string; model: string }>;
+  setModelForSession: (
+    sessionId: string,
+    model: { provider: string; model: string },
+  ) => void;
+  // 旁路问答（/btw）：主线会话 id → 它当前开放着的一条旁路会话（右侧边栏
+  // 「旁路问答」面板据此渲染整段对话流，可在面板输入框里多轮追问）。
+  bylineReplies: Record<string, BylineReply>;
+  setBylineReply: (mainSessionId: string, reply: BylineReply) => void;
+  // 旁路追问信号：右侧「旁路问答」面板输入框提交时递增。AgentFlowPanel 监听
+  // 本信号，把 bylineAskQuestion 丢进当前主线的旁路会话（无开放会话则新建）。
+  bylineAskSignal: number;
+  bylineAskQuestion: string;
+  /** 追问目标主线会话（面板提交瞬间的 currentSessionId；可能已切走，用记录值）。 */
+  bylineAskMainCid: string | null;
+  bylineAsk: (question: string, mainCid?: string | null) => void;
+  /** 让右侧「旁路问答」面板聚焦输入框（裸 /btw 打开面板后用）。 */
+  bylineFocusSignal: number;
+  focusBylineInput: () => void;
+  // 旁路停止信号：面板的停止按钮递增。AgentFlowPanel 监听后对当前主线名下
+  // 开放的旁路会话调用 handleStop——Enter 只发送，停止只能走这个显式按钮。
+  bylineStopSignal: number;
+  stopByline: () => void;
   // 每个会话是否有待用户确认（审批/反问/定时任务），侧边栏据此显示标记
   sessionPendingApproval: Record<string, boolean>;
   setSessionPendingApproval: (patch: Record<string, boolean>) => void;
@@ -420,6 +451,8 @@ interface HelixState
   transcriptFontSize: number;
   // Theme style: 'default' (built-in cream) or a Catppuccin flavor id.
   themeStyle: string;
+  // Boot overlay background image (Base64 encoded or null for default)
+  bootBackgroundImage: string | null;
   // Toast — see slices/toast-slice.ts
   pendingChanges: PendingChange[];
   // Panel toggles — see slices/panel-slice.ts
@@ -461,7 +494,22 @@ interface HelixState
   clearChatInPlace: () => Promise<void>;
   clearChatAndPersist: () => Promise<void>;
   setChatLoading: (loading: boolean) => void;
-  forkConversation: (messageId: string) => Promise<string | null>;
+  /**
+   * 从某条消息处分叉出新会话（新会话带该消息及之前的全部历史）。
+   * `labelPrefix` 覆盖默认的"分支"前缀（例如 /btw 用"旁路"）。
+   */
+  forkConversation: (
+    messageId: string,
+    opts?: {
+      labelPrefix?: string;
+      /** 父会话的后端 sid（面板从 sessionMap 取）。缺失则跳过无损分叉，
+       * 走 seed 重放。不能全局 helixSessionId 代替：侧边栏切换后它不清空。 */
+      parentSid?: string;
+      /** 无损分叉成功后由调用方登记 newCid→newSid 的后端映射（面板持有
+       * sessionMapRef，store 够不到）。不登记则后续 run 回落 seed 重放。 */
+      registerSid?: (cid: string, sid: string) => void;
+    },
+  ) => Promise<string | null>;
 
   // Actions - Editor
   setCursorPosition: (pos: CursorPosition) => void;
@@ -477,6 +525,7 @@ interface HelixState
   setInterfaceFont: (font: string) => void;
   setTranscriptFontSize: (size: number) => void;
   setThemeStyle: (styleId: string) => void;
+  setBootBackgroundImage: (image: string | null) => void;
   // Toast actions — see slices/toast-slice.ts
 
   // Actions - File modifications
@@ -794,6 +843,12 @@ async function persistCurrentSessionNow(): Promise<void> {
     const snapshot = useHelixStore.getState();
     const sessionId = snapshot.currentSessionId;
     const firstUser = snapshot.chatMessages.find((m) => m.role === "user");
+    // 标签只取**本会话**的首条 user 消息：chatMessages 是跨会话全局数组，不过滤
+    // sessionId 会把别的会话（含仍在后台跑的主线）的首条消息当成本会话的 label——
+    // 旁路会话/并发后台会话都会在侧边栏挂上别人的名字（看起来像重复项）。
+    const ownFirstUser = snapshot.chatMessages.find(
+      (m) => m.role === "user" && (!m.sessionId || m.sessionId === sessionId),
+    );
     // Don't persist empty sessions (no user/assistant messages).
     // This prevents auto-creating ghost sessions with timestamp labels when the
     // system clock resumes after sleep/freeze — the debounce timer fires, finds
@@ -806,6 +861,10 @@ async function persistCurrentSessionNow(): Promise<void> {
     // Never auto-create a session when there's no active session context.
     // persistCurrentSessionNow's job is to save the CURRENT session, not invent new ones.
     if (!sessionId) return;
+    // 旁路提问（/btw）跑在一次性的后台会话上，它不是要留在左侧边栏的对话：
+    // 答案单独存在 bylineReplies 里（有持久化），会话本身不落盘——否则每次
+    // /btw 都会在对话列表里多出一条，正是不要的效果。
+    if (sessionId.startsWith("btw-")) return;
 
     // If a stream is mid-flight for this session, also persist its buffered
     // partial text so quitting / reloading mid-generation doesn't silently
@@ -842,8 +901,8 @@ async function persistCurrentSessionNow(): Promise<void> {
     const label =
       savedLabel && savedLabel !== "新对话"
         ? savedLabel
-        : firstUser
-          ? firstUser.content.slice(0, 50)
+        : ownFirstUser
+          ? ownFirstUser.content.slice(0, 50)
           : new Date().toLocaleString("zh-CN");
 
     // Concurrency guard: only persist messages that belong to THIS session
@@ -976,6 +1035,8 @@ async function persistSessionById(sessionId: string): Promise<void> {
   try {
     const state = useHelixStore.getState();
     if (!sessionId) return;
+    // 旁路提问的一次性会话不落盘（答案在 bylineReplies 里），侧边栏不出现。
+    if (sessionId.startsWith("btw-")) return;
     if (state.currentSessionId === sessionId) return persistCurrentSessionNow();
     const msgs = state.chatMessages.filter((m) => m.sessionId === sessionId);
     if (msgs.length === 0) return;
@@ -1090,6 +1151,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     typeof window !== "undefined"
       ? window.localStorage.getItem("helix-theme-style") || "default"
       : "default",
+  bootBackgroundImage: null,
   // Toast — in slices/toast-slice.ts
   pendingChanges: [],
   // Agent Settings — in slices/agent-settings-slice.ts
@@ -1276,6 +1338,23 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   codeFullscreen: false,
   approvalMode: "accept_edits" as const,
   approvalModeBySession: {},
+  modelBySession: {},
+  bylineReplies: {},
+  bylineAskSignal: 0,
+  bylineAskQuestion: "",
+  bylineAskMainCid: null,
+  bylineAsk: (question, mainCid) => {
+    set((s) => ({
+      bylineAskSignal: s.bylineAskSignal + 1,
+      bylineAskQuestion: question,
+      bylineAskMainCid: mainCid ?? s.currentSessionId ?? null,
+    }));
+  },
+  bylineFocusSignal: 0,
+  focusBylineInput: () =>
+    set((s) => ({ bylineFocusSignal: s.bylineFocusSignal + 1 })),
+  bylineStopSignal: 0,
+  stopByline: () => set((s) => ({ bylineStopSignal: s.bylineStopSignal + 1 })),
   startupGreeting: "有什么可以帮你的？",
 
   // MCP Servers
@@ -1547,6 +1626,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           showPreviewRail: false,
           editorOpen: false,
         };
+      if (tab === "byline")
+        return {
+          rightSidebarTab: "byline",
+          showPreviewRail: false,
+          editorOpen: false,
+        };
       return {
         rightSidebarTab: null,
         showPreviewRail: false,
@@ -1578,6 +1663,42 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       persistence.saveSetting("approvalMode", st.approvalMode).catch(() => {});
       persistence
         .saveSetting("approvalModeBySession", st.approvalModeBySession)
+        .catch(() => {});
+    });
+  },
+  // 旁路面板的审批模式下拉：只写该旁路会话的覆盖值，不碰全局。旁路 cid
+  // （btw- 前缀）不参与 setCurrentSessionId 的恢复逻辑，所以直接落 map。
+  setApprovalModeForSession: (sessionId, mode) => {
+    set((s) => ({
+      approvalModeBySession: { ...s.approvalModeBySession, [sessionId]: mode },
+    }));
+    import("@/lib/persist").then(({ persistence }) => {
+      persistence
+        .saveSetting("approvalModeBySession", get().approvalModeBySession)
+        .catch(() => {});
+    });
+  },
+  // 旁路面板的模型下拉：只写该旁路会话的覆盖值。handleRun 每轮把它经
+  // set_model 透传到该会话的 pi 实例（网关按 session_id 路由），不改全局。
+  setModelForSession: (sessionId, model) => {
+    set((s) => ({
+      modelBySession: { ...s.modelBySession, [sessionId]: model },
+    }));
+    import("@/lib/persist").then(({ persistence }) => {
+      persistence
+        .saveSetting("modelBySession", get().modelBySession)
+        .catch(() => {});
+    });
+  },
+  // 旁路答案立即落盘：右侧「旁路问答」面板读它，重启后必须还在。与
+  // setContextUsage 同样走即时 saveSetting（不等 persistToStorage 的整批写）。
+  setBylineReply: (mainSessionId, reply) => {
+    set((s) => ({
+      bylineReplies: { ...s.bylineReplies, [mainSessionId]: reply },
+    }));
+    import("@/lib/persist").then(({ persistence }) => {
+      persistence
+        .saveSetting("bylineReplies", get().bylineReplies)
         .catch(() => {});
     });
   },
@@ -1747,7 +1868,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
   setChatLoading: (loading) => set({ isChatLoading: loading }),
 
-  forkConversation: async (messageId) => {
+  forkConversation: async (messageId, opts) => {
     const state = get();
     if (!state.currentSessionId) {
       state.showToast({
@@ -1779,13 +1900,68 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     const newSessionId =
       "session-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
 
+    // ── 后端无损分叉（pi 原生 fork / clone）───────────────────────────
+    // 原理：gateway "session/fork" 让父会话的 pi 实例在目标 entry 处创建
+    // branched session 文件（完整条目树——工具调用/结果/思考块全部保留），
+    // 实例随之 rebind 到新会话；父会话文件不动，下次使用时从盘透明恢复。
+    // 任一步失败都回落到 seed 重放（下方 saveSession 照旧，handleRun 用
+    // forkedMsgs 作 seedHistory 重建）——无损只是增强，不是依赖。
+    // 仅在父会话空闲时尝试：pi fork 会 teardown 当前运行中的 turn。
+    // parentSid 必须由调用方（面板）从 sessionMap 提供——全局 helixSessionId
+    // 在侧边栏切换后不清空，会指到别的会话，用它 fork 会分错会话。
+    let nativeSid: string | null = null;
+    const parentRunning =
+      !!state.streamingDrafts[state.currentSessionId ?? ""]?.isAgentRunning;
+    const parentSid = opts?.parentSid;
+    if (parentSid && !parentRunning) {
+      try {
+        const api = helixApi();
+        if (api) {
+          // pi 的 fork RPC 固定 position "before"：branch 到该 user entry
+          // 的 parent，即"保留到这条 user 消息之前"。所以取分叉点之后的
+          // 第一条 user 消息作为切点——branch 恰好保留到分叉点（含其后的
+          // 助手回复/工具活动）。分叉点在会话末尾（无后续 user 消息）时
+          // 用 clone：leaf 全量副本。
+          const nextUser = msgs
+            .slice(forkIdx + 1)
+            .find((m) => m.role === "user");
+          if (!nextUser) {
+            const r = (await api.send("session/fork", {
+              session_id: parentSid,
+            })) as any;
+            nativeSid = r?.session_id || null;
+          } else {
+            const fm = (await api.send("get_fork_messages", {
+              session_id: parentSid,
+            })) as any;
+            const forkList: Array<{ entryId: string; text: string }> =
+              fm?.messages ?? [];
+            const text = normalizeAcpContent(nextUser.content);
+            const hit = forkList.find((e) => e.text === text);
+            if (hit) {
+              const r = (await api.send("session/fork", {
+                session_id: parentSid,
+                entryId: hit.entryId,
+              })) as any;
+              nativeSid = r?.session_id || null;
+            }
+          }
+        }
+      } catch {
+        nativeSid = null;
+      }
+    }
+
     // Determine branch name: count existing forks from this parent
     const { persistence } = await import("@/lib/persist");
     const allSessions = await persistence.loadSessions();
     const siblingForks = allSessions.filter(
       (s) => s.parentSessionId === state.currentSessionId,
     );
-    const branchLabel = `分支 ${String.fromCharCode(65 + siblingForks.length)}`; // A, B, C...
+    // 旁路对话（/btw）会传 labelPrefix="旁路"，让侧边栏里一眼能分清它是旁路而不是
+    // 正式的分支线。字母后缀 A/B/C… 仍按同一父会话下的既有分叉数量递增。
+    const labelPrefix = opts?.labelPrefix ?? "分支";
+    const branchLabel = `${labelPrefix} ${String.fromCharCode(65 + siblingForks.length)}`; // A, B, C...
 
     // Persist the new session as a fork
     await persistence.saveSession({
@@ -1834,38 +2010,44 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     // Switch to the new session
     state.setCurrentSessionId(newSessionId);
 
-    // Load forked messages into chatMessages so handleRun's seedHistory filter
-    // (m.sessionId === activeSessionId) finds them. Without this the forked
-    // session would start with an empty context.
-    try {
-      const existingSession = allSessions.find((s) => s.id === newSessionId);
-      if (existingSession?.chatMessages && existingSession.chatMessages.length > 0) {
-        const existingIds = new Set(
-          state.chatMessages.map((m) => m.id),
-        );
-        const loadedMsgs = existingSession.chatMessages.filter(
-          (m: any) => !existingIds.has(m.id),
-        );
-        if (loadedMsgs.length > 0) {
-          set({
-            chatMessages: [
-              ...state.chatMessages,
-              ...loadedMsgs.map((m) => m as unknown as ChatMessage),
-            ],
-          });
-        }
-      }
-    } catch { /* best-effort; the persist timer will catch up */ }
+    // 把分叉消息装进内存，让 (a) 当前视图立即显示分叉会话的内容、
+    // (b) handleRun 的 seedHistory 过滤（m.sessionId === activeSessionId）
+    // 找得到它们。
+    // 旧实现从 allSessions 里 find 新会话——但 allSessions 是 saveSession
+    // **之前**的快照，find 永远 undefined，整块从不执行：分叉后视图空白、
+    // 直接提问时后端 seed 也是空的（分叉上下文全丢）。这里直接用算好的
+    // forkedMsgs 重映射进内存，不再绕盘。
+    set({
+      chatMessages: [
+        ...get().chatMessages,
+        ...forkedMsgs.map((m) => ({ ...m, sessionId: newSessionId }) as ChatMessage),
+      ],
+    });
+
+    // 无损分叉成功：登记 newCid→branched sid，后续 run 直连 branched 会话
+    // （完整条目树，无 seed 重放）。失败/未尝试则不登记 → handleRun 走
+    // seed 重放兜底。
+    if (nativeSid) {
+      opts?.registerSid?.(newSessionId, nativeSid);
+      state.showToast({
+        type: "success",
+        title: `已创建 ${branchLabel}`,
+        description: "已无损继承后端上下文（pi 原生分叉）",
+      });
+    }
 
     // Increment session save version so sidebar refreshes
     useHelixStore.setState((st) => ({
       sessionSaveVersion: st.sessionSaveVersion + 1,
     }));
-    state.showToast({
-      type: "success",
-      title: `已创建 ${branchLabel}`,
-      description: `从第 ${forkIdx + 1} 条消息处分叉`,
-    });
+    // 无损分叉成功时上面已 toast（带"无损继承"说明），不再重复弹。
+    if (!nativeSid) {
+      state.showToast({
+        type: "success",
+        title: `已创建 ${branchLabel}`,
+        description: `从第 ${forkIdx + 1} 条消息处分叉`,
+      });
+    }
 
     return newSessionId;
   },
@@ -1939,6 +2121,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     applyHelixPalette(styleId);
     import("@/lib/persist")
       .then(({ persistence }) => persistence.saveSetting("themeStyle", styleId))
+      .catch(() => {});
+  },
+  setBootBackgroundImage: (image) => {
+    set({ bootBackgroundImage: image });
+    import("@/lib/persist")
+      .then(({ persistence }) =>
+        persistence.saveSetting("bootBackgroundImage", image),
+      )
       .catch(() => {});
   },
 
@@ -2280,13 +2470,21 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }),
   navigateSession: async (direction, targetId) => {
     const state = get();
-    const { sessionHistory, sessionHistoryIndex } = state;
+    let { sessionHistory, sessionHistoryIndex } = state;
     if (sessionHistory.length === 0) return;
+    let historyChanged = false;
     let newIndex = sessionHistoryIndex;
     if (targetId) {
       const found = sessionHistory.indexOf(targetId);
-      if (found < 0) return;
-      newIndex = found;
+      if (found < 0) {
+        // 分支切换：目标可能从没进过历史（面板分支 chip 直跳兄弟/父会话）
+        // ——追加到历史末尾再跳。不能直接 return，否则分支导航是死功能。
+        sessionHistory = [...sessionHistory, targetId];
+        historyChanged = true;
+        newIndex = sessionHistory.length - 1;
+      } else {
+        newIndex = found;
+      }
     } else if (direction === "back" && newIndex > 0) {
       newIndex--;
     } else if (
@@ -2385,6 +2583,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         activeSessionWorkDir: session.workDir ?? null,
         currentSessionId: target,
         sessionHistoryIndex: newIndex,
+        // 分支切换追加进历史时同步进 store（普通路径引用相同，写回无副作用）
+        ...(historyChanged ? { sessionHistory } : {}),
       });
 
       // Persist the updated history index
@@ -3262,7 +3462,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           "approvalModeBySession",
           state.approvalModeBySession,
         ),
+        persistence.saveSetting("modelBySession", state.modelBySession),
+        persistence.saveSetting("bylineReplies", state.bylineReplies),
         persistence.saveSetting("startupGreeting", state.startupGreeting),
+        persistence.saveSetting(
+          "bootBackgroundImage",
+          state.bootBackgroundImage,
+        ),
         persistence.saveSetting("editorTheme", state.editorTheme),
         persistence.saveSetting("gitAutoCommit", state.gitAutoCommit),
         persistence.saveSetting("gitAutoPush", state.gitAutoPush),
@@ -3360,7 +3566,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitBranchPrefix,
         approvalMode,
         approvalModeBySession,
+        modelBySession,
+        bylineReplies,
         startupGreeting,
+        bootBackgroundImage,
         providers,
         activeModel,
         activeProviderId,
@@ -3513,8 +3722,24 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           "approvalModeBySession",
         ),
         safeLoad(
+          persistence.loadSetting<
+            Record<string, { provider: string; model: string }>
+          >("modelBySession"),
+          "modelBySession",
+        ),
+        safeLoad(
+          persistence.loadSetting<Record<string, BylineReply>>(
+            "bylineReplies",
+          ),
+          "bylineReplies",
+        ),
+        safeLoad(
           persistence.loadSetting<string>("startupGreeting"),
           "startupGreeting",
+        ),
+        safeLoad(
+          persistence.loadSetting<string | null>("bootBackgroundImage"),
+          "bootBackgroundImage",
         ),
         safeLoad(
           persistence.loadSetting<ProviderConfig[]>("providers"),
@@ -4134,7 +4359,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         approvalMode: (approvalMode as any) || get().approvalMode,
         approvalModeBySession:
           approvalModeBySession ?? get().approvalModeBySession,
+        modelBySession: modelBySession ?? get().modelBySession,
+        // 旁路答案按主线会话 id 索引，形状校验一下再收：脏数据不能让渲染层抛。
+        bylineReplies:
+          bylineReplies &&
+          typeof bylineReplies === "object" &&
+          !Array.isArray(bylineReplies)
+            ? (bylineReplies as Record<string, BylineReply>)
+            : {},
         startupGreeting: startupGreeting || get().startupGreeting,
+        bootBackgroundImage: bootBackgroundImage ?? get().bootBackgroundImage,
         browserHomeUrl: "",
       });
 
