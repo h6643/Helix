@@ -7,8 +7,8 @@
 //! takes effect).
 
 use crate::config::{
-    atomic_write, read_helix_config, set_model as config_set_model, set_yaml_key,
-    write_helix_config, HelixConfig,
+    apply_pi_provider_models, atomic_write, read_helix_config, set_model as config_set_model,
+    set_yaml_key, write_helix_config, HelixConfig,
 };
 use crate::gateway::restart_gateway_soon;
 use crate::pi_gateway;
@@ -190,6 +190,63 @@ pub fn helix_set_config(state: State<'_, Arc<AppState>>, config: Value) -> Value
     // only when the written config actually differs from pi's current one.
     let (changed, _key_changed) =
         write_helix_config(model, provider, base_url, api_key, context_window);
+    if !changed {
+        return json!({ "success": true, "changed": false });
+    }
+    let arc: Arc<AppState> = Arc::clone(&state);
+    restart_gateway_soon(&arc);
+    json!({ "success": true, "changed": true })
+}
+
+/// Register a provider with its whole model list (settings 添加供应商 flow).
+/// Each model carries its own `contextWindow`; the first one becomes pi's
+/// `defaultModel`. Writes settings.json + models.json, then respawns pi so it
+/// picks the new registry up (pi snapshots its config at startup).
+#[tauri::command]
+pub fn helix_set_provider_models(state: State<'_, Arc<AppState>>, config: Value) -> Value {
+    let provider = config
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let base_url = config
+        .get("baseUrl")
+        .or_else(|| config.get("base_url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let api_key = config
+        .get("apiKey")
+        .or_else(|| config.get("api_key"))
+        .and_then(|v| v.as_str());
+    let api = config
+        .get("api")
+        .or_else(|| config.get("apiFormat"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("openai-completions")
+        .to_string();
+    let models: Vec<(String, Option<u64>)> = config
+        .get("models")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let id = m
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        ?.trim()
+                        .to_string();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    Some((id, m.get("contextWindow").and_then(|v| v.as_u64())))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let (changed, _key_changed) =
+        apply_pi_provider_models(&provider, &base_url, api_key, &api, &models);
     if !changed {
         return json!({ "success": true, "changed": false });
     }

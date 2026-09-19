@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Button } from "@/components/ui/button";
+import { SaveBar } from "./settings-ui";
 
 export interface McpFormData {
   name: string;
@@ -16,12 +16,18 @@ export function McpEditorForm({
   onChange,
   onSave,
   onCancel,
+  saving,
+  saveState,
+  saveError,
   fullScreen,
 }: {
   form: McpFormData;
   onChange: (patch: Partial<McpFormData>) => void;
   onSave: () => void;
   onCancel: () => void;
+  saving?: boolean;
+  saveState?: null | "ok" | "err";
+  saveError?: string | null;
   fullScreen?: boolean;
 }) {
   return (
@@ -111,13 +117,15 @@ export function McpEditorForm({
         )}
       </div>
 
-      <div className="px-4 py-3 border-t border-border/50 bg-muted/10 flex justify-end gap-2 shrink-0">
-        <Button onClick={onCancel} size="sm" variant="ghost">
-          取消
-        </Button>
-        <Button onClick={onSave} size="sm" className="gap-1.5">
-          保存
-        </Button>
+      <div className="px-4 py-3 border-t border-border/50 bg-muted/10 shrink-0">
+        <SaveBar
+          saving={saving ?? false}
+          status={saveState ?? null}
+          errorText={saveError}
+          saveLabel="保存"
+          onSave={onSave}
+          onCancel={onCancel}
+        />
       </div>
     </div>
   );

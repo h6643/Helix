@@ -88,6 +88,7 @@ function LiveSubAgentCard({ agent }: { agent: SubAgent }) {
     (tc) => !isSyntheticSubAgentToolRow(tc.toolName),
   );
   const [promptOpen, setPromptOpen] = useState(false);
+  const [resultOpen, setResultOpen] = useState(false);
   return (
     <div className="border border-border/30 rounded-lg overflow-hidden">
       <div className="px-3 py-2 bg-muted/20 flex items-start gap-2">
@@ -171,9 +172,23 @@ function LiveSubAgentCard({ agent }: { agent: SubAgent }) {
 
       {agent.result && (
         <div className="px-3 py-1.5 border-t border-border/30">
-          <div className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 whitespace-pre-wrap break-words line-clamp-3">
-            {agent.result}
-          </div>
+          <button
+            type="button"
+            onClick={() => setResultOpen((v) => !v)}
+            className="w-full flex items-center gap-1.5 text-left text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 hover:text-foreground transition-colors"
+          >
+            <span className="select-none text-foreground/40 text-xs">{resultOpen ? "▾" : "▸"}</span>
+            <span className="font-medium shrink-0">结果</span>
+          </button>
+          {resultOpen ? (
+            <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/70 whitespace-pre-wrap break-words">
+              {agent.result}
+            </div>
+          ) : (
+            <div className="mt-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/50 whitespace-nowrap overflow-hidden text-ellipsis">
+              {agent.result.trim().slice(0, 80)}
+            </div>
+          )}
         </div>
       )}
 

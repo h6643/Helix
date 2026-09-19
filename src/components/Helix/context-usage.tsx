@@ -6,7 +6,6 @@ import { helixApi } from "@/lib/electron-bridge";
 import { formatTokens } from "@/lib/format";
 import { debug } from "@/lib/logger";
 import { resolveBackendSid } from "@/lib/session-map";
-import { mapBackendMessages } from "@/lib/session-resync";
 import {
   resyncCurrentSessionFromBackend,
   isCurrentSessionRenderBroken,
@@ -177,7 +176,7 @@ function ContextUsagePanel({
     normalizedCategories.every(isAggregateCategory);
 
   return (
-    <div className="absolute bottom-full right-0 mb-2 w-72 bg-card border border-border/60 rounded-xl shadow-lg p-3 z-50">
+    <div className="absolute bottom-full right-0 mb-2 w-72 bg-card border border-border/40 rounded-xl shadow-lg p-3 z-50">
       <ContextUsageBar
         used={used}
         total={total}
@@ -338,27 +337,28 @@ export function ContextUsageIndicator() {
                 const r = result as any;
                 if (r.status === "compressed" && Array.isArray(r.messages)) {
                   let anchorMessageId: string | undefined;
-                  // Update frontend messages with compressed messages
+                  // 压缩只改**模型侧上下文**，不动用户看得见的历史。
+                  //
+                  // 旧实现把后端压缩后的列表（pi 的 get_messages = 摘要 + 保留的
+                  // 消息）整体替换当前会话的转录，于是所有被摘要掉的早期消息——
+                  // 包括用户自己发过的输入——在界面上凭空消失，和"用户发消息后，
+                  // 之前用户的输入就会自动消失"这类反馈完全没法区分。
+                  // 本地转录本来就是完整历史（IndexedDB / pi jsonl 都在），没有理由
+                  // 因为一次（常常是自动触发的）压缩就收缩。压缩的可见反馈交给下面的
+                  // compressionNotice 分隔线（带前后 token 对比）就够。
+                  // 这里只需要把锚点定到当前会话最后一条本地消息，让分隔线落在它后面。
                   const currentSessionId =
                     useHelixStore.getState().currentSessionId;
                   if (currentSessionId) {
-                    const msgs = mapBackendMessages(
-                      r.messages,
-                      currentSessionId,
-                    );
-                    // 仅替换「当前会话」：chatMessages 是跨会话全局数组，整体覆盖会清掉
-                    // 其他会话历史（"压缩后消息全空"）。与手动 /compact 的修复一致。
-                    useHelixStore.setState((state) => ({
-                      chatMessages: [
-                        ...state.chatMessages.filter(
-                          (m) =>
-                            m.sessionId && m.sessionId !== currentSessionId,
-                        ),
-                        ...msgs,
-                      ],
-                    }));
+                    const local = useHelixStore
+                      .getState()
+                      .chatMessages.filter(
+                        (m) => m.sessionId === currentSessionId,
+                      );
                     anchorMessageId =
-                      msgs.length > 0 ? msgs[msgs.length - 1].id : undefined;
+                      local.length > 0
+                        ? local[local.length - 1].id
+                        : undefined;
                   }
                   // 自动压缩提示卡片：transcript 顶部可关闭，8s 自动消失
                   useHelixStore.getState().setCompressionNotice({

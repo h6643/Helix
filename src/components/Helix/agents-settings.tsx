@@ -1,8 +1,22 @@
 "use client";
 
-import { Trash2, ChevronDown, ChevronUp } from "lucide-react";
+import {
+  Trash2,
+  ChevronDown,
+  ChevronUp,
+  User,
+  Users,
+} from "lucide-react";
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { SettingRow, SettingGroup, PopupSelect } from "./settings-ui";
+import {
+  SettingRow,
+  SettingGroup,
+  PageHeader,
+  PopupSelect,
+  Toggle,
+  NumberField,
+  SaveBar,
+} from "./settings-ui";
 import { Button } from "@/components/ui/button";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -33,6 +47,18 @@ interface SubagentDraft {
 const truncate = (s: string, n: number) =>
   s.length > n ? s.slice(0, n) + "…" : s;
 
+// 来源徽标的取值来自后端 SubagentPreset.source（skills.rs::helix_list_subagents）：
+// 内置预设与 pi-subagents 扩展自带文件都是 "default"，`.pi/agents` → "project"，
+// `.agents/agents` → "workspace"，`~/.pi/agent/agents` → "global"。
+const SOURCE_LABEL: Record<string, string> = {
+  default: "内置",
+  project: "项目",
+  workspace: "工作区",
+  global: "全局",
+};
+
+
+
 const SubagentModelPicker = ({
   id,
   current,
@@ -46,7 +72,6 @@ const SubagentModelPicker = ({
   const ref = useRef<HTMLDivElement>(null);
 
   const providers = useHelixStore((s) => s.providers);
-  const providerModels = useHelixStore((s) => s.providerModels);
   const activeProviderId = useHelixStore((s) => s.activeProviderId);
 
   useEffect(() => {
@@ -60,14 +85,24 @@ const SubagentModelPicker = ({
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  // Build the flat list from all configured providers (declared + fetched models)
+  // 只列用户在「模型配置」里主动添加的模型（p.models）——不合并
+  // providerModels[p.id]（那是端点 /models 目录，会自动拉进来几百个没配置的
+  // 模型）。与主对话模型选择器行为一致（agent-flow-panel providerModelGroups
+  // 的同款注释）。
   const allModels = useMemo(() => {
     const seen = new Set<string>();
     const out: Array<{ providerLabel: string; modelId: string; key: string }> = [];
+    // current 形如 "<providerId>/<modelId>"；模型 id 本身可能含 "/"
+    // （org/model 格式），只按第一个斜杠切，与显示逻辑一致。
+    const slash = current.indexOf("/");
+    const curPid = slash > 0 ? current.slice(0, slash) : null;
+    const curModel = slash > 0 ? current.slice(slash + 1) : null;
     for (const p of providers) {
-      const models = Array.from(
-        new Set([...p.models, ...(providerModels[p.id] ?? [])]),
-      );
+      const models = new Set<string>(p.models.filter(Boolean));
+      // 当前保存的模型可能来自历史配置、不在当前清单里：至少让它可选中/高亮。
+      if (curPid === p.id && curModel && !models.has(curModel)) {
+        models.add(curModel);
+      }
       for (const m of models) {
         const key = `${p.id}/${m}`;
         if (seen.has(key)) continue;
@@ -76,7 +111,7 @@ const SubagentModelPicker = ({
       }
     }
     return out;
-  }, [providers, providerModels]);
+  }, [providers, current]);
 
   const display = current
     ? (() => {
@@ -101,18 +136,14 @@ const SubagentModelPicker = ({
         )}
       </button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] max-h-56 overflow-y-auto rounded-md border border-border/30 bg-popover shadow-md">
+        <div className="absolute right-0 top-full mt-1 z-50 min-w-[180px] max-h-56 overflow-y-auto rounded-xl border border-border bg-popover shadow-xl">
           <button
             type="button"
             onClick={() => {
               onModelChange(id, "");
               setOpen(false);
             }}
-            className={`w-full text-left px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-muted/30 transition-colors ${
-              !current ? "text-primary font-medium" : "text-muted-foreground/70"
-            }`}
           >
-            继承主模型（默认）
           </button>
           {allModels.length === 0 && (
             <p className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
@@ -152,23 +183,28 @@ const SubagentItem = ({
   i: SubagentDraft;
   remove: (id: string) => void;
 }) => (
-  <div className="rounded-lg border border-border/30 bg-muted/10 px-3 py-2.5 flex items-center justify-between gap-3">
-    <div className="min-w-0 space-y-0.5">
-      <p className="ui-text font-semibold text-foreground truncate">
-        {i.name.trim() || "未命名"}
-      </p>
-      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 truncate">
-        {i.system_prompt.trim()
-          ? truncate(i.system_prompt.trim(), 20)
-          : "（未填写系统提示词）"}
-      </p>
+  <div className="group flex items-center justify-between gap-3 rounded-xl border border-border/40 bg-card/60 px-4 py-3 transition-colors hover:border-border/70">
+    <div className="flex min-w-0 items-center gap-3">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <User className="size-5" />
+      </div>
+      <div className="min-w-0 space-y-0.5">
+        <p className="ui-text font-semibold text-foreground truncate">
+          {i.name.trim() || "未命名"}
+        </p>
+        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 truncate">
+          {i.system_prompt.trim()
+            ? truncate(i.system_prompt.trim(), 28)
+            : "（未填写系统提示词）"}
+        </p>
+      </div>
     </div>
     <Button
       size="icon"
       variant="ghost"
       className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
       onClick={() => remove(i.id)}
-      aria-label="删除 Subagent"
+      aria-label="删除子智能体"
       data-tip="删除"
     >
       <Trash2 className="size-4" />
@@ -183,7 +219,6 @@ const SubagentItem = ({
 ///   `helix_set_subagent_enabled`.
 /// - Delete unlinks a custom agent's .md — handled by `helix_delete_subagent`.
 ///   A two-step confirm prevents accidents.
-
 const PresetSubagentItem = ({
   p,
   onToggle,
@@ -202,50 +237,56 @@ const PresetSubagentItem = ({
   return (
     <div
       className={
-        "rounded-lg border border-border/20 bg-muted/5 px-3 py-2.5 space-y-2 " +
-        (disabled ? "opacity-60" : "")
+        "relative rounded-xl border border-border/40 bg-card/60 px-4 py-3 space-y-3 transition-colors " +
+        (disabled ? "opacity-55" : "hover:border-border/70")
       }
     >
-      <div className="flex items-center justify-between gap-3">
-        <p
-          className={
-            "ui-text font-semibold truncate " +
-            (disabled ? "text-muted-foreground/60" : "text-foreground")
-          }
-        >
-          {p.name?.trim() || p.id}
-        </p>
-        <div className="flex items-center gap-2 shrink-0">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="min-w-0 space-y-1">
+            <div className="flex items-center gap-2">
+              <p
+                className={`ui-text font-semibold truncate ${
+                  disabled ? "text-muted-foreground/60" : "text-foreground"
+                }`}
+              >
+                {p.name?.trim() || p.id}
+              </p>
+              <span className="shrink-0 rounded border border-border/20 bg-muted/40 px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70">
+                {SOURCE_LABEL[p.source] ?? p.source ?? "未知"}
+              </span>
+            </div>
+            {p.description?.trim() && (
+              <p className="text-[calc(var(--helix-transcript-size)*0.8571)] leading-snug text-muted-foreground/70">
+                {p.description}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
           <SubagentModelPicker
             id={p.id}
             current={p.model}
             onModelChange={onModelChange}
           />
-          {disabled && (
-            <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-amber-500/80 border border-amber-500/30 rounded px-1.5 py-0.5">
-              已禁用
-            </span>
-          )}
-          <button
-            type="button"
-            disabled={toggling}
-            onClick={async () => {
-              setToggling(true);
-              try {
-                await onToggle(p.id, !disabled);
-              } finally {
-                setToggling(false);
-              }
-            }}
-            className={
-              "text-[calc(var(--helix-transcript-size)*0.7857)] hover:underline disabled:opacity-50 " +
-              (disabled
-                ? "text-primary hover:text-primary/80"
-                : "text-muted-foreground hover:text-foreground")
-            }
-          >
-            {toggling ? "…" : disabled ? "启用" : "禁用"}
-          </button>
+          <div className="flex items-center gap-1.5">
+            {disabled && (
+              <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-amber-500/80">
+                已禁用
+              </span>
+            )}
+            <Toggle
+              enabled={!disabled}
+              onToggle={async () => {
+                setToggling(true);
+                try {
+                  await onToggle(p.id, !disabled);
+                } finally {
+                  setToggling(false);
+                }
+              }}
+            />
+          </div>
           {confirming ? (
             <span className="flex items-center gap-1.5">
               <button
@@ -273,23 +314,19 @@ const PresetSubagentItem = ({
               </button>
             </span>
           ) : (
-            <button
-              type="button"
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-8 text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10"
               onClick={() => setConfirming(true)}
               aria-label="删除预设"
               data-tip="删除"
-              className="text-muted-foreground/40 hover:text-destructive transition-colors"
             >
               <Trash2 className="size-4" />
-            </button>
+            </Button>
           )}
         </div>
       </div>
-      {p.description?.trim() && (
-        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
-          {p.description}
-        </p>
-      )}
       <div className="flex flex-wrap gap-1.5">
         {Array.isArray(p.tools) &&
           p.tools.map((t: string) => (
@@ -301,21 +338,21 @@ const PresetSubagentItem = ({
             </span>
           ))}
       </div>
-      {(p.thinking) && (
+      {p.thinking && (
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">
-          {p.thinking && <span>思考强度：{p.thinking}</span>}
+          <span>思考强度：{p.thinking}</span>
         </div>
       )}
       {p.systemPrompt?.trim() && (
         <details className="group">
-          <summary className="cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] text-primary/80 hover:text-primary select-none list-none">
+          <summary className="cursor-pointer list-none text-[calc(var(--helix-transcript-size)*0.8571)] text-primary/80 hover:text-primary select-none">
             <span className="inline-flex items-center gap-1">
               <span className="group-open:hidden">▸</span>
               <span className="hidden group-open:inline">▾</span>
               查看系统提示词
             </span>
           </summary>
-          <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted/10 border border-border/15 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 font-mono leading-relaxed">
+          <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-card/60 border border-border/40 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 font-mono leading-relaxed">
             {p.systemPrompt}
           </pre>
         </details>
@@ -444,7 +481,7 @@ export function AgentsSettings() {
         if (rawIds) {
           try {
             parsedIds = JSON.parse(rawIds);
-          } catch { /* empty */}
+          } catch { /* empty */ }
         }
         if (Array.isArray(parsedIds)) {
           setIdentities(
@@ -504,9 +541,9 @@ export function AgentsSettings() {
           system_prompt,
         }));
       await (window as any).electron?.helix?.setDelegationIdentities?.(payload);
+      // 与「保存 Hooks 配置」一致：保存后停留在本页并显示行内「已保存」状态，
+      // 不再自动跳回列表（避免状态一闪而过）。
       setSaved(true);
-      setAdding(false);
-      setTimeout(() => setSaved(false), 2000);
     } catch (e: any) {
       setErr(String(e?.message || e));
     } finally {
@@ -538,6 +575,20 @@ export function AgentsSettings() {
   const startAdd = () => {
     addIdentity();
     setAdding(true);
+    setSaved(false);
+    setErr(null);
+  };
+
+  // 取消/关闭添加页：未保存时丢弃 startAdd 插入的空白草稿；已保存后只是
+  // 退出编辑页（身份已写入，不应再删除），与「保存 Hooks 配置」停留显示一致。
+  const cancelAdd = () => {
+    setIdentities((prev) => prev.slice(0, -1));
+    setAdding(false);
+  };
+
+  const exitAdd = () => {
+    if (saved) setAdding(false);
+    else cancelAdd();
   };
 
   const updateIdentity = (
@@ -623,33 +674,52 @@ export function AgentsSettings() {
             [key]: type === "number" ? Number(e.target.value) : e.target.value,
           }))
         }
-        className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text font-mono text-foreground/70 text-center placeholder:text-muted-foreground/30 transition-colors"
+        className="w-56 px-3 py-1.5 bg-transparent border border-border/30 rounded-lg ui-text text-foreground/80 text-center placeholder:text-muted-foreground/30 transition-colors focus:border-primary/40"
       />
     </SettingRow>
   );
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h3 className="ui-subtitle font-semibold text-foreground">Subagent</h3>
-        <button
-          onClick={startAdd}
-          className="flex items-center gap-1.5 ui-text font-medium text-primary hover:text-primary/80 transition-colors"
-        >
-          添加 Subagent
-        </button>
-      </div>
+      {/* ── Header ── */}
+      <PageHeader
+        action={
+          adding ? (
+            <button
+              onClick={exitAdd}
+              className="text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors shrink-0"
+              data-tip="关闭"
+            >
+              关闭
+            </button>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={startAdd}
+              className="shrink-0"
+            >
+              添加子智能体
+            </Button>
+          )
+        }
+      >
+        子智能体
+      </PageHeader>
 
       <div className="max-w-3xl space-y-4">
         {loading ? (
           <div className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60 mt-2">
             读取配置中…
           </div>
-        ) : (
+        ) : adding ? (
+          /* ── 添加 Subagent 独立页：整页替换列表视图，与「添加模型」一致 ── */
           <>
-            {adding && (
-              <>
-                <SettingGroup>
+            <SettingGroup
+              plain
+              title="添加子智能体"
+              description="配置委派模型的默认参数，并登记一个具名的子智能体身份。"
+            >
                   {apiHistory.length > 0 ? (
                     <SettingRow label="模型配置（从历史选择）">
                       <PopupSelect
@@ -674,26 +744,32 @@ export function AgentsSettings() {
                       </span>
                     </SettingRow>
                   )}
-                  {field(
-                    "最大迭代次数",
-                    "max_iterations",
-                    "50",
-                    "number",
-                    "子智能体单次任务最多执行的步骤数，超过即停止。",
-                  )}
+                  <SettingRow
+                    label="最大迭代次数"
+                    hint="子智能体单次任务最多执行的步骤数，超过即停止。"
+                  >
+                    <NumberField
+                      value={cfg.max_iterations}
+                      min={1}
+                      max={1000}
+                      onCommit={(v) =>
+                        setCfg((c) => ({ ...c, max_iterations: v }))
+                      }
+                    />
+                  </SettingRow>
                   {field(
                     "推理强度",
                     "reasoning_effort",
                     "ultra / max / high（可选）",
                     "text",
-                    "控制子智能体的思考深度与耗时，留空使用默认。",
+                    "控制子智能体的思考深度与耗时",
                   )}
                   {identities.length > 0 &&
                     (() => {
                       const draft = identities[identities.length - 1];
                       return (
                         <>
-                          <SettingRow label="名称 Name">
+                          <SettingRow label="名称">
                             <div className="flex items-center gap-2">
                               <input
                                 value={draft.name}
@@ -703,14 +779,14 @@ export function AgentsSettings() {
                                   })
                                 }
                                 placeholder="如 researcher"
-                                className="w-56 px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text font-semibold text-foreground text-center placeholder:text-muted-foreground/30 placeholder:font-normal transition-colors"
+                                className="w-56 px-3 py-1.5 bg-transparent border border-border/30 rounded-lg ui-text font-semibold text-foreground text-center placeholder:text-muted-foreground/30 placeholder:font-normal transition-colors focus:border-primary/40"
                               />
                               <Button
                                 size="icon"
                                 variant="ghost"
                                 className="size-8 shrink-0 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10"
-                                onClick={() => removeIdentity(draft.id)}
-                                aria-label="删除 Subagent"
+                                onClick={exitAdd}
+                                aria-label="删除子智能体"
                                 data-tip="删除"
                               >
                                 <Trash2 className="size-4" />
@@ -729,206 +805,170 @@ export function AgentsSettings() {
                                 })
                               }
                               placeholder="系统提示词 / 人格描述…"
-                              className="w-72 min-h-[80px] px-3 py-1.5 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground text-left placeholder:text-muted-foreground/30 resize-y transition-colors"
+                              className="w-72 min-h-[80px] px-3 py-1.5 bg-transparent border border-border/30 rounded-lg ui-text text-foreground text-left placeholder:text-muted-foreground/30 resize-y transition-colors focus:border-primary/40"
                             />
                           </SettingRow>
                         </>
                       );
                     })()}
                   <SettingRow
-                    label="子智能体危险命令自动通过（非交互式）"
+                    label="危险命令自动通过"
                     hint="开启后，子智能体执行危险命令前不再逐条请求确认。"
                   >
-                    <input
-                      type="checkbox"
-                      checked={cfg.subagent_auto_approve}
-                      onChange={(e) =>
+                    <Toggle
+                      enabled={cfg.subagent_auto_approve}
+                      onToggle={() =>
                         setCfg((c) => ({
                           ...c,
-                          subagent_auto_approve: e.target.checked,
+                          subagent_auto_approve: !c.subagent_auto_approve,
                         }))
                       }
-                      className="size-4 accent-primary"
                     />
                   </SettingRow>
-                </SettingGroup>
+            </SettingGroup>
 
+            <SaveBar
+              saving={saving}
+              status={saved ? "ok" : err ? "err" : null}
+              errorText={err}
+              onSave={save}
+              onReset={() => setCfg(DEFAULTS)}
+              disabled={loading || saving}
+              saveLabel="保存"
+            />
+          </>
+        ) : (
+          /* ── 列表页 ── */
+          <>
+            {/* ── Subagent global settings (config.yaml subagents block) ── */}
+            <SettingGroup>
+              <SettingRow
+                label="工具描述模式"
+                hint="compact 缩短工具描述以节省上下文。"
+              >
+                <PopupSelect
+                  value={saSettings.toolDescriptionMode ?? "full"}
+                  onChange={(v) =>
+                    setSaSettings((s) => ({
+                      ...s,
+                      toolDescriptionMode: v as "full" | "compact" | "custom",
+                    }))
+                  }
+                  className="w-36"
+                  options={[
+                    { value: "full", label: "full" },
+                    { value: "compact", label: "compact" },
+                    { value: "custom", label: "custom" },
+                  ]}
+                />
+              </SettingRow>
 
-                <div className="flex items-center justify-end gap-3 pt-4">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setCfg(DEFAULTS)}
-                  >
-                    重置
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={save}
-                    disabled={loading || saving}
-                  >
-                    {saving ? "保存中…" : saved ? "已保存" : "保存"}
-                  </Button>
-                </div>
-              </>
-            )}
+              <SettingRow
+                label="并发上限"
+                hint="同时运行的子智能体数量上限。0 = 不限。"
+              >
+                <NumberField
+                  value={saSettings.maxConcurrent ?? 0}
+                  min={0}
+                  max={64}
+                  onCommit={(v) =>
+                    setSaSettings((s) => ({ ...s, maxConcurrent: v }))
+                  }
+                />
+              </SettingRow>
 
-                {/* ── Subagent global settings (config.yaml subagents block) ── */}
-                <SettingGroup
-                  title="子智能体行为（pi-subagents）"
-                  description="写入 ~/.pi/agent/config.yaml 的 subagents: 块，保存时同步到扩展的 settings.json 并重启网关。"
+              <SettingRow
+                label="最大嵌套深度"
+                hint="子智能体再派生子智能体的层数上限。"
+              >
+                <NumberField
+                  value={saSettings.maxSubagentDepth ?? 1}
+                  min={1}
+                  max={16}
+                  onCommit={(v) =>
+                    setSaSettings((s) => ({ ...s, maxSubagentDepth: v }))
+                  }
+                />
+              </SettingRow>
+
+              <SettingRow
+                label="启用调度"
+                hint="允许子智能体使用 schedule 工具。"
+              >
+                <Toggle
+                  enabled={saSettings.schedulingEnabled ?? false}
+                  onToggle={() =>
+                    setSaSettings((s) => ({
+                      ...s,
+                      schedulingEnabled: !(s.schedulingEnabled ?? false),
+                    }))
+                  }
+                />
+              </SettingRow>
+
+              <SettingRow
+                label="启用工作流"
+                hint="开启工作流编排（多步骤协作）。"
+              >
+                <Toggle
+                  enabled={saSettings.workflowsEnabled ?? false}
+                  onToggle={() =>
+                    setSaSettings((s) => ({
+                      ...s,
+                      workflowsEnabled: !(s.workflowsEnabled ?? false),
+                    }))
+                  }
+                />
+              </SettingRow>
+
+              <SettingRow
+                label="工作树隔离"
+                hint="为每个子智能体创建独立 git worktree。"
+              >
+                <Toggle
+                  enabled={saSettings.worktreeIsolation ?? false}
+                  onToggle={() =>
+                    setSaSettings((s) => ({
+                      ...s,
+                      worktreeIsolation: !(s.worktreeIsolation ?? false),
+                    }))
+                  }
+                />
+              </SettingRow>
+
+              <div className="flex items-center justify-end gap-3 px-4 py-3">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={saveSubagentSettings}
+                  disabled={saSaving}
                 >
-                  <SettingRow
-                    label="工具描述模式"
-                    hint="compact 缩短工具描述以节省上下文。"
-                  >
-                    <select
-                      value={saSettings.toolDescriptionMode ?? "full"}
-                      onChange={(e) =>
-                        setSaSettings((s) => ({
-                          ...s,
-                          toolDescriptionMode: e.target.value as
-                            | "full"
-                            | "compact"
-                            | "custom",
-                        }))
-                      }
-                      className="w-32 px-2 py-1 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground"
-                    >
-                      <option value="full">full</option>
-                      <option value="compact">compact</option>
-                      <option value="custom">custom</option>
-                    </select>
-                  </SettingRow>
+                  {saSaving ? "保存中…" : saSaved ? "已保存" : "保存行为设置"}
+                </Button>
+              </div>
+              {saErr && (
+                <p className="px-4 pb-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400">
+                  {saErr}
+                </p>
+              )}
+            </SettingGroup>
 
-                  <SettingRow
-                    label="并发上限（maxConcurrent）"
-                    hint="同时运行的子智能体数量上限。0 = 不限。"
-                  >
-                    <input
-                      type="number"
-                      min={0}
-                      value={saSettings.maxConcurrent ?? 0}
-                      onChange={(e) =>
-                        setSaSettings((s) => ({
-                          ...s,
-                          maxConcurrent: Number(e.target.value),
-                        }))
-                      }
-                      className="w-24 px-2 py-1 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground"
-                    />
-                  </SettingRow>
-
-                  <SettingRow
-                    label="最大嵌套深度（maxSubagentDepth）"
-                    hint="子智能体再派生子智能体的层数上限。"
-                  >
-                    <input
-                      type="number"
-                      min={1}
-                      value={saSettings.maxSubagentDepth ?? 1}
-                      onChange={(e) =>
-                        setSaSettings((s) => ({
-                          ...s,
-                          maxSubagentDepth: Number(e.target.value),
-                        }))
-                      }
-                      className="w-24 px-2 py-1 bg-muted/20 border border-border/20 rounded-md ui-text text-foreground"
-                    />
-                  </SettingRow>
-
-                  <SettingRow
-                    label="启用调度（schedulingEnabled）"
-                    hint="允许子智能体使用 schedule 工具。"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={saSettings.schedulingEnabled ?? false}
-                      onChange={(e) =>
-                        setSaSettings((s) => ({
-                          ...s,
-                          schedulingEnabled: e.target.checked,
-                        }))
-                      }
-                      className="size-4 accent-primary"
-                    />
-                  </SettingRow>
-
-                  <SettingRow
-                    label="启用工作流（workflowsEnabled）"
-                    hint="开启工作流编排（多步骤协作）。"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={saSettings.workflowsEnabled ?? false}
-                      onChange={(e) =>
-                        setSaSettings((s) => ({
-                          ...s,
-                          workflowsEnabled: e.target.checked,
-                        }))
-                      }
-                      className="size-4 accent-primary"
-                    />
-                  </SettingRow>
-
-                  <SettingRow
-                    label="工作树隔离（worktreeIsolation）"
-                    hint="为每个子智能体创建独立 git worktree。"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={saSettings.worktreeIsolation ?? false}
-                      onChange={(e) =>
-                        setSaSettings((s) => ({
-                          ...s,
-                          worktreeIsolation: e.target.checked,
-                        }))
-                      }
-                      className="size-4 accent-primary"
-                    />
-                  </SettingRow>
-
-                  <SettingRow
-                    label="隐藏内置默认 agent（disableDefaultAgents）"
-                    hint="设为 true 时不显示 general-purpose / Explore / Plan 等内置预设。"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={saSettings.disableDefaultAgents ?? false}
-                      onChange={(e) =>
-                        setSaSettings((s) => ({
-                          ...s,
-                          disableDefaultAgents: e.target.checked,
-                        }))
-                      }
-                      className="size-4 accent-primary"
-                    />
-                  </SettingRow>
-
-                  <div className="flex items-center justify-end gap-3 pt-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={saveSubagentSettings}
-                      disabled={saSaving}
-                    >
-                      {saSaving ? "保存中…" : saSaved ? "已保存" : "保存行为设置"}
-                    </Button>
-                  </div>
-                  {saErr && (
-                    <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400">
-                      {saErr}
-                    </p>
-                  )}
-                </SettingGroup>
-
-
-            {identities
-              .slice(0, adding ? identities.length - 1 : undefined)
-              .map((i) => (
-                <SubagentItem key={i.id} i={i} remove={removeIdentity} />
-              ))}
+            {identities.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Users className="size-4 text-muted-foreground/60" />
+                  <h4 className="ui-text font-semibold text-foreground/80">
+                    已登记的身份
+                  </h4>
+                  <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
+                    {identities.length}
+                  </span>
+                </div>
+                {identities.map((i) => (
+                  <SubagentItem key={i.id} i={i} remove={removeIdentity} />
+                ))}
+              </div>
+            )}
 
             {err && (
               <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-red-400 pt-2">
@@ -936,10 +976,10 @@ export function AgentsSettings() {
               </p>
             )}
 
-            <div className="pt-2 space-y-3">
+            <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <h4 className="ui-text font-semibold text-foreground/80">
-                  已注册的 Agent 类型（pi-subagents）
+                  已注册的 Agent
                 </h4>
                 <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
                   {presets.length}
@@ -947,7 +987,7 @@ export function AgentsSettings() {
               </div>
               {presets.length === 0 ? (
                 <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
-                  当前未检测到 pi-subagents 扩展注册的 agent 类型。安装扩展并重启网关后，这里会列出内置默认和自定义的 agent。
+                  当前未检测到 pi-subagents 扩展注册的 agent 类型。
                 </p>
               ) : (
                 <div className="space-y-2.5">

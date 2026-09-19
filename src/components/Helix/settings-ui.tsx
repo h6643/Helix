@@ -2,6 +2,7 @@
 
 import { Check, ChevronDown } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
 
 // 设置界面基础组件：每个 SettingGroup 渲染为一张卡片，
 // 卡片内设置项以分隔线区分，控件右对齐。
@@ -61,15 +62,20 @@ export const SettingGroup = ({
   description,
   children,
   className = "",
+  plain = false,
 }: {
-  title?: string;
+  title?: React.ReactNode;
   action?: React.ReactNode;
   description?: React.ReactNode;
   children?: React.ReactNode;
   className?: string;
+  /** 去掉卡片背景与边框，仅保留标题/描述与行分隔，用于嵌入已有卡片内的分组 */
+  plain?: boolean;
 }) => (
   <div
-    className={`rounded-xl border border-border bg-card overflow-hidden ${className}`}
+    className={`${
+      plain ? "" : "rounded-xl border border-border/40 bg-card/60 overflow-hidden"
+    } ${className}`}
   >
     {(title || action || description) && (
       <div
@@ -92,10 +98,37 @@ export const SettingGroup = ({
   </div>
 );
 
-export const SectionHeading = ({ children }: { children: React.ReactNode }) => (
-  <h3 className="ui-title font-semibold text-foreground tracking-tight mb-5">
-    {children}
-  </h3>
+/**
+ * 设置页主标题的唯一实现：常规 / 外观 / 模型 / MCP / 子智能体 / 用量 / 归档 / 帮助 等
+ * 所有页面共用，保证标题的字号、左对齐（无额外内边距，与下方卡片边缘对齐）完全一致。
+ * 右上角操作按钮顶对齐（items-start），不会因按钮高度把标题挤高；
+ * description 始终另起一行显示在标题下方，不会与标题挤在同一行。
+ * 标题与首个卡片的间距由父容器的 space-y 统一控制。
+ */
+export const PageHeader = ({
+  children,
+  description,
+  action,
+  className = "",
+}: {
+  children: React.ReactNode;
+  description?: React.ReactNode;
+  action?: React.ReactNode;
+  className?: string;
+}) => (
+  <div className={className || ""}>
+    <div className="flex items-start justify-between gap-3">
+      <h3 className="ui-title font-semibold text-foreground tracking-tight">
+        {children}
+      </h3>
+      {action && (
+        <div className="flex items-center gap-2 shrink-0">{action}</div>
+      )}
+    </div>
+    {description && (
+      <p className="mt-1 ui-text text-muted-foreground/60">{description}</p>
+    )}
+  </div>
 );
 
 /**
@@ -200,15 +233,15 @@ export function useLockScrollOnOpen(
       el = el.parentElement;
     }
     if (!scroller) return;
+    // 锁定背景滚动，但不动 paddingRight——弹窗是 fixed 定位，本身不受
+    // 滚动容器 padding 影响；加 paddingRight 会让滚动容器内容区变窄，
+    // 其他元素（左侧文字/卡片）整体往左挤，造成可见的布局抖动。
+    // 只需要防止用户滚动背景，不需要补偿滚动条宽度。
     const prevOverflow = scroller.style.overflowY;
-    const prevPadR = scroller.style.paddingRight;
-    const sbw = scroller.offsetWidth - scroller.clientWidth;
-    if (sbw > 0) scroller.style.paddingRight = `${sbw}px`;
     scroller.style.overflowY = "hidden";
     return () => {
       if (!scroller) return;
       scroller.style.overflowY = prevOverflow;
-      scroller.style.paddingRight = prevPadR;
     };
   }, [open, btnRef]);
 }
@@ -323,7 +356,7 @@ export function PopupSelect({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
-        className={`${className} flex items-center justify-between gap-2 text-left disabled:opacity-50 disabled:cursor-not-allowed`}
+        className={`${className} flex items-center justify-between gap-2 text-left border border-border rounded-lg px-3 py-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:border-foreground/25 transition-colors`}
       >
         <span className="truncate">{currentLabel}</span>
         <ChevronDown
@@ -334,7 +367,7 @@ export function PopupSelect({
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed z-50 bg-popover border border-border rounded-xl shadow-xl py-1 overflow-y-auto overscroll-contain"
+          className="fixed z-50 helix-popover-glass border border-border rounded-xl shadow-xl py-1 overflow-y-auto overscroll-contain"
           style={{
             left: pos.left,
             top: pos.top,
@@ -372,6 +405,84 @@ export function PopupSelect({
             );
           })}
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 统一的「保存」动作栏：与 hook-settings.tsx 的保存交互保持一致——
+ * 右侧 outline 保存按钮 + 行内保存状态（保存中 / 已保存 / 保存失败），
+ * 不依赖 toast 弹窗。各「添加 X」表单（供应商 / 服务器 / 子智能体）统一复用。
+ * - saving=true 时按钮禁用并显示 savingLabel（默认「保存中…」）。
+ * - status="ok" 显示绿色 okLabel（默认「已保存」）。
+ * - status="err" 显示红色 errorText（缺省「保存失败，请重试」）。
+ * - 可选 onReset / onCancel 在保存按钮前渲染 ghost 按钮。
+ */
+export function SaveBar({
+  saving,
+  status,
+  errorText,
+  onSave,
+  onReset,
+  onCancel,
+  disabled,
+  saveLabel = "保存",
+  savingLabel = "保存中…",
+  okLabel = "已保存",
+  errLabel = "保存失败，请重试",
+  resetLabel = "重置",
+}: {
+  saving: boolean;
+  status: null | "ok" | "err";
+  errorText?: string | null;
+  onSave: () => void;
+  onReset?: () => void;
+  onCancel?: () => void;
+  disabled?: boolean;
+  saveLabel?: string;
+  savingLabel?: string;
+  okLabel?: string;
+  errLabel?: string;
+  resetLabel?: string;
+}) {
+  return (
+    <div className="flex items-center justify-end gap-3 pt-4">
+      {onReset && (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onReset}
+          disabled={saving}
+        >
+          {resetLabel}
+        </Button>
+      )}
+      {onCancel && (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onCancel}
+          disabled={saving}
+        >
+          取消
+        </Button>
+      )}
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={onSave}
+        disabled={disabled || saving}
+      >
+        {saving ? savingLabel : saveLabel}
+      </Button>
+      {status === "ok" && (
+        <span className="ui-text text-primary">{okLabel}</span>
+      )}
+      {status === "err" && (
+        <span className="ui-text text-destructive">
+          {errorText ?? errLabel}
+        </span>
       )}
     </div>
   );

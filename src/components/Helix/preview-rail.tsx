@@ -247,9 +247,9 @@ export function BrowserView({
   }, [pickMode]);
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col bg-card">
+    <div className="flex-1 min-h-0 flex flex-col bg-background/50">
       {/* Navigation toolbar */}
-      <div className="flex items-center gap-1 px-2.5 py-1.5 border-b border-border/20 shrink-0 bg-card">
+      <div className="flex items-center gap-1 px-2.5 py-1.5 border-b border-border/20 shrink-0 bg-background/50">
         <button
           onClick={goBack}
           disabled={!inElectron}
@@ -333,7 +333,7 @@ export function BrowserView({
       </div>
 
       {/* Content */}
-      <div className="flex-1 min-h-0 bg-card relative">
+      <div className="flex-1 min-h-0 bg-background/50 relative">
         {pickMode ? (
           <WebviewFrame
             url={url}

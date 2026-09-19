@@ -174,7 +174,7 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
 
   if (!active) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50 gap-2 bg-card">
+      <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground/50 gap-2 bg-background/50">
         <FileCode2 className="size-10" />
         <p className="text-[length:var(--helix-transcript-size)]">
           从左侧文件树点击文件即可在此编辑
@@ -190,7 +190,7 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-card">
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-background/50">
       {/* Editor — the file name / close live in the unified right-sidebar tab
           strip (one row), so there is no duplicate per-file tab bar here. */}
       <div className="flex-1 min-h-0 overflow-hidden">

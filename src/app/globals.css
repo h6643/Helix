@@ -71,7 +71,9 @@
   --accent: oklch(0.90 0.022 85);
   --accent-foreground: oklch(0.25 0.024 80);
   --destructive: oklch(0.58 0.22 22);
-  --border: oklch(0.88 0.012 95);
+  /* 边框亮度 0.88 对卡片 0.985 的对比太弱，控件叠上 /50 /70 修饰后完全
+     看不见（"设置里按钮边框消失"）。压到 0.84 让浅色下所有描边可辨。 */
+  --border: oklch(0.84 0.014 95);
   --input: oklch(0.95 0.009 95);
   --ring: oklch(0.62 0.15 55);
   --chart-1: oklch(0.62 0.15 55);
@@ -457,7 +459,7 @@
   padding: 7px 11px;
   border-left: 2px solid var(--border);
   border-radius: 0 6px 6px 0;
-  background: color-mix(in oklch, var(--muted) 55%, transparent);
+  background: color-mix(in oklch, var(--muted) 20%, transparent);
   color: var(--muted-foreground);
   font-size: 0.85em;
   line-height: 1.6;
@@ -567,16 +569,32 @@ html, body {
   background: var(--background);
 }
 
-/* Flat planes separated by 1px borders — no blur, no gradients, no rims. */
+/* Flat planes separated by 1px borders — no blur, no gradients, no rims.
+   标题栏跟随平面色 --card（与侧栏、聊天卡同色）：聊天卡贴顶、侧栏也贴顶，
+   顶部条带整条一体，不再有"标题栏只覆盖侧栏宽度导致顶部两种底色"的错位。
+
+   position: relative 是承重的，不能删：全局背景图是 position:absolute; z-index:0，
+   在同一个层叠上下文里排在「非定位后代」这一层之上。标题栏若保持 static，
+   开背景图时图片会把整条标题栏盖掉，露出图片原色（侧栏因为本身是 relative 不受影响）。 */
 .helix-app-titlebar {
-  background: var(--sidebar);
+  position: relative;
+  background: var(--card);
   border-right: 1px solid var(--border);
 }
 
-.helix-sidebar {
+/* 左右两条侧栏共用同一平面色（含背景图模式的 88% 蒙罩），右侧栏随左侧变化，
+   避免"右侧栏比左侧亮一块"。圆角在 helix-layout 的右侧栏 wrapper 上已移除——
+   侧栏按设计语言是平面对接，不做浮起圆角。 */
+.helix-sidebar,
+.helix-sidebar-right {
   position: relative;
-  background: var(--sidebar);
+  background: var(--card);
+}
+.helix-sidebar {
   border-right: 1px solid var(--border);
+}
+.helix-sidebar-right {
+  border-left: 1px solid var(--border);
 }
 
 /* Headings: tighter tracking for cleaner hierarchy */
@@ -723,10 +741,13 @@ button, [role="button"], a, input, textarea, select {
 }
 
 /* Flat content plane — solid card color; separation comes from borders,
-   not blur or ambient shadow (dsh-desktop language). */
+   not blur or ambient shadow (dsh-desktop language).
+   背景走变量 --surface-bg（默认 var(--card)）：当设置了全局背景图时，
+   helix-layout 给根节点加上 helix-app-bg-active，变量被覆盖为半透明，
+   让背景图从卡片缝隙/边缘透出来。 */
 .helix-surface {
   position: relative;
-  background: var(--card);
+  background: var(--surface-bg, var(--card));
   isolation: isolate;
   box-shadow: none;
 }
@@ -744,16 +765,24 @@ button, [role="button"], a, input, textarea, select {
 
 @supports not (backdrop-filter: blur(1px)) {
   .helix-app-titlebar {
-    background: var(--background);
+    background: var(--card);
   }
 
-  .helix-sidebar {
-    background: var(--sidebar);
+  .helix-sidebar,
+  .helix-sidebar-right {
+    background: var(--card);
   }
 
   .helix-surface,
-  .helix-chat-input-card {
+  .helix-chat-input-card,
+  .helix-popover-glass {
     background: var(--card);
+  }
+
+  /* 无 backdrop-filter 时标签栏回到不透明底（它的背景激活态是 transparent，
+     透明在没有模糊兜底的老 WebView 上会让标签文字压在壁纸上不可读）。 */
+  .helix-app-backdrop.helix-app-bg-active .helix-terminal-tabbar {
+    background: var(--muted);
   }
 
   [class*="bg-popover"] {
@@ -771,20 +800,82 @@ button, [role="button"], a, input, textarea, select {
 }
 
 .dark .helix-app-titlebar {
-  background: var(--sidebar);
+  background: var(--card);
   border-right: 1px solid var(--border);
   box-shadow: none;
 }
 
-.dark .helix-sidebar {
-  background: var(--sidebar);
-  border-right: 1px solid var(--border);
+.dark .helix-sidebar,
+.dark .helix-sidebar-right {
+  background: var(--card);
   box-shadow: none;
+}
+.dark .helix-sidebar {
+  border-right: 1px solid var(--border);
+}
+.dark .helix-sidebar-right {
+  border-left: 1px solid var(--border);
 }
 
 .dark .helix-surface {
   background: var(--card);
   box-shadow: none;
+}
+
+/* 设置模式外层 wrapper：背景图激活时直接透明，
+   避免与内层 helix-surface 双层 88% 叠加后背景图几乎看不见。 */
+.helix-surface-transparent {
+  position: relative;
+  background: transparent;
+  isolation: isolate;
+  box-shadow: none;
+}
+
+/* 全局背景激活时（helix-layout 根节点带 helix-app-bg-active，
+   即设置了背景图或自定义底色时）：让侧边栏与内容平面的底色变半透明，
+   底色 / 图片从边缘 / 缝隙透出。浅色 / 深色各走接近自身背景色的透明度，
+   保持可读性不被冲淡。 */
+.helix-app-backdrop.helix-app-bg-active {
+  --surface-bg: color-mix(in oklch, var(--background) 88%, transparent);
+}
+.dark .helix-app-backdrop.helix-app-bg-active {
+  --surface-bg: color-mix(in oklch, var(--background) 88%, transparent);
+}
+.helix-app-backdrop.helix-app-bg-active .helix-surface {
+  background: var(--surface-bg);
+}
+.helix-app-backdrop.helix-app-bg-active .helix-app-titlebar,
+.helix-app-backdrop.helix-app-bg-active .helix-sidebar,
+.helix-app-backdrop.helix-app-bg-active .helix-sidebar-right {
+  background: var(--surface-bg);
+}
+/* 只有左侧外壳（标题栏 + 侧栏的父容器）在背景激活时需要透明：它挡在标题栏 /
+   侧栏 88% 蒙罩的底下，不透明会把背景图冲淡成三层叠加。
+   不能写成 .bg-card——那是通用工具类，会把上下文用量弹窗、确认弹窗、各类卡片
+   一起变透明，直接露出背景图原色。 */
+.helix-app-backdrop.helix-app-bg-active .helix-app-left-shell {
+  background: transparent;
+}
+
+/* 终端面板与全局背景图的层叠关系（承重，别删 relative）：
+   背景图是 absolute z-0 且树序最前的定位子元素，非定位后代的背景/内联内容
+   整层画在图片之下 —— 终端根节点曾是非定位的，bg-card、标签栏 bg-muted、
+   +/× 图标全部被壁纸盖住"隐身"（只有 xterm 内部 absolute 画布逃在其上）。
+   根节点加 relative 回到定位层后恢复可见。
+
+   底盘：面板根本身带 .helix-surface，与对话卡共用同一条
+   `.helix-app-bg-active .helix-surface { background: var(--surface-bg) }`
+   （--surface-bg = background 88%）—— 这是"两者看起来是一整块"的唯一保证。
+   ⚠️ 不要再在这里给面板单独写 background。曾写成 transparent 并用 ::before
+   补一层 60% 玻璃底垫，终端因此比对话卡（88%）更透，用户一眼就看出
+   "终端和对话界面还是不一样"。
+
+   标签栏在背景激活时也要转透明：它的 bg-muted 是不透明 utility，留着会在
+   88% 底盘上贴一条实色条带，把终端切成"上白下透"两截。文本区的可见底完全
+   由面板底盘提供 —— 所以 xterm 自身背景必须是全透明
+   （terminal-panel.tsx 的 TERMINAL_THEME.background）。 */
+.helix-app-backdrop.helix-app-bg-active .helix-terminal-tabbar {
+  background: transparent;
 }
 
 /* Input depth without replacing each component's own surface. */
@@ -900,6 +991,13 @@ details > div, details > .details-content {
 .overflow-y-auto {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
+}
+
+/* 始终为滚动条预留槽位。设置内容区是 flex justify-center 居中的内容列，
+   内容超出时才出现滚动条会把内容宽度压缩 ~10px，居中列整体左移 ~5px，
+   表现为「有滚动的页面标题位置和没滚动的页面差 5px」。 */
+.settings-scroll {
+  scrollbar-gutter: stable;
 }
 
 /* Remove default focus outlines — we use custom focus styles */
@@ -1273,9 +1371,12 @@ pre code.hljs {
 }
 
 /* 工具结果代码卡（showHeader=false，不带 data-code-card-header）：与 CodeCard
-   同款的卡片外框，避免裸 <pre> 背景透明/无边框时与消息气泡糊在一起。 */
+   同款的卡片外框，避免裸 <pre> 背景透明/无边框时与消息气泡糊在一起。
+   代码内容区（.helix-code-body）的背景必须不透明——否则 <pre> 的 60% 半透明
+   底色会透过代码区显示出来，而带头部条的 CodeCard（pre[data-code-card-header]）
+   里代码区是实色 --card，两种卡片同一页面内底色深浅不一（代码区看起来"没铺满"）。 */
 .helix-md pre.helix-code-body-pre {
-  background: var(--color-card);
+  background: var(--card);
   /* 代码块外框：用 --foreground 30% 混入 --color-card 生成，保证在任意主题下
      都与卡片背景形成对比（--color-border 在暗色下与卡片太接近、几乎看不见）；
      !important 防止被 .helix-md pre 的通用 border:none 规则覆盖。 */
@@ -1288,7 +1389,7 @@ pre code.hljs {
    none、背景置 transparent，这里以更高特异性（属性选择器）覆盖，让整张卡片
    有 1px 圆角轮廓，头部/内容区不会与消息气泡糊在一起。 */
 .helix-md pre[data-code-card-header] {
-  background: var(--color-card) !important;
+  background: var(--card) !important;
   border: 1.5px solid color-mix(in oklch, var(--foreground) 7%, var(--color-card)) !important;
   border-radius: 0.5rem;
   overflow: hidden;
@@ -1314,7 +1415,7 @@ pre code.hljs {
      纯 --muted 在浅色主题是 oklch(0.92)（卡片 oklch(0.985)），深约 0.065(L)，
      一条横贯整卡的色带显得又宽又重；混入卡片底色后只留极淡的暖灰调，
      头部不再"压住"代码内容。深色主题同理（0.21 vs 0.16 → 混合后 ~0.18）。 */
-  background: color-mix(in oklch, var(--muted) 40%, var(--color-card)) !important;
+  background: var(--card) !important;
   /* 收紧上下内边距（0.5rem→0.25rem）：头部条更薄，视觉重量进一步降低。 */
   padding-top: 0.25rem !important;
   padding-bottom: 0.25rem !important;
@@ -1695,11 +1796,16 @@ nav::-webkit-scrollbar-thumb:hover {
   -webkit-app-region: no-drag;
 }
 
-/* Tauri window drag region. The attribute selector is Tauri's documented
-   mechanism (the runtime also turns `data-tauri-drag-region` into this
-   declaration), so the explicit `.helix-app-titlebar` rule below is a fallback
-   for runtimes that only resolve the declaration from the stylesheet. Both
-   forms are harmless — an element carrying the attribute matches both. */
+/* Window dragging in Tauri is NOT driven by this CSS: the runtime's
+   `window/scripts/drag.js` listens for mousedown, inspects
+   `data-tauri-drag-region` on the composed path, and invokes
+   `plugin:window|start_dragging`. These declarations only keep the title bar a
+   drag region for hosts that honor `-webkit-app-region`, and make the intent
+   visible to readers.
+
+   Value semantics matter: a bare attribute means "drag only when this exact
+   element is the click target", so use `data-tauri-drag-region="deep"` on
+   containers and `="false"` on the buttons inside them. */
 [data-tauri-drag-region] {
   -webkit-app-region: drag;
   app-region: drag;
@@ -1895,10 +2001,15 @@ nav::-webkit-scrollbar-thumb:hover {
   }
 }
 
-/* xterm.js transparent background */
+/* xterm.js transparent background — the terminal paints its own glyph-layer
+   only; the visible plane comes from .helix-terminal-panel's glass underlay
+   (see the bg-active block above). `.xterm-scrollable-element` is the node
+   xterm writes `theme.background` into; forcing it transparent too keeps
+   that value from ever becoming a second, differently-coloured plate. */
 .xterm { background: transparent !important; }
 .xterm .xterm-viewport { background: transparent !important; }
 .xterm .xterm-screen { background: transparent !important; }
+.xterm .xterm-scrollable-element { background: transparent !important; }
 
 /* Isolate xterm from the global UI typography. The body sets a negative
    letter-spacing and OpenType feature settings (cv11/ss01/ss03) which are
@@ -1972,7 +2083,9 @@ nav::-webkit-scrollbar-thumb:hover {
    阴影交给元素自身的 shadow-sm（与 SettingGroup 同款），此处只负责底色。 */
 .helix-chat-input-card {
   container-type: inline-size;
-  background: var(--card);
+  background: color-mix(in oklch, var(--card) 94%, transparent);
+  backdrop-filter: blur(14px) saturate(1.15);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
   /* 长内容（尤其是未断行的长 token / 长 URL）不会把卡片撑宽：
      卡片宽度由外层布局（max-w-[700px]）决定，内容溢出靠 textarea 的
      overflow-x:hidden + overflow-wrap:anywhere 吸收。overflow-x:clip 兜底
@@ -1986,6 +2099,18 @@ nav::-webkit-scrollbar-thumb:hover {
      退化为 visible，同样不会纵向裁剪。 */
   overflow-x: clip;
   overflow-y: visible;
+}
+
+/* 与输入框同款的半透明表面（背景 = 88% 卡片色叠在应用背景之上，与
+   .helix-chat-input-card 一致），
+   供浮层菜单（「更多操作」弹出、PopupSelect / 主题下拉、tooltip）使用。
+   半透明浮层会透出底下滚动的内容文字，所以叠加 backdrop-filter 把背景
+   糊成色块：玻璃质感保留、文字不再可读。无 backdrop-filter 时退化为
+   实色，与输入框同步。 */
+.helix-popover-glass {
+  background: color-mix(in oklch, var(--card) 88%, transparent);
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
 }
 @container (max-width: 620px) {
   .chat-toolbar-label {

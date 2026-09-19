@@ -15,6 +15,7 @@ import {
 } from "@/lib/tool-display-utils";
 import { classifyTool } from "@/lib/tool-merge";
 import { cn } from "@/lib/utils";
+import { useElapsedSeconds } from "@/lib/use-elapsed";
 import { useHelixStore } from "@/stores/helix-store";
 
 interface Delegation {
@@ -112,6 +113,7 @@ export function AgentWorkPanel() {
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [timelineFound, setTimelineFound] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
+  const [resultOpen, setResultOpen] = useState(false);
   // 执行流每组合并行的展开态。默认全折叠（只显示合并摘要），点击展开看组内原始工具。
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
@@ -302,12 +304,19 @@ export function AgentWorkPanel() {
           ? "已取消"
           : "已停止";
 
+  // 运行中但还没收到工具行时的已运行秒数（后台子 agent 的工具活动要等
+  // subagents:tool 桥接事件，先如实显示"正在执行"，不再像卡死）。
+  const elapsed = useElapsedSeconds(
+    live?.createdAt,
+    isRunning && steps.length === 0,
+  );
+
   return (
     <div className="flex flex-col h-full w-full min-h-0 min-w-0 bg-card">
       <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3">
         {/* ── Prompt card ─────────────────────────────────────────────── */}
         {live && (
-          <div className="rounded-xl border border-border/40 bg-muted/30 px-4 py-3">
+          <div className="rounded-xl border border-border/40 bg-muted px-4 py-3">
             <div className="text-[length:var(--helix-transcript-size)] text-foreground/85 leading-relaxed whitespace-pre-wrap break-words">
               {live.description || live.name}
             </div>
@@ -369,7 +378,7 @@ export function AgentWorkPanel() {
                   <div key={i} className="py-0.5">
                     <button
                       type="button"
-                      title={step.tip}
+                      data-tip={step.tip}
                       onClick={() =>
                         setExpanded((prev) => {
                           const next = new Set(prev);
@@ -378,7 +387,7 @@ export function AgentWorkPanel() {
                           return next;
                         })
                       }
-                      className="w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 hover:bg-muted/40 rounded-sm py-0.5 px-1 -mx-1 cursor-pointer transition-colors"
+                      className="w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 hover:bg-muted rounded-sm py-0.5 px-1 -mx-1 cursor-pointer transition-colors"
                     >
                       {step.status === "error" ? (
                         <span className="tool-glyph tool-glyph-failed" aria-hidden>
@@ -425,7 +434,7 @@ export function AgentWorkPanel() {
             {isRunning && steps.length === 0 && (
               <div className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground py-1">
                 <Loader2 className="size-3 animate-spin" />
-                正在启动，等待第一个工具调用…
+                子代理正在后台执行…（已运行 {elapsed} 秒）
               </div>
             )}
           </div>
@@ -433,10 +442,28 @@ export function AgentWorkPanel() {
 
         {/* ── Result ──────────────────────────────────────────────────── */}
         {live?.result && (
-          <HelixMarkdown
-            text={live.result}
-            className="text-[calc(var(--helix-transcript-size)*0.8571)]"
-          />
+          <div className="rounded-lg border border-border/30 bg-muted/50">
+            <button
+              type="button"
+              onClick={() => setResultOpen((v) => !v)}
+              className="w-full flex items-center gap-1.5 px-3 py-2 text-left text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:text-foreground transition-colors"
+            >
+              <span className="select-none text-foreground/40 text-xs">{resultOpen ? "▾" : "▸"}</span>
+              <span className="font-medium">结果</span>
+            </button>
+            {resultOpen ? (
+              <div className="px-3 pb-3">
+                <HelixMarkdown
+                  text={live.result}
+                  className="text-[calc(var(--helix-transcript-size)*0.8571)]"
+                />
+              </div>
+            ) : (
+              <div className="px-3 pb-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/50 whitespace-nowrap overflow-hidden text-ellipsis font-mono">
+                {live.result.trim().slice(0, 80)}
+              </div>
+            )}
+          </div>
         )}
 
         {/* ── Modified files ──────────────────────────────────────────── */}
@@ -445,8 +472,8 @@ export function AgentWorkPanel() {
             {(live?.filesModified || []).slice(0, 8).map((f, i) => (
               <span
                 key={i}
-                className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground font-mono truncate max-w-full"
-                title={f}
+                className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono truncate max-w-full"
+                data-tip={f}
               >
                 {f.split(/[/\\]/).pop()}
               </span>

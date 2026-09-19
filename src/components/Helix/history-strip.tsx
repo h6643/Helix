@@ -29,11 +29,16 @@ export function HistoryStrip({
 
   const messages = useMemo(
     () =>
-      chatMessages.filter(
-        (m) =>
-          (!m.sessionId || m.sessionId === currentSessionId) &&
-          m.role === "user",
-      ),
+      chatMessages.filter((m) => {
+        // 与 agent-flow-panel 的 sessionMessages 同一规则（严格二选一）：
+        // 「无 sessionId」的消息属于**新对话**（currentSessionId 为 null）那一屏，
+        // 不是"每个会话都能看到"。旧写法 `!m.sessionId || …` 会让草稿期的用户输入
+        // 出现在所有会话的定位条里，点进去却找不到对应消息（它根本不在那个会话里）。
+        const own = currentSessionId
+          ? m.sessionId === currentSessionId
+          : !m.sessionId;
+        return own && m.role === "user";
+      }),
     [chatMessages, currentSessionId],
   );
 

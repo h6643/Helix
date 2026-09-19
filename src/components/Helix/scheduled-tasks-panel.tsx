@@ -569,18 +569,19 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
   }, [selectedIds.size, filteredTasks, filteredTasks.length]);
 
   return (
-    <div className="h-full w-full flex flex-col bg-background">
+    <div className="h-full w-full flex flex-col bg-transparent">
       {/* Header — big title + add action, search below (same layout as the
           plugin center). 40px top padding clears the window controls. */}
-      <div className="px-6 pt-10 pb-4 shrink-0 border-b border-border/40">
+      <div className="px-8 pt-10 pb-4 shrink-0 border-b border-border/40">
         <div className="flex items-center justify-between">
           <h1 className="ui-title font-semibold text-foreground tracking-tight">
             计划任务
           </h1>
           <button
             onClick={() => setIsAdding(true)}
-            className="p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
+            className="mr-2 p-1.5 rounded hover:bg-accent/60 text-muted-foreground hover:text-foreground transition-colors"
             data-tip="添加计划"
+            data-tip-side="left"
           >
             <Plus className="size-4" />
           </button>
@@ -593,7 +594,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索计划任务"
-            className="w-[95%] h-10 pl-10 pr-4 rounded-full border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
+            className="w-[95%] h-10 pl-10 pr-4 rounded-full border border-border/60 bg-card/40 text-[length:var(--helix-transcript-size)] transition-all"
           />
         </div>
       </div>

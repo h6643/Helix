@@ -103,7 +103,7 @@ function ApprovalBar({
   ];
 
   return (
-    <div className="w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-1.5">
+    <div className="w-full max-w-[700px] mx-auto bg-card text-foreground border border-border/40 rounded-2xl shadow-2xl p-1.5">
       <div className="flex items-start justify-between gap-2 mb-2">
         <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
           {getApprovalTitle(request.toolName)}
@@ -118,7 +118,7 @@ function ApprovalBar({
         </span>
       </div>
       {command && (
-        <pre className="bg-muted rounded-xl p-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-1.5 max-h-10 overflow-auto">
+        <pre className="bg-card rounded-xl p-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 font-mono whitespace-pre-wrap break-all mb-1.5 max-h-10 overflow-auto">
           {command}
         </pre>
       )}
@@ -267,7 +267,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
 
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
-      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border border-border rounded-2xl shadow-2xl p-4">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-card text-foreground border border-border/40 rounded-2xl shadow-2xl p-4">
         <div className="flex items-center justify-between gap-3 mb-2">
           <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
             需要你的确认
@@ -415,7 +415,7 @@ export function PlanReviewBar({
 
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
-      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-popover text-foreground border-2 border-primary/40 rounded-2xl shadow-2xl p-2">
+      <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-card text-foreground border-2 border-primary/40 rounded-2xl shadow-2xl p-2">
         <div className="flex items-center justify-between gap-3 mb-1.5">
           <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
             计划已生成

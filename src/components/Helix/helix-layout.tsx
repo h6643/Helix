@@ -71,6 +71,7 @@ import { isServeActive, getServeClient } from "@/lib/serve-gateway";
 import { resolveBackendSid, resolveBackendSids } from "@/lib/session-map";
 import { applyHelixPalette } from "@/lib/themes";
 import { isSyntheticSubAgentToolRow } from "@/lib/tool-display-utils";
+import { useElapsedSeconds } from "@/lib/use-elapsed";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -157,6 +158,27 @@ function PanelSuspense({ children }: { children: React.ReactNode }) {
     >
       {children}
     </Suspense>
+  );
+}
+
+/**
+ * 子 agent 运行中但还没收到工具行时的状态行：每秒刷新已运行秒数。
+ * （后台子 agent 的工具活动要等 subagents:tool 桥接事件，先如实显示
+ * "正在后台执行"，避免被误读为卡死。）独立成组件是因为它要用 hook，
+ * 而调用方在 .map() 里无法调用 hook。
+ */
+function SubAgentWaitingLine({
+  createdAt,
+  active,
+}: {
+  createdAt?: number;
+  active: boolean;
+}) {
+  const elapsed = useElapsedSeconds(createdAt, active);
+  return (
+    <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-primary">
+      正在后台执行…（已运行 {elapsed} 秒）
+    </div>
   );
 }
 
@@ -523,9 +545,15 @@ export function HelixLayout() {
   // display:none 隐藏而不是卸载。run 由 AgentFlowPanel 驱动，卸载会冻结流式
   // 画面并让暂停按钮消失（看起来像"点击插件把运行终止了"）。保持挂载即可在
   // 切页面时让模型继续在后台运行，返回后还能接着看。
-  // Only hide chat for overlay panels (delegations, runtime, worktree)
+  // Only hide chat for overlay panels (delegations, runtime, worktree,
+  // scheduled tasks, plugins) — 让计划/插件页与其它覆盖页一致：聊天 display:none
+  // 隐藏，页面直接铺在卡片自身的 surface 上，不再叠一层圆角浮窗。
   const sidePanelOpen =
-    showRuntimePanel || showWorktreePanel || showSubAgentPanel;
+    showRuntimePanel ||
+    showWorktreePanel ||
+    showSubAgentPanel ||
+    showSkillPanel ||
+    showScheduledTasksPanel;
   const rightSidebarTab = useHelixStore((s) => s.rightSidebarTab);
   const codeFullscreen = useHelixStore((s) => s.codeFullscreen);
   const isTerminalOpen = useHelixStore((s) => s.isTerminalOpen);
@@ -552,9 +580,14 @@ export function HelixLayout() {
       cancelled = true;
     };
   }, [selectedWorkDir]);
-  const editorTheme = useHelixStore((s) => s.editorTheme);
   const themeStyle = useHelixStore((s) => s.themeStyle);
   const setThemeStyle = useHelixStore((s) => s.setThemeStyle);
+  // 自定义背景图：选中的启动画面背景图同时也铺到主界面背景（helix-app-backdrop 之后、
+  // 各分区之前的最底层），与 BootOverlay 保持一致的视觉延续。
+  const bootBackgroundImage = useHelixStore((s) => s.bootBackgroundImage);
+  const showGlobalBackground = useHelixStore((s) => s.showGlobalBackground);
+  const globalBgImage = showGlobalBackground ? bootBackgroundImage : null;
+  const hasGlobalBg = Boolean(globalBgImage);
   const chatMessages = useHelixStore((s) => s.chatMessages);
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
   // 新对话 / 计划 / 插件 视图下隐藏标题栏的「终端 / 更多操作」——这两项是
@@ -666,6 +699,8 @@ export function HelixLayout() {
   const [commitMessage, setCommitMessage] = useState("");
   // 右上角统一工作面板（更改 / 任务清单 / 子 Agent 共用的下拉）。
   const [workPanelOpen, setWorkPanelOpen] = useState(false);
+  // 工作面板里「子 Agent」区块的折叠态：默认展开，点标题行收起/展开列表。
+  const [subAgentsCollapsed, setSubAgentsCollapsed] = useState(false);
   const workPanelRef = useRef<HTMLDivElement>(null);
   const workPanelBtnRef = useRef<HTMLButtonElement>(null);
   const workPanelPortalRef = useRef<HTMLDivElement>(null);
@@ -1635,7 +1670,19 @@ export function HelixLayout() {
     showSidebar && !showSettings ? sidebarPixelWidth : SIDEBAR_COLLAPSED;
 
   return (
-    <div className="helix-app-backdrop relative h-screen w-screen flex flex-row overflow-hidden">
+    <div
+      className={`helix-app-backdrop relative h-screen w-screen flex flex-row overflow-hidden ${
+        hasGlobalBg ? "helix-app-bg-active" : ""
+      }`}
+    >
+      {/* 自定义背景图（若已设置且启用）：铺满整个主界面最底层，与启动页视觉延续。 */}
+      {globalBgImage && (
+        <img
+          src={globalBgImage}
+          alt=""
+          className="pointer-events-none absolute inset-0 h-full w-full object-cover z-0"
+        />
+      )}
       <KeyboardShortcuts />
       <CommandPalette />
       <ContextMenuProvider />
@@ -1644,7 +1691,7 @@ export function HelixLayout() {
       {/* Two-region layout: the titlebar and navigation sidebar form the left
           region; the conversation/settings area owns the right region. */}
       <div
-        className={`flex flex-col overflow-hidden bg-sidebar ${showSettings ? "hidden" : ""}`}
+        className={`helix-app-left-shell flex flex-col overflow-hidden bg-card ${showSettings ? "hidden" : ""}`}
       >
         {/* Title bar — head of the left sidebar region. The whole bar is the
              window drag handle: the child buttons are covered by the
@@ -1654,7 +1701,7 @@ export function HelixLayout() {
         <div
           id="helix-titlebar"
           className="helix-app-titlebar flex items-center justify-between h-10 px-3 shrink-0 select-none"
-          data-tauri-drag-region=""
+          data-tauri-drag-region="deep"
           style={{ width: titlebarPixelWidth }}
         >
           {/* Left: navigation buttons */}
@@ -1900,7 +1947,7 @@ export function HelixLayout() {
           终端/更多操作 — hidden in settings & full-screen panel modes. */}
       <div
         className="absolute top-[2px] right-2 z-40 h-10 flex items-center gap-3"
-        data-tauri-drag-region=""
+        data-tauri-drag-region="deep"
       >
         {!showSettings && !hideConversationActions && (
           <>
@@ -1917,10 +1964,12 @@ export function HelixLayout() {
                   ref={workPanelBtnRef}
                   onClick={() => setWorkPanelOpen((o) => !o)}
                   data-tauri-drag-region="false"
-                className={`relative flex items-center gap-1.5 h-7 pl-2 pr-2.5 rounded-full border bg-card text-card-foreground shadow-sm select-none transition-colors ${
+                  // 样式与标题栏 main 分支按钮（BranchPicker）完全一致：
+                  // accent 半透明底 + rounded-lg + 无描边，悬停/展开加深。
+                className={`relative flex items-center gap-1.5 h-7 px-2 rounded-lg bg-accent/40 text-foreground/60 select-none transition-colors ${
                   workPanelOpen
-                    ? "border-primary/60 ring-1 ring-primary/20"
-                    : "border-border/70 hover:border-border"
+                    ? "bg-accent/60 text-foreground"
+                    : "hover:text-foreground hover:bg-accent/60"
                 }`}
                 data-tip="工作面板"
               >
@@ -2001,9 +2050,13 @@ export function HelixLayout() {
                     width: Math.max(200, maxW),
                   }}
                 >
-                <div className="w-full max-h-[70vh] overflow-y-auto overflow-x-hidden min-w-0 flex flex-col rounded-2xl border border-border bg-popover text-popover-foreground shadow-xl animate-scale-in">
+                {/* 卡片语言与底部审批浮条（approval-dialog.tsx ApprovalBar）一致：
+                    弱边框 + shadow-2xl，内层内容块用 bg-muted rounded-xl。
+                    底色必须不透明（bg-card）：开了全局背景图后 bg-card/60 会让
+                    背景图从面板后面透出来，面板文字压在背景图上不可读。 */}
+                <div className="w-full max-h-[70vh] overflow-y-auto overflow-x-hidden min-w-0 flex flex-col rounded-2xl border border-border/40 bg-card text-foreground shadow-2xl animate-scale-in">
                   {gitChangeStat && (
-                    <section className="p-2 border-b border-border/60">
+                    <section className="p-1.5 pb-1">
                       {/* 这里只给总体数字；整行可点 → 跳右侧栏「更改」看逐文件明细。 */}
                       <button
                         type="button"
@@ -2011,7 +2064,7 @@ export function HelixLayout() {
                           storeActions.setRightSidebarTab("diff");
                           setWorkPanelOpen(false);
                         }}
-                        className="w-full flex items-center gap-2.5 min-w-0 px-2.5 py-2 text-left rounded-lg hover:bg-accent/50 transition-colors"
+                        className="w-full flex items-center gap-2.5 min-w-0 px-3 py-2 text-left rounded-xl bg-muted hover:bg-accent/60 transition-colors"
                         data-tip="查看更改明细"
                       >
                         <FilePlus className="size-4 shrink-0 text-foreground/50" />
@@ -2037,7 +2090,7 @@ export function HelixLayout() {
                           setCommitDialogOpen(true);
                         }}
                         disabled={isCommitting}
-                        className="mt-1 w-full inline-flex items-center justify-center gap-1.5 h-8 rounded-lg bg-primary/10 text-primary text-[calc(var(--helix-transcript-size)*0.8571)] font-medium hover:bg-primary/20 disabled:opacity-50 transition-colors"
+                        className="mt-1 w-full inline-flex items-center justify-center gap-1.5 h-8 rounded-xl bg-muted text-primary text-[calc(var(--helix-transcript-size)*0.8571)] font-medium hover:bg-accent/60 disabled:opacity-50 transition-colors"
                       >
                         <Send className="size-3.5" />
                         提交并推送
@@ -2045,18 +2098,18 @@ export function HelixLayout() {
                     </section>
                   )}
                   {pendingPlanReview && (
-                    <section className="p-2 border-b border-border/60">
+                    <section className="p-1.5">
                       <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
                         <Pencil className="size-4 shrink-0 text-foreground/50" />
                         <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
                           计划 · 待批准
                         </span>
-                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">
+                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
                           计划模式
                         </span>
                       </div>
                       <div className="px-1.5 pb-1.5">
-                        <div className="max-h-48 overflow-y-auto rounded-lg border border-border/30 bg-muted/30 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/80 whitespace-pre-wrap break-words">
+                        <div className="max-h-48 overflow-y-auto rounded-xl bg-muted px-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/80 whitespace-pre-wrap break-words">
                           {pendingPlanReview.content}
                         </div>
                         <p className="mt-1.5 px-1 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
@@ -2066,7 +2119,7 @@ export function HelixLayout() {
                     </section>
                   )}
                   {helixTodos.length > 0 && (
-                  <section className="p-2 border-b border-border/60">
+                  <section className="p-1.5">
                     {(() => {
                       const doneCount = helixTodos.filter(
                         (t) => t.status === "completed",
@@ -2097,7 +2150,7 @@ export function HelixLayout() {
                             {helixTodos.map((todo) => (
                               <li
                                 key={todo.id}
-                                className="flex items-start gap-2 px-1.5 py-1.5 rounded-lg hover:bg-accent/40 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)]"
+                                className="flex items-start gap-2 px-1.5 py-1.5 rounded-xl hover:bg-accent/60 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)]"
                               >
                                 {todo.status === "completed" ? (
                                   <CheckCircle2 className="size-4 text-emerald-500 shrink-0 mt-0.5" />
@@ -2129,7 +2182,7 @@ export function HelixLayout() {
                   )}
                   {(subAgents.length > 0 || isElectron()) &&
                     (subAgents.length > 0 || delegations.length > 0) && (
-                    <section className="p-2">
+                    <section className="p-1.5">
                       {(() => {
                         // 磁盘重建卡已并入 subAgents；历史区只渲染剩余的
                         // delegation，计数同口径（否则列表 1 个、计数 2）。
@@ -2141,7 +2194,18 @@ export function HelixLayout() {
                         ).length;
                         const total = subAgents.length + diskOnlyDelegations.length;
                         return (
-                          <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSubAgentsCollapsed((v) => !v)
+                            }
+                            data-tip={
+                              subAgentsCollapsed
+                                ? "展开子 Agent 列表"
+                                : "折叠子 Agent 列表"
+                            }
+                            className="w-full flex items-center gap-2.5 min-w-0 px-2.5 py-2 rounded-xl hover:bg-accent/60 transition-colors text-left"
+                          >
                             <Users className="size-4 shrink-0 text-foreground/50" />
                             <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
                               子 Agent
@@ -2160,37 +2224,36 @@ export function HelixLayout() {
                                 {total} 个
                               </span>
                             )}
-                          </div>
+                            <ChevronDown
+                              className={`size-3.5 shrink-0 text-foreground/40 transition-transform ${
+                                subAgentsCollapsed ? "-rotate-90" : ""
+                              }`}
+                            />
+                          </button>
                         );
                       })()}
+                      {!subAgentsCollapsed && (
                       <div className="max-h-72 overflow-auto px-1.5">
                         {/* 实时区：store.subAgents（subagent.* 事件驱动），同步/后台
                             agent 都能显示，磁盘 delegations 作历史兜底。 */}
                         {subAgents.map((sa) => {
-                          // 运行中/完成都列出最近的真实工具调用（合成的
-                          // progress/background 行不显示，避免"progress"被
-                          // 当成工具名）。顶部是提示词（description），下方
-                          // 才是执行内容，符合"先给什么任务、再看干了什么"。
-                          const rows = (sa.toolCalls || []).filter(
-                            (tc) => !isSyntheticSubAgentToolRow(tc.toolName),
-                          );
-                          const recentRows = rows.slice(-3);
-                          const toolCount = rows.length;
                           return (
-                          <button
+                          <div
                             key={`live-${sa.id}`}
-                            type="button"
-                            onClick={() => {
-                              storeActions.openAgentView({
-                                id: sa.id,
-                                name: sa.description || sa.name,
-                              });
-                              setWorkPanelOpen(false);
-                            }}
-                            className="w-full text-left px-2 py-2 rounded-lg hover:bg-accent/50 transition-colors"
-                            data-tip="在右侧栏查看工作内容"
+                            className="w-full text-left px-2 py-2 rounded-xl hover:bg-accent/60 transition-colors"
                           >
-                            <div className="flex items-start gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                storeActions.openAgentView({
+                                  id: sa.id,
+                                  name: sa.description || sa.name,
+                                });
+                                setWorkPanelOpen(false);
+                              }}
+                              data-tip="在右侧栏查看工作内容"
+                              className="w-full flex items-start gap-2 text-left"
+                            >
                               {sa.status === "running" ? (
                                 <Loader2 className="size-3.5 text-primary shrink-0 animate-spin mt-0.5" />
                               ) : sa.status === "failed" ? (
@@ -2202,65 +2265,15 @@ export function HelixLayout() {
                                 {/* 提示词（最上面）：给这个子 Agent 的任务描述 */}
                                 <div
                                   className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/85 line-clamp-2"
-                                  title={sa.description || sa.name}
+                                  data-tip={sa.description || sa.name}
                                 >
                                   {sa.description || sa.name}
                                 </div>
-                                {/* 执行内容（下面）：最近几条真实工具调用 + 总数 */}
-                                {(recentRows.length > 0 || sa.status === "running") && (
-                                  <div className="mt-1 space-y-0.5">
-                                    {recentRows.map((tc, i) => (
-                                      <div
-                                        key={i}
-                                        className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground"
-                                      >
-                                        <span className="font-mono truncate">
-                                          {tc.toolName}
-                                        </span>
-                                        <span
-                                          className={
-                                            "shrink-0 " +
-                                            (tc.status === "running"
-                                              ? "text-primary"
-                                              : tc.status === "success"
-                                                ? "text-emerald-500"
-                                                : "text-destructive")
-                                          }
-                                        >
-                                          {tc.status === "running"
-                                            ? "…"
-                                            : tc.status === "success"
-                                              ? "✓"
-                                              : "✗"}
-                                        </span>
-                                        {tc.params && (
-                                          <span className="truncate min-w-0 flex-1 text-foreground/50">
-                                            {tc.params}
-                                          </span>
-                                        )}
-                                      </div>
-                                    ))}
-                                    {sa.status === "running" && recentRows.length === 0 && (
-                                      <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-primary">
-                                        等待第一个工具调用…
-                                      </div>
-                                    )}
-                                    {toolCount > recentRows.length && (
-                                      <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-foreground/40">
-                                        共 {toolCount} 次工具调用
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
-                                {sa.status !== "running" && sa.result && (
-                                  <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground line-clamp-2">
-                                    {sa.result}
-                                  </div>
-                                )}
                               </div>
                               <ChevronRight className="size-3.5 text-foreground/30 shrink-0 mt-0.5" />
-                            </div>
-                          </button>
+                            </button>
+                            {/* 展开的明细：默认折叠，点击标题行后在右侧详情面板查看完整内容 */}
+                          </div>
                           );
                         })}
                         {/* 历史区：磁盘 live 日志（重建卡已并入上方实时区，按 id 去重） */}
@@ -2279,7 +2292,7 @@ export function HelixLayout() {
                               });
                               setWorkPanelOpen(false);
                             }}
-                            className="w-full text-left px-2 py-2 rounded-lg hover:bg-accent/50 transition-colors"
+                            className="w-full text-left px-2 py-2 rounded-xl hover:bg-accent/60 transition-colors"
                             data-tip="在右侧栏查看工作内容"
                           >
                             <div className="flex items-center gap-2">
@@ -2295,6 +2308,7 @@ export function HelixLayout() {
                           </button>
                         ))}
                       </div>
+                      )}
                     </section>
                     )}
                     {/* 后台任务区：独立 section，不属于「子 Agent」——它们是
@@ -2302,7 +2316,7 @@ export function HelixLayout() {
                         仅本会话用 background 工具启动的任务；其它会话的在
                         右上角「后台任务」按钮的全局面板里。 */}
                     {workPanelBgTasks.length > 0 && (
-                      <section className="p-2">
+                      <section className="p-1.5">
                         <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
                           <Terminal className="size-4 shrink-0 text-foreground/50" />
                           <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
@@ -2323,7 +2337,7 @@ export function HelixLayout() {
                                 setBgTasksOpen(true);
                                 setWorkPanelOpen(false);
                               }}
-                              className="w-full text-left px-2 py-2 rounded-lg hover:bg-accent/50 transition-colors"
+                              className="w-full text-left px-2 py-2 rounded-xl hover:bg-accent/60 transition-colors"
                               data-tip="在后台任务面板查看详情"
                             >
                               <div className="flex items-center gap-2">
@@ -2508,7 +2522,11 @@ export function HelixLayout() {
             below applies its own mt/mb inset so the chat card floats. */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {showSettings ? (
-            <div className="helix-surface flex-1 flex flex-col overflow-hidden min-h-0">
+            <div
+              className={`flex-1 flex flex-col overflow-hidden min-h-0 ${
+                hasGlobalBg ? "helix-surface-transparent" : "helix-surface"
+              }`}
+            >
               <PanelSuspense>
                 <ApiSettings
                   themeStyle={themeStyle}
@@ -2579,6 +2597,17 @@ export function HelixLayout() {
                                 )}
                               </div>
                             )}
+                            {/* Middle drag handle — the left titlebar stops at the
+                                sidebar edge and the window controls are hoisted to
+                                the root, so this spacer is the only draggable piece
+                                of the top band. `deep`: it only occupies the empty
+                                space between the two control groups, so the folder
+                                button and branch picker keep their clicks. */}
+                            <div
+                              aria-hidden
+                              className="flex-1 min-w-0 h-full"
+                              data-tauri-drag-region="deep"
+                            />
                             <div className="flex items-center gap-1 shrink-0">
                               {browserMenuOpen &&
                                 typeof window !== "undefined" &&
@@ -2626,14 +2655,14 @@ export function HelixLayout() {
                     </div>
                   </div>
                   {showScheduledTasksPanel && (
-                    <div className="helix-surface helix-surface-overlay z-20 rounded-2xl overflow-hidden flex flex-col">
+                    <div className="absolute inset-0 z-20">
                       <PanelSuspense>
                         <ScheduledTasksPanel />
                       </PanelSuspense>
                     </div>
                   )}
                   {showSkillPanel && (
-                    <div className="helix-surface helix-surface-overlay z-20 rounded-2xl overflow-hidden flex flex-col">
+                    <div className="absolute inset-0 z-20">
                       <PanelSuspense>
                         <SkillPanel />
                       </PanelSuspense>
@@ -2661,7 +2690,7 @@ export function HelixLayout() {
                       <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-transparent group-hover:bg-border/40 transition-colors" />
                     </div>
                   )}
-                  <div className="helix-surface h-full rounded-2xl overflow-hidden">
+                  <div className="helix-sidebar-right h-full overflow-hidden">
                     <PanelSuspense>
                       <RightSidebar />
                     </PanelSuspense>

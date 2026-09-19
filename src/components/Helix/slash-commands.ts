@@ -1,15 +1,16 @@
 import { helixApi } from "@/lib/electron-bridge";
 import { debug } from "@/lib/logger";
+import { buildAcpMcpServers } from "@/lib/mcp";
 import {
   SESSION_MAP_KEY,
   resolveBackendSid,
   type SessionMapEntry,
 } from "@/lib/session-map";
-import { mapBackendMessages } from "@/lib/session-resync";
 import {
   resyncCurrentSessionFromBackend,
   isCurrentSessionRenderBroken,
 } from "@/lib/session-resync";
+import { normalizeAcpContent } from "@/lib/text-utils";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -32,12 +33,9 @@ export const BUILTIN_SLASH_COMMANDS: BuiltinCommand[] = [
     action: "compact",
   },
   {
-    // 旁路提问：打开右侧边栏的「旁路问答」面板（一个独立对话界面）。裸
-    // /btw 只打开面板并聚焦输入框；/btw <问题> 在当前主线已有旁路会话时
-    // 作为追问发进同一条会话（保留之前的问答），没有才新建。旁路会话带上
-    // 主线上下文（只读），主线不变，旁路会话也不进左侧对话列表。
+    // 旁路提问：打开右侧边栏的「旁路问答」面板
     name: "btw",
-    description: "旁路提问：打开右侧面板（/btw 问题 发问，已有会话则继续追问）",
+    description: "旁路提问：打开右侧面板",
     action: "btw",
   },
 ];
@@ -86,6 +84,112 @@ export interface CompactContext {
 export type CompactResult = "ok" | "busy" | "no-session" | "error";
 
 /**
+ * /compact 的自愈：会话映射缺失（网关重启后持久化写入丢失 / 对话从未建立
+ * 后端会话）时，不再要求用户先发一条消息——发送路径（handleRun）在映射丢失
+ * 时本来就自动走 session/new + seedHistory 重建，这里做同样的事，让 /compact
+ * 就地可用。先用内存映射里残留的 storedId / sids 试透明 resume，全部失败再
+ * 用本地 transcript 重建。返回可用 sid；失败返回 null（由调用方提示）。
+ */
+async function healMissingSession(
+  currentSessionId: string,
+  ctx: CompactContext,
+): Promise<string | null> {
+  const map = ctx.sessionMap;
+  const entry = map.get(currentSessionId);
+
+  // ① 内存映射还留着线索（比如 persistSessionMap 静默写失败、只有内存有值）：
+  //    按 storedId / sid / sids 依次尝试透明 resume。
+  const resumeCandidates = [
+    entry?.storedId,
+    entry?.sid,
+    ...(entry?.sids ?? []),
+  ].filter((v): v is string => Boolean(v));
+  for (const resumeId of resumeCandidates) {
+    try {
+      const res = (await helixApi()?.send("session.resume", {
+        session_id: resumeId,
+      })) as any;
+      if (res) {
+        const restoredId = res?.session_id || res?.sessionID || resumeId;
+        rebindSessionSid(map, currentSessionId, {
+          sid: restoredId,
+          epoch: useGatewayStore.getState().gatewayEpoch,
+          storedId: entry?.storedId,
+        });
+        void persistSessionMap(map);
+        debug("[Helix] /compact: healed via resume →", restoredId);
+        return restoredId;
+      }
+    } catch {
+      // 尝试下一个候选
+    }
+  }
+
+  // ② 无线索 / resume 全失败：session/new 重建 + seedHistory 重放本地历史。
+  const allMessages = useHelixStore.getState().chatMessages;
+  const ownMessages = allMessages.filter(
+    (m) => (m.sessionId || "") === currentSessionId,
+  );
+  // 对话本身没有本地历史，确实无可压缩：返回 null 走「先发一条消息」提示。
+  if (ownMessages.length === 0) return null;
+  // 与 handleRun 的 seedHistory 过滤一致：剔除上一次重建留下的「系统注入」种子
+  // 块及其确认语，避免重放时逐次叠加。
+  const seedHistory: Array<{ role: string; content: unknown }> = [];
+  const isSeedMessage = (t: string) =>
+    t.includes("（系统注入：以下是本次会话恢复的先前对话记录");
+  let prevWasSeed = false;
+  for (const m of ownMessages) {
+    const text = normalizeAcpContent(m.content);
+    if (isSeedMessage(text)) {
+      prevWasSeed = true;
+      continue;
+    }
+    if (prevWasSeed && m.role === "assistant") {
+      prevWasSeed = false;
+      continue;
+    }
+    prevWasSeed = false;
+    seedHistory.push({ role: m.role, content: m.content });
+  }
+  try {
+    const st0 = useHelixStore.getState();
+    const res = (await helixApi()?.send("session/new", {
+      mcpServers: buildAcpMcpServers(st0.mcpServers),
+      messages: seedHistory,
+      mode_id:
+        st0.approvalModeBySession?.[currentSessionId] ?? st0.approvalMode,
+      cwd: st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined,
+    })) as any;
+    const newSid =
+      res?.session_id ||
+      res?.sessionID ||
+      res?.threadId ||
+      (typeof res === "string" ? res : null);
+    if (!newSid) return null;
+    const storedId =
+      (typeof res === "object" && res
+        ? (res as any)?.stored_session_id
+        : null) || undefined;
+    rebindSessionSid(map, currentSessionId, {
+      sid: newSid,
+      epoch: useGatewayStore.getState().gatewayEpoch,
+      storedId: storedId ?? entry?.storedId,
+    });
+    void persistSessionMap(map);
+    useHelixStore.getState().showToast({
+      type: "warning",
+      title: "未能找回原后端会话，已新建并注入历史",
+      description: "已用本地历史重建后端会话，压缩将基于重建后的会话执行",
+    });
+    debug("[Helix] /compact: healed via session/new →", newSid);
+    return newSid;
+  } catch (e) {
+    debug("[Helix] /compact: heal via session/new failed", e);
+    return null;
+  }
+}
+
+/**
  * /compact 的完整执行体：调后端 session.compress、处理「会话不在内存」的
  * 透明 resume、把压缩后的消息写回**当前会话**的 chatMessages（跨会话全局
  * 数组，只替换本会话段）、挂压缩提示卡、必要时自动 resync 自愈。
@@ -117,10 +221,16 @@ export async function runCompactCommand(
     // found"。与 context-usage 的自动压缩路径保持一致：先解析映射拿 sid。
     // 2026-08-31 对齐官方语义：resolveBackendSid 不再按 epoch 丢弃持久化
     // sid——网关重启后后端会从 state.db 透明恢复该会话（get_session→_restore）。
-    const sid =
+    let sid =
       (await resolveBackendSid(currentSessionId)) ||
       ctx.fallbackSid ||
       useGatewayStore.getState().helixSessionId;
+    // 自愈：重启后映射缺失（持久化写入失败 / profile 变更 / 对话从未映射）时，
+    // 不再要求用户「先发送一条消息建立会话」——发送路径本来就会走
+    // session/new + seedHistory 重建，这里做同样的事，让 /compact 就地可用。
+    if (!sid && currentSessionId) {
+      sid = await healMissingSession(currentSessionId, ctx);
+    }
     if (!sid) {
       useHelixStore.getState().showToast({
         type: "warning",
@@ -179,22 +289,25 @@ export async function runCompactCommand(
     if (result && typeof result === "object") {
       const r = result as any;
       if (r.status === "compressed" && Array.isArray(r.messages)) {
-        // Update frontend messages with compressed messages from backend
-        const msgs = mapBackendMessages(r.messages, currentSessionId || "");
-        // 仅替换「当前会话」的消息：chatMessages 是跨会话全局数组（靠 sessionId
-        // 区分），整体覆盖会清掉所有其他会话的历史（"压缩后消息全空"）。
-        useHelixStore.setState((state) => ({
-          chatMessages: [
-            ...state.chatMessages.filter(
-              (m) => m.sessionId && m.sessionId !== currentSessionId,
-            ),
-            ...msgs,
-          ],
-        }));
+        // 压缩只改**模型侧上下文**，不动用户看得见的历史。
+        //
+        // 旧实现用后端压缩后的列表（pi 的 get_messages = 摘要 + 保留的消息）
+        // 整体替换当前会话的转录，于是所有被摘要掉的早期消息——包括用户自己发
+        // 过的输入——从界面上消失，与"用户发消息后，之前用户的输入就会自动消失"
+        // 完全没法区分。本地转录是完整历史（IndexedDB / pi jsonl 都在），没有理由
+        // 因为压缩而收缩；压缩的可见反馈交给下面的 compressionNotice 分隔线
+        // （带前后 token 对比）。
+        // 这里只把锚点定到当前会话（含 draft）最后一条本地消息，让分隔线落在其后。
+        // Draft 会话（currentSessionId 为 null）的消息不挂 sessionId（见
+        // helix-store addChatMessage 的 `|| undefined` 兜底），统一用空串作标记。
+        const targetKey = currentSessionId || "";
+        const local = useHelixStore
+          .getState()
+          .chatMessages.filter((m) => (m.sessionId || "") === targetKey);
         // 压缩提示卡片：transcript 顶部可关闭，8s 自动消失（不做 toast，
         // 与 WorkBuddy 的"过程卡片"风格一致）
         const anchorMessageId =
-          msgs.length > 0 ? msgs[msgs.length - 1].id : undefined;
+          local.length > 0 ? local[local.length - 1].id : undefined;
         useHelixStore.getState().setCompressionNotice({
           ts: Date.now(),
           sessionId: currentSessionId || DRAFT_SESSION_KEY,
@@ -237,9 +350,12 @@ export async function runCompactCommand(
     }
     return "ok";
   } catch (e) {
-    // 后端明确说会话不存在（从未跑过/已被删）：清掉失效映射，避免下次再撞
+    // 后端明确说会话不存在（从未跑过/已被删）：只清 live sid、保留
+    // storedId/sids 历史——整条删除会把后续 resume 的最后线索烧掉（与
+    // 会话恢复链的降级语义一致）。
     if (String(e).includes("session not found") && currentSessionId) {
-      ctx.sessionMap.delete(currentSessionId);
+      const entry = ctx.sessionMap.get(currentSessionId);
+      if (entry) entry.sid = "";
       void persistSessionMap(ctx.sessionMap);
     }
     useHelixStore.getState().showToast({

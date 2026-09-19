@@ -147,7 +147,7 @@ export function DiffSidebarPanel() {
   const gitStat = useGitChangeStat(gitWorkDir);
 
   return (
-    <div className="h-full w-full flex flex-col min-h-0 bg-card">
+    <div className="h-full w-full flex flex-col min-h-0 bg-background/50">
       {gitStat ? (
         <section className="flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col">
           <div className="shrink-0 flex items-center gap-2 min-w-0 px-3 py-2">
@@ -169,7 +169,6 @@ export function DiffSidebarPanel() {
               return (
                 <li
                   key={f.path}
-                  title={f.path}
                   className="flex items-center gap-2.5 min-w-0 px-2 py-1.5 rounded text-[calc(var(--helix-transcript-size)*0.8571)] hover:bg-accent/40 transition-colors"
                 >
                   <Icon className={`size-5 shrink-0 ${color}`} />

@@ -204,6 +204,7 @@ pub fn run() {
             helix::helix_fetch_models,
             helix::helix_get_config,
             helix::helix_set_config,
+            helix::helix_set_provider_models,
             helix::helix_set_yaml_key,
             helix::helix_set_delegation_identities,
             helix::helix_set_config_key_value,
@@ -313,6 +314,7 @@ pub fn run() {
             // app
             app::get_info,
             app::get_sessions_dir,
+            app::get_scratch_dir,
             app::get_status,
             app::helix_update,
             app::sync_work_dir,

@@ -354,7 +354,7 @@ export function BylinePanel() {
   };
 
   return (
-    <div className="flex flex-1 min-h-0 min-w-0 flex-col overflow-hidden">
+    <div className="flex flex-1 min-h-0 min-w-0 flex-col overflow-hidden bg-background/50">
       {/* 对话流 */}
       <div
         className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3"
@@ -421,13 +421,6 @@ export function BylinePanel() {
                 </div>
               )}
             </div>
-          </div>
-        )}
-        {!rec && (
-          <div className="ui-text-sm text-muted-foreground/60">
-            在这里输入问题，Enter 发送。旁路会话会带上主对话的上下文（只读），
-            主线对话不受影响，可多轮追问。输入 / 查看快捷命令（/compact
-            压缩主线上下文）。
           </div>
         )}
       </div>
@@ -512,7 +505,7 @@ export function BylinePanel() {
               )}
 
               {showModeDropdown && btwCid && (
-                <div className="absolute bottom-full left-0 mb-2 w-44 bg-popover rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
+                <div className="absolute bottom-full left-0 mb-2 w-44 bg-card/60 rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
                   {MODE_ITEMS.map((mode) => {
                     const Icon = mode.icon;
                     const active = effectiveMode === mode.id;
@@ -545,7 +538,7 @@ export function BylinePanel() {
               )}
 
               {showModelDropdown && btwCid && (
-                <div className="absolute bottom-full left-0 mb-2 w-56 max-h-72 overflow-y-auto bg-popover rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
+                <div className="absolute bottom-full left-0 mb-2 w-56 max-h-72 overflow-y-auto bg-card/60 rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
                   {modelChoices.map((m) => {
                     const active = effectiveModel === m;
                     return (

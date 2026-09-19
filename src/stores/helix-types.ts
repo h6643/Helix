@@ -245,6 +245,9 @@ export interface ApiConfig {
   baseUrl: string;
   model: string;
   contextWindow?: number;
+  /** Wire protocol of the endpoint: openai-completions / openai-responses /
+   *  anthropic-messages / google-generative-ai (pi's models.json `api` field). */
+  apiFormat?: string;
   engine?: AgentEngine;
 }
 

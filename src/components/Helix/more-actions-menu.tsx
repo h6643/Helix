@@ -17,7 +17,7 @@ export function MoreActionsMenu({
   onAddBrowser,
 }: MoreActionsMenuProps) {
   return (
-    <div className="w-52 bg-card border border-border/80 rounded-lg shadow-xl py-1">
+    <div className="w-52 helix-popover-glass border border-border/40 rounded-xl shadow-xl py-1">
       <button
         data-tip="浏览器"
         onClick={() => (onAddBrowser ? onAddBrowser() : onToggleTab("browser"))}

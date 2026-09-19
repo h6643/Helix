@@ -316,7 +316,7 @@ function MarkdownTable({ children }: { children: ReactNode }) {
         <button
           type="button"
           aria-label="复制表格"
-          title="复制表格"
+          data-tip="复制表格"
           onClick={() => {
             const text = tableToMarkdown(children);
             if (!text) return;
@@ -434,7 +434,7 @@ export function CodeCard({
               <button
                 type="button"
                 aria-label="执行代码"
-                title="执行代码"
+                data-tip="执行代码"
                 onClick={runCode}
                 className="p-1 rounded text-foreground/40 hover:text-foreground/70 hover:bg-foreground/5 transition-colors cursor-pointer"
               >
@@ -448,7 +448,7 @@ export function CodeCard({
             <button
               type="button"
               aria-label="复制代码"
-              title="复制代码"
+              data-tip="复制代码"
               onClick={() => {
                 try {
                   void navigator.clipboard?.writeText(trimmed);

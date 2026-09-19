@@ -189,6 +189,18 @@ pub fn get_sessions_dir() -> Value {
     json!({ "sessionsDir": crate::state::pi_sessions_dir().display().to_string() })
 }
 
+/// The no-project scratch dir (`~/.pi/agent/scratch`).
+///
+/// This MUST be the same dir the gateway uses as the spawn cwd for
+/// project-less conversations (pi_gateway.rs's `spawn_cwd` fallback). The
+/// terminal used to derive `sessions/default` instead, which never exists —
+/// `create_process` silently ignored the missing cwd and the shell opened in
+/// the app's own working directory.
+#[tauri::command]
+pub fn get_scratch_dir() -> Value {
+    json!({ "scratchDir": crate::state::pi_sessions_default_dir().display().to_string() })
+}
+
 /// Returns the effective data-root info for the Settings UI.
 #[tauri::command]
 pub fn get_data_root() -> Value {

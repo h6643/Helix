@@ -2,7 +2,7 @@
 
 import { Plus, Trash2 } from "lucide-react";
 import React, { useState, useEffect, useCallback } from "react";
-import { Toggle, SettingGroup, SectionHeading } from "./settings-ui";
+import { PageHeader, Toggle, SettingGroup } from "./settings-ui";
 import { Button } from "@/components/ui/button";
 import { isElectron } from "@/lib/electron-bridge";
 import {
@@ -141,28 +141,28 @@ export function HookSettings() {
 
   if (!platformReady) {
     return (
-      <div className="max-w-3xl">
-        <SectionHeading>Hooks</SectionHeading>
+      <div className="max-w-3xl space-y-2">
+        <PageHeader>Hooks</PageHeader>
       </div>
     );
   }
 
   if (!loaded) {
     return (
-      <div className="max-w-3xl">
-        <SectionHeading>Hooks</SectionHeading>
+      <div className="max-w-3xl space-y-2">
+        <PageHeader>Hooks</PageHeader>
         <p className="ui-text text-muted-foreground">加载 Hooks 配置中…</p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-4">
-      <SectionHeading>Hooks</SectionHeading>
+    <div className="space-y-6">
+      <PageHeader>Hook</PageHeader>
 
       <div className="flex items-center justify-between gap-3 px-1">
         <span className="ui-subtitle font-semibold text-foreground">
-          启用 Hooks
+          启用 Hook
         </span>
         <Toggle
           enabled={settings.enabled}

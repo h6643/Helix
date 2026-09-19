@@ -330,7 +330,7 @@ export function RightSidebar() {
   // render ("Rendered fewer hooks than expected"). All hooks run on every render;
   // only the rendered output differs.
   if (pages.length === 0 && editorTabs.length === 0) {
-    return <div ref={sidebarRef} className="h-full w-full bg-card" />;
+    return <div ref={sidebarRef} className="h-full w-full" />;
   }
 
   // The header strip holds browser/diff pages PLUS every open code file.
@@ -340,13 +340,13 @@ export function RightSidebar() {
   return (
     <div
       ref={sidebarRef}
-      className="h-full w-full bg-card flex flex-col overflow-hidden"
+      className="h-full w-full flex flex-col overflow-hidden"
     >
       {/* Unified tab strip: browser / diff pages AND every open file share ONE
           row (the editor's own per-file tab bar was removed so the file name is
           never shown twice). Tabs compress / truncate as more are added. */}
       {(stripPages.length > 0 || editorTabs.length > 0) && (
-        <div className="flex items-end gap-0.5 px-1 mt-10 h-9 shrink-0 bg-card border-b border-border/40">
+        <div className="flex items-end gap-0.5 px-1 mt-10 h-9 shrink-0 border-b border-border/20 bg-card">
           {stripPages.map((p) => {
             const label =
               p.kind === "browser"

@@ -161,7 +161,7 @@ export function ArtifactsBrowser({ onClose }: { onClose: () => void }) {
                   返回
                 </button>
               </div>
-              <pre className="text-[calc(var(--helix-transcript-size)*0.7857)] whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-muted/40 rounded-lg p-2">
+              <pre className="text-[calc(var(--helix-transcript-size)*0.7857)] whitespace-pre-wrap break-all max-h-[60vh] overflow-auto bg-card/60 rounded-lg p-2">
                 {content.text.slice(0, 20000)}
               </pre>
             </div>

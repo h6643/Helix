@@ -356,6 +356,19 @@ function groupSteps(
   for (const s of steps) {
     if (s.type === "tool_call") {
       rows.push({ call: s, results: [] });
+      continue;
+    }
+    // 结果/错误步骤优先按 toolCallId 挂回发起调用的那张卡；两侧都有 id
+    // 但对不上时仍退回"最后一个 call"（组内通常只有一个 call，此兜底
+    // 只服务无 id 的旧事件）。
+    const rid =
+      s.type === "tool_result" || s.type === "error" ? s.toolCallId : undefined;
+    const byId =
+      rid && rows.length > 0
+        ? rows.find((r) => r.call.toolCallId === rid)
+        : undefined;
+    if (byId) {
+      byId.results.push(s);
     } else if (rows.length > 0) {
       rows[rows.length - 1].results.push(s);
     } else {

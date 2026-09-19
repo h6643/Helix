@@ -19,7 +19,7 @@ export function ModelUsageStats() {
       <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-semibold text-foreground">
         模型 Token 使用量
       </h3>
-      <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
+      <div className="rounded-xl border border-border/40 bg-card/60/60 overflow-hidden">
         <div className="grid grid-cols-4 gap-2 px-4 py-2 bg-muted/30 border-b border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/60">
           <span>模型</span>
           <span className="text-right">输入</span>
@@ -107,7 +107,7 @@ export function UsageSummary() {
         本次会话用量
       </h3>
       <div className="grid grid-cols-2 gap-3">
-        <div className="p-3 rounded-xl border border-border/50 bg-card/50 shadow-sm">
+        <div className="p-3 rounded-xl border border-border/50 bg-card/60/60 shadow-sm">
           <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground uppercase tracking-wider">
             API 调用
           </p>
@@ -158,7 +158,7 @@ export function UsageDetail() {
       <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-semibold text-foreground">
         用量明细
       </h3>
-      <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
+      <div className="rounded-xl border border-border/40 bg-card/60/60 overflow-hidden">
         <div className="grid grid-cols-4 gap-2 px-4 py-2 bg-muted/30 border-b border-border/50 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/60">
           <span>时间</span>
           <span>模型</span>
@@ -250,7 +250,7 @@ export function TokenUsagePanel() {
   return (
     <section className="space-y-4">
       {/* Total consumed tokens — large hero card */}
-      <div className="rounded-xl border border-border/40 bg-card p-5">
+      <div className="rounded-xl border border-border/40 bg-card/60 p-5">
         <div className="min-w-0">
           <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
             真实消耗 Tokens
@@ -265,7 +265,7 @@ export function TokenUsagePanel() {
       </div>
 
       {/* Daily usage bar chart */}
-      <div className="rounded-xl border border-border/40 bg-card p-4">
+      <div className="rounded-xl border border-border/40 bg-card/60 p-4">
         <div className="flex items-center justify-between px-0.5">
           <div className="flex items-center gap-3">
             <h3 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
@@ -303,7 +303,7 @@ export function TokenUsagePanel() {
       </div>
 
       {/* Activity heatmap — real dailyUsage data (GitHub-style grid), replaces the old static placeholder PNG */}
-      <div className="rounded-xl border border-border/40 bg-card p-4">
+      <div className="rounded-xl border border-border/40 bg-card/60 p-4">
         <div className="flex items-center justify-between px-0.5">
           <h3 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
             活跃热力图
@@ -321,7 +321,7 @@ export function TokenUsagePanel() {
       </div>
 
       {/* Per-model breakdown for the selected day */}
-      <div className="rounded-xl border border-border/40 bg-card">
+      <div className="rounded-xl border border-border/40 bg-card/60">
         <div className="flex items-center justify-between px-4 pt-3 pb-2">
           <h3 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
             模型用量明细

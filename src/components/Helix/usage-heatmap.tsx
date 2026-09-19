@@ -154,7 +154,7 @@ export function UsageHeatmap({
                   return (
                     <div
                       key={key}
-                      title={`${key}：${val.toLocaleString()} tokens`}
+                      data-tip={`${key}：${val.toLocaleString()} tokens`}
                       onClick={() => onDaySelect?.(key)}
                       style={{
                         width: cell,

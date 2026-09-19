@@ -113,10 +113,31 @@ export async function resyncCurrentSessionFromBackend(
       return 0;
     }
     const msgs = mapBackendMessages((res as any).messages, currentSessionId);
+    // 不让视图**变小**：后端快照比本地可见历史更短 = 后端滞后（刚提交的消息
+    // 还没落 state.db）或已被压缩摘要掉。无条件整段替换会把用户看得见的内容
+    // 删掉（"之前用户的输入自动消失"），而 /resync 的诉求是"把丢掉的找回来"，
+    // 不是"以后端为准做减法"。真需要强制以后端为准时，走 /compact 或重开会话。
+    const local = useHelixStore
+      .getState()
+      .chatMessages.filter((m) => m.sessionId === currentSessionId);
+    if (msgs.length < local.length) {
+      if (opts.showToast)
+        store.showToast({
+          type: "warning",
+          title: "后端历史比本地更短，已保留本地",
+          description: `后端 ${msgs.length} 条 / 本地 ${local.length} 条`,
+        });
+      return 0;
+    }
     useHelixStore.setState((state) => ({
       chatMessages: [
+        // ⚠️ 不能写成 `m.sessionId && m.sessionId !== …`：那会顺手删掉所有
+        // sessionId 为 undefined 的消息，而它们**是可见的**（渲染层的过滤条件是
+        // `!m.sessionId || m.sessionId === currentSessionId`，与 helix-store
+        // addChatMessage 的 `|| undefined` 兜底配对）。无 sessionId 的消息在
+        // hidden 之前一直是用户能看到的内容，删掉就是"消息凭空消失"。
         ...state.chatMessages.filter(
-          (m) => m.sessionId && m.sessionId !== currentSessionId,
+          (m) => m.sessionId !== currentSessionId,
         ),
         ...msgs,
       ],

@@ -20,6 +20,7 @@ import React, {
   useRef,
 } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { PopupSelect } from "./settings-ui";
 import { helixApi } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -474,7 +475,7 @@ export function SkillPanel({}: SkillPanelProps) {
                 });
               }}
               className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg text-[calc(var(--helix-transcript-size)*0.7143)] text-primary bg-primary/10 hover:bg-primary/20 transition-colors"
-              title={`更新至 v${latest}`}
+              data-tip={`更新至 v${latest}`}
             >
               <Download className="size-3.5" />
               更新
@@ -490,7 +491,7 @@ export function SkillPanel({}: SkillPanelProps) {
               className={`relative w-10 h-6 rounded-full transition-colors duration-200 ${
                 isEnabled ? "bg-primary" : "bg-muted-foreground/20"
               } disabled:opacity-50`}
-              title={isEnabled ? "点击禁用插件" : "点击启用插件"}
+              data-tip={isEnabled ? "点击禁用插件" : "点击启用插件"}
             >
               <span
                 className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform duration-200 ${
@@ -510,7 +511,7 @@ export function SkillPanel({}: SkillPanelProps) {
                 }}
                 disabled={installing === item.name}
                 className="shrink-0 p-1.5 rounded text-muted-foreground/40 hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-50"
-                title="卸载"
+                data-tip="卸载"
               >
                 {installing === item.name ? (
                   <Loader2 className="size-3.5 animate-spin" />
@@ -638,10 +639,10 @@ export function SkillPanel({}: SkillPanelProps) {
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-background">
+    <div className="h-full w-full flex flex-col bg-transparent">
       {/* Header — big title + action, search below (same layout as the
           scheduled tasks panel). 40px top padding clears the window controls. */}
-      <div className="px-6 pt-10 pb-4 shrink-0 border-b border-border/40">
+      <div className="px-8 pt-10 pb-4 shrink-0 border-b border-border/40">
         <div className="flex items-center justify-between">
           <h1 className="ui-title font-semibold text-foreground tracking-tight">
             插件中心
@@ -650,12 +651,13 @@ export function SkillPanel({}: SkillPanelProps) {
             {activeTab === "plugins" && (
               <button
                 onClick={() => setShowBrowse(!showBrowse)}
-                className={`p-1.5 rounded hover:bg-accent/60 transition-colors ${
+                className={`mr-2 p-1.5 rounded hover:bg-accent/60 transition-colors ${
                   showBrowse
                     ? "text-primary bg-primary/10"
                     : "text-muted-foreground hover:text-foreground"
                 }`}
                 data-tip="浏览安装"
+                data-tip-side="left"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
@@ -733,31 +735,33 @@ export function SkillPanel({}: SkillPanelProps) {
                       value={browseQuery}
                       onChange={(e) => handleBrowseSearchChange(e.target.value)}
                       placeholder="搜索 npm 上的 Pi 插件..."
-                      className="w-[95%] h-10 pl-10 pr-4 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] transition-all"
+                      className="w-[95%] h-10 pl-10 pr-4 rounded border border-border/60 bg-card/40 text-[length:var(--helix-transcript-size)] transition-all"
                     />
                     {searchLoading && (
                       <Loader2 className="absolute right-3.5 top-1/2 -translate-y-1/2 size-4 animate-spin text-muted-foreground" />
                     )}
                   </div>
-                  <select
+                  <PopupSelect
                     value={filterType}
-                    onChange={(e) => setFilterType(e.target.value)}
-                    className="h-10 px-3 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground transition-all min-w-[110px]"
-                  >
-                    <option value="all">全部类型</option>
-                    <option value="extension">扩展</option>
-                    <option value="skill">技能</option>
-                    <option value="theme">主题</option>
-                    <option value="prompt">提示模板</option>
-                  </select>
-                  <select
+                    onChange={setFilterType}
+                    className="h-10 min-w-[110px] rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground transition-all"
+                    options={[
+                      { label: "全部类型", value: "all" },
+                      { label: "扩展", value: "extension" },
+                      { label: "技能", value: "skill" },
+                      { label: "主题", value: "theme" },
+                      { label: "提示模板", value: "prompt" },
+                    ]}
+                  />
+                  <PopupSelect
                     value={sortBy}
-                    onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-                    className="h-10 px-3 rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground transition-all min-w-[130px]"
-                  >
-                    <option value="downloads">最多下载</option>
-                    <option value="date">最近更新</option>
-                  </select>
+                    onChange={(v) => setSortBy(v as typeof sortBy)}
+                    className="h-10 min-w-[130px] rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground transition-all"
+                    options={[
+                      { label: "最多下载", value: "downloads" },
+                      { label: "最近更新", value: "date" },
+                    ]}
+                  />
                 </div>
 
                 {searchResults.length > 0 ? (
@@ -840,7 +844,7 @@ export function SkillPanel({}: SkillPanelProps) {
                           {skill.source && (
                             <span
                               className="text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-0.5 rounded bg-primary/10 text-primary/80 font-mono"
-                              title={`来源: ${skill.source}`}
+                              data-tip={`来源: ${skill.source}`}
                             >
                               {skill.source}
                             </span>
@@ -861,7 +865,7 @@ export function SkillPanel({}: SkillPanelProps) {
                         <button
                           onClick={() => void onDeleteSkill(skill)}
                           className="shrink-0 p-1.5 rounded text-muted-foreground/40 hover:text-red-500 hover:bg-red-500/10 transition-colors"
-                          title="删除"
+                          data-tip="删除"
                         >
                           <Trash2 className="size-3.5" />
                         </button>

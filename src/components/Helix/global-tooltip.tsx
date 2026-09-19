@@ -50,12 +50,31 @@ export function GlobalTooltip() {
       // 全部往左展开、一行显示：右边缘对齐触发元素，向左生长——贴近屏幕右缘
       // 时不会伸出屏幕外。垂直方向优先下方，下方放不下才放上方；水平越界由
       // 下方的 useLayoutEffect 按实际尺寸钳回视口内。
+      // data-tip-side="left|right" 可强制横向放置（按钮右侧贴边时避免提示
+      // 盖住下方内容，如插件中心/计划任务页头的操作按钮）。
+      const side = el.getAttribute("data-tip-side");
       const placement: TipState["placement"] =
-        rect.bottom + gap + 32 <= window.innerHeight ? "bottom" : "top";
+        side === "left" || side === "right"
+          ? side
+          : rect.bottom + gap + 32 <= window.innerHeight
+            ? "bottom"
+            : "top";
       setState({
         text,
-        x: rect.right,
-        y: placement === "top" ? rect.top - gap : rect.bottom + gap,
+        // 横向放置（left/right）时锚在按钮边缘外侧、垂直居中，不盖住按钮；
+        // 纵向（top/bottom）保持触发元素水平居中。
+        x:
+          side === "left"
+            ? rect.left - gap
+            : side === "right"
+              ? rect.right + gap
+              : rect.left + rect.width / 2,
+        y:
+          side === "left" || side === "right"
+            ? rect.top + rect.height / 2
+            : placement === "top"
+              ? rect.top - gap
+              : rect.bottom + gap,
         placement,
       });
     };
@@ -102,11 +121,12 @@ export function GlobalTooltip() {
     const vh = window.innerHeight;
     let x = state.x;
     let y = state.y;
+    const halfW = w / 2;
     if (state.placement === "top") {
-      x = Math.min(Math.max(x, w + m), vw - m);
+      x = Math.min(Math.max(x, halfW + m), vw - halfW - m);
       y = Math.min(Math.max(y, h + m), vh - m);
     } else if (state.placement === "bottom") {
-      x = Math.min(Math.max(x, w + m), vw - m);
+      x = Math.min(Math.max(x, halfW + m), vw - halfW - m);
       y = Math.min(Math.max(y, m), vh - h - m);
     } else if (state.placement === "left") {
       x = Math.min(Math.max(x, w + m), vw - m);
@@ -124,9 +144,9 @@ export function GlobalTooltip() {
 
   const transform =
     state.placement === "top"
-      ? "translate(-100%, -100%)"
+      ? "translate(-50%, -100%)"
       : state.placement === "bottom"
-        ? "translate(-100%, 0)"
+        ? "translate(-50%, 0)"
         : state.placement === "left"
           ? "translate(-100%, -50%)"
           : "translate(0, -50%)";
@@ -143,7 +163,7 @@ export function GlobalTooltip() {
       ref={tipRef}
       role="tooltip"
       style={style}
-      className="pointer-events-none z-[9999] whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] leading-relaxed text-foreground shadow-md"
+      className="pointer-events-none z-[9999] max-w-[min(420px,calc(100vw-16px))] whitespace-nowrap rounded-lg border border-border helix-popover-glass px-2 py-1 text-[10px] leading-relaxed text-foreground shadow-xl"
     >
       {state.text}
     </div>,

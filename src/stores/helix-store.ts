@@ -453,6 +453,11 @@ interface HelixState
   themeStyle: string;
   // Boot overlay background image (Base64 encoded or null for default)
   bootBackgroundImage: string | null;
+  // Whether the custom background image also shows on the main workspace
+  // (vs. the boot screen only). Defaults true so the image persists across
+  // the whole app surface, not just the splash.
+  showGlobalBackground: boolean;
+  setGlobalBackgroundEnabled: (enabled: boolean) => void;
   // Toast — see slices/toast-slice.ts
   pendingChanges: PendingChange[];
   // Panel toggles — see slices/panel-slice.ts
@@ -862,8 +867,7 @@ async function persistCurrentSessionNow(): Promise<void> {
     // persistCurrentSessionNow's job is to save the CURRENT session, not invent new ones.
     if (!sessionId) return;
     // 旁路提问（/btw）跑在一次性的后台会话上，它不是要留在左侧边栏的对话：
-    // 答案单独存在 bylineReplies 里（有持久化），会话本身不落盘——否则每次
-    // /btw 都会在对话列表里多出一条，正是不要的效果。
+    // 会话本身不落盘——否则每次 /btw 都会在对话列表里多出一条，正是不要的效果。
     if (sessionId.startsWith("btw-")) return;
 
     // If a stream is mid-flight for this session, also persist its buffered
@@ -1035,7 +1039,7 @@ async function persistSessionById(sessionId: string): Promise<void> {
   try {
     const state = useHelixStore.getState();
     if (!sessionId) return;
-    // 旁路提问的一次性会话不落盘（答案在 bylineReplies 里），侧边栏不出现。
+    // 旁路提问的一次性会话不落盘，侧边栏不出现。
     if (sessionId.startsWith("btw-")) return;
     if (state.currentSessionId === sessionId) return persistCurrentSessionNow();
     const msgs = state.chatMessages.filter((m) => m.sessionId === sessionId);
@@ -1152,6 +1156,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       ? window.localStorage.getItem("helix-theme-style") || "default"
       : "default",
   bootBackgroundImage: null,
+  showGlobalBackground:
+    typeof window !== "undefined"
+      ? (localStorage.getItem("helix-global-bg") ?? "true") !== "false"
+      : true,
   // Toast — in slices/toast-slice.ts
   pendingChanges: [],
   // Agent Settings — in slices/agent-settings-slice.ts
@@ -1696,11 +1704,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set((s) => ({
       bylineReplies: { ...s.bylineReplies, [mainSessionId]: reply },
     }));
-    import("@/lib/persist").then(({ persistence }) => {
-      persistence
-        .saveSetting("bylineReplies", get().bylineReplies)
-        .catch(() => {});
-    });
   },
   sessionPendingApproval: {},
   setSessionPendingApproval: (patch: Record<string, boolean>) =>
@@ -1879,10 +1882,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       return null;
     }
 
-    // Find the fork point: copy all messages up to and including this one
-    const msgs = state.chatMessages.filter(
-      (m) => !m.sessionId || m.sessionId === state.currentSessionId,
-    );
+    // Find the fork point: copy all messages up to and including this one.
+    // 过滤规则必须与渲染层（agent-flow-panel 的 sessionMessages）一致：无 sessionId
+    // 的消息只属于「新对话」那一屏，旧写法 `!m.sessionId || …` 会把它算进当前会话，
+    // 分叉点因而可能落在一条用户根本没在本会话里看到的消息上。
+    const forkCid = state.currentSessionId;
+    const msgs = forkCid
+      ? state.chatMessages.filter((m) => m.sessionId === forkCid)
+      : state.chatMessages.filter((m) => !m.sessionId);
     const forkIdx = msgs.findIndex((m) => m.id === messageId);
     if (forkIdx < 0) {
       state.showToast({
@@ -2128,6 +2135,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     import("@/lib/persist")
       .then(({ persistence }) =>
         persistence.saveSetting("bootBackgroundImage", image),
+      )
+      .catch(() => {});
+  },
+  setGlobalBackgroundEnabled: (enabled) => {
+    set({ showGlobalBackground: enabled });
+    import("@/lib/persist")
+      .then(({ persistence }) =>
+        persistence.saveSetting("showGlobalBackground", enabled),
       )
       .catch(() => {});
   },
@@ -2562,7 +2577,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         byId.set(m.id, m);
       }
       const merged = [
-        ...live.filter((m) => m.sessionId && m.sessionId !== target),
+        // 保留「其他会话」的消息 + 「无 sessionId 的草稿消息」（= 新对话那一屏的
+        // 内容，见 addChatMessage 的 `|| undefined` 兜底）。
+        //
+        // ⚠️ 旧写法 `m.sessionId && m.sessionId !== target` 会把后者直接删掉。
+        // 它们不属于任何会话、也不参与落盘（persistCurrentSessionNow 在
+        // currentSessionId 为 null 时第 868 行就 return），所以在切会话时被丢掉
+        // 就是**永久**消失——切回新对话也不会再有。注意 byId 的收集循环用的是
+        // `if (!m.sessionId || m.sessionId !== target) continue`（continue 语义，
+        // 只收 target 自己的消息），别和这里的 include 语义搞混。
+        ...live.filter((m) => m.sessionId !== target),
         ...[...byId.values()],
       ];
       merged.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
@@ -3463,7 +3487,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           state.approvalModeBySession,
         ),
         persistence.saveSetting("modelBySession", state.modelBySession),
-        persistence.saveSetting("bylineReplies", state.bylineReplies),
         persistence.saveSetting("startupGreeting", state.startupGreeting),
         persistence.saveSetting(
           "bootBackgroundImage",
@@ -3513,6 +3536,21 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           logError(`[restore] failed to load ${key}:`, e);
           return null;
         });
+
+      // Early-load the boot background image so the splash screen paints WITH
+      // it on the first frame instead of flashing the "no image" version first.
+      // The image lives in the same settings batch below (a ~5MB base64 blob
+      // mixed with ~30 other awaits); waiting for that whole batch makes the
+      // splash show without the picture, then pop it in a beat later. Loading it
+      // here as a standalone read lets it settle within a few ms of first paint.
+      // The later batch still loads it too, and the final `set` uses
+      // `?? get().bootBackgroundImage`, so this early set is strictly additive.
+      safeLoad(
+        persistence.loadSetting<string | null>("bootBackgroundImage"),
+        "bootBackgroundImage-early",
+      ).then((img) => {
+        if (img) set({ bootBackgroundImage: img });
+      });
 
       // Try loading the latest saved session first (full state)
       const sessions =
@@ -3567,7 +3605,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         approvalMode,
         approvalModeBySession,
         modelBySession,
-        bylineReplies,
         startupGreeting,
         bootBackgroundImage,
         providers,
@@ -3728,12 +3765,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           "modelBySession",
         ),
         safeLoad(
-          persistence.loadSetting<Record<string, BylineReply>>(
-            "bylineReplies",
-          ),
-          "bylineReplies",
-        ),
-        safeLoad(
           persistence.loadSetting<string>("startupGreeting"),
           "startupGreeting",
         ),
@@ -3811,44 +3842,30 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // the pollution on every restart. The legacy apiProfiles / apiConfig
       // backfill keeps older installs working without data loss.
       //
-      // SELF-HEAL for already-polluted installs: earlier builds unioned every
-      // endpoint's fetched models into a single profile's `models` (via
-      // handleSaveApi), so existing profiles in IndexedDB may carry models that
-      // don't belong to their endpoint — which is what makes the input-bar
-      // dropdown show "一堆放一起". When we have the clean per-endpoint fetched
-      // list for a profile (providerModels[pid]), we treat it as authoritative
-      // and REPLACE the profile's models with it (plus the profile's own
-      // configured model). This scrubs cross-endpoint pollution on next restart
-      // without needing the user to clear data. When no fetched list exists for a
-      // profile, we leave its declared models untouched (can't verify), but the
-      // fixed write path (handleSaveApi) will no longer re-pollute it.
-      const deriveProviderName = (
-        baseUrl?: string,
-        fallback?: string,
-      ): string => {
-        if (!baseUrl) return fallback || "配置";
-        try {
-          const host = new URL(baseUrl).hostname.toLowerCase();
-          if (host.includes("deepseek")) return "DeepSeek";
-          if (host.includes("openai")) return "OpenAI";
-          if (host.includes("anthropic")) return "Anthropic";
-          if (host.includes("google")) return "Gemini";
-          return host.replace(/^www\./, "") || fallback || "配置";
-        } catch {
-          return fallback || "配置";
-        }
-      };
+      // SELF-HEAL for already-polluted installs:
+      // `apiProfiles[].models` is the AUTHORITATIVE declared list — the new
+      // settings save path (handleSaveApi → updateApiProfileConfig) writes the
+      // user's "已添加的模型" list here, so p.models is exactly what the user
+      // wants to see in the level-2 cards. We do NOT consult the endpoint
+      // catalog cache (providerModels[pid]) as an authoritative replacement:
+      // that cache holds the endpoint's full /models directory, and treating
+      // it as authoritative would re-inject hundreds of models the user never
+      // added into the profile, which is exactly the "只保存了一个模型，二级
+      // 卡片却把所有模型都显示" bug. `p.models` wins; if it's empty for a
+      // legacy profile we fall back to `p.config.model` (and later to
+      // apiHistory below).
       const cleanedProviderModels: Record<string, string[]> = {};
       for (const [pid, models] of Object.entries(providerModels || {})) {
         if (models && models.length) cleanedProviderModels[pid] = models;
       }
       const cleanProfileModels = (p: ApiProfile): string[] => {
-        const own = p.config?.model ? [p.config.model] : [];
-        const fetched = cleanedProviderModels[p.id] || [];
-        if (fetched.length > 0) {
-          return Array.from(new Set([...own, ...fetched].filter(Boolean)));
-        }
-        return Array.from(new Set(own.filter(Boolean)));
+        // Declared list is authoritative. Only fall back to the active config
+        // model when nothing was declared (very old profile shapes).
+        const declared = Array.isArray(p.models)
+          ? p.models.filter((m): m is string => typeof m === "string" && !!m)
+          : [];
+        if (declared.length > 0) return declared;
+        return p.config?.model ? [p.config.model] : [];
       };
       const builtProviders: ProviderConfig[] =
         apiProfiles && apiProfiles.length > 0
@@ -3871,7 +3888,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
               }
               return {
                 id: p.id || `p-${i}`,
-                name: p.name,
+                name: p.config?.provider || p.name,
                 baseUrl: p.config?.baseUrl || "",
                 apiKey: p.config?.apiKey || "",
                 models,
@@ -3932,10 +3949,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         for (const [baseUrl, entry] of byBase) {
           historyProviders.push({
             id: `hist-${historyProviders.length}`,
-            name:
-              deriveProviderName(baseUrl, entry.provider) ||
-              entry.provider ||
-              "配置",
+            name: entry.provider || "配置",
             baseUrl,
             apiKey: entry.apiKey,
             models: Array.from(entry.models),
@@ -3944,19 +3958,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         }
       }
       const allBuiltProviders = [...builtProviders, ...historyProviders];
-      // Merge the persisted per-provider fetched model lists (providerModels)
-      // into each provider's candidate `models` pool. This keeps a single source
-      // of truth so a model selected from "获取模型列表" survives a cold restart:
-      // without it, `activeModel` would be rejected by the check below (not in
-      // `providers[].models`) and silently fall back to the default model.
-      const mergedProviders: ProviderConfig[] = allBuiltProviders.map((p) => {
-        const fetched = cleanedProviderModels[p.id];
-        if (fetched && fetched.length > 0) {
-          const models = Array.from(new Set([...p.models, ...fetched]));
-          return { ...p, models };
-        }
-        return p;
-      });
+      // `allBuiltProviders` IS the merged set. Do NOT union in the endpoint
+      // catalog cache (providerModels[pid]) here either — doing so would
+      // re-introduce the "所有模型都显示" bug at the restore layer even
+      // after the UI-level fix. `p.models` (from apiProfiles or
+      // apiHistory-derived historyProviders) is the only candidate list we
+      // consult for the level-2 cards.
+      const mergedProviders: ProviderConfig[] = allBuiltProviders;
       // Canonical restore logic: the active model is whatever IndexedDB persisted
       // as `activeModel`. If that model is not declared by any provider, fall
       // back to the default provider's first model.
@@ -4092,6 +4100,28 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           : restoredIndex;
       get().restoreNavigation(navHistory, navIndex, validSessionIds);
 
+      // Heal a historically polluted startupGreeting: a transient dev-state
+      // restore once paired this destructure slot with the bootBackgroundImage
+      // load, copying the ~1MB background-image data URL into the greeting
+      // (persisted on the next save). The empty conversation state renders this
+      // string verbatim, so the user saw a wall of base64 instead of the
+      // greeting. A greeting is short user text — a data URL or anything over
+      // 500 chars can only be pollution. Reset to the default AND write the
+      // healed value back so the bad record doesn't come back on next start.
+      const DEFAULT_STARTUP_GREETING = "有什么可以帮你的？";
+      let healedStartupGreeting =
+        startupGreeting || get().startupGreeting || DEFAULT_STARTUP_GREETING;
+      if (
+        healedStartupGreeting.startsWith("data:") ||
+        healedStartupGreeting.length > 500
+      ) {
+        healedStartupGreeting = DEFAULT_STARTUP_GREETING;
+        safeLoad(
+          persistence.saveSetting("startupGreeting", healedStartupGreeting),
+          "startupGreeting-heal",
+        ).catch(() => {});
+      }
+
       set({
         // memories are global and owned by the Helix backend (memories/MEMORY.md);
         // do NOT overwrite them from a per-session snapshot.
@@ -4195,14 +4225,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
               if (!groups.has(key)) groups.set(key, []);
               groups.get(key)!.push(h);
             }
-            return Array.from(groups.entries()).map(([baseUrl, entries], i) => {
+            return Array.from(groups.values()).map((entries) => {
               const primary = entries[0];
               const models = Array.from(
                 new Set(entries.map((h) => h.model).filter(Boolean)),
               );
               return {
                 id: generateId(),
-                name: deriveProviderName(baseUrl, `配置 ${i + 1}`),
+                name: "",
                 config: { ...defaults, ...primary },
                 models,
               };
@@ -4360,14 +4390,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         approvalModeBySession:
           approvalModeBySession ?? get().approvalModeBySession,
         modelBySession: modelBySession ?? get().modelBySession,
-        // 旁路答案按主线会话 id 索引，形状校验一下再收：脏数据不能让渲染层抛。
-        bylineReplies:
-          bylineReplies &&
-          typeof bylineReplies === "object" &&
-          !Array.isArray(bylineReplies)
-            ? (bylineReplies as Record<string, BylineReply>)
-            : {},
-        startupGreeting: startupGreeting || get().startupGreeting,
+        startupGreeting: healedStartupGreeting,
         bootBackgroundImage: bootBackgroundImage ?? get().bootBackgroundImage,
         browserHomeUrl: "",
       });
@@ -4597,3 +4620,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     return ctx;
   },
 }));
+
+// TEMP DEBUG: expose store for runtime diagnosis (remove after debugging)
+if (typeof window !== "undefined") {
+  (window as any).__helixStore = useHelixStore;
+}

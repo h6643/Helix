@@ -51,6 +51,7 @@ import { HistoryStrip } from "./history-strip";
 import { InlineToolGroup, summarizeGroupDiff } from "./inline-tool-group";
 import { ScheduledTaskConfirm } from "./scheduled-task-confirm";
 import { Button } from "@/components/ui/button";
+import { SaveBar } from "./settings-ui";
 import { pushModelConfig } from "@/lib/config-sync";
 import { captureContextBreakdown } from "@/lib/context-capture";
 import {
@@ -507,7 +508,7 @@ function ReasoningEffortControl({
           <div
             ref={panelRef}
             style={panelStyle}
-            className="p-2 bg-popover border border-border/40 rounded-xl shadow-2xl flex flex-col gap-1 w-48 select-none animate-scale-in"
+            className="p-2 bg-card border border-border/40 rounded-xl shadow-2xl flex flex-col gap-1 w-48 select-none animate-scale-in"
           >
             <div className="flex items-center justify-between">
               <span className="ui-text-sm2 font-medium text-foreground/60">
@@ -562,10 +563,13 @@ const MAX_REASONING_CHARS = 40_000;
 const MAX_STEP_CHARS = 60_000; // 单步工具输出上限
 const MAX_STREAM_CHARS = 400_000; // 流式正文缓冲上限（防单次 run 失控）
 const TRUNC_MARK = "…[内容过长已截断]";
-// 网关重建会话时注入的历史重放块的固定前缀，与 Rust 侧 seed_history_prompt
+// 网关重建会话时注入的历史重放块的完整标识句，与 Rust 侧 seed_history_prompt
 // （src-tauri/src/pi_gateway.rs）里的标记一致。本地历史里如果躺着上一轮注入
 // 的这段文本，再把它当历史重放一次就是"系统注入被反复叠加"的来源。
-const SEED_MARKER = "（系统注入：";
+// 用完整句子（而非短前缀）做 contains 判定：注入块被回灌/重放后可能嵌在
+// 其他消息中间，短前缀 startsWith 会漏判（2026-09-19 四连铸残留 4/3/2/4 层
+// 的根因）。判定逻辑在 seedHistory 与 buildBtwTranscript 两处内联。
+const SEED_MARKER = "（系统注入：以下是本次会话恢复的先前对话记录";
 
 type DisplayItem =
   | {
@@ -706,7 +710,10 @@ function SummarizedHistoryBlock({
       <summary className="flex items-center gap-1.5 px-1 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/40 cursor-pointer hover:text-foreground/60 select-none list-none transition-colors">
         <ChevronRight className="size-3 transition-transform group-open/details:rotate-90 shrink-0" />
         <span>
-          已压缩 {count} 条较早消息{range}，点击展开预览
+          {/* 措辞刻意避开「已压缩」：这只是**渲染窗口**之外的旧消息（DISPLAY_LIMIT
+              折叠），跟真正的上下文压缩（transcript 里那条「上下文已压缩」分隔线）
+              完全无关。旧措辞把两者混为一谈，用户会以为压缩把消息吃掉了。 */}
+          更早的 {count} 条消息{range}，点击展开预览
         </span>
       </summary>
       <div className="pl-4 pr-2 ui-text-sm2 text-muted-foreground/45  leading-relaxed mb-2">
@@ -777,6 +784,10 @@ export function AgentFlowPanel() {
   const [newServerPort, setNewServerPort] = useState("22");
   const [newServerUser, setNewServerUser] = useState("");
   const [newServerName, setNewServerName] = useState("");
+  // 保存状态（与「保存 Hooks 配置」一致的行内反馈，不依赖 toast）
+  const [serverSaving, setServerSaving] = useState(false);
+  const [serverSaveState, setServerSaveState] = useState<null | "ok" | "err">(null);
+  const [serverSaveErr, setServerSaveErr] = useState<string | null>(null);
   const approvalMode = useHelixStore((s) => s.approvalMode);
   const setApprovalMode = useHelixStore((s) => s.setApprovalMode);
   // 压缩完成提示 divider（手动 /compact 与自动压缩都会写入，持久化显示，切会话时清空）
@@ -1017,9 +1028,15 @@ export function AgentFlowPanel() {
     // 的历史消息，绝不能把其他会话（含仍在后台运行的旧 run）的消息漏进来。
     // 之前 `if (!currentSessionId) return chatMessages` 会让点击「新对话」后
     // 旧 run 结束时提交的 assistant 消息出现在全新对话里。
-    return chatMessages.filter(
-      (m) => !m.sessionId || m.sessionId === currentSessionId,
-    );
+    //
+    // ⚠️ 「无 sessionId 的消息」= **新对话自己的**消息（helix-store addChatMessage
+    // 在 currentSessionId 为 null 时用 `|| undefined`），不是"所有会话都能看到"的。
+    // 旧写法 `!m.sessionId || m.sessionId === currentSessionId` 让它们出现在**每一个**
+    // 会话里：草稿消息（含旧 run 收尾时提交的那条）会漂到别的对话视图里，看起来
+    // 像"消息自己跑过去了"。所以这里按"当前有没有会话"严格二选一。
+    return currentSessionId
+      ? chatMessages.filter((m) => m.sessionId === currentSessionId)
+      : chatMessages.filter((m) => !m.sessionId);
   }, [chatMessages, currentSessionId]);
 
   // ── /btw 旁路问答：每轮完成时落定记录 + 清掉该轮草稿 + toast ─────────────
@@ -1095,26 +1112,8 @@ export function AgentFlowPanel() {
   const displayMessages = useMemo<DisplayItem[]>(() => {
     const n = sessionMessages.length;
     const items: DisplayItem[] = [];
-    if (n > DISPLAY_LIMIT) {
-      const collapsed = n - DISPLAY_LIMIT;
-      const chunks = Math.ceil(collapsed / SUMMARY_CHUNK);
-      for (let c = 0; c < chunks; c++) {
-        const start = c * SUMMARY_CHUNK;
-        const end = Math.min(start + SUMMARY_CHUNK, collapsed);
-        const chunk = sessionMessages.slice(start, end);
-        items.push({
-          kind: "summary",
-          id: "summary-" + c,
-          count: chunk.length,
-          preview: summarizeChunk(chunk),
-          startTs: chunk[0]?.timestamp,
-          endTs: chunk[chunk.length - 1]?.timestamp,
-        });
-      }
-    }
-    const recentStart = Math.max(0, n - DISPLAY_LIMIT);
-    for (let i = recentStart; i < n; i++) {
-      items.push({ kind: "message", msg: truncateMessage(sessionMessages[i]) });
+    // 一条消息附带的改动卡（diff）——折叠区与渲染窗口共用，避免两处逻辑漂移。
+    const pushChanges = (i: number) => {
       const changes = sessionMessages[i].fileChanges?.length
         ? [...sessionMessages[i].fileChanges!]
         : collectFileChanges(sessionMessages[i].blocks ?? []);
@@ -1126,6 +1125,63 @@ export function AgentFlowPanel() {
           changes,
         });
       }
+    };
+    // 折叠区：**用户消息不折叠，始终完整渲染**。
+    //
+    // DISPLAY_LIMIT 是"按条数"的滑动窗口（recentStart = n - DISPLAY_LIMIT）：
+    // 每来一条新消息，窗口整体前移一条，最早那条可见消息立刻被摘要块吞掉。
+    // 一次 run 会产生 ~6 条 message（正文 + 各步工具/思考），窗口实际只覆盖
+    // 最近十来轮 —— 用户每发一条新消息，就约有**一条之前发过的输入**被推出
+    // 可见区，用户视角就是"我发一条，之前发的内容就自动少一条"
+    // （"用户发消息后，之前用户的输入就会自动消失"）。
+    //
+    // 内存守卫（见文件顶部说明）针对的是体量大的助手内容（工具输出 / 思考 /
+    // steps 的 normalized + markdown + DOM 多份副本）。用户消息是纯文本、体量
+    // 极小，不承担这个职责——把它们一起折叠没有任何内存收益，只有可见性损失。
+    // 所以按角色切分：用户消息无条件渲染（含 diff 卡），非用户消息按
+    // SUMMARY_CHUNK 成块折叠。
+    if (n > DISPLAY_LIMIT) {
+      const collapsed = n - DISPLAY_LIMIT;
+      // 连续的非用户消息攒成一个 pending 段，段内再按 SUMMARY_CHUNK 切块。
+      // 块 id 用块内首条消息的 id：折叠区只从尾部增长，同一段历史的成块结果
+      // 稳定，多次渲染能拿到稳定的 React key。
+      let pendingStart = -1;
+      const flushPending = (endExclusive: number) => {
+        if (pendingStart < 0) return;
+        for (let s = pendingStart; s < endExclusive; s += SUMMARY_CHUNK) {
+          const chunk = sessionMessages.slice(
+            s,
+            Math.min(s + SUMMARY_CHUNK, endExclusive),
+          );
+          items.push({
+            kind: "summary",
+            id: "summary-" + chunk[0].id,
+            count: chunk.length,
+            preview: summarizeChunk(chunk),
+            startTs: chunk[0]?.timestamp,
+            endTs: chunk[chunk.length - 1]?.timestamp,
+          });
+        }
+        pendingStart = -1;
+      };
+      for (let i = 0; i < collapsed; i++) {
+        if (sessionMessages[i].role === "user") {
+          flushPending(i);
+          items.push({
+            kind: "message",
+            msg: truncateMessage(sessionMessages[i]),
+          });
+          pushChanges(i);
+        } else if (pendingStart < 0) {
+          pendingStart = i;
+        }
+      }
+      flushPending(collapsed);
+    }
+    const recentStart = Math.max(0, n - DISPLAY_LIMIT);
+    for (let i = recentStart; i < n; i++) {
+      items.push({ kind: "message", msg: truncateMessage(sessionMessages[i]) });
+      pushChanges(i);
     }
     // 自动压缩事件以居中状态行的形式插入对话流末尾
     for (const notice of autoCompressNotices) {
@@ -1510,16 +1566,27 @@ export function AgentFlowPanel() {
   // next prompt opens a fresh session rooted at the new cwd.
   // 例外：对话正在运行（有 streamingDraft）时绝不删——否则下次 session/prompt 会拿一个
   // 已从 sessionMapRef 移除的死会话去 prompt.submit → 后端 4001 "session not found" → 模型停止。
+  const prevWorkDirRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!currentSessionId) return;
+    // 首挂载/hydration 不算"用户切了项目"：启动水合会把 selectedWorkDir 从
+    // null 变成上次会话的项目。旧版本在这一步就把当前对话的 sid 抹成 ""，
+    // resume 分支（含 storedId 兜底）整体被跳过、只能靠指纹找回——恢复失败的
+    // 确定性来源之一（2026-09-19 连环四铸的帮凶）。只在真实变化（用户主动
+    // 切换项目）时清 sid；且只清 sid，storedId/sids 历史永远保留。
+    const prev = prevWorkDirRef.current;
+    prevWorkDirRef.current = selectedWorkDir;
+    if (prev === null) return; // 首挂载（ref 初值 null）
+    if (prev === selectedWorkDir) return; // 仅 currentSessionId 变化触发
+    const cid = useHelixStore.getState().currentSessionId;
+    if (!cid) return;
     const running =
       useHelixStore.getState().isAgentRunning ||
-      !!useHelixStore.getState().streamingDrafts?.[currentSessionId];
+      !!useHelixStore.getState().streamingDrafts?.[cid];
     if (!running) {
       // 只清 live sid，保留条目（sids/storedId/epoch 历史）——resume 的
       // storedId 兜底和子 Agent 磁盘 rehydrate 还要用它；无条件 delete 会把
       // 这些一起丢掉。
-      const entry = sessionMapRef.current.get(currentSessionId);
+      const entry = sessionMapRef.current.get(cid);
       if (entry) {
         entry.sid = "";
       }
@@ -1584,44 +1651,11 @@ export function AgentFlowPanel() {
     };
   }, []);
 
-  // When the gateway restarts (e.g. provider switch), ALL backend sessions
-  // are destroyed server-side. Clear our cached session id DIRECTLY on the
-  // event (not via a store-effect indirection) so the very next handleRun
-  // unconditionally recreates a fresh session. The store-effect approach was
-  // unreliable: handleRun only wrote helixSessionIdRef (never the store), so
-  // the store stayed null and the [helixSessionId] effect never re-fired on a
-  // second restart — leaving a stale id in the ref and causing prompts to hit a
-  // dead session with no output.
-  useEffect(() => {
-    const unsub = window.electron?.helix?.onEvent?.((event: string) => {
-      if (event === "gateway.sessionInvalidated") {
-        // All backend sessions are destroyed on restart — but the pi session
-        // files on disk (~/.pi/agent/sessions/...) are NOT destroyed: they
-        // outlive the gateway process. Bumping the epoch sentinel alone is
-        // enough — the run path (handleRun) already checks
-        // `epochStale` and, when true, tries `session/resume` FIRST (pi's
-        // transparent restore from the on-disk session file, no history
-        // replay) and only falls back to `session/new` + seedHistory if that
-        // genuinely fails (file deleted, etc.).
-        //
-        // The old code here used to wipe `entry.sid = ""` for every
-        // conversation and persist it: that turned a recoverable situation
-        // (sid still valid on disk) into a forced full-history replay on
-        // every single gateway restart, because `existing?.sid || null`
-        // collapses an empty string to null and skips the resume branch
-        // entirely. Just bump the epoch and leave the sids alone.
-        // Force the next run to re-verify the gateway is fully up (it may still
-        // be recycling) rather than trusting helixConnected which is already
-        // true after a prior restart.
-        sessionEpochRef.current = -1;
-      }
-    });
-    return () => {
-      try {
-        unsub?.();
-      } catch { /* empty */}
-    };
-  }, []);
+  // （已删除 gateway.sessionInvalidated 监听）该事件全仓从未有发射方——Rust 侧
+  // 只发 gateway.ready（pi_gateway.rs spawn 完成处），重启场景由
+  // helix-layout 的 gateway.ready → bumpGatewayEpoch → epochStale 链路覆盖，
+  // handleRun 的 resume 分支据其触发。留着这个监听只会让人误以为存在后端
+  // 会话失效语义（pi 会话文件在磁盘上，本来就穿越网关重启）。
 
   // 网关重连（同一进程，如 WebView2 崩溃自动恢复/整页重载）后，自动把当前
   // 对话的后端会话 resume 回来：① 后端断连时会把会话 detach 到 drop
@@ -1803,37 +1837,98 @@ export function AgentFlowPanel() {
   // to the same endpoint (e.g. DeepSeek): the model may have been fetched under
   // one provider id while `activeProvider` resolved to the other, causing the
   // dropdown to miss the selected model and auto-snap back to the default.
-  const modelList = useMemo(() => {
-    const baseUrl = activeProvider?.baseUrl || apiConfig?.baseUrl;
-    const candidates = baseUrl
-      ? providers.filter((p) => p.baseUrl === baseUrl)
-      : activeProvider
-        ? [activeProvider]
-        : [];
-    const set = new Set<string>();
-    for (const p of candidates) {
+  const groupedModelList = useMemo(() => {
+    const providerGroups: { id: string; name: string; models: string[] }[] = [];
+    for (const p of providers) {
+      const models = new Set<string>();
       if (p.id && providerModels[p.id]?.length) {
-        providerModels[p.id].forEach((m) => {
-          if (m) set.add(m);
-        });
+        providerModels[p.id].forEach((m) => { if (m) models.add(m); });
       }
       if (p.models?.length) {
-        p.models.forEach((m) => {
-          if (m) set.add(m);
+        p.models.forEach((m) => { if (m) models.add(m); });
+      }
+      if (models.size > 0) {
+        providerGroups.push({ id: p.id, name: p.name || p.id, models: Array.from(models) });
+      }
+    }
+    if (apiConfig.model) {
+      const found = providerGroups.some((g) => g.models.includes(apiConfig.model));
+      if (!found) {
+        const pid = activeProvider?.id || apiConfig.provider || "custom";
+        const existing = providerGroups.find((g) => g.id === pid);
+        if (existing) {
+          existing.models.push(apiConfig.model);
+        } else {
+          providerGroups.push({ id: pid, name: activeProvider?.name || pid, models: [apiConfig.model] });
+        }
+      }
+    }
+    const result: { id: string; name: string; models: string[] }[] = [];
+    for (const pg of providerGroups) {
+      if (pg.models.length <= 6) { result.push(pg); continue; }
+      const orgMap = new Map<string, string[]>();
+      const noOrg: string[] = [];
+      for (const m of pg.models) {
+        const slash = m.indexOf("/");
+        if (slash > 0 && slash < 30) {
+          const org = m.slice(0, slash);
+          if (!orgMap.has(org)) orgMap.set(org, []);
+          orgMap.get(org)!.push(m);
+        } else {
+          noOrg.push(m);
+        }
+      }
+      if (orgMap.size >= 2) {
+        for (const [org, orgModels] of orgMap) {
+          result.push({ id: `${pg.id}/${org}`, name: org, models: orgModels });
+        }
+        if (noOrg.length > 0) result.push({ id: pg.id, name: pg.name, models: noOrg });
+      } else {
+        result.push(pg);
+      }
+    }
+    return result;
+  }, [providers, providerModels, apiConfig.model, activeProvider]);
+
+  // 两级选择器用的扁平分组：一级是供应商，二级是它名下的模型。
+  // 二级只列 p.models（用户在设置里主动添加的清单），故意不合并
+  // providerModels[p.id] —— 那个是端点 /models 目录，会自动拉进来几百个
+  // 用户根本不想要的模型。要扩模型请走「设置 → 添加模型」按钮。
+  // 不复用 groupedModelList —— 那个在模型超过 6 个时会按 `org/model` 前缀再
+  // 拆一层，会把二级卡片拆碎。
+  const providerModelGroups = useMemo(() => {
+    const groups: {
+      id: string;
+      name: string;
+      baseUrl: string;
+      models: string[];
+    }[] = [];
+    for (const p of providers) {
+      const models = new Set<string>();
+      (p.models || []).forEach((m) => {
+        if (m) models.add(m);
+      });
+      // 当前模型可能还没进任何列表（刚保存、缓存被清），至少要在它所属
+      // 供应商的二级卡片里出现，否则选中状态无处高亮。
+      if (
+        apiConfig.model &&
+        !models.has(apiConfig.model) &&
+        (p.id === activeProvider?.id ||
+          (apiConfig.baseUrl && p.baseUrl === apiConfig.baseUrl))
+      ) {
+        models.add(apiConfig.model);
+      }
+      if (models.size > 0) {
+        groups.push({
+          id: p.id,
+          name: p.name || p.id,
+          baseUrl: p.baseUrl,
+          models: Array.from(models),
         });
       }
     }
-    // Always surface the currently selected model so the button/dropdown never
-    // shows a stale name and the selection survives transient list gaps.
-    if (apiConfig.model) set.add(apiConfig.model);
-    return Array.from(set);
-  }, [
-    activeProvider,
-    providerModels,
-    providers,
-    apiConfig?.baseUrl,
-    apiConfig.model,
-  ]);
+    return groups;
+  }, [providers, apiConfig, activeProvider]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -1864,31 +1959,20 @@ export function AgentFlowPanel() {
     }
   }, [showModelDropdown, showFolderDropdown, showApprovalModeDropdown]);
 
-  // The dropdown shows ONLY the active provider's models (modelList). If the
-  // current model doesn't belong to that provider (e.g. after switching the
-  // provider in Settings, or a stale persisted value), snap to the provider's
-  // first model so the button never shows a different supplier's model name
-  // than the list. A model genuinely owned by the active provider is already in
-  // modelList, so we won't snap away from a valid selection.
+  // The dropdown shows all providers' models grouped. If the current model
+  // doesn't belong to any provider, snap to the first available model.
   useEffect(() => {
-    if (modelList.length === 0) return;
+    const allModels = groupedModelList.flatMap((g) => g.models);
+    if (allModels.length === 0) return;
     const store = useHelixStore.getState();
     const current = store.apiConfig.model;
-    if (current && modelList.includes(current)) return;
-    // If the active provider's fetched list hasn't loaded yet, the current model
-    // may be valid but only present in the fetched list. Skip the snap to avoid
-    // overwriting the user's explicit selection with a stale fallback.
+    if (current && allModels.includes(current)) return;
     const pid = activeProvider?.id;
     const hasFetched = pid && (store.providerModels?.[pid]?.length ?? 0) > 0;
     if (!hasFetched) return;
-    const fixed = modelList[0];
+    const fixed = allModels[0];
     if (current !== fixed) store.setActiveModel(fixed);
-    // Depend on a STABLE primitive signature of modelList, NOT the array itself
-    // and never spread it. Spreading [...modelList] makes the deps array change
-    // size whenever the fetched list grows (e.g. a 4th model loads), which
-    // throws "changed size between renders". The join('|') string changes only
-    // when the set of models actually changes, and always stays length 3.
-  }, [activeProvider?.id, apiConfig.model, modelList.join("|")]);
+  }, [activeProvider?.id, apiConfig.model, groupedModelList.map((g) => g.models.join("|")).join("~")]);
   // Shared tail for a model switch. Cancels the in-flight session, invalidates
   // the cached session id, then pushes the freshly-resolved config to the
   // backend. The ordering here is what prevents the swap-401: `cacheConfig`
@@ -2004,88 +2088,113 @@ export function AgentFlowPanel() {
   // handleSaveApi / handleModelSelect) writes. Using `activeModel` as the
   // display source caused persistent drift because auto-correct effects and
   // stale fallback chains could leave the button showing a PREVIOUS supplier's
+  // 模型名称最多显示 18 个字符 —— 长名（如 `gpt-4-turbo-2024-01-25-preview`）
+  // 在卡片里挤成一片，截到 18 字保持整齐。悬停 title 保留完整名，避免误认。
+  const truncateModelLabel = (name: string): string => {
+    if (name.length <= 18) return name;
+    return `${name.slice(0, 18)}…`;
+  };
   // model name while the backend was already on the new one.
   const renderModelSelector = () => {
     const displayName =
-      apiConfig.model || activeModel || modelList[0] || null || "选择模型";
-    // DROPDOWN HIGHLIGHT uses the SAME expression as the button display
-    // (apiConfig.model first), so the highlighted item and the button text can
-    // never disagree. Using activeModel-first here caused a visible mismatch:
-    // when activeModel was stale (e.g. still "flash" after saving a different
-    // model from Settings, which only writes apiConfig.model), the button showed
-    // the new model while the dropdown kept highlighting the old one.
-    const selectedForHighlight = apiConfig.model || activeModel;
+      apiConfig.model || activeModel || "选择模型";
     return (
       <>
-        {/* Model selector — wide button matching settings page style */}
         <div className="relative min-w-0" ref={modelDropdownRef}>
           <button
             type="button"
-            onClick={() => {
-              const opening = !showModelDropdown;
-              setShowModelDropdown(!showModelDropdown);
-              // 打开下拉且当前 provider 还没有抓取过的模型列表时，自动拉取，
-              // 免去用户手动去设置页点"获取模型列表"。覆盖冷启动 / applyProfile
-              // 等未经过 setActiveModel 的激活路径；成功后 providerModels 持久化，
-              // 之后不再重复拉取。
-              if (opening) {
-                const st = useHelixStore.getState();
-                // Always refresh the active provider's model list on open. The
-                // dropdown is scoped to this provider, so a single endpoint probe
-                // is enough. Forcing a re-fetch (rather than only when the cache is
-                // empty) means newly-added models (e.g. a freshly added DeepSeek variant) show up
-                // immediately, and we never rely on a possibly-stale persisted list.
-                // Use the baseUrl-resolved activeProvider, NOT the raw
-                // activeProviderId — the latter can be stale after saving a
-                // different provider's config, which would probe the wrong endpoint
-                // and leave the selector showing only the declared model.
-                const pid = activeProvider?.id || st.activeProviderId;
-                if (pid) {
-                  st.fetchProviderModels(pid);
-                }
-              }
-            }}
+            onClick={() => setShowModelDropdown(!showModelDropdown)}
             className="flex items-center justify-between gap-2 min-w-0 max-w-[140px] px-2.5 py-1.5 h-7 bg-muted/30 border border-border/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
+            data-tip={
+              activeProvider?.name
+                ? `${activeProvider.name} · ${displayName}`
+                : displayName
+            }
           >
             <span className="truncate min-w-0 flex-1 text-left chat-toolbar-label">
-              {displayName}
+              {truncateModelLabel(displayName)}
             </span>
-            <svg
-              className={`size-3.5 text-muted-foreground transition-transform shrink-0 ${showModelDropdown ? "rotate-180" : ""}`}
-              xmlns="http://www.w3.org/2000/svg"
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="m6 9 6 6 6-6" />
-            </svg>
           </button>
           {showModelDropdown && (
-            <div className="absolute bottom-full right-0 mb-2 min-w-[220px] max-w-[360px] max-h-56 overflow-y-auto bg-popover border border-border/40 rounded-xl shadow-xl z-50 p-1 animate-scale-in">
-              {modelList.map((m) => (
+            <div className="absolute bottom-full right-0 mb-2 w-44 overflow-visible rounded-xl border border-border/40 bg-card shadow-xl z-50 animate-scale-in">
+              {/* 面板高度自适应 —— 不设 max-h，否则内部滚动容器会把弹出
+                  的二级菜单裁掉（CSS spec：overflow-y:auto 会把
+                  overflow-x:visible 强制变成 auto，产生裁剪）。 */}
+              <div className="py-1">
+                {providerModelGroups.length === 0 && (
+                  <div className="px-3 py-4 text-center text-[length:var(--helix-transcript-size)] text-foreground/40">
+                    暂无可用模型
+                  </div>
+                )}
+                {providerModelGroups.map((g) => {
+                  return (
+                    <div
+                      key={g.id}
+                      className="group relative flex items-center gap-1.5 px-2 py-1.5 cursor-default transition-colors rounded-lg hover:bg-muted/70"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate ui-text-sm2 font-semibold text-foreground">
+                            {g.name}
+                          </span>
+                        </div>
+                      </div>
+                      <svg
+                        className="size-4 shrink-0 text-muted-foreground/50"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="m9 18 6-6-6-6" />
+                      </svg>
+                      {/* 二级：悬停左侧弹出（面板靠右侧工具栏，
+                          往右会被窗口边缘裁掉，所以翻到左边）。 */}
+                      <div
+                        className="invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute right-full top-0 mr-1 w-52 max-w-[208px] rounded-xl border border-border/40 bg-card shadow-xl z-50 py-1"
+                      >
+                        {g.models.length === 0 ? (
+                          <div className="px-3 py-3 text-center text-[length:var(--helix-transcript-size)*0.8571] text-foreground/40">
+                            该供应商暂无模型
+                          </div>
+                        ) : (
+                          g.models.map((m) => {
+                            return (
+                              <button
+                                key={m}
+                                type="button"
+                                onClick={() => {
+                                  handleModelSelect(m);
+                                  setShowModelDropdown(false);
+                                }}
+                                className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left transition-colors rounded-lg hover:bg-muted/70"
+                              >
+                                <span className="min-w-0 flex-1 truncate font-mono ui-text text-foreground" data-tip={m}>
+                                  {truncateModelLabel(m)}
+                                </span>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="border-t border-border/30 pt-0.5">
                 <button
-                  key={m}
                   type="button"
-                  onClick={() => handleModelSelect(m)}
-                  className={`w-full text-left px-3 py-2 rounded-md text-[length:var(--helix-transcript-size)] font-mono transition-colors ${
-                    m === selectedForHighlight
-                      ? "bg-primary/10 text-primary font-semibold"
-                      : "text-foreground/70 hover:bg-muted"
-                  }`}
+                  onClick={() => {
+                    setShowModelDropdown(false);
+                    storeActions.toggleSettings("api");
+                  }}
+                  className="w-full px-2 py-1.5 text-left ui-text-sm2 text-foreground/50 transition-colors hover:bg-muted hover:text-foreground/70"
                 >
-                  <span className="truncate">{m}</span>
+                  管理模型
                 </button>
-              ))}
-              {modelList.length === 0 && (
-                <div className="px-3 py-2 text-[length:var(--helix-transcript-size)] text-foreground/40">
-                  暂无可用模型
-                </div>
-              )}
+              </div>
             </div>
           )}
         </div>
@@ -2487,8 +2596,13 @@ export function AgentFlowPanel() {
     try {
       const cid = currentSessionId;
       // ① 本地截断：立即从 UI 移除最后一轮（同步，无网络往返）。
+      // `local` 必须与渲染层 sessionMessages 的过滤规则**完全一致**（严格二选一），
+      // 否则撤回会截断到用户根本没看到的那些消息（旧写法把"无 sessionId"的消息
+      // 也算进本会话，撤回时会把它们一起算进"最后一轮"）。
       const all = useHelixStore.getState().chatMessages;
-      const local = all.filter((m) => !m.sessionId || m.sessionId === cid);
+      const local = cid
+        ? all.filter((m) => m.sessionId === cid)
+        : all.filter((m) => !m.sessionId);
       const lastUserIdx = [...local]
         .reverse()
         .findIndex((m) => m.role === "user");
@@ -2658,9 +2772,9 @@ export function AgentFlowPanel() {
   const BTW_MAX_TOTAL_CHARS = 24000;
   const BTW_MAX_MESSAGES = 40;
 
-  // 主线转录 → 一段可读文本。剔除上次重建留下的注入块（SEED_MARKER 开头）
-  // 及其确认语——handleRun 的 seedHistory 同样跳过它们，这里保持一致，否则
-  // 旁路会话会看到上一轮的「（系统注入…）」再嵌套一层。
+  // 主线转录 → 一段可读文本。剔除上次重建留下的注入块及其确认语——handleRun
+  // 的 seedHistory 同样跳过它们，这里保持一致（含嵌套判定，见 isSeedMessage），
+  // 否则旁路会话会看到上一轮的「（系统注入…）」再嵌套一层。
   const buildBtwTranscript = useCallback((msgs: ChatMessage[]): string => {
     let prevWasSeed = false;
     const lines: string[] = [];
@@ -2672,7 +2786,7 @@ export function AgentFlowPanel() {
         prevWasSeed = false;
         continue;
       }
-      if (text.startsWith(SEED_MARKER)) {
+      if (text.includes(SEED_MARKER)) {
         prevWasSeed = true;
         continue;
       }
@@ -2786,9 +2900,12 @@ export function AgentFlowPanel() {
     async (question: string) => {
       const mainCid = mainCidRef.current ?? DRAFT_SESSION_KEY;
       const st = useHelixStore.getState();
+      // 与渲染层 sessionMessages 同一规则（严格二选一）：DRAFT 键 → 无 sessionId
+      // 的消息；否则 → 只取主线自己的。旧写法在主线分支里多带了 `!m.sessionId`，
+      // 会把"新对话那屏"的消息当成主线历史喂进旁路转录。
       const mainMessages = mainCid === DRAFT_SESSION_KEY
         ? st.chatMessages.filter((m) => !m.sessionId)
-        : st.chatMessages.filter((m) => !m.sessionId || m.sessionId === mainCid);
+        : st.chatMessages.filter((m) => m.sessionId === mainCid);
       const transcript = buildBtwTranscript(mainMessages);
       const bylineCid =
         "btw-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
@@ -3115,6 +3232,37 @@ export function AgentFlowPanel() {
     // chatMessages，此时用本次 done 自带正文（message.complete / run.completed 的 text，与
     // state.db 持久化同源，字节完好）原地修正已提交消息，覆盖流式累积可能丢空白/换行的损坏。
     // 只替换为原文，不猜补空格；归一化比较下 complete 更短（截断/中断）时则保留流式累积。
+    // ── blocks ↔ content 一致性自愈 ─────────────────────────────────────
+    // 渲染优先用 blocks；流式丢字（如 " Hel" 在传输中丢失）会让文本块比
+    // 权威正文少内容。把全部文本块收敛为单个权威文本块（挂第一个文本块
+    // 位置，thinking/工具卡不动），保证渲染文本与 content 一致。
+    // 无差异返回 null（调用方据此跳过重写）。
+    const reconcileBlocksText = (
+      blocks: NonNullable<ChatMessage["blocks"]>,
+      content: string,
+    ): NonNullable<ChatMessage["blocks"]> | null => {
+      if (!content.trim()) return null;
+      const blockText = blocks
+        .filter((b) => b.type === "text")
+        .map((b) => String(b.content || ""))
+        .join("");
+      if (normalizeForCompare(blockText) === normalizeForCompare(content)) {
+        return null;
+      }
+      const firstTextIdx = blocks.findIndex((b) => b.type === "text");
+      if (firstTextIdx < 0) return null;
+      const out: NonNullable<ChatMessage["blocks"]> = [];
+      blocks.forEach((b, i) => {
+        if (b.type === "text") {
+          if (i === firstTextIdx) {
+            out.push({ type: "text", content });
+          }
+        } else {
+          out.push(b);
+        }
+      });
+      return out;
+    };
     const patchDoneMessage = (finalText: string) => {
       const mid = doneMsgIdRef.current;
       if (!mid || !finalText || !finalText.trim()) return;
@@ -3130,9 +3278,26 @@ export function AgentFlowPanel() {
       if (
         !cur.trim() ||
         (normFinal.length >= normCur.length &&
-          (normFinal.includes(normCur) || normCur.includes(normFinal)))
+          (normFinal.includes(normCur) || normCur.includes(normFinal))) ||
+        // 中游分歧（流式丢字导致正文缺段，非包含关系）：后端 final_response
+        // 与 state.db 同源、字节完好，更长且高度相似时以它为准。
+        (normFinal.length >= normCur.length &&
+          normCur.length >= 8 &&
+          textSimilarityRatio(normCur, normFinal) >= 0.6)
       ) {
         st.updateChatMessage(mid, finalText);
+        // 正文自愈后，已提交的 blocks 若仍是缺字版本需一并收敛，
+        // 否则渲染（优先 blocks）继续显示缺字文本。
+        if (existing.blocks) {
+          const reconciled = reconcileBlocksText(existing.blocks, finalText);
+          if (reconciled) {
+            useHelixStore.setState((state) => ({
+              chatMessages: state.chatMessages.map((m) =>
+                m.id === mid ? { ...m, blocks: reconciled } : m,
+              ),
+            }));
+          }
+        }
         debug("[HelixTrace] 权威全文自愈，已原地修正消息正文", {
           len: cur.length,
           to: finalText.length,
@@ -3451,6 +3616,117 @@ export function AgentFlowPanel() {
       // conversation. Sessions are keyed by conversationId so multiple
       // conversations can run in parallel (each keeps its own backend session).
       const myCid = activeSessionId;
+      // ── 恢复链公共助手 ────────────────────────────────────────────────
+      // resume 一个 sid 并在成功时采纳：回灌后端权威历史、rebind 映射、刷新
+      // 上下文环、（前台时）重绑全局 sid。已知 sid / storedId / sids 历史 /
+      // 指纹找回四条路径共用同一实现；失败时把**错误串**打进 [HelixRecover]——
+      // 此前三处 .catch(() => null) 把具体错误全部吞掉，"找回失败"永远无法
+      // 定位是哪层、什么原因（后端 helix-recover.log 的前端对照面）。
+      const recoverFailures: string[] = [];
+      const triedSids = new Set<string>();
+      const tryResumeAndAdopt = async (
+        targetSid: string,
+        source: string,
+        storedId?: string,
+      ): Promise<{ sid: string } | null> => {
+        triedSids.add(targetSid);
+        let res: any = null;
+        let err: unknown = null;
+        try {
+          res = await helixApi()!.send("session/resume", {
+            session_id: targetSid,
+          });
+        } catch (e) {
+          err = e;
+        }
+        if (!res || (typeof res === "object" && (res as any).error)) {
+          const reason = err != null ? String(err) : String((res as any)?.error || "空响应");
+          console.warn(`[HelixRecover] resume 失败(${source})`, {
+            sid: targetSid,
+            reason,
+          });
+          recoverFailures.push(`resume(${source}): ${reason.slice(0, 120)}`);
+          return null;
+        }
+        const resumedId =
+          (typeof res === "object" ? res.session_id : null) || targetSid;
+        console.warn(`[HelixRecover] resume 成功(${source})`, {
+          sid: targetSid,
+          resumedId,
+        });
+        // session/resume 成功：用后端历史修补本地视图——但**只在后端快照
+        // 不比本地少时**才整体替换。resume 返回的是 state.db 快照，中断/崩溃
+        // 后经常比本地可见历史更短（思考中内容、甚至最后一条用户消息还没落
+        // 后端库），整体替换会把用户之前发的输入连同刚发的这条一起卷走
+        // （"重启后发消息，之前的用户输入也消失"）。快照更短 = 后端滞后，
+        // 此时保留本地消息、仅重绑 sid 继续跑。替换时也必须保留本次刚提交
+        // 的 newUserMsgId——它在后端快照里必然还不存在。
+        if (Array.isArray(res.messages)) {
+          const ownCid = myCid || currentSessionId || "";
+          const msgs = mapBackendMessages(res.messages, ownCid);
+          const stNow = useHelixStore.getState();
+          const own = stNow.chatMessages.filter((m) => m.sessionId === ownCid);
+          if (msgs.length >= own.length) {
+            const preserved = own.filter((m) => m.id === newUserMsgId);
+            useHelixStore.setState((state) => ({
+              chatMessages: [
+                // ⚠️ 不能写成 `m.sessionId && m.sessionId !== myCid`：那会顺手
+                // 删掉所有 sessionId 为 undefined 的消息，而它们是**可见的**
+                // （渲染过滤条件是 `!m.sessionId || m.sessionId === currentSessionId`）。
+                ...state.chatMessages.filter((m) => m.sessionId !== myCid),
+                ...msgs,
+                ...preserved,
+              ],
+            }));
+          }
+        }
+        rebindSessionSid(sessionMapRef.current, myCid, {
+          sid: resumedId,
+          epoch: liveEpoch,
+          // 不传 storedId 会把历史值冲掉——保留旧值（若有）。
+          storedId: storedId ?? sessionMapRef.current.get(myCid)?.storedId,
+        });
+        persistSessionMap(sessionMapRef.current);
+        sessionEpochRef.current = liveEpoch;
+        // resume 成功：立即把后端算好的 context_used/max 写进本地快照，环不再
+        // 卡在 0 等到下一条 prompt 的 usage 事件才恢复。字段缺失（旧后端）时
+        // 整段跳过。
+        const ctxMax = Number(res?.context_max) || 0;
+        const ctxUsed = Number(res?.context_used) || 0;
+        const categories = Array.isArray(res?.categories)
+          ? (res.categories as Array<{
+              id: string;
+              label: string;
+              tokens: number;
+              color: string;
+              aggregate?: boolean;
+            }>)
+          : undefined;
+        if (ctxMax && ctxUsed && myCid) {
+          useHelixStore
+            .getState()
+            .setContextUsage(myCid, ctxMax, ctxUsed, categories);
+        }
+        if (isFrontRun()) {
+          helixSessionIdRef.current = resumedId;
+          try {
+            useGatewayStore.getState().setHelixSessionId(resumedId);
+          } catch {
+            /* store setHelixSessionId 不应抛错；防御性忽略 */
+          }
+        }
+        return { sid: resumedId };
+      };
+      // 收集「被其他对话占用」的 sid 集合（防串台）。
+      const collectClaimedSids = (exceptCid: string | null) => {
+        const claimed = new Set<string>();
+        sessionMapRef.current.forEach((e, cid) => {
+          if (cid === exceptCid) return;
+          if (e.sid) claimed.add(e.sid);
+          for (const s of e.sids || []) claimed.add(s);
+        });
+        return claimed;
+      };
       const existing = sessionMapRef.current.get(myCid);
       // 重启/刷新后（epochStale，持久化 sid 由后端 pi 网关从 session jsonl
       // 透明恢复）：优先 session.resume 把后端原会话复活——sid 不变、历史
@@ -3461,110 +3737,62 @@ export function AgentFlowPanel() {
         let liveSid: string | null = null; // 仅当 epoch 匹配（未过期）时非 null
         let staleSid: string | null = null; // 本次走过 stale 路径（尝试过 resume）
         let sessionId: string | null = existing?.sid || null;
+        // stale 分支是否已经试过 storedId/sids 候选（供下方空-sid 路径去重）。
+        let triedSidCandidates = false;
         if (sessionId && (epochStale || existing!.epoch !== liveEpoch)) {
           const staleEntry = existing!;
           staleSid = sessionId;
           sessionId = null;
-          let resumeRes = await helixApi()!
-            .send("session/resume", { session_id: staleSid })
-            .catch(() => null); // resume 失败（会话已死/文件丢失）→ 走 session/new 重建
-          if (
-            !resumeRes ||
-            (typeof resumeRes === "object" && resumeRes.error)
-          ) {
-            // Migration fallback: older serve-gateway records may carry a DB key
-            // in storedId while sid remains the current pi session id.
-            if (staleEntry.storedId && staleEntry.storedId !== staleSid) {
-              resumeRes = await helixApi()!
-                .send("session/resume", { session_id: staleEntry.storedId })
-                .catch(() => null);
+          triedSidCandidates = true;
+          // ① 已知 sid（可能已失效）→ ② storedId → ③ sids 历史（未被其他
+          // 对话占用的）逐个 resume，谁先成功用谁。此前 storedId 兜底嵌在
+          // sid 失败分支里、sids 历史则完全没试——三条找回路径只剩一条。
+          let adopted = await tryResumeAndAdopt(
+            staleSid,
+            "已知sid",
+            staleEntry.storedId,
+          );
+          if (!adopted) {
+            const claimed = collectClaimedSids(myCid);
+            const candidates = [
+              staleEntry.storedId,
+              ...(staleEntry.sids || []),
+            ].filter(
+              (s): s is string =>
+                !!s && !triedSids.has(s) && !claimed.has(s),
+            );
+            for (const c of candidates) {
+              adopted = await tryResumeAndAdopt(
+                c,
+                "storedId/sids",
+                staleEntry.storedId,
+              );
+              if (adopted) break;
             }
           }
-          if (resumeRes && !(typeof resumeRes === "object" && resumeRes.error)) {
-            const resumedId =
-              (typeof resumeRes === "object" ? resumeRes.session_id : null) ||
-              staleSid;
-            sessionId = resumedId;
-            liveSid = resumedId; // 成功 resume 的会话可作发送目标
-            // session/resume 成功：后端返回了完整历史，用其更新本地 chatMessages
-            // 否则 UI 会显示空对话（模型实际有上下文，但用户看不到）
-            if (Array.isArray((resumeRes as any).messages)) {
-              const msgs = mapBackendMessages(
-                (resumeRes as any).messages,
-                myCid || currentSessionId || "",
-              );
-              useHelixStore.setState((state) => ({
-                chatMessages: [
-                  ...state.chatMessages.filter(
-                    m => m.sessionId && m.sessionId !== myCid,
-                  ),
-                  ...msgs,
-                ],
-              }));
-            }
-            rebindSessionSid(sessionMapRef.current, myCid, {
-              sid: resumedId,
-              epoch: liveEpoch,
-              storedId: staleEntry.storedId,
-            });
-            persistSessionMap(sessionMapRef.current);
-            sessionEpochRef.current = liveEpoch;
-            // 重启/刷新后 resume 成功：立即把后端算好的 context_used/max 写进
-            // 本地快照，环不再卡在 0 等到下一条 prompt 的 usage 事件才恢复
-            // （"重启后上下文显示为 0"的根因——ring 唯一写入源是
-            // usage:prompt-complete / context_breakdown，resume 路径两者都
-            // 不经过）。字段缺失（旧后端）时整段跳过。
-            const resumeCtxMax = Number((resumeRes as any)?.context_max) || 0;
-            const resumeCtxUsed =
-              Number((resumeRes as any)?.context_used) || 0;
-            const resumeCategories =
-              Array.isArray((resumeRes as any)?.categories)
-                ? ((resumeRes as any).categories as Array<{
-                    id: string;
-                    label: string;
-                    tokens: number;
-                    color: string;
-                    aggregate?: boolean;
-                  }>)
-                : undefined;
-            if (resumeCtxMax && resumeCtxUsed && myCid) {
-              // 用后端 restore 后返回的真实用量**直接覆盖**，不做 max 合并。
-              // resume 的 context_used 来自 switch_session 之后的会话文件估算，
-              // 已是"恢复后当前会话"的权威值；若再与本地旧快照取 max，会把上一次
-              // （可能更大的）会话峰值带进来——于是"新会话很小却环显示高占用、
-              // 而 /compact 报 session too small"的错位（见 2026-09-18 Q2）。
-              // 运行期 usage 事件的防抖动 max 合并留在 per-run 路径，这里只负责
-              // 把环初始化成恢复会话的真实起点。
-              useHelixStore
-                .getState()
-                .setContextUsage(
-                  myCid,
-                  resumeCtxMax,
-                  resumeCtxUsed,
-                  resumeCategories,
-                );
-            }
-            if (isFrontRun()) {
-              helixSessionIdRef.current = resumedId;
-              try {
-                useGatewayStore.getState().setHelixSessionId(resumedId);
-              } catch {
-                /* store setHelixSessionId 不应抛错；防御性忽略 */
-              }
-            }
+          if (adopted) {
+            sessionId = adopted.sid;
+            liveSid = adopted.sid; // 成功 resume 的会话可作发送目标
           } else {
-            // resume 失败（会话文件不存在/被清理）：删映射，本次直接走 session/new
-            // 重建 + seedHistory。必须把 sessionId 置空，否则下方 if (!sessionId)
-            // 判断不到、拿这个已经失效的旧 sid 继续发 session/prompt / set_mode，
-            // 触发后端隐性重建或下一轮重复失败循环——主对话反复出新 pi sid 的根因。
-            console.warn("[HelixRecover] 已知 sid resume 失败 → 删映射", {
-              myCid: myCid?.slice(0, 24),
-              staleSid,
-              storedId: staleEntry.storedId,
-              resumeRes,
-            });
-            sessionMapRef.current.delete(myCid);
-            persistSessionMap(sessionMapRef.current);
+            // resume 全路径失败（文件不存在/被清理/超时）：**降级而非删除**——
+            // 清 sid、保留 storedId/sids 历史。整条删除会把找回线索永久烧掉
+            // （transient 失败如超时/网关抖动也一视同仁），下一轮只能指纹→
+            // session/new。清成 "" 后下一轮 `existing?.sid || null` 同样为
+            // null，不会拿死 sid 去 prompt（原删除逻辑防的问题不受影响）。
+            console.warn(
+              "[HelixRecover] 已知 sid resume 全路径失败 → 降级映射(清sid留历史)",
+              {
+                myCid: myCid?.slice(0, 24),
+                staleSid,
+                storedId: staleEntry.storedId,
+                sids: staleEntry.sids,
+              },
+            );
+            const downgraded = sessionMapRef.current.get(myCid);
+            if (downgraded) {
+              downgraded.sid = "";
+              persistSessionMap(sessionMapRef.current);
+            }
             sessionId = null;
           }
         } else {
@@ -3635,81 +3863,73 @@ export function AgentFlowPanel() {
             sids: v.sids,
           })),
         });
-        if (cwdForRecover && ownMessages.length > 0) {
+        // ④ storedId/sids 历史独立重试：sid 被抹成 ""（切项目 effect、上一轮
+        // 降级）时 resume 分支整体被跳过，storedId 候选从未有机会——这里补上。
+        // stale 分支已经试过的话不重复（triedSidCandidates）。
+        if (!sessionId && !triedSidCandidates && existing) {
+          const candidates = [
+            existing.storedId,
+            ...(existing.sids || []),
+          ].filter(
+            (s): s is string =>
+              !!s && !triedSids.has(s) && !collectClaimedSids(myCid).has(s),
+          );
+          for (const c of candidates) {
+            const adopted = await tryResumeAndAdopt(
+              c,
+              "storedId/sids(空sid)",
+              existing.storedId,
+            );
+            if (adopted) {
+              sessionId = adopted.sid;
+              liveSid = adopted.sid;
+              break;
+            }
+          }
+        }
+        if (cwdForRecover && ownMessages.length > 0 && !sessionId) {
           const latest = await helixApi()!
             .send("session/latest_for_cwd", {
               cwd: cwdForRecover,
               first_user_message: firstUserText,
             })
-            .catch(() => null);
-          const recoveredSid =
-            (latest as any)?.session_id &&
-            typeof (latest as any).session_id === "string"
-              ? ((latest as any).session_id as string)
-              : null;
+            .catch((e) => {
+              console.warn("[HelixRecover] latest_for_cwd 调用失败", e);
+              recoverFailures.push(`latest_for_cwd: ${String(e).slice(0, 120)}`);
+              return null;
+            });
+          // 后端返回按 mtime 新→旧的候选列表（session_ids）；兼容旧后端只回
+          // 单个 session_id。
+          const fpCandidates: string[] = Array.isArray(
+            (latest as any)?.session_ids,
+          )
+            ? ((latest as any).session_ids as string[])
+            : typeof (latest as any)?.session_id === "string"
+              ? [(latest as any).session_id as string]
+              : [];
           console.warn("[HelixRecover] latest_for_cwd →", {
             raw: latest,
-            recoveredSid,
-            blockedByOthers: recoveredSid
-              ? claimedByOthers.has(recoveredSid)
-              : false,
+            candidates: fpCandidates,
           });
-          // 有指纹时不再需要"别人占用"这层守卫——指纹（cwd + 首条用户消息包含）
-          // 已经保证找到的就是**本对话自己**的文件，claimedByOthers 只会在
-          // 同一对话存在多个 cid（历史遗留）时误伤、把合法恢复挡掉。仅当没传
-          // 指纹（退化为旧"行数最多"逻辑）时才保留这层守卫。
-          const allowedByFp = !!firstUserText;
-          if (
-            recoveredSid &&
-            (allowedByFp || !claimedByOthers.has(recoveredSid))
-          ) {
-            const recRes = await helixApi()!
-              .send("session/resume", { session_id: recoveredSid })
-              .catch(() => null);
-            console.warn("[HelixRecover] resume 找回 →", {
-              recoveredSid,
-              ok:
-                !!recRes &&
-                !(typeof recRes === "object" && (recRes as any).error),
-              recRes,
-            });
-            if (
-              recRes &&
-              !(typeof recRes === "object" && (recRes as any).error)
-            ) {
-              sessionId = recoveredSid;
-              liveSid = recoveredSid;
-              rebindSessionSid(sessionMapRef.current, myCid, {
-                sid: recoveredSid,
-                epoch: liveEpoch,
-              });
-              persistSessionMap(sessionMapRef.current);
-              sessionEpochRef.current = liveEpoch;
-              // 找回成功也要把上下文环刷新成**恢复后**的真实用量——与上面
-              // "已知 sid" 的 resume 分支保持一致。此前这条找回路径漏了这一步，
-              // 环会一直停在持久化的旧快照（表现为"压缩后环仍显示压缩前的 187K"，
-              // 因为恢复是走 latest_for_cwd + resume 这条线、不会经过上面那段）。
-              const recCtxMax = Number((recRes as any)?.context_max) || 0;
-              const recCtxUsed = Number((recRes as any)?.context_used) || 0;
-              const recCategories = Array.isArray((recRes as any)?.categories)
-                ? ((recRes as any).categories as Array<{
-                    id: string;
-                    label: string;
-                    tokens: number;
-                    color: string;
-                    aggregate?: boolean;
-                  }>)
-                : undefined;
-              if (recCtxMax && recCtxUsed && myCid) {
-                useHelixStore
-                  .getState()
-                  .setContextUsage(
-                    myCid,
-                    recCtxMax,
-                    recCtxUsed,
-                    recCategories,
-                  );
-              }
+          // **分叉会复制完整历史** → 父/分叉的首条用户消息完全相同，指纹无法
+          // 区分二者。逐个候选 resume、跳过被其他对话占用的 sid：父对话撞上
+          // 分叉的 sid（已被声明）时跳过、落到自己的文件。旧逻辑「指纹即免检」
+          // （allowedByFp）会把分叉会话静默接进父对话——分叉场景下指纹的
+          // "精确"承诺不成立，防串台守卫必须始终生效。
+          for (const recoveredSid of fpCandidates) {
+            if (sessionId) break;
+            if (triedSids.has(recoveredSid)) continue;
+            if (collectClaimedSids(myCid).has(recoveredSid)) {
+              console.warn(
+                "[HelixRecover] 指纹候选被其他对话占用，跳过",
+                recoveredSid,
+              );
+              continue;
+            }
+            const adopted = await tryResumeAndAdopt(recoveredSid, "指纹找回");
+            if (adopted) {
+              sessionId = adopted.sid;
+              liveSid = adopted.sid;
             }
           }
         }
@@ -3723,10 +3943,15 @@ export function AgentFlowPanel() {
         // 逐次叠加（曾观察到 seed 正文里嵌着上一轮注入产生的「已恢复上下文」）。
         // 紧跟种子的那一轮 assistant 是模型对种子的确认，同样没有重放价值。
         const seedHistory: Array<{ role: string; content: unknown }> = [];
+        // 注入块识别加固：不只认「整条消息以（系统注入：开头」——回灌/重放
+        // 后的注入块可能嵌在别的消息中间（2026-09-19 磁盘证据：新铸会话文件
+        // 里「系统注入」层层残留 4/3/2/4 处）。用完整标识句做 contains 判定，
+        // 命中即整条消息视为种子、连同紧跟的「好」确认一起剔除，不再叠加。
+        const isSeedMessage = (t: string) => t.includes(SEED_MARKER);
         let prevWasSeed = false;
         for (const m of ownMessages) {
           const text = normalizeAcpContent(m.content);
-          if (text.trimStart().startsWith(SEED_MARKER)) {
+          if (isSeedMessage(text)) {
             prevWasSeed = true;
             continue;
           }
@@ -3765,10 +3990,26 @@ export function AgentFlowPanel() {
         rebindSessionSid(sessionMapRef.current, myCid, {
           sid: sessionId,
           epoch: liveEpoch,
-          storedId,
+          // pi 模式 res 无 stored_session_id → 裸 undefined 会把历史 storedId
+          // 冲掉；保留旧值（若有过）。
+          storedId: storedId ?? existing?.storedId,
         });
         persistSessionMap(sessionMapRef.current);
         sessionEpochRef.current = liveEpoch;
+        // 兜底可见化：此前这条路径完全静默——用户只看到"对话忽然变了/上下文
+        // 重置"，不知道发生了会话重建（2026-09-19 四连铸时用户全程蒙在鼓里，
+        // 还以为是自己误删了什么）。只在确有本地历史（真正在"找回"）时提示；
+        // 全新对话 session/new 是正常路径，不打扰。
+        if (ownMessages.length > 0) {
+          useHelixStore.getState().showToast({
+            type: "warning",
+            title: "未能找回原后端会话，已新建并注入历史",
+            description:
+              (recoverFailures.length
+                ? `${recoverFailures.slice(-3).join("；")}。`
+                : "") + "原会话文件仍在磁盘没有丢失；失败层次见 ~/.pi/agent/helix-recover.log",
+          });
+        }
         // 重建（session/new）成功后，本对话的上下文环必须归零到新会话的真实
         // 起点，不能继承上一会话（可能更大）的历史峰值——否则"新会话很小却环
         // 显示高占用、而 /compact 报 session too small"的错位。下一次 usage
@@ -3912,6 +4153,8 @@ export function AgentFlowPanel() {
             case "tool_call_chunk":
               return {
                 type: "tool_result",
+                toolCallId:
+                  typeof u.toolCallId === "string" ? u.toolCallId : "",
                 toolName: "",
                 content: normalizeAcpContent(u.content),
               };
@@ -3982,8 +4225,13 @@ export function AgentFlowPanel() {
                   typeof d?.patch === "string" && d.patch.trim() ? d.patch : "";
                 const diffPayload = diffText || patchText;
                 const baseText = normalizeAcpContent(u.content || "");
+                // toolCallId 必须透传：下游按 id 把结果挂回发起调用的那张
+                // 工具卡。丢掉 id 会退化为"填进第一个还没结果的组"——总结
+                // 两侧的工具并行执行、后启动的先完成时，结果就挂错组
+                // （表现为"总结后面的工具合并进了总结上面的工具组"）。
                 return {
                   type: "tool_result",
+                  toolCallId: tcId,
                   toolName: u.toolName || u.title || "",
                   content: diffPayload
                     ? `${baseText}\n${diffPayload}`
@@ -4941,13 +5189,18 @@ export function AgentFlowPanel() {
               typeof parsed.content === "string" ? parsed.content : "",
             );
           }
-          if (parsed && (parsed.type === "done" || parsed.type === "error")) {
+          if (parsed && parsed.type === "done") {
             queueDone = true;
             if (idleTimerRef) {
               clearTimeout(idleTimerRef);
               idleTimerRef = null;
             }
           }
+          // 注意：error 事件不再在这里置 queueDone。error 分两类——终止性
+          // （prompt 通道关闭 / session.evicted，入队前已各自显式置位）和中游
+          // 可恢复（上游抖动、后端自动重试后流继续）。在这里一刀切置位会把
+          // 可恢复错误当终止处理，下游 error 分支随之清空思考/正文缓冲
+          // （"输出中思考突然清空又继续输出"的根因之一）。
           if (
             parsed &&
             (parsed.type === "text" ||
@@ -5470,9 +5723,11 @@ export function AgentFlowPanel() {
               ]);
             } else if (parsed.type === "tool_result") {
               const id = generateId();
+              const resultCallId: string = parsed.toolCallId || "";
               const step: ExecutionStep = {
                 id,
                 type: "tool_result",
+                toolCallId: resultCallId || undefined,
                 content: parsed.content,
                 toolName: parsed.toolName,
                 timestamp: Date.now(),
@@ -5483,24 +5738,44 @@ export function AgentFlowPanel() {
                 toolName: parsed.toolName,
               });
               // Mark the matching tool_call step as completed so the top status
-              // bar stops showing it in "正在执行工具". We match by the last
-              // unfinished tool_call (serial execution) or any running one.
+              // bar stops showing it in "正在执行工具". Prefer the exact
+              // toolCallId; fall back to the last unfinished tool_call (serial
+              // execution) when the event carries no id.
               uiSteps((prev) => {
                 const next = [...prev];
-                for (let i = next.length - 1; i >= 0; i--) {
-                  if (
-                    next[i].type === "tool_call" &&
-                    next[i].status === "running"
-                  ) {
-                    next[i] = { ...next[i], status: "completed" as const };
-                    break;
+                let marked = false;
+                if (resultCallId) {
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    if (
+                      next[i].type === "tool_call" &&
+                      next[i].toolCallId === resultCallId &&
+                      next[i].status === "running"
+                    ) {
+                      next[i] = { ...next[i], status: "completed" as const };
+                      marked = true;
+                      break;
+                    }
+                  }
+                }
+                if (!marked) {
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    if (
+                      next[i].type === "tool_call" &&
+                      next[i].status === "running"
+                    ) {
+                      next[i] = { ...next[i], status: "completed" as const };
+                      break;
+                    }
                   }
                 }
                 return next;
               });
-              // tool_result 归到第一个尚未收到结果的 tool_group 块
-              // （串行时即当前块；并行时按调用顺序依次填充，避免全堆到最后一块）。
-              // 同时把该块中 status==='running' 的 tool_call 标记 completed/failed——
+              // 结果块归属：优先按 toolCallId 精确找到发起调用的那个 tool_group
+              // （并行执行/慢工具时结果到达顺序 ≠ 调用顺序，位置匹配会把结果
+              // 挂进"思考总结"另一侧的组，表现成"总结后面的工具被合并到总结
+              // 上面的工具组"）。找不到 id 对应的组时退回旧行为：第一个尚未
+              // 收到结果的 tool_group（串行时即当前块）。
+              // 同时把该组中 status==='running' 的 tool_call 标记 completed/failed——
               // 否则工具已完成但卡片仍显示"执行"（tool_group 块的状态只在
               // 这里维护，done 分支只更新独立的 steps 数组，不动 responseBlocks）。
               // 先把可能延迟提交（走 pendingBlocksRef + rAF）的工具卡落盘，
@@ -5508,23 +5783,46 @@ export function AgentFlowPanel() {
               // 进而新建出与本应对应的工具卡脱节的结果块。
               flushPending();
               uiRB((prev) => {
-                const idx = prev.findIndex((b) => {
-                  if (b.type !== "tool_group") return false;
-                  return !b.steps.some(
-                    (s) => s.type === "tool_result" || s.type === "error",
-                  );
-                });
+                const callIdOf = (b: (typeof prev)[number]) =>
+                  b.type === "tool_group"
+                    ? (b.steps.find(
+                        (s) =>
+                          s.type === "tool_call" &&
+                          !!resultCallId &&
+                          s.toolCallId === resultCallId,
+                      ) ?? null)
+                    : null;
+                // id 精确匹配（事件带 id 且组里有对应 call）
+                let idx = -1;
+                if (resultCallId) {
+                  idx = prev.findIndex((b) => callIdOf(b) !== null);
+                }
+                // 兜底：第一个尚未收到结果的组（旧行为，串行时即当前块）
+                if (idx === -1) {
+                  idx = prev.findIndex((b) => {
+                    if (b.type !== "tool_group") return false;
+                    return !b.steps.some(
+                      (s) => s.type === "tool_result" || s.type === "error",
+                    );
+                  });
+                }
                 if (idx !== -1) {
                   const cur = prev[idx] as Extract<
                     ResponseBlock,
                     { type: "tool_group" }
                   >;
+                  const matchedCall = callIdOf(cur);
                   const nb = prev.slice();
                   nb[idx] = {
                     type: "tool_group",
                     steps: [
                       ...cur.steps.map((s) =>
-                        s.type === "tool_call" && s.status === "running"
+                        s.type === "tool_call" &&
+                        s.status === "running" &&
+                        // id 命中时只完成对应的那个 call；其余 running call
+                        // 属于别的工具，不能顺手标记（并行时会把别的工具
+                        // 的卡提前标完成）。
+                        (!matchedCall || s.id === matchedCall.id)
                           ? {
                               ...s,
                               status: parsed.failed
@@ -5543,45 +5841,81 @@ export function AgentFlowPanel() {
             } else if (parsed.type === "tool_output_delta") {
               // Streaming output chunk from a running tool — append to the
               // latest tool_call step's content so the user sees output in real time.
+              // 按 toolCallId 精确匹配（并行时 A 的输出流不能进 B 的卡）；
+              // 事件缺 id 时退回"最后一个运行中的工具"旧行为。
               const delta = normalizeAcpContent(parsed.content);
               if (!delta) return;
+              const deltaCallId: string = parsed.toolCallId || "";
               uiSteps((prev) => {
                 const next = [...prev];
-                for (let i = next.length - 1; i >= 0; i--) {
-                  if (
-                    next[i].type === "tool_call" &&
-                    next[i].status !== "completed" &&
-                    next[i].status !== "failed" &&
-                    !next[i].subSteps
-                  ) {
-                    next[i] = {
-                      ...next[i],
-                      content: (next[i].content || "") + delta,
-                    };
-                    break;
+                let matched = false;
+                if (deltaCallId) {
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    if (
+                      next[i].type === "tool_call" &&
+                      next[i].toolCallId === deltaCallId &&
+                      next[i].status !== "completed" &&
+                      next[i].status !== "failed" &&
+                      !next[i].subSteps
+                    ) {
+                      next[i] = {
+                        ...next[i],
+                        content: (next[i].content || "") + delta,
+                      };
+                      matched = true;
+                      break;
+                    }
+                  }
+                }
+                if (!matched) {
+                  for (let i = next.length - 1; i >= 0; i--) {
+                    if (
+                      next[i].type === "tool_call" &&
+                      next[i].status !== "completed" &&
+                      next[i].status !== "failed" &&
+                      !next[i].subSteps
+                    ) {
+                      next[i] = {
+                        ...next[i],
+                        content: (next[i].content || "") + delta,
+                      };
+                      break;
+                    }
                   }
                 }
                 return next;
               });
               // Also append to the corresponding tool_group in responseBlocks
               uiRB((prev) => {
-                for (let i = prev.length - 1; i >= 0; i--) {
-                  const block = prev[i];
-                  if (block.type !== "tool_group") continue;
-                  const lastToolCall = [...block.steps]
-                    .reverse()
-                    .find(
+                const findIn = (block: (typeof prev)[number]) => {
+                  if (block.type !== "tool_group") return null;
+                  const steps = [...block.steps].reverse();
+                  if (deltaCallId) {
+                    const byId = steps.find(
                       (s) =>
                         s.type === "tool_call" &&
+                        s.toolCallId === deltaCallId &&
                         s.status !== "completed" &&
                         s.status !== "failed" &&
                         !s.subSteps,
                     );
+                    if (byId) return byId;
+                  }
+                  return steps.find(
+                    (s) =>
+                      s.type === "tool_call" &&
+                      s.status !== "completed" &&
+                      s.status !== "failed" &&
+                      !s.subSteps,
+                  );
+                };
+                for (let i = prev.length - 1; i >= 0; i--) {
+                  const lastToolCall = findIn(prev[i]);
                   if (lastToolCall) {
                     const nb = prev.slice();
                     nb[i] = {
-                      ...block,
-                      steps: block.steps.map((s) =>
+                      ...prev[i],
+                      steps: prev[i].steps.map((s) =>
                         s.id === lastToolCall.id
                           ? { ...s, content: (s.content || "") + delta }
                           : s,
@@ -5762,6 +6096,49 @@ export function AgentFlowPanel() {
                 }
               }
               pendingTextRef.current = renderText;
+              // ── 权威重发修正（blocks 自愈）────────────────────────────────
+              // 相似度替换分支用后端重发覆盖了缓冲、且新缓冲与 lastStreamed
+              // 有分歧（不是干净追加）时：已提交的文本块是带病版本（如流中
+              // 丢过 " Hel" → "确认ix..."），而缓冲已被修正为权威全文。若走
+              // 常规 delta 路径，修正会被近重复规则抑制（delta=""），blocks
+              // 永远缺字。这里把已提交的全部文本块收敛为单一权威文本块，
+              // 并同步收敛 pending 的文本分片。
+              const cleanAppend = renderText.startsWith(
+                lastStreamedTextRef.current,
+              );
+              const authoritativeReplace =
+                !cleanAppend &&
+                cur.length > 0 &&
+                newText === incRaw &&
+                incRaw !== cur &&
+                textSimilarityRatio(curTrim, incTrim) >= 0.6;
+              if (authoritativeReplace) {
+                // 直接重写已提交的文本块；pending 里的旧文本分片一并丢弃
+                // （修正重发覆盖了它们的全部内容，再拼接会双重渲染）。
+                uiRB((prev) => {
+                  const textIdxs: number[] = [];
+                  prev.forEach((b, i) => {
+                    if (b.type === "text") textIdxs.push(i);
+                  });
+                  if (textIdxs.length === 0) {
+                    return [...prev, { type: "text" as const, content: renderText }];
+                  }
+                  const nb = prev.slice();
+                  nb[textIdxs[0]] = { type: "text", content: renderText };
+                  for (let k = textIdxs.length - 1; k >= 1; k--) {
+                    nb.splice(textIdxs[k], 1);
+                  }
+                  return nb;
+                });
+                pendingBlocksRef.current = pendingBlocksRef.current.filter(
+                  (b) => b.type !== "text",
+                );
+                lastStreamedTextRef.current = renderText;
+                // 正文落块 = 思考阶段边界（与常规路径一致）。
+                markThinkingPhaseBoundary();
+                scheduleStreamRender();
+                return;
+              }
               let delta: string;
               if (renderText.startsWith(lastStreamedTextRef.current)) {
                 delta = renderText.slice(lastStreamedTextRef.current.length);
@@ -5849,7 +6226,12 @@ export function AgentFlowPanel() {
                   normFinal.length >= normBuf.length &&
                   (normFinal === normBuf ||
                     normFinal.includes(normBuf) ||
-                    normBuf.includes(normFinal))
+                    normBuf.includes(normFinal) ||
+                    // 中游分歧（流式丢字、非包含关系）：final_response 与
+                    // state.db 同源、字节完好，更长且高度相似时以它为准，
+                    // 否则流式丢的字（如 " Hel"）在渲染里永远缺失。
+                    (normBuf.length >= 8 &&
+                      textSimilarityRatio(normBuf, normFinal) >= 0.6))
                 ) {
                   content = finalText;
                 }
@@ -5957,6 +6339,14 @@ export function AgentFlowPanel() {
                 // 交替结构，渲染时直接用 normalizeTextBlocks 去重。若存在"整段无
                 // text 块"的情况（全部正文压在未冲刷的 pending 里、或模型只发工具
                 // 不发文本），上面的末位追加会把权威全文补进末尾。
+                // blocks ↔ content 一致性自愈：流式丢字（中间缺段、非包含关系）
+                // 时文本块比权威正文少内容——把全部文本块收敛为单个权威文本块
+                // （挂第一个文本块位置，thinking/工具卡不动），渲染文本与原文
+                // 对齐；无差异时不动（保留原始交替结构）。
+                if (finalBlocks && content) {
+                  const reconciled = reconcileBlocksText(finalBlocks, content);
+                  if (reconciled) finalBlocks = reconciled;
+                }
                 // 本次运行的文件改动统一挂在最终消息的 fileChanges 上，只由
                 // 回复末尾的"已修改"汇总卡片渲染，不混进流式过程块。
                 const runFileChanges = runFileChangesRef.current;
@@ -6068,81 +6458,109 @@ export function AgentFlowPanel() {
                 ];
               });
             } else if (parsed.type === "error") {
-              const content = textBufferRef.current;
-              const reasoning = thoughtBufferRef.current;
-              const errorSteps = stepsRef.current;
-              textBufferRef.current = "";
-              thoughtBufferRef.current = "";
-              streamCappedRef.current = false;
-              thinkingCappedRef.current = false;
-              pendingTextRef.current = null;
-              pendingThinkingRef.current = null;
-              pendingBlocksRef.current = [];
-              rafPendingRef.current = false;
-              uiST("");
-              // Clear streaming blocks BEFORE adding to chatMessages — same race
-              // condition as the done path above (Zustand store write can trigger
-              // a re-render before React useState batches flush).
-              uiRB([]);
-              if (
-                content ||
-                reasoning ||
-                errorSteps.length > 0 ||
-                responseBlocks.length > 0
-              ) {
-                const curState = useHelixStore.getState();
-                const runFileChanges = runFileChangesRef.current;
-                const byFile = new Map<string, PendingChange>();
-                for (const c of runFileChanges) byFile.set(c.fileId, c);
-                const fileChanges = [...byFile.values()];
-                const msgId = curState.addChatMessage({
-                  role: "assistant",
-                  content,
-                  reasoning: reasoning || undefined,
-                  steps: errorSteps.length ? errorSteps : undefined,
-                  fileChanges: fileChanges.length ? fileChanges : undefined,
-                  blocks: responseBlocksRef.current.length
-                    ? responseBlocksRef.current
-                    : undefined,
-                  sessionId: activeSessionId,
+              // error 事件分两类，处理必须分开：
+              // ① 终止性（prompt 通道关闭 / session.evicted 等路径入队前已置
+              //    queueDone=true）→ run 到头，按原有逻辑清空并落盘收尾。
+              // ② 中游可恢复（上游抖动，后端自动重试后流继续）→ 绝不能清空
+              //    思考/正文缓冲和已落块的 thinking 卡（"正常输出中思考突然
+              //    清空、随后又继续输出"的根因）。内容原样保留，只记录错误
+              //    步骤，并把兜底定时器武装到 20s：重试后的内容事件会把它重新
+              //    武装回 300s；后端若真的不再输出，20s 后 synth-done 收尾。
+              if (!queueDone) {
+                debug("[HelixTrace] mid-run soft error — keep streaming", {
+                  content: String(parsed.content ?? "").slice(0, 200),
+                  textLen: textBufferRef.current?.length ?? 0,
+                  reasoningLen: thoughtBufferRef.current?.length ?? 0,
                 });
-                curState.setChatMessageStreaming(msgId, false);
-                if (activeSessionId) {
-                  useHelixStore.getState().persistSessionNow(activeSessionId);
-                }
-              } else if (parsed.content) {
-                // Pure error with no streamed content — surface it as an assistant message
-                const curState = useHelixStore.getState();
-                const msgId = curState.addChatMessage({
-                  role: "assistant",
-                  content: "⚠️ " + parsed.content,
-                  sessionId: activeSessionId,
-                });
-                curState.setChatMessageStreaming(msgId, false);
-                if (activeSessionId) {
-                  useHelixStore.getState().persistSessionNow(activeSessionId);
-                }
-              }
-              // Mark all running tool_calls as failed so they disappear from the
-              // "正在执行工具" status bar.
-              const errId = generateId();
-              uiSteps((prev) => {
-                const next = prev.map((s) =>
-                  s.type === "tool_call" && s.status === "running"
-                    ? { ...s, status: "failed" as const }
-                    : s,
-                );
-                return [
-                  ...next,
+                uiSteps((prev) => [
+                  ...prev,
                   {
-                    id: errId,
+                    id: generateId(),
                     type: "error",
                     content: parsed.content,
                     timestamp: Date.now(),
                   },
-                ];
-              });
-              storeActions.addExecutionStep({ type: "error" });
+                ]);
+                storeActions.addExecutionStep({ type: "error" });
+                scheduleSynthDone(20000);
+                resetIdleTimer();
+              } else {
+                const content = textBufferRef.current;
+                const reasoning = thoughtBufferRef.current;
+                const errorSteps = stepsRef.current;
+                textBufferRef.current = "";
+                thoughtBufferRef.current = "";
+                streamCappedRef.current = false;
+                thinkingCappedRef.current = false;
+                pendingTextRef.current = null;
+                pendingThinkingRef.current = null;
+                pendingBlocksRef.current = [];
+                rafPendingRef.current = false;
+                uiST("");
+                // Clear streaming blocks BEFORE adding to chatMessages — same race
+                // condition as the done path above (Zustand store write can trigger
+                // a re-render before React useState batches flush).
+                uiRB([]);
+                if (
+                  content ||
+                  reasoning ||
+                  errorSteps.length > 0 ||
+                  responseBlocks.length > 0
+                ) {
+                  const curState = useHelixStore.getState();
+                  const runFileChanges = runFileChangesRef.current;
+                  const byFile = new Map<string, PendingChange>();
+                  for (const c of runFileChanges) byFile.set(c.fileId, c);
+                  const fileChanges = [...byFile.values()];
+                  const msgId = curState.addChatMessage({
+                    role: "assistant",
+                    content,
+                    reasoning: reasoning || undefined,
+                    steps: errorSteps.length ? errorSteps : undefined,
+                    fileChanges: fileChanges.length ? fileChanges : undefined,
+                    blocks: responseBlocksRef.current.length
+                      ? responseBlocksRef.current
+                      : undefined,
+                    sessionId: activeSessionId,
+                  });
+                  curState.setChatMessageStreaming(msgId, false);
+                  if (activeSessionId) {
+                    useHelixStore.getState().persistSessionNow(activeSessionId);
+                  }
+                } else if (parsed.content) {
+                  // Pure error with no streamed content — surface it as an assistant message
+                  const curState = useHelixStore.getState();
+                  const msgId = curState.addChatMessage({
+                    role: "assistant",
+                    content: "⚠️ " + parsed.content,
+                    sessionId: activeSessionId,
+                  });
+                  curState.setChatMessageStreaming(msgId, false);
+                  if (activeSessionId) {
+                    useHelixStore.getState().persistSessionNow(activeSessionId);
+                  }
+                }
+                // Mark all running tool_calls as failed so they disappear from the
+                // "正在执行工具" status bar.
+                const errId = generateId();
+                uiSteps((prev) => {
+                  const next = prev.map((s) =>
+                    s.type === "tool_call" && s.status === "running"
+                      ? { ...s, status: "failed" as const }
+                      : s,
+                  );
+                  return [
+                    ...next,
+                    {
+                      id: errId,
+                      type: "error",
+                      content: parsed.content,
+                      timestamp: Date.now(),
+                    },
+                  ];
+                });
+                storeActions.addExecutionStep({ type: "error" });
+              }
             } else if (parsed.type === "plan") {
               const id = generateId();
               uiSteps((prev) => [
@@ -7056,7 +7474,7 @@ export function AgentFlowPanel() {
           <ChevronDown className="size-3" />
         </button>
         {showApprovalModeDropdown && (
-          <div className="absolute bottom-full left-0 mb-2 w-44 bg-popover rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
+          <div className="absolute bottom-full left-0 mb-2 w-44 bg-card rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
             {[
               {
                 id: "default" as const,
@@ -7289,29 +7707,28 @@ export function AgentFlowPanel() {
           onPaste={handlePaste}
           placeholder={"随心输入..."}
           rows={2}
-          className="chat-input w-full min-w-0 resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 text-[length:var(--helix-transcript-size)] min-h-[38px] max-h-[300px] px-2.5 pt-2 pb-0.5 leading-[1.45] break-all overflow-x-hidden overflow-y-auto text-foreground"
+          className="chat-input w-full min-w-0 resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 text-[length:var(--helix-transcript-size)] min-h-[60px] max-h-[300px] px-2.5 pt-2 pb-0.5 leading-[1.45] break-all overflow-x-hidden overflow-y-auto text-foreground"
           style={{
             overflowX: "hidden",
             overflowY: "auto",
-            height: "38px",
             wordBreak: "break-all",
             overflowWrap: "anywhere",
           }}
           onInput={(e) => {
             const target = e.target as HTMLTextAreaElement;
-            const prevHeight = target.style.height || "38px";
+            const prevHeight = target.style.height || "60px";
             // 先让 textarea 恢复自然高度（auto）再量 scrollHeight：
-            // 若固定 38px 去量，长而不带换行符的内容会全部计入 scrollHeight，
+            // 若固定高度去量，长而不带换行符的内容会全部计入 scrollHeight，
             // 使输入框顶到 300px 上限、行距看着拉得很大。auto 下浏览器按真实
             // 行高折行，scrollHeight 才是准确的当前内容高度。
             target.style.height = "auto";
             const ch = target.scrollHeight;
-            const min = 38;
+            const min = 60; // 两行内容的自然高度，短内容不缩进
             const nextHeight = ch > min ? Math.min(ch, 300) : min;
             target.style.height = nextHeight + "px";
             const grew =
               parseFloat(target.style.height) >
-              parseFloat(prevHeight.replace("px", "") || "38");
+              parseFloat(prevHeight.replace("px", "") || "60");
             // 输入框长高时自动把视口滚到底，防止输入框跑到可见区域下方
             if (grew && scrollRef.current) {
               const vp = scrollRef.current;
@@ -7326,7 +7743,7 @@ export function AgentFlowPanel() {
 
         {/* Unified slash command dropdown */}
         {showSlashMenu && (
-          <div className="absolute bottom-full left-0 right-0 mb-2 bg-popover rounded-xl border border-border shadow-xl z-50 max-h-[300px] overflow-y-auto mx-3">
+          <div className="absolute bottom-full left-0 right-0 mb-2 bg-card rounded-xl border border-border/40 shadow-xl z-50 max-h-[300px] overflow-y-auto mx-3">
             {/* Commands section */}
             {filteredCommands.length > 0 && (
               <>
@@ -7428,7 +7845,7 @@ export function AgentFlowPanel() {
 
         {/* @-triggered file reference dropdown */}
         {showAtRef && filteredAtFiles.length > 0 && (
-          <div className="absolute bottom-full left-0 right-0 mb-2 bg-popover rounded-xl border border-border shadow-xl z-50 max-h-[200px] overflow-y-auto mx-3">
+          <div className="absolute bottom-full left-0 right-0 mb-2 bg-card rounded-xl border border-border/40 shadow-xl z-50 max-h-[200px] overflow-y-auto mx-3">
             {filteredAtFiles.map((file, index) => (
               <button
                 key={file.path}
@@ -7514,7 +7931,11 @@ export function AgentFlowPanel() {
                 />
                 <button
                   type="button"
-                  onClick={isBusy ? () => handleStop() : () => handleRun()}
+                  onClick={
+                    isBusy && !input.trimStart().startsWith("/btw")
+                      ? () => handleStop()
+                      : () => handleRun()
+                  }
                   disabled={
                     !isBusy &&
                     !input.trim() &&
@@ -7522,10 +7943,10 @@ export function AgentFlowPanel() {
                     pendingFiles.length === 0 &&
                     pendingLinks.length === 0
                   }
-                  className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center ${
+                  className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center border border-border/60 bg-muted/40 hover:bg-muted/70 ${
                     isBusy
-                      ? "text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40"
-                      : "text-muted-foreground hover:text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40"
+                      ? "text-foreground"
+                      : "text-foreground/40"
                   }`}
                   data-tip={isBusy ? "停止" : "发送"}
                 >
@@ -7566,7 +7987,11 @@ export function AgentFlowPanel() {
                 />
                 <button
                   type="button"
-                  onClick={isBusy ? () => handleStop() : () => handleRun()}
+                  onClick={
+                    isBusy && !input.trimStart().startsWith("/btw")
+                      ? () => handleStop()
+                      : () => handleRun()
+                  }
                   disabled={
                     !isBusy &&
                     !input.trim() &&
@@ -7574,10 +7999,10 @@ export function AgentFlowPanel() {
                     pendingFiles.length === 0 &&
                     pendingLinks.length === 0
                   }
-                  className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center ${
+                  className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center border border-border/60 bg-muted/40 hover:bg-muted/70 ${
                     isBusy
-                      ? "text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40"
-                      : "text-muted-foreground hover:text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40"
+                      ? "text-foreground"
+                      : "text-foreground/40"
                   }`}
                   data-tip={isBusy ? "停止" : "发送"}
                 >
@@ -7611,7 +8036,7 @@ export function AgentFlowPanel() {
 
       {/* Conversation search bar (Ctrl+F) */}
       {conversationSearchOpen && (
-        <div className="absolute top-2.5 right-3 z-40 flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-popover text-popover-foreground border border-border/70 shadow-lg">
+        <div className="absolute top-2.5 right-3 z-40 flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-card text-foreground border border-border/40 shadow-lg">
           <Search className="size-3.5 text-muted-foreground shrink-0" />
           <input
             ref={conversationSearchInputRef}
@@ -7666,7 +8091,7 @@ export function AgentFlowPanel() {
         ref={scrollRef}
         className={`flex-1 min-h-0 overflow-y-auto msg-scroll-viewport transition-opacity duration-200 ${sessionMessages.length === 0 && !hasSteps ? "hide-scrollbar" : ""} ${historyStripHover ? "opacity-0" : "opacity-100"}`}
       >
-        <div className="max-w-[700px] mx-auto px-5 py-4 pb-12 min-h-full">
+        <div className="max-w-[700px] mx-auto px-5 py-4 pb-4 min-h-full">
           {sessionMessages.length === 0 && !hasSteps ? (
             <div className="flex flex-col items-center w-full pt-[22vh]">
               <div className="w-full max-w-[700px] mx-auto px-5">
@@ -7711,7 +8136,7 @@ export function AgentFlowPanel() {
                       </span>
                     </button>
                     {showFolderDropdown && (
-                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-[220px] bg-popover border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in overflow-hidden">
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-[220px] bg-card border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in overflow-hidden">
                         {showRemoteServers ? (
                           <div>
                             <div className="px-3 py-2 border-b border-border/30 flex items-center gap-2">
@@ -7782,64 +8207,73 @@ export function AgentFlowPanel() {
                                     className="w-16 px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/40"
                                   />
                                 </div>
-                                <div className="flex gap-2 justify-end pt-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
+                                <div className="flex items-center gap-2 justify-end pt-1">
+                                  <SaveBar
+                                    saving={serverSaving}
+                                    status={serverSaveState}
+                                    errorText={serverSaveErr}
+                                    saveLabel="保存"
+                                    disabled={!newServerHost.trim()}
+                                    onSave={async () => {
+                                      setServerSaving(true);
+                                      setServerSaveState(null);
+                                      setServerSaveErr(null);
+                                      try {
+                                        const host = newServerHost.trim();
+                                        const port =
+                                          parseInt(newServerPort) || 22;
+                                        const username =
+                                          newServerUser.trim() || "user";
+                                        const name =
+                                          newServerName.trim() ||
+                                          `${username}@${host}`;
+                                        await addExternalService({
+                                          name,
+                                          host,
+                                          port,
+                                          username,
+                                          authType: "key",
+                                        });
+                                        setServerSaveState("ok");
+                                        setNewServerHost("");
+                                        setNewServerPort("22");
+                                        setNewServerUser("");
+                                        setNewServerName("");
+                                        setTimeout(() => {
+                                          setServerSaveState(null);
+                                          setShowAddServerForm(false);
+                                        }, 1200);
+                                      } catch (e) {
+                                        setServerSaveErr(
+                                          (e as Error)?.message ||
+                                            "添加失败，请重试",
+                                        );
+                                        setServerSaveState("err");
+                                      } finally {
+                                        setServerSaving(false);
+                                      }
+                                    }}
+                                    onCancel={() => {
                                       setShowAddServerForm(false);
                                       setNewServerHost("");
                                       setNewServerPort("22");
                                       setNewServerUser("");
                                       setNewServerName("");
                                     }}
-                                    className="px-3 py-1 ui-text-sm2 text-muted-foreground hover:text-foreground rounded-md transition-colors"
-                                  >
-                                    取消
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={async () => {
-                                      if (!newServerHost.trim()) return;
-                                      setShowAddServerForm(false);
-                                      const host = newServerHost.trim();
-                                      const port =
-                                        parseInt(newServerPort) || 22;
-                                      const username =
-                                        newServerUser.trim() || "user";
-                                      const name =
-                                        newServerName.trim() ||
-                                        `${username}@${host}`;
-                                      await addExternalService({
-                                        name,
-                                        host,
-                                        port,
-                                        username,
-                                        authType: "key",
-                                      });
-                                      storeActions.showToast({
-                                        type: "success",
-                                        title: "服务器已添加",
-                                      });
-                                    }}
-                                    className="px-3 py-1 ui-text-sm2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                    disabled={!newServerHost.trim()}
-                                  >
-                                    添加
-                                  </button>
+                                  />
                                 </div>
                               </div>
                             ) : externalServices.length === 0 ? (
                               <div className="px-3 py-6">
-                                <button
+                                <Button
+                                  variant="outline"
+                                  size="sm"
                                   type="button"
+                                  className="w-full"
                                   onClick={() => setShowAddServerForm(true)}
-                                  className="w-full flex items-center gap-2 px-3 py-3 ui-text-sm2 text-foreground/70 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
                                 >
-                                  <span className="size-5 flex items-center justify-center border border-current rounded text-sm leading-none">
-                                    +
-                                  </span>
-                                  <span>添加服务器</span>
-                                </button>
+                                  添加服务器
+                                </Button>
                               </div>
                             ) : (
                               <div className="max-h-32 overflow-y-auto py-1">
@@ -7923,16 +8357,15 @@ export function AgentFlowPanel() {
                                     </button>
                                   );
                                 })}
-                                <button
+                                <Button
+                                  variant="outline"
+                                  size="sm"
                                   type="button"
+                                  className="w-full mt-1"
                                   onClick={() => setShowAddServerForm(true)}
-                                  className="w-full flex items-center gap-2 px-3 py-2 ui-text-sm2 text-muted-foreground/60 hover:text-foreground/80 hover:bg-accent transition-colors border-t border-border/30 mt-1"
                                 >
-                                  <span className="size-4 flex items-center justify-center border border-dashed border-current rounded text-xs leading-none">
-                                    +
-                                  </span>
-                                  <span>添加服务器</span>
-                                </button>
+                                  添加服务器
+                                </Button>
                               </div>
                             )}
                           </div>
@@ -8033,7 +8466,7 @@ export function AgentFlowPanel() {
                     <ChevronDown className="size-3 text-muted-foreground shrink-0" />
                   </button>
                   {showBranchMenu && (
-                    <div className="absolute top-full left-0 mt-1 w-52 bg-popover rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
+                    <div className="absolute top-full left-0 mt-1 w-52 bg-card rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
                       {currentBranchInfo.parent && (
                         <button
                           type="button"
@@ -8103,10 +8536,11 @@ export function AgentFlowPanel() {
                 ) : item.kind === "compressing" ? (
                   <div
                     key={item.id}
-                    className="flex w-full items-center justify-center gap-2 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70"
+                    className="flex w-full items-center gap-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70"
                   >
+                    <div className="h-px flex-1 bg-border/60" />
                     <svg
-                      className="size-3.5 animate-spin text-muted-foreground/70"
+                      className="size-3.5 animate-spin text-muted-foreground/70 shrink-0"
                       viewBox="0 0 24 24"
                       fill="none"
                       stroke="currentColor"
@@ -8117,7 +8551,8 @@ export function AgentFlowPanel() {
                         strokeLinecap="round"
                       />
                     </svg>
-                    <span>{item.text}</span>
+                    <span className="shrink-0">{item.text}</span>
+                    <div className="h-px flex-1 bg-border/60" />
                   </div>
                 ) : item.kind === "divider" ? (
                   <div
@@ -8257,15 +8692,35 @@ export function AgentFlowPanel() {
                             break;
                           }
                         }
-                        // 同完成态：最后 text 段之后的段保留进折叠区，不丢弃。
+                        // 「最后一段文本」只有在它**真的位于末尾**时才算收尾总结，
+                        // 这时才把它提到过程卡下方（最常见形态：思考/工具 → 最终答复）。
+                        //
+                        // 若它后面还有段，那它不是总结、只是过程里的一句话——典型
+                        // 场景是模型先讲一段话、再调用 ask_user_question 然后本轮就
+                        // 停住等回答。旧逻辑无条件把最后一段文本提到卡下，于是真实的
+                        // [文字, 工具] 被渲染成 [工具, 文字]（"明明下面的话先输出，
+                        // ask 工具后使用，结果上 ask 工具还在上面"）。此时必须按时间序
+                        // 渲染：过程卡（文字之前的段）→ 文字 → 尾段。
+                        const isFinalText =
+                          lastTextIdx >= 0 &&
+                          lastTextIdx === allSegments.length - 1;
                         const processSegments =
-                          lastTextIdx >= 0
-                            ? allSegments.slice(0, lastTextIdx).concat(
-                                allSegments.slice(lastTextIdx + 1),
-                              )
-                            : allSegments;
+                          lastTextIdx < 0
+                            ? // 全程没有文本段（纯工具轮）：整段都留在过程卡里（原行为）
+                              allSegments
+                            : isFinalText
+                              ? allSegments
+                                  .slice(0, lastTextIdx)
+                                  .concat(allSegments.slice(lastTextIdx + 1))
+                              : // 非收尾文本：卡只装它**之前**的段，之后的段走 trailingSegments
+                                allSegments.slice(0, lastTextIdx);
                         const summarySegment =
                           lastTextIdx >= 0 ? allSegments[lastTextIdx] : null;
+                        // 尾段：仅当最后文本不位于末尾时非空（见上）。
+                        const trailingSegments =
+                          lastTextIdx >= 0 && !isFinalText
+                            ? allSegments.slice(lastTextIdx + 1)
+                            : [];
                         const answerSegments =
                           buildProcessSegments(answerBlocks);
                         // 「思考中」脉冲只在该状态真实成立时亮：最后一个非
@@ -8282,17 +8737,27 @@ export function AgentFlowPanel() {
                         }
                         return (
                           <>
-                            <details className="my-2 group/details" open={streamingActive}>
+                            <details
+                              ref={(el) => {
+                                if (el && !el.hasAttribute("open")) el.open = true;
+                              }}
+                              className="my-2 group/details"
+                            >
                               <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors mb-1">
-                                {!streamingActive && (
-                                  <>
-                                    <FoldTitle
-                                      label="已完成"
-                                      active={false}
-                                      fontSize={transcriptFontSize}
-                                    />
-                                  </>
-                                )}
+                                {/* 只有卡里真的装了过程段才显示「已完成」标题：
+                                    「最后文本不位于末尾」时 processSegments 可能为空
+                                    （消息以文字开头、后面全是工具调用），此时折叠卡里
+                                    没有内容，再挂一个孤零零的「已完成」就是纯噪声。 */}
+                                {!streamingActive &&
+                                  processSegments.length > 0 && (
+                                    <>
+                                      <FoldTitle
+                                        label="已完成"
+                                        active={false}
+                                        fontSize={transcriptFontSize}
+                                      />
+                                    </>
+                                  )}
                               </summary>
                               <ProcessWindow
                                 active={streamingActive}
@@ -8563,6 +9028,126 @@ export function AgentFlowPanel() {
                                   </div>
                                 );
                               })}
+                              {/* 尾段：按时间序画在「总结」之后，不塞回过程卡。
+                                  只有「最后一段文本并不位于末尾」时非空——例如模型先
+                                  说话、再调用 ask_user_question 然后本轮停住等回答。
+                                  塞回卡里会渲染成"工具在上、文字在下"，与真实顺序相反。 */}
+                              {trailingSegments.map((seg, si) => (
+                                <div
+                                  key={`trail-${si}`}
+                                  className="my-2 space-y-1"
+                                >
+                                  {seg.kind === "thinking" ? (
+                                    (() => {
+                                      const c = mergeThinkingContents(
+                                        seg.blocks.map((b) =>
+                                          b.type === "thinking"
+                                            ? String(b.content || "")
+                                            : "",
+                                        ),
+                                      );
+                                      if (!c.trim()) return null;
+                                      return (
+                                        <ThinkingFold
+                                          content={c}
+                                          fontSize={transcriptFontSize}
+                                          searchOpen={conversationSearchOpen}
+                                          searchQuery={conversationSearchQuery}
+                                          isSearchActive={false}
+                                        />
+                                      );
+                                    })()
+                                  ) : (
+                                    (() => {
+                                      const toolBlocks = seg.blocks.filter(
+                                        (b) => b.type === "tool_group",
+                                      );
+                                      return (
+                                        <>
+                                          {seg.blocks
+                                            .filter(
+                                              (b) => b.type !== "tool_group",
+                                            )
+                                            .map((b, i) => {
+                                              if (b.type === "text") {
+                                                return (
+                                                  <div
+                                                    key={i}
+                                                    style={{
+                                                      fontSize:
+                                                        transcriptFontSize,
+                                                    }}
+                                                  >
+                                                    {conversationSearchOpen &&
+                                                    conversationSearchQuery.trim() ? (
+                                                      <div className="whitespace-pre-wrap break-words">
+                                                        <HighlightText
+                                                          text={normalizeAcpContentRaw(
+                                                            b.content,
+                                                          )}
+                                                          query={
+                                                            conversationSearchQuery
+                                                          }
+                                                          active={false}
+                                                        />
+                                                      </div>
+                                                    ) : (
+                                                      <HelixMarkdown
+                                                        text={normalizeAcpContentRaw(
+                                                          b.content,
+                                                        )}
+                                                      />
+                                                    )}
+                                                  </div>
+                                                );
+                                              }
+                                              if (b.type === "file_change") {
+                                                return (
+                                                  <FileChangeSummary
+                                                    key={i}
+                                                    changes={b.changes}
+                                                  />
+                                                );
+                                              }
+                                              return null;
+                                            })}
+                                          {toolBlocks.length > 0 && (
+                                            <ToolStreamFold
+                                              blocks={toolBlocks}
+                                              fontSize={transcriptFontSize}
+                                              forceFold
+                                              isRunning={isRunning}
+                                            >
+                                              {toolBlocks
+                                                .filter(
+                                                  (tb) =>
+                                                    !(tb.steps ?? []).every(
+                                                      (s) =>
+                                                        s.type !==
+                                                          "tool_call" ||
+                                                        isSubAgentTool(
+                                                          s.toolName,
+                                                        ),
+                                                    ),
+                                                )
+                                                .map((tb, tbi) => (
+                                                  <InlineToolGroup
+                                                    key={`trail-tb-${tbi}`}
+                                                    steps={tb.steps}
+                                                    isRunning={isRunning}
+                                                    fontSize={
+                                                      transcriptFontSize
+                                                    }
+                                                  />
+                                                ))}
+                                            </ToolStreamFold>
+                                          )}
+                                        </>
+                                      );
+                                    })()
+                                  )}
+                                </div>
+                              ))}
                             </div>
                           </>
                         );
@@ -8626,24 +9211,27 @@ export function AgentFlowPanel() {
         </div>
       )}
 
-      {/* Scroll to bottom button */}
-      {userScrolledUp && sessionMessages.length > 0 && !approvalRequest && (
-        <div className="flex justify-center shrink-0 -my-1 relative z-10">
-          <button
-            onClick={jumpToBottom}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-muted hover:bg-accent border border-border ui-text-sm2 text-muted-foreground hover:text-foreground transition-all duration-200 shadow-sm"
-          >
-            <ArrowDown className="size-3.5" />
-          </button>
-        </div>
-      )}
-
+      {/* Scroll to bottom button — 悬浮在输入框上缘，不占布局空间。
+          此前是夹在消息列表与输入框之间的实体行（约 44px），一出现就把列表
+          视口压矮，列表底部本来可见的最新文字被挤出可视区，看起来像"按钮
+          行把后面的文字挡住了"。改为 absolute 覆盖层后列表高度恒定，出现/
+          消失不再引发任何内容位移。 */}
       {/* Bottom input */}
       {sessionMessages.length > 0 &&
         !approvalRequest &&
         !clarifyRequest &&
         pendingTaskCreations.length === 0 && (
-          <div className="bg-transparent shrink-0 mb-2 mt-2 w-full px-5">
+          <div className="relative bg-transparent shrink-0 mb-2 mt-2 w-full px-5">
+            {userScrolledUp && (
+              <div className="absolute -top-10 left-0 right-0 flex justify-center pointer-events-none z-20">
+                <button
+                  onClick={jumpToBottom}
+                  className="pointer-events-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-muted/95 hover:bg-accent border border-border ui-text-sm2 text-muted-foreground hover:text-foreground transition-all duration-200 shadow-md"
+                >
+                  <ArrowDown className="size-3.5" />
+                </button>
+              </div>
+            )}
             <div className="w-full max-w-[700px] mx-auto">
               {renderChatInput()}
             </div>

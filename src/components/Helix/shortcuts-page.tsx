@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useHelixStore, DEFAULT_SHORTCUTS } from "@/stores/helix-store";
+import { PageHeader } from "./settings-ui";
 
 export function ShortcutsPage() {
   const { customShortcuts, updateCustomShortcut, showToast } = useHelixStore();
@@ -81,10 +82,10 @@ export function ShortcutsPage() {
 
   return (
     <div className="space-y-6">
+      <PageHeader>快捷键</PageHeader>
       {systemShortcuts.length > 0 && (
         <section className="space-y-3">
-          <h3 className="ui-title font-semibold text-foreground">快捷键</h3>
-          <div className="rounded-xl border border-border/50 bg-card/50 shadow-sm overflow-hidden">
+          <div className="rounded-xl border border-border/40 bg-card/60 overflow-hidden">
             <div className="divide-y divide-border/50">
               {systemShortcuts.map(([id, s]) => (
                 <div

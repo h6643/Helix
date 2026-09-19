@@ -318,20 +318,18 @@ export const ThinkingFold = React.memo(function ThinkingFold({
   const [userOpen, setUserOpen] = useState(false);
   const open = active || userOpen;
   const bodyRef = React.useRef<HTMLDivElement | null>(null);
-  const userClickedRef = React.useRef(false);
+  const prevActiveRef = React.useRef(active);
 
   const detailsRef = React.useRef<HTMLDetailsElement | null>(null);
   React.useEffect(() => {
     const el = detailsRef.current;
     if (!el) return;
-    if (open && !el.open) {
+    const justActivated = active && !prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (justActivated && !el.open) {
       el.open = true;
-      el.setAttribute("data-force", "1");
-    } else if (!open && el.open && el.getAttribute("data-force") === "1" && !userClickedRef.current) {
-      el.open = false;
-      el.removeAttribute("data-force");
     }
-  }, [open]);
+  }, [active]);
 
   const shown = active ? body : userOpen ? body : summary || body.slice(0, 0) || body;
 
@@ -340,8 +338,7 @@ export const ThinkingFold = React.memo(function ThinkingFold({
       ref={detailsRef}
       className="group/think my-1 rounded-md"
       onToggle={(e) => {
-        const t = e.currentTarget as HTMLDetailsElement;
-        if (t.open) userClickedRef.current = true;
+        setUserOpen((e.currentTarget as HTMLDetailsElement).open);
       }}
     >
       <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
@@ -354,10 +351,15 @@ export const ThinkingFold = React.memo(function ThinkingFold({
           }`}
           style={{ fontSize: fontSize + 2 }}
         >
-          {kaomojiStatus ? `思考中 ${kaomojiStatus}` : active ? "思考中…" : "思考"}
+          {kaomojiStatus ? `思考中 ${kaomojiStatus}` : active ? "思考中" : "思考"}
         </span>
+        {active && summary && (
+          <span className="text-foreground/30 truncate max-w-[60%]" style={{ fontSize }}>
+            {summary}
+          </span>
+        )}
         {status && !active && (
-          <span className="text-foreground/30 text-[calc(var(--helix-transcript-size)*0.7143)]">
+          <span className="text-foreground/30 text-[calc(var(--helix-transcript-size)*0.7143)] ml-auto shrink-0">
             · {status}
           </span>
         )}
@@ -706,14 +708,34 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                     break;
                   }
                 }
+                // 「最后一段文本」只有在它**真的位于末尾**时才算收尾总结，这时才
+                // 提到过程卡下方（最常见形态：思考/工具 → 最终答复）。
+                //
+                // 若它后面还有段，那它不是总结、只是过程里的一句话——典型场景是模型
+                // 先讲一段话、再调用 ask_user_question 然后本轮停住等回答。旧逻辑
+                // 无条件把最后一段文本提到卡下，真实的 [文字, 工具] 就被渲染成
+                // [工具, 文字]（"明明下面的话先输出，ask 工具后使用，结果上 ask 工具
+                // 还在上面"）。此时按时间序渲染：过程卡（文字之前的段）→ 文字 → 尾段。
+                // 与主对话流式管线（agent-flow-panel 的同一处）保持一致。
+                const isFinalText =
+                  lastTextIdx >= 0 && lastTextIdx === allSegments.length - 1;
                 const processSegments =
-                  lastTextIdx >= 0
-                    ? allSegments.slice(0, lastTextIdx).concat(
-                        allSegments.slice(lastTextIdx + 1),
-                      )
-                    : allSegments;
+                  lastTextIdx < 0
+                    ? // 全程没有文本段（纯工具轮）：整段都留在过程卡里（原行为）
+                      allSegments
+                    : isFinalText
+                      ? allSegments
+                          .slice(0, lastTextIdx)
+                          .concat(allSegments.slice(lastTextIdx + 1))
+                      : // 非收尾文本：卡只装它**之前**的段，之后的段走 trailingSegments
+                        allSegments.slice(0, lastTextIdx);
                 const summarySegment =
                   lastTextIdx >= 0 ? allSegments[lastTextIdx] : null;
+                // 尾段：仅当最后文本不位于末尾时非空（见上）。
+                const trailingSegments =
+                  lastTextIdx >= 0 && !isFinalText
+                    ? allSegments.slice(lastTextIdx + 1)
+                    : [];
                 const hasProcess =
                   processSegments.length > 0 || showInlineReasoning;
                 // 思考中脉冲：仅流式且最后一段是思考段（与主对话
@@ -901,6 +923,106 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                         })}
                       </div>
                     )}
+                    {/* 尾段：按时间序画在「总结」之后，不塞回过程卡。
+                        只有「最后一段文本并不位于末尾」时非空——例如模型先说话、
+                        再调用 ask_user_question 然后本轮停住等回答。塞回卡里会渲染成
+                        "工具在上、文字在下"，与真实顺序相反。 */}
+                    {trailingSegments.map((seg, si) => (
+                      <div key={`trail-${si}`} className="my-2 space-y-1">
+                        {seg.kind === "thinking"
+                          ? (() => {
+                              const c = mergeThinkingContents(
+                                seg.blocks.map((b) =>
+                                  b.type === "thinking"
+                                    ? String(b.content || "")
+                                    : "",
+                                ),
+                              );
+                              if (!c.trim()) return null;
+                              return (
+                                <ThinkingFold
+                                  content={c}
+                                  fontSize={fontSize}
+                                  searchOpen={searchOpen}
+                                  searchQuery={searchQuery}
+                                  isSearchActive={isSearchActive}
+                                />
+                              );
+                            })()
+                          : (() => {
+                              const toolBlocks = seg.blocks.filter(
+                                (b) => b.type === "tool_group",
+                              );
+                              const otherBlocks = seg.blocks.filter(
+                                (b) =>
+                                  b.type !== "tool_group" &&
+                                  b.type !== "thinking",
+                              );
+                              return (
+                                <>
+                                  {otherBlocks.map((b, i) => {
+                                    if (b.type === "text") {
+                                      return (
+                                        <div key={i} style={{ fontSize }}>
+                                          {searchOpen && searchQuery.trim() ? (
+                                            <div className="whitespace-pre-wrap break-words">
+                                              <Highlighted
+                                                text={normalizeAcpContentRaw(
+                                                  b.content,
+                                                )}
+                                                query={searchQuery}
+                                                active={isSearchActive}
+                                              />
+                                            </div>
+                                          ) : (
+                                            <HelixMarkdown
+                                              text={normalizeAcpContentRaw(
+                                                b.content,
+                                              )}
+                                            />
+                                          )}
+                                        </div>
+                                      );
+                                    }
+                                    if (b.type === "file_change") {
+                                      return (
+                                        <FileChangeSummary
+                                          key={i}
+                                          changes={b.changes}
+                                        />
+                                      );
+                                    }
+                                    return null;
+                                  })}
+                                  {toolBlocks.length > 0 && (
+                                    <ToolStreamFold
+                                      blocks={toolBlocks}
+                                      fontSize={fontSize}
+                                    >
+                                      {toolBlocks
+                                        .filter(
+                                          (tb) =>
+                                            !(tb.steps ?? []).every(
+                                              (s) =>
+                                                s.type !== "tool_call" ||
+                                                isSubAgentTool(s.toolName),
+                                            ),
+                                        )
+                                        .map((tb, tbi) => (
+                                          <InlineToolGroup
+                                            key={`trail-tb-${tbi}`}
+                                            steps={tb.steps}
+                                            isRunning={false}
+                                            fontSize={fontSize}
+                                          />
+                                        ))}
+                                    </ToolStreamFold>
+                                  )}
+                                </>
+                              );
+                            })()}
+                      </div>
+                    ))}
                     {answerBlocks.length > 0 && (
                       <div
                         className="helix-md helix-answer mt-3"

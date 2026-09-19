@@ -745,7 +745,7 @@ export function FileTreePanel({
         <div className="shrink-0 flex items-center gap-1 px-2 py-1.5">
           <span
             className="pl-2 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium truncate flex-1"
-            title={root}
+            data-tip={root}
           >
             {(() => {
               const n = root.split(/[/\\]/).pop() || root;

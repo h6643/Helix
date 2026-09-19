@@ -70,7 +70,9 @@ const REAP_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// long, the model stream is considered wedged (free-tier upstreams do
 /// silently drop SSE streams). The turn is aborted instead of holding the
 /// UI in "工作中" until PROMPT_TIMEOUT (an hour).
-const STREAM_SILENCE_TIMEOUT: Duration = Duration::from_secs(180);
+/// 300s：实际观测到 agnes 等上游在工具调用后的下一次生成可能静默 3 分钟以上
+/// 才出流（180s 时误杀过两次，196s/199s 被中止）。放宽到 5 分钟。
+const STREAM_SILENCE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How often turn-wait loops re-check the watchdog between PROMPT_TIMEOUT
 /// deadlines.
 const WATCHDOG_TICK: Duration = Duration::from_secs(30);
@@ -559,11 +561,49 @@ impl PiInstance {
     }
 }
 
-/// Startup diagnostic logging to ~/.pi/agent/helix-spawn-debug.log was removed
-/// after the "连接中" spawn-deadlock was fixed. Kept as a no-op so the ~25
-/// call sites don't need to be touched; the file is no longer written.
-fn log_spawn_diag(_message: &str) {
-    // intentionally disabled
+/// Recovery-path diagnostic log: `~/.pi/agent/helix-recover.log`, rotated at
+/// 1MB (one `.1` backup kept). Every spawn / resume / restore /
+/// fingerprint-recovery / session-new step lands here with a UTC timestamp —
+/// without it a failed recovery chain (resume → storedId → fingerprint →
+/// session/new) is undebuggable: the release build drops stderr and the
+/// frontend swallows the concrete errors, so "找回对话失败" has always been
+/// unreproducible after the fact. Best-effort: IO errors are silently ignored
+/// (logging must never take the gateway down), and the file matches the
+/// session jsonl filenames' UTC clock so timestamps correlate directly.
+fn log_spawn_diag(message: &str) {
+    use std::io::Write;
+    static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_guard) = LOG_LOCK.lock() else {
+        return;
+    };
+    let Some(dir) = dirs::home_dir().map(|h| h.join(".pi/agent")) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("helix-recover.log");
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 1_000_000 {
+            let _ = std::fs::rename(&path, dir.join("helix-recover.log.1"));
+        }
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let ts = now_ms();
+    let (secs, ms) = (ts / 1000, ts % 1000);
+    let _ = writeln!(
+        f,
+        "[{:02}:{:02}:{:02}.{:03}] {}",
+        secs / 3600 % 24,
+        secs / 60 % 60,
+        secs % 60,
+        ms,
+        message
+    );
 }
 
 fn now_ms() -> u64 {
@@ -1579,6 +1619,10 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // immediately, and pi's queue serializes it ahead of the caller's
             // real prompt, preserving turn order without blocking the send.
             let seed = seed_history_prompt(params.get("messages"));
+            log_spawn_diag(&format!(
+                "session/new OK sid={session_id} seed_len={}",
+                seed.len()
+            ));
             if !seed.is_empty() {
                 // Fire-and-forget seed turn: register turn debt so the seed's
                 // agent_settled consumes the debt instead of releasing the
@@ -1666,6 +1710,7 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // Respawns the instance (switch_session restores the reaped
             // conversation from its session file) if it is not live.
             log_spawn_diag(&format!("session/resume: sid={session_id}"));
+            let resume_started = now_ms();
             let instance = match instance_for_session(&session_id, &state).await {
                 Ok(i) => i,
                 Err(e) => {
@@ -1675,6 +1720,10 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                     return Err(e);
                 }
             };
+            log_spawn_diag(&format!(
+                "session/resume OK sid={session_id} elapsed_ms={}",
+                now_ms() - resume_started
+            ));
             // Restore-time context read for the frontend's context ring:
             // session/new's seed-history replay can re-shape the active
             // branch, so estimate AFTER the switch has landed. `context_max`
@@ -1722,8 +1771,12 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .unwrap_or(session_id);
             // The resync path replaces the visible transcript with the
             // backend's authoritative history — return it in the shape
-            // mapBackendMessages reads (role + text/content, tool results
-            // collapsed to assistant text).
+            // mapBackendMessages reads (role + text/content). Plain user /
+            // assistant turns come back as text; `toolResult` entries are
+            // rebuilt into tool_group blocks (tool_call + tool_result steps)
+            // so the transcript renders them as real tool cards — including a
+            // proper ✕ failed card for an interrupted tool — instead of a
+            // flat "bash (错误):\n<output>" assistant text line.
             let pi_messages = instance
                 .request("get_messages", Value::Null, RPC_TIMEOUT)
                 .await?
@@ -1767,24 +1820,67 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                         }))
                     }
                     Some("toolResult") => {
-                        // Fold tool results into the assistant stream the way
-                        // the TUI transcript shows them (append to the prior
-                        // assistant turn is not possible here — emit as its
-                        // own assistant entry).
-                        let text = content_to_text(
-                            m.get("content").unwrap_or(&Value::Null),
-                        )
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_default();
+                        // Reconstruct a proper tool-step block (tool_call +
+                        // tool_result steps) instead of folding the result into
+                        // a flat assistant text line. The frontend's
+                        // transcript renderer shows this as a real tool card
+                        // (✕ glyph for failures), matching the live streaming
+                        // path — rather than the old "bash (错误):\n<output>"
+                        // plain text that looked like garbled output.
+                        let tool_name = m
+                            .get("toolName")
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool");
+                        let is_error =
+                            m.get("isError").and_then(Value::as_bool) == Some(true);
+                        let text = match m.get("content") {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(other) => content_to_text(other)
+                                .as_str()
+                                .map(str::to_string)
+                                .unwrap_or_default(),
+                            None => String::new(),
+                        };
+                        let timestamp = m.get("timestamp").cloned().unwrap_or(Value::Null);
+                        let msg_id = m
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let tool_params = m
+                            .get("toolParams")
+                            .cloned()
+                            .unwrap_or_else(|| json!({}));
+                        let status = if is_error { "failed" } else { "completed" };
+                        let call_id = format!("{}-call", msg_id);
+                        let result_id = format!("{}-result", msg_id);
                         Some(json!({
-                            "id": m.get("id").and_then(Value::as_str),
+                            "id": msg_id,
                             "role": "assistant",
-                            "text": format!("{} {}:\n{}",
-                                m.get("toolName").and_then(Value::as_str).unwrap_or("tool"),
-                                if m.get("isError").and_then(Value::as_bool) == Some(true) { "(错误)" } else { "" },
-                                text),
-                            "timestamp": m.get("timestamp"),
+                            "content": "",
+                            "timestamp": timestamp,
+                            "blocks": [{
+                                "type": "tool_group",
+                                "steps": [
+                                    {
+                                        "id": call_id,
+                                        "type": "tool_call",
+                                        "toolName": tool_name,
+                                        "status": status,
+                                        "toolParams": tool_params,
+                                        "content": "",
+                                        "timestamp": timestamp,
+                                    },
+                                    {
+                                        "id": result_id,
+                                        "type": "tool_result",
+                                        "toolName": tool_name,
+                                        "status": status,
+                                        "content": text,
+                                        "timestamp": timestamp,
+                                    },
+                                ],
+                            }],
                         }))
                     }
                     _ => None,
@@ -1841,13 +1937,23 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .get("first_user_message")
                 .and_then(Value::as_str)
                 .filter(|c| !c.is_empty());
-            let best = find_session_file_by_cwd(&cwd, first_user_message);
+            let candidates = match first_user_message {
+                Some(_) => find_session_files_by_cwd(&cwd, first_user_message, 5),
+                // 无指纹：退回旧"行数最多"启发（保持旧行为，仅前端未传指纹时）。
+                None => find_session_file_by_cwd(&cwd, None).into_iter().collect(),
+            };
             log_spawn_diag(&format!(
                 "latest_for_cwd: cwd={cwd:?} fp={:?} -> {:?}",
                 first_user_message.map(|f| f.chars().take(40).collect::<String>()),
-                best
+                candidates
             ));
-            Ok(json!({ "session_id": best }))
+            // session_ids = 按 mtime 新→旧的候选；session_id 保留第一个
+            // （旧前端只读它）。分叉会复制完整历史 → 父/分叉指纹相同，单一
+            // "最佳"答案有歧义，调用方需逐个尝试、跳过被其他对话占用的 sid。
+            Ok(json!({
+                "session_ids": candidates,
+                "session_id": candidates.first(),
+            }))
         }
         "session/set_mode" => {
             let instance = routed_instance(&params, &state).await?;
@@ -2446,14 +2552,27 @@ fn restore_session_instance(
     // (if any) keeps its stored cwd, so the respawn lands in the same project.
     // Cached paths are validated — the file may have been deleted since the
     // index was built (session cleanup / pi CLI housekeeping).
-    let session_file = SESSION_FILES
+    let session_file = match SESSION_FILES
         .lock()
         .unwrap()
         .get(session_id)
         .filter(|p| std::path::Path::new(p).exists())
         .cloned()
         .or_else(|| find_session_file(session_id))
-        .ok_or_else(|| format!("no session file for {session_id}"))?;
+    {
+        Some(f) => {
+            log_spawn_diag(&format!(
+                "restore: sid={session_id} file={f}"
+            ));
+            f
+        }
+        None => {
+            log_spawn_diag(&format!(
+                "restore FAILED sid={session_id}: no session file (cache miss + scan miss)"
+            ));
+            return Err(format!("no session file for {session_id}"));
+        }
+    };
     // The conversation's real project dir comes from the jsonl header — the
     // sessions folder name is lossy (every path separator and '-' encodes as
     // '-'), so it can't be recovered from the directory alone. Feeding it to
@@ -2485,14 +2604,28 @@ fn restore_session_instance(
     } else {
         spawn_instance(session_id.to_string(), None, state)?
     };
-    let data = instance.request_sync(
+    let data = match instance.request_sync(
         "switch_session",
         json!({ "sessionPath": session_file }),
         // Restoring a long conversation parses the whole jsonl — the same
         // heavyweight class as the spawn handshake, not a quick RPC.
         HANDSHAKE_TIMEOUT,
-    )?;
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            // Timeout / process death during the restore switch: the file
+            // exists but never came back — log it so the recover log shows
+            // WHICH layer of the chain failed and how long it hung.
+            log_spawn_diag(&format!(
+                "restore FAILED sid={session_id} switch_session: {e}"
+            ));
+            return Err(e);
+        }
+    };
     if data.get("cancelled").and_then(Value::as_bool) == Some(true) {
+        log_spawn_diag(&format!(
+            "restore FAILED sid={session_id}: pi declined the session switch"
+        ));
         return Err("pi declined the session switch".into());
     }
     // get_state + stamp (session_state is async-only; inline the sync pair).
@@ -2510,6 +2643,9 @@ fn restore_session_instance(
     if let Some(window) = instance.context_window() {
         let trimmed = trim_session_if_oversized(&session_file, window)?;
         if let Some(trimmed_path) = trimmed {
+            log_spawn_diag(&format!(
+                "restore: sid={session_id} oversized ({window} window) → switching to trimmed copy"
+            ));
             match instance.request_sync(
                 "switch_session",
                 json!({ "sessionPath": trimmed_path }),
@@ -2521,7 +2657,12 @@ fn restore_session_instance(
                         instance.stamp_session_from_state(Some(&fresh));
                     }
                 }
-                Err(e) => eprintln!("[pi agent] oversized-session trim switch failed: {e}"),
+                Err(e) => {
+                    log_spawn_diag(&format!(
+                        "restore WARNING sid={session_id} oversized-session trim switch failed: {e}"
+                    ));
+                    eprintln!("[pi agent] oversized-session trim switch failed: {e}");
+                }
             }
         }
     }
@@ -3033,10 +3174,95 @@ fn find_session_file(session_id: &str) -> Option<String> {
 /// In fingerprint mode each candidate's header (cwd, O(1)) plus its first user
 /// record (O(file), bounded by that record's position) is read. The legacy mode
 /// reads each candidate's line count (O(file-size)).
-fn find_session_file_by_cwd(target_cwd: &str, first_user_message: Option<&str>) -> Option<String> {
+/// Fingerprint-mode candidate list: files in `target_cwd` whose first user
+/// message contains `fp`, newest mtime first, up to `limit`.
+///
+/// Why a LIST: forks duplicate the whole history, so a parent and its branch
+/// share the SAME fingerprint — a single "best" answer is ambiguous (the
+/// branch is usually newer and would shadow the parent). The caller tries
+/// candidates in order and skips sids claimed by other conversations.
+///
+/// Seed compatibility: a rebuilt session's (session/new + seedHistory) first
+/// user message is the whole SEED — "（系统注入…）\n\n[用户]\n{real}\n\n[助手]…"
+/// — and the real first message only appears verbatim when the seed replay
+/// wasn't front-truncated (SEED_MAX_TURNS/CHARS drain oldest first). For
+/// seeded files we match against the first "[用户]" turn inside the seed so
+/// existing seed sessions are findable again; heavily truncated seeds still
+/// fall through (the frontend's storedId/sids retries cover them).
+fn find_session_files_by_cwd(
+    target_cwd: &str,
+    first_user_message: Option<&str>,
+    limit: usize,
+) -> Vec<String> {
     let target_norm = normalize_path(target_cwd);
     let fp = first_user_message.map(normalize_fingerprint);
-    let mut fp_best: Option<(std::time::SystemTime, String)> = None;
+    let mut fp_hits: Vec<(std::time::SystemTime, String)> = Vec::new();
+    scan_session_files(|id, path| {
+        let Some(file_cwd) = read_session_cwd(&path.to_string_lossy()) else {
+            return None;
+        };
+        if normalize_path(&file_cwd) != target_norm {
+            return None;
+        }
+        let Some(fp) = &fp else { return None };
+        let Some(first) = read_first_user_message(&path.to_string_lossy()) else {
+            return None;
+        };
+        let first_norm = normalize_fingerprint(&first);
+        // SEED 兼容：重建会话的磁盘首条消息是「（系统注入…）」包装，真实首条
+        // 消息藏在首个 [用户] 段里。剥离包装后再比对，否则种子会话永远无法被
+        // 指纹找回（"每次重启都铸造新 jsonl"的根因之一）。
+        let effective = if first_norm.contains("系统注入：以下是本次会话恢复的先前对话记录") {
+            extract_seed_fingerprint(&first_norm)
+        } else {
+            first_norm
+        };
+        let modified = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .unwrap_or(std::time::UNIX_EPOCH);
+        // CONTAINMENT, not equality: the caller's fingerprint is the
+        // conversation's *real* first user message while the file's may be a
+        // seed-wrapped superset (or contain casing/whitespace drift). Require
+        // ≥3 normalized chars so a 1–2 char first message can't spuriously
+        // match everything.
+        if fp.chars().count() >= 3 && effective.contains(fp.as_str()) {
+            fp_hits.push((modified, id.to_string()));
+        }
+        None::<()>
+    });
+    fp_hits.sort_by(|a, b| b.0.cmp(&a.0));
+    fp_hits.truncate(limit);
+    fp_hits.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Pull the conversation's real first user message out of a seed-wrapped one:
+/// "（系统注入：…）\n\n[用户]\n{real}\n\n[助手]\n…" → "{real}". Returns the
+/// input unchanged when no "[用户]" section exists (defensive).
+fn extract_seed_fingerprint(seed_text: &str) -> String {
+    let rest = match seed_text.find("[用户]") {
+        Some(i) => &seed_text[i + "[用户]".len()..],
+        None => return seed_text.to_string(),
+    };
+    let real = rest.strip_prefix('\n').unwrap_or(rest);
+    match real.find("\n\n[") {
+        Some(j) => real[..j].to_string(),
+        None => real.to_string(),
+    }
+}
+
+/// Single-best wrapper kept for other call sites: fingerprint mode delegates
+/// to the candidate list (newest hit); no-fingerprint mode keeps the legacy
+/// "longest chain in this cwd" heuristic (frontend only sends no-fingerprint
+/// for legacy/edge paths).
+fn find_session_file_by_cwd(target_cwd: &str, first_user_message: Option<&str>) -> Option<String> {
+    if first_user_message.is_some() {
+        return find_session_files_by_cwd(target_cwd, first_user_message, 1)
+            .into_iter()
+            .next();
+    }
+    let target_norm = normalize_path(target_cwd);
     let mut longest: Option<(u64, std::time::SystemTime, String)> = None;
     scan_session_files(|id, path| {
         let Some(file_cwd) = read_session_cwd(&path.to_string_lossy()) else {
@@ -3050,42 +3276,18 @@ fn find_session_file_by_cwd(target_cwd: &str, first_user_message: Option<&str>) 
             .and_then(|m| m.modified())
             .ok()
             .unwrap_or(std::time::UNIX_EPOCH);
-        if let Some(fp) = &fp {
-            if let Some(first) = read_first_user_message(&path.to_string_lossy()) {
-                // CONTAINMENT, not equality: the caller's fingerprint is the
-                // conversation's *real* first user message, but a rebuilt
-                // session's first user message is the whole SEED — the marker
-                // "（系统注入…）" + "[用户]\n{real message}" + "[助手]…". The real
-                // first message is therefore a SUBSTRING of the file's first
-                // user message, and exact equality never matches (that was the
-                // bug: recovery always fell through to session/new, minting a
-                // fresh .jsonl on every restart). Require ≥3 normalized chars so
-                // a 1–2 char first message can't spuriously match everything.
-                if fp.chars().count() >= 3
-                    && normalize_fingerprint(&first).contains(fp.as_str())
-                    && fp_best
-                        .as_ref()
-                        .is_none_or(|(m, _)| *m < modified)
-                {
-                    fp_best = Some((modified, id.to_string()));
-                }
-            }
-        } else {
-            // Count newlines in the file — pi writes one JSON record per line.
-            let lines =
-                std::fs::read(path).map(|b| b.iter().filter(|&&c| c == b'\n').count()).unwrap_or(0);
-            if longest
-                .as_ref()
-                .is_none_or(|(bl, bm, _)| (lines as u64, modified) > (*bl, *bm))
-            {
-                longest = Some((lines as u64, modified, id.to_string()));
-            }
+        // Count newlines in the file — pi writes one JSON record per line.
+        let lines =
+            std::fs::read(path).map(|b| b.iter().filter(|&&c| c == b'\n').count()).unwrap_or(0);
+        if longest
+            .as_ref()
+            .is_none_or(|(bl, bm, _)| (lines as u64, modified) > (*bl, *bm))
+        {
+            longest = Some((lines as u64, modified, id.to_string()));
         }
         None::<()>
     });
-    fp_best
-        .map(|(_, id)| id)
-        .or_else(|| longest.map(|(_, _, id)| id))
+    longest.map(|(_, _, id)| id)
 }
 
 /// Normalize a message into a comparison key: lowercase + collapse all
@@ -3742,6 +3944,56 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     // returned (foreground run completing fast): let the
                     // tool_execution_end handler emit the completion so the
                     // card order matches the transcript order.
+                }
+            }
+            // pi-subagents 扩展把子 agent 的工具活动写成 subagents:tool 记录
+            // （与 subagents:record 同机制——RPC/electron 模式下只有写进父会话
+            // 文件的记录能穿透到网关）。转发给前端，子 agent 卡片据此显示真实
+            // 工具调用，而不是一直"等待第一个工具调用…"。归属优先按子 agent
+            // 真实 id 精确匹配（后台运行 Agent 工具返回 background 时 record.
+            // agent_id 已更新）；前台运行尚未返回时按"仍在运行中的子 agent"
+            // （!tool_returned）归属。
+            if entry.get("type").and_then(Value::as_str) == Some("custom")
+                && entry.get("customType").and_then(Value::as_str) == Some("subagents:tool")
+            {
+                let data = entry.get("data").cloned().unwrap_or(Value::Null);
+                let agent_id = data
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let tool_name = data
+                    .get("toolName")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let status = data
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("running")
+                    .to_string();
+                if agent_id.is_empty() || tool_name.is_empty() {
+                    return;
+                }
+                let matched = {
+                    let subagents = instance.subagents.lock().unwrap();
+                    subagents
+                        .iter()
+                        .find(|(_, rec)| rec.agent_id == agent_id)
+                        .or_else(|| subagents.iter().find(|(_, rec)| !rec.tool_returned))
+                        .map(|(tool_call_id, _)| tool_call_id.clone())
+                };
+                if let Some(tool_call_id) = matched {
+                    emit_helix_event(
+                        "subagent.tool",
+                        &json!({
+                            "session_id": sid(),
+                            "subagent_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "tool_preview": tool_name,
+                            "status": status,
+                        }),
+                    );
                 }
             }
         }

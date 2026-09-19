@@ -56,6 +56,7 @@ export function BootOverlay() {
   // the cleanup cleared the 800ms timer — `isReady` never became true and the
   // overlay stayed on screen forever even after the gateway was ready.
   useEffect(() => {
+    // DEBUG: 强制卡在启动页，注释掉下面整段以恢复
     if (helixConnected && !isFadingOut) {
       setShowSuccess(true);
       setIsFadingOut(true);

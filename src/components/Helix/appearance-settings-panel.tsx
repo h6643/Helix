@@ -5,13 +5,15 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   SettingRow,
   SettingGroup,
-  SectionHeading,
+  PageHeader,
   PopupSelect,
   NumberField,
+  Toggle,
   useLockScrollOnOpen,
 } from "./settings-ui";
 import { THEME_SELECT_GROUPS } from "@/lib/themes";
 import { useHelixStore } from "@/stores/helix-store";
+import { Button } from "@/components/ui/button";
 
 /**
  * Custom theme picker. Native `<select>` + `<optgroup>` popups are unreliable
@@ -133,7 +135,7 @@ function ThemeStylePicker({
       {open && pos && (
         <div
           ref={popRef}
-          className="fixed z-50 w-40 bg-popover border border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto overscroll-contain"
+          className="fixed z-50 w-40 helix-popover-glass border border-border rounded-xl shadow-xl py-1 max-h-[70vh] overflow-y-auto overscroll-contain"
           style={{ left: pos.left, top: pos.top }}
         >
           {THEME_SELECT_GROUPS.map((g) => (
@@ -230,6 +232,10 @@ export function AppearanceSettingsPanel({
   const setBootBackgroundImage = useHelixStore(
     (s) => s.setBootBackgroundImage,
   );
+  const showGlobalBackground = useHelixStore((s) => s.showGlobalBackground);
+  const setGlobalBackgroundEnabled = useHelixStore(
+    (s) => s.setGlobalBackgroundEnabled,
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -260,8 +266,8 @@ export function AppearanceSettingsPanel({
   };
 
   return (
-    <div className="space-y-4">
-      <SectionHeading>外观</SectionHeading>
+    <div className="space-y-6">
+      <PageHeader>外观</PageHeader>
 
       <SettingGroup>
         <SettingRow label="配色风格" hint="选择浅色、深色或跟随系统主题。">
@@ -325,21 +331,23 @@ export function AppearanceSettingsPanel({
                 className="hidden"
                 onChange={handleImageUpload}
               />
-              <button
+              <Button
+                variant="outline"
+                size="sm"
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="ui-text-sm2 text-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 transition-colors hover:bg-muted/40"
               >
                 选择图片
-              </button>
+              </Button>
               {bootBackgroundImage && (
-                <button
+                <Button
+                  variant="outline"
+                  size="sm"
                   type="button"
                   onClick={() => setBootBackgroundImage(null)}
-                  className="ui-text-sm2 text-muted-foreground border border-border bg-muted/20 rounded-md px-3 py-1.5 transition-colors hover:bg-muted/40"
                 >
                   恢复默认
-                </button>
+                </Button>
               )}
             </div>
           </SettingRow>
@@ -351,16 +359,18 @@ export function AppearanceSettingsPanel({
                   alt="启动画面背景预览"
                   className="w-full h-full object-cover"
                 />
-                <button
-                  type="button"
-                  onClick={() => setBootBackgroundImage(null)}
-                  className="absolute top-2 right-2 p-1 rounded-full bg-background/80 text-foreground hover:bg-background transition-colors"
-                >
-                  <X className="size-3" />
-                </button>
               </div>
             </div>
           )}
+          <SettingRow
+            label="透明模式"
+            hint="开启后界面透明"
+          >
+            <Toggle
+              enabled={showGlobalBackground}
+              onToggle={() => setGlobalBackgroundEnabled(!showGlobalBackground)}
+            />
+          </SettingRow>
         </SettingGroup>
       </div>
     </div>

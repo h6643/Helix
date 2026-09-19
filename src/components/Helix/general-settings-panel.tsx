@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   SettingRow,
   SettingGroup,
-  SectionHeading,
+  PageHeader,
   PopupSelect,
 } from "./settings-ui";
 import { Button } from "@/components/ui/button";
@@ -186,8 +186,8 @@ export function GeneralSettingsPanel() {
   };
 
   return (
-    <div className="space-y-4">
-      <SectionHeading>常规</SectionHeading>
+    <div className="space-y-6">
+      <PageHeader>常规</PageHeader>
 
       <SettingGroup>
         <SettingRow label="HTTP 代理" hint="模型、MCP出口流量将经此代理">

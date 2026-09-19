@@ -30,7 +30,7 @@ import { GeneralSettingsPanel } from "./general-settings-panel";
 import { HookSettings } from "./hook-settings";
 import { ImageModelSettings } from "./image-model-settings";
 import { McpEditorForm, type McpFormData } from "./mcp-editor-form";
-import { PopupSelect, SettingGroup } from "./settings-ui";
+import { PageHeader, PopupSelect, SettingGroup, SaveBar } from "./settings-ui";
 import { ShortcutsPage } from "./shortcuts-page";
 import {
   ModelUsageStats,
@@ -54,42 +54,25 @@ import { getAllProviders, getBaseUrl } from "@/lib/providers";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore, type ApiConfig } from "@/stores/helix-store";
 
-function SectionTitle({
-  children,
-  className,
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={`flex items-center gap-2 mb-4 ${className || ""}`}>
-      <h3 className="ui-title font-semibold text-foreground">{children}</h3>
-    </div>
-  );
-}
-
 const ALL_PROVIDERS = getAllProviders();
+
+// 供应商的 API 格式 —— 写入 pi models.json 的 provider `api` 字段。
+// 取值与 pi-ai 的协议枚举一致，拼错会导致该 provider 的所有请求走错协议。
+const API_FORMATS = [
+  { label: "Anthropic Messages (/v1/messages)", value: "openai-completions" },
+  { label: "Responses (/responses)", value: "openai-responses" },
+  { label: "Chat Completions (/chat/completions)", value: "anthropic-messages" },
+];
+const DEFAULT_API_FORMAT = "openai-completions";
 
 const PERSONALITY_LABELS: Record<string, string> = {};
 
 const CUSTOM_PROVIDER_ID = "__custom__";
 
-/** Derive a readable provider name from its base URL instead of the legacy
+/* Derives a friendly provider name from a baseUrl hostname, falling back to the
  *  "配置 · <model>" pattern, which becomes meaningless once a profile accumulates
  *  models from multiple endpoints. */
-function deriveProviderName(baseUrl?: string, fallback?: string): string {
-  if (!baseUrl) return fallback || "配置";
-  try {
-    const host = new URL(baseUrl).hostname.toLowerCase();
-    if (host.includes("deepseek")) return "DeepSeek";
-    if (host.includes("openai")) return "OpenAI";
-    if (host.includes("anthropic")) return "Anthropic";
-    if (host.includes("google")) return "Gemini";
-    return host.replace(/^www\./, "") || fallback || "配置";
-  } catch {
-    return fallback || "配置";
-  }
-}
+
 
 interface SettingsProps {
   themeStyle: string;
@@ -143,13 +126,13 @@ const NAV_GROUPS: NavGroup[] = [
       { id: "api", label: "模型", icon: Globe },
       { id: "mcp", label: "MCP", icon: Plug },
       { id: "usage", label: "用量", icon: Activity },
-      { id: "agents", label: "Subagent", icon: Bot },
+      { id: "agents", label: "子智能体", icon: Bot },
     ],
   },
   {
     title: "集成",
     items: [
-      { id: "hook", label: "Hooks", icon: Workflow },
+      { id: "hook", label: "Hook", icon: Workflow },
       { id: "archive", label: "历史归档", icon: Archive },
     ],
   },
@@ -334,19 +317,22 @@ export function ApiSettings({
   }, [isResizing, setSidebarWidth, saveSidebarWidth]);
 
   useEffect(() => {
-    setIsCustomProvider(
-      !!localConfig.provider &&
-        !ALL_PROVIDERS.some((p) => p.id === localConfig.provider),
-    );
-  }, [localConfig.provider]);
-
-  useEffect(() => {
     setLocalConfig({ ...apiConfig });
-    setIsCustomProvider(
-      !!apiConfig.provider &&
-        !ALL_PROVIDERS.some((p) => p.id === apiConfig.provider),
-    );
   }, [apiConfig]);
+
+  // 挂载时把 activeProfile 自动带进供应商列表 + 右侧编辑表单，用户一打开
+  // 设置就能看到当前生效的供应商及其已添加的模型，不必先在左侧手动点一下
+  // 才把 addedModels 灌进来。保存后 activeProfile 会指向刚保存的那一条，
+  // 下次打开设置直接命中，符合"保存后回来看应该还在"的预期。
+  useEffect(() => {
+    if (!activeProfileId || apiProfiles.length === 0) return;
+    const p = apiProfiles.find((x) => x.id === activeProfileId);
+    if (!p) return;
+    setSelectedProviderId(p.id);
+    setEditingProfileId(p.id);
+    setLocalConfig({ ...p.config });
+    setAddedModels((p.models || []).map((id) => ({ id })));
+  }, [activeProfileId, apiProfiles]);
 
   // Mirror the backend's actual config when running in Electron so the form
   // shows what Helix is really using.
@@ -409,11 +395,19 @@ export function ApiSettings({
 
   const [showApiKey, setShowApiKey] = useState(false);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
-  const [isCustomProvider, setIsCustomProvider] = useState(false);
-  const [customInputFocused, setCustomInputFocused] = useState(false);
   const [showAddModelModal, setShowAddModelModal] = useState(false);
+  // 已添加的模型（第一个是默认模型）。每项的 contextWindow 单独落到
+  // models.json 里对应模型条目上，所以不能复用 localConfig.contextWindow。
+  const [addedModels, setAddedModels] = useState<
+    { id: string; contextWindow?: number }[]
+  >([]);
+  const [showAddModelDialog, setShowAddModelDialog] = useState(false);
+  const [pickedModel, setPickedModel] = useState("");
+  const [pickedContext, setPickedContext] = useState("");
+  const [manualModel, setManualModel] = useState("");
   type ModelTab = "main" | "vision" | "image";
   const [modelTab, setModelTab] = useState<ModelTab>("main");
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
 
   // ── Pi-backed model list ──────────────────────────────────────────────────
   // The dropdowns used to render only Helix's own static provider table plus
@@ -567,9 +561,11 @@ export function ApiSettings({
   }, [showModelDropdown]);
 
   // MCP state
-  const [reloadingMcp, setReloadingMcp] = useState(false);
   const [editingMcpName, setEditingMcpName] = useState<string | null>(null);
   const [isAddingMcp, setIsAddingMcp] = useState(false);
+  const [mcpSaving, setMcpSaving] = useState(false);
+  const [mcpSaveState, setMcpSaveState] = useState<null | "ok" | "err">(null);
+  const [mcpSaveErr, setMcpSaveErr] = useState<string | null>(null);
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
   const [defaultMcpCwd, setDefaultMcpCwd] = useState("");
   useEffect(() => {
@@ -710,48 +706,14 @@ export function ApiSettings({
   }, [loadArchives]);
 
   // ── API handlers ──────────────────────────────────────────────────────────
-  const handleSelectProvider = useCallback(
-    (providerId: string) => {
-      setAvailableModels([]);
-      if (providerId === CUSTOM_PROVIDER_ID) {
-        setIsCustomProvider(true);
-        setLocalConfig((prev) => ({
-          ...prev,
-          provider: "",
-          baseUrl: "",
-          model: "",
-        }));
-        return;
-      }
-      setIsCustomProvider(false);
-      setCustomInputFocused(false);
-      const provider = ALL_PROVIDERS.find((p) => p.id === providerId);
-      // Pi's own entries win: they carry the endpoint the backend will really
-      // dial, which for gateway providers differs from Helix's static table.
-      const piForProvider = piModels.filter((m) => m.provider === providerId);
-      setLocalConfig((prev) => ({
-        ...prev,
-        provider: providerId,
-        baseUrl:
-          piForProvider.find((m) => m.baseUrl)?.baseUrl ||
-          getBaseUrl(providerId) ||
-          prev.baseUrl,
-        model: piForProvider[0]?.id  || prev.model,
-      }));
-    },
-    [piModels],
-  );
-
   const handleCustomProviderChange = useCallback((providerValue: string) => {
     setLocalConfig((prev) => ({ ...prev, provider: providerValue }));
-    // Only auto-switch if user's input exactly matches a known provider ID
+    // 输入恰好命中已知 provider 时自动补 Base URL，省得再查一遍地址。
     if (providerValue.trim().length > 0) {
       const match = ALL_PROVIDERS.find(
         (p) => p.id.toLowerCase() === providerValue.trim().toLowerCase(),
       );
       if (match) {
-        setIsCustomProvider(false);
-        setCustomInputFocused(false);
         setLocalConfig((prev) => ({
           ...prev,
           provider: match.id,
@@ -761,14 +723,6 @@ export function ApiSettings({
       }
     }
   }, []);
-
-  const handleBlurCustomInput = useCallback(() => {
-    setCustomInputFocused(false);
-    if (!localConfig.provider) {
-      setIsCustomProvider(false);
-      setLocalConfig((prev) => ({ ...prev, provider: "" }));
-    }
-  }, [localConfig.provider]);
 
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [apiView, setApiView] = useState<"list" | "edit">("list");
@@ -893,7 +847,6 @@ export function ApiSettings({
   const handleAddProfile = useCallback(() => {
     setEditingProfileId(null);
     setLocalConfig({ provider: "", apiKey: "", baseUrl: "", model: "" });
-    setIsCustomProvider(false);
     setAvailableModels([]);
     setShowModelDropdown(false);
     setApiView("edit");
@@ -914,12 +867,11 @@ export function ApiSettings({
       if (!p) return;
       setEditingProfileId(id);
       setLocalConfig({ ...p.config });
-      setIsCustomProvider(
-        !!p.config.provider &&
-          !ALL_PROVIDERS.some((pr) => pr.id === p.config.provider),
-      );
       setAvailableModels([]);
       setShowModelDropdown(false);
+      // 编辑既有供应商时把已保存的模型带进卡片，否则列表会显示为空、
+      // 保存一次就把 models 数组清空。
+      setAddedModels((p.models || []).map((id) => ({ id })));
       setApiView("edit");
     },
     [apiProfiles],
@@ -930,60 +882,134 @@ export function ApiSettings({
     setEditingProfileId(null);
   }, []);
 
-  const handleSaveApi = useCallback(async () => {
-    if (!localConfig.baseUrl.trim()) {
-      showToast({ type: "error", title: "请填写 Base URL" });
+  // 把弹窗里选/填的模型加入当前供应商的模型列表。
+  const confirmAddModel = useCallback(() => {
+    const id = pickedModel.trim() || manualModel.trim();
+    if (!id) {
+      showToast({ type: "error", title: "请先获取并选择模型，或手动输入名称" });
       return;
     }
-    if (!localConfig.model.trim()) {
-      showToast({ type: "error", title: "请填写模型名称" });
+    const raw = pickedContext.trim();
+    const contextWindow = raw ? Number(raw) : undefined;
+    if (
+      contextWindow !== undefined &&
+      (!Number.isFinite(contextWindow) ||
+        !Number.isInteger(contextWindow) ||
+        contextWindow <= 0)
+    ) {
+      showToast({ type: "error", title: "模型上下文限制必须是正整数" });
+      return;
+    }
+    setAddedModels((prev) => [
+      ...prev.filter((m) => m.id !== id),
+      { id, contextWindow },
+    ]);
+    setPickedModel("");
+    setManualModel("");
+    setPickedContext("");
+    setModelSearch("");
+    setShowAddModelDialog(false);
+  }, [pickedModel, manualModel, pickedContext, showToast]);
+
+  // 保存状态（与「保存 Hooks 配置」一致的行内反馈，不依赖 toast）
+  const [apiSaving, setApiSaving] = useState(false);
+  const [apiSaveState, setApiSaveState] = useState<null | "ok" | "err">(null);
+  const [apiSaveErr, setApiSaveErr] = useState<string | null>(null);
+
+  const handleSaveApi = useCallback(async () => {
+    setApiSaving(true);
+    setApiSaveState(null);
+    setApiSaveErr(null);
+    let failed = false;
+    try {
+    if (!localConfig.baseUrl.trim()) {
+      failed = true;
+      setApiSaveErr("请填写 Base URL");
+      setApiSaveState("err");
+      return;
+    }
+    const savedModels = addedModels
+      .map((m) => m.id.trim())
+      .filter(Boolean);
+    if (savedModels.length === 0) {
+      failed = true;
+      setApiSaveErr("请至少添加一个模型");
+      setApiSaveState("err");
       return;
     }
     if (
-      localConfig.contextWindow !== undefined &&
-      (!Number.isFinite(localConfig.contextWindow) ||
-        !Number.isInteger(localConfig.contextWindow) ||
-        localConfig.contextWindow <= 0)
+      addedModels.some(
+        (m) =>
+          m.contextWindow !== undefined &&
+          (!Number.isFinite(m.contextWindow) ||
+            !Number.isInteger(m.contextWindow) ||
+            m.contextWindow <= 0),
+      )
     ) {
-      showToast({ type: "error", title: "上下文窗口必须是正整数" });
+      failed = true;
+      setApiSaveErr("模型上下文限制必须是正整数");
+      setApiSaveState("err");
       return;
     }
-    const keyMissing = !localConfig.apiKey.trim();
-    // Store ONLY the single chosen model — NOT the full fetched list. The model
-    // list is fetched live when the selector is opened (renderModelSelector), so
-    // persisting the fetched list here would only create a stale cache that hides
-    // newly-added models (e.g. a freshly added DeepSeek variant) until the next manual refresh.
-    const profileModels = [localConfig.model].filter(Boolean) as string[];
+    // 第一个模型是默认模型（写入 settings.json 的 defaultModel），其余只进
+    // models.json 的模型列表；每个模型的上下文限制落在各自条目上。
+    const firstModel = addedModels.find((m) => m.id.trim())!;
+    const finalConfig: ApiConfig = {
+      ...localConfig,
+      apiFormat: localConfig.apiFormat || DEFAULT_API_FORMAT,
+      model: firstModel.id,
+      contextWindow: firstModel.contextWindow,
+    };
+    // Persist the whole added list (the fetched list stays in-memory: it is
+    // re-fetched whenever the selector opens, so caching it would only hide
+    // newly added models until a manual refresh).
+    const profileModels = savedModels;
     // Bind to current profile: update the active one, otherwise reuse a matching
     // profile or create a new named one.
+    const profileName = localConfig.provider.trim().replace(/^custom:/, "") || "配置";
     if (editingProfileId) {
-      updateApiProfileConfig(editingProfileId, localConfig, profileModels);
+      updateApiProfileConfig(editingProfileId, finalConfig, profileModels);
+      renameApiProfile(editingProfileId, profileName);
       setActiveProfile(editingProfileId);
     } else {
       const dup = apiProfiles.find(
         (p) =>
-          p.config.baseUrl === localConfig.baseUrl &&
-          p.config.apiKey === localConfig.apiKey,
+          p.config.baseUrl === finalConfig.baseUrl &&
+          p.config.apiKey === finalConfig.apiKey,
       );
       if (dup) {
-        // Same endpoint — merge models into existing profile
-        const mergedModels = [
-          ...new Set([...(dup.models || []), ...profileModels]),
-        ];
-        updateApiProfileConfig(dup.id, localConfig, mergedModels);
+        // Same endpoint — reuse that profile and let this card's list be the
+        // provider's authoritative model list (deletions in the card apply).
+        updateApiProfileConfig(dup.id, finalConfig, profileModels);
+        renameApiProfile(dup.id, profileName);
         setActiveProfile(dup.id);
       } else {
-        const name = deriveProviderName(
-          localConfig.baseUrl,
-          localConfig.model
-            ? `配置 · ${localConfig.model}`
-            : `配置 ${apiProfiles.length + 1}`,
-        );
-        const id = addApiProfile(name, localConfig, profileModels);
+        const id = addApiProfile(profileName, finalConfig, profileModels);
         setActiveProfile(id);
       }
     }
-    setApiConfig(localConfig);
+    // 让聊天输入框的两级模型选择器立刻看到这个供应商。`providers` 只在启动
+    // 恢复时从 apiProfiles 重建，不同步的话保存完得重启才看得到刚加的模型。
+    // 按 baseUrl 复用已有条目，避免重复保存一次就多一张重复的供应商卡片。
+    {
+      const st = useHelixStore.getState();
+      const existing =
+        st.providers.find(
+          (p) =>
+            p.baseUrl === finalConfig.baseUrl &&
+            (!finalConfig.apiKey || p.apiKey === finalConfig.apiKey),
+        ) || st.providers.find((p) => p.baseUrl === finalConfig.baseUrl);
+      upsertProvider({
+        id: existing?.id,
+        name: finalConfig.provider.trim(),
+        baseUrl: finalConfig.baseUrl,
+        // 留空就沿用该条目已有的 key，别把已保存的密钥覆盖成空串。
+        apiKey: finalConfig.apiKey.trim() || existing?.apiKey || "",
+        models: profileModels,
+        defaultModel: profileModels[0],
+      });
+    }
+    setApiConfig(finalConfig);
     // Keep activeModel in sync with the saved model. Without this the chat
     // dropdown highlight (activeModel-first) and the settings backend mirror
     // (which guards on activeModel || cur.model) would keep pinning the
@@ -1014,7 +1040,7 @@ export function ApiSettings({
     {
       const st = useHelixStore.getState();
       const pid = st.providers.find(
-        (p) => p.baseUrl === localConfig.baseUrl,
+        (p) => p.baseUrl === finalConfig.baseUrl,
       )?.id;
       if (pid) st.clearProviderModels(pid);
     }
@@ -1025,15 +1051,32 @@ export function ApiSettings({
     if (isElectron() || helix?.setConfig) {
       try {
         const cfg = {
-          model: localConfig.model,
+          model: finalConfig.model,
           provider:
-            localConfig.provider && localConfig.provider !== "__custom__"
-              ? localConfig.provider
+            finalConfig.provider && finalConfig.provider !== "__custom__"
+              ? finalConfig.provider
               : "custom",
-          baseUrl: localConfig.baseUrl,
-          apiKey: localConfig.apiKey,
-          contextWindow: localConfig.contextWindow,
+          baseUrl: finalConfig.baseUrl,
+          apiKey: finalConfig.apiKey,
+          contextWindow: finalConfig.contextWindow,
+          api: finalConfig.apiFormat,
         };
+        // Register the whole model list first (per-model contextWindow + the
+        // API format), then point pi's default at the first model.
+        if (typeof helix?.setProviderModels === "function") {
+          await helix.setProviderModels({
+            provider: cfg.provider,
+            baseUrl: cfg.baseUrl,
+            apiKey: cfg.apiKey,
+            api: cfg.api,
+            models: addedModels
+              .filter((m) => m.id.trim())
+              .map((m) => ({
+                id: m.id.trim(),
+                contextWindow: m.contextWindow,
+              })),
+          });
+        }
         await helix.setConfig(cfg);
         // Persist the active profile so the next cold start re-asserts it
         // into Helix config.yaml (no hardcoded pin, free switching preserved).
@@ -1042,24 +1085,23 @@ export function ApiSettings({
         // with the updated config. Without this, a stale session ID could be
         // reused against a restarted gateway, producing 401 errors.
         useGatewayStore.getState().setHelixSessionId(null);
-        showToast({
-          type: "success",
-          title: keyMissing
-            ? "已保存并同步到 Helix（复用其已配置密钥）"
-            : "API 配置已保存（已同步到 Helix）",
-        });
-      } catch (err) {
-        showToast({
-          type: "warning",
-          title: "API 配置已保存（Helix 同步失败）",
-        });
+      } catch {
+        failed = true;
+        setApiSaveErr("配置已保存，但 Helix 同步失败");
       }
-    } else {
-      showToast({ type: "success", title: "API 配置已保存" });
     }
-    setApiView("list");
+    if (!failed) {
+      setApiSaveState("ok");
+      setTimeout(() => setApiSaveState(null), 2000);
+    } else {
+      setApiSaveState("err");
+    }
+    } finally {
+      setApiSaving(false);
+    }
   }, [
     localConfig,
+    addedModels,
     editingProfileId,
     apiProfiles,
     setApiConfig,
@@ -1067,6 +1109,7 @@ export function ApiSettings({
     updateApiProfileConfig,
     setActiveProfile,
     addApiHistory,
+    upsertProvider,
     persistToStorage,
     showToast,
   ]);
@@ -1084,31 +1127,6 @@ export function ApiSettings({
     }
   }, []);
 
-  const handleReloadMcp = useCallback(async () => {
-    if (reloadingMcp) return;
-    setReloadingMcp(true);
-    try {
-      await helixApi()!.send("reload.mcp", {
-        session_id: helixSessionId,
-        confirm: true,
-      });
-      showToast({
-        type: "success",
-        title: "MCP 工具已重新加载",
-        description: "新的工具 schema 将应用到当前会话",
-      });
-      setTimeout(fetchMcpStatus, 1000);
-    } catch (e: any) {
-      showToast({
-        type: "error",
-        title: "MCP 重新加载失败",
-        description: String(e?.message || e),
-      });
-    } finally {
-      setReloadingMcp(false);
-    }
-  }, [reloadingMcp, helixSessionId, showToast, fetchMcpStatus]);
-
   const resetMcpForm = useCallback(() => {
     setMcpForm({ name: "", type: "local", command: "", url: "", args: "" });
   }, []);
@@ -1116,22 +1134,29 @@ export function ApiSettings({
   const handleSaveMcp = useCallback(async () => {
     const name = mcpForm.name.trim();
     if (!name) {
-      showToast({ type: "error", title: "请填写服务器名称" });
+      setMcpSaveState("err");
+      setMcpSaveErr("请填写服务器名称");
       return;
     }
     if (mcpForm.type === "local" && !mcpForm.command.trim()) {
-      showToast({ type: "error", title: "请填写启动命令" });
+      setMcpSaveState("err");
+      setMcpSaveErr("请填写启动命令");
       return;
     }
     if (mcpForm.type === "remote" && !mcpForm.url.trim()) {
-      showToast({ type: "error", title: "请填写 URL" });
+      setMcpSaveState("err");
+      setMcpSaveErr("请填写 URL");
       return;
     }
     const api = (window as any).electron?.mcpConfig;
     if (!api?.save) {
-      showToast({ type: "error", title: "当前环境不支持写入 mcp.json" });
+      setMcpSaveState("err");
+      setMcpSaveErr("当前环境不支持写入 mcp.json");
       return;
     }
+    setMcpSaving(true);
+    setMcpSaveState(null);
+    setMcpSaveErr(null);
     const cmdParts = [
       mcpForm.command.trim(),
       ...mcpForm.args.trim().split(/\s+/),
@@ -1165,10 +1190,8 @@ export function ApiSettings({
     try {
       const r = await api.save(servers);
       if (!r?.ok) {
-        showToast({
-          type: "error",
-          title: `保存失败：${r?.error || "未知错误"}`,
-        });
+        setMcpSaveState("err");
+        setMcpSaveErr(`保存失败：${r?.error || "未知错误"}`);
         return;
       }
       // 新加的服务器只留在 config.yaml（网关级），不重复放进应用列表。
@@ -1177,19 +1200,13 @@ export function ApiSettings({
       else if (mcpServers[name]) removeMcpServer(name);
       await persistToStorage();
       await reloadGatewayMcp();
-      showToast({
-        type: "success",
-        title: `服务器 "${name}" 已保存到 config.yaml`,
-      });
-      setEditingMcpName(null);
-      setIsAddingMcp(false);
-      resetMcpForm();
+      setMcpSaveState("ok");
       setTimeout(fetchMcpStatus, 1000);
     } catch (e) {
-      showToast({
-        type: "error",
-        title: `保存失败：${(e as Error)?.message || e}`,
-      });
+      setMcpSaveState("err");
+      setMcpSaveErr(`保存失败：${(e as Error)?.message || e}`);
+    } finally {
+      setMcpSaving(false);
     }
   }, [
     mcpForm,
@@ -1199,8 +1216,6 @@ export function ApiSettings({
     removeMcpServer,
     persistToStorage,
     reloadGatewayMcp,
-    showToast,
-    resetMcpForm,
     fetchMcpStatus,
     resolveDefaultMcpCwd,
   ]);
@@ -1272,23 +1287,29 @@ export function ApiSettings({
   const handleSaveGatewayMcp = useCallback(async () => {
     const name = mcpForm.name.trim();
     if (!name) {
-      showToast({ type: "error", title: "请填写服务器名称" });
+      setMcpSaveState("err");
+      setMcpSaveErr("请填写服务器名称");
       return;
     }
     if (mcpForm.type === "local" && !mcpForm.command.trim()) {
-      showToast({ type: "error", title: "请填写启动命令" });
+      setMcpSaveState("err");
+      setMcpSaveErr("请填写启动命令");
       return;
     }
     if (mcpForm.type === "remote" && !mcpForm.url.trim()) {
-      showToast({ type: "error", title: "请填写 URL" });
+      setMcpSaveState("err");
+      setMcpSaveErr("请填写 URL");
       return;
     }
     const api = (window as any).electron?.mcpConfig;
     if (!api?.save) {
-      showToast({ type: "error", title: "当前环境不支持保存" });
+      setMcpSaveState("err");
+      setMcpSaveErr("当前环境不支持保存");
       return;
     }
-
+    setMcpSaving(true);
+    setMcpSaveState(null);
+    setMcpSaveErr(null);
     const cmdParts = [
       mcpForm.command.trim(),
       ...mcpForm.args.trim().split(/\s+/),
@@ -1322,30 +1343,23 @@ export function ApiSettings({
     try {
       const r = await api.save(servers);
       if (!r?.ok) {
-        showToast({
-          type: "error",
-          title: `保存失败：${r?.error || "未知错误"}`,
-        });
+        setMcpSaveState("err");
+        setMcpSaveErr(`保存失败：${r?.error || "未知错误"}`);
         return;
       }
-      showToast({ type: "success", title: `服务器 "${name}" 已保存` });
-      setGatewayEditing(null);
-      setIsAddingMcp(false);
-      resetMcpForm();
+      setMcpSaveState("ok");
       await reloadGatewayMcp();
       setTimeout(fetchMcpStatus, 1000);
     } catch (e) {
-      showToast({
-        type: "error",
-        title: `保存失败：${(e as Error)?.message || e}`,
-      });
+      setMcpSaveState("err");
+      setMcpSaveErr(`保存失败：${(e as Error)?.message || e}`);
+    } finally {
+      setMcpSaving(false);
     }
   }, [
     mcpForm,
     gatewayEditing,
     gatewayMcp,
-    showToast,
-    resetMcpForm,
     reloadGatewayMcp,
     fetchMcpStatus,
     resolveDefaultMcpCwd,
@@ -1717,232 +1731,148 @@ export function ApiSettings({
       case "api":
         return (
           <div className="space-y-6">
-            {/* Title + add model */}
-            <div className="flex items-center justify-between">
-              <h1 className="ui-title font-semibold text-foreground tracking-tight">
-                模型设置
-              </h1>
-              {modelTab === "main" && !showAddModelModal && (
-                <button
-                  onClick={() => {
-                    setLocalConfig({
-                      provider: "",
-                      apiKey: "",
-                      baseUrl: "",
-                      model: "",
-                    });
-                    setIsCustomProvider(false);
-                    setAvailableModels([]);
-                    setShowModelDropdown(false);
-                    setShowAddModelModal(true);
-                  }}
-                  className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
-                >
-                  添加模型
-                </button>
-              )}
-              {modelTab === "main" && showAddModelModal && (
-                <button
-                  onClick={() => setShowAddModelModal(false)}
-                  className="text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-accent/60 rounded-lg px-2 py-1 transition-colors"
-                  data-tip="关闭"
-                >
-                  关闭
-                </button>
-              )}
-            </div>
-
-            {/* Sub-tabs: 对话 / 视觉 */}
-            <div className="flex items-center gap-1 bg-muted/60 rounded-full p-1 w-fit">
-              <button
-                onClick={() => setModelTab("main")}
-                className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
-                  modelTab === "main"
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                对话
-              </button>
-              <button
-                onClick={() => setModelTab("vision")}
-                className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
-                  modelTab === "vision"
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                视觉
-              </button>
-              <button
-                onClick={() => setModelTab("image")}
-                className={`px-3.5 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
-                  modelTab === "image"
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                生图
-              </button>
-            </div>
-
-            {modelTab === "main" ? (
-              !showAddModelModal ? (
-                <div className="max-w-3xl space-y-6">
-                  <ModelHistoryList />
-                  <ModelUsageStats />
+            <PageHeader>模型设置</PageHeader>
+            {/* ── Left-right split layout ── */}
+            <div className="flex gap-5 items-stretch">
+              {/* Left sidebar — tabs + provider list */}
+              <div className="w-60 shrink-0 flex flex-col rounded-xl border border-border/40 bg-card/60 overflow-hidden">
+                <div className="px-3 pt-3 pb-2">
+                    <div className="flex items-center gap-1 bg-muted/60 rounded-full p-1">
+                    <button
+                      onClick={() => setModelTab("main")}
+                      className={`flex-1 px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
+                        modelTab === "main"
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      对话
+                    </button>
+                    <button
+                      onClick={() => setModelTab("vision")}
+                      className={`flex-1 px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
+                        modelTab === "vision"
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      视觉
+                    </button>
+                    <button
+                      onClick={() => setModelTab("image")}
+                      className={`flex-1 px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
+                        modelTab === "image"
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      生图
+                    </button>
+                  </div>
                 </div>
-              ) : (
-                /* Add model form */
-                <SettingGroup>
-                  <div className="p-4 space-y-3">
-                    {/* Provider */}
-                    <div>
-                      <label className="block ui-text font-medium text-foreground mb-1.5">
-                        Provider
-                      </label>
-                      {!isCustomProvider ? (
-                        <PopupSelect
-                          value={localConfig.provider}
-                          onChange={handleSelectProvider}
-                          placeholder="请选择 Provider"
-                          className="w-full ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2"
-                          options={[
-                            ...ALL_PROVIDERS.map((p) => ({
-                              label: `${p.name} (${p.id})`,
-                              value: p.id,
-                            })),
-                            { label: "＋ 自定义", value: CUSTOM_PROVIDER_ID },
-                          ]}
-                        />
-                      ) : (
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={localConfig.provider}
-                            onChange={(e) =>
-                              handleCustomProviderChange(e.target.value)
-                            }
-                            onFocus={() => setCustomInputFocused(true)}
-                            onBlur={handleBlurCustomInput}
-                            placeholder="输入 Provider 名称"
-                            className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
-                            autoFocus
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setIsCustomProvider(false);
-                              setCustomInputFocused(false);
-                            }}
-                            className="px-3 py-2 bg-muted/50 border border-border/50 rounded-lg text-[length:var(--helix-transcript-size)] text-foreground hover:bg-accent/50 transition-colors"
-                            data-tip="返回列表"
-                          >
-                            返回
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                {modelTab === "main" && (
+                  <>
+                    <div className="flex-1 overflow-y-auto px-2 py-1 space-y-0.5">
+                    {apiProfiles.map((p) => {
+                      const isActive = selectedProviderId === p.id;
+                      return (
+                        <button
+                          key={p.id}
+                          onClick={() => {
+                            setSelectedProviderId(p.id);
+                            setEditingProfileId(p.id);
+                            setLocalConfig({ ...p.config });
+                            setAddedModels(
+                              (p.models || []).map((id) => ({ id })),
+                            );
+                            setAvailableModels([]);
+                            setShowModelDropdown(false);
+                          }}
+                          className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors ${
+                            isActive
+                              ? "bg-primary/10 text-primary"
+                              : "text-foreground hover:bg-muted/50"
+                          }`}
+                        >
+                          <span className="min-w-0 flex-1 truncate text-[length:var(--helix-transcript-size)] font-medium">
+                            {p.config.provider || p.name}
+                          </span>
+                          {p.config.apiKey && (
+                            <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="p-2 border-t border-border/30">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => {
+                        setSelectedProviderId(null);
+                        setEditingProfileId(null);
+                        setLocalConfig({
+                          provider: "",
+                          apiKey: "",
+                          baseUrl: "",
+                          model: "",
+                          apiFormat: DEFAULT_API_FORMAT,
+                        });
+                        setAddedModels([]);
+                        setAvailableModels([]);
+                        setShowModelDropdown(false);
+                      }}
+                    >
+                      添加供应商
+                    </Button>
+                  </div>
+                  </>
+                )}
+              </div>
 
-                    {/* Base URL */}
-                    <div>
-                      <label className="block ui-text font-medium text-foreground mb-1.5">
-                        Base URL
-                      </label>
-                      <input
-                        type="text"
-                        value={localConfig.baseUrl}
-                        onChange={(e) =>
-                          setLocalConfig((prev) => ({
-                            ...prev,
-                            baseUrl: e.target.value,
-                          }))
-                        }
-                        placeholder="https://api.openai.com/v1"
-                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
-                      />
-                    </div>
-
-                    {/* API Key */}
-                    <div>
-                      <label className="block ui-text font-medium text-foreground mb-1.5">
-                        API Key
-                      </label>
-                      <div className="relative">
+                {/* Right content */}
+                <div className="flex-1 min-w-0 flex flex-col">
+                  {modelTab === "main" ? (
+                    <>
+                      <SettingGroup className="flex-1 flex flex-col">
+                    <div className="p-5 space-y-4 flex-1 flex flex-col">
+                      <div className="flex items-center gap-3">
                         <input
-                          type={showApiKey ? "text" : "password"}
-                          value={localConfig.apiKey}
+                          type="text"
+                          value={localConfig.provider}
                           onChange={(e) =>
+                            handleCustomProviderChange(e.target.value)
+                          }
+                          placeholder="供应商名称"
+                          className="flex-1 px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text font-semibold text-foreground placeholder:text-muted-foreground/40"
+                        />
+                        <Toggle
+                          enabled={!!localConfig.apiKey}
+                          onToggle={() =>
                             setLocalConfig((prev) => ({
                               ...prev,
-                              apiKey: e.target.value,
+                              apiKey: prev.apiKey ? "" : "enabled",
                             }))
                           }
-                          placeholder="sk-..."
-                          className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
                         />
-                        <button
-                          type="button"
-                          onClick={() => setShowApiKey(!showApiKey)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 hover:text-foreground transition-colors"
-                        >
-                          {showApiKey ? "隐藏" : "显示"}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Context window */}
-                    <div>
-                      <label className="block ui-text font-medium text-foreground mb-1.5">
-                        上下文窗口
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        step={1000}
-                        value={localConfig.contextWindow ?? ""}
-                        onChange={(e) => {
-                          const raw = e.target.value.trim();
-                          setLocalConfig((prev) => ({
-                            ...prev,
-                            contextWindow: raw ? Number(raw) : undefined,
-                          }));
-                        }}
-                        className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
-                      />
-                      <p className="mt-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70"></p>
-                    </div>
-
-                    {/* Model */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="block ui-text font-medium text-foreground">
-                          模型名称
-                        </label>
-                        <button
-                          type="button"
-                          onClick={handleFetchModels}
-                          disabled={isLoadingModels}
-                          className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-primary hover:text-primary/80 disabled:text-muted-foreground transition-colors"
-                        >
-                          {isLoadingModels ? "获取中..." : "获取模型列表"}
-                        </button>
-                      </div>
-                      {availableModels.length > 0 ? (
-                        <div className="relative" ref={modelDropdownRef}>
+                        {editingProfileId && (
                           <button
-                            type="button"
-                            onClick={() =>
-                              setShowModelDropdown(!showModelDropdown)
-                            }
-                            className="w-full flex items-center justify-between ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2 transition-colors"
+                            onClick={async (e) => {
+                              await handleRemoveProfile(e, editingProfileId);
+                              setSelectedProviderId(null);
+                              setEditingProfileId(null);
+                              setLocalConfig({
+                                provider: "",
+                                apiKey: "",
+                                baseUrl: "",
+                                model: "",
+                              });
+                              setAddedModels([]);
+                            }}
                           >
-                            <span>{localConfig.model || "选择模型"}</span>
                             <svg
-                              className={`size-4 text-muted-foreground transition-transform ${showModelDropdown ? "rotate-180" : ""}`}
-                              xmlns="http://www.w3.org/2000/svg"
-                              width="14"
-                              height="14"
+                              className="size-4"
                               viewBox="0 0 24 24"
                               fill="none"
                               stroke="currentColor"
@@ -1950,18 +1880,241 @@ export function ApiSettings({
                               strokeLinecap="round"
                               strokeLinejoin="round"
                             >
-                              <path d="m6 9 6 6 6-6" />
+                              <path d="M3 6h18" />
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                              <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                             </svg>
                           </button>
-                          {showModelDropdown && (
-                            <div className="absolute bottom-full left-0 right-0 mb-1.5 z-50 rounded-lg border border-border/60 bg-card/95 backdrop-blur-sm shadow-lg shadow-black/10 overflow-hidden">
-                              {/* Toolbar: search + sort, fixed above the list */}
-                              <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border/40 bg-card/80">
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="block ui-text font-medium text-foreground mb-1.5">
+                          Base URL
+                        </label>
+                        <input
+                          type="text"
+                          value={localConfig.baseUrl}
+                          onChange={(e) =>
+                            setLocalConfig((prev) => ({
+                              ...prev,
+                              baseUrl: e.target.value,
+                            }))
+                          }
+                          placeholder="https://api.openai.com/v1"
+                          className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block ui-text font-medium text-foreground mb-1.5">
+                          API 格式
+                        </label>
+                        <PopupSelect
+                          value={localConfig.apiFormat || DEFAULT_API_FORMAT}
+                          onChange={(v) =>
+                            setLocalConfig((prev) => ({
+                              ...prev,
+                              apiFormat: v,
+                            }))
+                          }
+                          placeholder="请选择 API 格式"
+                          className="w-full ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2"
+                          options={API_FORMATS}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block ui-text font-medium text-foreground mb-1.5">
+                          API Key
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showApiKey ? "text" : "password"}
+                            value={localConfig.apiKey}
+                            onChange={(e) =>
+                              setLocalConfig((prev) => ({
+                                ...prev,
+                                apiKey: e.target.value,
+                              }))
+                            }
+                            placeholder="sk-..."
+                            className="w-full px-3 py-2 pr-10 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground placeholder:text-muted-foreground/40 font-mono"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowApiKey(!showApiKey)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 hover:text-foreground transition-colors"
+                          >
+                            {showApiKey ? "隐藏" : "显示"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="block ui-text font-medium text-foreground">
+                            已添加的模型
+                          </label>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            type="button"
+                            onClick={() => {
+                              setPickedModel("");
+                              setManualModel("");
+                              setPickedContext("");
+                              setModelSearch("");
+                              setShowAddModelDialog(true);
+                            }}
+                          >
+                            添加模型
+                          </Button>
+                        </div>
+                        {addedModels.length === 0 ? (
+                          <p className="px-1 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50">
+                            还没有模型，点击「添加模型」添加
+                          </p>
+                        ) : (
+                          <div className="space-y-1.5">
+                            {addedModels.map((m, idx) => (
+                              <div
+                                key={m.id}
+                                className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border/40 bg-muted/30 group/model-row"
+                              >
+                                <span className="min-w-0 flex-1 truncate font-mono text-[length:var(--helix-transcript-size)] text-foreground">
+                                  {m.id}
+                                </span>
+                                {m.contextWindow !== undefined && (
+                                  <span className="shrink-0 font-mono text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70">
+                                    {m.contextWindow.toLocaleString()} ctx
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    showToast({ type: "info", title: `正在测试「${m.id}」连接…` });
+                                    try {
+                                      const models = await new Promise<string[]>((resolve, reject) => {
+                                        if (isElectron() && window.electron?.helix?.fetchModels) {
+                                          window.electron.helix.fetchModels({
+                                            baseUrl: localConfig.baseUrl,
+                                            apiKey: localConfig.apiKey,
+                                          }).then((r: any) => {
+                                            if (r?.error) reject(new Error(r.error));
+                                            else resolve(r?.models || []);
+                                          }).catch(reject);
+                                        } else {
+                                          reject(new Error("模型测试仅在桌面端可用"));
+                                        }
+                                      });
+                                      if (models.includes(m.id)) {
+                                        showToast({ type: "success", title: `「${m.id}」连接正常` });
+                                      } else {
+                                        showToast({ type: "warning", title: `未找到「${m.id}」，请检查模型名称` });
+                                      }
+                                    } catch (e: any) {
+                                      showToast({
+                                        type: "error",
+                                        title: `「${m.id}」连接失败`,
+                                        description: String(e?.message || e),
+                                      });
+                                    }
+                                  }}
+                                  className="shrink-0 p-1 text-muted-foreground/40 hover:text-primary opacity-0 group-hover/model-row:opacity-100 transition-colors"
+                                  data-tip="测试连接"
+                                >
+                                  <svg
+                                    className="size-3.5"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  >
+                                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                                  </svg>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setPickedModel(m.id);
+                                    setManualModel("");
+                                    setPickedContext(
+                                      m.contextWindow ? String(m.contextWindow) : "",
+                                    );
+                                    setModelSearch("");
+                                    setShowAddModelDialog(true);
+                                  }}
+                                  className="shrink-0 p-1 text-muted-foreground/30 hover:text-foreground opacity-0 group-hover/model-row:opacity-100 transition-colors"
+                                  data-tip="编辑"
+                                >
+                                  <svg
+                                    className="size-3.5"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  >
+                                    <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                                    <path d="m15 5 4 4" />
+                                  </svg>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setAddedModels((prev) =>
+                                      prev.filter((x) => x.id !== m.id),
+                                    )
+                                  }
+                                  className="shrink-0 p-1 text-muted-foreground/30 hover:text-destructive opacity-0 group-hover/model-row:opacity-100 transition-colors"
+                                  data-tip="删除模型"
+                                >
+                                  <svg
+                                    className="size-3.5"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  >
+                                    <path d="M3 6h18" />
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                                    <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                                  </svg>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Add model dialog */}
+                      {showAddModelDialog && (
+                        <div
+                          className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/40 p-4 backdrop-blur-[2px]"
+                          onClick={() => setShowAddModelDialog(false)}
+                        >
+                          <div
+                            className="w-full max-w-md space-y-4 rounded-xl border border-border/50 bg-card p-4 shadow-xl"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="flex items-center justify-between">
+                              <h3 className="ui-title font-semibold text-foreground">
+                                添加模型
+                              </h3>
+                              <button
+                                type="button"
+                                onClick={() => setShowAddModelDialog(false)}
+                                className="p-1 text-muted-foreground/60 hover:text-foreground transition-colors"
+                                data-tip="关闭"
+                              >
                                 <svg
-                                  className="size-3.5 shrink-0 text-muted-foreground/50"
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  width="14"
-                                  height="14"
+                                  className="size-4"
                                   viewBox="0 0 24 24"
                                   fill="none"
                                   stroke="currentColor"
@@ -1969,169 +2122,152 @@ export function ApiSettings({
                                   strokeLinecap="round"
                                   strokeLinejoin="round"
                                 >
-                                  <circle cx="11" cy="11" r="8" />
-                                  <path d="m21 21-4.3-4.3" />
+                                  <path d="M18 6 6 18" />
+                                  <path d="m6 6 12 12" />
                                 </svg>
-                                <input
-                                  type="text"
-                                  value={modelSearch}
-                                  onChange={(e) => setModelSearch(e.target.value)}
-                                  placeholder="筛选模型…"
-                                  className="flex-1 min-w-0 bg-transparent outline-none border-none text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground placeholder:text-muted-foreground/40"
-                                />
-                                {modelSearch && (
-                                  <button
-                                    type="button"
-                                    onClick={() => setModelSearch("")}
-                                    className="shrink-0 text-muted-foreground/50 hover:text-foreground transition-colors"
-                                    title="清除筛选"
-                                  >
-                                    <svg
-                                      className="size-3.5"
-                                      xmlns="http://www.w3.org/2000/svg"
-                                      width="14"
-                                      height="14"
-                                      viewBox="0 0 24 24"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      strokeWidth="2"
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                    >
-                                      <path d="M18 6 6 18" />
-                                      <path d="m6 6 12 12" />
-                                    </svg>
-                                  </button>
-                                )}
-                                {availableModels.length > 1 && (
-                                  <div className="flex items-center shrink-0 rounded-md border border-border/50 overflow-hidden">
-                                    {(["asc", "desc"] as const).map((dir) => (
-                                      <button
-                                        key={dir}
-                                        type="button"
-                                        onClick={() =>
-                                          setModelSort((prev) =>
-                                            prev === dir ? "none" : dir
-                                          )
-                                        }
-                                        title={
-                                          dir === "asc" ? "升序（A→Z）" : "降序（Z→A）"
-                                        }
-                                        className={`px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] leading-none transition-colors ${
-                                          dir === "asc" ? "border-r border-border/50" : ""
-                                        } ${
-                                          modelSort === dir
-                                            ? "bg-muted text-foreground"
-                                            : "text-muted-foreground/60 hover:text-foreground hover:bg-muted/60"
-                                        }`}
-                                      >
-                                        {dir === "asc" ? "A→Z" : "Z→A"}
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                              {/* List */}
-                              <div className="max-h-52 overflow-y-auto p-1">
-                                {sortedModelOptions.length === 0 ? (
-                                  <p className="px-3 py-3 text-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50">
-                                    无匹配模型
-                                  </p>
-                                ) : (
-                                  sortedModelOptions.map((model) => {
-                                    const selected = localConfig.model === model;
-                                    return (
-                                      <button
-                                        key={model}
-                                        type="button"
-                                        onClick={() => {
-                                          const metadata = piModels.find(
-                                            (m) =>
-                                              m.id === model &&
-                                              m.provider ===
-                                                localConfig.provider
-                                                  .trim()
-                                                  .replace(/^custom:/, ""),
-                                          );
-                                          setLocalConfig((prev) => ({
-                                            ...prev,
-                                            model,
-                                            contextWindow: metadata?.contextWindow,
-                                          }));
-                                          setShowModelDropdown(false);
-                                          setModelSearch("");
-                                        }}
-                                        className={`w-full flex items-center justify-between gap-2 text-left px-2.5 py-1.5 rounded-md text-[length:var(--helix-transcript-size)] font-mono transition-colors ${
-                                          selected
-                                            ? "bg-primary/10 text-primary"
-                                            : "text-foreground/70 hover:bg-muted/70 hover:text-foreground"
-                                        }`}
-                                      >
-                                        <span className="truncate">{model}</span>
-                                        {selected && (
-                                          <svg
-                                            className="size-3.5 shrink-0"
-                                            xmlns="http://www.w3.org/2000/svg"
-                                            width="14"
-                                            height="14"
-                                            viewBox="0 0 24 24"
-                                            fill="none"
-                                            stroke="currentColor"
-                                            strokeWidth="2.5"
-                                            strokeLinecap="round"
-                                            strokeLinejoin="round"
-                                          >
-                                            <path d="M20 6 9 17l-5-5" />
-                                          </svg>
-                                        )}
-                                      </button>
-                                    );
-                                  })
-                                )}
-                              </div>
-                              {/* Footer: count */}
-                              <div className="px-2.5 py-1 border-t border-border/40 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
-                                {sortedModelOptions.length}/{availableModels.length} 个模型
-                              </div>
+                              </button>
                             </div>
-                          )}
-                        </div>
-                      ) : (
-                        <input
-                          type="text"
-                          value={localConfig.model}
-                          onChange={(e) =>
-                            setLocalConfig((prev) => ({
-                              ...prev,
-                              model: e.target.value,
-                            }))
-                          }
-                          className="w-full px-3 py-2 bg-muted/50 border border-border/50 rounded-lg ui-text text-foreground font-mono"
-                        />
-                      )}
-                    </div>
 
-                    {/* Save button — inside card, bottom-right */}
-                    <div className="flex justify-end pt-2">
-                      <Button
-                        onClick={async () => {
-                          await handleSaveApi();
-                          setShowAddModelModal(false);
-                        }}
-                        size="sm"
-                        variant="outline"
-                      >
-                        保存
-                      </Button>
+                            <div>
+                              <div className="mb-1.5 flex items-center justify-between">
+                                <label className="block ui-text font-medium text-foreground">
+                                  获取模型列表
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={handleFetchModels}
+                                  disabled={isLoadingModels}
+                                  className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-primary hover:text-primary/80 disabled:text-muted-foreground transition-colors"
+                                >
+                                  <RefreshCw
+                                    size={13}
+                                    className={isLoadingModels ? "animate-spin" : ""}
+                                  />
+                                  {isLoadingModels ? "获取中..." : "获取"}
+                                </button>
+                              </div>
+                              {availableModels.length > 0 ? (
+                                <div className="space-y-1.5">
+                                  <input
+                                    type="text"
+                                    value={modelSearch}
+                                    onChange={(e) => setModelSearch(e.target.value)}
+                                    placeholder="筛选模型…"
+                                    className="w-full rounded-lg border border-border/50 bg-muted/50 px-2.5 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground outline-none placeholder:text-muted-foreground/40"
+                                  />
+                                  <div className="max-h-44 overflow-y-auto rounded-lg border border-border/40">
+                                    {sortedModelOptions.length === 0 ? (
+                                      <p className="px-2.5 py-3 text-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50">
+                                        无匹配模型
+                                      </p>
+                                    ) : (
+                                      sortedModelOptions.map((model) => {
+                                        const picked = pickedModel === model;
+                                        return (
+                                          <button
+                                            key={model}
+                                            type="button"
+                                            onClick={() => setPickedModel(model)}
+                                            className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-left font-mono text-[length:var(--helix-transcript-size)] transition-colors ${
+                                              picked
+                                                ? "bg-primary/10 text-primary"
+                                                : "text-foreground/70 hover:bg-muted/70 hover:text-foreground"
+                                            }`}
+                                          >
+                                            <span className="truncate">{model}</span>
+                                            {picked && (
+                                              <svg
+                                                className="size-3.5 shrink-0"
+                                                viewBox="0 0 24 24"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                strokeWidth="2.5"
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                              >
+                                                <path d="M20 6 9 17l-5-5" />
+                                              </svg>
+                                            )}
+                                          </button>
+                                        );
+                                      })
+                                    )}
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="space-y-1.5">
+                                  <input
+                                    type="text"
+                                    value={manualModel}
+                                    onChange={(e) => {
+                                      setManualModel(e.target.value);
+                                      setPickedModel("");
+                                    }}
+                                    placeholder="获取不到列表时手动输入模型名称"
+                                    className="w-full rounded-lg border border-border/50 bg-muted/50 px-2.5 py-2 font-mono ui-text text-foreground placeholder:text-muted-foreground/40"
+                                  />
+                                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">
+                                    点「获取」会从该供应商的 Base URL 拉取可用模型，也可以直接输入名称。
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+
+                            <div>
+                              <label className="mb-1.5 block ui-text font-medium text-foreground">
+                                模型上下文限制
+                              </label>
+                              <input
+                                type="number"
+                                min={1}
+                                step={1000}
+                                value={pickedContext}
+                                onChange={(e) => setPickedContext(e.target.value)}
+                                placeholder="默认 256000"
+                                className="w-full rounded-lg border border-border/50 bg-muted/50 px-3 py-2 font-mono ui-text text-foreground placeholder:text-muted-foreground/40"
+                              />
+                            </div>
+
+                            <div className="flex justify-end gap-2 pt-1">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => setShowAddModelDialog(false)}
+                              >
+                                取消
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={confirmAddModel}
+                                disabled={!pickedModel.trim() && !manualModel.trim()}
+                              >
+                                添加
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="mt-auto">
+                        <SaveBar
+                          saving={apiSaving}
+                          status={apiSaveState}
+                          errorText={apiSaveErr}
+                          onSave={() => void handleSaveApi()}
+                          saveLabel="保存"
+                        />
+                      </div>
                     </div>
-                  </div>
-                </SettingGroup>
-              )
-            ) : modelTab === "vision" ? (
-              <VisionModelSettings />
-            ) : (
-              <ImageModelSettings />
-            )}
+                  </SettingGroup>
+                  </>
+                ) : modelTab === "vision" ? (
+                  <VisionModelSettings />
+                ) : (
+                  <ImageModelSettings />
+                )}
+              </div>
+            </div>
           </div>
         );
 
@@ -2145,23 +2281,8 @@ export function ApiSettings({
       case "mcp":
         return (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <h3 className="text-[calc(var(--helix-transcript-size)*1.2857)] font-semibold text-foreground">
-                MCP
-              </h3>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => void handleReloadMcp()}
-                  className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-foreground/50 hover:text-foreground transition-colors"
-                  data-tip="重新加载 MCP（应用到当前会话）"
-                  disabled={reloadingMcp}
-                >
-                  <RefreshCw
-                    size={13}
-                    className={reloadingMcp ? "animate-spin" : ""}
-                  />
-                  {reloadingMcp ? "刷新中…" : "刷新"}
-                </button>
+            <PageHeader
+              action={<>
                 {!isAddingMcp && !editingMcpName && !gatewayEditing ? (
                   <button
                     onClick={() => {
@@ -2186,8 +2307,9 @@ export function ApiSettings({
                     关闭
                   </button>
                 )}
-              </div>
-            </div>
+              </>}>
+              MCP
+            </PageHeader>
 
             {/* Gateway-loaded MCP servers (config.yaml mcp_servers) — editable */}
             {gatewayMcpLoaded &&
@@ -2324,6 +2446,9 @@ export function ApiSettings({
                   <McpEditorForm
                     form={mcpForm}
                     onChange={handleMcpFormChange}
+                    saving={mcpSaving}
+                    saveState={mcpSaveState}
+                    saveError={mcpSaveErr}
                     onSave={
                       gatewayEditing ? handleSaveGatewayMcp : handleSaveMcp
                     }
@@ -2332,6 +2457,8 @@ export function ApiSettings({
                       setEditingMcpName(null);
                       setGatewayEditing(null);
                       resetMcpForm();
+                      setMcpSaveState(null);
+                      setMcpSaveErr(null);
                     }}
                   />
                 </div>
@@ -2343,7 +2470,7 @@ export function ApiSettings({
       case "archive":
         return (
           <div className="max-w-3xl space-y-6">
-            <SectionTitle className="mb-0">历史归档</SectionTitle>
+            <PageHeader>历史归档</PageHeader>
 
             {/* Archived sessions */}
             <section className="space-y-3">
@@ -2389,7 +2516,7 @@ export function ApiSettings({
       case "usage":
         return (
           <div className="max-w-3xl space-y-6">
-            <SectionTitle>用量</SectionTitle>
+            <PageHeader>用量</PageHeader>
             <TokenUsagePanel />
           </div>
         );
@@ -2399,8 +2526,8 @@ export function ApiSettings({
 
       case "help":
         return (
-          <div className="max-w-3xl space-y-8">
-            <SectionTitle>帮助</SectionTitle>
+          <div className="max-w-3xl space-y-6">
+            <PageHeader>帮助</PageHeader>
 
             {/* About */}
             <section className="space-y-3">
@@ -2577,7 +2704,7 @@ export function ApiSettings({
       )}
 
       {/* Right content — flat card, border-separated from the nav sidebar */}
-      <div className="helix-surface flex-1 overflow-y-auto relative">
+      <div className="helix-surface settings-scroll flex-1 overflow-y-auto relative">
         <div className="flex justify-center">
           <div className="px-8 pt-10 pb-10 w-full max-w-3xl">
             {renderContent()}

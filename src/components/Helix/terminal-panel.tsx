@@ -24,27 +24,43 @@ function stripVerbatimPrefix(
 }
 
 // ── No-project terminal default ────────────────────────────────────────────
-// Fetched once from the backend (getSessionsDir → ~/.pi/agent/sessions),
-// then "/default" is appended. This is the stable cwd for project-less chats.
+// Fetched once from the backend (get_scratch_dir → ~/.pi/agent/scratch).
+//
+// MUST match the gateway's own no-project spawn cwd (pi_gateway.rs's
+// `spawn_cwd` fallback → state::pi_sessions_default_dir). This used to derive
+// `sessions/default` from get_sessions_dir instead — a directory that never
+// exists. `create_process` silently ignores a missing cwd, so the shell simply
+// opened in the app's own working directory, and the cwd-sync effect then
+// "cd"-ed the tab into whatever the app directory happened to be.
 let _noProjectDefaultDir: string | null = null;
 async function getNoProjectDefaultDir(): Promise<string> {
   if (_noProjectDefaultDir) return _noProjectDefaultDir;
   try {
-    const { electronApp } = await import("@/lib/electron-bridge");
-    const { sessionsDir } = await electronApp.getSessionsDir();
-    const dir = sessionsDir ? sessionsDir.replace(/[/\\]$/, "") + "/default" : "";
+    const { invoke } = await import("@tauri-apps/api/core");
+    const r = await invoke<{ scratchDir?: string }>("get_scratch_dir");
+    const dir = r?.scratchDir ? r.scratchDir.replace(/[/\\]$/, "") : "";
     if (dir) _noProjectDefaultDir = dir;
     return dir;
   } catch {
-    return "C:\\Users\\hyt\\.pi\\agent\\sessions\\default";
+    // No `get_scratch_dir` (Rust 侧还没重建 / 浏览器模式)。**不能返回 ""**：
+    // 调用方 `terminalCwd = activeSessionWorkDir ?? noProjectDefaultDir` 为空
+    // 就永远不会 start PTY（`if (!terminalCwd) return`），无项目对话的终端会
+    // 直接不出壳。退回旧的推导（sessions/default）—— 路径虽然不存在，但
+    // create_process 会忽略它、让 shell 落在进程 cwd，至少能用（与改动前
+    // 行为一致）。等 Rust 重建后自动走上面的正确路径。
+    try {
+      const { electronApp } = await import("@/lib/electron-bridge");
+      const { sessionsDir } = await electronApp.getSessionsDir();
+      return sessionsDir ? sessionsDir.replace(/[/\\]$/, "") + "/default" : "";
+    } catch {
+      return "";
+    }
   }
 }
-const LIGHT_THEME = {
-  background: "#ffffff",
-  foreground: "#333333",
-  cursor: "#333333",
-  cursorAccent: "#ffffff",
-  selectionBackground: "#cfe3ff",
+
+// ANSI palette (VS Code-ish). Theme-independent — these are the 16 named
+// colours programs explicitly ask for, so they read fine on either plane.
+const ANSI_PALETTE = {
   black: "#000000",
   red: "#cd3131",
   green: "#0dbc79",
@@ -63,30 +79,39 @@ const LIGHT_THEME = {
   brightWhite: "#ffffff",
 };
 
-// Transparent theme — blends with the app background
-const TRANSPARENT_THEME = {
-  background: "rgba(255,255,255,0.7)",
-  foreground: "#333333",
-  cursor: "#333333",
-  cursorAccent: "rgba(255,255,255,0.7)",
-  selectionBackground: "rgba(147,197,253,0.4)",
-  black: "#000000",
-  red: "#cd3131",
-  green: "#0dbc79",
-  yellow: "#8a8a8a",
-  blue: "#2472c8",
-  magenta: "#bc3fbc",
-  cyan: "#11a8cd",
-  white: "#e5e5e5",
-  brightBlack: "#666666",
-  brightRed: "#f14c4c",
-  brightGreen: "#23d18b",
-  brightYellow: "#9a9a9a",
-  brightBlue: "#3b8eea",
-  brightMagenta: "#d670d6",
-  brightCyan: "#29b8db",
-  brightWhite: "#ffffff",
-};
+/**
+ * xterm theme — deliberately paints NO background.
+ *
+ * The panel root carries `.helix-surface`, so it inherits the SAME
+ * `--surface-bg` plane as the conversation card (solid `--card` normally, 88%
+ * opaque-background mix when a wallpaper is active). Painting a colour here
+ * would re-introduce a second, differently-coloured plate — which is exactly
+ * the "终端和对话界面还是不一样" symptom:
+ *   - the old `rgba(255,255,255,0.7)` was a 70%-WHITE veil (never equal to the
+ *     88% card plane, and glaringly white in dark mode), and
+ *   - xterm only fills canvas cells that carry a background colour, so the
+ *     `px-1 py-1` padding and any empty canvas area stayed fully transparent,
+ *     letting the raw wallpaper show through *inside* the panel.
+ *
+ * With `rgba(0,0,0,0)` the plane comes entirely from the panel, so text area,
+ * padding and tab bar all read as one surface — same as the conversation card.
+ *
+ * foreground/cursor follow the colour scheme: the hand-written `#333` was
+ * invisible on a dark `--card` (dark-on-dark), so dark mode gets a light grey.
+ */
+function terminalTheme() {
+  const dark =
+    typeof document !== "undefined" &&
+    document.documentElement.classList.contains("dark");
+  return {
+    ...ANSI_PALETTE,
+    background: "rgba(0,0,0,0)",
+    foreground: dark ? "#d4d4d4" : "#333333",
+    cursor: dark ? "#d4d4d4" : "#333333",
+    cursorAccent: "rgba(0,0,0,0)",
+    selectionBackground: dark ? "rgba(96,165,250,0.35)" : "rgba(147,197,253,0.4)",
+  };
+}
 
 interface TerminalTabViewProps {
   id: number;
@@ -102,8 +127,9 @@ interface TerminalTabViewProps {
 function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
   const { activeSessionWorkDir, isTerminalOpen } =
     useHelixStore();
-  // No-project conversations pin to ~/.pi/agent/sessions/default — resolved
-  // asynchronously from the backend; falls back to null until loaded.
+  // No-project conversations pin to ~/.pi/agent/scratch — the SAME dir the
+  // gateway spawns their pi instance in. Resolved asynchronously from the
+  // backend; falls back to null until loaded.
   const [noProjectDefaultDir, setNoProjectDefaultDir] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -136,7 +162,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
         'Consolas, "Cascadia Code", "Microsoft YaHei Mono", monospace',
       fontSize: 13,
       cursorBlink: true,
-      theme: TRANSPARENT_THEME,
+      theme: terminalTheme(),
       scrollback: 5000,
     });
     const fitAddon = new FitAddon();
@@ -463,10 +489,13 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
 
   return (
     <div
-      className={`shrink-0 h-64 flex flex-col bg-card border-t border-border/40 rounded-t-lg overflow-hidden ${isTerminalOpen ? "" : "hidden"}`}
+      // helix-surface 提供与对话卡同一层 --surface-bg 底盘（背景图激活时
+      // 88% 半透明、无背景图时实色 --card），保证终端"周围"不直接透出壁纸。
+      // 不能删 relative：背景图是 absolute z-0，非定位后代会被整层盖住。
+      className={`helix-terminal-panel helix-surface relative shrink-0 h-64 flex flex-col border-t border-border/40 overflow-hidden ${isTerminalOpen ? "" : "hidden"}`}
     >
       {/* Tab bar — Windows Terminal style */}
-      <div className="flex items-center h-8 bg-muted shrink-0 select-none">
+      <div className="helix-terminal-tabbar flex items-center h-8 bg-muted shrink-0 select-none">
         <div className="flex items-center gap-1 px-1 h-full min-w-0 overflow-x-auto scrollbar-hide">
           {tabs.map((tab, i) => {
             const isActive = tab.id === activeId;
@@ -488,7 +517,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
                       e.stopPropagation();
                       closeTab(tab.id);
                     }}
-                    className="p-0.5 rounded text-muted-foreground/50 hover:text-foreground hover:bg-black/10 transition-colors"
+                    className="p-0.5 rounded text-muted-foreground/70 hover:text-foreground hover:bg-black/10 transition-colors"
                     data-tip="关闭终端"
                   >
                     <X className="size-3" />

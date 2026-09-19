@@ -1386,8 +1386,11 @@ export class ServeGatewayClient {
             );
             const { useHelixStore } = await import("@/stores/helix-store");
             const st = useHelixStore.getState();
+            // 历史按**出错会话自己的** sessionId 取：prompt 的 sessionId 可能是
+            // 后台旁路会话（btw-cid），此时 currentSessionId 还停留在主线——
+            // 取主线历史种进旁路重建会话，等于把别的对话的上下文灌进来。
             const history = st.chatMessages
-              .filter((m) => m.sessionId === st.currentSessionId)
+              .filter((m) => m.sessionId === sessionId)
               .map((m) => ({ role: m.role, content: m.content }));
             const res = await this.createSession({ messages: history });
             const newId = res.session_id;
