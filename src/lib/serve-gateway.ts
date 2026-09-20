@@ -1318,92 +1318,12 @@ export class ServeGatewayClient {
         // 由 run.completed/cancelled/failed 事件驱动（translateEvent 发 run_complete 事件，
         // agent-flow-panel 据此收尾）。只把 session 记为 in-flight，供 WS 断连重连后
         // session.resume 恢复事件流（见 resumeInflightSessions）。
-        try {
-          await this.rpc("prompt.submit", { session_id: sessionId, text });
-        } catch (err) {
-          // "session not found" 的自动恢复兜底（对齐官方桌面版语义）。后端
-          // tui_gateway 的会话是持久化的（state.db）：网关重启 / 空闲回收
-          // （idle reaper）只会把会话踢出内存，state.db 里 agent+历史还在。
-          // 官方正解（后端注释原文：client is expected to recover via
-          // session.resume on the STORED session id）是先 session.resume 把
-          // 原会话从 DB 捞回来 —— 同一 sid 复活，不新建 id、不丢上下文。
-          // 只有 resume 也失败（会话真的被删/从未建过）才退回 createSession。
-          const msg = (err as Error)?.message || "";
-          if (
-            /session.*not.*found|not found|no such session|unknown session/i.test(
-              msg,
-            )
-          ) {
-            try {
-              // resume 用 DB 持久化 key（stored_session_id）才能从 state.db 恢复
-              // 同一会话（ui_session 在进程重启后必然不在内存、也查不到 DB 行）。
-              // 只对"能从 DB 快速恢复"的场景有价值；给 8s 上限，慢就放弃走
-              // createSession（重建 agent 的路径更可靠，事件流正常）。
-              const resumeId =
-                this.storedSessionIds.get(sessionId) || sessionId;
-              debug(
-                "[ServeGateway] session not found on prompt — trying resume restore:",
-                sessionId,
-                "→",
-                resumeId,
-              );
-              const resumeRes = await this.rpc(
-                "session.resume",
-                { session_id: resumeId },
-                8_000,
-              );
-              if (resumeRes) {
-                // resume 成功后会话注册在 resumeId 名下，事件也以它发出：
-                // 若与原 sid 不同，发 sessionReplaced 让前端改绑；prompt 用恢复后的 id 重发。
-                const restoredId =
-                  (resumeRes as { session_id?: string }).session_id || resumeId;
-                debug(
-                  "[ServeGateway] resumed session, retrying prompt with sid:",
-                  restoredId,
-                );
-                if (restoredId !== sessionId) {
-                  this.storedSessionIds.set(restoredId, restoredId);
-                  this.emit("gateway.sessionReplaced", {
-                    oldId: sessionId,
-                    newId: restoredId,
-                  });
-                }
-                await this.rpc("prompt.submit", {
-                  session_id: restoredId,
-                  text,
-                });
-                this.inflightSessions.add(restoredId);
-                return { status: "streaming" };
-              }
-            } catch (resumeErr) {
-              debug(
-                "[ServeGateway] session.resume failed — falling back to recreate:",
-                String(resumeErr),
-              );
-            }
-            warn(
-              "[ServeGateway] session not found + resume failed — recreating session and retrying",
-            );
-            const { useHelixStore } = await import("@/stores/helix-store");
-            const st = useHelixStore.getState();
-            // 历史按**出错会话自己的** sessionId 取：prompt 的 sessionId 可能是
-            // 后台旁路会话（btw-cid），此时 currentSessionId 还停留在主线——
-            // 取主线历史种进旁路重建会话，等于把别的对话的上下文灌进来。
-            const history = st.chatMessages
-              .filter((m) => m.sessionId === sessionId)
-              .map((m) => ({ role: m.role, content: m.content }));
-            const res = await this.createSession({ messages: history });
-            const newId = res.session_id;
-            if (newId) {
-              debug("[ServeGateway] recreated session for retry:", newId);
-              this.emit("gateway.sessionReplaced", { oldId: sessionId, newId });
-              await this.rpc("prompt.submit", { session_id: newId, text });
-              this.inflightSessions.add(newId);
-              return { status: "streaming", session_id: newId };
-            }
-          }
-          throw err;
-        }
+        // 官方语义：prompt.submit 只回 ack（{"status":"streaming"}）。只面对
+        // **已经恢复好的 active session**——恢复是 Session Manager 的职责
+        // （统一 resumeSession），这里不做任何恢复/重建。会话不存在时后端返回
+        // "session not found"，原样上抛，由前端标记 broken（不再内嵌 resume-retry，
+        // 也不再 createSession 注入历史）。
+        await this.rpc("prompt.submit", { session_id: sessionId, text });
         this.inflightSessions.add(sessionId);
         return { status: "streaming" };
       }

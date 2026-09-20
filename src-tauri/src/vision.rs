@@ -144,7 +144,7 @@ pub async fn vision_describe_core(image: String, prompt: Option<String>) -> Resu
         "max_tokens": 1024
     });
 
-    let client = reqwest::Client::new();
+    let client = crate::proxy::proxy_aware_client().map_err(|e| e.to_string())?;
     let mut req = client.post(&url).json(&body);
     if !api_key.is_empty() {
         req = req.bearer_auth(api_key);

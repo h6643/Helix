@@ -252,17 +252,19 @@ function saveSidebarWidth(w: number) {
   } catch { /* empty */}
 }
 
-function loadRightSidebarWidth(): number {
-  if (typeof localStorage === "undefined") return RIGHT_SIDEBAR_DEFAULT;
+function loadRightSidebarWidth(): { value: number; fromStorage: boolean } {
+  if (typeof localStorage === "undefined")
+    return { value: RIGHT_SIDEBAR_DEFAULT, fromStorage: false };
   const cap = rightSidebarCap(SIDEBAR_DEFAULT);
   try {
     const v = localStorage.getItem(RIGHT_STORAGE_KEY);
     if (v) {
       const n = parseInt(v, 10);
-      if (n >= RIGHT_SIDEBAR_MIN && n <= cap) return n;
+      if (n >= RIGHT_SIDEBAR_MIN && n <= cap)
+        return { value: n, fromStorage: true };
     }
   } catch { /* empty */}
-  return Math.min(RIGHT_SIDEBAR_DEFAULT, cap);
+  return { value: Math.min(RIGHT_SIDEBAR_DEFAULT, cap), fromStorage: false };
 }
 
 function saveRightSidebarWidth(w: number) {
@@ -283,9 +285,12 @@ export function HelixLayout() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [isDragging, setIsDragging] = useState(false);
+  const initialRightWidth = loadRightSidebarWidth();
   const [rightSidebarWidth, setRightSidebarWidth] = useState(
-    loadRightSidebarWidth,
+    initialRightWidth.value,
   );
+  // 用户拖过 / 之前存过宽度 → 保留其选择，不再对齐工作面板胶囊。
+  const rightWidthFromStorage = useRef(initialRightWidth.fromStorage);
   const [isRightDragging, setIsRightDragging] = useState(false);
   // Mirror sidebarWidth so the right-sidebar resize clamp can read it live
   // without re-subscribing the drag effect on every sidebar width change.
@@ -295,6 +300,24 @@ export function HelixLayout() {
   // without re-subscribing the drag effect on every right-sidebar width change.
   const rightSidebarWidthRef = useRef(rightSidebarWidth);
   rightSidebarWidthRef.current = rightSidebarWidth;
+
+  // 首次进入且用户未拖过/存过宽度时，把右侧栏默认宽度对齐到右上角
+  // 「工作面板」胶囊的左边缘（胶囊在标题栏最右，其左缘即右侧栏应到的位置）。
+  // 之后用户手动拖拽会写入 localStorage，fromStorage 置真，本对齐不再生效。
+  useEffect(() => {
+    if (rightWidthFromStorage.current) return;
+    const el = workPanelRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const aligned = Math.round(window.innerWidth - rect.left);
+    const cap = rightSidebarCap(sidebarWidthRef.current);
+    const clamped = Math.max(
+      RIGHT_SIDEBAR_MIN,
+      Math.min(aligned, cap),
+    );
+    setRightSidebarWidth(clamped);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [isMaximized, setIsMaximized] = useState(false);
   const dragStartX = useRef(0);
   const dragStartW = useRef(0);
@@ -327,13 +350,39 @@ export function HelixLayout() {
   const enqueueBrowserOpRef = useRef(enqueueBrowserOp);
   enqueueBrowserOpRef.current = enqueueBrowserOp;
   useEffect(() => {
-    const open = (url: string) => {
+    const open = (url: string, quiet: boolean) => {
       if (!url) return;
       const s = useHelixStore.getState();
-      s.setPreviewRailUrl(url);
-      s.setRightSidebarTab("browser");
+      // 侧边栏正显示浏览器页 → 原地导航即可，什么都不用提示。
+      const browserVisible = s.rightSidebarTab === "browser";
+      if (!quiet && !browserVisible) {
+        // 主动入口（消息里点链接 / __helixOpenBrowser / devtools）：拉出侧边栏
+        // + 切到浏览器页签，这是用户明确的意图。
+        s.setPreviewRailUrl(url, true);
+        return;
+      }
+      // agent 触发（pi extension 的 browser navigate）：只有侧边栏本来就开着
+      // 浏览器页签才让它可见，否则只记 URL —— 从 diff / code 上把用户拽走是打扰。
+      // 第三个参数 quiet=true 让 navSeq effect 明白这是后台导航：**已有**浏览器
+      // 页时原地导航；**还没有**页时只更新 URL、不新建页签（否则侧边栏收起时
+      // 静默建出一个网页页，用户下次打开「更改」就凭空看见它）。用户点 toast
+      // 「查看」时走 forceOpen 路径（quiet=false）再真正建页。
+      s.setPreviewRailUrl(url, browserVisible, true);
+      if (!browserVisible) {
+        s.showToast({
+          type: "info",
+          title: "Agent 打开了一个页面",
+          description: url,
+          duration: 6000,
+          onClick: () => {
+            const cur = useHelixStore.getState();
+            if (cur.previewRailUrl) cur.setPreviewRailUrl(cur.previewRailUrl, true);
+          },
+        });
+      }
     };
-    (window as any).__helixOpenBrowser = open;
+    (window as any).__helixOpenBrowser = (url: unknown) =>
+      open(String(url ?? ""), false);
     // Tauri event bridge: Rust commands (e.g. agent-triggered) emit this to
     // open a URL in the side browser without needing direct DOM access.
     let unlisten: (() => void) | undefined;
@@ -344,9 +393,15 @@ export function HelixLayout() {
         const { listen } = await import("@tauri-apps/api/event");
         const { isTauri } = await import("@/lib/tauri-bridge");
         if (isTauri()) {
-          unlisten = await listen("helix:open-browser", (e: any) =>
-            open(String(e.payload?.url ?? "")),
-          );
+          unlisten = await listen("helix:open-browser", (e: any) => {
+            // quiet:true = agent 触发（poll_browser_requests 的 navigate、
+            // 网关的 app/open_browser 都带）→ 不抢标签；只有显式入口
+            // open_browser_url 不带 quiet → 视为用户意图，抢焦点。
+            open(
+              String(e.payload?.url ?? ""),
+              e.payload?.quiet === true,
+            );
+          });
           // Automation requests from the pi extension (op + reqId + params).
           // navigate is ALSO emitted as helix:open-browser by Rust (back-compat)
           // and must not be double-processed here.
@@ -614,6 +669,7 @@ export function HelixLayout() {
   const navigationIndex = useHelixStore((s) => s.navigationIndex);
   const customShortcuts = useHelixStore((s) => s.customShortcuts);
   const helixTodos = useHelixStore((s) => s.helixTodos);
+  const activePlan = useHelixStore((s) => s.activePlan);
   const pendingPlanReviewAll = useHelixStore((s) => s.pendingPlanReview);
   // 实时子代理（store.subAgents，由 subagent.* 事件写入）。pi-subagents 的
   // Agent 工具不写旧 delegate_task 磁盘目录，磁盘探测（hasDelegations）看不到
@@ -631,6 +687,18 @@ export function HelixLayout() {
         (a) => !a.sessionId || a.sessionId === currentSessionId,
       ),
     [subAgentsAll, currentSessionId],
+  );
+  // 按钮层级判断：全部 completed 的子 Agent 不再抢占「更改/任务」显示，
+  // 只有 running/failed/cancelled 视为仍有事可看。delegations 是磁盘历史，
+  // 无 status 字段，有记录一律保留在次级层。
+  const activeSubAgents = useMemo(
+    () => subAgents.filter((a) => a.status !== "completed"),
+    [subAgents],
+  );
+  // 任务清单同理：全部完成的清单让位给「更改」，未完成的仍占位。
+  const activeTodos = useMemo(
+    () => helixTodos.filter((t) => t.status !== "completed"),
+    [helixTodos],
   );
   const pendingPlanReview =
     pendingPlanReviewAll &&
@@ -1348,6 +1416,7 @@ export function HelixLayout() {
     useHelixStore.getState().flushSessionPersist();
     storeActions.clearChat();
     useHelixStore.getState().clearExecutionFlow();
+    useHelixStore.getState().setNoActiveConversation(false);
     useHelixStore.getState().setCurrentSessionId(null);
   }, [storeActions.clearChat]);
 
@@ -1789,11 +1858,6 @@ export function HelixLayout() {
                             window as any
                           ).electron?.helix?.piCheckUpdates?.();
                           if (!res) {
-                            useHelixStore.getState().showToast({
-                              type: "error",
-                              title: "检查更新失败",
-                              description: "更新检查不可用",
-                            });
                             return;
                           }
                           const pi = res.pi || {};
@@ -1840,20 +1904,9 @@ export function HelixLayout() {
                               title: "已是最新版本",
                               description: `pi v${pi.installed}（含全部插件）`,
                             });
-                          } else {
-                            useHelixStore.getState().showToast({
-                              type: "error",
-                              title: "检查更新失败",
-                              description: "未找到 pi 安装",
-                            });
                           }
-                        } catch (e) {
-                          useHelixStore.getState().showToast({
-                            type: "error",
-                            title: "检查更新失败",
-                            description:
-                              e instanceof Error ? e.message : "网络异常",
-                          });
+                        } catch {
+                          // 手动检查失败静默处理：不弹 error toast。
                         }
                       }}
                     >
@@ -1953,13 +2006,13 @@ export function HelixLayout() {
           <>
             {/* 统一工作面板：更改（含提交/推送）、任务清单、子 Agent 收进同一个下拉。仅在有内容时显示。 */}
             {(pendingPlanReview ||
+              activePlan.length > 0 ||
               hasDelegations ||
               delegations.length > 0 ||
               subAgents.length > 0 ||
               helixTodos.length > 0 ||
               gitChangeStat) && (
-              <div className="relative" ref={workPanelRef}>
-                <button
+              <div className="relative" ref={workPanelRef}>                <button
                   type="button"
                   ref={workPanelBtnRef}
                   onClick={() => setWorkPanelOpen((o) => !o)}
@@ -1973,7 +2026,20 @@ export function HelixLayout() {
                 }`}
                 data-tip="工作面板"
               >
-                {pendingPlanReview ? (
+                {gitChangeStat ? (
+                  <>
+                    <FilePlus className="size-3.5 text-foreground/60 shrink-0" />
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
+                      更改
+                    </span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-emerald-600 dark:text-emerald-400">
+                      +{gitChangeStat.added}
+                    </span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-red-500 dark:text-red-400">
+                      -{gitChangeStat.removed}
+                    </span>
+                  </>
+                ) : pendingPlanReview ? (
                   <>
                     <Pencil className="size-3.5 text-foreground/60 shrink-0" />
                     <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
@@ -1983,7 +2049,20 @@ export function HelixLayout() {
                       待批准
                     </span>
                   </>
-                ) : subAgents.length > 0 ? (
+                ) : activePlan.length > 0 ? (
+                  <>
+                    <ListTodo className="size-3.5 text-foreground/60 shrink-0" />
+                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
+                      计划
+                    </span>
+                    <span className="flex items-center gap-1 text-[calc(var(--helix-transcript-size)*0.7143)] px-1.5 py-px rounded-full bg-primary/10 text-primary">
+                      {activePlan.some((s) => s.status === "in_progress") && (
+                        <span className="size-1.5 rounded-full bg-primary animate-pulse" />
+                      )}
+                      执行中
+                    </span>
+                  </>
+                ) : activeSubAgents.length > 0 ? (
                   <>
                     <Users className="size-3.5 text-foreground/60 shrink-0" />
                     <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
@@ -1993,7 +2072,7 @@ export function HelixLayout() {
                       {subAgents.some((a) => a.status === "running") && (
                         <span className="size-1.5 rounded-full bg-primary animate-pulse" />
                       )}
-                      {subAgents.length}
+                      {activeSubAgents.length}
                     </span>
                   </>
                 ) : (hasDelegations && delegations.length > 0) ? (
@@ -2008,27 +2087,14 @@ export function HelixLayout() {
                     </span>
                     )}
                   </>
-                ) : helixTodos.length > 0 ? (
+                ) : activeTodos.length > 0 ? (
                   <>
                     <ListTodo className="size-3.5 text-foreground/60 shrink-0" />
                     <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
                       任务
                     </span>
                     <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-foreground/60">
-                      {helixTodos.length}
-                    </span>
-                  </>
-                ) : gitChangeStat ? (
-                  <>
-                    <FilePlus className="size-3.5 text-foreground/60 shrink-0" />
-                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
-                      更改
-                    </span>
-                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-emerald-600 dark:text-emerald-400">
-                      +{gitChangeStat.added}
-                    </span>
-                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-red-500 dark:text-red-400">
-                      -{gitChangeStat.removed}
+                      {activeTodos.length}
                     </span>
                   </>
                 ) : (
@@ -2118,7 +2184,65 @@ export function HelixLayout() {
                       </div>
                     </section>
                   )}
-                  {helixTodos.length > 0 && (
+                  {activePlan.length > 0 && (
+                    <section className="p-1.5">
+                      {(() => {
+                        const doneCount = activePlan.filter(
+                          (s) => s.status === "completed",
+                        ).length;
+                        const pct = Math.round(
+                          (doneCount / activePlan.length) * 100,
+                        );
+                        return (
+                          <>
+                            <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
+                              <Pencil className="size-4 shrink-0 text-foreground/50" />
+                              <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
+                                执行计划
+                              </span>
+                              <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums text-foreground/50">
+                                {doneCount}/{activePlan.length}
+                              </span>
+                            </div>
+                            <div className="px-2.5 pb-2.5">
+                              <div className="h-1 rounded-full bg-muted overflow-hidden">
+                                <div
+                                  className="h-full rounded-full bg-primary transition-[width] duration-300"
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                            </div>
+                            <ul className="px-1 pb-1 max-h-52 overflow-y-auto">
+                              {activePlan.map((step, i) => (
+                                <li
+                                  key={`${i}-${step.text.slice(0, 32)}`}
+                                  className="flex items-start gap-2 px-1.5 py-1.5 rounded-xl hover:bg-accent/60 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)]"
+                                >
+                                  {step.status === "completed" ? (
+                                    <CheckCircle2 className="size-4 text-emerald-500 shrink-0 mt-0.5" />
+                                  ) : step.status === "in_progress" ? (
+                                    <Loader2 className="size-4 text-primary shrink-0 mt-0.5 animate-spin" />
+                                  ) : (
+                                    <Circle className="size-4 text-foreground/40 shrink-0 mt-0.5" />
+                                  )}
+                                  <span
+                                    className={`min-w-0 break-words ${
+                                      step.status === "completed"
+                                        ? "line-through text-foreground/50"
+                                        : "text-foreground/90"
+                                    }`}
+                                  >
+                                    {step.text}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        );
+                      })()}
+                    </section>
+                  )}
+                  {activeTodos.length > 0 && (
                   <section className="p-1.5">
                     {(() => {
                       const doneCount = helixTodos.filter(
@@ -2373,8 +2497,16 @@ export function HelixLayout() {
                 <div
                   className="fixed inset-0 bg-black/30 z-[300]"
                   onClick={() => !isCommitting && setCommitDialogOpen(false)}
+                  data-tauri-drag-region="false"
                 />
-                <div className="fixed z-[310] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] max-h-[80vh] bg-card rounded-xl border border-border/50 shadow-2xl flex flex-col overflow-hidden">
+                {/* data-tauri-drag-region="false"：本弹窗渲染在上方 deep 拖拽区
+                    （顶部图标行）的子树里，WebView2 的 app-region:drag 会覆盖到
+                    定位后代——不加 no-drag 的话，在提交信息里拖选文字会变成拖动
+                    整个窗口。deep 容器内的所有浮层都必须带 ="false"。 */}
+                <div
+                  className="fixed z-[310] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] max-h-[80vh] bg-card rounded-xl border border-border/50 shadow-2xl flex flex-col overflow-hidden"
+                  data-tauri-drag-region="false"
+                >
                   <div className="shrink-0 px-5 pt-5 pb-3 flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <h3 className="text-[calc(var(--helix-transcript-size)*1.1429)] font-semibold text-foreground leading-tight">

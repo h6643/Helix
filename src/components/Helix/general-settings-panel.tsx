@@ -45,7 +45,7 @@ export function GeneralSettingsPanel() {
   const [dataRootPath, setDataRootPath] = useState("");
   const [dataRootBusy, setDataRootBusy] = useState(false);
 
-  // HTTP 代理（配置持久化在 Rust 侧 proxy.json，重启应用后生效）。
+  // HTTP 代理（持久化在 pi 全局 settings.json 的 httpProxy 键，重启应用后生效）。
   const [proxyUrl, setProxyUrl] = useState("");
   const [proxyBusy, setProxyBusy] = useState(false);
 
@@ -190,7 +190,10 @@ export function GeneralSettingsPanel() {
       <PageHeader>常规</PageHeader>
 
       <SettingGroup>
-        <SettingRow label="HTTP 代理" hint="模型、MCP出口流量将经此代理">
+        <SettingRow
+          label="HTTP 代理"
+          hint="模型 / MCP / 浏览器抓取 / npm 检查均经此代理；localhost 直连；支持 socks5；保存后需重启应用"
+        >
           <div className="flex flex-wrap items-center gap-2 justify-end">
             <input
               type="text"

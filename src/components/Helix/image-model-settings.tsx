@@ -88,9 +88,12 @@ export function ImageModelSettings() {
   };
 
   return (
-    <div className="space-y-4">
-      <SettingGroup>
-        <div className="p-4 space-y-3">
+    <div className="flex-1 min-h-0 flex flex-col">
+      <SettingGroup
+        className="flex-1 flex flex-col"
+        bodyClassName="flex-1 flex flex-col"
+      >
+        <div className="p-4 space-y-3 flex-1 flex flex-col">
           {/* Provider */}
           <div>
             <label className="block ui-text font-medium text-foreground mb-1.5">
@@ -168,14 +171,14 @@ export function ImageModelSettings() {
               />
             </div>
           )}
+          {/* 底部操作行：mt-auto 钉在拉伸后的卡片底部（与对话 tab 的 SaveBar 同位） */}
+          <div className="mt-auto flex justify-end pt-2">
+            <Button size="sm" variant="outline" onClick={save} disabled={saving}>
+              {saving ? "保存中..." : "保存"}
+            </Button>
+          </div>
         </div>
       </SettingGroup>
-
-      <div className="flex justify-end pt-2">
-        <Button size="sm" variant="outline" onClick={save} disabled={saving}>
-          {saving ? "保存中..." : "保存"}
-        </Button>
-      </div>
     </div>
   );
 }

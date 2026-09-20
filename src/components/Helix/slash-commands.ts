@@ -11,6 +11,14 @@ import {
   isCurrentSessionRenderBroken,
 } from "@/lib/session-resync";
 import { normalizeAcpContent } from "@/lib/text-utils";
+import {
+  classifyResumeError,
+  isSessionGone,
+  resumeFailureDescription,
+  resumeFailureTitle,
+  resumeSession,
+  sessionFileGone,
+} from "@/lib/session-resume";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -84,112 +92,6 @@ export interface CompactContext {
 export type CompactResult = "ok" | "busy" | "no-session" | "error";
 
 /**
- * /compact 的自愈：会话映射缺失（网关重启后持久化写入丢失 / 对话从未建立
- * 后端会话）时，不再要求用户先发一条消息——发送路径（handleRun）在映射丢失
- * 时本来就自动走 session/new + seedHistory 重建，这里做同样的事，让 /compact
- * 就地可用。先用内存映射里残留的 storedId / sids 试透明 resume，全部失败再
- * 用本地 transcript 重建。返回可用 sid；失败返回 null（由调用方提示）。
- */
-async function healMissingSession(
-  currentSessionId: string,
-  ctx: CompactContext,
-): Promise<string | null> {
-  const map = ctx.sessionMap;
-  const entry = map.get(currentSessionId);
-
-  // ① 内存映射还留着线索（比如 persistSessionMap 静默写失败、只有内存有值）：
-  //    按 storedId / sid / sids 依次尝试透明 resume。
-  const resumeCandidates = [
-    entry?.storedId,
-    entry?.sid,
-    ...(entry?.sids ?? []),
-  ].filter((v): v is string => Boolean(v));
-  for (const resumeId of resumeCandidates) {
-    try {
-      const res = (await helixApi()?.send("session.resume", {
-        session_id: resumeId,
-      })) as any;
-      if (res) {
-        const restoredId = res?.session_id || res?.sessionID || resumeId;
-        rebindSessionSid(map, currentSessionId, {
-          sid: restoredId,
-          epoch: useGatewayStore.getState().gatewayEpoch,
-          storedId: entry?.storedId,
-        });
-        void persistSessionMap(map);
-        debug("[Helix] /compact: healed via resume →", restoredId);
-        return restoredId;
-      }
-    } catch {
-      // 尝试下一个候选
-    }
-  }
-
-  // ② 无线索 / resume 全失败：session/new 重建 + seedHistory 重放本地历史。
-  const allMessages = useHelixStore.getState().chatMessages;
-  const ownMessages = allMessages.filter(
-    (m) => (m.sessionId || "") === currentSessionId,
-  );
-  // 对话本身没有本地历史，确实无可压缩：返回 null 走「先发一条消息」提示。
-  if (ownMessages.length === 0) return null;
-  // 与 handleRun 的 seedHistory 过滤一致：剔除上一次重建留下的「系统注入」种子
-  // 块及其确认语，避免重放时逐次叠加。
-  const seedHistory: Array<{ role: string; content: unknown }> = [];
-  const isSeedMessage = (t: string) =>
-    t.includes("（系统注入：以下是本次会话恢复的先前对话记录");
-  let prevWasSeed = false;
-  for (const m of ownMessages) {
-    const text = normalizeAcpContent(m.content);
-    if (isSeedMessage(text)) {
-      prevWasSeed = true;
-      continue;
-    }
-    if (prevWasSeed && m.role === "assistant") {
-      prevWasSeed = false;
-      continue;
-    }
-    prevWasSeed = false;
-    seedHistory.push({ role: m.role, content: m.content });
-  }
-  try {
-    const st0 = useHelixStore.getState();
-    const res = (await helixApi()?.send("session/new", {
-      mcpServers: buildAcpMcpServers(st0.mcpServers),
-      messages: seedHistory,
-      mode_id:
-        st0.approvalModeBySession?.[currentSessionId] ?? st0.approvalMode,
-      cwd: st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined,
-    })) as any;
-    const newSid =
-      res?.session_id ||
-      res?.sessionID ||
-      res?.threadId ||
-      (typeof res === "string" ? res : null);
-    if (!newSid) return null;
-    const storedId =
-      (typeof res === "object" && res
-        ? (res as any)?.stored_session_id
-        : null) || undefined;
-    rebindSessionSid(map, currentSessionId, {
-      sid: newSid,
-      epoch: useGatewayStore.getState().gatewayEpoch,
-      storedId: storedId ?? entry?.storedId,
-    });
-    void persistSessionMap(map);
-    useHelixStore.getState().showToast({
-      type: "warning",
-      title: "未能找回原后端会话，已新建并注入历史",
-      description: "已用本地历史重建后端会话，压缩将基于重建后的会话执行",
-    });
-    debug("[Helix] /compact: healed via session/new →", newSid);
-    return newSid;
-  } catch (e) {
-    debug("[Helix] /compact: heal via session/new failed", e);
-    return null;
-  }
-}
-
-/**
  * /compact 的完整执行体：调后端 session.compress、处理「会话不在内存」的
  * 透明 resume、把压缩后的消息写回**当前会话**的 chatMessages（跨会话全局
  * 数组，只替换本会话段）、挂压缩提示卡、必要时自动 resync 自愈。
@@ -204,6 +106,9 @@ export async function runCompactCommand(
   // 忙标记键：当前会话或 __draft__（新对话尚未分配 id）。提升到 try 外，
   // finally 也要按它清标记，不能包在 try 里。
   const busySessionKey = currentSessionId ?? DRAFT_SESSION_KEY;
+  // 解析出的后端 sid 提升到 try 外：catch 要用它做一次权威 resume 检查，
+  // 判定 "session not found" 是持久化文件没了还是只是没 attach。
+  let compressSid = "";
   try {
     // 并发保护：忙标记按会话隔离（compressionBusyBySession），切换对话后
     // 其他会话的压缩状态不再跟着当前 UI 走。
@@ -225,12 +130,7 @@ export async function runCompactCommand(
       (await resolveBackendSid(currentSessionId)) ||
       ctx.fallbackSid ||
       useGatewayStore.getState().helixSessionId;
-    // 自愈：重启后映射缺失（持久化写入失败 / profile 变更 / 对话从未映射）时，
-    // 不再要求用户「先发送一条消息建立会话」——发送路径本来就会走
-    // session/new + seedHistory 重建，这里做同样的事，让 /compact 就地可用。
-    if (!sid && currentSessionId) {
-      sid = await healMissingSession(currentSessionId, ctx);
-    }
+    compressSid = sid ?? "";
     if (!sid) {
       useHelixStore.getState().showToast({
         type: "warning",
@@ -239,39 +139,29 @@ export async function runCompactCommand(
       });
       return "no-session";
     }
-    let result = await helixApi()?.send("session.compress", {
+    // 统一 Resume 状态机（与 handleRun / resync / gateway.ready 同一套）：
+    //   成功 → attached，继续压缩
+    //   SESSION_NOT_FOUND → markSessionBroken + 明确提示，结束
+    //   其他错误 → 保留真实错误提示，**不**标 broken（可重试）
+    // 不自行 session/new + seedHistory 重建，也**不再**用 storedId 再 resume
+    // 一次找替代会话——那会让 compact 拥有独立于 Resume 的第二套恢复语义。
+    const resumed = await resumeSession(sid);
+    if (!resumed.ok) {
+      const hstore = useHelixStore.getState();
+      if (isSessionGone(resumed) && currentSessionId) {
+        hstore.markSessionBroken(currentSessionId, resumed.error);
+      }
+      hstore.showToast({
+        type: "warning",
+        title: resumeFailureTitle(resumed),
+        description: resumeFailureDescription(resumed),
+      });
+      return "no-session";
+    }
+    sid = resumed.sessionId;
+    const result = await helixApi()?.send("session.compress", {
       session_id: sid,
     });
-    // 会话不在内存（网关重启/空闲回收后）：与 prompt 路径一致，先
-    // session.resume 从 state.db 捞回原会话再重试压缩，避免"压缩失败"。
-    // resume 用 storedId（DB 主键）才能跨重启恢复；ui_session 查不到 DB 行。
-    if (
-      !result ||
-      (typeof result === "object" && (result as any).error)
-    ) {
-      const errText = String((result as any)?.error || "");
-      if (
-        /session.*not.*found|not found|no such session|unknown session/i.test(
-          errText,
-        )
-      ) {
-        const entry = currentSessionId
-          ? ctx.sessionMap.get(currentSessionId)
-          : null;
-        const resumeId = entry?.storedId || sid;
-        debug("[Helix] /compact: session not in memory, trying resume →", resumeId);
-        const resumeRes = await helixApi()
-          ?.send("session.resume", { session_id: resumeId })
-          .catch(() => null);
-        if (resumeRes) {
-          const restoredId = (resumeRes as any)?.session_id || resumeId;
-          debug("[Helix] /compact: resumed, retrying compress");
-          result = await helixApi()?.send("session.compress", {
-            session_id: restoredId,
-          });
-        }
-      }
-    }
     // 压缩成功说明 sid 在后端活着（可能刚被透明恢复）：刷新映射 epoch 并
     // 恢复全局绑定，让 handleRun / context-usage 后续都命中同一会话。
     if (currentSessionId) {
@@ -308,16 +198,33 @@ export async function runCompactCommand(
         // 与 WorkBuddy 的"过程卡片"风格一致）
         const anchorMessageId =
           local.length > 0 ? local[local.length - 1].id : undefined;
+        const afterTokens = Number(r.after_tokens) || undefined;
+        const ctxKey = currentSessionId || DRAFT_SESSION_KEY;
         useHelixStore.getState().setCompressionNotice({
           ts: Date.now(),
-          sessionId: currentSessionId || DRAFT_SESSION_KEY,
+          sessionId: ctxKey,
           anchorMessageId,
           source: "manual",
           removed: Number(r.removed) || undefined,
           beforeTokens: Number(r.before_tokens) || undefined,
-          afterTokens: Number(r.after_tokens) || undefined,
+          afterTokens,
           messageCount: Number(r.after_messages) || undefined,
         });
+        // 权威写回环：after_tokens 是压缩后「下一条 prompt 实际重放」的大小
+        // （estimate_messages_tokens，见 pi_gateway session.compress）。压缩是
+        // 唯一确定性的下降事件，走默认 max 合并会让 after_tokens 被压缩前的旧
+        // 高位抬回去，环就永远停在压缩前的读数上。这里必须 authoritative。
+        if (afterTokens) {
+          const prev = useHelixStore.getState().contextUsage[ctxKey];
+          useHelixStore.getState().setContextUsage(
+            ctxKey,
+            prev?.size || 0,
+            afterTokens,
+            undefined,
+            undefined,
+            true,
+          );
+        }
         // 自动自愈：极端情况下压缩回包异常/映射失败会让当前会话仍为空。
         // 直接异步从后端拉权威历史覆盖，无需用户手动输入 /resync。
         if (isCurrentSessionRenderBroken(currentSessionId)) {
@@ -350,13 +257,18 @@ export async function runCompactCommand(
     }
     return "ok";
   } catch (e) {
-    // 后端明确说会话不存在（从未跑过/已被删）：只清 live sid、保留
-    // storedId/sids 历史——整条删除会把后续 resume 的最后线索烧掉（与
-    // 会话恢复链的降级语义一致）。
-    if (String(e).includes("session not found") && currentSessionId) {
-      const entry = ctx.sessionMap.get(currentSessionId);
-      if (entry) entry.sid = "";
-      void persistSessionMap(ctx.sessionMap);
+    // compress 抛错（区别于上面结构化的 error 响应）：按统一规则判定。
+    // 不能只凭 "session not found" 清映射或标 broken——serve 模式下它指
+    // 内存 ui_session 丢失，磁盘文件可能还在。做一次权威 resume 检查，
+    // 只有文件确实没了才标 broken；其余保留 sid 让用户重试。
+    if (
+      currentSessionId &&
+      classifyResumeError(e).code === "SESSION_NOT_FOUND"
+    ) {
+      const gone = await sessionFileGone(compressSid);
+      if (gone) {
+        useHelixStore.getState().markSessionBroken(currentSessionId, String(e));
+      }
     }
     useHelixStore.getState().showToast({
       type: "error",

@@ -460,14 +460,20 @@ function ToolCard({
   const verbText = verb;
   // 完整标题（verb + action/label）：action 为空时回退到工具显示名。title 属性
   // 用于悬停查看全文——命令类标题可能被 CSS truncate 视觉截断。
+  // 注意：action 为空时回退标签自带动词（bash 无参 → "执行命令"），再前置 verb
+  // 会得到「执行 执行命令」——API 报错中断时 toolCall 参数为空，正是这个形态。
+  // 此时改显英文工具名（"执行 bash"），既去掉重复动词，又保留"调的是哪个工具"。
+  const fallbackLabel = getToolDisplayLabel(
+    step.toolName || "",
+    step.toolKind,
+    path,
+    step.toolParams,
+  );
   const titleLabel =
     action ||
-    getToolDisplayLabel(
-      step.toolName || "",
-      step.toolKind,
-      path,
-      step.toolParams,
-    );
+    (fallbackLabel.startsWith(verb) && step.toolName
+      ? step.toolName
+      : fallbackLabel);
   // 卡片首部文本（"输入"）：命令类 → `$ 命令`；其余工具 → 参数。与结果合并为同一张
   // 卡片，避免"参数卡 + 结果卡"分裂成两张。单参数且其值已作为标题展示（如 read/list
   // 的 path、grep 的 query）时不再重复，仅在输入尚未见于标题时才并入卡片首部。

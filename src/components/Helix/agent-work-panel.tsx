@@ -121,6 +121,49 @@ export function AgentWorkPanel() {
     ? subAgents.find((a) => a.id === agent.id || a.name === agent.id)
     : undefined;
   const isRunning = live?.status === "running";
+
+  // 派生数据提前到 early return 之前：这些是纯计算（无 hook），提前不影响语义，
+  // 且让 useElapsedSeconds 能在两个 early return 之前无条件调用（hooks 数量
+  // 必须每条渲染路径一致，否则 "Rendered fewer hooks than expected"）。
+  const storeRows = (live?.toolCalls || []).filter(
+    (tc) => !isSyntheticSubAgentToolRow(tc.toolName),
+  );
+
+  // 取原始工具行（timeline 优先，回退 store）。明细只喂给悬停提示，
+  // 渲染统一走 mergeSteps 的「合并同类」，不再逐条摊开参数 JSON。
+  const rawSteps: RawStep[] = timelineFound
+    ? timeline
+        .slice(-20)
+        .filter((tc) => !isSyntheticSubAgentToolRow(tc.tool_name || tc.kind))
+        .map((tc) => ({
+          toolName: tc.tool_name || tc.kind,
+          detail: tc.preview || "",
+          status:
+            tc.status === "error"
+              ? "error"
+              : tc.status === "success"
+                ? "success"
+                : "running",
+        }))
+    : storeRows
+        .filter((tc) => tc.toolName !== "progress")
+        .slice(-20)
+        .map((tc) => ({
+          toolName: tc.toolName,
+          detail: tc.params || "",
+          status: tc.status as StepStatus,
+        }));
+
+  const steps = mergeSteps(rawSteps);
+
+  // 运行中但还没收到工具行时的已运行秒数（后台子 agent 的工具活动要等
+  // subagents:tool 桥接事件，先如实显示"正在执行"，不再像卡死）。
+  // 注意：必须放在所有 early return 之前，否则会触发 hooks 数量不一致。
+  const elapsed = useElapsedSeconds(
+    live?.createdAt,
+    isRunning && steps.length === 0,
+  );
+
   // 切换子 agent 时收起展开态，避免上个 agent 的指令/执行流展开态残留。
   useEffect(() => {
     setPromptOpen(false);
@@ -263,37 +306,6 @@ export function AgentWorkPanel() {
     );
   }
 
-  const storeRows = (live?.toolCalls || []).filter(
-    (tc) => !isSyntheticSubAgentToolRow(tc.toolName),
-  );
-
-  // 取原始工具行（timeline 优先，回退 store）。明细只喂给悬停提示，
-  // 渲染统一走 mergeSteps 的「合并同类」，不再逐条摊开参数 JSON。
-  const rawSteps: RawStep[] = timelineFound
-    ? timeline
-        .slice(-20)
-        .filter((tc) => !isSyntheticSubAgentToolRow(tc.tool_name || tc.kind))
-        .map((tc) => ({
-          toolName: tc.tool_name || tc.kind,
-          detail: tc.preview || "",
-          status:
-            tc.status === "error"
-              ? "error"
-              : tc.status === "success"
-                ? "success"
-                : "running",
-        }))
-    : storeRows
-        .filter((tc) => tc.toolName !== "progress")
-        .slice(-20)
-        .map((tc) => ({
-          toolName: tc.toolName,
-          detail: tc.params || "",
-          status: tc.status as StepStatus,
-        }));
-
-  const steps = mergeSteps(rawSteps);
-
   const statusLabel = isRunning
     ? "运行中"
     : live?.status === "completed"
@@ -303,13 +315,6 @@ export function AgentWorkPanel() {
         : live?.status === "cancelled"
           ? "已取消"
           : "已停止";
-
-  // 运行中但还没收到工具行时的已运行秒数（后台子 agent 的工具活动要等
-  // subagents:tool 桥接事件，先如实显示"正在执行"，不再像卡死）。
-  const elapsed = useElapsedSeconds(
-    live?.createdAt,
-    isRunning && steps.length === 0,
-  );
 
   return (
     <div className="flex flex-col h-full w-full min-h-0 min-w-0 bg-card">

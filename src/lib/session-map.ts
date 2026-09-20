@@ -66,3 +66,53 @@ export async function resolveBackendSid(
   const map = await loadSessionMap();
   return map.get(conversationId)?.sid ?? null;
 }
+
+let loadPromise: Promise<Map<string, SessionMapEntry>> | null = null;
+
+/**
+ * Memoized 加载：同一进程内所有调用方共享同一个 promise。
+ *
+ * handleRun 靠 `await ensureSessionMapLoaded()` 作为**硬门槛**——在此之前
+ * sessionMap 不是可信事实源。冷启动时内存 Map 还是空的，若在门槛之前提前捕获
+ * `existing`，会拿到 `undefined` 并被判成"全新对话"，`session/new` 铸造一个空
+ * 会话覆盖映射，旧历史从此对不上（2026-09-20 `01a0bce1` → `01a0befe` 那次
+ * 丢失就是这条路径：重启后 3 分 17 秒发的第一条消息，`msgs=0 seed_len=0`）。
+ *
+ * 语义是「加载未完成 → 暂停等待」，不是「没加载好就 fallback 成空」。
+ */
+export function ensureSessionMapLoaded(): Promise<Map<string, SessionMapEntry>> {
+  if (!loadPromise) {
+    loadPromise = loadSessionMap();
+  }
+  return loadPromise;
+}
+
+/** 磁盘写入后调用：memoized 结果作废，下一次 await 重新读盘。 */
+export function invalidateSessionMapCache(): void {
+  loadPromise = null;
+}
+
+/**
+ * 按 key 合并写，**绝不用内存 Map 整表覆盖**。
+ *
+ * 冷启动阶段内存 Map 可能还是空的；整表覆盖会把其它对话的 sid 一起抹掉，造成
+ * "明明之前有 SID，为什么 map 后来没了"——那是 handleRun 之外第二个独立的 SID
+ * 丢失制造器。这里以磁盘现值为准，只落本次改动的 key（`null` = 删除该 key），
+ * 未提及的 key 原样保留。
+ */
+export async function persistSessionMapEntries(
+  patch: Iterable<readonly [string, SessionMapEntry | null]>,
+): Promise<void> {
+  const db = await loadSessionMap();
+  for (const [key, value] of patch) {
+    if (value === null) db.delete(key);
+    else db.set(key, value);
+  }
+  const obj: Record<string, SessionMapEntry> = {};
+  db.forEach((value, key) => {
+    obj[key] = value;
+  });
+  const { persistence } = await import("@/lib/persist");
+  await persistence.saveSetting(SESSION_MAP_KEY, obj);
+  invalidateSessionMapCache();
+}

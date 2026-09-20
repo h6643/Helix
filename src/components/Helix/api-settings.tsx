@@ -30,7 +30,7 @@ import { GeneralSettingsPanel } from "./general-settings-panel";
 import { HookSettings } from "./hook-settings";
 import { ImageModelSettings } from "./image-model-settings";
 import { McpEditorForm, type McpFormData } from "./mcp-editor-form";
-import { PageHeader, PopupSelect, SettingGroup, SaveBar } from "./settings-ui";
+import { PageHeader, PopupSelect, SettingGroup } from "./settings-ui";
 import { ShortcutsPage } from "./shortcuts-page";
 import {
   ModelUsageStats,
@@ -224,6 +224,14 @@ export function ApiSettings({
   const [page, setPage] = useState<SettingsPage>(
     (settingsPage as SettingsPage) || "general",
   );
+  // Reset the shared scroll container when switching settings pages.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const handlePageChange = useCallback((p: SettingsPage) => {
+    setPage(p);
+    requestAnimationFrame(() => {
+      if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    });
+  }, []);
   const [navSearch, setNavSearch] = useState("");
   const navSearchRef = useRef<HTMLInputElement>(null);
 
@@ -882,6 +890,13 @@ export function ApiSettings({
     setEditingProfileId(null);
   }, []);
 
+  // Ref to the auto-save function so `confirmAddModel` (defined earlier in the
+  // component body) can trigger persistence after adding a model. Assigned
+  // below once `handleSaveApi` exists.
+  const saveApiRef = useRef<
+    ((modelsList?: typeof addedModels) => Promise<void>) | null
+  >(null);
+
   // 把弹窗里选/填的模型加入当前供应商的模型列表。
   const confirmAddModel = useCallback(() => {
     const id = pickedModel.trim() || manualModel.trim();
@@ -900,37 +915,43 @@ export function ApiSettings({
       showToast({ type: "error", title: "模型上下文限制必须是正整数" });
       return;
     }
-    setAddedModels((prev) => [
-      ...prev.filter((m) => m.id !== id),
+    const newModels = [
+      ...addedModels.filter((m) => m.id !== id),
       { id, contextWindow },
-    ]);
+    ];
+    setAddedModels(newModels);
     setPickedModel("");
     setManualModel("");
     setPickedContext("");
     setModelSearch("");
     setShowAddModelDialog(false);
-  }, [pickedModel, manualModel, pickedContext, showToast]);
+    // 保存按钮已移除：添加模型后立即自动持久化（传入刚更新好的列表，
+    // 避免 state 尚未刷新导致的闭包陈旧）。
+    void saveApiRef.current?.(newModels);
+  }, [pickedModel, manualModel, pickedContext, addedModels, showToast]);
 
   // 保存状态（与「保存 Hooks 配置」一致的行内反馈，不依赖 toast）
   const [apiSaving, setApiSaving] = useState(false);
   const [apiSaveState, setApiSaveState] = useState<null | "ok" | "err">(null);
   const [apiSaveErr, setApiSaveErr] = useState<string | null>(null);
 
-  const handleSaveApi = useCallback(async () => {
-    setApiSaving(true);
-    setApiSaveState(null);
-    setApiSaveErr(null);
-    let failed = false;
-    try {
-    if (!localConfig.baseUrl.trim()) {
-      failed = true;
-      setApiSaveErr("请填写 Base URL");
-      setApiSaveState("err");
-      return;
-    }
-    const savedModels = addedModels
-      .map((m) => m.id.trim())
-      .filter(Boolean);
+  const handleSaveApi = useCallback(
+    async (modelsList?: typeof addedModels) => {
+      // 无参调用用 state 里的 addedModels（供未来保存入口）；传参则用调用方给的
+      // 刚更新过的列表（添加模型即自动保存的场景，避免 state 尚未刷新的闭包陈旧）。
+      const models = modelsList ?? addedModels;
+      setApiSaving(true);
+      setApiSaveState(null);
+      setApiSaveErr(null);
+      let failed = false;
+      try {
+        if (!localConfig.baseUrl.trim()) {
+          failed = true;
+          setApiSaveErr("请填写 Base URL");
+          setApiSaveState("err");
+          return;
+        }
+        const savedModels = models.map((m) => m.id.trim()).filter(Boolean);
     if (savedModels.length === 0) {
       failed = true;
       setApiSaveErr("请至少添加一个模型");
@@ -938,7 +959,7 @@ export function ApiSettings({
       return;
     }
     if (
-      addedModels.some(
+      models.some(
         (m) =>
           m.contextWindow !== undefined &&
           (!Number.isFinite(m.contextWindow) ||
@@ -953,7 +974,7 @@ export function ApiSettings({
     }
     // 第一个模型是默认模型（写入 settings.json 的 defaultModel），其余只进
     // models.json 的模型列表；每个模型的上下文限制落在各自条目上。
-    const firstModel = addedModels.find((m) => m.id.trim())!;
+    const firstModel = models.find((m) => m.id.trim())!;
     const finalConfig: ApiConfig = {
       ...localConfig,
       apiFormat: localConfig.apiFormat || DEFAULT_API_FORMAT,
@@ -1069,7 +1090,7 @@ export function ApiSettings({
             baseUrl: cfg.baseUrl,
             apiKey: cfg.apiKey,
             api: cfg.api,
-            models: addedModels
+            models: models
               .filter((m) => m.id.trim())
               .map((m) => ({
                 id: m.id.trim(),
@@ -1113,6 +1134,10 @@ export function ApiSettings({
     persistToStorage,
     showToast,
   ]);
+
+  // Keep the ref current so `confirmAddModel`'s auto-save always calls the
+  // latest `handleSaveApi` (avoids stale-closure issues across re-renders).
+  saveApiRef.current = handleSaveApi;
 
   const hasApiConfig = !!apiConfig.apiKey;
 
@@ -1730,10 +1755,10 @@ export function ApiSettings({
 
       case "api":
         return (
-          <div className="space-y-6">
+          <div className="flex-1 flex flex-col space-y-6">
             <PageHeader>模型设置</PageHeader>
-            {/* ── Left-right split layout ── */}
-            <div className="flex gap-5 items-stretch">
+            {/* ── Left-right split layout（flex-1：撑满滚动视口剩余高度，三个 tab 高度一致）── */}
+            <div className="flex flex-1 gap-5 items-stretch min-h-0">
               {/* Left sidebar — tabs + provider list */}
               <div className="w-60 shrink-0 flex flex-col rounded-xl border border-border/40 bg-card/60 overflow-hidden">
                 <div className="px-3 pt-3 pb-2">
@@ -2065,11 +2090,28 @@ export function ApiSettings({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    setAddedModels((prev) =>
-                                      prev.filter((x) => x.id !== m.id),
-                                    )
-                                  }
+                                  onClick={() => {
+                                    // 与「添加模型」对称：只改本地 addedModels 不会
+                                    // 持久化，而且这个 state 会在 activeProfileId /
+                                    // apiProfiles 变化时从 profile 重新灌入（上方
+                                    // mount effect），所以「删除模型没效果」。这里同样
+                                    // 立即走 saveApiRef 落盘（profile + providers +
+                                    // 后端 settings.json / models.json）。
+                                    if (addedModels.length <= 1) {
+                                      showToast({
+                                        type: "warning",
+                                        title: "至少保留一个模型",
+                                        description:
+                                          "如需清空该配置，请删除整个供应商。",
+                                      });
+                                      return;
+                                    }
+                                    const next = addedModels.filter(
+                                      (x) => x.id !== m.id,
+                                    );
+                                    setAddedModels(next);
+                                    void saveApiRef.current?.(next);
+                                  }}
                                   className="shrink-0 p-1 text-muted-foreground/30 hover:text-destructive opacity-0 group-hover/model-row:opacity-100 transition-colors"
                                   data-tip="删除模型"
                                 >
@@ -2249,15 +2291,6 @@ export function ApiSettings({
                         </div>
                       )}
 
-                      <div className="mt-auto">
-                        <SaveBar
-                          saving={apiSaving}
-                          status={apiSaveState}
-                          errorText={apiSaveErr}
-                          onSave={() => void handleSaveApi()}
-                          saveLabel="保存"
-                        />
-                      </div>
                     </div>
                   </SettingGroup>
                   </>
@@ -2576,8 +2609,7 @@ export function ApiSettings({
                 <button
                   key={item.id}
                   onClick={() => {
-                    setPage(item.id);
-                    pushNavigation({ type: "settings", page: item.id });
+                    handlePageChange(item.id);
                   }}
                   data-tip={item.label}
                   className={`p-2.5 rounded-lg transition-colors ${
@@ -2653,7 +2685,7 @@ export function ApiSettings({
                             <button
                               key={item.id}
                               onClick={() => {
-                                setPage(item.id);
+                                handlePageChange(item.id);
                                 pushNavigation({
                                   type: "settings",
                                   page: item.id,
@@ -2704,9 +2736,9 @@ export function ApiSettings({
       )}
 
       {/* Right content — flat card, border-separated from the nav sidebar */}
-      <div className="helix-surface settings-scroll flex-1 overflow-y-auto relative">
-        <div className="flex justify-center">
-          <div className="px-8 pt-10 pb-10 w-full max-w-3xl">
+      <div ref={scrollRef} className="helix-surface settings-scroll flex-1 overflow-y-auto relative">
+        <div className="flex min-h-full flex-col items-center">
+          <div className="px-8 pt-10 pb-10 w-full max-w-3xl flex-1 flex flex-col">
             {renderContent()}
           </div>
         </div>

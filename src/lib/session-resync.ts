@@ -1,4 +1,9 @@
 ﻿import { helixApi } from "@/lib/electron-bridge";
+import {
+  isSessionGone,
+  resumeFailureDescription,
+  resumeSession,
+} from "@/lib/session-resume";
 import { loadSessionMap, resolveBackendSid } from "@/lib/session-map";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
@@ -92,18 +97,24 @@ export async function resyncCurrentSessionFromBackend(
         });
       return 0;
     }
-    let res: any = await helixApi()
-      ?.send("session.resume", { session_id: sid })
-      .catch(() => null);
-    // 会话不在内存（网关重启 / 空闲回收后）：用 storedId 从 state.db 透明恢复
-    if (!res || (typeof res === "object" && (res as any).error)) {
-      const map = await loadSessionMap();
-      const storedId = map.get(currentSessionId)?.storedId || sid;
-      res = await helixApi()
-        ?.send("session.resume", { session_id: storedId })
-        .catch(() => null);
+    // 统一 Resume 状态机（与 handleRun / gateway.ready / compact 同一套）：
+    // 只按本对话保存的 SID 恢复原会话——不换 storedId、不查最近，那是"换
+    // 一个 SID"。SESSION_NOT_FOUND → 标 broken + 明确提示；其他错误保留
+    // 真实错误、**不**标 broken（可重试）。resync 自己不做任何 fallback。
+    const resumed = await resumeSession(sid);
+    if (!resumed.ok) {
+      if (isSessionGone(resumed)) {
+        store.markSessionBroken(currentSessionId, resumed.error);
+      }
+      if (opts.showToast)
+        store.showToast({
+          type: "error",
+          title: "同步失败",
+          description: resumeFailureDescription(resumed),
+        });
+      return 0;
     }
-    if (!res || !Array.isArray((res as any).messages)) {
+    if (!Array.isArray(resumed.messages)) {
       if (opts.showToast)
         store.showToast({
           type: "error",
@@ -112,7 +123,7 @@ export async function resyncCurrentSessionFromBackend(
         });
       return 0;
     }
-    const msgs = mapBackendMessages((res as any).messages, currentSessionId);
+    const msgs = mapBackendMessages(resumed.messages, currentSessionId);
     // 不让视图**变小**：后端快照比本地可见历史更短 = 后端滞后（刚提交的消息
     // 还没落 state.db）或已被压缩摘要掉。无条件整段替换会把用户看得见的内容
     // 删掉（"之前用户的输入自动消失"），而 /resync 的诉求是"把丢掉的找回来"，

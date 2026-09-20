@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  Send,
+  ArrowUp,
   Square,
   Zap,
   Hand,
@@ -21,6 +21,8 @@ import {
   BUILTIN_SLASH_COMMANDS,
   runCompactCommand,
 } from "./slash-commands";
+import { ContextUsageIndicator } from "./context-usage";
+import { ReasoningEffortControl } from "./agent-flow-panel";
 
 /** 剥掉 user 消息里注入的指令段，只留问题正文（首段，到空行为止）。 */
 function displayUserContent(raw: string): string {
@@ -153,6 +155,8 @@ export function BylinePanel() {
   const activeModel = useHelixStore((s) => s.activeModel);
   const providers = useHelixStore((s) => s.providers);
   const providerModels = useHelixStore((s) => s.providerModels);
+  const reasoningEffort = useHelixStore((s) => s.reasoningEffort);
+  const setReasoningEffort = useHelixStore((s) => s.setReasoningEffort);
   const [showModeDropdown, setShowModeDropdown] = useState(false);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -287,6 +291,12 @@ export function BylinePanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slashQuery]);
 
+  // 清空草稿后把 textarea 高度压回单行基准（onInput 只在键入时触发，
+  // setDraft("") 是程序清空——不重置的话多行输入发送后框会停在长高状态）。
+  const resetInputHeight = () => {
+    if (inputRef.current) inputRef.current.style.height = "36px";
+  };
+
   const handleSend = () => {
     const q = draft.trim();
     if (!q) return;
@@ -307,6 +317,7 @@ export function BylinePanel() {
       const cmd = BUILTIN_SLASH_COMMANDS.find((c) => c.name === name);
       if (cmd?.action === "compact") {
         setDraft("");
+        resetInputHeight();
         void (async () => {
           // 发命令前先确保 cid→sid 磁盘映射在手（handleSend 是同步入口，
           // 预热 effect 可能还没拉完）。
@@ -330,6 +341,7 @@ export function BylinePanel() {
         // /btw 的落点就是本面板本身（主对话发 /btw 才是发问入口）：选中/输入
         // 只补全提示，发送时说明入口，不发空命令。
         setDraft("");
+        resetInputHeight();
         showToast({
           type: "warning",
           title: "/btw 请从主对话输入框发送",
@@ -341,6 +353,7 @@ export function BylinePanel() {
     }
 
     setDraft("");
+    resetInputHeight();
     // 附带提交瞬间的主线 cid：面板可能已不是 currentSessionId，追问必须进
     // 提交时那条主线名下开放的旁路会话。
     bylineAsk(q, mainCid);
@@ -441,19 +454,19 @@ export function BylinePanel() {
             onKeyDown={handleKeyDown}
             onInput={(e) => {
               const target = e.target as HTMLTextAreaElement;
-              const prevHeight = target.style.height || "38px";
+              const prevHeight = target.style.height || "36px";
               target.style.height = "auto";
               const ch = target.scrollHeight;
-              const min = 38;
+              const min = 36;
               const nextHeight = ch > min ? Math.min(ch, 300) : min;
               target.style.height = nextHeight + "px";
             }}
             placeholder="随心输入...（/ 查看快捷命令）"
-            className="chat-input w-full min-w-0 resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 text-[length:var(--helix-transcript-size)] min-h-[38px] max-h-[300px] px-2.5 pt-2 pb-0.5 leading-[1.45] break-all overflow-x-hidden overflow-y-auto text-foreground outline-none"
+            className="chat-input w-full min-w-0 resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 text-[length:var(--helix-transcript-size)] min-h-[36px] max-h-[300px] px-2.5 pt-1.5 pb-0.5 leading-[1.45] break-all overflow-x-hidden overflow-y-auto text-foreground outline-none"
             style={{
               overflowX: "hidden",
               overflowY: "auto",
-              height: "38px",
+              height: "36px",
               wordBreak: "break-all",
               overflowWrap: "anywhere",
             }}
@@ -570,28 +583,35 @@ export function BylinePanel() {
                 </div>
               )}
             </div>
-            {isRunning ? (
-              // 运行中 = 显式停止按钮：经 bylineStopSignal 让 AgentFlowPanel
-              // 对旁路会话调 handleStop。Enter 不承担停止（只发送）。
-              <button
-                type="button"
-                onClick={stopByline}
-                data-tip="停止"
-                className="h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center text-muted-foreground hover:text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40"
-              >
-                <Square className="size-3.5 fill-current" />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!draft.trim()}
-                data-tip="发送"
-                className="h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center text-muted-foreground hover:text-foreground bg-muted/30 border border-border/30 hover:bg-muted/40 disabled:opacity-40"
-              >
-                <Send className="size-4" />
-              </button>
-            )}
+            <div className="flex items-center gap-1.5 min-w-0 shrink">
+              <ContextUsageIndicator />
+              <ReasoningEffortControl
+                value={reasoningEffort}
+                onChange={(v) => setReasoningEffort(v)}
+              />
+              {isRunning ? (
+                // 运行中 = 显式停止按钮：经 bylineStopSignal 让 AgentFlowPanel
+                // 对旁路会话调 handleStop。Enter 不承担停止（只发送）。
+                <button
+                  type="button"
+                  onClick={stopByline}
+                  data-tip="停止"
+                  className="h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center text-foreground border border-border/60 bg-muted/40 hover:bg-muted/70"
+                >
+                  <Square className="size-3 text-foreground fill-foreground" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSend}
+                  disabled={!draft.trim()}
+                  data-tip="发送"
+                  className="h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center border border-border/60 bg-muted/40 hover:bg-muted/70 text-foreground/40 disabled:opacity-40"
+                >
+                  <ArrowUp className="size-4" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>

@@ -367,6 +367,16 @@ export interface HelixTodo {
   activeForm?: string;
 }
 
+/**
+ * 一条结构化计划步骤（来自 plan.md 的列表项，解析见 src/lib/plan-parse.ts）。
+ * 比 HelixTodo 语义更窄：只有三态、无 id/activeForm——它描述的是“计划里写
+ * 了什么步骤 + 当前做到哪一步”，供工作面板「执行计划」区块渲染。
+ */
+export interface PlanStep {
+  text: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
 export interface SubAgent {
   id: string;
   name: string;

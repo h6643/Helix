@@ -62,6 +62,7 @@ export const SettingGroup = ({
   description,
   children,
   className = "",
+  bodyClassName = "",
   plain = false,
 }: {
   title?: React.ReactNode;
@@ -69,6 +70,8 @@ export const SettingGroup = ({
   description?: React.ReactNode;
   children?: React.ReactNode;
   className?: string;
+  /** 透传给卡片内层包裹 div（divide-y 那层）：需要让内层随卡片拉伸时用 */
+  bodyClassName?: string;
   /** 去掉卡片背景与边框，仅保留标题/描述与行分隔，用于嵌入已有卡片内的分组 */
   plain?: boolean;
 }) => (
@@ -94,7 +97,11 @@ export const SettingGroup = ({
         )}
       </div>
     )}
-    {children && <div className="divide-y divide-border/30">{children}</div>}
+    {children && (
+      <div className={`divide-y divide-border/30 ${bodyClassName}`}>
+        {children}
+      </div>
+    )}
   </div>
 );
 

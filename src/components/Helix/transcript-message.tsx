@@ -538,43 +538,17 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** 流式过程区的滚动容器：内容超出限高时内部滚动（与主对话同款行为）。 */
+/** 流式过程区容器。历史上的 300px 限高内滚已移除：内容自然撑开，
+ *  贴底跟随交给外层转录视口（运行中每 200ms scrollToBottom，用户上翻即停）。
+ *  组件壳保留，调用点不用动。 */
 export function ProcessWindow({
-  active,
-  dependency,
   children,
 }: {
-  active: boolean;
-  /** 依赖此数组的引用来重新测量滚动位置（引用变化 → effect 重跑）。 */
-  dependency: unknown[];
+  active?: boolean;
+  dependency?: unknown[];
   children: React.ReactNode;
 }) {
-  const [innerH, setInnerH] = useState<number | null>(null);
-  const scrollerRef = React.useRef<HTMLDivElement | null>(null);
-  React.useEffect(() => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    const update = () => setInnerH(el.scrollHeight);
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  React.useEffect(() => {
-    if (!active) return;
-    const el = scrollerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [active, dependency]);
-  const cap = active ? 300 : undefined;
-  return (
-    <div
-      ref={scrollerRef}
-      style={{ maxHeight: cap, overflowY: cap ? "auto" : "visible" }}
-      className={active ? "" : "max-h-[300px] overflow-y-auto"}
-    >
-      {children}
-    </div>
-  );
+  return <>{children}</>;
 }
 
 export function HighlightText({
@@ -1117,10 +1091,14 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
               </div>
             )}
 
-            {/* Copy button */}
+            {/* 操作行（复制 + 分叉）：blocks / plain 两个分支共用，放外层
+                避免两处重复。复制任何状态都可用（复制的是当前已渲染的
+                正文，流式中也无妨）；分叉要求消息已落定（forkConversation
+                从消息列表切片复制，流式草稿尚未提交进 chatMessages，分叉
+                点会缺内容），所以只在 !isStreaming 时显示。 */}
             <div className="flex opacity-0 group-hover:opacity-100 transition-opacity pt-1 px-1 gap-0.5">
-              <CopyButton text={mdContent} />
-              {onFork && (
+              <CopyButton text={mdContent || content} />
+              {!isStreaming && onFork && (
                 <button
                   onClick={() => onFork(msg.id)}
                   className="p-1 rounded-lg text-muted-foreground/40 hover:text-blue-500 hover:bg-blue-500/10 transition-colors"

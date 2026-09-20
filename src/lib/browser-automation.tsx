@@ -20,7 +20,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface BrowserExecRequest {
-  op: "read" | "click" | "type" | "press" | "back" | "forward" | "refresh";
+  op:
+    | "read"
+    | "click"
+    | "type"
+    | "press"
+    | "screenshot"
+    | "back"
+    | "forward"
+    | "refresh";
   url?: string;
   reqId: string;
   params?: {
@@ -50,6 +58,10 @@ export interface BrowserExecResult {
   clicked?: string;
   typed?: string;
   navigated?: string;
+  /** browser_screenshot：页面渲染快照（PNG data URL）。 */
+  image?: string;
+  /** 视觉模型转述（配置了视觉模型时尽力而为，供非多模态主模型阅读）。 */
+  description?: string;
 }
 
 const EXEC_TIMEOUT_MS = 15_000;
@@ -181,11 +193,56 @@ const EXECUTOR_SCRIPT = `
     return { ok: true, pressed: key };
   }
 
+  // 截图：把当前渲染的 DOM 序列化进 SVG foreignObject，画到 canvas 转 PNG。
+  // srcdoc 快照与宿主同源，可直接 drawImage；无外部样式表时是未排版渲染，
+  // 但有总比没有强——视觉模型能读出布局/文本/大体结构。
+  function escapeXml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function doScreenshot() {
+    return new Promise(function (resolve, reject) {
+      try {
+        var docEl = document.documentElement;
+        var w = Math.max(docEl.scrollWidth, 1280);
+        var h = Math.max(docEl.scrollHeight, 800);
+        var svg =
+          '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '">' +
+          '<foreignObject width="100%" height="100%">' +
+          '<div xmlns="http://www.w3.org/1999/xhtml">' +
+          escapeXml(docEl.outerHTML) +
+          '</div></foreignObject></svg>';
+        var img = new Image();
+        img.onload = function () {
+          try {
+            var c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            var ctx = c.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+            resolve({ ok: true, image: c.toDataURL('image/png') });
+          } catch (err) { reject(err); }
+        };
+        img.onerror = function () { reject(new Error('页面渲染为图片失败')); };
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+      } catch (err) { reject(err); }
+    });
+  }
+
   window.addEventListener('message', function (e) {
     var d = e.data;
     if (!d || d.type !== 'HELIX_EXEC_RUN') return;
-    var res;
+    var done = function (res) {
+      parent.postMessage({ type: 'HELIX_EXEC_RESULT', reqId: d.reqId, result: res }, '*');
+    };
     try {
+      if (d.op === 'screenshot') {
+        doScreenshot().then(done, function (err) {
+          done({ ok: false, error: String((err && err.message) || err) });
+        });
+        return;
+      }
+      var res;
       if (d.op === 'read') {
         var r = readAll(d.params && d.params.selector);
         res = { ok: true, url: d.url, title: document.title || '', text: r.text, elements: r.elements };
@@ -200,10 +257,10 @@ const EXECUTOR_SCRIPT = `
       } else {
         res = { ok: false, error: 'unknown op: ' + d.op };
       }
+      done(res);
     } catch (err) {
-      res = { ok: false, error: String((err && err.message) || err) };
+      done({ ok: false, error: String((err && err.message) || err) });
     }
-    parent.postMessage({ type: 'HELIX_EXEC_RESULT', reqId: d.reqId, result: res }, '*');
   });
 
   parent.postMessage({ type: 'HELIX_EXEC_READY' }, '*');
@@ -211,6 +268,26 @@ const EXECUTOR_SCRIPT = `
 </script>
 `;
 
+
+/** 视觉模型转述（尽力而为）：把截图 data URL 交给 vision_describe，返回文字描述。 */
+async function describeImage(image: string): Promise<string | null> {
+  try {
+    const internals = (
+      window as unknown as {
+        __TAURI_INTERNALS__?: {
+          invoke?: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    const desc = await internals?.invoke?.("vision_describe", {
+      image,
+      prompt: null,
+    });
+    return typeof desc === "string" && desc ? desc : null;
+  } catch {
+    return null;
+  }
+}
 /** Fetch a page's HTML through the Rust page_fetch command (server-side fetch:
  *  bypasses CORS entirely). Returns null on failure. */
 async function fetchPageHtml(url: string): Promise<string | null> {
@@ -283,6 +360,21 @@ export function useBrowserAutomation() {
       if (done) return;
       done = true;
       const reqId = pending.reqId;
+      // browser_screenshot：尽量用视觉模型把截图转述成文字，供非多模态
+      // 主模型阅读（原图也一并回传，多模态模型可直接看图）。
+      if (result.ok && result.image && !result.description) {
+        void describeImage(result.image).then((desc) => {
+          import("@/lib/electron-bridge").then(({ electronApp }) => {
+            electronApp.browserWriteResult?.(reqId, {
+              ...result,
+              description: desc ?? undefined,
+            });
+          });
+          setPending(null);
+          setFrameHtml(null);
+        });
+        return;
+      }
       import("@/lib/electron-bridge").then(({ electronApp }) => {
         electronApp.browserWriteResult?.(reqId, result);
       });

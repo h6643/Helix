@@ -16,6 +16,7 @@ import {
   RotateCcw,
   MoreVertical,
   Pencil,
+  Copy,
   GitBranch,
   AlertTriangle,
 } from "lucide-react";
@@ -70,6 +71,11 @@ interface SessionActionsMenuProps {
   onDelete?: () => void;
   onRestore?: () => void;
   onRename?: () => void;
+  onCopyId?: () => void;
+  // 展开态受控：菜单有两个入口（hover 的「更多操作」按钮 + 对话行右键），
+  // 状态必须住在父组件，否则右键无法驱动打开。
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }
 
 function SessionActionsMenu({
@@ -80,8 +86,10 @@ function SessionActionsMenu({
   onDelete,
   onRestore,
   onRename,
+  onCopyId,
+  open,
+  onOpenChange,
 }: SessionActionsMenuProps) {
-  const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<{
@@ -118,9 +126,9 @@ function SessionActionsMenu({
       ) {
         return;
       }
-      setOpen(false);
+      onOpenChange(false);
     };
-    const handleScroll = () => setOpen(false);
+    const handleScroll = () => onOpenChange(false);
     document.addEventListener("mousedown", handle);
     window.addEventListener("scroll", handleScroll, true);
     window.addEventListener("resize", handleScroll);
@@ -129,7 +137,7 @@ function SessionActionsMenu({
       window.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("resize", handleScroll);
     };
-  }, [open, updatePosition]);
+  }, [open, onOpenChange, updatePosition]);
 
   return (
     <div className="absolute right-1 top-1/2 -translate-y-1/2">
@@ -137,7 +145,7 @@ function SessionActionsMenu({
         ref={buttonRef}
         onClick={(e) => {
           e.stopPropagation();
-          setOpen((v) => !v);
+          onOpenChange(!open);
         }}
         className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
         data-tip="更多操作"
@@ -163,7 +171,7 @@ function SessionActionsMenu({
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    setOpen(false);
+                    onOpenChange(false);
                     onRename();
                   }}
                   className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground hover:bg-accent/60"
@@ -176,7 +184,7 @@ function SessionActionsMenu({
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    setOpen(false);
+                    onOpenChange(false);
                     onArchive();
                   }}
                   className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
@@ -189,7 +197,7 @@ function SessionActionsMenu({
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    setOpen(false);
+                    onOpenChange(false);
                     onPin();
                   }}
                   className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
@@ -204,7 +212,7 @@ function SessionActionsMenu({
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    setOpen(false);
+                    onOpenChange(false);
                     onRestore();
                   }}
                   className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
@@ -213,11 +221,24 @@ function SessionActionsMenu({
                   恢复
                 </button>
               )}
+              {onCopyId && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenChange(false);
+                    onCopyId();
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                >
+                  <Copy className="size-3.5" />
+                  复制对话 ID
+                </button>
+              )}
               {onDelete && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    setOpen(false);
+                    onOpenChange(false);
                     onDelete();
                   }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-destructive hover:bg-destructive/10"
@@ -440,6 +461,39 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   );
   const [deleteProjectDir, setDeleteProjectDir] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  // 对话操作菜单的展开目标（受控）：同一时刻最多展开一个。右键对话行或
+  // hover 的「更多操作」按钮都能打开，所以 open 不能只存在菜单组件内部。
+  const [sessionMenuId, setSessionMenuId] = useState<string | null>(null);
+  // 复制对话 id：取后端 sid（pi 会话 UUID，会话目录 / 日志都用它定位），
+  // 这个对话还没绑定过后端会话时才退回前端会话 id。toast 带上 id 本体，
+  // 复制结果一眼可核对。
+  const copySessionId = useCallback(
+    (id: string) => {
+      void resolveBackendSid(id)
+        .then((sid) => {
+          if (!sid) {
+            showToast({
+              type: "warning",
+              title: "该对话还没有后端会话 ID",
+              description: "发送第一条消息后才会生成",
+            });
+            return null;
+          }
+          return navigator.clipboard.writeText(sid).then(() => sid);
+        })
+        .then((value) => {
+          if (value) {
+            showToast({
+              type: "success",
+              title: "已复制对话 ID",
+              description: value,
+            });
+          }
+        })
+        .catch(() => showToast({ type: "error", title: "复制失败" }));
+    },
+    [showToast],
+  );
 
   // 历史对话条分页：每页最多显示 20 条（项目内会话与独立对话各自分页）。
   const PAGE_SIZE = 20;
@@ -575,6 +629,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     useHelixStore.getState().flushSessionPersist();
     clearChat();
     useHelixStore.getState().clearExecutionFlow();
+    // 显式点「新对话」→ 进入可输入的草稿（重启恢复不到会话时界面停在
+    // 占位，必须这一步才真正进入可发消息状态）。
+    useHelixStore.getState().setNoActiveConversation(false);
     useHelixStore.getState().setCurrentSessionId(null);
     // Returning to a conversation from the sidebar should dismiss the
     // full-area panels so the chat is visible again.
@@ -608,6 +665,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         }
         // Double-check: clearChat wipes selectedWorkDir, restore it to the target project.
         useHelixStore.getState().setSelectedWorkDir(dir);
+        useHelixStore.getState().setNoActiveConversation(false);
         useHelixStore.getState().setCurrentSessionId(null);
         await persistence.saveProjectFolder(dir);
       } catch (e) {
@@ -721,6 +779,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
             /* best-effort */
           }
         }
+        useHelixStore.getState().setNoActiveConversation(false);
         useHelixStore.getState().setCurrentSessionId(session.id);
         // 切换对话时关闭右侧边栏：右侧面板（更改/代码/浏览器等）是上一个对话
         // 的上下文，切到新对话后保留旧内容会造成误导，统一收起。
@@ -746,7 +805,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         // 的实测值——恢复/重启用后不再增长，环会停在过期读数（显示 50k 而
         // 下一条 prompt 实际要重放 ~276k 的根因）。captureContextBreakdown
         // 向后端要真实下条 prompt 估算（含 restore-time trim 后的文件），
-        // max 合并落盘，环读数恢复真实。等待 prepare 完成后拉取——restore
+        // 按 authoritative 覆盖落盘，环读数恢复真实。等待 prepare 完成后拉取——restore
         // （含 trim switch）完成后 get_session_stats 才反映切换后的文件。
         void (async () => {
           try {
@@ -1022,6 +1081,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       const st = useHelixStore.getState();
       if (st.currentSessionId && deletedIds.has(st.currentSessionId)) {
         useHelixStore.getState().setCurrentSessionId(null);
+        // 当前会话随项目一起被删：同样回到"无当前会话"占位，
+        // 由用户显式新建或选择会话后才可输入。
+        useHelixStore.getState().setNoActiveConversation(true);
       }
       if (st.activeSessionWorkDir === deleteProjectDir) {
         useHelixStore.setState({ activeSessionWorkDir: null });
@@ -1375,6 +1437,11 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                                                 ? "bg-primary/10 text-primary"
                                                 : "text-sidebar-foreground/50 hover:bg-sidebar-accent/30 hover:text-sidebar-foreground/80"
                                             }`}
+                                            onContextMenu={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              setSessionMenuId(session.id);
+                                            }}
                                           >
                                             {streamingDrafts[session.id]
                                               ?.isAgentRunning ? (
@@ -1457,6 +1524,15 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                                             </span>
                                             <SessionActionsMenu
                                               isPinned={session.isPinned}
+                                              open={sessionMenuId === session.id}
+                                              onOpenChange={(v) =>
+                                                setSessionMenuId(
+                                                  v ? session.id : null,
+                                                )
+                                              }
+                                              onCopyId={() =>
+                                                copySessionId(session.id)
+                                              }
                                               onArchive={() =>
                                                 handleToggleArchive(session.id)
                                               }
@@ -1547,6 +1623,11 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                               ? "bg-primary/10 text-primary"
                               : "text-sidebar-foreground/70 hover:bg-sidebar-accent/40"
                           }`}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setSessionMenuId(session.id);
+                          }}
                         >
                           {streamingDrafts[session.id]?.isAgentRunning ? (
                             <div className="w-4 flex items-center justify-center shrink-0">
@@ -1606,6 +1687,11 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                           </span>
                           <SessionActionsMenu
                             isPinned={session.isPinned}
+                            open={sessionMenuId === session.id}
+                            onOpenChange={(v) =>
+                              setSessionMenuId(v ? session.id : null)
+                            }
+                            onCopyId={() => copySessionId(session.id)}
                             onArchive={() => handleToggleArchive(session.id)}
                             onPin={() => handleTogglePin(session.id)}
                             onDelete={() => handleDeleteSession(session.id)}

@@ -286,8 +286,9 @@ pub fn run() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_kill,
-            // page fetch (browser pick-element)
+            // page fetch (browser pick-element) + iframe 嵌入能力探测
             page_fetch::page_fetch,
+            page_fetch::page_frame_policy,
             // git
             git::status,
             git::diff,

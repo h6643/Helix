@@ -31,11 +31,16 @@ pub fn open_browser_url(url: String) -> Value {
 }
 
 /// Poll the pi extension's browser request queue
-/// (`~/.pi/agent/helix-browser-requests/*.json`), forward each NEW request's
+/// (`~/.pi/agent/browser-requests/*.json`), forward each NEW request's
 /// full payload (op/url/reqId/params) as a `helix:browser-request` event, and
 /// mark consumed files by renaming to `*.consumed` so the frontend's periodic
 /// poll picks up each request exactly once. Result files (`*.result.json`)
 /// are skipped — they belong to the extension's request-response protocol.
+/// Requests older than `STALE_REQUEST_MS` are marked consumed WITHOUT emitting:
+/// they belong to a run where the frontend wasn't polling (app closed/restarting),
+/// and consuming one "late" would silently build a browser page from a stale URL.
+const STALE_REQUEST_MS: u64 = 2 * 60 * 1000;
+
 #[tauri::command]
 pub fn poll_browser_requests() -> Value {
     use crate::state::app_handle;
@@ -43,8 +48,12 @@ pub fn poll_browser_requests() -> Value {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".pi")
         .join("agent")
-        .join("helix-browser-requests");
+        .join("browser-requests");
     let mut opened: Vec<String> = Vec::new();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -57,6 +66,31 @@ pub fn poll_browser_requests() -> Value {
                 continue;
             }
             let path = dir.join(&name);
+            // 未消费请求只在前端轮询时才有意义。过期的（前端当时不在线）
+            // 直接标记消费并跳过——否则前端晚启动时会"迟到地"消费它，在用户
+            // 下次打开侧边栏时凭空建出一个网页页签并导航到几分钟前的旧 URL。
+            // 年龄优先取文件名前缀（扩展写入时的 Date.now()），退回文件 mtime。
+            let ts_from_name = name
+                .split('-')
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let age_ms = if now_ms > 0 && ts_from_name > 0 {
+                now_ms.saturating_sub(ts_from_name)
+            } else {
+                entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| now_ms.saturating_sub(d.as_millis() as u64))
+                    .unwrap_or(0)
+            };
+            if age_ms > STALE_REQUEST_MS {
+                let consumed = dir.join(format!("{}.consumed", name));
+                let _ = std::fs::rename(&path, &consumed);
+                continue;
+            }
             let Ok(raw) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -86,10 +120,12 @@ pub fn poll_browser_requests() -> Value {
                     json!({ "ok": true, "navigated": url }),
                 );
                 // Back-compat: emit the legacy event so the sidebar-open path
-                // keeps working.
+                // keeps working. `quiet: true` marks it as agent-triggered so
+                // the frontend navigates in place instead of yanking the
+                // sidebar open over whatever tab the user is reading.
                 let _ = app_handle().emit(
                     "helix:open-browser",
-                    json!({ "url": url }),
+                    json!({ "url": url, "quiet": true }),
                 );
             }
             let consumed = dir.join(format!("{}.consumed", name));
@@ -108,7 +144,7 @@ pub fn browser_write_result(req_id: String, result: Value) -> Value {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".pi")
         .join("agent")
-        .join("helix-browser-requests");
+        .join("browser-requests");
     let _ = std::fs::create_dir_all(&dir);
     // Sanitize the id: it names a file — strip separators so a crafted reqId
     // can't escape the request directory.
@@ -366,7 +402,7 @@ pub async fn helix_approval_respond(params: Option<Value>) -> Result<Value, Stri
 /// Fetch the model list from an OpenAI-compatible endpoint (GET /models).
 #[tauri::command]
 pub async fn helix_fetch_models(base_url: String, api_key: String) -> Value {
-    let client = match reqwest::Client::builder().build() {
+    let client = match crate::proxy::proxy_aware_client() {
         Ok(c) => c,
         Err(_) => return json!({ "models": [] }),
     };
@@ -1464,7 +1500,12 @@ pub async fn pi_search_packages(query: String) -> Result<Value, String> {
         "https://registry.npmjs.org/-/v1/search?text={}&size=20",
         urlencoding::encode(&query)
     );
-    let resp = reqwest::get(&url)
+    let resp = crate::proxy::proxy_aware_client_builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?
+        .get(&url)
+        .send()
         .await
         .map_err(|e| format!("npm registry request failed: {e}"))?;
     let body: Value = resp
@@ -1647,7 +1688,7 @@ fn version_is_newer(installed: &str, latest: &str) -> bool {
 async fn npm_latest_version(name: &str) -> Result<String, String> {
     let encoded = name.replace('/', "%2F");
     let url = format!("https://registry.npmjs.org/{encoded}/latest");
-    let resp = reqwest::Client::builder()
+    let resp = crate::proxy::proxy_aware_client_builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("failed to build http client: {e}"))?

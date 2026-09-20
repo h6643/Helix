@@ -822,8 +822,12 @@ button, [role="button"], a, input, textarea, select {
   box-shadow: none;
 }
 
-/* 设置模式外层 wrapper：背景图激活时直接透明，
-   避免与内层 helix-surface 双层 88% 叠加后背景图几乎看不见。 */
+/* 设置模式外层 wrapper：背景图激活时必须保持全透明 —— 它只是"占位外壳"，
+   真正的 88% 蒙罩由内层的 .helix-surface（设置页侧栏、settings-scroll）提供。
+   若这里也铺 var(--surface-bg)（88%），会与内层叠成 1-(0.12)² ≈ 98.6%，
+   视觉上等于不透明（症状：设置界面看不到背景图透出）。
+   ⚠️ 只允许设置模式外壳使用；主对话卡要用 .helix-surface（它是唯一的
+   88% 底色来源，挂 transparent 外壳会让正文直接压在壁纸上）。 */
 .helix-surface-transparent {
   position: relative;
   background: transparent;
@@ -1411,11 +1415,10 @@ pre code.hljs {
 }
 
 .helix-md pre > .helix-code-card-header {
-  /* 头部条背景：由纯 --muted 改为「40% muted + 60% 卡片底色」的浅混合。
-     纯 --muted 在浅色主题是 oklch(0.92)（卡片 oklch(0.985)），深约 0.065(L)，
-     一条横贯整卡的色带显得又宽又重；混入卡片底色后只留极淡的暖灰调，
-     头部不再"压住"代码内容。深色主题同理（0.21 vs 0.16 → 混合后 ~0.18）。 */
-  background: var(--card) !important;
+  /* 头部条背景：「50% muted + 50% 卡片底色」的混合，比卡片略深一档，
+     让 TSX 标签条与代码区有可见的分层（纯 --card 时头部与代码区同色、看不出头部）。
+     深浅主题各自成立：muted 恒比 card 深，混合后保持同一方向。 */
+  background: color-mix(in oklch, var(--muted) 50%, var(--card)) !important;
   /* 收紧上下内边距（0.5rem→0.25rem）：头部条更薄，视觉重量进一步降低。 */
   padding-top: 0.25rem !important;
   padding-bottom: 0.25rem !important;

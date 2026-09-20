@@ -45,13 +45,31 @@ export const createCompactNoticeSlice: StateCreator<
   CompactNoticeSlice
 > = (set) => ({
   compressionNotices: {},
-  setCompressionNotice: (notice) =>
+  setCompressionNotice: (notice) => {
     set((state) => ({
       compressionNotices: {
         ...state.compressionNotices,
         [notice.sessionId || "__draft__"]: notice,
       },
-    })),
+    }));
+    // 顺手落盘压缩记录：内存 notice 只在这一次 UI 会话存活，重启后 divider
+    // 就没了。这里把 notice 转成持久化记录（键与上面的内存 map 一致——
+    // draft 期两边都是 "__draft__"），下次启动 / 切会话按会话回填。
+    // setCompressionNotice 是压缩提示的**唯一**写入点（手动 /compact、
+    // 自动压缩、后端 in-turn 压缩三处都走它），所以集中在这里持久化，
+    // 不用每个调用方重复一遍。
+    const key = notice.sessionId || "__draft__";
+    useHelixStore.getState().appendCompressionRecord({
+      ts: notice.ts,
+      sessionId: key,
+      source: notice.source,
+      anchorMessageId: notice.anchorMessageId,
+      removed: notice.removed,
+      beforeTokens: notice.beforeTokens,
+      afterTokens: notice.afterTokens,
+      messageCount: notice.messageCount,
+    });
+  },
   clearCompressionNotice: (sessionId) =>
     set((state) => {
       if (!sessionId) return { compressionNotices: {} };

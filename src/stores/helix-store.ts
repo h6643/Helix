@@ -36,6 +36,8 @@ import type {
   McpServerConfig,
   ApprovalMode,
   BylineReply,
+  HelixTodo,
+  PlanStep,
 } from "./helix-types";
 import { DEFAULT_SHORTCUTS } from "./helix-types";
 import { helixApi } from "@/lib/electron-bridge";
@@ -88,6 +90,10 @@ import {
   createCompactNoticeSlice,
   type CompactNoticeSlice,
 } from "./slices/compact-notice-slice";
+import {
+  createCompressionRecordsSlice,
+  type CompressionRecordsSlice,
+} from "./slices/compression-records-slice";
 import { createEditorSlice, type EditorSlice } from "./slices/editor-slice";
 import { createGitSlice, type GitSlice } from "./slices/git-slice";
 import { createPanelSlice, type PanelSlice } from "./slices/panel-slice";
@@ -124,6 +130,8 @@ export type {
   TaskNode,
   ScheduledTask,
   ProviderConfig,
+  HelixTodo,
+  PlanStep,
 };
 export { DEFAULT_SHORTCUTS };
 
@@ -132,6 +140,7 @@ interface HelixState
     GitSlice,
     ToastSlice,
     CompactNoticeSlice,
+    CompressionRecordsSlice,
     TerminalSlice,
     EditorSlice,
     AgentSettingsSlice,
@@ -192,7 +201,21 @@ interface HelixState
   // `previewRailUrl` value is unchanged) still navigates instead of leaving a
   // freshly-created blank browser page.
   previewRailNavSeq: number;
-  setPreviewRailUrl: (url: string | null) => void;
+  // 最近一次 setPreviewRailUrl 是否为「安静」触发（agent / 后台 browser 工具）。
+  // 供 right-sidebar 的 navSeq effect 判断：quiet 且当前**没有任何**浏览器页时
+  // 不新建页签——否则用户正看着「更改」/「代码」，tab 条上会莫名多出一个网页
+  // 标签（agent 后台 navigate → 静默建页 → 下次打开侧边栏才看见）。此时只记
+  // URL，等用户在 toast 上点「查看」（forceOpen → quiet=false）再真正建页。
+  lastPreviewRailQuiet: boolean;
+  // `forceOpen`（默认 true）控制是否**抢焦点**：拉出侧边栏 + 切到浏览器页签 +
+  // 关编辑器。用户自己点链接 → true；pi agent 的 browser 工具 navigate → false，
+  // 只记 URL，不把你从 diff / code 上拽走。
+  // `quiet`（默认 false）标记 agent / 后台触发，见 lastPreviewRailQuiet。
+  setPreviewRailUrl: (
+    url: string | null,
+    forceOpen?: boolean,
+    quiet?: boolean,
+  ) => void;
   togglePreviewRail: () => void;
 
   // Monotonic counter bumped on every "新建浏览器页" request (the "更多操作 /
@@ -344,8 +367,22 @@ interface HelixState
   setWorkDir: (relativePath: string) => Promise<void>;
   sessionSaveVersion: number;
   currentSessionId: string | null;
+  /** 重启后没有可恢复的会话时为 true：界面停在「无会话」占位，不显示可输入的
+   *  空草稿——首次发消息不会再悄悄建后端会话文件；必须显式点「新对话」或选会话。 */
+  noActiveConversation: boolean;
+  setNoActiveConversation: (v: boolean) => void;
   activeSessionWorkDir: string | null;
   setCurrentSessionId: (id: string | null) => void;
+  /**
+   * 已标记失效的会话。只有 Resume 返回 SESSION_NOT_FOUND 才能写入这里
+   * （判定统一走 session-resume 的 isSessionGone）——restore 失败/内部错误
+   * 是可重试故障，写进这里等于把一次抖动永久化成失效会话。
+   */
+  brokenSessionIds: string[];
+  /** 每个失效会话的原因（错误文本），供 UI 与下次发消息时的短路提示用。 */
+  brokenSessionReasons: Record<string, string>;
+  markSessionBroken: (cid: string, reason?: string) => void;
+  clearSessionBroken: (cid: string) => void;
   sessionHistory: string[];
   sessionHistoryIndex: number;
   /** direction 步进 sessionHistory；给 targetId 时直接跳到该会话在栈中的
@@ -412,6 +449,11 @@ interface HelixState
       tool_count: number;
       schema_tokens: number;
     }>,
+    /** 权威快照：完整后端查询 / 压缩完成回报，直接覆盖 size/used，允许 used 下降。
+     *  默认的 max 合并只适用于工具循环内流式的 provider totalTokens——它在
+     *  cache miss / in-turn compaction 时不单调，覆盖会把环来回跳。压缩是一个
+     *  已知的确定性下降事件，不能被 max 拦住，否则环永远停在压缩前的高位。 */
+    authoritative?: boolean,
   ) => void;
   // Estimated tokens for in-flight requests (shows ~Xk while waiting for API response)
   estimatedTokens: Record<string, number>;
@@ -503,17 +545,11 @@ interface HelixState
    * 从某条消息处分叉出新会话（新会话带该消息及之前的全部历史）。
    * `labelPrefix` 覆盖默认的"分支"前缀（例如 /btw 用"旁路"）。
    */
+  /** 从某条消息分叉：复制到该条为止的会话消息到**新对话**（纯本地，不涉及
+   *  后端 session fork / 分支链）。labelPrefix 用于旁路（/btw）等场景。 */
   forkConversation: (
     messageId: string,
-    opts?: {
-      labelPrefix?: string;
-      /** 父会话的后端 sid（面板从 sessionMap 取）。缺失则跳过无损分叉，
-       * 走 seed 重放。不能全局 helixSessionId 代替：侧边栏切换后它不清空。 */
-      parentSid?: string;
-      /** 无损分叉成功后由调用方登记 newCid→newSid 的后端映射（面板持有
-       * sessionMapRef，store 够不到）。不登记则后续 run 回落 seed 重放。 */
-      registerSid?: (cid: string, sid: string) => void;
-    },
+    opts?: { labelPrefix?: string },
   ) => Promise<string | null>;
 
   // Actions - Editor
@@ -1112,6 +1148,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   ...createGitSlice(set, get, store),
   ...createToastSlice(set, get, store),
   ...createCompactNoticeSlice(set, get, store),
+  ...createCompressionRecordsSlice(set, get, store),
   ...createTerminalSlice(set, get, store),
   ...createEditorSlice(set, get, store),
   ...createAgentSettingsSlice(set, get, store),
@@ -1288,6 +1325,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   workDirEpoch: 0,
   sessionSaveVersion: 0,
   currentSessionId: null,
+  noActiveConversation: true,
+  brokenSessionIds: [],
+  brokenSessionReasons: {},
   activeSessionWorkDir: null,
   sessionHistory: [],
   sessionHistoryIndex: -1,
@@ -1338,6 +1378,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   showPreviewRail: false,
   previewRailUrl: null as string | null,
   previewRailNavSeq: 0,
+  lastPreviewRailQuiet: false,
   browserAddSeq: 0,
   browserHomeUrl: "",
   rightSidebarTab: null,
@@ -1579,11 +1620,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           }
         : { rightSidebarTab: null, showPreviewRail: false, editorOpen: false };
     }),
-  setPreviewRailUrl: (url: string | null) =>
+  setPreviewRailUrl: (url: string | null, forceOpen = true, quiet = false) =>
     set((s) => ({
       previewRailUrl: url === null ? null : cleanUrl(url),
       previewRailNavSeq: s.previewRailNavSeq + 1,
-      ...(url !== null
+      lastPreviewRailQuiet: quiet,
+      ...(url !== null && forceOpen
         ? {
             showPreviewRail: true,
             rightSidebarTab: "browser",
@@ -1686,8 +1728,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         .catch(() => {});
     });
   },
-  // 旁路面板的模型下拉：只写该旁路会话的覆盖值。handleRun 每轮把它经
-  // set_model 透传到该会话的 pi 实例（网关按 session_id 路由），不改全局。
+  // 按会话的模型选择：输入框模型下拉与旁路面板都写它。handleRun 每轮把
+  // modelBySession[会话cid] 经 set_model 透传到该会话的 pi 实例（网关按
+  // session_id 路由），不改全局 config.yaml——所以每个对话可以各选各的模型，
+  // 新对话继续走全局默认。
   setModelForSession: (sessionId, model) => {
     set((s) => ({
       modelBySession: { ...s.modelBySession, [sessionId]: model },
@@ -1907,57 +1951,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     const newSessionId =
       "session-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
 
-    // ── 后端无损分叉（pi 原生 fork / clone）───────────────────────────
-    // 原理：gateway "session/fork" 让父会话的 pi 实例在目标 entry 处创建
-    // branched session 文件（完整条目树——工具调用/结果/思考块全部保留），
-    // 实例随之 rebind 到新会话；父会话文件不动，下次使用时从盘透明恢复。
-    // 任一步失败都回落到 seed 重放（下方 saveSession 照旧，handleRun 用
-    // forkedMsgs 作 seedHistory 重建）——无损只是增强，不是依赖。
-    // 仅在父会话空闲时尝试：pi fork 会 teardown 当前运行中的 turn。
-    // parentSid 必须由调用方（面板）从 sessionMap 提供——全局 helixSessionId
-    // 在侧边栏切换后不清空，会指到别的会话，用它 fork 会分错会话。
-    let nativeSid: string | null = null;
-    const parentRunning =
-      !!state.streamingDrafts[state.currentSessionId ?? ""]?.isAgentRunning;
-    const parentSid = opts?.parentSid;
-    if (parentSid && !parentRunning) {
-      try {
-        const api = helixApi();
-        if (api) {
-          // pi 的 fork RPC 固定 position "before"：branch 到该 user entry
-          // 的 parent，即"保留到这条 user 消息之前"。所以取分叉点之后的
-          // 第一条 user 消息作为切点——branch 恰好保留到分叉点（含其后的
-          // 助手回复/工具活动）。分叉点在会话末尾（无后续 user 消息）时
-          // 用 clone：leaf 全量副本。
-          const nextUser = msgs
-            .slice(forkIdx + 1)
-            .find((m) => m.role === "user");
-          if (!nextUser) {
-            const r = (await api.send("session/fork", {
-              session_id: parentSid,
-            })) as any;
-            nativeSid = r?.session_id || null;
-          } else {
-            const fm = (await api.send("get_fork_messages", {
-              session_id: parentSid,
-            })) as any;
-            const forkList: Array<{ entryId: string; text: string }> =
-              fm?.messages ?? [];
-            const text = normalizeAcpContent(nextUser.content);
-            const hit = forkList.find((e) => e.text === text);
-            if (hit) {
-              const r = (await api.send("session/fork", {
-                session_id: parentSid,
-                entryId: hit.entryId,
-              })) as any;
-              nativeSid = r?.session_id || null;
-            }
-          }
-        }
-      } catch {
-        nativeSid = null;
-      }
-    }
+    // 纯本地分叉（不依赖后端 session/fork RPC——该 RPC 已从网关移除）：
+    // 复制到分叉点为止的消息到新对话，后续 run 正常创建自己的后端会话。
 
     // Determine branch name: count existing forks from this parent
     const { persistence } = await import("@/lib/persist");
@@ -2031,30 +2026,16 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       ],
     });
 
-    // 无损分叉成功：登记 newCid→branched sid，后续 run 直连 branched 会话
-    // （完整条目树，无 seed 重放）。失败/未尝试则不登记 → handleRun 走
-    // seed 重放兜底。
-    if (nativeSid) {
-      opts?.registerSid?.(newSessionId, nativeSid);
-      state.showToast({
-        type: "success",
-        title: `已创建 ${branchLabel}`,
-        description: "已无损继承后端上下文（pi 原生分叉）",
-      });
-    }
+    state.showToast({
+      type: "success",
+      title: `已创建 ${branchLabel}`,
+      description: `从第 ${forkIdx + 1} 条消息处分叉`,
+    });
 
     // Increment session save version so sidebar refreshes
     useHelixStore.setState((st) => ({
       sessionSaveVersion: st.sessionSaveVersion + 1,
     }));
-    // 无损分叉成功时上面已 toast（带"无损继承"说明），不再重复弹。
-    if (!nativeSid) {
-      state.showToast({
-        type: "success",
-        title: `已创建 ${branchLabel}`,
-        description: `从第 ${forkIdx + 1} 条消息处分叉`,
-      });
-    }
 
     return newSessionId;
   },
@@ -2262,6 +2243,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // Don't auto-save the current session when switching projects.
       // Just clear the current session so new messages go to the new project.
       get().setCurrentSessionId(null);
+      get().setNoActiveConversation(false);
       set({
         selectedWorkDir: relativePath,
         workDirEpoch: get().workDirEpoch + 1,
@@ -2274,6 +2256,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // Don't auto-save the current session when switching projects.
       // Just clear the current session so new messages go to the new project.
       get().setCurrentSessionId(null);
+      get().setNoActiveConversation(false);
       // 先更新工作目录与 epoch，保证即使扫描失败，目录标签也是正确的。
       set({ selectedWorkDir: absDir, workDirEpoch: get().workDirEpoch + 1 });
       // 文件树扫描降级为尽力而为：scanTree 不可用时不影响工作目录切换。
@@ -2315,9 +2298,20 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         },
       };
     }),
-  setContextUsage: (sessionId, size, used, categories, toolsets) => {
+  setContextUsage: (
+    sessionId,
+    size,
+    used,
+    categories,
+    toolsets,
+    authoritative = false,
+  ) => {
     set((s) => {
       const prev = s.contextUsage[sessionId];
+      // 权威快照直接覆盖（size 也覆盖，窗口本身变了就得跟）；流式数据只做
+      // 单调抬升，避免 cache miss / in-turn compaction 把环来回跳。
+      const nextSize = authoritative ? size : Math.max(prev?.size || 0, size);
+      const nextUsed = authoritative ? used : Math.max(prev?.used || 0, used);
       const next: {
         size: number;
         used: number;
@@ -2333,7 +2327,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           tool_count: number;
           schema_tokens: number;
         }>;
-      } = { size, used };
+      } = { size: nextSize, used: nextUsed };
       // Only a non-empty categories/toolsets array overrides the snapshot — an
       // empty array is a "backend couldn't produce a breakdown" marker, and
       // treating `[]` as authoritative (truthy) permanently destroyed real
@@ -2437,6 +2431,22 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         ]).catch(() => {});
       }));
   },
+  setNoActiveConversation: (v) => set({ noActiveConversation: v }),
+  markSessionBroken: (cid, _reason) =>
+    set((s) => ({
+      brokenSessionIds: s.brokenSessionIds.includes(cid)
+        ? s.brokenSessionIds
+        : [...s.brokenSessionIds, cid],
+    })),
+  clearSessionBroken: (cid) =>
+    set((s) => {
+      if (!s.brokenSessionIds.includes(cid)) return {};
+      const { [cid]: _reason, ...restReasons } = s.brokenSessionReasons;
+      return {
+        brokenSessionIds: s.brokenSessionIds.filter((x) => x !== cid),
+        brokenSessionReasons: restReasons,
+      };
+    }),
   setCurrentSessionId: (id) =>
     set((state) => {
       if (!id)
@@ -3466,6 +3476,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting("themeStyle", state.themeStyle),
         persistence.saveSetting("sessionUsageStats", state.sessionUsageStats),
         persistence.saveSetting("contextUsage", state.contextUsage),
+        persistence.saveSetting("compressionRecords", state.compressionRecordsBySession),
         persistence.saveSetting("dailyUsage", state.dailyUsage),
         persistence.saveScheduledTasks(state.scheduledTasks),
         persistence.saveSetting("mcpServers", state.mcpServers),
@@ -3616,6 +3627,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         loadedHasOnboarded,
         contextUsage,
         externalServices,
+        compressionRecordsBySession,
       ] = await Promise.all([
         safeLoad(persistence.loadMemories(), "memories"),
         safeLoad(persistence.loadTasks(), "tasks"),
@@ -3809,6 +3821,15 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(
           persistence.loadSetting<ExternalService[]>("externalServices"),
           "externalServices",
+        ),
+        safeLoad(
+          persistence.loadSetting<
+            Record<
+              string,
+              import("./slices/compression-records-slice").PersistedCompressionRecord[]
+            > | null
+          >("compressionRecords"),
+          "compressionRecords",
         ),
       ]);
 
@@ -4130,7 +4151,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         notes: notes || "",
         goal: goal,
         // 恢复上次打开的会话和它的历史，避免重启后模型/界面都变成新对话。
+        // 没有可恢复的会话时（restoredSessionId 为 null）置 noActiveConversation，
+        // 界面停在「无会话」占位：用户必须显式点「新对话」或选会话才进入草稿，
+        // 避免首条消息悄悄创建后端会话文件（"自己建文件"的根因）。
         currentSessionId: restoredSessionId,
+        noActiveConversation: !restoredSessionId,
         activeSessionWorkDir: latestSession?.workDir ?? null,
         sessionHistory: restoredHistory,
         sessionHistoryIndex: restoredIndex,
@@ -4328,6 +4353,18 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             ? (contextUsage as unknown as Record<
                 string,
                 { size: number; used: number }
+              >)
+            : {},
+        // 恢复每会话的压缩记录（compression-records-slice），重启后按会话回填
+        // 压缩提示 divider。形状校验在 slice 的 loadCompressionNoticesFromPersistence
+        // 里做，这里只做「对象且非数组」的最小守卫，避免坏数据把内存态清掉。
+        compressionRecordsBySession:
+          compressionRecordsBySession &&
+          typeof compressionRecordsBySession === "object" &&
+          !Array.isArray(compressionRecordsBySession)
+            ? (compressionRecordsBySession as Record<
+                string,
+                import("./slices/compression-records-slice").PersistedCompressionRecord[]
               >)
             : {},
         dailyUsage:

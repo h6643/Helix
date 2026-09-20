@@ -9,7 +9,7 @@ import {
   MousePointer2,
   Globe,
 } from "lucide-react";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { isRealElectron } from "@/lib/electron-bridge";
 import { cleanUrl } from "@/lib/url-utils";
@@ -87,6 +87,18 @@ function normalizeUrl(raw: string): string {
   return `https://${t}`;
 }
 
+/** 本地地址：dev server / 本地 serve 网关走真 iframe（需要完整 JS、HMR、cookie），
+ *  不做 frame-ancestors 探测，也不降级成快照。 */
+function isLocalhostUrl(url: string): boolean {
+  try {
+    return ["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(
+      new URL(url).hostname,
+    );
+  } catch {
+    return false;
+  }
+}
+
 function summarizeUrl(url: string): string {
   if (!url) return "";
   try {
@@ -118,11 +130,106 @@ export function BrowserView({
   const webviewRef = useRef<any>(null);
   const inElectron = isRealElectron();
 
+  // ── 快照模式 ─────────────────────────────────────────────────────────
+  // 站点自己禁止被嵌入（X-Frame-Options: deny / CSP frame-ancestors: 'none'）时，
+  // 真 iframe / webview 会被浏览器直接拒绝。退化为 Rust 端 page_fetch 抓 HTML +
+  // <iframe srcdoc> 渲染：srcdoc 继承父 origin，frame-ancestors 不适用。
+  // 代价：无登录态（cookie 属于站点 origin，带不进应用的 origin）、无客户端交互。
+  const [snapshotHtml, setSnapshotHtml] = useState<string | null>(null);
+  // 探测/抓取进行中的标记。为 true 时 frame 被 suspend（不真加载），
+  // 避免 React 在 loaded 变化与判定返回之间的那一帧里先撞一次 frame-ancestors。
+  const [framePending, setFramePending] = useState(() => {
+    const u = cleanUrl(url);
+    return (
+      !!u &&
+      (u.startsWith("http://") || u.startsWith("https://")) &&
+      !isLocalhostUrl(u)
+    );
+  });
+  // 探测/抓取是异步的，用户可能已换链接 —— 用代次号丢弃过期结果。
+  const probeGen = useRef(0);
+
+  /** 决定加载方式：真 iframe/webview，还是 page_fetch + srcdoc 快照。 */
+  const prepareLoad = useCallback(async (u: string) => {
+    const gen = ++probeGen.current;
+    const setDone = () => {
+      setSnapshotHtml(null);
+      setFramePending(false);
+      setLoading(false);
+    };
+    if (
+      !u.startsWith("http://") &&
+      !u.startsWith("https://") &&
+      !isLocalhostUrl(u)
+    ) {
+      // file: 等非 http(s) 地址不做探测，直接真加载。
+      setDone();
+      return;
+    }
+    const invoke = (window as any).__TAURI_INTERNALS__?.invoke;
+    if (typeof invoke !== "function") {
+      // 非 Tauri（serve / 纯浏览器）跑不了后端抓取，直接真加载。
+      setDone();
+      return;
+    }
+    if (isLocalhostUrl(u)) {
+      // 本地 dev server 需要完整 JS / HMR / cookie，不降级成快照。
+      setDone();
+      return;
+    }
+    setFramePending(true);
+    setLoading(true);
+    setSnapshotHtml(null);
+    try {
+      // 探测失败（网络不通等）→ 退回真加载，让浏览器自己判断，别在此处阻断。
+      let frameable = false;
+      try {
+        const policy = (await invoke("page_frame_policy", { url: u })) as
+          | { frameable?: boolean }
+          | undefined;
+        if (gen !== probeGen.current) return;
+        frameable = policy?.frameable === true;
+      } catch {
+        if (gen !== probeGen.current) return;
+        // 探测失败 → 退回真加载，让浏览器自己判断，别在此处阻断。
+        setDone();
+        return;
+      }
+      if (frameable) {
+        setFramePending(false);
+        setLoading(false);
+        return;
+      }
+      const res = (await invoke("page_fetch", { url: u })) as
+        | { html?: string }
+        | undefined;
+      if (gen !== probeGen.current) return;
+      if (!res?.html) throw new Error("抓取失败");
+      setSnapshotHtml(res.html);
+      setFramePending(false);
+      setLoading(false);
+    } catch (e: any) {
+      if (gen !== probeGen.current) return;
+      setSnapshotHtml(null);
+      setFramePending(false);
+      setLoading(false);
+      setError(
+        `${summarizeUrl(u)} 禁止被嵌入（frame-ancestors），且快照抓取失败（${e?.message || e}）` +
+          "。点工具栏「在外部浏览器中打开」可直接查看。",
+      );
+    }
+  }, []);
+
   // Sync when the controlled `url` prop changes (external link / page switch).
   useEffect(() => {
     const u = cleanUrl(url);
     if (u !== loadedRef.current) setLoaded(u);
   }, [url]);
+
+  // 每个 loaded 都过一次加载方式判定（本地直连跳过探测）。
+  useEffect(() => {
+    void prepareLoad(loaded);
+  }, [loaded, prepareLoad]);
 
   const goBack = () => {
     try {
@@ -135,6 +242,11 @@ export function BrowserView({
     } catch { /* empty */}
   };
   const reload = () => {
+    // 快照模式下 iframe 没有 reload()，重新走一次抓取。
+    if (snapshotHtml) {
+      void prepareLoad(loadedRef.current || url);
+      return;
+    }
     try {
       webviewRef.current?.reload?.();
     } catch { /* empty */}
@@ -188,6 +300,11 @@ export function BrowserView({
     setPickError("");
     setPickMode(true);
     try {
+      // 快照模式下已经有同源 HTML，直接复用，避免重复请求。
+      if (snapshotHtml) {
+        setPickSrcDoc(snapshotHtml);
+        return;
+      }
       const res = await (window as any).__TAURI_INTERNALS__?.invoke?.(
         "page_fetch",
         { url: loaded },
@@ -357,6 +474,8 @@ export function BrowserView({
           <WebviewFrame
             url={url}
             active
+            srcdoc={snapshotHtml ?? undefined}
+            suspend={framePending}
             onLoading={setLoading}
             onError={(e) => {
               setError(e);
@@ -390,6 +509,12 @@ export function BrowserView({
             {error}
           </div>
         )}
+        {snapshotHtml && !pickMode && (
+          <div className="absolute inset-x-0 bottom-0 z-[5] px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-amber-700 bg-amber-50/95 border-t border-amber-200/70">
+            快照模式 · 站点禁止被嵌入（frame-ancestors），已降级为静态快照 ——
+            无登录态、客户端交互不可用
+          </div>
+        )}
       </div>
     </div>
   );
@@ -400,6 +525,7 @@ function WebviewFrame({
   url,
   active,
   srcdoc,
+  suspend,
   pickMode,
   onLoading,
   onError,
@@ -410,6 +536,8 @@ function WebviewFrame({
   url: string;
   active: boolean;
   srcdoc?: string;
+  /** 挂起真加载（判定嵌入能力期间）：iframe 不拿到 src，guest 只停在 about:blank。 */
+  suspend?: boolean;
   pickMode?: boolean;
   onLoading: (loading: boolean) => void;
   onError: (error: string) => void;
@@ -549,18 +677,22 @@ function WebviewFrame({
 
   // Load whenever the controlled `url` prop changes (user input / external link).
   // Gated on guestReady so we never call loadURL before the guest exists.
+  // srcdoc 时渲染的是 <iframe>（没有 loadURL），suspend 时判定还没出结果，都跳过。
   useEffect(() => {
-    if (!inElectron || !guestReady) return;
+    if (!inElectron || srcdoc || suspend || !guestReady) return;
     const el = webviewRef.current;
     if (!el || !url) return;
     doLoad(url);
-  }, [url, guestReady, inElectron]);
+  }, [url, guestReady, inElectron, srcdoc, suspend]);
 
   if (!url && !srcdoc) return null;
 
   return (
     <div ref={wrapRef} className={`absolute inset-0 ${active ? "" : "hidden"}`}>
-      {inElectron ? (
+      {/* srcdoc 必须走 <iframe> —— Electron 的 <webview> 没有 srcdoc，传了也
+       * 被忽略（guest 只会加载 about:blank）。srcdoc 在两种运行时都是 iframe，
+       * 所以快照模式在 Electron 下同样可用。 */}
+      {inElectron && !srcdoc ? (
         React.createElement(
           "webview",
           {
@@ -574,9 +706,10 @@ function WebviewFrame({
       ) : (
         <iframe
           ref={setWebviewRef as any}
-          src={srcdoc ? undefined : url}
+          src={srcdoc || suspend ? undefined : url}
           srcDoc={srcdoc || undefined}
           onLoad={() => {
+            onLoadingRef.current(false);
             // 选择模式：srcdoc iframe 继承父 origin，加载后注入选择脚本
             if (pickMode && srcdoc) {
               const doc = (webviewRef.current as any)?.contentDocument;
@@ -585,7 +718,6 @@ function WebviewFrame({
           }}
           className="w-full h-full border-0"
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-          data-tip="Preview"
         />
       )}
     </div>

@@ -361,6 +361,7 @@ export function ContextUsageIndicator() {
                         : undefined;
                   }
                   // 自动压缩提示卡片：transcript 顶部可关闭，8s 自动消失
+                  const afterTokens = Number(r.after_tokens) || undefined;
                   useHelixStore.getState().setCompressionNotice({
                     ts: Date.now(),
                     sessionId: currentSessionId || "__draft__",
@@ -368,9 +369,26 @@ export function ContextUsageIndicator() {
                     anchorMessageId,
                     removed: Number(r.removed) || undefined,
                     beforeTokens: Number(r.before_tokens) || undefined,
-                    afterTokens: Number(r.after_tokens) || undefined,
+                    afterTokens,
                     messageCount: Number(r.after_messages) || undefined,
                   });
+                  // 权威写回环：同手动 /compact。压缩后的权威值必须绕开默认的
+                  // max 合并，否则自动压缩每次都显示成功、环却一动不动——
+                  // 而 context_percent 又按旧值算（后端已把 last_context_used
+                  // 重置，否则会反复踩 80% 闸门）。
+                  if (afterTokens && currentSessionId) {
+                    const prev = useHelixStore
+                      .getState()
+                      .contextUsage[currentSessionId];
+                    useHelixStore.getState().setContextUsage(
+                      currentSessionId,
+                      prev?.size || 0,
+                      afterTokens,
+                      undefined,
+                      undefined,
+                      true,
+                    );
+                  }
                   // 自动自愈：若压缩回包异常导致当前会话仍为空，直接异步从后端拉
                   // 权威历史覆盖，无需用户手动 /resync（"压缩后消息全空"兜底）。
                   if (isCurrentSessionRenderBroken(currentSessionId)) {
@@ -484,7 +502,8 @@ export function ContextUsageIndicator() {
   // fallback to the locally persisted per-conversation store
   // (contextUsage[currentSessionId]) so the ring does NOT reset to 0 after a
   // restart. The snapshot is written by usage_prompt_complete (实测) AND
-  // captureContextBreakdown (max 合并下一条 prompt 的真实估算).
+  // captureContextBreakdown（下一条 prompt 的真实估算，authoritative 覆盖）；
+  // 压缩完成回报（/compact 与自动压缩）也直接写回这条快照。
   // (No client-side estimation - real saved values.)
   // 快照键可能是 cid（常规）或 sid（历史遗留 / draft 期写入）——两键都查。
   const localCtx = useHelixStore((s) => {
@@ -497,9 +516,10 @@ export function ContextUsageIndicator() {
   );
   const isChatLoading = useHelixStore((s) => s.isChatLoading);
   // 统一口径：环读数以本地每对话快照为唯一渲染来源（usage_prompt_complete
-  // 实测值与 captureContextBreakdown 的 max 合并写回——后两者同语义，都是
-  // 「下一条 prompt 的真实上下文」）。弹窗 RPC 不直接喂环：它通过
-  // captureContextBreakdown 落盘后再反映到环，避免开/关弹窗读数乱跳。
+  // 实测值与 captureContextBreakdown 权威写回——两者同语义，都是
+  // 「下一条 prompt 的真实上下文」；压缩完成回报也会直接写回）。弹窗 RPC
+  // 不直接喂环：它通过 captureContextBreakdown 落盘后再反映到环，避免
+  // 开/关弹窗读数乱跳。
   //
   // 如果请求正在进行中（isChatLoading），且有估算值，显示估算值（带 ~ 前缀）。
   // 请求完成后，显示真实的 context_used 值。

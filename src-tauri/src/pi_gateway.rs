@@ -30,6 +30,7 @@
 use base64::Engine;
 use crate::gateway::emit_helix_event;
 use crate::state::AppState;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -499,6 +500,14 @@ impl PiInstance {
         }
     }
 
+    /// Reset the remembered figure (compaction discarded the context it
+    /// described). Bypasses `set_last_context_used`'s `> 0` guard, which
+    /// exists so an estimate can't overwrite a real number and would
+    /// otherwise make a zeroing write a silent no-op.
+    fn reset_last_context_used(&self) {
+        self.last_context_used.store(0, Ordering::SeqCst);
+    }
+
     /// Last real context figure; 0 when nothing has been measured yet.
     fn last_context_used(&self) -> i64 {
         self.last_context_used.load(Ordering::SeqCst)
@@ -561,6 +570,55 @@ impl PiInstance {
     }
 }
 
+/// Classify a restore/resume failure into a structured kind so the frontend can
+/// decide the SESSION'S LIFECYCLE STATE, not just display a message.
+///
+/// Only `session_not_found` is permanent — the SID's persisted session file does
+/// not exist (cache miss + disk scan miss), so the conversation is marked
+/// `broken` and no later operation may pretend it still exists.
+///
+/// `session_restore_failed` means the file WAS found but could not be restored
+/// (permission denied, JSONL parse/decode error, `switch_session` timeout or
+/// process death, pi declining the switch, oversized-trim failure). These are
+/// recovery failures, not "the session is gone" — the file is still on disk and
+/// a retry can succeed. Marking these `broken` would permanently lose a
+/// restorable conversation because of one transient failure.
+///
+/// `internal` is everything else: spawn failure, app quitting, missing app
+/// state — gateway-level problems that say nothing about the session.
+///
+/// NOTE: text matching is a fallback for the fact that the lower layers
+/// (`restore_session_instance`, `spawn_instance`, pi's `switch_session` RPC)
+/// return bare strings. Keep the "no session file" check FIRST — the
+/// `restore FAILED … no session file` log line and the wrapped
+/// `session restore task failed: no session file for …` message both contain
+/// "no session file" and must classify as `session_not_found`, not as a
+/// generic restore failure.
+fn classify_session_error(msg: &str) -> &'static str {
+    let m = msg.to_lowercase();
+    if m.contains("no session file")
+        || m.contains("session not found")
+        || m.contains("unknown session")
+        || m.contains("no such session")
+    {
+        "session_not_found"
+    } else if m.contains("permission")
+        || m.contains("access denied")
+        || m.contains("denied")
+        || m.contains("corrupt")
+        || m.contains("parse")
+        || m.contains("decode")
+        || m.contains("restore")
+        || m.contains("switch session")
+        || m.contains("get_state")
+        || m.contains("timeout")
+    {
+        "session_restore_failed"
+    } else {
+        "internal"
+    }
+}
+
 /// Recovery-path diagnostic log: `~/.pi/agent/helix-recover.log`, rotated at
 /// 1MB (one `.1` backup kept). Every spawn / resume / restore /
 /// fingerprint-recovery / session-new step lands here with a UTC timestamp —
@@ -604,6 +662,87 @@ fn log_spawn_diag(message: &str) {
         ms,
         message
     );
+}
+
+/// conversation → 后端 sid 的**反向**索引：`~/.pi/agent/conversation-index.json`
+///
+/// 前端的 sessionMap（IndexedDB `conversationSessions`）是唯一记录这个关系的
+/// 地方，而它会被 `syncConfigToBackend`（改设置）/ `handleUndoChat`（撤回失败）
+/// 整条 `delete` 掉，也可能随 site-data 一起清空。删掉之后 sid → conversation
+/// 在全系统范围无解：pi 的 jsonl 文件名只有 `时间戳_sid`，内容里也不含前端
+/// conversation id（实测 3.1MB 会话文件里 `session-17…` 出现 0 次）。这里在
+/// 每次 sid 绑定时顺手落一份到磁盘，作为唯一持久化的反向索引——map 再丢，
+/// 也能反查这个后端会话属于哪个对话、还能不能 resume 回来。
+///
+/// 尽力而为：索引失败绝不影响正常的会话绑定。
+fn conversation_index_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".pi/agent").join("conversation-index.json"))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ConversationIndexEntry {
+    conversation_id: String,
+    ts: u64,
+}
+
+fn index_upsert(entries: &[(String, String)]) {
+    static INDEX_LOCK: Mutex<()> = Mutex::new(());
+    let Ok(_guard) = INDEX_LOCK.lock() else {
+        return;
+    };
+    let Some(path) = conversation_index_path() else {
+        return;
+    };
+    let mut index: HashMap<String, Vec<ConversationIndexEntry>> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    for (conversation_id, session_id) in entries {
+        let list = index.entry(session_id.clone()).or_default();
+        list.retain(|e| e.conversation_id != *conversation_id);
+        list.push(ConversationIndexEntry {
+            conversation_id: conversation_id.clone(),
+            ts: now_ms(),
+        });
+        // 一个 sid 正常情况下只绑一个对话；多余的是历史噪声，留最近几条。
+        if list.len() > 3 {
+            list.drain(0..list.len() - 3);
+        }
+    }
+    let Ok(json) = serde_json::to_string_pretty(&index) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // 临时文件 + rename：写一半被杀不会留下半个 JSON 把下一次读盘搞坏。
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&tmp, &path);
+}
+
+fn index_lookup(session_id: &str) -> Value {
+    let Some(path) = conversation_index_path() else {
+        return json!({ "found": false });
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return json!({ "found": false });
+    };
+    let Ok(index) =
+        serde_json::from_str::<HashMap<String, Vec<ConversationIndexEntry>>>(&raw)
+    else {
+        return json!({ "found": false });
+    };
+    let Some(list) = index.get(session_id) else {
+        return json!({ "found": false });
+    };
+    json!({
+        "found": true,
+        "session_id": session_id,
+        "conversations": list,
+    })
 }
 
 fn now_ms() -> u64 {
@@ -1041,6 +1180,12 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // 代理：pi 内的模型 / MCP / 命令工具 / npx 出口流量也走用户配置的代理。
+    // `NODE_USE_ENV_PROXY=1` 是必需的 —— Node 24 的全局 fetch（undici）默认
+    // **不读** `HTTP_PROXY` 等 env，缺这个开关 pi 内的 fetch 全走直连。
+    for (k, v) in crate::proxy::proxy_env_pairs() {
+        command.env(k, v);
+    }
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
 
@@ -1132,6 +1277,12 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
                             instance_clone.key(),
                             status
                         );
+                        log_spawn_diag(&format!(
+                            "child exited: gen={} key={} status={:?}",
+                            _generation,
+                            instance_clone.key(),
+                            status
+                        ));
                     }
                     _ => {
                         eprintln!(
@@ -1139,6 +1290,11 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
                             _generation,
                             instance_clone.key()
                         );
+                        log_spawn_diag(&format!(
+                            "stdout EOF on live child: gen={} key={}",
+                            _generation,
+                            instance_clone.key()
+                        ));
                     }
                 }
             }
@@ -1147,10 +1303,22 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
         // one (generation unchanged → no respawn happened meanwhile).
         if instance_clone.generation.load(Ordering::SeqCst) == _generation {
             let quitting = state_clone.gateway.app_quitting.load(Ordering::SeqCst);
+            let had_waiter = instance_clone.turn_waiter.lock().unwrap().is_some();
             instance_clone.initialized.store(false, Ordering::SeqCst);
             *instance_clone.writer.lock().unwrap() = None;
             instance_clone.pending.lock().unwrap().clear();
             *instance_clone.turn_waiter.lock().unwrap() = None;
+            // This bare drop is the only path that closes a prompt's oneshot
+            // without a structured marker — the frontend sees "pi turn event
+            // channel closed". Log it so the recover.log timeline explains it.
+            if had_waiter {
+                log_spawn_diag(&format!(
+                    "child death: turn_waiter dropped bare (gen={} key={} quitting={} had_waiter=true)",
+                    _generation,
+                    instance_clone.key(),
+                    quitting
+                ));
+            }
             let sid = instance_clone.current_session_id();
             // Fail any in-flight turn: dropping the waiter wakes the
             // session/prompt call with an error (the frontend's run loop
@@ -1311,11 +1479,29 @@ const SEED_MAX_TURNS: usize = 40;
 /// 重放历史的字符预算（超了就从最早处丢整轮）。
 const SEED_MAX_CHARS: usize = 24_000;
 
-/// seedHistory → the session-opening user message that re-establishes context
-/// after a session rebuild (session/new {messages: [{role, content}, …]}).
+/// ─────────────────────────────────────────────────────────────────────────
+/// HISTORY → NEW SESSION  （职责隔离：这不是 Resume 的 fallback）
+///
+/// 这段机制的作用是把一份**已有的本地历史**作为会话开场消息注入到一个
+/// **全新的** session 里，让新会话带着上下文启动。它属于「History → New
+/// Session」这一职责：调用方必须已经决定要开一个新会话，历史只是新会话的
+/// 初始上下文。
+///
+/// 它**绝不**是 `session/resume` 的 fallback。Resume 的契约是：按 SID 恢复
+/// 原会话；SID 对应的文件不存在 → `session_not_found`，由前端把会话标记为
+/// broken 并结束——不允许「resume 失败 → session/new + seed」换一个新 SID
+/// 顶替。那样做的直接后果是新会话文件里第一句话是这段注入的对话记录，
+/// 而真正的原始会话从此无法再被找回（指纹/映射全部指向一个不存在的 SID）。
+/// 因此 `session/resume` 处理器里**不得**调用本函数或 `spawn_history_seed_turn`。
+/// 若将来需要迁移/合并会话，请走 session/merge 之类显式命名的 RPC，不要
+/// 把本机制接回 Resume 链。
+/// ─────────────────────────────────────────────────────────────────────────
+
+/// History → New Session: the session-opening user message that seeds a FRESH
+/// session with prior history (session/new {messages: [{role, content}, …]}).
 /// Renders as a transcript the model can continue from; asks for no response
-/// beyond a short ack.
-fn seed_history_prompt(messages: Option<&Value>) -> String {
+/// beyond a short ack. See the block above for the Resume prohibition.
+fn build_history_seed_prompt(messages: Option<&Value>) -> String {
     let Some(messages) = messages.and_then(Value::as_array) else {
         return String::new();
     };
@@ -1378,6 +1564,54 @@ fn seed_history_prompt(messages: Option<&Value>) -> String {
     turns.join("\n\n")
 }
 
+/// History → New Session: replay prior history into a FRESHLY CREATED session
+/// as its opening user message. Called ONLY from `session/new`, AFTER the new
+/// session id is known and the instance is re-keyed. See the block above
+/// `build_history_seed_prompt` for the Resume prohibition.
+///
+/// Fire-and-forget: AWAITING the seed turn (the old request_turn call) held
+/// session/new until the model finished digesting the whole replayed history —
+/// meanwhile the frontend's run loop had not yet subscribed to events or sent
+/// the real prompt, so the UI sat in "工作中" with zero streaming output for
+/// minutes ("重启后旧对话一直不输出"). Worse, a seed turn that raised an
+/// approval/clarify card deadlocked: the backend waits for the user, but the
+/// card event had no subscriber yet. The seed is sent as a plain queued prompt:
+/// the ack (session_id) returns immediately, and pi's queue serializes it ahead
+/// of the caller's real prompt, preserving turn order without blocking the send.
+///
+/// Turn debt: the seed's agent_settled consumes the debt instead of releasing
+/// the real prompt's waiter (registered after this returns) — the seed settles
+/// FIRST because pi serializes the queue, and without the debt its settle
+/// prematurely completes the caller's run with empty output.
+async fn spawn_history_seed_turn(
+    instance: &Arc<PiInstance>,
+    history: Option<&Value>,
+    session_id: &str,
+) -> usize {
+    let seed = build_history_seed_prompt(history);
+    if seed.is_empty() {
+        return 0;
+    }
+    // Diagnostics: every use of this mechanism must be visible in the
+    // recover log. A seed turn means a NEW session was opened carrying
+    // imported history — if that ever shows up where a resume is expected,
+    // the wiring is wrong.
+    log_spawn_diag(&format!(
+        "history → new session: sid={session_id} seeded {len} chars of prior history",
+        len = seed.len()
+    ));
+    instance.turn_debt.fetch_add(1, Ordering::SeqCst);
+    if let Err(e) = instance
+        .request("prompt", json!({ "message": seed }), RPC_TIMEOUT)
+        .await
+    {
+        eprintln!("[pi agent] history seed turn failed: {e}");
+        log_spawn_diag(&format!("history → new session: seed failed sid={session_id}: {e}"));
+        instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
+    }
+    seed.len()
+}
+
 /// `image/generate` — 前端 `/image` 斜杠命令走这里。读 config.yaml 的 `image:`
 /// 块（z.ai / CogView-3-Flash 等 OpenAI 兼容生图端点），调 images/generations
 /// 拿图片 URL，再下载成 data URL 返回给前端（前端期望 {success, image_data,
@@ -1429,7 +1663,8 @@ fn image_generate(params: &Value) -> Result<Value, String> {
 
     // 用 reqwest blocking 客户端：避免把整条 async send() 链改成 async/await，
     // 且 reqwest blocking 跑在独立线程池上，不会阻塞 tokio 运行时。
-    let client = reqwest::blocking::Client::new();
+    let client = crate::proxy::proxy_aware_blocking_client()
+        .map_err(|e| format!("生图请求准备失败: {e}"))?;
     let resp = client
         .post(&endpoint)
         .json(&body)
@@ -1618,27 +1853,12 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // sent as a plain queued prompt: the ack (session_id) returns
             // immediately, and pi's queue serializes it ahead of the caller's
             // real prompt, preserving turn order without blocking the send.
-            let seed = seed_history_prompt(params.get("messages"));
+            let seeded = spawn_history_seed_turn(&instance, params.get("messages"), &session_id)
+                .await;
             log_spawn_diag(&format!(
                 "session/new OK sid={session_id} seed_len={}",
-                seed.len()
+                seeded
             ));
-            if !seed.is_empty() {
-                // Fire-and-forget seed turn: register turn debt so the seed's
-                // agent_settled consumes the debt instead of releasing the
-                // real prompt's waiter (registered after this returns) — the
-                // seed settles FIRST because pi serializes the queue, and
-                // without the debt its settle prematurely completes the
-                // caller's run with empty output.
-                instance.turn_debt.fetch_add(1, Ordering::SeqCst);
-                if let Err(e) = instance
-                    .request("prompt", json!({ "message": seed }), RPC_TIMEOUT)
-                    .await
-                {
-                    eprintln!("[pi agent] seed history failed: {e}");
-                    instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
-                }
-            }
             emit_helix_event(
                 "gateway.sessionCreated",
                 &json!({ "sessionId": session_id }),
@@ -1659,6 +1879,36 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .and_then(Value::as_u64)
                 .unwrap_or(30) as usize;
             peek_session_tail(&session_id, count)
+        }
+        "session/index_put" => {
+            // 前端 rebindSessionSid 之后调用：把 conversation → sid 的关系冗余
+            // 落盘。IndexedDB 的 sessionMap 被 delete / site-data 清空之后，
+            // 这是唯一还能反查"这个后端会话属于哪个对话"的地方。
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            if let Some(arr) = params.get("entries").and_then(Value::as_array) {
+                for e in arr {
+                    if let (Some(cid), Some(sid)) = (
+                        e.get("conversation_id").and_then(Value::as_str),
+                        e.get("session_id").and_then(Value::as_str),
+                    ) {
+                        if !cid.is_empty() && !sid.is_empty() {
+                            pairs.push((cid.to_string(), sid.to_string()));
+                        }
+                    }
+                }
+            }
+            if !pairs.is_empty() {
+                index_upsert(&pairs);
+            }
+            Ok(json!({ "indexed": pairs.len() }))
+        }
+        "session/index_get" => {
+            let session_id = params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or("session/index_get is missing session_id")?
+                .to_string();
+            Ok(index_lookup(&session_id))
         }
         "session/prepare" => {
             // Fire-and-forget resume warmup: restores the session's instance
@@ -1685,23 +1935,49 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             tokio::task::spawn(async move {
                 let started = std::time::Instant::now();
                 let result = instance_for_session(&session_id, &state_clone).await;
-                let ok = result.is_ok();
-                if let Err(e) = &result {
+                if let Err(e) = result {
+                    let kind = classify_session_error(&e);
                     eprintln!("[pi agent] session prepare failed for {session_id}: {e}");
-                } else {
-                    eprintln!(
-                        "[pi agent] session prepared for {session_id} in {:?}",
-                        started.elapsed()
+                    log_spawn_diag(&format!(
+                        "session/prepare FAILED sid={session_id} kind={kind}: {e}"
+                    ));
+                    // Same error_kind contract as session/resume: warm-up callers
+                    // can decide `broken` vs retryable from the kind alone.
+                    emit_helix_event(
+                        "gateway.sessionPrepared",
+                        &json!({
+                            "session_id": session_id,
+                            "ok": false,
+                            "error": e,
+                            "error_kind": kind,
+                        }),
                     );
+                    return;
                 }
+                eprintln!(
+                    "[pi agent] session prepared for {session_id} in {:?}",
+                    started.elapsed()
+                );
                 emit_helix_event(
                     "gateway.sessionPrepared",
-                    &json!({ "session_id": session_id, "ok": ok }),
+                    &json!({ "session_id": session_id, "ok": true }),
                 );
             });
             Ok(json!({ "prepared": true }))
         }
         "session/resume" => {
+            // Resume = restore THIS session, by its SID. Exactly one of:
+            //   live / restored            → Ok(state)
+            //   file missing               → Ok({error, error_kind:"session_not_found"})
+            //   file found, restore failed → Ok({error, error_kind:"session_restore_failed"})
+            //   anything else              → Ok({error, error_kind:"internal"})
+            // and NEVER `session/new` + `build_history_seed_prompt` /
+            // `spawn_history_seed_turn`. Replacing a lost session with a fresh
+            // seeded one would mint a new SID that shadows the dead one, and
+            // the original conversation becomes unrecoverable. The decision of
+            // whether a failure is permanent (`broken`) belongs to the
+            // frontend, and it must be driven by error_kind — not by "it
+            // failed, therefore broken".
             let session_id = params
                 .get("session_id")
                 .and_then(Value::as_str)
@@ -1714,10 +1990,16 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             let instance = match instance_for_session(&session_id, &state).await {
                 Ok(i) => i,
                 Err(e) => {
+                    let kind = classify_session_error(&e);
                     log_spawn_diag(&format!(
-                        "session/resume FAILED sid={session_id}: {e}"
+                        "session/resume FAILED sid={session_id} kind={kind}: {e}"
                     ));
-                    return Err(e);
+                    // Structured, NOT a throw: the frontend decides whether the
+                    // session is permanently `broken` from `error_kind`, and only
+                    // `session_not_found` earns that. Returning an Err would
+                    // collapse every failure mode into one indistinguishable
+                    // string and force the frontend back to guessing.
+                    return Ok(json!({ "error": e, "error_kind": kind }));
                 }
             };
             log_spawn_diag(&format!(
@@ -2091,6 +2373,24 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                     SESSION_FILES.lock().unwrap().insert(sid, file);
                 }
             }
+            // Re-anchor the remembered context figure to the compacted context.
+            // Otherwise `last_context_used` keeps the pre-compaction peak, which
+            // wins the max() in `context_breakdown` and `emit_usage` until the
+            // next real call — the ring stays pinned at the old high, and
+            // `context_percent` stays past the 80% auto-compact gate. Prefer pi's
+            // own post-compact `contextUsage` (a real figure) over the chars/4
+            // estimate, which lands a few thousand low on a summary message; if
+            // it is missing, clear the floor entirely rather than keeping the
+            // stale peak.
+            let post_compact_used = stats
+                .get("contextUsage")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            if post_compact_used > 0 {
+                instance.set_last_context_used(post_compact_used);
+            } else {
+                instance.reset_last_context_used();
+            }
             let tokens_before = compacted
                 .get("tokensBefore")
                 .and_then(Value::as_i64)
@@ -2405,9 +2705,13 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             if url.is_empty() {
                 return Err("open_browser requires a non-empty url".into());
             }
+            // `quiet: true` 标记为 agent 触发（与 poll_browser_requests 的
+            // navigate 一致）：前端只在侧边栏本来就开着浏览器时才让它可见，
+            // 否则只记 URL + 弹「Agent 打开了一个页面」toast。缺这个标记的话，
+            // 模型每次 open_browser 都会把侧边栏从「更改」上拽到「浏览器」。
             let _ = crate::state::app_handle().emit(
                 "helix:open-browser",
-                json!({ "url": url }),
+                json!({ "url": url, "quiet": true }),
             );
             Ok(json!({ "ok": true, "url": url }))
         }
@@ -2535,8 +2839,10 @@ async fn instance_for_session(
     // restore 失败（如 "no session file"）原样上抛给调用方（session/prompt、
     // session/resume、session/prepare）。绝不在这里静默 new_session 建空白
     // 会话：session/prompt 路由过来时前端不会带 seedHistory，用户消息会直接
-    // 落进零上下文的空白会话——无声的彻底失忆。显式报错让前端走
-    // session/new + seedHistory 兜底（文本级历史仍在，远好于空白）。
+    // 落进零上下文的空白会话——无声的彻底失忆。也绝不在此触发
+    // session/new + spawn_history_seed_turn：那会用一个新 SID 顶替丢失的
+    // 原会话，把原始对话变成永远找不回来。失败只上报，处理权在调用方
+    // （session/resume 返回 error_kind，前端据此标记 broken 或提示可重试）。
     restored
 }
 
@@ -3436,7 +3742,21 @@ async fn routed_instance(params: &Value, state: &Arc<AppState>) -> Result<Arc<Pi
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    instance_for_session(&session_id, state).await
+    // Prefix the structured kind on the error string. The callers that keep
+    // the Err contract (session/prompt, session/compress, ...) surface this
+    // string verbatim to the frontend, which classifies it with the same
+    // rule as session/resume's `error_kind`. prompt.submit / compress must
+    // NEVER resume or create on this failure — they only report the
+    // classification, and the caller decides whether the session is broken.
+    instance_for_session(&session_id, state)
+        .await
+        .map_err(|e| {
+            let kind = classify_session_error(&e);
+            log_spawn_diag(&format!(
+                "route FAILED sid={session_id} kind={kind}: {e}"
+            ));
+            format!("{kind}: {e}")
+        })
 }
 
 /// approval/clarify routing: prefer session_id; fall back to which instance
@@ -4897,9 +5217,8 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         }),
                     );
                 }
-                // notify / setStatus / setWidget / setTitle / set_editor_text:
-                // fire-and-forget — surface as a warning, never block.
-                _ => {
+                // 已知的 fire-and-forget 方法（不阻塞模型）：surface as warning。
+                "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text" | "status" => {
                     let msg = message
                         .get("message")
                         .or_else(|| message.get("statusText"))
@@ -4911,6 +5230,51 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             &json!({ "session_id": sid(), "message": msg, "raw": message }),
                         );
                     }
+                }
+                // 其余未列出的方法（如 ask_user_question 的 ui.custom）都是
+                // **交互型**：模型在等用户输入，属 Pending Work。路由成
+                // clarify_request，让前端计数 pending 并弹浮条，避免 90s idle
+                // 误判 done（"ask_user_question 之后模型被判定完成"根因）。
+                _ => {
+                    instance.ui_requests.lock().unwrap().insert(
+                        request_id.clone(),
+                        PendingUI {
+                            method: ui_method.to_string(),
+                        },
+                    );
+                    UI_REQUEST_OWNERS.lock().unwrap().insert(
+                        request_id.clone(),
+                        instance
+                            .current_session
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| instance.key()),
+                    );
+                    let question = message
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .or_else(|| message.get("message").and_then(Value::as_str))
+                        .or_else(|| message.get("placeholder").and_then(Value::as_str))
+                        .unwrap_or("请输入");
+                    let choices: Vec<&str> = message
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|opts| opts.iter().filter_map(|o| o.as_str()).collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    emit_helix_event(
+                        "session/update",
+                        &json!({
+                            "session_id": sid(),
+                            "update": {
+                                "sessionUpdate": "clarify_request",
+                                "requestId": request_id,
+                                "question": question,
+                                "choices": if choices.is_empty() { Value::Null } else { json!(choices) },
+                                "params": message,
+                            },
+                        }),
+                    );
                 }
             }
         }

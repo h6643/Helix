@@ -165,28 +165,53 @@ export function RightSidebar() {
   // Keyed off the monotonically increasing nav sequence (NOT the URL value), so
   // RE-clicking the same link still navigates: when the value is unchanged the
   // freshly-created blank page (from the tab effect) would otherwise be left
-  // empty. seq 0 is the initial mount value — skipping it avoids hijacking other
-  // tabs (e.g. the diff panel) with a stale previewRailUrl on first render.
+  // empty.
+  //
+  // useRef 的初始值只在首次渲染取一次 = 挂载时的 seq，天然就是"已处理基线"。
+  // 不能写 useRef(0)：store 里 previewRailNavSeq 的初始值就是 0，那样本次会话
+  // 的第一次链接点击（seq 0→1）会被当成"挂载首次运行"直接吞掉，表现为
+  // 「第一次点链接没反应，第二次才跳转」。
   const previewRailNavSeq = useHelixStore((s) => s.previewRailNavSeq);
+  const lastNavSeqRef = useRef(previewRailNavSeq);
   useEffect(() => {
-    if (previewRailNavSeq === 0) return;
+    const isIncrease = previewRailNavSeq > lastNavSeqRef.current;
+    lastNavSeqRef.current = previewRailNavSeq;
+    if (!isIncrease) return;
     const url = cleanUrl(previewRailUrl ?? "");
     if (!url) return;
-    // React 的 setState updater 在渲染阶段才执行，updater 内赋值的局部变量
-    // 在 effect 同步代码里读不到 → 用 ref 记录待激活的 id，渲染后激活。
-    // 点击链接时 tab effect 已先建了一个空 url 的 browser 页并同步更新了
-    // activePageIdRef（同一渲染批内 effect 按声明顺序执行），这里更新它即可。
-    // 当前激活的页不是 browser（diff / code / 无页）→ 新建一个 browser 页，
-    // 这样「更多操作 → 浏览器」每次都能开新的浏览器标签（多开）。
+    // 最近一次是否为「安静」触发（agent / 后台 browser 工具）。
+    const isQuiet = useHelixStore.getState().lastPreviewRailQuiet;
+    // 允许「新建并激活」浏览器页只限于用户本来就在看浏览器的两种情况：
+    //   · 当前激活的页本身就是 browser → 原地导航，不动激活态；
+    //   · 侧边栏页签是「浏览器」→ 新建并激活（点消息里的链接走这条）。
+    // 其余情况（用户正在看「更改 / 目录 / 代码」）：
+    //   · 已有浏览器页 → 后台原地导航（不往标签条里堆新页），不激活；
+    //   · 没有浏览器页 + quiet（agent 后台导航）→ 什么都不建，只留 URL。
+    //     tab 条是按 pages 渲染的：侧边栏收起时静默建页，会让用户下次打开侧
+    //     边栏（如看「更改」）时凭空看见一个网页标签——「只打开了更改，却自己
+    //     蹦出一个网页标签」。等用户在 toast 上点「查看」（forceOpen，
+    //     quiet=false）时再真正建页。
+    const onBrowserTab = tab === "browser";
     setPages((prev) => {
       const active = prev.find((p) => p.id === activePageIdRef.current);
       if (active?.kind === "browser") {
         if (active.url === url) return prev;
         return prev.map((p) => (p.id === active.id ? { ...p, url } : p));
       }
-      const np = { id: newPageId(), kind: "browser" as const, url };
-      pendingActivateRef.current = np.id;
-      return [...prev, np];
+      if (onBrowserTab) {
+        const np = { id: newPageId(), kind: "browser" as const, url };
+        pendingActivateRef.current = np.id;
+        return [...prev, np];
+      }
+      // 后台：优先复用已有的浏览器页导航（不往标签条里堆新页），不激活。
+      const existing = prev.find((p) => p.kind === "browser");
+      if (existing) {
+        if (existing.url === url) return prev;
+        return prev.map((p) => (p.id === existing.id ? { ...p, url } : p));
+      }
+      // quiet 且当前没有任何浏览器页 → 不凭空新建页签（只留 URL）。
+      if (isQuiet) return prev;
+      return [...prev, { id: newPageId(), kind: "browser" as const, url }];
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewRailNavSeq]);

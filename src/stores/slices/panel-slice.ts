@@ -3,7 +3,7 @@
  * Zero business-logic cross-references; purely UI state.
  */
 import type { StateCreator } from "zustand";
-import type { AvailableCommand, HelixTodo } from "../helix-types";
+import type { AvailableCommand, HelixTodo, PlanStep } from "../helix-types";
 import type { PlanReviewRequest } from "@/components/Helix/approval-dialog";
 
 type NavEntry =
@@ -50,6 +50,10 @@ export interface PanelSlice {
   /** 计划模式（plan mode）模型产出的待批准方案。由后端 plan_complete /
    *  run 结束等事件写入，全局共享，供右上角工作面板与底部 PlanReviewBar 共用。 */
   pendingPlanReview: PlanReviewRequest | null;
+  /** 正在执行的计划步骤（plan.md 解析而来）：工作面板「执行计划」区块渲染它，
+   *  非空 = 计划已进入实施阶段（待批准时显示的是 pendingPlanReview 纯文本）。 */
+  activePlan: PlanStep[];
+  setActivePlan: (steps: PlanStep[] | null) => void;
   setPendingPlanReview: (v: PlanReviewRequest | null) => void;
   toggleCommandPalette: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
@@ -101,6 +105,7 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
   helixTodos: [],
   helixTodosBySession: {},
   pendingPlanReview: null,
+  activePlan: [],
 
   toggleCommandPalette: () =>
     set((state) => ({ showCommandPalette: !state.showCommandPalette })),
@@ -215,4 +220,5 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
       };
     }),
   setPendingPlanReview: (v) => set({ pendingPlanReview: v }),
+  setActivePlan: (steps) => set({ activePlan: steps ?? [] }),
 });

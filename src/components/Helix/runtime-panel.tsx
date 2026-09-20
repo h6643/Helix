@@ -58,11 +58,6 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
       // “检查更新”同一后端命令；Helix 应用自身没有自动更新通道。
       const res = await (window as any).electron?.helix?.piCheckUpdates?.();
       if (!res) {
-        useHelixStore.getState().showToast({
-          type: "error",
-          title: "检查更新失败",
-          description: "更新检查不可用",
-        });
         return;
       }
       const pi = res.pi || {};
@@ -99,19 +94,9 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
           title: "已是最新版本",
           description: `pi v${pi.installed}（含全部插件）`,
         });
-      } else {
-        useHelixStore.getState().showToast({
-          type: "error",
-          title: "检查更新失败",
-          description: "未找到 pi 安装",
-        });
       }
-    } catch (e: any) {
-      useHelixStore.getState().showToast({
-        type: "error",
-        title: "检查更新失败",
-        description: String(e?.message || e),
-      });
+    } catch {
+      // 手动检查失败静默处理：不弹 error toast。
     } finally {
       setUpdating(false);
     }

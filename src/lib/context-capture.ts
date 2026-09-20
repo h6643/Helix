@@ -49,13 +49,13 @@ interface ContextBreakdownData {
  *
  * 写回规则：
  * - 仅当后端返回非空分类或非零用量才写（空会话不把本地真实值覆盖成 0）；
- * - size/used 取 max(本地快照, 后端值)。后端 context_used 现在是「下一条
- *   prompt 将重放的真实上下文」（pi 最后一次请求用量与 jsonl 活跃分支估算
- *   的较大者，见 pi_gateway context_breakdown）——与环要显示的语义一致。
- *   max 合并保证单调不减：恢复的旧对话不再停留在上一次 run 的过期读数
- *   （环显示 50k 而下一条 prompt 实际要发 276k 的根因），也不会在估算
- *   偏低时把环缩水。压缩后的下降由下一次 run 的 usage_prompt_complete
- *   实测值覆盖（非 max 路径），不受影响。
+ * - size/used 按 authoritative 直接覆盖。后端 context_used 是「下一条
+ *   prompt 将重放的真实上下文」（pi 最后一次请求用量与 jsonl 活跃分支估算、
+ *   持久化 usage anchor 的较大者，见 pi_gateway context_breakdown）——与环要
+ *   显示的语义一致，且后端已做过 max，本地再取一次只会把残留的高位抬回来。
+ *   历史版本用 max(本地快照, 后端值) 保证单调不减，副作用是压缩后本地快照里
+ *   的旧高位盖掉后端的 16k，环和弹窗刷新都永远停在压缩前。恢复旧对话读数偏低
+ *   的问题由后端那个 max 兜住，不再需要前端这边再抬一次。
  *
  * @returns 是否实际写入了本地快照（供调用方决定是否标记"已捕获"）。
  */
@@ -77,14 +77,17 @@ export async function captureContextBreakdown(
       ((data.context_used ?? 0) > 0 && (data.context_max ?? 0) > 0);
     if (!hasBreakdown) return false;
     const key = conversationId || sid;
-    const localPrev = useHelixStore.getState().contextUsage[key];
-    // max 合并：后端 context_used 与本地快照同语义（下一条 prompt 的真实
-    // 上下文），取较大者——恢复的旧对话读数被抬升到真实值，估算偏低时
-    // 也不缩水（见函数头注释）。
+    // authoritative：context_breakdown 是完整后端查询，返回的 context_used 已按
+    // 「下一条 prompt 真实上下文」的语义取过 max——它本身就是权威值，不该再和本地
+    // 快照 max 一次。旧的 max 合并是为了解决两个问题：恢复旧对话时读数偏低、估算
+    // 偏低时把环缩水。两者都依赖 max 抬升，但如果快照里残留的是压缩前的高位，max
+    // 会把后端的 16k 抬回 213k，弹窗刷新就永远不会更新环。
+    // 代价：这个函数也会被弹窗每 5s 的轮询调用，工具循环进行中会短暂低于实际在飞
+    // 的上下文——下一条 usage_prompt_complete（同样 authoritative）会把它抬回真实值。
     useHelixStore.getState().setContextUsage(
       key,
-      Math.max(localPrev?.size || 0, data.context_max || 0),
-      Math.max(localPrev?.used || 0, data.context_used || 0),
+      data.context_max || 0,
+      data.context_used || 0,
       data.categories.map((c) => ({
         id: c.id,
         label: c.label,
@@ -97,6 +100,7 @@ export async function captureContextBreakdown(
         tool_count: t.tool_count,
         schema_tokens: t.schema_tokens,
       })),
+      true,
     );
     return true;
   } catch {

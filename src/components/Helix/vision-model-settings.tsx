@@ -152,9 +152,12 @@ export function VisionModelSettings() {
   };
 
   return (
-    <div className="space-y-4">
-      <SettingGroup>
-        <div className="p-4 space-y-3">
+    <div className="flex-1 min-h-0 flex flex-col">
+      <SettingGroup
+        className="flex-1 flex flex-col"
+        bodyClassName="flex-1 flex flex-col"
+      >
+        <div className="p-4 space-y-3 flex-1 flex flex-col">
           {/* Provider */}
           <div>
             <label className="block ui-text font-medium text-foreground mb-1.5">
@@ -232,42 +235,44 @@ export function VisionModelSettings() {
               />
             </div>
           )}
+
+          {/* 连通性测试结果（行内展示，不 toast） */}
+          {testResult && (
+            <div
+              className={`rounded-lg border px-3 py-2 ui-text font-mono whitespace-pre-wrap break-words ${
+                testResult.ok
+                  ? "border-emerald-500/40 bg-emerald-500/5 text-emerald-600"
+                  : "border-destructive/40 bg-destructive/5 text-destructive"
+              }`}
+            >
+              <span className="font-medium">
+                {testResult.ok ? "连接正常 · " : "测试失败 · "}
+              </span>
+              {testResult.text}
+            </div>
+          )}
+
+          {/* 底部操作行：mt-auto 钉在拉伸后的卡片底部（与对话 tab 的 SaveBar 同位） */}
+          <div className="mt-auto flex justify-end gap-2 pt-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={runTest}
+              disabled={testing || saving}
+            >
+              {testing ? "测试中..." : "测试连接"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => save()}
+              disabled={saving}
+            >
+              {saving ? "保存中..." : "保存"}
+            </Button>
+          </div>
         </div>
       </SettingGroup>
-
-      {testResult && (
-        <div
-          className={`rounded-lg border px-3 py-2 ui-text font-mono whitespace-pre-wrap break-words ${
-            testResult.ok
-              ? "border-emerald-500/40 bg-emerald-500/5 text-emerald-600"
-              : "border-destructive/40 bg-destructive/5 text-destructive"
-          }`}
-        >
-          <span className="font-medium">
-            {testResult.ok ? "连接正常 · " : "测试失败 · "}
-          </span>
-          {testResult.text}
-        </div>
-      )}
-
-      <div className="flex justify-end gap-2 pt-2">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={runTest}
-          disabled={testing || saving}
-        >
-          {testing ? "测试中..." : "测试连接"}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => save()}
-          disabled={saving}
-        >
-          {saving ? "保存中..." : "保存"}
-        </Button>
-      </div>
     </div>
   );
 }
