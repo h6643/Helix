@@ -80,6 +80,7 @@ import { isServeActive } from "@/lib/serve-gateway";
 import { loadPlanSteps } from "@/lib/plan-parse";
 import {
   ensureSessionMapLoaded,
+  loadSessionMap,
   persistSessionMapEntries,
   type SessionMapEntry,
 } from "@/lib/session-map";
@@ -187,6 +188,34 @@ async function persistSessionMap(map: Map<string, SessionMapEntry>) {
 }
 
 /**
+ * 内存 sessionMap 丢了之后的磁盘反查：conversation id → 最近绑定的 sid。
+ *
+ * `syncConfigToBackend` / 撤回失败会把整条条目 `delete` 掉，`sids` 历史一并
+ * 丢掉；而 IndexedDB 的写入是合并式的，`.delete()` 只影响内存，磁盘索引里
+ * 那份还在。拿到 sid 就能走统一的 resume 把原会话接回来，不必标 broken。
+ *
+ * 尽力而为：查不到 / 非 Electron / RPC 失败一律返回 null，调用方继续原有的
+ * 「无 sid」判定，不因兜底失败而多报错。
+ */
+async function lookupSessionSidForConversation(
+  cid: string,
+): Promise<string | null> {
+  if (!isElectron() || !cid) return null;
+  try {
+    const r = (await electronHelix.send("session/index_lookup_conversation", {
+      conversation_id: cid,
+    })) as any;
+    const sids: unknown[] = Array.isArray(r?.session_ids) ? r.session_ids : [];
+    for (const sid of sids) {
+      if (typeof sid === "string" && sid.trim()) return sid.trim();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * sessionMap 硬门槛：等水合完成，并在 ref 还是空 Map 时灌入解析结果。
  *
  * 调用方必须 `await` 它**之后**才读 `existing`——`existing` 绝不能在 await 之前
@@ -205,6 +234,96 @@ async function awaitSessionMap(ref: {
     ref.current = loaded;
   }
   return ref.current;
+}
+
+/**
+ * 把「本轮没有任何可见内容」的原因归类成可辨识的形态。
+ *
+ * 之前只有一句「本轮运行已结束，但模型未返回任何可见内容」——而真实原因几乎
+ * 总是一个具体的 HTTP 状态码（400 参数错、401/403 凭据、404 端点/模型不存在、
+ * 429 限流、5xx 服务端），用户看不出下一步该改什么。pi 把 provider 的原始
+ * 错误原样放在 assistant 消息的 `errorMessage` 里（例如
+ * `404 {"error":{"message":"Invalid URL (POST /v1/v1/messages)"}}`），网关在
+ * `agent_settled` 时透传到 `session/complete.error`。
+ *
+ * 只按错误文本分类，不做任何猜测：抓不到状态码就退回「未知」，同时保留原文
+ * 摘要，至少能看到 provider 说了什么。
+ */
+function classifyModelError(raw: string): { label: string; detail: string } {
+  const msg = (raw || "").trim();
+  if (!msg) return { label: "未知", detail: "模型没有返回任何内容" };
+
+  const flat = msg.replace(/\s+/g, " ");
+  const head = msg.slice(0, 12).replace(/[^0-9]/g, "");
+  const status = /^([1-5]\d\d)\b/.exec(flat)?.[1];
+  // 404/401 这类错误体里常带别的数字，只在开头附近找状态码。
+  const code = status ?? (flat.slice(0, 80).match(/\b([45]\d\d)\b/)?.[1] ?? "");
+
+  const detail =
+    flat.length > 300
+      ? flat.slice(0, 300).replace(/\s+$/, "") + "…"
+      : flat;
+  const withDetail = (label: string): { label: string; detail: string } => ({
+    label,
+    detail: detail ? `${label}：${detail}` : label,
+  });
+
+  if (code) {
+    if (code === "400")
+      return withDetail(
+        "400 请求被拒绝",
+      );
+    if (code === "401" || code === "403")
+      return withDetail("401/403 凭据无效");
+    if (code === "404") {
+      // baseUrl 末尾已带 /v1 时，pi 再拼协议路径会变成 /v1/v1/…
+      return /\/v\d+\/v\d+\//.test(flat)
+        ? withDetail("404 端点不存在（路径重复，检查 baseUrl 末尾的 /v1）")
+        : withDetail("404 端点或模型不存在");
+    }
+    if (code === "408") return withDetail("408 请求超时");
+    if (code === "413") return withDetail("413 请求体过大");
+    if (code === "422") return withDetail("422 参数校验失败");
+    if (code === "429")
+      return withDetail(
+        "429 触发限流",
+      );
+    if (code === "500") return withDetail("500 服务端错误");
+    if (code === "502") return withDetail("502 网关错误");
+    if (code === "503") return withDetail("503 服务暂不可用");
+    if (code === "504") return withDetail("504 网关超时");
+    if (/^5\d\d$/.test(code)) return withDetail(`${code} 服务端错误`);
+    if (/^[34]\d\d$/.test(code)) return withDetail(`${code} 请求失败`);
+  }
+
+  const lower = flat.toLowerCase();
+  const hit = (re: RegExp, label: string) => (re.test(lower) ? withDetail(label) : null);
+
+  return (
+    hit(
+      /context.{0,12}(exceed|length|window)|context_length_exceeded|maximum context|prompt is too long/,
+      "上下文超出模型窗口",
+    ) ??
+    hit(
+      /insufficient_(quota|balance)|quota( exceeded|exceeded)?|billing|no credits|out of credits|not activated|arrears/,
+      "额度或余额不足",
+    ) ??
+    hit(
+      /model not found|unknown model|does not exist|no such model|model_not_found/,
+      "模型不存在",
+    ) ??
+    hit(/invalid url|invalid_request|bad request/, "400 请求被拒绝") ??
+    hit(
+      /etimedout|esockettimeout|request timed out|timed? ?out|deadline exceeded/,
+      "请求超时",
+    ) ??
+    hit(/econnrefused|connection refused/, "连接被拒绝（服务未启动？）") ??
+    hit(/enotfound|getaddrinfo|dns|name or service not known/, "DNS 解析失败") ??
+    hit(/econnreset|socket hang up|connection reset/, "连接中断") ??
+    hit(/network|fetch failed|failed to fetch/, "网络错误") ??
+    hit(/stopReason: error/, "模型返回错误") ??
+    withDetail("未知")
+  );
 }
 
 /** Update a conversation's mapping to a (possibly new) backend sid, keeping
@@ -1258,11 +1377,7 @@ export function AgentFlowPanel() {
     // 压缩完成提示以 WorkBuddy 风格的 inline divider 插入对话流。锚定到压缩后
     // 的最后一条消息之后，后续新消息不会把该时间点往上顶。
     if (compressionNotice) {
-      const parts: string[] = [
-        compressionNotice.source === "auto"
-          ? "上下文已自动压缩"
-          : "上下文已压缩",
-      ];
+      const parts: string[] = ["上下文已压缩"];
       if (
         compressionNotice.beforeTokens != null &&
         compressionNotice.afterTokens != null
@@ -1723,6 +1838,38 @@ export function AgentFlowPanel() {
     };
   }, []);
 
+  // 组件外的路径写 sessionMap 磁盘后，把磁盘现值合并回本组件的 sessionMapRef：
+  // handleRun 只读内存 ref，磁盘写不会自动出现在那里（ref 只在挂载时读过一次盘，
+  // 之后只跟自己写的同步）。当前唯一的组件外写入方是 `/compact` 的
+  // `rebindSessionSid` + `persistSessionMap`（slash-commands.ts，旁路面板走同一条
+  // 函数），它落盘后会 `bumpSessionMapVersion()`；这里收到版本号就重读合并。
+  // 不合并的后果：ref 停在旧 sid 上，下次 handleRun 的 existing 与后端实际会话
+  // 对不上（旧实现里 forkConversation 曾在此列——它现在已是纯本地分叉，不再写映射）。
+  // 合并而不是整体替换：run 循环里的 rebindSessionSid 先改内存再异步落盘，
+  // 整体替换会掐掉在途写入。
+  const sessionMapVersion = useHelixStore((s) => s.sessionMapVersion);
+  useEffect(() => {
+    if (sessionMapVersion <= 0) return;
+    let cancelled = false;
+    loadSessionMap()
+      .then((m) => {
+        if (cancelled) return;
+        m.forEach((entry, cid) => sessionMapRef.current.set(cid, entry));
+        const cid = useHelixStore.getState().currentSessionId;
+        const sid = cid
+          ? (sessionMapRef.current.get(cid)?.sid ?? null)
+          : null;
+        helixSessionIdRef.current = sid;
+        try {
+          useGatewayStore.getState().setHelixSessionId(sid);
+        } catch { /* empty */}
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionMapVersion]);
+
   // （已删除 gateway.sessionInvalidated 监听）该事件全仓从未有发射方——Rust 侧
   // 只发 gateway.ready（pi_gateway.rs spawn 完成处），重启场景由
   // helix-layout 的 gateway.ready → bumpGatewayEpoch → epochStale 链路覆盖，
@@ -2088,12 +2235,18 @@ export function AgentFlowPanel() {
         electronHelix.notify("session/cancel", { session_id: currentSid });
       } catch { /* empty */}
     }
-    // 2) Invalidate the session so the next prompt rebuilds it from config.yaml.
+    // 2) Invalidate the GLOBAL cached session id so the next prompt re-resolves
+    //    against the new config.yaml. Do NOT delete this conversation's map
+    //    entry: `sids` / `storedId` / `epoch` history would go with it, and the
+    //    next message would then look like a brand-new conversation with local
+    //    history but no sid — which handleRun marks broken ("刚刚还在对话，
+    //    突然显示该对话已失效"). Keep the entry and let handleRun's resume
+    //    branch re-attach the same sid under the restarted gateway; that is the
+    //    same decision already made for the epoch-stale case below, and resume
+    //    goes through session/resume, which re-snapshots credentials on the new
+    //    instance, so the swap-401 guard (cacheConfig before setConfig) still
+    //    holds.
     useGatewayStore.getState().setHelixSessionId(null);
-    if (currentSessionId) {
-      sessionMapRef.current.delete(currentSessionId);
-      persistSessionMap(sessionMapRef.current);
-    }
     // 3) Push the resolved config (provider+baseUrl+model) to the backend.
     if (isElectron()) {
       const store = useHelixStore.getState();
@@ -2112,9 +2265,6 @@ export function AgentFlowPanel() {
             : "custom",
         baseUrl: cfg.baseUrl,
       };
-      debug(
-        `[config-switch] → provider=${push.provider} baseUrl=${push.baseUrl} model=${push.model}（key 由 pi 侧文件持有，不推送）`,
-      );
       // Flush IMMEDIATELY (bypass the 1.2s debounce). A model switch is an
       // explicit user action and must persist to active-profile.json + config.yaml
       // right away — otherwise closing/restarting within the debounce window leaves
@@ -2267,14 +2417,6 @@ export function AgentFlowPanel() {
                       >
                         <path d="m9 18 6-6-6-6" />
                       </svg>
-                      {/* 二级：悬停左侧弹出（面板靠右侧工具栏，
-                          往右会被窗口边缘裁掉，所以翻到左边）。
-                          ⚠️ 不能用 mr-* 留缝：margin 不属于元素命中区，
-                          鼠标横穿缝隙的瞬间既不在行上也不在子菜单上
-                          → group-hover 丢失 → 子菜单消失（且
-                          visibility:hidden 不接收指针，永远进不去）。
-                          改用外层 pr-1 当「悬停桥」：padding 属于元素，
-                          缝隙内仍算悬停在行上，子菜单不会闪没。 */}
                       <div
                         className="invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute right-full top-0 pr-1"
                       >
@@ -3338,6 +3480,10 @@ export function AgentFlowPanel() {
     const pendingAssistantRowIdRef = { current: null as number | null };
     const streamCappedRef = { current: false };
     const thinkingCappedRef = { current: false };
+    // 本次运行的 provider 原始错误（pi `errorMessage`，经 session/complete
+    // 透传）。只在「run 结束但没有任何可见内容」时用来分类显示——正常回复
+    // 不该因为一次上游错误就把错误挂在正文里。
+    const runErrorRef = { current: "" };
     const pendingTextRef = { current: null as string | null };
     const pendingThinkingRef = { current: null as string | null };
     const pendingBlocksRef = {
@@ -3634,6 +3780,7 @@ export function AgentFlowPanel() {
     lastStreamedTextRef.current = "";
     streamCappedRef.current = false;
     thinkingCappedRef.current = false;
+    runErrorRef.current = "";
     thinkingStartTimeRef.current = 0;
     thinkingDurationRef.current = 0;
     promptSentAtRef.current = 0;
@@ -3762,7 +3909,7 @@ export function AgentFlowPanel() {
       // conversation. Sessions are keyed by conversationId so multiple
       // conversations can run in parallel (each keeps its own backend session).
       const myCid = activeSessionId;
-      const existing = sessionMap.get(myCid);
+      let existing = sessionMap.get(myCid);
 
       // ── broken 短路 ───────────────────────────────────────────────
       // 会话已被标记失效（resume 返回 SESSION_NOT_FOUND）时，不再假装它存在：
@@ -3809,6 +3956,43 @@ export function AgentFlowPanel() {
           throw new Error(resumeFailureMessage(r));
         }
       }
+      // ── 磁盘反向索引兜底 ─────────────────────────────────────────────
+      // 内存 sessionMap 被整条 delete（syncConfigToBackend 改设置 / 撤回失败）
+      // 时 sids 历史一并丢掉，但 IndexedDB 的写入是合并式的、`.delete()` 只影响
+      // 内存，磁盘索引里的绑定还在。反查到 sid 就走统一的 resume 接回原会话。
+      // 不做这一步的后果：后端文件完好、对话还在被写入，UI 却显示
+      // 「该对话已失效，无法继续对话」——用户感受是「刚刚还在对话，突然就这样」。
+      // 真 Draft 反查不到（从未绑定过），只是多一次 IPC，直接落回下面的判定。
+      if (!sessionId && myCid) {
+        const diskSid = await lookupSessionSidForConversation(myCid);
+        if (diskSid) {
+          const r = await resumeSession(diskSid);
+          if (r.ok) {
+            rebindSessionSid(sessionMapRef.current, myCid, {
+              sid: r.sessionId,
+              epoch: liveEpoch,
+              storedId: existing?.storedId,
+            });
+            persistSessionMap(sessionMapRef.current);
+            sessionEpochRef.current = liveEpoch;
+            sessionId = r.sessionId;
+            // resume 成功 = 会话活着，清掉之前可能留下的 broken 标记。
+            useHelixStore.getState().clearSessionBroken(myCid);
+            debug(
+              "[HelixTrace] 内存映射丢失，已从磁盘反向索引恢复 →",
+              r.sessionId,
+            );
+          } else {
+            // 索引查到了 sid 但 resume 失败：走统一状态机。只有
+            // SESSION_NOT_FOUND 才标 broken；restore 失败 / 内部错误是可重试
+            // 故障，保留真实错误、不永久化会话状态，下一条消息还会再试。
+            if (isSessionGone(r)) {
+              useHelixStore.getState().markSessionBroken(myCid, r.error);
+            }
+            throw new Error(resumeFailureMessage(r));
+          }
+        }
+      }
       if (!sessionId) {
         // 无 SID ≠ 新对话。所有权判定按持久化记录，不靠 React 内存里的
         // chatMessages——冷启动时 UI 会话已存在但 chatMessages 尚未 hydrate，
@@ -3827,9 +4011,10 @@ export function AgentFlowPanel() {
         if (record && hasContent) {
           // 已存在且有内容的对话却无 sid：不能 session/new——那会铸造空会话
           // 覆盖映射，历史从此对不上。标 broken 交给用户显式决策，不静默重建。
+          // 走到这里说明上面的磁盘索引兜底也没查到。
           useHelixStore.getState().markSessionBroken(
             myCid,
-            "no sid with history",
+            "本地历史还在，但后端会话指针（sid）已丢失，磁盘索引也反查不到，无法自动恢复",
           );
           throw new Error(
             "SESSION_NOT_FOUND: 该对话没有可恢复的后端会话（有本地历史但 SID 缺失）",
@@ -4185,6 +4370,10 @@ export function AgentFlowPanel() {
           // 缓冲为空时退回这份权威思考，否则「已完成」折叠卡里思考整段消失。
           const remoteThinking =
             typeof params?.reasoning === "string" ? params.reasoning : "";
+          // 上游 provider 的原始错误（`errorMessage`）。空正文 + 有错误时用它
+          // 分类显示，不再只有一句「模型未返回任何可见内容」。
+          runErrorRef.current =
+            typeof params?.error === "string" ? params.error : "";
           return {
             type: "done",
             content: textBufferRef.current,
@@ -6381,13 +6570,22 @@ export function AgentFlowPanel() {
                   });
                 }
               } else {
-                // 防御性兜底：run 结束但无任何可见内容（根因已修复，极少触发）。
-                // 注意：必须放在「有内容」分支的 else 里——上一版误置于 if 内，
-                // 导致每次成功运行都无条件追加这条警告，模型有输出却仍显示。
+                // 防御性兜底：run 结束但无任何可见内容。注意：必须放在「有内容」
+                // 分支的 else 里——上一版误置于 if 内，导致每次成功运行都无条件
+                // 追加这条警告，模型有输出却仍显示。
+                //
+                // 不再只显示一句泛泛的话：provider 的原始错误已经随
+                // session/complete 透传过来，按状态码分类（400 / 401-403 / 404 /
+                // 408 / 413 / 422 / 429 / 5xx，以及上下文超限 / 额度不足 / 超时 /
+                // 连接 / DNS / 网络）。用户能直接看出该改 baseUrl、改凭据、
+                // 退避限流，还是等上游恢复。
+                const noOutputContent = runErrorRef.current
+                  ? `⚠️ 本轮运行已结束，模型未返回任何可见内容。\n\n${classifyModelError(runErrorRef.current).detail}`
+                  : "⚠️ 本轮运行已结束，但模型未返回任何可见内容。";
                 const st = useHelixStore.getState();
                 const mid = st.addChatMessage({
                   role: "assistant",
-                  content: "⚠️ 本轮运行已结束，但模型未返回任何可见内容。",
+                  content: noOutputContent,
                   sessionId: activeSessionId,
                 });
                 doneMsgIdRef.current = mid;
@@ -7556,7 +7754,7 @@ export function AgentFlowPanel() {
             <AlertTriangle className="size-3.5 mt-0.5 shrink-0" />
             <div className="min-w-0">
               <div className="font-medium">
-                该对话已失效：后端会话文件不存在，无法继续对话
+                该对话已失效，无法继续对话
               </div>
               <div className="opacity-80 break-all">
                 {brokenSessionReason

@@ -188,6 +188,15 @@ pub struct PiInstance {
     /// carries them, but tool_execution_end does not — needed there to
     /// synthesize a patch for `write` (pi's write result has no details).
     exec_tool_args: Mutex<HashMap<String, Value>>,
+    /// `write` 工具**覆盖前**的文件内容：toolCallId → 旧内容（`Some(None)` = 当时
+    /// 文件不存在）。在 tool_execution_start（文件还没被写）抓取。
+    ///
+    /// 为什么需要：pi 的 write 结果不带 details（源码实测 `details:void 0`），
+    /// 网关只能拿 args 合成 patch —— 而"覆盖已有文件"用 `@@ -0,0 +1,N @@` 是假的，
+    /// 前端按它反推撤销会按行号切坏文件。有了旧内容就能算出**真 diff**，撤销
+    /// 也随之安全；老内容读不到（非文本/权限/相对路径无法解析）时不写这个 key，
+    /// 前端按"撤销不安全"处理。
+    exec_file_prior: Mutex<HashMap<String, Option<String>>>,
     /// Model context window (get_state's model.contextWindow) for usage ring.
     context_window: Mutex<Option<i64>>,
     /// Last REAL context figure we saw for this instance: pi's per-call
@@ -230,6 +239,11 @@ pub struct PiInstance {
     /// can self-heal from the authoritative source.
     last_assistant_text: Mutex<String>,
     last_assistant_thinking: Mutex<String>,
+    /// Terminal model error captured from pi's `message_end` when the message
+    /// carries `stopReason: "error"` (e.g. an upstream 400). `agent_settled`
+    /// forwards it as a fatal `error` event so the frontend surfaces the real
+    /// message instead of the "no visible content" fallback.
+    last_assistant_error: Mutex<String>,
     /// Live subagents spawned by the pi-subagents extension. Maps the parent
     /// tool-call id to the extension's real agent id — background Agent calls
     /// return "Agent started in background" immediately while the child keeps
@@ -276,6 +290,7 @@ impl PiInstance {
             turn_debt: AtomicU64::new(0),
             tool_args: Mutex::new(HashMap::new()),
             exec_tool_args: Mutex::new(HashMap::new()),
+            exec_file_prior: Mutex::new(HashMap::new()),
             context_window: Mutex::new(None),
             last_context_used: AtomicI64::new(0),
             initialized: AtomicBool::new(false),
@@ -288,6 +303,7 @@ impl PiInstance {
             executing_tools: Mutex::new(std::collections::HashSet::new()),
             last_assistant_text: Mutex::new(String::new()),
             last_assistant_thinking: Mutex::new(String::new()),
+            last_assistant_error: Mutex::new(String::new()),
             subagents: Mutex::new(HashMap::new()),
         })
     }
@@ -406,6 +422,35 @@ impl PiInstance {
     /// respawn lands in the same project and can restore the session.
     fn kill(&self) {
         log_spawn_diag(&format!("kill({}): entry", self.key()));
+        // C: release an armed turn waiter BEFORE the child dies.
+        //
+        // 顺序是承重结构，不是风格问题：`child.kill()` 会让 stdout 立刻 EOF，
+        // 而 reader 线程的死亡簿记（见 stdout reader 的 EOF 分支）也会清
+        // `turn_waiter` —— 两个线程谁先拿到谁说了算。原先"先杀子进程、再 take()
+        // waiter"的顺序让 reader 几乎必然先到：它把 oneshot 裸丢掉，kill() 随后
+        // take 到 None，于是下面这条结构化 `{cancelled:true}` **永远发不出去**，
+        // 在飞的 session/prompt 只能以裸的 "pi turn event channel closed" 冒到
+        // 前端（2026-09-21 实测：helix-recover.log 里
+        // `child death: turn_waiter dropped bare` 与
+        // `kill(<sid>): turn_waiter was None` 出现在同一毫秒）。
+        // 先取 waiter 就把这个竞态彻底关掉：kill 现在**总是**结构化取消。
+        //
+        // 注意必须先把 guard.take() 的结果放进 `let` 再判分支，不能写成
+        // `if let Some(w) = self.turn_waiter.lock().unwrap().take() { … } else { … }`
+        // —— edition 2021 下 `if let` 的 scrutinee 临时值（MutexGuard）会活到整个
+        // `if let` 表达式结束（含 else 块），else 里再 lock() 就是对同一把非重入
+        // Mutex 的重入 → 自死锁（kill() 卡住 → 初始化永不完 → 前端一直"正在连接
+        // 网关"）。
+        let armed = self.turn_waiter.lock().unwrap().take();
+        if let Some(w) = armed {
+            let _ = w.tx.send(json!({ "cancelled": true }));
+            log_spawn_diag(&format!(
+                "kill({}): cancelled armed turn waiter (before child kill)",
+                self.key()
+            ));
+        } else {
+            log_spawn_diag(&format!("kill({}): turn_waiter was None", self.key()));
+        }
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -429,31 +474,9 @@ impl PiInstance {
             }
         }
         log_spawn_diag(&format!("kill({}): UI_REQUEST_OWNERS cleared", self.key()));
-        // C: don't silently drop an armed turn waiter — the in-flight
-        // session/prompt would otherwise surface as "pi turn event channel
-        // closed" (raw channel drop) instead of a structured cancellation.
-        // Send a cancelled marker so the RPC waiter gets a clean cancel and
-        // the frontend can treat it as recoverable (reconnect / respawn) rather
-        // than a hard failure. No-op when no waiter is armed.
-        log_spawn_diag(&format!("kill({}): acquiring turn_waiter", self.key()));
-        // 先把 guard 取出来放进 `let`，再对**已拥有**的 Option 做分支。
-        // 不能写成 `if let Some(w) = self.turn_waiter.lock().unwrap().take() { }
-        // else { *self.turn_waiter.lock().unwrap() = None; }` —— 在 edition 2021
-        // 下 `if let` 的 scrutinee 临时值（这里的 MutexGuard）会一直活到整个
-        // `if let` 表达式结束（含 else 块），于是 else 里的第二次 lock() 变成
-        // 对同一把非重入 std::sync::Mutex 的重入 → 自死锁。kill() 卡住 →
-        // spawn_process 走不下去 → get_state 握手永不执行 → initialized 恒 false
-        // → 前端 status() 永远 connected:false → 启动后一直"正在连接网关"。
-        let armed = self.turn_waiter.lock().unwrap().take();
-        if let Some(w) = armed {
-            let _ = w.tx.send(json!({ "cancelled": true }));
-            log_spawn_diag(&format!("kill({}): cancelled armed turn waiter", self.key()));
-        } else {
-            // take() 已经把它变成 None，这里无需再写一次（原本那次冗余写入正是死锁点）。
-            log_spawn_diag(&format!("kill({}): turn_waiter was None", self.key()));
-        }
         self.tool_args.lock().unwrap().clear();
         self.exec_tool_args.lock().unwrap().clear();
+        self.exec_file_prior.lock().unwrap().clear();
         self.executing_tools.lock().unwrap().clear();
         self.initialized.store(false, Ordering::SeqCst);
         self.streaming.store(false, Ordering::SeqCst);
@@ -667,12 +690,17 @@ fn log_spawn_diag(message: &str) {
 /// conversation → 后端 sid 的**反向**索引：`~/.pi/agent/conversation-index.json`
 ///
 /// 前端的 sessionMap（IndexedDB `conversationSessions`）是唯一记录这个关系的
-/// 地方，而它会被 `syncConfigToBackend`（改设置）/ `handleUndoChat`（撤回失败）
-/// 整条 `delete` 掉，也可能随 site-data 一起清空。删掉之后 sid → conversation
-/// 在全系统范围无解：pi 的 jsonl 文件名只有 `时间戳_sid`，内容里也不含前端
+/// 地方，且可能随 site-data 一起清空（2026-09-21 之前还有两处代码会把它整条
+/// `delete` / 把 sid 清空：syncConfigToBackend 改设置、handleUndoChat 撤回——
+/// 那两处已改成保留 sid 只标 epoch 过期）。一旦这个关系没了：sid → conversation
+/// 在全系统范围无解——pi 的 jsonl 文件名只有 `时间戳_sid`，内容里也不含前端
 /// conversation id（实测 3.1MB 会话文件里 `session-17…` 出现 0 次）。这里在
 /// 每次 sid 绑定时顺手落一份到磁盘，作为唯一持久化的反向索引——map 再丢，
 /// 也能反查这个后端会话属于哪个对话、还能不能 resume 回来。
+///
+/// 注意目前只实现了 `sid → conversation` 方向（`index_lookup`）；`conversation
+/// → sid` 需要扫全表反查，前端在「有本地历史但无 SID」时**还没有**用上它，
+/// 所以那个状态下仍是不可自愈的（只能新建对话）。
 ///
 /// 尽力而为：索引失败绝不影响正常的会话绑定。
 fn conversation_index_path() -> Option<PathBuf> {
@@ -683,6 +711,24 @@ fn conversation_index_path() -> Option<PathBuf> {
 struct ConversationIndexEntry {
     conversation_id: String,
     ts: u64,
+}
+
+fn write_index(index: &HashMap<String, Vec<ConversationIndexEntry>>) {
+    let Some(path) = conversation_index_path() else {
+        return;
+    };
+    let Ok(json) = serde_json::to_string_pretty(index) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // 临时文件 + rename：写一半被杀不会留下半个 JSON 把下一次读盘搞坏。
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&tmp, &path);
 }
 
 fn index_upsert(entries: &[(String, String)]) {
@@ -709,18 +755,39 @@ fn index_upsert(entries: &[(String, String)]) {
             list.drain(0..list.len() - 3);
         }
     }
-    let Ok(json) = serde_json::to_string_pretty(&index) else {
-        return;
+    write_index(&index);
+}
+
+/// 删除对话后清理反向索引：按前端 conversation_id 全表移除对应条目，
+/// 某个 sid 名下的列表清空时把整个 sid 键也删掉（该文件只增不减的
+/// 历史累积由此收敛）。
+fn index_remove(conversation_ids: &[String]) -> usize {
+    static INDEX_LOCK: Mutex<()> = Mutex::new(());
+    let Ok(_guard) = INDEX_LOCK.lock() else {
+        return 0;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let Some(path) = conversation_index_path() else {
+        return 0;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    let Ok(mut index) =
+        serde_json::from_str::<HashMap<String, Vec<ConversationIndexEntry>>>(&raw)
+    else {
+        return 0;
+    };
+    let mut removed = 0;
+    index.retain(|_, list| {
+        let before = list.len();
+        list.retain(|e| !conversation_ids.iter().any(|cid| cid == &e.conversation_id));
+        removed += before - list.len();
+        !list.is_empty()
+    });
+    if removed > 0 {
+        write_index(&index);
     }
-    // 临时文件 + rename：写一半被杀不会留下半个 JSON 把下一次读盘搞坏。
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, json).is_err() {
-        return;
-    }
-    let _ = std::fs::rename(&tmp, &path);
+    removed
 }
 
 fn index_lookup(session_id: &str) -> Value {
@@ -1303,21 +1370,33 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
         // one (generation unchanged → no respawn happened meanwhile).
         if instance_clone.generation.load(Ordering::SeqCst) == _generation {
             let quitting = state_clone.gateway.app_quitting.load(Ordering::SeqCst);
-            let had_waiter = instance_clone.turn_waiter.lock().unwrap().is_some();
             instance_clone.initialized.store(false, Ordering::SeqCst);
             *instance_clone.writer.lock().unwrap() = None;
             instance_clone.pending.lock().unwrap().clear();
-            *instance_clone.turn_waiter.lock().unwrap() = None;
-            // This bare drop is the only path that closes a prompt's oneshot
-            // without a structured marker — the frontend sees "pi turn event
-            // channel closed". Log it so the recover.log timeline explains it.
-            if had_waiter {
+            // Release an in-flight turn with a STRUCTURED marker — never a bare
+            // drop. A bare drop closes the oneshot with no reason at all, which
+            // the frontend can only report as the unattributable "pi turn event
+            // channel closed" (2026-09-21: that message turned out to be a kill()
+            // race, not this branch — kill() now takes the waiter before the child
+            // dies, so reaching HERE means the child really did exit on its own:
+            // crash / external kill / OOM).
+            let waiter = {
+                let mut guard = instance_clone.turn_waiter.lock().unwrap();
+                let w = guard.take();
+                drop(guard);
+                w
+            };
+            if let Some(w) = waiter {
                 log_spawn_diag(&format!(
-                    "child death: turn_waiter dropped bare (gen={} key={} quitting={} had_waiter=true)",
+                    "child death: released armed turn waiter with process_exited marker (gen={} key={} quitting={})",
                     _generation,
                     instance_clone.key(),
                     quitting
                 ));
+                let _ = w.tx.send(json!({
+                    "process_exited": true,
+                    "message": "pi agent process exited unexpectedly",
+                }));
             }
             let sid = instance_clone.current_session_id();
             // Fail any in-flight turn: dropping the waiter wakes the
@@ -1909,6 +1988,26 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .ok_or("session/index_get is missing session_id")?
                 .to_string();
             Ok(index_lookup(&session_id))
+        }
+        "session/index_del" => {
+            // 删除对话时同步清理反向索引：按前端 conversation_id 全表移除，
+            // 不再需要先查 sid（删除路径只拿得到 conversation id）。
+            let mut ids: Vec<String> = Vec::new();
+            if let Some(arr) = params.get("conversation_ids").and_then(Value::as_array) {
+                for e in arr {
+                    if let Some(cid) = e.as_str() {
+                        if !cid.is_empty() {
+                            ids.push(cid.to_string());
+                        }
+                    }
+                }
+            }
+            let removed = if ids.is_empty() {
+                0
+            } else {
+                index_remove(&ids)
+            };
+            Ok(json!({ "removed": removed }))
         }
         "session/prepare" => {
             // Fire-and-forget resume warmup: restores the session's instance
@@ -2535,8 +2634,21 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 let sleep = tokio::time::sleep_until(deadline);
                 tokio::select! {
                     result = &mut rx => {
+                        // map_err 是最后一道网：这个 oneshot 现在所有**主动**关闭
+                        // 都带结构化标记——kill() → {cancelled:true}，子进程真死 →
+                        // {process_exited:true}。裸 close 只剩"没人发就 drop"的
+                        // 意外情形。
                         let v = result.map_err(|_| "pi turn event channel closed".to_string())?;
                         instance.streaming.store(false, Ordering::SeqCst);
+                        if v.get("process_exited").and_then(Value::as_bool) == Some(true) {
+                            // 子进程中途退出：这一轮不可能有终局，报明确原因（前端
+                            // 按"可恢复中断"处理，等 respawn/重连，而不是当模型失败）。
+                            return Err(v
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("pi agent process exited unexpectedly")
+                                .to_string());
+                        }
                         break v;
                     }
                     _ = tokio::time::sleep(WATCHDOG_TICK) => {
@@ -3969,6 +4081,145 @@ fn resume_category_payload(by_kind: &[(&'static str, i64)]) -> Value {
     Value::Array(categories)
 }
 
+/// diff 文本送前端的字节上限：超了就截断（前端只显示一截），并且**必须**让
+/// 前端把撤销标为不安全——被截断的 diff 反推不出原文件，拿来写盘就是损坏。
+const MAX_DIFF_BYTES: usize = 16_384;
+
+/// 按行切分用于 diff 的内容：末尾换行不算一行（`"a\n"` = 1 行，不是 2 行），
+/// 空文本 = 0 行。与旧的 write 合成 patch 保持同一约定。
+fn split_lines_for_diff(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    if text.ends_with('\n') {
+        lines[..lines.len().saturating_sub(1)].to_vec()
+    } else {
+        lines
+    }
+}
+
+/// 读取 `write` 即将覆盖的文件的旧内容（在 tool_execution_start、文件还没被写时调用）。
+///
+/// - `Some(Some(text))`：读到了旧内容（必须是 UTF-8 文本、≤2MB）
+/// - `Some(None)`：文件当时确实不存在 → 这是一次新建
+/// - `None`：**无法判定**（相对路径且实例没有 cwd、二进制、权限、太大）——
+///   调用方必须按"旧内容未知"处理，绝不能猜成空文件（猜错会让撤销删/切文件）。
+/// 工具 args 里的文件路径字段：pi 默认 write/edit 用 `path`，个别封装变体
+/// 用 `file_path` / `filePath`。三种都认——字段名对不上时合成 patch 会被
+/// **静默**跳过，前端就再也看不到 +N −n。
+fn arg_path(args: &Value) -> Option<&str> {
+    args.get("path")
+        .or_else(|| args.get("file_path"))
+        .or_else(|| args.get("filePath"))
+        .and_then(Value::as_str)
+}
+
+fn read_prior_file_content(instance: &PiInstance, path: &str) -> Option<Option<String>> {
+    let p = std::path::Path::new(path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        let dir = instance.spawn_dir();
+        if dir.is_empty() {
+            return None;
+        }
+        std::path::Path::new(&dir).join(p)
+    };
+    match std::fs::read(&abs) {
+        Ok(bytes) => {
+            if bytes.len() > 2 * 1024 * 1024 {
+                return None;
+            }
+            String::from_utf8(bytes).ok().map(Some)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None),
+        Err(_) => None,
+    }
+}
+
+/// 统一截断 diff 文本（见 [`MAX_DIFF_BYTES`]）。
+fn truncate_diff(s: String) -> String {
+    if s.len() <= MAX_DIFF_BYTES {
+        return s;
+    }
+    format!(
+        "{}…[diff 过长已截断]",
+        s.chars().take(MAX_DIFF_BYTES).collect::<String>()
+    )
+}
+
+/// 为 `write` 合成 unified diff（旧内容 → 新内容）。
+///
+/// 只出一段 hunk：公共前缀/后缀各留 ≤3 行上下文，中间整段替换。行号与计数都
+/// 精确，所以前端 `reverseUnifiedDiff` 能逐行还原（撤销 = 写回旧内容）。
+///
+/// `new_file = true` 时用 `--- /dev/null` 头（前端据此把撤销实现为删除文件）。
+/// `prior = None` 且 `new_file = false` 表示"旧内容未知"：此时只能按空文件假想，
+/// 调用方**必须**同时标 `undoUnsafe`。
+///
+/// 返回 `None` = 新旧内容一致（这次 write 没改任何东西，不该进「已修改」）。
+fn write_unified_diff(
+    path: &str,
+    prior: Option<&str>,
+    new_text: &str,
+    new_file: bool,
+) -> Option<String> {
+    let new_lines = split_lines_for_diff(new_text);
+    let old_lines = prior.map(split_lines_for_diff).unwrap_or_default();
+    if !new_file && old_lines == new_lines {
+        return None;
+    }
+    let mut patch = String::new();
+    if new_file {
+        patch.push_str(&format!("--- /dev/null\n+++ {path}\n"));
+    } else {
+        patch.push_str(&format!("--- {path}\n+++ {path}\n"));
+    }
+    let mut pre = 0usize;
+    while pre < old_lines.len() && pre < new_lines.len() && old_lines[pre] == new_lines[pre] {
+        pre += 1;
+    }
+    let mut suf = 0usize;
+    while suf < old_lines.len() - pre
+        && suf < new_lines.len() - pre
+        && old_lines[old_lines.len() - 1 - suf] == new_lines[new_lines.len() - 1 - suf]
+    {
+        suf += 1;
+    }
+    let before = pre.min(3);
+    let after = suf.min(3);
+    let old_mid = &old_lines[pre..old_lines.len() - suf];
+    let new_mid = &new_lines[pre..new_lines.len() - suf];
+    patch.push_str(&format!(
+        "@@ -{},{} +{},{} @@\n",
+        if old_lines.is_empty() { 0 } else { pre - before + 1 },
+        before + old_mid.len() + after,
+        pre - before + 1,
+        before + new_mid.len() + after
+    ));
+    // 正文各行用 "\n" 分隔但**末尾不留换行**：前端 `reverseUnifiedDiff` 是按
+    // `diff.split("\n")` 逐行读的，结尾那个空串会被当成一条空的上下文行
+    // （源码里 `else oldSegment.push(bodyLine)` 兜住了它），反推出来的文件就
+    // 平白多一个换行 —— 撤销写回去的内容与原文差一个 \n。实测（16 个往返用例）
+    // 只有不留尾换行时反推才逐字节等于旧内容。
+    let mut body: Vec<String> = Vec::new();
+    for line in &old_lines[pre - before..pre] {
+        body.push(format!(" {line}"));
+    }
+    for line in old_mid {
+        body.push(format!("-{line}"));
+    }
+    for line in new_mid {
+        body.push(format!("+{line}"));
+    }
+    for line in &old_lines[old_lines.len() - suf..old_lines.len() - suf + after] {
+        body.push(format!(" {line}"));
+    }
+    patch.push_str(&body.join("\n"));
+    Some(patch)
+}
+
 fn handle_line(instance: &Arc<PiInstance>, line: &str) {
     let Ok(message) = serde_json::from_str::<Value>(line) else {
         return;
@@ -4056,6 +4307,21 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     }
                     *instance.last_assistant_text.lock().unwrap() = text_parts.join("");
                     *instance.last_assistant_thinking.lock().unwrap() = thinking_parts.join("");
+                    // 回合以模型错误收尾（stopReason=error，如上游 400）时，错误
+                    // 只写在 pi 的消息记录里（errorMessage），不流任何正文。缓存它，
+                    // agent_settled 时作为 fatal error 事件转发给前端；正常消息清掉
+                    // 上一回合残留，避免跨回合串错误。
+                    let stop_reason = msg.get("stopReason").and_then(Value::as_str).unwrap_or_default();
+                    let error_message = msg
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if stop_reason == "error" && !error_message.is_empty() {
+                        *instance.last_assistant_error.lock().unwrap() = error_message;
+                    } else {
+                        instance.last_assistant_error.lock().unwrap().clear();
+                    }
                 }
             }
         }
@@ -4456,6 +4722,20 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         .unwrap()
                         .insert(tool_call_id.clone(), args.clone());
                 }
+                // write 会整体覆盖文件，而它的 result 不带 diff → 趁现在（工具还
+                // 没跑）把旧内容读下来，tool_execution_end 才能算出真 diff、撤销
+                // 才有安全的反推依据。edit 自带 details.diff/patch，不需要。
+                if tool_name == "write" {
+                    if let Some(path) = arg_path(&args) {
+                        if let Some(prior) = read_prior_file_content(instance, path) {
+                            instance
+                                .exec_file_prior
+                                .lock()
+                                .unwrap()
+                                .insert(tool_call_id.clone(), prior);
+                        }
+                    }
+                }
                 instance
                     .executing_tools
                     .lock()
@@ -4734,6 +5014,12 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 .unwrap()
                 .remove(&tool_call_id)
                 .unwrap_or(Value::Null);
+            // write 覆盖前的旧内容（execution_start 抓的）——同样只取一次，防泄漏。
+            //   Some(None)  = 当时文件不存在（新建）
+            //   Some(Some)  = 读到了旧内容
+            //   None        = 读不到/无法判定 → 旧内容未知
+            let prior_entry: Option<Option<String>> =
+                instance.exec_file_prior.lock().unwrap().remove(&tool_call_id);
             // 只有真出 diff 的工具才转发 diff 类 details：edit 工具 result
             // 自带 details.diff / details.patch；write 工具（全新文件无
             // details）用 execution_start 缓存的 args 在网关侧合成。
@@ -4742,6 +5028,9 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             // diff/patch 会把任意工具的任意 payload 当成 diff 喂给前端
             // （如 ls 触发 +N 徽标 / DiffView 误着色），白名单外直接不给。
             let is_diff_tool = tool_name == "edit" || tool_name == "write";
+            // 这个 details 里只要出现被截断的 diff，就必须同时标 undoUnsafe —— 截断
+            // 后的 diff 反推不出原文件，前端拿它撤销会写坏文件。
+            let mut truncated_diff = false;
             let diff_details: Value = {
                 let mut picked = serde_json::Map::new();
                 if is_diff_tool {
@@ -4759,43 +5048,51 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             // 只接受文本形态的 diff 字段：非字符串（对象/数组）
                             // 进前端会走 JSON.stringify 拼进结果文本，形态彻底跑偏。
                             if let Some(Value::String(v)) = details.get(key) {
-                                picked.insert(
-                                    key.to_string(),
-                                    if v.len() > 16_384 {
-                                        Value::String(format!(
-                                            "{}…[diff 过长已截断]",
-                                            v.chars().take(16_384).collect::<String>()
-                                        ))
-                                    } else {
-                                        Value::String(v.clone())
-                                    },
-                                );
+                                if v.len() > MAX_DIFF_BYTES && key != "firstChangedLine" {
+                                    truncated_diff = true;
+                                }
+                                picked.insert(key.to_string(), Value::String(truncate_diff(v.clone())));
                             }
                         }
                     }
                 }
-                // pi 的 write 工具 result 完全没有 details（全新文件无 diff 可
-                // 言），前端 write 卡片同样出不了 +N −n。用 execution_start 缓存
-                // 的 args（path + content）在网关侧合成一个 unified patch 兜底。
+                // pi 的 write 工具 result 完全没有 details（源码实测 `details:void 0`），
+                // 前端 write 卡片出不了 +N −n。用 execution_start 缓存的 args（path +
+                // content）**加上那一刻读到的旧内容**在网关侧合成真 diff。
                 if picked.is_empty() && tool_name == "write" && !is_error {
-                    if let Some(path) = exec_args.get("path").and_then(Value::as_str) {
+                    if let Some(path) = arg_path(&exec_args) {
                         if let Some(text) = exec_args.get("content").and_then(Value::as_str) {
-                            let lines: Vec<&str> = text.split('\n').collect();
-                            let body = if text.ends_with('\n') {
-                                &lines[..lines.len().saturating_sub(1)]
-                            } else {
-                                &lines[..]
-                            };
-                            let mut patch = format!(
-                                "--- {path}\n+++ {path}\n@@ -0,0 +1,{} @@\n",
-                                body.len().max(1)
-                            );
-                            for line in body {
-                                patch.push_str(&format!("+{line}\n"));
+                            // prior_entry: Some(None)=新建 / Some(Some)=旧内容 /
+                            // None=旧内容未知（读不到，例如二进制、权限、相对路径
+                            // 无法解析）。未知时按空文件假想，但必须标 undoUnsafe ——
+                            // 否则前端按这个假 patch 反推会把现有内容切掉。
+                            let new_file = matches!(prior_entry, Some(None));
+                            let prior_text = prior_entry.as_ref().and_then(|o| o.as_deref());
+                            match write_unified_diff(path, prior_text, text, new_file) {
+                                Some(patch) => {
+                                    if patch.len() > MAX_DIFF_BYTES {
+                                        truncated_diff = true;
+                                    }
+                                    picked.insert(
+                                        "patch".to_string(),
+                                        Value::String(truncate_diff(patch)),
+                                    );
+                                    if prior_entry.is_none() {
+                                        picked.insert(
+                                            "undoUnsafe".to_string(),
+                                            Value::Bool(true),
+                                        );
+                                    }
+                                }
+                                // 内容与旧文件完全一致：这次 write 什么都没改，
+                                // 不该出现在「已修改」里。
+                                None => {}
                             }
-                            picked.insert("patch".to_string(), Value::String(patch));
                         }
                     }
+                }
+                if truncated_diff {
+                    picked.insert("undoUnsafe".to_string(), Value::Bool(true));
                 }
                 Value::Object(picked)
             };
@@ -5034,6 +5331,23 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             let had_waiter = instance.turn_waiter.lock().unwrap().is_some();
             instance.streaming.store(false, Ordering::SeqCst);
             if had_waiter && !cancelled {
+                // 回合以模型错误收尾（message_end 的 stopReason=error）时，先把
+                // 真实错误作为终止性 error 事件发出去（前端 fatal 分支渲染成
+                // "⚠️ …" 正文并抑制后续空 done 的兜底文案），再照常发
+                // session/complete 兜底——即使 error 事件丢失，前端也只是回到
+                // 旧的"未返回任何可见内容"行为，不会更糟。
+                let fatal_error =
+                    std::mem::take(&mut *instance.last_assistant_error.lock().unwrap());
+                if !fatal_error.is_empty() {
+                    emit_helix_event(
+                        "error",
+                        &json!({
+                            "session_id": sid(),
+                            "message": fatal_error,
+                            "fatal": true,
+                        }),
+                    );
+                }
                 // Attach the authoritative final text/thinking captured at
                 // message_end. The frontend prefers its streamed buffer when
                 // non-empty and only falls back to these — so a healthy
@@ -5102,6 +5416,8 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     &json!({
                         "session_id": sid(),
                         "message": final_error,
+                        // 重试耗尽 = 回合终止性失败，前端直接渲染错误正文
+                        "fatal": true,
                         "raw": message,
                     }),
                 );

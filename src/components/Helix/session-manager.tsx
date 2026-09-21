@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { timeAgo } from "@/lib/format";
 import { persistence, type PersistedSession } from "@/lib/persist";
+import { removeConversationIndex } from "@/lib/session-map";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -51,6 +52,8 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
     if (!deleteTarget) return;
     try {
       await persistence.deleteSession(deleteTarget.id);
+      // 同步清理磁盘反向索引，避免 conversation-index.json 只增不减
+      await removeConversationIndex(deleteTarget.id);
       setDeleteTarget(null);
       await loadSessions();
     } catch (e) {

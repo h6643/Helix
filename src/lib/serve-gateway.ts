@@ -990,7 +990,22 @@ export class ServeGatewayClient {
         return;
       }
       case "run.failed": {
-        const err = payload?.error ?? payload?.message ?? "运行失败";
+        const rawErr = payload?.error ?? payload?.message;
+        const err =
+          typeof rawErr === "string"
+            ? rawErr
+            : rawErr != null
+              ? JSON.stringify(rawErr)
+              : "运行失败";
+        // 终止性失败：把真实错误作为 fatal error 事件先发给前端（前端终止
+        // 分支渲染成 "⚠️ …" 正文，并抑制随后空 done 的兜底文案）。原来这里
+        // 只发空正文的 run_complete，错误串算出来就被丢弃——前端永远只看到
+        // "本轮运行已结束，但模型未返回任何可见内容"。
+        this.emit("error", {
+          session_id: sessionId,
+          message: err,
+          fatal: true,
+        });
         this.emit("session/update", {
           session_id: sessionId,
           update: { sessionUpdate: "run_complete", content: "" },

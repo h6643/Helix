@@ -106,32 +106,7 @@ export function UsageHeatmap({
     <div ref={containerRef}>
       <div className="overflow-hidden">
         <div style={{ width: gridW, margin: "0 auto" }}>
-          {/* 图例：右上角 */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "flex-end",
-              gap: 4,
-              fontSize: 10,
-              color: "rgba(127,127,127,0.7)",
-              marginBottom: 4,
-            }}
-          >
-            <span>较少</span>
-            {Array.from({ length: LEVELS }, (_, i) => (
-              <div
-                key={i}
-                style={{
-                  width: cell,
-                  height: cell,
-                  borderRadius: 2,
-                  background: levelColor(i),
-                }}
-              />
-            ))}
-            <span>较多</span>
-          </div>
+          {/* 图例：右上角（已移除色块图例） */}
           <div style={{ display: "flex" }}>
             <div
               style={{

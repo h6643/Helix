@@ -2,6 +2,7 @@
 
 import { Copy, CheckCheck } from "lucide-react";
 import React, { useState } from "react";
+import { looksLikeUnifiedDiff } from "@/components/Helix/diff-preview";
 import { CodeCard } from "@/components/Helix/helix-markdown";
 import { formatDurationSeconds } from "@/lib/format";
 import { normalizeAcpContent, stripEmoji } from "@/lib/text-utils";
@@ -137,21 +138,6 @@ function extractResultCount(
   return "";
 }
 
-/** 文本是否含 unified-diff 头行（--- file / +++ file / @@ hunk）。 */
-function hasDiffHeader(line: string): boolean {
-  return /^--- /.test(line) || /^\+\+\+ /.test(line) || /^@@ /.test(line);
-}
-
-/** 是否为真正的 unified diff：diff 头行出现在文本前部，
- *  且后文存在 + / - 改动行。普通命令/ls 输出不满足（无 @@ / ---++++ 头）。 */
-function looksLikeUnifiedDiff(text: string): boolean {
-  const lines = text.split("\n");
-  const firstNonEmpty = lines.findIndex((l) => l.trim());
-  if (firstNonEmpty === -1 || firstNonEmpty > 3) return false;
-  const head = lines.slice(firstNonEmpty, firstNonEmpty + 4);
-  if (!head.some(hasDiffHeader)) return false;
-  return lines.some((l) => l.startsWith("+") || l.startsWith("-"));
-}
 
 // 统计统一 diff 里的 +N/−N：先验「这是 diff」，再逐行计数；
 // 非 diff 文本（ls 结果、JSON、命令输出）返回 0/0 不出徽标。

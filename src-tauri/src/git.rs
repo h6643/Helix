@@ -2,6 +2,7 @@
 //! injection. Port of `electron/ipc/git.js`.
 
 use crate::state::AppState;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -178,6 +179,241 @@ pub fn diff_numstat(state: State<'_, Arc<AppState>>, target_cwd: Option<String>)
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
+/// 单文件改动统计（已跟踪文件 vs HEAD，或未跟踪文件的新增行数）。
+#[derive(Clone, Serialize)]
+struct NumstatFile {
+    path: String,
+    added: u64,
+    removed: u64,
+    binary: bool,
+    untracked: bool,
+}
+
+/// 未跟踪文件最多统计多少个、单个最多读多少字节。大仓库里未跟踪的构建产物
+/// 可能有几千个，全量读会让这个 5s 轮询的命令卡住。
+const MAX_UNTRACKED_FILES: usize = 500;
+const MAX_UNTRACKED_BYTES: usize = 5 * 1024 * 1024;
+
+/// numstat 一行的路径列可能带 `core.quotePath` 引号（非 ASCII 路径），或重命名
+/// 标记（`dir/{old => new}/file`、`old => new`）。统一成工作区里的真实新路径
+/// ——前端拿它当列表 key 与点击目标，格式不统一会显示乱码、点不开。
+fn normalize_numstat_path(raw: &str) -> String {
+    let s = unquote_git_path(raw);
+    if !s.contains("=>") {
+        return s;
+    }
+    // 形式 1：`prefix/{old => new}/suffix` → `prefix/new/suffix`
+    if let Some(open) = s.find("{") {
+        let after_open = &s[open + 1..];
+        if let Some(rel) = after_open.find(" => ") {
+            let name_start = open + 1 + rel + 4;
+            if let Some(close_rel) = after_open[rel + 4..].find("}") {
+                let close = name_start + close_rel;
+                let new_name = &s[name_start..close];
+                let suffix = &s[close + 1..];
+                let prefix = &s[..open];
+                return if prefix.ends_with('/') {
+                    format!("{prefix}{new_name}{suffix}")
+                } else {
+                    format!("{prefix}/{new_name}{suffix}")
+                };
+            }
+        }
+    }
+    // 形式 2：整条就是 `old => new`
+    let mut split = s.splitn(2, " => ");
+    if let (Some(_), Some(new)) = (split.next(), split.next()) {
+        return new.to_string();
+    }
+    s
+}
+
+fn digit_val(c: char) -> Option<u8> {
+    ('0'..='7').contains(&c).then(|| (c as u8) - b'0')
+}
+
+/// 反转义 git 的 quotePath 输出（非 ASCII 路径会被转成 `"a/\346\226\207.txt"`
+/// 这样的三位八进制）。未加引号或无法解析时原样返回——宁可显示引号，
+/// 也不要为了"更干净"丢掉字节。
+fn unquote_git_path(raw: &str) -> String {
+    let t = raw.trim();
+    if t.len() < 2 || !t.starts_with('"') || !t.ends_with('"') {
+        return raw.to_string();
+    }
+    let inner = &t[1..t.len() - 1];
+    let mut out: Vec<u8> = Vec::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push(b'"'),
+            Some('\\') => out.push(b'\\'),
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            // git 的 quotePath（C 风格转义）还会发这几个控制字符。不认出来的话
+            // 会掉进下面的八进制分支，把后面两个**正文字符**一起当转义吃掉。
+            Some('r') => out.push(b'\r'),
+            Some('a') => out.push(0x07),
+            Some('b') => out.push(0x08),
+            Some('f') => out.push(0x0c),
+            Some('v') => out.push(0x0b),
+            // 必须加 `is_digit(8)` 守卫：无守卫的 `Some(oct0)` 是**兜底**模式，
+            // 下面 `Some(other)` 那个臂就永远不可达（rustc: unreachable pattern），
+            // 任何非八进制转义（如 `\a`）都会被当成三位八进制去读。
+            Some(oct0) if oct0.is_digit(8) => {
+                // 八进制转义固定三位，拼成一个 UTF-8 字节。
+                let oct1 = chars.next();
+                let oct2 = chars.next();
+                if let (Some(a), Some(b)) = (oct1, oct2) {
+                    if let (Some(d0), Some(d1), Some(d2)) = (
+                        digit_val(oct0),
+                        digit_val(a),
+                        digit_val(b),
+                    ) {
+                        out.push((d0 << 6) | (d1 << 2) | d2);
+                        continue;
+                    }
+                }
+                // 三个字符都是 Option：oct0 已知是 Some，另两个可能为 None
+                // （行尾截断的转义）。统一成 Option 再 flatten，逐字符原样输出。
+                for c in [Some(oct0), oct1, oct2].into_iter().flatten() {
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                }
+            }
+            Some(other) => {
+                out.push(b'\\');
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            }
+            None => out.push(b'\\'),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 解析一行 numstat：`<added>\t<removed>\t<path>`；`-` 表示二进制不可计数。
+fn parse_numstat_line(line: &str) -> Option<NumstatFile> {
+    let parts: Vec<&str> = line.split('\t').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let binary = parts[0] == "-" || parts[1] == "-";
+    let added = if binary { 0 } else { parts[0].parse().unwrap_or(0) };
+    let removed = if binary { 0 } else { parts[1].parse().unwrap_or(0) };
+    // join 的参数是 &str，不是 char（`'\t'` 会报 expected `&str`, found `char`）。
+    let path = normalize_numstat_path(&parts[2..].join("\t"));
+    if path.is_empty() {
+        return None;
+    }
+    Some(NumstatFile {
+        path,
+        added,
+        removed,
+        binary,
+        untracked: false,
+    })
+}
+
+/// 数一个未跟踪文件的行数（git 不给它们出 numstat，而「write 新建文件」
+/// 恰恰是这个列表里最常见的一类）。读不到 / 空 / 过大 → None，交给调用方跳过。
+fn stat_untracked_file(cwd: &std::path::Path, rel: &str) -> Option<(u64, bool)> {
+    let bytes = std::fs::read(cwd.join(rel)).ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_UNTRACKED_BYTES {
+        return None;
+    }
+    if bytes.iter().take(8192).any(|&b| b == 0) {
+        return Some((0, true));
+    }
+    Some((
+        String::from_utf8_lossy(&bytes).lines().count() as u64,
+        false,
+    ))
+}
+
+/// 「未提交的更改」完整明细：已跟踪文件 vs `HEAD`（含删除、含已暂存）
+/// **加上未跟踪的新文件**。
+///
+/// 与 `diff_numstat` 的区别（后者原样保留，分支切换的脏文件提示还在用）：
+/// 1. 基准是 `HEAD` 而不是 index —— agent 一旦 `git add`，`git diff` 整段隐身；
+/// 2. 覆盖未跟踪文件 —— `write` 新建的文件 `git diff` 永远看不到，
+///    这是「右边不显示 +n」的主因；
+/// 3. 直接返回结构化列表与总计，前端不用再解析一遍 numstat 文本。
+#[tauri::command]
+pub fn diff_numstat_full(
+    state: State<'_, Arc<AppState>>,
+    target_cwd: Option<String>,
+) -> Value {
+    let cwd = git_cwd(&state, target_cwd.as_deref());
+    if !cwd.exists() {
+        return json!({ "ok": false, "error": "work dir not found" });
+    }
+    let mut files: Vec<NumstatFile> = Vec::new();
+    let mut numstat = git_exec(
+        &state,
+        &["diff", "HEAD", "--numstat"],
+        target_cwd.as_deref(),
+    );
+    // 还没提交过（无 HEAD）时 `git diff HEAD` 报 bad revision。
+    if numstat.is_err() {
+        numstat = git_exec(
+            &state,
+            &["diff", "--numstat"],
+            target_cwd.as_deref(),
+        );
+    }
+    match numstat {
+        Ok((stdout, _)) => {
+            for line in stdout.lines() {
+                if let Some(f) = parse_numstat_line(line) {
+                    files.push(f);
+                }
+            }
+        }
+        Err(e) => return json!({ "ok": false, "error": e }),
+    }
+    // 未跟踪文件单独算：`-z` 输出，路径含空格 / 中文也不会串行。
+    if let Ok((stdout, _)) = git_exec(
+        &state,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        target_cwd.as_deref(),
+    ) {
+        let mut untracked = 0usize;
+        for rel in stdout.split('\0') {
+            let rel = rel.trim();
+            if rel.is_empty() {
+                continue;
+            }
+            if untracked >= MAX_UNTRACKED_FILES {
+                break;
+            }
+            if let Some((lines, binary)) = stat_untracked_file(&cwd, rel) {
+                untracked += 1;
+                files.push(NumstatFile {
+                    path: rel.to_string(),
+                    added: lines,
+                    removed: 0,
+                    binary,
+                    untracked: true,
+                });
+            }
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let added: u64 = files.iter().map(|f| f.added).sum();
+    let removed: u64 = files.iter().map(|f| f.removed).sum();
+    json!({
+        "ok": true,
+        "files": files,
+        "added": added,
+        "removed": removed,
+    })
+}
+
 
 #[tauri::command]
 pub fn branch_list(state: State<'_, Arc<AppState>>, target_cwd: Option<String>) -> Value {

@@ -248,11 +248,37 @@ export const createApiConfigSlice: StateCreator<
       ),
     })),
   removeApiProfile: (id) =>
-    set((state) => ({
-      apiProfiles: state.apiProfiles.filter((p) => p.id !== id),
-      activeProfileId:
-        state.activeProfileId === id ? null : state.activeProfileId,
-    })),
+    set((state) => {
+      const target = state.apiProfiles.find((p) => p.id === id);
+      const baseUrl = target?.config?.baseUrl;
+      const apiKey = target?.config?.apiKey ?? "";
+      // Keep ALL selector-facing state in lockstep with apiProfiles. After the
+      // restore-time unification, `providers` is built from the same set as
+      // apiProfiles, but a settings-page delete only touched apiProfiles — the
+      // provider entry (and its fetched model list) kept living in the dropdown,
+      // and the matching apiHistory entries would resurrect the profile on the
+      // next restart (restore re-promotes any history endpoint not covered by a
+      // profile). Purge all three, keyed by baseUrl+apiKey so sibling profiles
+      // on the same endpoint with a different key are untouched.
+      const nextProviderModels = { ...state.providerModels };
+      if (target && target.id in nextProviderModels) {
+        delete nextProviderModels[target.id];
+      }
+      return {
+        apiProfiles: state.apiProfiles.filter((p) => p.id !== id),
+        providers: state.providers.filter((p) => p.id !== id),
+        providerModels: nextProviderModels,
+        apiHistory: baseUrl
+          ? state.apiHistory.filter(
+              (h) => !(h.baseUrl === baseUrl && (h.apiKey ?? "") === apiKey),
+            )
+          : state.apiHistory,
+        activeProfileId:
+          state.activeProfileId === id ? null : state.activeProfileId,
+        activeProviderId:
+          state.activeProviderId === id ? null : state.activeProviderId,
+      };
+    }),
   setActiveProfile: (id) => set({ activeProfileId: id }),
 
   // ── Multi-provider actions ──
@@ -342,9 +368,77 @@ export const createApiConfigSlice: StateCreator<
       );
       return;
     }
+    // ── Option B: promote a history-only endpoint into a real apiProfile the
+    // moment it's selected. A history endpoint (added via "添加模型", never saved
+    // as a profile) only ever lives in apiHistory + a synthetic `hist-*` provider
+    // entry, so the settings page (apiProfiles) and the model selector (providers =
+    // apiProfiles ∪ historyProviders) diverge in count. Promoting here makes them
+    // share one source of truth and removes the "半存在" state for good.
+    const promoteBaseUrl = provider.baseUrl;
+    const alreadyReal = !!get().apiProfiles.find(
+      (p) => p.config?.baseUrl === promoteBaseUrl,
+    );
+    let promotedProfileId: string | null = null;
+    if (!alreadyReal && promoteBaseUrl) {
+      const hist = (get().apiHistory || []).filter(
+        (h) => h.baseUrl === promoteBaseUrl,
+      );
+      const seed = hist.find((h) => h.model === model) || hist[0];
+      if (seed) {
+        const newProfile: ApiProfile = {
+          id: generateId(),
+          name:
+            seed.provider && seed.provider !== "__custom__"
+              ? seed.provider
+              : "配置",
+          config: {
+            provider: seed.provider || "openai",
+            apiKey: seed.apiKey || "",
+            baseUrl: seed.baseUrl || promoteBaseUrl,
+            model,
+            contextWindow: seed.contextWindow,
+            apiFormat: seed.apiFormat,
+            engine: seed.engine,
+          },
+          models: Array.from(
+            new Set(hist.map((h) => h.model).filter(Boolean) as string[]),
+          ),
+        };
+        const oldProviderId = provider.id;
+        const promoted: ProviderConfig = { ...provider, id: newProfile.id };
+        set((s) => {
+          const nextProviderModels = { ...s.providerModels };
+          // Carry over any fetched model list keyed under the old synthetic id
+          // so the dropdown keeps showing the full list under the new real id.
+          if (nextProviderModels[oldProviderId]) {
+            nextProviderModels[newProfile.id] =
+              nextProviderModels[oldProviderId];
+            delete nextProviderModels[oldProviderId];
+          }
+          return {
+            apiProfiles: [...s.apiProfiles, newProfile],
+            // Replace the synthetic hist-* entry with the real profile so the
+            // selector never shows the same endpoint twice within the session.
+            providers: s.providers.map((p) =>
+              p.id === oldProviderId ? promoted : p,
+            ),
+            providerModels: nextProviderModels,
+          };
+        });
+        provider = promoted;
+        promotedProfileId = newProfile.id;
+        // Persist so a cold restart keeps the promoted profile (restoreFromStorage
+        // reads apiProfiles first and will skip synthesizing a hist-* for it).
+        import("@/lib/persist").then(({ persistence }) => {
+          persistence.saveSetting("apiProfiles", get().apiProfiles);
+        });
+      }
+    }
     // Mirror the resolved provider config into apiConfig (what Helix backend reads).
     // Keep activeProviderId in sync so the dropdown stays scoped to this provider.
-    set({
+    // When we just promoted a history endpoint, also re-anchor activeProfileId to
+    // the new real profile (the model's true owner).
+    const patch: Partial<ApiConfigSlice> = {
       activeModel: model,
       activeProviderId: provider.id,
       apiConfig: {
@@ -354,7 +448,9 @@ export const createApiConfigSlice: StateCreator<
         apiKey: provider.apiKey,
         model,
       },
-    });
+    };
+    if (promotedProfileId) patch.activeProfileId = promotedProfileId;
+    set(patch);
     // Keep the settings model list in sync: the model just activated must show
     // up (highlighted) on the config page. addApiHistory dedups by baseUrl +
     // apiKey + model, so re-activating the same model is idempotent.
@@ -362,6 +458,9 @@ export const createApiConfigSlice: StateCreator<
     import("@/lib/persist").then(({ persistence }) => {
       persistence.saveSetting("activeModel", model);
       persistence.saveSetting("activeProviderId", provider.id);
+      if (promotedProfileId) {
+        persistence.saveSetting("activeProfileId", promotedProfileId);
+      }
     });
     // Synchronous backup — if the async IndexedDB write above is still pending
     // when the app exits, we lose the last model. localStorage.setItem is

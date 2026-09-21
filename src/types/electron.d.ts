@@ -380,6 +380,21 @@ export interface ElectronAPI {
     diffNumstat: (
       cwd?: string | null,
     ) => Promise<{ ok: boolean; output?: string; error?: string }>;
+    diffNumstatFull: (
+      cwd?: string | null,
+    ) => Promise<{
+      ok: boolean;
+      files?: {
+        path: string;
+        added: number;
+        removed: number;
+        binary: boolean;
+        untracked: boolean;
+      }[];
+      added?: number;
+      removed?: number;
+      error?: string;
+    }>;
     revert: (filePath?: string) => Promise<{ ok: boolean; error?: string }>;
     stage: (filePath?: string) => Promise<{ ok: boolean; error?: string }>;
     unstage: (filePath?: string) => Promise<{ ok: boolean; error?: string }>;

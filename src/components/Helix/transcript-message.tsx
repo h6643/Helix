@@ -318,30 +318,27 @@ export const ThinkingFold = React.memo(function ThinkingFold({
   const [userOpen, setUserOpen] = useState(false);
   const open = active || userOpen;
   const bodyRef = React.useRef<HTMLDivElement | null>(null);
-  const prevActiveRef = React.useRef(active);
 
-  const detailsRef = React.useRef<HTMLDetailsElement | null>(null);
+  // 流式思考（active）时 body 受 max-h 限高 + 滚轮，增量内容要把视图钉到底部，
+  // 否则用户只能看到最开头的旧文本、看不到模型正在写的最新思考。
   React.useEffect(() => {
-    const el = detailsRef.current;
-    if (!el) return;
-    const justActivated = active && !prevActiveRef.current;
-    prevActiveRef.current = active;
-    if (justActivated && !el.open) {
-      el.open = true;
+    if (active && bodyRef.current) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
     }
-  }, [active]);
-
-  const shown = active ? body : userOpen ? body : summary || body.slice(0, 0) || body;
+  }, [active, body]);
 
   return (
-    <details
-      ref={detailsRef}
-      className="group/think my-1 rounded-md"
-      onToggle={(e) => {
-        setUserOpen((e.currentTarget as HTMLDetailsElement).open);
-      }}
-    >
-      <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
+    <div className="group/think my-1 rounded-md">
+      {/* 用受控 div 替代原生 <details>：WebKit/Chromium 里 <details> 包裹
+          overflow:auto 子元素时存在高度计算循环依赖，内部滚动条不出现、内容被
+          直接裁断（"截断无滚轮"）。这里用普通 div + inline maxHeight 限高，
+          让滚动条稳定出现。点击标题仅在不活跃（active=false）时切换展开。 */}
+      <div
+        onClick={() => {
+          if (!active) setUserOpen((v) => !v);
+        }}
+        className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors"
+      >
         <ThinkGlyph active={active} />
         <span
           className={`select-none ${
@@ -363,22 +360,17 @@ export const ThinkingFold = React.memo(function ThinkingFold({
             · {status}
           </span>
         )}
-        {searchOpen && searchQuery.trim() ? (
-          <span className="ml-auto" />
-        ) : null}
-      </summary>
-      {(open || active) && (
+      </div>
+      {open && (
         <div
           ref={bodyRef}
-          className={`mt-1 pl-5 text-foreground/70 whitespace-pre-wrap ${
-            active ? "" : "max-h-72 overflow-y-auto"
-          }`}
-          style={{ fontSize }}
+          className="mt-1 pl-5 text-foreground/70 whitespace-pre-wrap"
+          style={{ fontSize, maxHeight: "18rem", overflowY: "auto" }}
         >
           {active && !body ? "…" : body}
         </div>
       )}
-    </details>
+    </div>
   );
 });
 
@@ -719,6 +711,19 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                   processSegments.length > 0 &&
                   processSegments[processSegments.length - 1].kind ===
                     "thinking";
+                // 整个消息的所有思考（含 msg.reasoning 兜底与尾段思考）合并为
+                // 一张限高滚轮折叠卡，不再按阶段拆成多张。
+                const mergedThinkingContent = mergeThinkingContents(
+                  allSegments
+                    .flatMap((seg) =>
+                      seg.kind === "thinking"
+                        ? seg.blocks.map((b) =>
+                            b.type === "thinking" ? String(b.content || "") : "",
+                          )
+                        : [],
+                    )
+                    .concat(reasoning.trim() ? [reasoning] : []),
+                );
                 const processDuration =
                   !isStreaming && (messageDuration ?? 0) > 0
                     ? formatDuration(messageDuration ?? 0)
@@ -749,11 +754,11 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                           )}
                         </summary>
                         <div className="mt-1">
-                          {showInlineReasoning && (
+                          {mergedThinkingContent.trim() && (
                             <ThinkingFold
-                              content={reasoning}
+                              content={mergedThinkingContent}
                               fontSize={fontSize}
-                              active={isStreaming}
+                              active={isStreaming && lastSegIsThinking}
                               searchOpen={searchOpen}
                               searchQuery={searchQuery}
                               isSearchActive={isSearchActive}
@@ -762,25 +767,8 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                           <div className="my-2 space-y-2">
                             {processSegments.map((seg, si) => {
                               if (seg.kind === "thinking") {
-                                const segContent = mergeThinkingContents(
-                                  seg.blocks.map((b) =>
-                                    b.type === "thinking"
-                                      ? String(b.content || "")
-                                      : "",
-                                  ),
-                                );
-                                if (!segContent.trim()) return null;
-                                return (
-                                  <ThinkingFold
-                                    key={si}
-                                    content={segContent}
-                                    fontSize={fontSize}
-                                    active={lastSegIsThinking && si === processSegments.length - 1}
-                                    searchOpen={searchOpen}
-                                    searchQuery={searchQuery}
-                                    isSearchActive={isSearchActive}
-                                  />
-                                );
+                                // 思考段已并入上方唯一的限高滚轮卡
+                                return null;
                               }
                               const toolBlocks = seg.blocks.filter(
                                 (b) => b.type === "tool_group",
@@ -904,25 +892,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                     {trailingSegments.map((seg, si) => (
                       <div key={`trail-${si}`} className="my-2 space-y-1">
                         {seg.kind === "thinking"
-                          ? (() => {
-                              const c = mergeThinkingContents(
-                                seg.blocks.map((b) =>
-                                  b.type === "thinking"
-                                    ? String(b.content || "")
-                                    : "",
-                                ),
-                              );
-                              if (!c.trim()) return null;
-                              return (
-                                <ThinkingFold
-                                  content={c}
-                                  fontSize={fontSize}
-                                  searchOpen={searchOpen}
-                                  searchQuery={searchQuery}
-                                  isSearchActive={isSearchActive}
-                                />
-                              );
-                            })()
+                          ? null
                           : (() => {
                               const toolBlocks = seg.blocks.filter(
                                 (b) => b.type === "tool_group",

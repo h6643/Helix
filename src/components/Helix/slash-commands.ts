@@ -13,6 +13,8 @@ import {
 import { normalizeAcpContent } from "@/lib/text-utils";
 import {
   classifyResumeError,
+  brokenReasonFileGone,
+  brokenReasonFromResume,
   isSessionGone,
   resumeFailureDescription,
   resumeFailureTitle,
@@ -149,7 +151,10 @@ export async function runCompactCommand(
     if (!resumed.ok) {
       const hstore = useHelixStore.getState();
       if (isSessionGone(resumed) && currentSessionId) {
-        hstore.markSessionBroken(currentSessionId, resumed.error);
+        hstore.markSessionBroken(
+          currentSessionId,
+          brokenReasonFromResume(resumed),
+        );
       }
       hstore.showToast({
         type: "warning",
@@ -170,6 +175,11 @@ export async function runCompactCommand(
         epoch: useGatewayStore.getState().gatewayEpoch,
       });
       void persistSessionMap(ctx.sessionMap);
+      // 这是**组件外**改写磁盘映射的唯一路径（旁路面板的 /compact 也走这里，
+      // 而它传进来的 ctx.sessionMap 是自己现读的一份）。主对话面板的
+      // sessionMapRef 只在挂载时读过一次盘，必须收到版本号才回去合并，否则
+      // 它的 ref 停在旧 sid 上，下一次 handleRun 读到旧值。
+      useHelixStore.getState().bumpSessionMapVersion();
       try {
         useGatewayStore.getState().setHelixSessionId(sid);
       } catch {
@@ -267,7 +277,9 @@ export async function runCompactCommand(
     ) {
       const gone = await sessionFileGone(compressSid);
       if (gone) {
-        useHelixStore.getState().markSessionBroken(currentSessionId, String(e));
+        useHelixStore
+          .getState()
+          .markSessionBroken(currentSessionId, brokenReasonFileGone(String(e)));
       }
     }
     useHelixStore.getState().showToast({

@@ -59,9 +59,9 @@ const ALL_PROVIDERS = getAllProviders();
 // 供应商的 API 格式 —— 写入 pi models.json 的 provider `api` 字段。
 // 取值与 pi-ai 的协议枚举一致，拼错会导致该 provider 的所有请求走错协议。
 const API_FORMATS = [
-  { label: "Anthropic Messages (/v1/messages)", value: "openai-completions" },
+  { label: "Anthropic Messages (/v1/messages)", value: "anthropic-messages" },
   { label: "Responses (/responses)", value: "openai-responses" },
-  { label: "Chat Completions (/chat/completions)", value: "anthropic-messages" },
+  { label: "Chat Completions (/chat/completions)", value: "openai-completions" },
 ];
 const DEFAULT_API_FORMAT = "openai-completions";
 
@@ -416,6 +416,47 @@ export function ApiSettings({
   type ModelTab = "main" | "vision" | "image";
   const [modelTab, setModelTab] = useState<ModelTab>("main");
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
+
+  // Vision / Image model config (loaded from config.yaml via Tauri or localStorage)
+  const [visionModelName, setVisionModelName] = useState("");
+  const [visionHasApiKey, setVisionHasApiKey] = useState(false);
+  const [imageModelName, setImageModelName] = useState("");
+  const [imageHasApiKey, setImageHasApiKey] = useState(false);
+
+  useEffect(() => {
+    const loadVisionImage = async () => {
+      if (isElectron()) {
+        try {
+          const visionApi = (window as any).electron?.vision;
+          if (visionApi?.getConfig) {
+            const r = await visionApi.getConfig();
+            if (r?.ok && r.config) {
+              setVisionModelName(r.config.model || "");
+              setVisionHasApiKey(!!r.config.apiKey);
+            }
+          }
+        } catch { /* empty */ }
+        try {
+          const imageApi = (window as any).electron?.image;
+          if (imageApi?.getConfig) {
+            const r = await imageApi.getConfig();
+            if (r?.ok && r.config) {
+              setImageModelName(r.config.model || "");
+              setImageHasApiKey(!!r.config.apiKey);
+            }
+          }
+        } catch { /* empty */ }
+      } else {
+        try {
+          const vs = localStorage.getItem("helix-vision-model");
+          if (vs) { const d = JSON.parse(vs); setVisionModelName(d.model || ""); setVisionHasApiKey(!!d.apiKey); }
+          const is = localStorage.getItem("helix-image-model");
+          if (is) { const d = JSON.parse(is); setImageModelName(d.model || ""); setImageHasApiKey(!!d.apiKey); }
+        } catch { /* empty */ }
+      }
+    };
+    loadVisionImage();
+  }, [modelTab]);
 
   // ── Pi-backed model list ──────────────────────────────────────────────────
   // The dropdowns used to render only Helix's own static provider table plus
@@ -1758,110 +1799,113 @@ export function ApiSettings({
           <div className="flex-1 flex flex-col space-y-6">
             <PageHeader>模型设置</PageHeader>
             {/* ── Left-right split layout（flex-1：撑满滚动视口剩余高度，三个 tab 高度一致）── */}
-            <div className="flex flex-1 gap-5 items-stretch min-h-0">
-              {/* Left sidebar — tabs + provider list */}
+            <div className="flex gap-5 items-stretch">
+              {/* Left sidebar — all models list */}
               <div className="w-60 shrink-0 flex flex-col rounded-xl border border-border/40 bg-card/60 overflow-hidden">
-                <div className="px-3 pt-3 pb-2">
-                    <div className="flex items-center gap-1 bg-muted/60 rounded-full p-1">
-                    <button
-                      onClick={() => setModelTab("main")}
-                      className={`flex-1 px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
-                        modelTab === "main"
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      对话
-                    </button>
-                    <button
-                      onClick={() => setModelTab("vision")}
-                      className={`flex-1 px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
-                        modelTab === "vision"
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
+                <div className="flex-1 overflow-y-auto px-2 py-1 space-y-0.5">
+                  <button
+                    onClick={() => setModelTab("vision")}
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors ${
+                      modelTab === "vision"
+                        ? "bg-primary/10 text-primary"
+                        : "text-foreground hover:bg-muted/50"
+                    }`}
+                  >
+                    <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] px-1.5 py-0.5 rounded-full font-medium bg-muted/80 text-muted-foreground">
                       视觉
-                    </button>
-                    <button
-                      onClick={() => setModelTab("image")}
-                      className={`flex-1 px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium rounded-full transition-colors ${
-                        modelTab === "image"
-                          ? "bg-background text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[length:var(--helix-transcript-size)] font-medium">
+                      {visionModelName || "未配置"}
+                    </span>
+                    {visionHasApiKey && (
+                      <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setModelTab("image")}
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors ${
+                      modelTab === "image"
+                        ? "bg-primary/10 text-primary"
+                        : "text-foreground hover:bg-muted/50"
+                    }`}
+                  >
+                    <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] px-1.5 py-0.5 rounded-full font-medium bg-muted/80 text-muted-foreground">
                       生图
-                    </button>
-                  </div>
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[length:var(--helix-transcript-size)] font-medium">
+                      {imageModelName || "未配置"}
+                    </span>
+                    {imageHasApiKey && (
+                      <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                    )}
+                  </button>
+                  {apiProfiles.map((p) => {
+                    const isActive = modelTab === "main" && selectedProviderId === p.id;
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => {
+                          setModelTab("main");
+                          setSelectedProviderId(p.id);
+                          setEditingProfileId(p.id);
+                          setLocalConfig({ ...p.config });
+                          setAddedModels(
+                            (p.models || []).map((id) => ({ id })),
+                          );
+                          setAvailableModels([]);
+                          setShowModelDropdown(false);
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors ${
+                          isActive
+                            ? "bg-primary/10 text-primary"
+                            : "text-foreground hover:bg-muted/50"
+                        }`}
+                      >
+                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] px-1.5 py-0.5 rounded-full font-medium bg-muted/80 text-muted-foreground">
+                          对话
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-[length:var(--helix-transcript-size)] font-medium">
+                          {p.config.provider || p.name}
+                        </span>
+                        {p.config.apiKey && (
+                          <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
-                {modelTab === "main" && (
-                  <>
-                    <div className="flex-1 overflow-y-auto px-2 py-1 space-y-0.5">
-                    {apiProfiles.map((p) => {
-                      const isActive = selectedProviderId === p.id;
-                      return (
-                        <button
-                          key={p.id}
-                          onClick={() => {
-                            setSelectedProviderId(p.id);
-                            setEditingProfileId(p.id);
-                            setLocalConfig({ ...p.config });
-                            setAddedModels(
-                              (p.models || []).map((id) => ({ id })),
-                            );
-                            setAvailableModels([]);
-                            setShowModelDropdown(false);
-                          }}
-                          className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors ${
-                            isActive
-                              ? "bg-primary/10 text-primary"
-                              : "text-foreground hover:bg-muted/50"
-                          }`}
-                        >
-                          <span className="min-w-0 flex-1 truncate text-[length:var(--helix-transcript-size)] font-medium">
-                            {p.config.provider || p.name}
-                          </span>
-                          {p.config.apiKey && (
-                            <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="p-2 border-t border-border/30">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="w-full"
-                      onClick={() => {
-                        setSelectedProviderId(null);
-                        setEditingProfileId(null);
-                        setLocalConfig({
-                          provider: "",
-                          apiKey: "",
-                          baseUrl: "",
-                          model: "",
-                          apiFormat: DEFAULT_API_FORMAT,
-                        });
-                        setAddedModels([]);
-                        setAvailableModels([]);
-                        setShowModelDropdown(false);
-                      }}
-                    >
-                      添加供应商
-                    </Button>
-                  </div>
-                  </>
-                )}
+                <div className="px-2 pt-1 mb-4">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    onClick={() => {
+                      setSelectedProviderId(null);
+                      setEditingProfileId(null);
+                      setLocalConfig({
+                        provider: "",
+                        apiKey: "",
+                        baseUrl: "",
+                        model: "",
+                        apiFormat: DEFAULT_API_FORMAT,
+                      });
+                      setAddedModels([]);
+                      setAvailableModels([]);
+                      setShowModelDropdown(false);
+                      setModelTab("main");
+                    }}
+                  >
+                    添加供应商
+                  </Button>
+                </div>
               </div>
 
                 {/* Right content */}
                 <div className="flex-1 min-w-0 flex flex-col">
                   {modelTab === "main" ? (
                     <>
-                      <SettingGroup className="flex-1 flex flex-col">
-                    <div className="p-5 space-y-4 flex-1 flex flex-col">
+                      <SettingGroup className="flex flex-col">
+                    <div className="p-5 space-y-4 flex flex-col">
                       <div className="flex items-center gap-3">
                         <input
                           type="text"
@@ -1976,7 +2020,7 @@ export function ApiSettings({
                         </div>
                       </div>
 
-                      <div>
+                      <div className="flex flex-col flex-1 min-h-0">
                         <div className="flex items-center justify-between mb-1.5">
                           <label className="block ui-text font-medium text-foreground">
                             已添加的模型
@@ -2001,7 +2045,7 @@ export function ApiSettings({
                             还没有模型，点击「添加模型」添加
                           </p>
                         ) : (
-                          <div className="space-y-1.5">
+                          <div className="max-h-[80px] overflow-y-auto space-y-1.5 pr-1">
                             {addedModels.map((m, idx) => (
                               <div
                                 key={m.id}

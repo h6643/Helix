@@ -160,3 +160,27 @@ export function resumeFailureMessage(r: ResumeResult): string {
     ? "恢复失败：未知错误"
     : `恢复失败 (${r.code}): ${r.error.slice(0, 200)}`;
 }
+
+/**
+ * `markSessionBroken` 的**统一原因文案**（人话 + 括号里后端原文）。
+ *
+ * brokenSessionReasons 会直接显示在失效横幅（agent-flow-panel 底部）和
+ * handleRun 的 broken 短路报错里（"失效原因：…"），所以不能在各个入口自己拼
+ * 字符串，更不能塞后端原文（旧实现干脆把 reason 参数丢了 → 界面永远显示
+ * sid）。所有 resume 驱动的 markSessionBroken 都走这里。
+ */
+export function brokenReasonFromResume(r: ResumeResult): string {
+  const detail = !r.ok && r.error ? r.error : "";
+  return isSessionGone(r)
+    ? brokenReasonFileGone(detail)
+    : `会话恢复失败${detail ? `（${detail.slice(0, 120)}）` : ""}`;
+}
+
+/**
+ * 同一套「文件不存在」原因文案，给**只拿到原始错误文本**、没有 ResumeResult
+ * 的路径用（sessionFileGone 已把结果压成 boolean 的调用点）。
+ */
+export function brokenReasonFileGone(detail?: string): string {
+  const d = detail?.trim();
+  return d ? `后端会话文件不存在（${d.slice(0, 120)}）` : "后端会话文件不存在";
+}

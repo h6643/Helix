@@ -34,7 +34,7 @@ import { captureContextBreakdown } from "@/lib/context-capture";
 import { isElectron, electronShell, helixApi } from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
 import { persistence, type PersistedSession } from "@/lib/persist";
-import { resolveBackendSid } from "@/lib/session-map";
+import { resolveBackendSid, removeConversationIndex } from "@/lib/session-map";
 import { mapBackendMessages } from "@/lib/session-resync";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { useHelixStore } from "@/stores/helix-store";
@@ -877,6 +877,8 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     if (!deleteTarget) return;
     try {
       await persistence.deleteSession(deleteTarget.id);
+      // 同步清理磁盘反向索引，避免 conversation-index.json 只增不减
+      await removeConversationIndex(deleteTarget.id);
       const remaining = await persistence.loadSessions();
       setSessions(sortSessions(remaining));
       const state = useHelixStore.getState();
@@ -1047,6 +1049,8 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           .map((s) => s.id),
       );
       await persistence.deleteSessionsByWorkDir(deleteProjectDir);
+      // 批量清理磁盘反向索引里的对应 conversation 条目
+      await removeConversationIndex([...deletedIds]);
       await persistence.deleteProjectFolder(deleteProjectDir);
       // Drop the dir from pinned folders (if it was pinned) so it can't re-appear.
       const pinned = await persistence.getPinnedProjectFolders();

@@ -957,7 +957,7 @@ export function AgentsSettings() {
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <Users className="size-4 text-muted-foreground/60" />
-                  <h4 className="ui-text font-semibold text-foreground/80">
+                  <h4 className="ui-subtitle font-semibold text-foreground">
                     已登记的身份
                   </h4>
                   <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
@@ -978,7 +978,7 @@ export function AgentsSettings() {
 
             <div className="space-y-3">
               <div className="flex items-center gap-2">
-                <h4 className="ui-text font-semibold text-foreground/80">
+                <h4 className="ui-subtitle font-semibold text-foreground">
                   已注册的 Agent
                 </h4>
                 <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">

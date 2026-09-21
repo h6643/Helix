@@ -294,6 +294,7 @@ pub fn run() {
             git::diff,
             git::diff_head,
             git::diff_numstat,
+            git::diff_numstat_full,
             git::revert,
             git::stage,
             git::unstage,

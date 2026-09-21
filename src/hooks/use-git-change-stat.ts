@@ -18,8 +18,8 @@ export interface GitChangeStat {
 }
 
 /**
- * 轮询工作区的 `git diff --numstat`（未暂存、已跟踪文件的改动），汇总出每个
- * 文件的 +added / -removed 以及总计。
+ * 轮询工作区「未提交的更改」：已跟踪文件 vs HEAD（含删除、含已暂存）
+ * **加上未跟踪的新文件**，汇总出每个文件的 +added / -removed 以及总计。
  *
  * - 每 5s 轮询一次（agent 改文件很频繁）；`workDir` 变化（切会话 / 切项目）或
  *   `revision` 递增（提交完成后）会立即重算。
@@ -41,26 +41,24 @@ export function useGitChangeStat(
     let cancelled = false;
     const load = async () => {
       try {
-        const res = await electronGit.diffNumstat(workDir);
+        // 用 diffNumstatFull（不是 diffNumstat）：git 不给未跟踪文件出
+        // numstat，write 新建的文件在旧接口里完全不可见。
+        const res = await electronGit.diffNumstatFull(workDir);
         if (cancelled) return;
-        if (!res.ok || !res.output) {
+        if (!res.ok) {
           setStat(null);
           return;
         }
-        let added = 0;
-        let removed = 0;
-        const files: GitChangeFile[] = [];
-        for (const line of res.output.split("\n")) {
-          // numstat 行格式：`<added>\t<removed>\t<path>`；二进制文件为 `-\t-\t<path>`。
-          const m = line.match(/^(\d+|-)\s+(\d+|-)\s+(.+)$/);
-          if (!m) continue;
-          const binary = m[1] === "-" || m[2] === "-";
-          const a = binary ? 0 : Number(m[1]);
-          const r = binary ? 0 : Number(m[2]);
-          added += a;
-          removed += r;
-          files.push({ path: m[3], added: a, removed: r, binary });
-        }
+        const files = (res.files ?? [])
+          .filter((f) => typeof f.path === "string" && f.path.length > 0)
+          .map((f) => ({
+            path: f.path,
+            added: f.added ?? 0,
+            removed: f.removed ?? 0,
+            binary: !!f.binary,
+          }));
+        const added = res.added ?? files.reduce((s, f) => s + f.added, 0);
+        const removed = res.removed ?? files.reduce((s, f) => s + f.removed, 0);
         setStat(files.length ? { added, removed, files } : null);
       } catch {
         if (!cancelled) setStat(null);

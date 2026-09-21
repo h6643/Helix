@@ -116,3 +116,28 @@ export async function persistSessionMapEntries(
   await persistence.saveSetting(SESSION_MAP_KEY, obj);
   invalidateSessionMapCache();
 }
+
+/**
+ * 删除对话后同步清理磁盘反向索引（~/.pi/agent/conversation-index.json）里
+ * 的对应条目。conversation-index.json 是 sid → conversation 的只增不减兜底
+ * 索引，删除对话不清理的话条目会永久残留（该文件唯一的收敛点是这里）。
+ * 尽力而为：索引清理失败绝不影响对话删除。
+ */
+export async function removeConversationIndex(
+  conversationIds: string | string[],
+): Promise<void> {
+  const ids = Array.isArray(conversationIds)
+    ? conversationIds.filter(Boolean)
+    : conversationIds
+      ? [conversationIds]
+      : [];
+  if (ids.length === 0) return;
+  try {
+    const { electronHelix } = await import("@/lib/electron-bridge");
+    await electronHelix.send("session/index_del", {
+      conversation_ids: ids,
+    });
+  } catch {
+    /* best-effort */
+  }
+}

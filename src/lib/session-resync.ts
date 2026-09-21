@@ -1,5 +1,6 @@
 ﻿import { helixApi } from "@/lib/electron-bridge";
 import {
+  brokenReasonFromResume,
   isSessionGone,
   resumeFailureDescription,
   resumeSession,
@@ -104,7 +105,10 @@ export async function resyncCurrentSessionFromBackend(
     const resumed = await resumeSession(sid);
     if (!resumed.ok) {
       if (isSessionGone(resumed)) {
-        store.markSessionBroken(currentSessionId, resumed.error);
+        store.markSessionBroken(
+          currentSessionId,
+          brokenReasonFromResume(resumed),
+        );
       }
       if (opts.showToast)
         store.showToast({

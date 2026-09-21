@@ -323,6 +323,16 @@ interface HelixState
   requestSend: () => void;
   injectAndSend: (text: string) => void;
   tabInputs: Record<string, string>;
+  // 输入队列：模型还在思考时发出的纯文本消息先按会话排在这里（附件不排队，
+  // 它们必须跟着 prompt 一起发出），卡片上可编辑 / 删除 / 立即发送。
+  inputQueue: Record<
+    string,
+    Array<{ id: string; text: string; ts: number }>
+  >;
+  enqueueInput: (sessionId: string, text: string) => void;
+  updateQueueItem: (sessionId: string, id: string, text: string) => void;
+  dequeueInput: (sessionId: string, id: string) => void;
+  clearInputQueue: (sessionId: string) => void;
   tabAttachments: Record<
     string,
     {
@@ -366,6 +376,20 @@ interface HelixState
   workDirEpoch: number;
   setWorkDir: (relativePath: string) => Promise<void>;
   sessionSaveVersion: number;
+  /**
+   * cid→sid 映射（磁盘 setting `conversationSessions`）被**组件外**的代码路径
+   * 改写后的递增计数。agent-flow-panel 的 `sessionMapRef` 只在挂载时读一次盘，
+   * 之后只跟自己写的同步；面板外的写盘（目前是 `/compact` 的
+   * `rebindSessionSid` + `persistSessionMap`，含旁路面板走的那条）不会自动出现
+   * 在那个 ref 里，于是 handleRun 读到的是旧 sid → 走 session/new 铸造空会话
+   * 覆盖映射。
+   *
+   * 语义是「磁盘被第三方动过」，所以**只能**由面板之外的写入方 bump；面板自己
+   * 持久化（`persistSessionMap` / `persistSessionMapEntries`）绝不能 bump，否则
+   * 每次写盘都会触发一次重读，形成自激循环。
+   */
+  sessionMapVersion: number;
+  bumpSessionMapVersion: () => void;
   currentSessionId: string | null;
   /** 重启后没有可恢复的会话时为 true：界面停在「无会话」占位，不显示可输入的
    *  空草稿——首次发消息不会再悄悄建后端会话文件；必须显式点「新对话」或选会话。 */
@@ -1243,6 +1267,44 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       const { [sessionId]: _, ...rest } = state.tabInputs;
       return { tabInputs: rest };
     }),
+  inputQueue: {},
+  enqueueInput: (sessionId, text) =>
+    set((state) => ({
+      inputQueue: {
+        ...state.inputQueue,
+        [sessionId]: [
+          ...(state.inputQueue[sessionId] ?? []),
+          {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            text,
+            ts: Date.now(),
+          },
+        ],
+      },
+    })),
+  updateQueueItem: (sessionId, id, text) =>
+    set((state) => ({
+      inputQueue: {
+        ...state.inputQueue,
+        [sessionId]: (state.inputQueue[sessionId] ?? []).map((item) =>
+          item.id === id ? { ...item, text, ts: Date.now() } : item,
+        ),
+      },
+    })),
+  dequeueInput: (sessionId, id) =>
+    set((state) => ({
+      inputQueue: {
+        ...state.inputQueue,
+        [sessionId]: (state.inputQueue[sessionId] ?? []).filter(
+          (item) => item.id !== id,
+        ),
+      },
+    })),
+  clearInputQueue: (sessionId) =>
+    set((state) => {
+      const { [sessionId]: _, ...rest } = state.inputQueue;
+      return { inputQueue: rest };
+    }),
   tabAttachments: {} as Record<
     string,
     {
@@ -1324,6 +1386,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   selectedWorkDir: null,
   workDirEpoch: 0,
   sessionSaveVersion: 0,
+  sessionMapVersion: 0,
+  bumpSessionMapVersion: () =>
+    set((st) => ({ sessionMapVersion: st.sessionMapVersion + 1 })),
   currentSessionId: null,
   noActiveConversation: true,
   brokenSessionIds: [],
@@ -2432,11 +2497,18 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       }));
   },
   setNoActiveConversation: (v) => set({ noActiveConversation: v }),
-  markSessionBroken: (cid, _reason) =>
+  // 标 broken 必须连**原因**一起存：UI（agent-flow-panel 的 broken 横幅）与
+  // handleRun 的 broken 短路都读 brokenSessionReasons[cid] 当提示文案。旧实现
+  // 参数名写成 `_reason` 且从不写入 → reasons 恒为 {}，界面退化成显示 sid
+  // （"失效原因：01a0c3d3-…"），用户看不到到底为什么失效。
+  markSessionBroken: (cid, reason) =>
     set((s) => ({
       brokenSessionIds: s.brokenSessionIds.includes(cid)
         ? s.brokenSessionIds
         : [...s.brokenSessionIds, cid],
+      brokenSessionReasons: reason
+        ? { ...s.brokenSessionReasons, [cid]: reason }
+        : s.brokenSessionReasons,
     })),
   clearSessionBroken: (cid) =>
     set((s) => {
@@ -3888,69 +3960,48 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         if (declared.length > 0) return declared;
         return p.config?.model ? [p.config.model] : [];
       };
-      const builtProviders: ProviderConfig[] =
-        apiProfiles && apiProfiles.length > 0
-          ? apiProfiles.map((p, i) => {
-              // Scrub cross-endpoint pollution; if that leaves a profile with
-              // NO models, re-seed it from its own history endpoint so a
-              // deepseek profile that had its models polluted by another
-              // supplier's list still surfaces the correct model
-              // (e.g. deepseek-v4-pro) instead of going empty.
-              let models = cleanProfileModels(p);
-              if (models.length === 0 && p.config?.baseUrl) {
-                const histModels = Array.from(
-                  new Set(
-                    (apiHistory || [])
-                      .filter((h) => h.baseUrl === p.config!.baseUrl && h.model)
-                      .map((h) => h.model as string),
-                  ),
-                );
-                if (histModels.length) models = histModels;
-              }
-              return {
-                id: p.id || `p-${i}`,
-                name: p.config?.provider || p.name,
-                baseUrl: p.config?.baseUrl || "",
-                apiKey: p.config?.apiKey || "",
-                models,
-                isDefault: p.id === loadedActiveProfileId,
-              };
-            })
-          : apiConfig && apiConfig.baseUrl && apiConfig.model
-            ? [
-                {
-                  id: "p-default",
-                  name: apiConfig.provider || "default",
-                  baseUrl: apiConfig.baseUrl,
-                  apiKey: apiConfig.apiKey,
-                  models: [apiConfig.model],
-                  isDefault: true,
-                },
-              ]
-            : [];
-      // ── Include history-only endpoints as providers ──
-      // An endpoint the user has only ever used via "添加模型" (landing in
-      // apiHistory) but never saved as an apiProfile has NO provider entry. On
-      // restoreFromStorage the persisted activeModel then can't be validated by
-      // any provider and silently falls back to the default provider's first
-      // model (e.g. Ling) — so clicking a deepseek/kimi history item appears to
-      // "switch to Ling" after a refresh. Synthesize a provider for every
-      // history endpoint not already covered by a named profile, so the active
-      // model stays pinned to the endpoint it belongs to.
-      const historyProviders: ProviderConfig[] = [];
+      // ── Unify apiProfiles + history endpoints (Option B: 从源头消除"半存在") ──
+      // A history endpoint (added via "添加模型", never saved as a profile) only
+      // ever lived in apiHistory + a synthetic `hist-*` provider, so the settings
+      // page (apiProfiles) and the model selector (providers) diverged in count.
+      // Promote EVERY history-only endpoint into a REAL apiProfile here, so
+      // apiProfiles becomes the single source of truth and BOTH lists show the
+      // same set. Idempotent: once promoted it's a real profile, so subsequent
+      // restores see it via builtProviders and skip re-synthesis. The heal block
+      // at the end of this function persists the expanded list, so the promotion
+      // sticks after one restart (no manual data clearing needed).
+      const expandedProfiles: ApiProfile[] = [];
       {
-        const seenBase = new Set(builtProviders.map((p) => p.baseUrl));
+        const seenBase = new Set<string>();
+        const seedFrom = (list: ApiProfile[] | undefined) => {
+          for (const p of list || []) {
+            const base = p.config?.baseUrl;
+            if (base) seenBase.add(base);
+            // Scrub cross-endpoint pollution the same way the legacy set() path
+            // did, so persisted profiles stay clean.
+            expandedProfiles.push({ ...p, models: cleanProfileModels(p) });
+          }
+        };
+        seedFrom(apiProfiles ?? undefined);
+        // Synthesize a real profile for each history endpoint not already covered
+        // by a saved profile.
         const hist = (apiHistory || []) as Array<{
           baseUrl?: string;
           apiKey?: string;
           model?: string;
           provider?: string;
+          contextWindow?: number;
+          apiFormat?: string;
+          engine?: string;
         }>;
-        // Single O(n) pass: group history entries by endpoint instead of the old
-        // O(n²) approach that re-filtered the whole list per unique baseUrl.
         const byBase = new Map<
           string,
-          { apiKey: string; provider?: string; models: Set<string> }
+          {
+            apiKey: string;
+            provider?: string;
+            models: Set<string>;
+            seed: (typeof hist)[number];
+          }
         >();
         for (const h of hist) {
           if (!h.baseUrl || !h.model) continue;
@@ -3961,6 +4012,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
               apiKey: h.apiKey || "",
               provider: h.provider,
               models: new Set<string>(),
+              seed: h,
             };
             byBase.set(h.baseUrl, entry);
             seenBase.add(h.baseUrl);
@@ -3968,24 +4020,76 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           entry.models.add(h.model);
         }
         for (const [baseUrl, entry] of byBase) {
-          historyProviders.push({
-            id: `hist-${historyProviders.length}`,
-            name: entry.provider || "配置",
-            baseUrl,
-            apiKey: entry.apiKey,
+          expandedProfiles.push({
+            id: generateId(),
+            name:
+              entry.provider && entry.provider !== "__custom__"
+                ? entry.provider
+                : "配置",
+            config: {
+              provider: entry.seed.provider || "openai",
+              apiKey: entry.seed.apiKey || "",
+              baseUrl,
+              model: entry.seed.model || Array.from(entry.models)[0] || "",
+              contextWindow: entry.seed.contextWindow,
+              // Preserve the wire format from the history entry. Dropping this
+              // silently fell back to the default protocol on restore and made an
+              // OpenAI-configured endpoint behave as Anthropic after a restart.
+              apiFormat: entry.seed.apiFormat ?? "openai-completions",
+            },
             models: Array.from(entry.models),
-            isDefault: false,
+          });
+        }
+        // Legacy single-config users (no saved profiles, no history, but a live
+        // apiConfig): promote that config into a profile too, so the selector and
+        // settings still share one source and never diverge to 1 vs 0.
+        if (
+          expandedProfiles.length === 0 &&
+          apiConfig &&
+          apiConfig.baseUrl &&
+          apiConfig.model
+        ) {
+          expandedProfiles.push({
+            id: generateId(),
+            name:
+              apiConfig.provider && apiConfig.provider !== "__custom__"
+                ? apiConfig.provider
+                : "配置",
+            config: { ...defaults, ...apiConfig },
+            models: [apiConfig.model],
           });
         }
       }
-      const allBuiltProviders = [...builtProviders, ...historyProviders];
-      // `allBuiltProviders` IS the merged set. Do NOT union in the endpoint
-      // catalog cache (providerModels[pid]) here either — doing so would
-      // re-introduce the "所有模型都显示" bug at the restore layer even
-      // after the UI-level fix. `p.models` (from apiProfiles or
-      // apiHistory-derived historyProviders) is the only candidate list we
-      // consult for the level-2 cards.
-      const mergedProviders: ProviderConfig[] = allBuiltProviders;
+      const builtProviders: ProviderConfig[] = expandedProfiles.map((p, i) => {
+        // Scrub cross-endpoint pollution; if that leaves a profile with NO
+        // models, re-seed it from its own history endpoint so a deepseek profile
+        // that had its models polluted by another supplier's list still surfaces
+        // the correct model (e.g. deepseek-v4-pro) instead of going empty.
+        let models = cleanProfileModels(p);
+        if (models.length === 0 && p.config?.baseUrl) {
+          const histModels = Array.from(
+            new Set(
+              (apiHistory || [])
+                .filter((h) => h.baseUrl === p.config!.baseUrl && h.model)
+                .map((h) => h.model as string),
+            ),
+          );
+          if (histModels.length) models = histModels;
+        }
+        return {
+          id: p.id || `p-${i}`,
+          name: p.config?.provider || p.name,
+          baseUrl: p.config?.baseUrl || "",
+          apiKey: p.config?.apiKey || "",
+          models,
+          isDefault: p.id === loadedActiveProfileId,
+        };
+      });
+      // Every endpoint is now a real profile in `expandedProfiles`, so `providers`
+      // (built from expandedProfiles) and `apiProfiles` (set to expandedProfiles
+      // below) are the SAME set — the model selector and the settings page can no
+      // longer diverge. No separate historyProviders list is needed.
+      const mergedProviders: ProviderConfig[] = builtProviders;
       // Canonical restore logic: the active model is whatever IndexedDB persisted
       // as `activeModel`. If that model is not declared by any provider, fall
       // back to the default provider's first model.
@@ -4001,7 +4105,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         (() => {
           if (activeModel) return activeModel;
           if (loadedActiveProfileId) {
-            const prof = (apiProfiles || []).find(
+            const prof = expandedProfiles.find(
               (p) => p.id === loadedActiveProfileId,
             );
             if (prof?.config?.model) return prof.config.model;
@@ -4226,45 +4330,15 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             return true;
           });
         })(),
-        apiProfiles: (() => {
-          const loaded = apiProfiles || [];
-          if (loaded.length > 0) {
-            // Backfill + SELF-HEAL models[] for existing profiles. We reuse
-            // cleanProfileModels() so a profile's models are scrubbed of
-            // cross-endpoint pollution (using providerModels[pid] when present)
-            // and rewritten to IndexedDB below via persistToStorage on the next
-            // save — permanently removing "一堆放一起" without user action.
-            return loaded.map((p) => ({
-              ...p,
-              models: cleanProfileModels(p),
-            }));
-          }
-          if (apiHistory && apiHistory.length > 0) {
-            // Group history entries by baseUrl so each endpoint becomes its own
-            // provider. This prevents a single "配置 · xxx" profile from owning
-            // models that clearly belong to different endpoints (e.g. Kimi and
-            // DeepSeek models mixed together after repeated saves).
-            const groups = new Map<string, typeof apiHistory>();
-            for (const h of apiHistory) {
-              const key = h.baseUrl || `unknown-${groups.size}`;
-              if (!groups.has(key)) groups.set(key, []);
-              groups.get(key)!.push(h);
-            }
-            return Array.from(groups.values()).map((entries) => {
-              const primary = entries[0];
-              const models = Array.from(
-                new Set(entries.map((h) => h.model).filter(Boolean)),
-              );
-              return {
-                id: generateId(),
-                name: "",
-                config: { ...defaults, ...primary },
-                models,
-              };
-            });
-          }
-          return [];
-        })(),
+        // Option B (single source of truth): use the SAME expandedProfiles that
+        // `providers` was built from, so the settings page and the model
+        // selector render the identical set. expandedProfiles already backfills
+        // and self-heals models[] (via cleanProfileModels) for saved profiles
+        // AND promotes every history-only endpoint into a real profile, so this
+        // single assignment replaces the old dual-path branching below. Because
+        // heal block below re-persists `healed.apiProfiles === expandedProfiles`,
+        // the promotion sticks after one restart (no manual data clearing).
+        apiProfiles: expandedProfiles,
         // Multi-provider config backing the flattened model selector.
         // Write `mergedProviders` (declared + per-provider fetched) so that each
         // provider's `models` array survives a restart even if `providerModels`
@@ -4279,7 +4353,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         activeProfileId: (() => {
           const id = loadedActiveProfileId;
           if (!id) return null;
-          const prof = (apiProfiles || []).find((p) => p.id === id);
+          const prof = expandedProfiles.find((p) => p.id === id);
           if (!prof) return null;
           return id;
         })(),

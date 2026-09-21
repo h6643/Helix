@@ -2,7 +2,7 @@
 
 import { FileCode, Undo2 } from "lucide-react";
 import React, { useMemo, useState } from "react";
-import { countDiffLines } from "./diff-preview";
+import { countDiffLines, firstChangedLineRange } from "./diff-preview";
 import { electronFS } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 import type { PendingChange } from "@/stores/helix-types";
@@ -76,6 +76,15 @@ export function FileChangeSummaryCard({
   const totalRemoved = stats.reduce((sum, s) => sum + s.removed, 0);
 
   const undoChange = async (change: PendingChange) => {
+    // undoUnsafe：网关标了"这份 diff 不能拿去反推撤销"—— pi 的 write 结果不带
+    // diff，若工具执行前读不到旧内容，合成出来的 patch 只是"假想原文件为空"；
+    // diff 过长被截断时也置位。reverseUnifiedDiff 是按行号 splice 的，拿这类
+    // diff 反推会静默切坏文件，宁可拒绝并说清原因。
+    if (change.undoUnsafe) {
+      throw new Error(
+        "缺少可靠的改动内容（write 覆盖前内容未取到或 diff 被截断），无法自动撤销（请用编辑器或 Git 恢复）",
+      );
+    }
     if (!change.filePath) throw new Error("缺少文件路径");
     const st = useHelixStore.getState();
     const workDir = st.selectedWorkDir ?? st.activeSessionWorkDir ?? "";
@@ -126,6 +135,12 @@ export function FileChangeSummaryCard({
           ? `${workDir.replace(/[\\/]+$/, "")}/${change.filePath}`
           : change.filePath;
 
+    // 目标行：unified diff 的第一个 hunk 在新文件里的首处改动。只打开文件不滚
+    // 过去 = 用户还得自己找那几行（"点了文件但没跳到改动内容"）。
+    const target = change.unifiedDiff
+      ? firstChangedLineRange(change.unifiedDiff)
+      : null;
+
     // 右侧栏由 rightSidebarTab 控制显隐，先切到 code 视图再建编辑器 tab。
     st.setRightSidebarTab("code");
     const createdEmpty = st.ensureEditorTab(absolutePath, change.fileName);
@@ -141,7 +156,7 @@ export function FileChangeSummaryCard({
         if (createdEmpty) st.closeEditorTab(absolutePath);
         return;
       }
-// eslint-disable-next-line no-control-regex
+      // eslint-disable-next-line no-control-regex
       if (/[\u0000-\u0008]/.test(content.slice(0, 4096))) {
         st.showToast({
           type: "error",
@@ -152,6 +167,11 @@ export function FileChangeSummaryCard({
         return;
       }
       if (createdEmpty) st.fillEditorTabContent(absolutePath, content);
+      // 内容就绪后再请求定位：编辑器 effect 收到请求时 doc 已是新内容，行号
+      // 才落得准（先请求后填内容会被 clamp 到旧文档的行数上）。
+      if (target) {
+        st.revealEditorRange(absolutePath, target.start, target.end);
+      }
     } catch (e: any) {
       // 诊断：把实际尝试读取的绝对路径与 workDir 带出来，便于定位是路径拼错还是编码/权限问题
       console.warn("[Helix] openChange failed:", {
@@ -251,7 +271,7 @@ export function FileChangeSummaryCard({
                 type="button"
                 onClick={() => openChange(change)}
                 className="flex flex-1 min-w-0 items-center gap-1.5 px-3 py-1.5 text-left"
-                data-tip="在侧边栏打开"
+                data-tip="在侧边栏打开并定位到改动处"
               >
                 <FileCode className="size-3.5 shrink-0 text-sky-500/80" />
                 <span className="break-all font-mono text-[length:var(--helix-transcript-size)] text-foreground/70">

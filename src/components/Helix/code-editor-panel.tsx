@@ -4,12 +4,64 @@ import {
   defaultHighlightStyle,
   syntaxHighlighting,
 } from "@codemirror/language";
+import {
+  Range,
+  StateEffect,
+  StateField,
+} from "@codemirror/state";
+import {
+  Decoration,
+  EditorView,
+  type DecorationSet,
+} from "@codemirror/view";
 import { loadLanguage } from "@uiw/codemirror-extensions-langs";
 import CodeMirror from "@uiw/react-codemirror";
 import { FileCode2, AlertTriangle } from "lucide-react";
-import React, { useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import { electronFS } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
+
+/* ── 跳转定位高亮（「已修改」卡片点文件名 → 滚到改动处并闪一下） ──────────
+ * 用 StateField 而不是 ViewPlugin：行装饰（Decoration.line）允许由状态字段
+ * 提供，且字段会随 tr.changes 自动映射，用户在跳转后继续编辑也不会错位。 */
+const setRevealLines = StateEffect.define<{ from: number; to: number }>();
+const clearRevealLines = StateEffect.define<null>();
+
+// 琥珀色：与 diff 的绿(新增)/红(删除)区分开，语义是"你要看的是这里"。
+const REVEAL_LINE_STYLE =
+  "background: rgba(245, 158, 11, 0.16); box-shadow: inset 2px 0 0 #f59e0b;";
+
+const revealLineField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    let next = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setRevealLines)) {
+        const doc = tr.state.doc;
+        const from = Math.max(1, Math.min(e.value.from, doc.lines));
+        const to = Math.max(from, Math.min(e.value.to, doc.lines));
+        const ranges: Range<Decoration>[] = [];
+        for (let n = from; n <= to; n++) {
+          ranges.push(
+            Decoration.line({ attributes: { style: REVEAL_LINE_STYLE } }).range(
+              doc.line(n).from,
+            ),
+          );
+        }
+        next = Decoration.set(ranges, true);
+      } else if (e.is(clearRevealLines)) {
+        next = Decoration.none;
+      }
+    }
+    return next;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+// 高亮持续时长：足够看到，又不至于一直留在编辑器里。
+const REVEAL_HIGHLIGHT_MS = 2400;
+// 一次最多高亮多少行（整文件重写的 diff 会有上千行，装饰逐行建太贵）。
+const REVEAL_MAX_LINES = 200;
 
 // Map a file extension to a CodeMirror language id (the keys accepted by
 // `@uiw/codemirror-extensions-langs` loadLanguage).
@@ -98,6 +150,10 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
   const showToast = useHelixStore((s) => s.showToast);
 
   const active = editorTabs.find((t) => t.id === activeId) || null;
+  const reveal = useHelixStore((s) => s.editorReveal);
+  const viewRef = useRef<EditorView | null>(null);
+  // 已消费的 nonce：同一条请求只处理一次（否则切走再切回来会重新滚动）。
+  const consumedRevealRef = useRef(0);
 
   // Self-heal a stale `activeEditorTabId`: the parent only renders this panel
   // when there is at least one open tab, so `active` being null here is always a
@@ -111,6 +167,62 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
 
   // Editor tab waiting for an unsaved-changes confirmation before it closes.
   const pendingClose = editorTabs.find((t) => t.id === pendingCloseId) || null;
+
+  // 「跳到改动处」：消费 store 里的一次性请求（「已修改」卡片点文件名 → 打开
+  // 侧边栏编辑器后滚到那一行并高亮几秒）。依赖里不放 active 对象本身：它每次
+  // 输入都会换新引用，会把滚动/高亮在打字过程中反复触发。
+  useEffect(() => {
+    if (!reveal || reveal.path !== activeId) return;
+    if (consumedRevealRef.current === reveal.nonce) return;
+    consumedRevealRef.current = reveal.nonce;
+    // 延后到下一帧再重试的计数（见下方 retry 说明）。
+    let raf = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+
+    const apply = (retry: number) => {
+      if (cancelled) return;
+      const view = viewRef.current;
+      if (!view) return;
+      const doc = view.state.doc;
+      // 文档还没被换成新内容（@uiw/react-codemirror 的值同步 effect 会被"正在
+      // 打字"的 200ms latch 推迟）→ 此刻按行号定位会落到旧文档上，等一帧再来。
+      // 等两帧还短就说明是文件真的比 diff 短（改动已被撤掉），按 clamp 处理。
+      if (doc.lines < reveal.start && retry > 0) {
+        raf = requestAnimationFrame(() => apply(retry - 1));
+        return;
+      }
+      const from = Math.max(1, Math.min(reveal.start, doc.lines));
+      const to = Math.max(
+        from,
+        Math.min(reveal.end, from + REVEAL_MAX_LINES - 1),
+      );
+      const fromPos = doc.line(from).from;
+      view.dispatch({
+        // 只放光标，不整段选中：高亮已经把范围说清楚了，而选中状态下用户一
+        // 打字就会把整段替换掉。
+        selection: { anchor: fromPos },
+        effects: [
+          setRevealLines.of({ from, to }),
+          EditorView.scrollIntoView(fromPos, { y: "center" }),
+        ],
+        userEvent: "select",
+      });
+      view.focus();
+      timer = setTimeout(() => {
+        if (viewRef.current === view) {
+          view.dispatch({ effects: clearRevealLines.of(null) });
+        }
+      }, REVEAL_HIGHLIGHT_MS);
+    };
+
+    apply(2);
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+      if (timer) clearTimeout(timer);
+    };
+  }, [reveal, activeId]);
 
   const handleSave = async (id: string): Promise<boolean> => {
     const tab = useHelixStore.getState().editorTabs.find((t) => t.id === id);
@@ -163,11 +275,12 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
     const highlight = syntaxHighlighting(defaultHighlightStyle, {
       fallback: true,
     });
-    if (!active) return [highlight];
+    // revealLineField 提供「跳转定位」的行高亮（见文件头注释）。
+    if (!active) return [highlight, revealLineField];
     const ext = loadLanguage(
       langFromName(active.name) as Parameters<typeof loadLanguage>[0],
     );
-    return ext ? [highlight, ext] : [highlight];
+    return ext ? [highlight, revealLineField, ext] : [highlight, revealLineField];
   }, [active]);
 
   const themeMode = editorTheme === "vs-dark" ? "dark" : "light";
@@ -199,6 +312,9 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
           height="100%"
           theme={themeMode}
           extensions={langExt}
+          onCreateEditor={(view) => {
+            viewRef.current = view;
+          }}
           onChange={(val) => updateEditorTabContent(active.id, val)}
           basicSetup={{
             lineNumbers: true,

@@ -192,6 +192,15 @@ export interface PendingChange {
    *  ANSI-stripped. When present, DiffPreview renders it directly instead of
    *  recomputing a diff from old/new content. */
   unifiedDiff?: string;
+  /**
+   * 不能用这份 diff 反推撤销（网关标的）。两种来源：
+   *  1. pi 的 `write` 工具结果不带 diff，网关若拿不到覆盖前的旧内容，只能按
+   *     "原文件为空"假想一个 patch —— 覆盖已有文件时它是假的；
+   *  2. diff 过长被网关截断（`diff 过长已截断`），残缺 hunks 反推不出原文。
+   * 共同点：`reverseUnifiedDiff` 是按行号 splice 的，拿这些 diff 撤销会**静默
+   * 破坏文件** → 卡片必须拒绝撤销并说明原因。edit 工具自带真 diff，不受影响。
+   */
+  undoUnsafe?: boolean;
 }
 
 type ApiProvider = string;

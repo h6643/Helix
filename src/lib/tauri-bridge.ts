@@ -335,6 +335,8 @@ function buildTauriAPI(): ElectronAPI {
       invoke("diff_head", { filePath: filePath ?? null }),
     diffNumstat: (cwd?: string | null) =>
       invoke("diff_numstat", { targetCwd: cwd ?? null }),
+    diffNumstatFull: (cwd?: string | null) =>
+      invoke("diff_numstat_full", { targetCwd: cwd ?? null }),
     revert: (filePath?: string) =>
       invoke("revert", { filePath: filePath ?? null }),
     stage: (filePath?: string) =>

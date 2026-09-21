@@ -525,6 +525,33 @@ export const electronGit = {
     return { ok: false, error: "Git not available in browser mode" };
   },
 
+  /**
+   * 「未提交的更改」完整明细：已跟踪文件 vs HEAD（含删除、含已暂存）
+   * **加上未跟踪的新文件**，行数以结构化字段返回。
+   *
+   * 与 diffNumstat 的区别：git 不对未跟踪文件出 numstat，所以 write 新建
+   * 的文件在旧接口里永远看不到——右侧「更改」tab 不显示 +n 的主因。
+   */
+  async diffNumstatFull(
+    cwd?: string | null,
+  ): Promise<{
+    ok: boolean;
+    files?: {
+      path: string;
+      added: number;
+      removed: number;
+      binary: boolean;
+      untracked: boolean;
+    }[];
+    added?: number;
+    removed?: number;
+    error?: string;
+  }> {
+    const api = getElectronAPI();
+    if (api?.git) return api.git.diffNumstatFull(cwd);
+    return { ok: false, error: "Git not available in browser mode" };
+  },
+
   async revert(filePath?: string): Promise<{ ok: boolean; error?: string }> {
     const api = getElectronAPI();
     if (api?.git) return api.git.revert(filePath);
