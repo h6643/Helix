@@ -40,14 +40,32 @@ export interface ApiConfigSlice {
   getApiConfig: () => ApiConfig;
   /** Find which profile owns a given model name (reverse-lookup). */
   findProfileByModel: (model: string) => ApiProfile | undefined;
+  /** Resolve which provider owns `model` **without mutating anything**: the
+   *  provider's declared `models` array first, then the fetched per-provider
+   *  list (providerModels), then the provider whose baseUrl matches
+   *  apiConfig.baseUrl (hand-typed / fetched-only models).
+   *
+   *  The chat input's per-conversation model switch needs the owning provider's
+   *  baseUrl / apiKey / apiFormat to register it in pi's models.json and to send
+   *  the per-session set_model — but it must NOT write apiConfig,
+   *  activeProviderId or the global default model. setActiveModel does that
+   *  resolution as a side effect, which is exactly what made every conversation
+   *  inherit the last input-bar selection. */
+  resolveModelProvider: (model: string) => ProviderConfig | undefined;
   addApiHistory: (config: ApiConfig) => void;
   removeApiHistory: (index: number) => void;
   selectApiHistory: (index: number) => void;
-  addApiProfile: (name: string, config: ApiConfig, models?: string[]) => string;
+  addApiProfile: (
+    name: string,
+    config: ApiConfig,
+    models?: string[],
+    modelContextWindows?: Record<string, number>,
+  ) => string;
   updateApiProfileConfig: (
     id: string,
     config: ApiConfig,
     models?: string[],
+    modelContextWindows?: Record<string, number>,
   ) => void;
   renameApiProfile: (id: string, name: string) => void;
   removeApiProfile: (id: string) => void;
@@ -228,17 +246,27 @@ export const createApiConfigSlice: StateCreator<
       return { apiConfig: { ...config } };
     }),
 
-  addApiProfile: (name, config, models?) => {
+  addApiProfile: (name, config, models?, modelContextWindows?) => {
     const id = generateId();
     set((state) => ({
-      apiProfiles: [...state.apiProfiles, { id, name, config, models }],
+      apiProfiles: [
+        ...state.apiProfiles,
+        { id, name, config, models, modelContextWindows },
+      ],
     }));
     return id;
   },
-  updateApiProfileConfig: (id, config, models?) =>
+  updateApiProfileConfig: (id, config, models?, modelContextWindows?) =>
     set((state) => ({
       apiProfiles: state.apiProfiles.map((p) =>
-        p.id === id ? { ...p, config, ...(models ? { models } : {}) } : p,
+        p.id === id
+          ? {
+              ...p,
+              config,
+              ...(models ? { models } : {}),
+              ...(modelContextWindows ? { modelContextWindows } : {}),
+            }
+          : p,
       ),
     })),
   renameApiProfile: (id, name) =>
@@ -297,38 +325,52 @@ export const createApiConfigSlice: StateCreator<
     };
   },
 
-  setActiveModel: (model) => {
-    const providers = get().providers;
+  resolveModelProvider: (model) => {
+    const { providers, providerModels, activeProviderId, apiConfig } = get();
     // A model may live in the fetched per-provider list (providerModels[pid])
     // rather than the provider's declared `models` array — e.g. after "获取模型列表".
     // Resolve the owning provider from BOTH sources so selecting a fetched model
     // works instead of silently no-op'ing (which made the input-bar selector look
     // frozen on the previous model).
-    let provider = providers.find((p) => p.models.includes(model));
-    if (!provider) {
-      const { providerModels, activeProviderId } = get();
-      const search = (pid?: string | null) =>
-        pid && providerModels[pid]?.includes(model)
-          ? providers.find((p) => p.id === pid)
-          : undefined;
-      provider =
-        search(activeProviderId) ||
-        providers.find((p) => (providerModels[p.id] || []).includes(model));
+    //
+    // Resolution order matters: the SAME model id can be listed under several
+    // endpoints (e.g. deepseek-ai/DeepSeek-V4-Flash on both shangtang and
+    // 硅基流动). A blind first-match scan over `providers` always hits whichever
+    // profile comes first in the list, so the selection silently re-anchors to
+    // the wrong supplier. Prefer, in order:
+    //   1) a provider on the CURRENT endpoint (apiConfig.baseUrl) that owns the
+    //      model — the user is selecting from that endpoint's list;
+    //   2) the active provider (activeProviderId) when it owns the model;
+    //   3) global first-match (legacy behavior, last resort).
+    const owns = (p: (typeof providers)[number]) =>
+      p.models.includes(model) || (providerModels[p.id] || []).includes(model);
+    let provider: (typeof providers)[number] | undefined;
+    const currentUrl = apiConfig?.baseUrl;
+    if (currentUrl) {
+      provider = providers.find((p) => p.baseUrl === currentUrl && owns(p));
+    }
+    if (!provider && activeProviderId) {
+      provider = providers.find(
+        (p) => p.id === activeProviderId && owns(p),
+      );
     }
     if (!provider) {
-      // Final fallback: match by the current backend URL for hand-typed /
-      // fetched-only models that don't appear in any provider's declared
-      // `models` array. We HONOR the user's explicit selection and do NOT snap
-      // to a different model — that snap was the cause of "selecting
-      // deepseek-v4-flash reverts to deepseek-v4-pro" when flash only lived in
-      // the fetched model list (providerModels) and never in static models.
-      // Credentials still come from the baseUrl-matched provider; only the model
-      // name is kept exactly as chosen.
-      const currentUrl = get().apiConfig?.baseUrl;
-      const urlProvider = currentUrl
+      provider = providers.find(owns);
+    }
+    if (!provider) {
+      // Hand-typed / fetched-only models that appear in no provider's declared
+      // `models` array: match by the current backend URL. Credentials still come
+      // from that provider; the model NAME is kept exactly as chosen.
+      provider = currentUrl
         ? providers.find((p) => p.baseUrl === currentUrl)
         : undefined;
-      if (!urlProvider) {
+    }
+    return provider;
+  },
+
+  setActiveModel: (model) => {
+    let provider = get().resolveModelProvider(model);
+    if (!provider) {
         // No provider known for this endpoint at all — trust the selection and
         // mirror it straight into apiConfig without rewriting the model name.
         const fallbackId = get().apiConfig.provider || "custom";
@@ -338,7 +380,6 @@ export const createApiConfigSlice: StateCreator<
           apiConfig: {
             ...get().apiConfig,
             model,
-            baseUrl: currentUrl || get().apiConfig.baseUrl,
           },
         });
         // Record the activation into apiHistory so the settings model list can
@@ -356,9 +397,6 @@ export const createApiConfigSlice: StateCreator<
           localStorage.setItem("helix-active-provider-id", fallbackId);
         } catch { /* empty */}
         return;
-      }
-      // Provider resolved by baseUrl — keep `model` exactly as the user selected.
-      provider = urlProvider;
     }
     if (!provider) {
       warn(

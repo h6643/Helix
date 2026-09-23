@@ -573,7 +573,11 @@ export class ServeGatewayClient {
         Math.min(this.reconnectAttempt, RECONNECT_DELAYS.length - 1)
       ];
     this.reconnectAttempt++;
-    this.emit("gateway.retry", { attempt: this.reconnectAttempt, delay });
+    this.emit("gateway.retry", {
+      attempt: this.reconnectAttempt,
+      total: RECONNECT_DELAYS.length,
+      delay,
+    });
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       await this.refreshInfoFromMain(); // 网关可能已重启换端口

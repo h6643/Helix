@@ -3,7 +3,7 @@
 import { FileCode, Undo2 } from "lucide-react";
 import React, { useMemo, useState } from "react";
 import { countDiffLines, firstChangedLineRange } from "./diff-preview";
-import { electronFS } from "@/lib/electron-bridge";
+import { electronFS, getElectronAPI } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 import type { PendingChange } from "@/stores/helix-types";
 
@@ -135,6 +135,23 @@ export function FileChangeSummaryCard({
           ? `${workDir.replace(/[\\/]+$/, "")}/${change.filePath}`
           : change.filePath;
 
+    // 主进程 fs 沙箱只认它登记的根（模块级 workDir + allowRoot 注册的根）。
+    // 本会话可能在非应用激活目录里跑 pi（如应用 workDir=D:\桌面\pi-main，而 pi
+    // 会话 cwd=D:\Project\Helix），此时不 ensure 根 → readFile 判"在项目里却
+    // 报工作区外"。与 file-tree-panel / setWorkDir 的 allowRoot 口径一致，读数前
+    // 先把当前项目目录登记为合法根（best-effort）。
+    const api = getElectronAPI();
+    const rootToAllow = workDir || (/^[A-Za-z]:[\\/]/.test(absolutePath)
+      ? absolutePath.split(/[\\/]/).slice(0, 3).join("/")
+      : "");
+    if (rootToAllow) {
+      try {
+        await (api as any)?.fs?.allowRoot?.(rootToAllow);
+      } catch {
+        /* best-effort */
+      }
+    }
+
     // 目标行：unified diff 的第一个 hunk 在新文件里的首处改动。只打开文件不滚
     // 过去 = 用户还得自己找那几行（"点了文件但没跳到改动内容"）。
     const target = change.unifiedDiff
@@ -253,7 +270,6 @@ export function FileChangeSummaryCard({
           onClick={handleUndoAll}
           disabled={undoing}
           className="ml-1.5 flex items-center gap-1 px-1.5 py-0.5 rounded text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-red-500/10 disabled:opacity-50 transition-colors"
-          data-tip={undoing ? "撤销中" : "撤销本次回复的全部修改"}
         >
           <Undo2 className={`size-3.5 ${undoing ? "animate-pulse" : ""}`} />
           {undoing ? "撤销中" : "撤销"}
@@ -271,7 +287,6 @@ export function FileChangeSummaryCard({
                 type="button"
                 onClick={() => openChange(change)}
                 className="flex flex-1 min-w-0 items-center gap-1.5 px-3 py-1.5 text-left"
-                data-tip="在侧边栏打开并定位到改动处"
               >
                 <FileCode className="size-3.5 shrink-0 text-sky-500/80" />
                 <span className="break-all font-mono text-[length:var(--helix-transcript-size)] text-foreground/70">

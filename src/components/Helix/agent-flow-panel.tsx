@@ -23,10 +23,12 @@ import {
   GitFork,
   CornerUpLeft,
   Undo2,
-  Archive,
   Link,
-  Sparkles,
   MessageSquarePlus,
+  Pencil,
+  Trash2,
+  Send,
+  ListChecks,
 } from "lucide-react";
 import React, {
   useState,
@@ -44,7 +46,6 @@ import {
   type PlanReviewRequest,
 } from "./approval-dialog";
 import { ContextUsageIndicator } from "./context-usage";
-import { looksLikeUnifiedDiff } from "./diff-preview";
 import { FileChangeSummary } from "./file-change-summary";
 import { FileChangeSummaryCard } from "./file-change-summary-card";
 import { HelixMarkdown } from "./helix-markdown";
@@ -64,6 +65,10 @@ import {
 } from "@/lib/electron-bridge";
 import { generateId } from "@/lib/format";
 import {
+  diffLanguageForPath,
+  registerFileChangesFromToolUpdate,
+} from "@/lib/run-file-changes";
+import {
   processClipboardImage,
   canAddMoreImages,
   blobToDataUrl,
@@ -82,6 +87,7 @@ import {
   ensureSessionMapLoaded,
   loadSessionMap,
   persistSessionMapEntries,
+  sidCandidates,
   type SessionMapEntry,
 } from "@/lib/session-map";
 import {
@@ -145,6 +151,7 @@ import type {
   HelixTodo,
   PendingChange,
 } from "@/stores/helix-types";
+import type { PersistedChatMessage, PersistedSession } from "@/lib/persist";
 
 // ── Persisted per-conversation backend session map ──────────────────────────
 // `sessionMapRef` lives in component memory and is wiped on every app restart.
@@ -164,54 +171,37 @@ async function persistSessionMap(map: Map<string, SessionMapEntry>) {
     // 按 key 合并写磁盘现值，绝不用内存 Map 整表覆盖：冷启动阶段内存 Map 可能
     // 还是空的，整表覆盖会把其它对话的 sid 一起抹掉——那是 handleRun 之外
     // 第二个独立的 SID 丢失制造器（"明明之前有 SID，为什么 map 后来没了"）。
+    // 写盘时还会做两件护栏：`mergeSessionMapEntry` 拒绝把 sid 写空（保留磁盘
+    // 现值 + warn），以及同步刷新磁盘反向索引（见 session-map.ts）。
     await persistSessionMapEntries(map);
   } catch {
     /* best-effort persistence — never block the UI on it */
   }
-  // 磁盘反向索引（sid → conversation）。IndexedDB 的 sessionMap 是唯一记录这个
-  // 关系的地方，被 delete（改设置 / 撤回失败）或随 site-data 清空之后，
-  // sid → conversation 在全系统范围无解——pi 的 jsonl 文件名只有 `时间戳_sid`，
-  // 内容里也不含前端 conversation id。这里在每次绑定时冗余落一份到
-  // ~/.pi/agent/conversation-index.json，作为唯一持久化的反向索引。
-  // 一次批量推送，不阻塞 UI。
-  if (isElectron() && map.size > 0) {
-    const entries: Array<{ conversation_id: string; session_id: string }> = [];
-    map.forEach((entry, cid) => {
-      if (entry.sid) {
-        entries.push({ conversation_id: cid, session_id: entry.sid });
-      }
-    });
-    if (entries.length > 0) {
-      void electronHelix.send("session/index_put", { entries }).catch(() => {});
-    }
-  }
 }
 
 /**
- * 内存 sessionMap 丢了之后的磁盘反查：conversation id → 最近绑定的 sid。
+ * 内存 sessionMap 丢了 live sid 之后的磁盘反查：conversation id → 它历史上
+ * 绑过的**全部** sid（新→旧）。
  *
- * `syncConfigToBackend` / 撤回失败会把整条条目 `delete` 掉，`sids` 历史一并
- * 丢掉；而 IndexedDB 的写入是合并式的，`.delete()` 只影响内存，磁盘索引里
- * 那份还在。拿到 sid 就能走统一的 resume 把原会话接回来，不必标 broken。
+ * 注意这是"候选列表"而不是单个答案：同一个对话可能在 /clear、重建后换过 sid，
+ * 新的那个 jsonl 才更可能是活的，但只有逐个 resume 才知道哪个真的还在磁盘上，
+ * 所以把决定权交给调用方的恢复阶梯。
  *
- * 尽力而为：查不到 / 非 Electron / RPC 失败一律返回 null，调用方继续原有的
- * 「无 sid」判定，不因兜底失败而多报错。
+ * 尽力而为：查不到 / 非 Electron / RPC 失败一律返回空数组，调用方继续走下一级
+ * 恢复（历史 sid → 指纹 → 重建），不因兜底失败而报错。
  */
-async function lookupSessionSidForConversation(
+async function lookupSessionSidsForConversation(
   cid: string,
-): Promise<string | null> {
-  if (!isElectron() || !cid) return null;
+): Promise<string[]> {
+  if (!isElectron() || !cid) return [];
   try {
     const r = (await electronHelix.send("session/index_lookup_conversation", {
       conversation_id: cid,
     })) as any;
     const sids: unknown[] = Array.isArray(r?.session_ids) ? r.session_ids : [];
-    for (const sid of sids) {
-      if (typeof sid === "string" && sid.trim()) return sid.trim();
-    }
-    return null;
+    return sids.filter((s): s is string => typeof s === "string" && !!s.trim());
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -342,52 +332,11 @@ function rebindSessionSid(
 }
 
 
-// ── Diff capture from backend inline_diff ──────────────────────────────────
-// the backend `tool.complete` ships a rendered unified diff (inline_diff) for
-// write_file/patch. Parse enough structure out of it to feed DiffPreview:
-// file path comes from the `a/<path> → b/<path>` label line produced by
-// agent/display.py _render_inline_unified_diff.
-function inferDiffPath(diff: string): string {
-  if (!diff) return "";
-  const lines = diff.split("\n");
-  const label = lines.find((l) => l.includes("→"));
-  if (label) {
-    const m = label.match(/(?:^|\s)([^\s→]+)\s*→\s*([^\s→]+)/);
-    if (m) return m[1].replace(/^a\//, "") || m[2].replace(/^b\//, "");
-  }
-  const hdr = lines.find((l) => /^(?:---|\+\+\+) /.test(l.trim()));
-  if (hdr) {
-    const p = hdr
-      .trim()
-      .slice(4)
-      .replace(/^(a|b)\//, "")
-      .replace(/\s+\(timestamp.*\)$/, "");
-    if (p && p !== "/dev/null") return p;
-  }
-  return "";
-}
-
-function diffLanguageForPath(filePath: string): string {
-  const fileName = filePath.split(/[/\\]/).pop() || filePath;
-  const ext = fileName.includes(".")
-    ? fileName.split(".").pop()!.toLowerCase()
-    : "";
-  const map: Record<string, string> = {
-    ts: "typescript",
-    tsx: "typescript",
-    js: "javascript",
-    jsx: "javascript",
-    py: "python",
-    md: "markdown",
-    json: "json",
-    yml: "yaml",
-    yaml: "yaml",
-    css: "css",
-    html: "html",
-    sh: "bash",
-  };
-  return map[ext] || "plaintext";
-}
+// ── Diff capture from backend inline_diff ─────────────────────────────────
+// 「已修改」卡片的登记逻辑（路径推断 / 形态校验 / undoUnsafe / sids 去重）全部
+// 在 `@/lib/run-file-changes` 里 —— 那是唯一入口，本文件只负责在收到工具完成
+// 事件时调一次。**别把这段逻辑再写回本文件**：2026-09-22 它整块丢过一次，
+// 结果卡片静默消失（剩下的两条旧登记路径在 pi 后端下永远不成立）。
 
 // ── 审批分流：按操作类型决定弹窗 or 自动批准 ─────────────────────────────
 // yolo 关（default 模式）时后端对每个需要授权的工具调用发 approval.request，
@@ -910,10 +859,20 @@ export function AgentFlowPanel() {
   // 不创建任何会话文件，直到用户显式点「新对话」或从侧边栏选一个会话。
   const noActiveConversation = useHelixStore((s) => s.noActiveConversation);
   const connectionNotice = useHelixStore((s) => s.connectionNotice);
-  // 重连中（连接断开 / 重试中）：思考标签统一显示「重连」，代替「思考中」
+  // Per-conversation retry/limit state. The backend's retry signals arrive
+  // without a session tag; the run loop attaches the conversation id while
+  // handling them, so each conversation carries its own "限流重试中" without
+  // clobbering parallel runs.
+  const sessionRetry = useHelixStore(
+    (s) => (currentSessionId ? s.sessionRetryNotices[currentSessionId] : undefined),
+  );
+  // 重连中（连接断开 / 重试中）：思考标签统一显示「重连」，代替「思考中」。
+  // 优先 per-session 记录（并行会话各自互不影响）；没有时退回全局 notice。
   const isReconnecting =
-    connectionNotice?.phase === "error" ||
-    connectionNotice?.phase === "retrying";
+    (sessionRetry?.phase === "error" ||
+      sessionRetry?.phase === "retrying") ??
+    (connectionNotice?.phase === "error" ||
+      connectionNotice?.phase === "retrying");
   const [steps, setSteps] = useState<ExecutionStep[]>([]);
   useEffect(() => {
     stepsRef.current = steps;
@@ -1051,6 +1010,18 @@ export function AgentFlowPanel() {
       inputRef.current.style.height = "36px";
     }
   }, []);
+
+  // Write-through local pending attachments into store.tabAttachments so
+  // persistToStorage can save them (restart keeps unsent pasted images/files).
+  // The session-switch effect mirrors on switch; this covers in-session mutations.
+  const persistPendingAttachments = useCallback(
+    (images: ImageAttachment[], files: FileAttachment[]) => {
+      const key = useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY;
+      const links = useHelixStore.getState().tabAttachments[key]?.links ?? [];
+      useHelixStore.getState().setTabAttachments(key, images, files, links);
+    },
+    [],
+  );
 
   const abortRef = useRef<AbortController | null>(null);
   // 当前会话 id 的 ref 镜像：/btw 在 handleRun 里执行，useCallback 闭包里的
@@ -1378,14 +1349,6 @@ export function AgentFlowPanel() {
     // 的最后一条消息之后，后续新消息不会把该时间点往上顶。
     if (compressionNotice) {
       const parts: string[] = ["上下文已压缩"];
-      if (
-        compressionNotice.beforeTokens != null &&
-        compressionNotice.afterTokens != null
-      ) {
-        parts.push(
-          `${(compressionNotice.beforeTokens / 1000).toFixed(0)}k → ${(compressionNotice.afterTokens / 1000).toFixed(0)}k`,
-        );
-      }
       const anchorIndex = compressionNotice.anchorMessageId
         ? items.findIndex(
             (item) =>
@@ -1746,37 +1709,23 @@ export function AgentFlowPanel() {
       useHelixStore.getState().setConnectionNotice(null);
     }
   }, []);
-  // Drop the cached backend session when the project directory changes so the
-  // next prompt opens a fresh session rooted at the new cwd.
-  // 例外：对话正在运行（有 streamingDraft）时绝不删——否则下次 session/prompt 会拿一个
-  // 已从 sessionMapRef 移除的死会话去 prompt.submit → 后端 4001 "session not found" → 模型停止。
-  const prevWorkDirRef = useRef<string | null>(null);
-  useEffect(() => {
-    // 首挂载/hydration 不算"用户切了项目"：启动水合会把 selectedWorkDir 从
-    // null 变成上次会话的项目。旧版本在这一步就把当前对话的 sid 抹成 ""，
-    // resume 分支（含 storedId 兜底）整体被跳过、只能靠指纹找回——恢复失败的
-    // 确定性来源之一（2026-09-19 连环四铸的帮凶）。只在真实变化（用户主动
-    // 切换项目）时清 sid；且只清 sid，storedId/sids 历史永远保留。
-    const prev = prevWorkDirRef.current;
-    prevWorkDirRef.current = selectedWorkDir;
-    if (prev === null) return; // 首挂载（ref 初值 null）
-    if (prev === selectedWorkDir) return; // 仅 currentSessionId 变化触发
-    const cid = useHelixStore.getState().currentSessionId;
-    if (!cid) return;
-    const running =
-      useHelixStore.getState().isAgentRunning ||
-      !!useHelixStore.getState().streamingDrafts?.[cid];
-    if (!running) {
-      // 只清 live sid，保留条目（sids/storedId/epoch 历史）——resume 的
-      // storedId 兜底和子 Agent 磁盘 rehydrate 还要用它；无条件 delete 会把
-      // 这些一起丢掉。
-      const entry = sessionMapRef.current.get(cid);
-      if (entry) {
-        entry.sid = "";
-      }
-      persistSessionMap(sessionMapRef.current);
-    }
-  }, [selectedWorkDir]);
+  // 这里原本有一个「selectedWorkDir 变化 → 清掉当前对话的 sid」的 effect，
+  // 理由是"下一条消息在新 cwd 下开一个干净的后端会话"。**已整个删除**：
+  //   1. 前提不成立 —— 对话的后端会话由 sid 唯一标识，它的 cwd 记在 pi 的
+  //      jsonl 头部，resume 会原样接回来；"同一个对话换项目"没有语义。
+  //   2. 它有确定性误伤 —— 从历史里点开另一项目的对话，selectedWorkDir 会跟着
+  //      导航变过去，于是它把**当前**（正在离开）那条对话的 sid 抹掉。
+  //      2026-09-22 早上用户报的"该对话已失效"就是它干的：map 里 6 条记录被
+  //      置空，而 pi 的 jsonl 全都还在磁盘上。
+  //   3. 抹 sid 的代价是**不可逆**的（在加了恢复阶梯之前）：本地历史在、后端
+  //      文件在，前端却再也接不回去。
+  // 现在"想让当前对话的后端会话作废"只有一种做法：置 `entry.epoch = -1`
+  // （≠ liveEpoch ⇒ 下一次 handleRun 走 resume 重新验证），sid 永远保留。
+  //
+  // 代价（明确接受）：同一对话被切到另一个项目目录时，resume 仍以 jsonl 头部的
+  // cwd 为准，agent 继续在旧目录里干活。旧行为是靠清 sid 让下一条消息 session/new
+  // 到新 cwd —— 那等于用"丢失整段上下文 + 对话分裂"去换一个 cwd，不划算；
+  // 要换项目就新建对话。
 
   // Switching conversations: clear the *front-end* streaming UI so the newly
   // focused conversation starts with a clean panel. We deliberately do NOT
@@ -1897,35 +1846,37 @@ export function AgentFlowPanel() {
           // entry 在门槛 await 之后才读：sessionMap 水合前不是可信事实源。
           const map = await awaitSessionMap(sessionMapRef);
           const entry = map.get(cid);
-          if (!entry?.sid) return;
-          if (useGatewayStore.getState().helixSessionId === entry.sid) return;
+          // 用候选列表而不是 entry.sid：live sid 被清空过的对话，凭据还在
+          // sids[] 里（loadSessionMap 也已经把它自愈回 sid）。
+          const targetSid = sidCandidates(entry)[0];
+          if (!targetSid) return;
+          if (useGatewayStore.getState().helixSessionId === targetSid) return;
           debug(
             "[HelixTrace] 网关重连（同一进程），自动 resume 当前会话 →",
-            entry.sid,
+            targetSid,
           );
-          const r = await resumeSession(entry.sid);
+          const r = await resumeSession(targetSid);
           if (r.ok) {
             rebindSessionSid(sessionMapRef.current, cid, {
               sid: r.sessionId,
               epoch: useGatewayStore.getState().gatewayEpoch,
-              storedId: entry.storedId,
+              storedId: entry?.storedId,
             });
             persistSessionMap(sessionMapRef.current);
             useGatewayStore.getState().setHelixSessionId(r.sessionId);
             return;
           }
+          // 不标 broken：这个对话可能还有别的候选 sid（历史 / 磁盘索引 / 指纹）
+          // 或能靠本地历史重建，真正的裁决在 handleRun 的恢复阶梯里。
           const hstore = useHelixStore.getState();
-          if (isSessionGone(r)) hstore.markSessionBroken(cid, r.error);
           hstore.showToast({
             type: "warning",
             title: resumeFailureTitle(r),
             description: resumeFailureDescription(r),
           });
           debug(
-            "[HelixTrace] resume 失败（不静默）→ broken=" +
-              isSessionGone(r) +
-              ":",
-            entry.sid,
+            "[HelixTrace] resume 失败（不静默）→:",
+            targetSid,
             r,
           );
         })();
@@ -2053,9 +2004,15 @@ export function AgentFlowPanel() {
   // handleRun 每轮把 modelBySession[本对话] 经 set_model 透传到该会话的 pi 实例
   // （网关按 session_id 路由），所以每个对话能各选各的模型而互不影响。
   const modelBySession = useHelixStore((s) => s.modelBySession);
-  // 当前对话是否有专属模型（区别于继承全局默认）。
+  // 当前对话是否有专属模型（区别于继承全局默认）。草稿阶段（cid 还没分配）
+  // 的选择记在 DRAFT_SESSION_KEY 上，必须一起看，否则新对话第一次选模型后
+  // 按钮还显示全局默认。
   const sessionModel =
-    currentSessionId && modelBySession[currentSessionId]?.model;
+    modelBySession[currentSessionId ?? DRAFT_SESSION_KEY]?.model;
+  // 本对话覆盖值的完整对象（含 provider）：悬停提示的供应商必须跟显示的模型
+  // 同源，只有模型字符串不够。
+  const sessionModelOverride =
+    modelBySession[currentSessionId ?? DRAFT_SESSION_KEY];
 
   // Resolve the provider that owns the current backend endpoint.
   // Primary key: activeProviderId when it still matches the current baseUrl.
@@ -2280,68 +2237,79 @@ export function AgentFlowPanel() {
   // cancel + invalidate + push tail so a model switch also rebuilds the
   // session from config.yaml — never a stale key.
   const handleModelSelect = useCallback(
-    async (model: string) => {
-      useHelixStore.getState().setActiveModel(model);
-      // 每个对话可各选各的模型：setActiveModel 已经把 apiConfig 重解析到所选
-      // 模型所属的供应商，这里用解析后的 provider 名把选择记到「当前对话」上。
-      // handleRun 每轮把 modelBySession[本对话] 经 set_model 透传到该会话的 pi
-      // 实例（网关按 session_id 路由），不改全局 config.yaml，所以不影响其他
-      // 对话。新对话（尚无 cid）没有可记的键，走上面的全局默认即可。
-      {
-        const st0 = useHelixStore.getState();
-        if (st0.currentSessionId) {
-          st0.setModelForSession(st0.currentSessionId, {
-            provider:
-              st0.apiConfig.provider && st0.apiConfig.provider !== "__custom__"
-                ? st0.apiConfig.provider
-                : "custom",
-            model,
-          });
-        }
-      }
-      // Keep the provider store in sync too. It persists its own
-      // activeModel separately, and helix-layout.tsx bridges THAT store into the
-      // Helix store on launch — so if we don't update it here, a restart would
-      // re-read the stale value (e.g. the previously-selected pro) and the bridge
-      // would overwrite the Helix store back to it.
-      useProviderStore.getState().setActiveModel(model);
-      // Sync the ACTIVE profile's model too. restoreFromStorage prefers the
-      // activeProfileId's config.model over the persisted activeModel — if we
-      // only updated activeModel here, the profile keeps its old model and a
-      // restart reverts the input-bar choice to whatever the profile pinned.
-      const pst = useHelixStore.getState();
-      if (pst.activeProfileId) {
-        const prof = pst.apiProfiles.find((p) => p.id === pst.activeProfileId);
-        if (prof) {
-          useHelixStore.getState().updateApiProfileConfig(pst.activeProfileId, {
-            ...prof.config,
-            model,
-          });
-        }
-      }
-      // setActiveModel already records the activation into apiHistory (settings
-      // model list highlight) — no separate addApiHistory needed here.
-      // Persist the API-related state only. The full persistToStorage() is too
-      // heavy for a model switch: it re-serializes the ENTIRE chat session
-      // (every message) plus all settings to IndexedDB on the main thread. The
-      // bridge (onModelSwitched) already persisted these four keys when
-      // useProviderStore.setActiveModel fired above; this covers the fallback
-      // branch where the bridge found no owning provider and skipped persisting.
-      import("@/lib/persist").then(({ persistence }) => {
-        const st = useHelixStore.getState();
-        persistence.saveSetting("apiHistory", st.apiHistory);
-        persistence.saveSetting("apiConfig", st.apiConfig);
-        persistence.saveSetting("activeModel", st.activeModel);
-        persistence.saveSetting("activeProviderId", st.activeProviderId);
-        // Persist the synced profile model so a cold restart restores the same
-        // model (restoreFromStorage reads activeProfileId's config first).
-        persistence.saveSetting("apiProfiles", st.apiProfiles);
+    async (model: string, ownerProviderId?: string) => {
+      const st0 = useHelixStore.getState();
+      // 每个对话各选各的：用纯解析拿到所选模型所属供应商（**不**动全局状态），
+      // 只把选择写进本对话的覆盖值。handleRun 每轮把 modelBySession[本对话] 经
+      // set_model 透传到该会话自己的 pi 实例（网关按 session_id 路由），全局默认
+      // 原封不动 → 其他对话不受影响。
+      //
+      // 这里不再调用 setActiveModel / updateApiProfileConfig /
+      // syncConfigToBackend：三者都会把「输入栏最近一次的选择」写成全局默认
+      // （apiConfig.model + 当前 profile 的 model + config.yaml 的 defaultModel），
+      // 而没有自己覆盖值的对话全部回落全局默认 → 表现为「所有对话共享一个模型
+      // 配置」。全局默认只由设置页管理。
+      //
+      // ownerProviderId：二级菜单点选时用户是在**某个供应商分组下**点的，分组 id
+      // 就是归属供应商——同一模型 id 可能同时挂在多个端点（如 shangtang 和硅基
+      // 流动都列了 deepseek-ai/DeepSeek-V4-Flash），此时必须信分组、不能让
+      // resolveModelProvider 按列表顺序全库扫到先出现的那个（曾把硅基流动的
+      // 选择解析成 shangtang）。
+      const provider =
+        (ownerProviderId &&
+          st0.providers.find((p) => p.id === ownerProviderId)) ||
+        st0.resolveModelProvider(model);
+      st0.setModelForSession(st0.currentSessionId ?? DRAFT_SESSION_KEY, {
+        provider:
+          provider?.name && provider.name !== "__custom__"
+            ? provider.name
+            : st0.apiConfig.provider && st0.apiConfig.provider !== "__custom__"
+              ? st0.apiConfig.provider
+              : "custom",
+        model,
       });
+      st0.showToast({
+        type: "success",
+        title: `本会话已覆盖为 ${model}`,
+      });
+
+      // 跨端点切换时，先把这个 provider 注册进 pi 的 models.json：只加不改默认、
+      // 不重启网关（重启会打断其他对话在飞的 run）。已注册的端点这一步是空操作。
+      // pi 在实例启动时快照 models.json，所以**全新**端点要等该会话的实例重建才
+      // 生效；已注册端点立即可用。
+      if (provider?.baseUrl) {
+        const profile = st0.apiProfiles.find(
+          (p) => p.config?.baseUrl === provider.baseUrl,
+        );
+        void window.electron?.helix?.registerProviderModels({
+          provider: provider.name,
+          baseUrl: provider.baseUrl,
+          apiKey: provider.apiKey || profile?.config.apiKey || undefined,
+          // 不传 api：协议格式只由设置页维护。这里若把 profile 里可能过期的
+          // apiFormat（旧版 label/value 错位存下的 anthropic-messages）写回
+          // models.json，会把用户改成 openai-completions 的值再冲掉。
+          // contextWindow 必须按当前选中的 model 从 profile 的 modelContextWindows
+          // 查：旧代码直接拿 profile.config.contextWindow（= 第一个模型的窗口）
+          // 当成本模型的窗口写回，会把本模型自己的值覆盖成第一个模型的
+          // （"我之前填的上下文窗口被改掉"根因之一）。
+          // 查不到就不传（传 undefined）——后端只接受显式值，None 时保留
+          // models.json 里已有的窗口，不会拿 256_000 覆盖用户填过的值。
+          models: [
+            {
+              id: model,
+              contextWindow: profile?.modelContextWindows?.[model] ?? undefined,
+            },
+          ],
+        })?.catch((e) =>
+          console.warn("[Helix] registerProviderModels failed:", e),
+        );
+      }
+
       setShowModelDropdown(false);
-      await syncConfigToBackend();
     },
-    [syncConfigToBackend],
+    [],
   );
+
 
   // Model selector for the active provider only. Rendered in BOTH input-bar
   // layouts (empty-state and active-conversation) via this helper so the
@@ -2363,19 +2331,28 @@ export function AgentFlowPanel() {
     // 显示源：本对话的专属模型优先（每个对话可各选各的），没有才回落全局默认。
     const displayName =
       sessionModel || apiConfig.model || activeModel || "选择模型";
+    // 本会话有专属覆盖时用主色描边 + 圆点标记，一眼区分「不是全局默认」。
+    const hasSessionOverride = Boolean(sessionModelOverride?.model);
     return (
       <>
         <div className="relative min-w-0" ref={modelDropdownRef}>
           <button
             type="button"
             onClick={() => setShowModelDropdown(!showModelDropdown)}
-            className="flex items-center justify-between gap-2 min-w-0 max-w-[140px] px-2.5 py-1.5 h-7 bg-muted/30 border border-border/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 hover:border-border/30 transition-all duration-200 font-mono"
+            className={`flex items-center justify-between gap-2 min-w-0 max-w-[140px] px-2.5 py-1.5 h-7 bg-muted/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 transition-all duration-200 font-mono border border-border/30 hover:border-border/30`}
             data-tip={
-              activeProvider?.name
-                ? `${activeProvider.name} · ${displayName}`
-                : sessionModel
-                  ? `本对话模型 · ${displayName}`
-                  : displayName
+              (() => {
+                // 提示里的供应商必须跟「显示的模型」同源：本对话有专属模型时用
+                // 该覆盖值的 provider（选择时就已解析），只有回落全局默认时才用
+                // activeProvider——否则对话覆盖指向硅基流动、全局还停在
+                // shangtang 时，悬停会显示成 shangtang · 硅基流动的模型。
+                const tipProvider =
+                  sessionModelOverride?.provider || activeProvider?.name;
+                const base = tipProvider
+                  ? `${tipProvider} · ${displayName}`
+                  : displayName;
+                return hasSessionOverride ? `${base}` : base;
+              })()
             }
           >
             <span className="truncate min-w-0 flex-1 text-left chat-toolbar-label">
@@ -2432,21 +2409,17 @@ export function AgentFlowPanel() {
                                 key={m}
                                 type="button"
                                 onClick={() => {
-                                  handleModelSelect(m);
+                                  handleModelSelect(m, g.id);
                                   setShowModelDropdown(false);
                                 }}
-                                className={`w-full flex items-center gap-1.5 px-2 py-1.5 text-left transition-colors rounded-lg hover:bg-muted/70 ${
-                                  m === displayName
-                                    ? "bg-primary/10 text-primary"
-                                    : ""
-                                }`}
+                                className={`w-full flex items-center gap-1.5 px-2 py-1.5 text-left transition-colors rounded-lg hover:bg-muted/70`}
                               >
                                 <span className="min-w-0 flex-1 truncate font-mono ui-text text-foreground" data-tip={m}>
                                   {truncateModelLabel(m)}
                                 </span>
                                 {m === displayName && (
                                   <span
-                                    className="shrink-0 text-primary"
+                                    className="shrink-0 text-foreground/50"
                                     data-tip="当前模型"
                                   >
                                     <Check className="size-3.5" />
@@ -2964,12 +2937,16 @@ export function AgentFlowPanel() {
         Array.from(files).map((f) => fileToAttachment(f).catch(() => null)),
       );
       const valid = attachments.filter((a): a is FileAttachment => a !== null);
-      if (valid.length > 0) setPendingFiles((prev) => [...prev, ...valid]);
+      if (valid.length > 0) {
+        const next = [...pendingFiles, ...valid];
+        setPendingFiles(next);
+        persistPendingAttachments(pendingImages, next);
+      }
 
       // Reset input so selecting the same file again triggers onChange
       e.target.value = "";
     },
-    [],
+    [pendingImages, pendingFiles, persistPendingAttachments],
   );
 
   // Handle new project creation
@@ -3245,6 +3222,8 @@ export function AgentFlowPanel() {
     sessionId?: string;
     prompt?: string;
     silent?: boolean;
+    /** 发送后保留输入框原文（「立即发送」刷队列条目用，不清空用户正在打的字） */
+    keepInput?: boolean;
   }) => {
     const isBackground = !!opts?.sessionId;
     const currentInput = opts?.prompt ?? inputValueRef.current;
@@ -3281,6 +3260,11 @@ export function AgentFlowPanel() {
     // the model gets interrupted mid-thought.
     // 后台旁路提问不占主线的 isChatLoading：主线发送按钮不该变「停止」，
     // 用户应能立刻在主线继续发消息。
+    // 入队判定用的忙态必须在这里读——下一行就会把 isChatLoading 置 true，
+    // 之后再读就永远是「忙」，会把空闲时的正常发送也错排进队列。
+    const busyBeforeSend =
+      isBusy ||
+      (isBackground && !!streamingDrafts[opts?.sessionId ?? ""]?.isAgentRunning);
     if (!isBackground) useHelixStore.setState({ isChatLoading: true });
     // Set estimated tokens while waiting for API response (shows ~Xk during request).
     // A brand-new session has no baseline: previousUsed=0 + a short input would
@@ -3396,6 +3380,30 @@ export function AgentFlowPanel() {
       return;
     }
 
+    // ── 输入队列 ────────────────────────────────────────────────────────
+    // 本会话还在跑时，纯文本消息不再「先停再发」（那会掐掉正在跑的任务），
+    // 而是排进发送队列：任务结束后按 Enter 自动刷入，或在队列卡片上
+    // 「立即发送」。附件 / 链接卡片不排队——它们必须跟着这一发 prompt 一起
+    // 发出去，拆开会丢掉本轮的上下文，所以仍走原来的「先停再发」。
+    if (!isBackground && !cmd && !opts?.keepInput) {
+      const hasAttachments =
+        pendingImages.length > 0 ||
+        pendingFiles.length > 0 ||
+        linkCards.length > 0;
+      if (busyBeforeSend && baseTrimmed && !hasAttachments) {
+        useHelixStore.getState().enqueueInput(
+          currentSessionId ?? DRAFT_SESSION_KEY,
+          baseTrimmed,
+        );
+        setInputSynced("");
+        resetInputHeight();
+        // 上面已把 isChatLoading 置 true，但这次并没有真的发起 run，必须复位，
+        // 否则发送按钮会一直显示成「停止」。
+        useHelixStore.setState({ isChatLoading: false });
+        return;
+      }
+    }
+
     // 后台旁路提问跑在自己的会话上，绝不能因为「主线正在跑」就 handleStop 掉
     // 主线的 run（那是 toggle 语义，只对当前会话生效）。同理也不读主线的
     // 草稿来判断忙闲——要查的是旁路会话自己的草稿。
@@ -3416,8 +3424,9 @@ export function AgentFlowPanel() {
       return;
     }
 
-    // 后台旁路提问不动主线的输入框（用户可能正在主线打字）。
-    if (!isBackground) {
+    // 后台旁路提问不动主线的输入框（用户可能正在主线打字）；刷队列条目
+    // （keepInput）同样保留——那条文本已经发出去了，用户正在打的新字不动。
+    if (!isBackground && !opts?.keepInput) {
       setInputSynced("");
       resetInputHeight();
     }
@@ -3809,11 +3818,15 @@ export function AgentFlowPanel() {
     });
     setPendingImages([]);
     setPendingFiles([]);
-    // Clear the web-link cards that rode along on this send.
+    // Clear the web-link cards that rode along on this send, and mirror the
+    // empty composer into tabAttachments so a restart doesn't resurrect them.
     if (linkCards.length > 0) {
       for (const l of linkCards)
         useHelixStore.getState().removeLinkAttachment(l.id);
     }
+    useHelixStore
+      .getState()
+      .setTabAttachments(currentSessionId ?? DRAFT_SESSION_KEY, [], [], []);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -3911,121 +3924,151 @@ export function AgentFlowPanel() {
       const myCid = activeSessionId;
       let existing = sessionMap.get(myCid);
 
-      // ── broken 短路 ───────────────────────────────────────────────
-      // 会话已被标记失效（resume 返回 SESSION_NOT_FOUND）时，不再假装它存在：
-      // 不重试 resume、不用 session/new 顶替、也不发 prompt（用户消息会落进
-      // 零上下文的新会话）。直接报错让用户知道这个对话已结束、需要新建。
-      // 标记录在内存，重启后会重新尝试 resume——文件若已回来则自然恢复。
-      if (
-        myCid &&
-        useHelixStore.getState().brokenSessionIds.includes(myCid) &&
-        existing?.sid
-      ) {
-        const reason =
-          useHelixStore.getState().brokenSessionReasons[myCid] ||
-          existing.sid;
-        throw new Error(
-          `SESSION_NOT_FOUND: 该对话已标记为失效，无法继续发送消息，请新建对话（失效原因：${reason.slice(0, 120)}）`,
+      // ── 会话恢复阶梯（**永不判死**）───────────────────────────────────
+      // 不变量：只要这个对话还有本地历史，它就一定能继续用。sid 只是"接回原
+      // 后端会话"的凭据，凭据丢了 ≠ 对话死了——所以按可靠性从高到低逐级尝试，
+      // 最后一级是"用本地历史重建一个后端会话"，它保证阶梯一定有出口：
+      //   ① 现存 sid 且 epoch 仍是当前代 → 实例还活着，直接沿用（不付 resume 代价）
+      //   ② 本对话的历史 sid（entry.sids[]，rebindSessionSid 一直往里追加）
+      //   ③ 磁盘反向索引 conversation-index.json（conversation → sid）
+      //   ④ pi 磁盘扫描 + 首条用户消息指纹（session/latest_for_cwd）
+      //   ⑤ 重建：session/new + 回放最近若干轮本地历史 → 绑定新 sid，旧 sid 继续
+      //      留在 sids[]（子 Agent 磁盘清单按它归位）
+      // 以前这里只有 ①→③，且 ③ 的 RPC 在网关侧根本不存在（unknown method）→
+      // 于是"sid 被清空"必然落到"标记失效、永久不可用"。2026-09-22 早上 6 条
+      // 对话就是这么坏的，而它们的 jsonl 全都还在磁盘上。
+      let sessionId: string | null = null;
+      if (existing?.sid && !epochStale && existing.epoch === liveEpoch) {
+        sessionId = existing.sid; // ①
+      }
+
+      const adoptSid = (sid: string, how: string, storedId?: string) => {
+        rebindSessionSid(sessionMapRef.current, myCid, {
+          sid,
+          epoch: liveEpoch,
+          storedId: storedId ?? existing?.storedId,
+        });
+        persistSessionMap(sessionMapRef.current);
+        sessionEpochRef.current = liveEpoch;
+        // 接回来了 = 会话活着，清掉可能残留的 broken 标记（横幅随之消失）。
+        useHelixStore.getState().clearSessionBroken(myCid);
+        debug(`[HelixTrace] 会话恢复成功（${how}）→`, sid);
+      };
+
+      /** 逐个候选 resume：成功就采用；SESSION_GONE（文件真没了）换下一个；
+       *  其余（restore 失败 / 内部错误）是可重试故障，原样抛出、不永久化状态。
+       *  `tried` 跨级去重：同一个 sid 可能在 sids[]、磁盘索引、指纹候选里各出现
+       *  一次，而 resume 是重量级操作（要 spawn/claim 实例），不能重复付代价。 */
+      const tried = new Set<string>();
+      const tryResumeCandidates = async (
+        candidates: string[],
+        how: string,
+      ): Promise<void> => {
+        for (const cand of candidates) {
+          if (!cand || cand === sessionId || tried.has(cand)) continue;
+          tried.add(cand);
+          const r = await resumeSession(cand);
+          if (r.ok) {
+            sessionId = r.sessionId;
+            adoptSid(r.sessionId, how);
+            return;
+          }
+          if (isSessionGone(r)) continue;
+          throw new Error(resumeFailureMessage(r));
+        }
+      };
+
+      // ② 历史 sid + 现存 sid（新→旧）。epoch 新鲜时 ① 已经直接沿用了现存 sid，
+      //    这里只在它过期/缺失时才逐个 resume 验证——包括现存的那个，它的静态
+      //    值恰好排在候选列表最前（sidCandidates 把 live sid 算作最新）。
+      if (!sessionId && myCid) {
+        await tryResumeCandidates(sidCandidates(existing), "live/history-sid");
+      }
+      // ③ 磁盘反向索引
+      if (!sessionId && myCid) {
+        await tryResumeCandidates(
+          await lookupSessionSidsForConversation(myCid),
+          "disk-index",
         );
       }
 
-      // ── 统一 Resume（Codex Thread Resume 模型，设计 #6/#8）────────────
-      // 只按本对话保存的 SID 恢复原会话。失败 → SESSION_NOT_FOUND → 标记
-      // broken。不再有 storedId / sids 历史 / 指纹(latest_for_cwd) 多级找回，
-      // 也不再有 createSession + seed_history 注入重建——那是 Discovery /
-      // 重建的职责，不属于 Resume（设计 #7）。
-      let sessionId: string | null = existing?.sid || null;
-      if (sessionId && (epochStale || existing?.epoch !== liveEpoch)) {
-        const r = await resumeSession(sessionId);
-        if (r.ok) {
-          rebindSessionSid(sessionMapRef.current, myCid, {
-            sid: r.sessionId,
-            epoch: liveEpoch,
-            storedId: existing?.storedId,
-          });
-          persistSessionMap(sessionMapRef.current);
-          sessionEpochRef.current = liveEpoch;
-          sessionId = r.sessionId;
-        } else {
-          // 统一状态机：只有 SESSION_NOT_FOUND 才标 broken（会话永久失效）；
-          // restore 失败 / 内部错误是可重试故障——保留真实错误，但不把会话
-          // 状态永久化，下次发消息仍会尝试恢复。
-          if (isSessionGone(r)) {
-            useHelixStore.getState().markSessionBroken(myCid, r.error);
-          }
-          throw new Error(resumeFailureMessage(r));
-        }
-      }
-      // ── 磁盘反向索引兜底 ─────────────────────────────────────────────
-      // 内存 sessionMap 被整条 delete（syncConfigToBackend 改设置 / 撤回失败）
-      // 时 sids 历史一并丢掉，但 IndexedDB 的写入是合并式的、`.delete()` 只影响
-      // 内存，磁盘索引里的绑定还在。反查到 sid 就走统一的 resume 接回原会话。
-      // 不做这一步的后果：后端文件完好、对话还在被写入，UI 却显示
-      // 「该对话已失效，无法继续对话」——用户感受是「刚刚还在对话，突然就这样」。
-      // 真 Draft 反查不到（从未绑定过），只是多一次 IPC，直接落回下面的判定。
+      // 本地持久化记录：④ 的指纹与 ⑤ 的回放都要用。**只在凭据全丢时才读盘**
+      // （`loadSessions()` 要反序列化全部对话的转录，不能放在常规路径上）。
+      let localTurns: PersistedChatMessage[] = [];
+      let hasContent = false;
       if (!sessionId && myCid) {
-        const diskSid = await lookupSessionSidForConversation(myCid);
-        if (diskSid) {
-          const r = await resumeSession(diskSid);
-          if (r.ok) {
-            rebindSessionSid(sessionMapRef.current, myCid, {
-              sid: r.sessionId,
-              epoch: liveEpoch,
-              storedId: existing?.storedId,
-            });
-            persistSessionMap(sessionMapRef.current);
-            sessionEpochRef.current = liveEpoch;
-            sessionId = r.sessionId;
-            // resume 成功 = 会话活着，清掉之前可能留下的 broken 标记。
-            useHelixStore.getState().clearSessionBroken(myCid);
-            debug(
-              "[HelixTrace] 内存映射丢失，已从磁盘反向索引恢复 →",
-              r.sessionId,
-            );
-          } else {
-            // 索引查到了 sid 但 resume 失败：走统一状态机。只有
-            // SESSION_NOT_FOUND 才标 broken；restore 失败 / 内部错误是可重试
-            // 故障，保留真实错误、不永久化会话状态，下一条消息还会再试。
-            if (isSessionGone(r)) {
-              useHelixStore.getState().markSessionBroken(myCid, r.error);
-            }
-            throw new Error(resumeFailureMessage(r));
-          }
-        }
-      }
-      if (!sessionId) {
-        // 无 SID ≠ 新对话。所有权判定按持久化记录，不靠 React 内存里的
-        // chatMessages——冷启动时 UI 会话已存在但 chatMessages 尚未 hydrate，
-        // ownMessages === 0 会制造第二个假阴性，正是上面那个空会话的来源。
-        // 判定优先级：conversation identity → 持久化记录 → sessionMap →
-        // chatMessages（后者只是 UI 内容，不参与 Session 生命周期）。
         const { persistence } = await import("@/lib/persist");
-        const record = (await persistence.loadSessions()).find(
-          (s) => s.id === myCid,
+        const record: PersistedSession | undefined = (
+          await persistence.loadSessions()
+        ).find((s) => s.id === myCid);
+        localTurns = (record?.chatMessages ?? []).filter(
+          (m) => m.role === "user" || m.role === "assistant",
         );
-        const hasContent =
+        const firstUserText =
+          localTurns.find((m) => m.role === "user")?.content ?? "";
+        hasContent =
           !!record &&
-          ((record.chatMessages?.length ?? 0) > 0 ||
+          (localTurns.length > 0 ||
             (record.tasks?.length ?? 0) > 0 ||
             (record.checkpoints?.length ?? 0) > 0);
-        if (record && hasContent) {
-          // 已存在且有内容的对话却无 sid：不能 session/new——那会铸造空会话
-          // 覆盖映射，历史从此对不上。标 broken 交给用户显式决策，不静默重建。
-          // 走到这里说明上面的磁盘索引兜底也没查到。
-          useHelixStore.getState().markSessionBroken(
-            myCid,
-            "本地历史还在，但后端会话指针（sid）已丢失，磁盘索引也反查不到，无法自动恢复",
-          );
-          throw new Error(
-            "SESSION_NOT_FOUND: 该对话没有可恢复的后端会话（有本地历史但 SID 缺失）",
-          );
+
+        // ④ pi 磁盘扫描 + 首条用户消息指纹。指纹精确（同一对话/分叉共享），所以
+        //    必须跳过已被**别的**对话占用的 sid，否则会把别人的会话抢过来续写。
+        const cwd =
+          record?.workDir ??
+          useHelixStore.getState().activeSessionWorkDir ??
+          selectedWorkDir ??
+          undefined;
+        if (!sessionId && cwd && firstUserText) {
+          try {
+            const r = (await helixApi()!.send("session/latest_for_cwd", {
+              cwd,
+              first_user_message: normalizeAcpContent(firstUserText).slice(
+                0,
+                400,
+              ),
+            })) as any;
+            const owned = new Set(
+              [...sessionMapRef.current.entries()]
+                .filter(([cid]) => cid !== myCid)
+                .map(([, e]) => e.sid)
+                .filter(Boolean),
+            );
+            const candidates = (
+              Array.isArray(r?.session_ids) ? r.session_ids : []
+            ).filter(
+              (s: unknown): s is string =>
+                typeof s === "string" && s.length > 0 && !owned.has(s),
+            );
+            await tryResumeCandidates(candidates, "cwd-fingerprint");
+          } catch (e) {
+            // 指纹找回是尽力而为：失败就走 ⑤ 重建，不阻断对话。
+            debug("[HelixTrace] cwd 指纹找回失败，继续重建", e);
+          }
         }
-        // 真 Draft（无持久化记录，或已持久化但尚无任何内容）：正常创建。
+      }
+
+      if (!sessionId) {
+        // ⑤ 重建 / 真 Draft。无 SID ≠ 新对话：有本地历史就必须把历史回放进新
+        // 会话（否则用户看到的是一段有上下文、模型却从零开始的对话）。回放走
+        // session/new 的 messages（Rust 侧按轮数与字符预算裁剪）。
+        // 这**不是**"静默 session/new 顶替"：旧 sid 留在 sids[] 里，映射被
+        // rebindSessionSid 原地更新，历史一条都不会丢。
+        const seedMessages = hasContent
+          ? localTurns
+              .map((m) => ({
+                role: m.role,
+                content: normalizeAcpContent(m.content),
+              }))
+              .filter((m) => m.content.trim())
+              .slice(-40)
+          : [];
         const st0 = useHelixStore.getState();
         const res = (await helixApi()!.send("session/new", {
           mcpServers: buildAcpMcpServers(st0.mcpServers),
           mode_id: st0.approvalModeBySession?.[myCid] ?? st0.approvalMode,
           cwd: st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined,
+          ...(seedMessages.length > 0 ? { messages: seedMessages } : {}),
         })) as any;
         sessionId =
           res?.session_id ||
@@ -4046,7 +4089,22 @@ export function AgentFlowPanel() {
         });
         persistSessionMap(sessionMapRef.current);
         sessionEpochRef.current = liveEpoch;
+        useHelixStore.getState().clearSessionBroken(myCid);
+        // 新建/重建 = 全新后端会话，上下文占用从零开始。
         useHelixStore.getState().setContextUsage(myCid, 0, 0, []);
+        if (seedMessages.length > 0) {
+          // 必须让用户知道"这不是原来那个后端会话了"——上下文是回放出来的
+          // 近似，比原会话短（只带最近若干轮）。
+          useHelixStore.getState().showToast({
+            type: "info",
+            title: "已重建后端会话",
+            description: `原会话凭据已不可恢复，已回放最近 ${seedMessages.length} 条本地历史继续对话。`,
+          });
+          debug(
+            "[HelixTrace] 凭据全丢，已用本地历史重建后端会话 →",
+            sessionId,
+          );
+        }
       }
       // Auto-approve edits for this session (no manual approval UI): switch
       // the backend into "don"t ask" mode. Sent on EVERY run (not just
@@ -4071,8 +4129,25 @@ export function AgentFlowPanel() {
       // （两个 key 空间互不冲突，共用同一张表）。经网关透传 set_model 到该会话
       // 的 pi 实例（带 session_id 即路由到对应实例），每轮重放一次，网关重启 /
       // 实例回收后也能恢复。不改全局 config.yaml——全局默认仍由设置页管理。
+      // 草稿阶段（cid 未分配）选过的模型记在 DRAFT_SESSION_KEY 上，第一次
+      // handleRun 才分配出真 cid → 只查 activeSessionId 会漏掉它，该会话回落
+      // 全局默认（表现为"新对话选了模型却没生效"）。这里两键都查，命中草稿
+      // 键就搬到真 cid 上，后续轮次直接命中。
+      const modelOverrides = useHelixStore.getState().modelBySession;
       const modelOverride =
-        useHelixStore.getState().modelBySession?.[activeSessionId];
+        modelOverrides?.[activeSessionId] ??
+        (activeSessionId !== DRAFT_SESSION_KEY
+          ? modelOverrides?.[DRAFT_SESSION_KEY]
+          : undefined);
+      if (
+        modelOverride?.model &&
+        activeSessionId !== DRAFT_SESSION_KEY &&
+        modelOverrides?.[DRAFT_SESSION_KEY]
+      ) {
+        useHelixStore
+          .getState()
+          .setModelForSession(activeSessionId, modelOverride);
+      }
       if (modelOverride?.model) {
         try {
           await helixApi()!.send("set_model", {
@@ -4890,6 +4965,13 @@ export function AgentFlowPanel() {
               message: "与 Helix 网关连接已断开，正在尝试恢复…",
               ts: Date.now(),
             });
+            if (myCid) {
+              useHelixStore.getState().setSessionRetryNotice(myCid, {
+                phase: "error",
+                message: "与 Helix 网关连接已断开，正在尝试恢复…",
+                ts: Date.now(),
+              });
+            }
             return;
           }
           // Reconnect completed (serve-gateway already re-ran session.resume).
@@ -4901,7 +4983,12 @@ export function AgentFlowPanel() {
               ts: Date.now(),
             });
             setTimeout(
-              () => useHelixStore.getState().setConnectionNotice(null),
+              () => {
+                useHelixStore.getState().setConnectionNotice(null);
+                if (myCid) {
+                  useHelixStore.getState().setSessionRetryNotice(myCid, null);
+                }
+              },
               2000,
             );
             return;
@@ -4966,10 +5053,24 @@ export function AgentFlowPanel() {
               message: warningMessage,
               ts: Date.now(),
             });
+            // Per-conversation copy — the global notice clobbers every parallel
+            // run, so the banner below reads the conversation-scoped record.
+            if (myCid) {
+              useHelixStore.getState().setSessionRetryNotice(myCid, {
+                phase: "retrying",
+                attempt,
+                total,
+                message: warningMessage,
+                ts: Date.now(),
+              });
+            }
             setTimeout(() => {
-              const cur = useHelixStore.getState().connectionNotice;
-              if (cur?.phase === "retrying") {
-                useHelixStore.getState().setConnectionNotice(null);
+              const st = useHelixStore.getState();
+              if (st.connectionNotice?.phase === "retrying") {
+                st.setConnectionNotice(null);
+              }
+              if (myCid && st.sessionRetryNotices[myCid]?.phase === "retrying") {
+                st.setSessionRetryNotice(myCid, null);
               }
             }, 30000);
             return;
@@ -5002,29 +5103,46 @@ export function AgentFlowPanel() {
                   message: "连接已恢复",
                   ts: Date.now(),
                 });
-                setTimeout(
-                  () => useHelixStore.getState().setConnectionNotice(null),
-                  2000,
-                );
+                setTimeout(() => {
+                  useHelixStore.getState().setConnectionNotice(null);
+                  if (myCid) {
+                    useHelixStore.getState().setSessionRetryNotice(myCid, null);
+                  }
+                }, 2000);
               } else {
                 const attempt = params?.attempt ?? 1;
-                const total = params?.total ?? 3;
+                const total = params?.total ?? 4;
+                const serveMsg =
+                  "上游连接不稳定，正在重连（第 " +
+                  attempt +
+                  "/" +
+                  total +
+                  " 次）…";
                 useHelixStore.getState().setConnectionNotice({
                   phase: "retrying",
                   attempt,
                   total,
-                  message:
-                    "上游连接不稳定，正在重连（第 " +
-                    attempt +
-                    "/" +
-                    total +
-                    " 次）…",
+                  message: serveMsg,
                   ts: Date.now(),
                 });
+                if (myCid) {
+                  useHelixStore
+                    .getState()
+                    .setSessionRetryNotice(myCid, {
+                      phase: "retrying",
+                      attempt,
+                      total,
+                      message: serveMsg,
+                      ts: Date.now(),
+                    });
+                }
                 setTimeout(() => {
-                  const cur = useHelixStore.getState().connectionNotice;
-                  if (cur?.phase === "retrying") {
-                    useHelixStore.getState().setConnectionNotice(null);
+                  const st = useHelixStore.getState();
+                  if (st.connectionNotice?.phase === "retrying") {
+                    st.setConnectionNotice(null);
+                  }
+                  if (myCid && st.sessionRetryNotices[myCid]?.phase === "retrying") {
+                    st.setSessionRetryNotice(myCid, null);
                   }
                 }, 30000);
               }
@@ -5060,6 +5178,13 @@ export function AgentFlowPanel() {
                 message: "连接中断",
                 ts: Date.now(),
               });
+              if (myCid) {
+                useHelixStore.getState().setSessionRetryNotice(myCid, {
+                  phase: "error",
+                  message: "连接中断",
+                  ts: Date.now(),
+                });
+              }
             } else if (phase === "retrying") {
               textBufferRef.current = "";
               thoughtBufferRef.current = "";
@@ -5086,32 +5211,47 @@ export function AgentFlowPanel() {
                 return nb;
               });
               const attempt = params?.attempt ?? 1;
-              const total = params?.total ?? 3;
+              const total = params?.total ?? 4;
+              const acpRetryMsg =
+                "连接中断，正在重连... (" + attempt + "/" + total + ")";
               useHelixStore.getState().setConnectionNotice({
                 phase: "retrying",
                 attempt,
                 total,
-                message:
-                  "连接中断，正在重连... (" + attempt + "/" + total + ")",
+                message: acpRetryMsg,
                 ts: Date.now(),
               });
+              if (myCid) {
+                useHelixStore.getState().setSessionRetryNotice(myCid, {
+                  phase: "retrying",
+                  attempt,
+                  total,
+                  message: acpRetryMsg,
+                  ts: Date.now(),
+                });
+              }
             } else if (phase === "recovered") {
               useHelixStore.getState().setConnectionNotice({
                 phase: "recovered",
                 message: "连接已恢复",
                 ts: Date.now(),
               });
-              setTimeout(
-                () => useHelixStore.getState().setConnectionNotice(null),
-                2000,
-              );
+              setTimeout(() => {
+                useHelixStore.getState().setConnectionNotice(null);
+                if (myCid) {
+                  useHelixStore.getState().setSessionRetryNotice(myCid, null);
+                }
+              }, 2000);
             }
             // Safety: clear stale retrying notices after 30 seconds
             if (phase === "retrying") {
               setTimeout(() => {
-                const cur = useHelixStore.getState().connectionNotice;
-                if (cur?.phase === "retrying") {
-                  useHelixStore.getState().setConnectionNotice(null);
+                const st = useHelixStore.getState();
+                if (st.connectionNotice?.phase === "retrying") {
+                  st.setConnectionNotice(null);
+                }
+                if (myCid && st.sessionRetryNotices[myCid]?.phase === "retrying") {
+                  st.setSessionRetryNotice(myCid, null);
                 }
               }, 30000);
             }
@@ -5240,50 +5380,17 @@ export function AgentFlowPanel() {
                 if (changed) st.setActivePlan(next);
               }
             }
-            // Diff capture: tool.complete carries a rendered unified diff
-            // (inline_diff) for write_file/patch. Turn it into a pending change
-            // so the diff button lights up. The per-reply summary card is only
-            // attached to the final message when the run finishes.
+            // Diff capture —— 「已修改」汇总卡片的**唯一登记点**。
+            // pi 网关把真 diff 放在 `update.details.patch`（edit/write 白名单转发；
+            // write 的由网关在工具执行前读旧内容后合成），旧 ACP 放 `update.inlineDiff`。
+            // 两者都在 registerFileChangesFromToolUpdate 里按优先级处理；本文件不再
+            // 自己实现校验/路径推断 —— 那段逻辑 2026-09-22 整块丢失过一次，卡片因此静默消失。
             if (su === "tool_call_update") {
-              const raw = params?.update?.inlineDiff;
-              if (typeof raw === "string" && raw.trim()) {
-                // Normalize CRLF to LF for consistent line splitting
-                const diff = raw
-                  .replace(/\r\n/g, "\n")
-                  .replace(/\r/g, "\n")
-                // eslint-disable-next-line no-control-regex
-                  .replace(/\[[0-9;]*m/g, "");
-                // 严格形态校验：diff 头行（---/+++/@@）须出现在开头附近且有
-                // +/− 改动行。后端误发的非 diff 文本（如普通命令输出）不进
-                // pendingChanges，避免回复末尾「已修改」卡片把它渲染成整列 +。
-                if (!looksLikeUnifiedDiff(diff)) {
-                  return;
-                }
-                const filePath = inferDiffPath(diff);
-                if (filePath) {
-                  const fileName = filePath.split(/[/\\]/).pop() || filePath;
-                  const changeId = storeActions.addPendingChange({
-                    fileId: filePath,
-                    fileName,
-                    filePath,
-                    oldContent: "",
-                    newContent: "",
-                    language: diffLanguageForPath(filePath),
-                    unifiedDiff: diff,
-                  });
-                  runFileChangesRef.current.push({
-                    id: changeId,
-                    fileId: filePath,
-                    fileName,
-                    filePath,
-                    oldContent: "",
-                    newContent: "",
-                    language: diffLanguageForPath(filePath),
-                    unifiedDiff: diff,
-                  });
-                  syncDraft();
-                }
-              }
+              registerFileChangesFromToolUpdate(params?.update, {
+                runChanges: runFileChangesRef.current,
+                addPendingChange: storeActions.addPendingChange,
+                afterRegister: syncDraft,
+              });
             }
           }
           if (parsed && parsed.type === "done" && doneProcessedRef.current) {
@@ -5336,6 +5443,12 @@ export function AgentFlowPanel() {
             const cur = useHelixStore.getState().connectionNotice;
             if (cur && cur.phase !== "recovered") {
               useHelixStore.getState().setConnectionNotice(null);
+            }
+            const curSession = myCid
+              ? useHelixStore.getState().sessionRetryNotices[myCid]
+              : undefined;
+            if (curSession && curSession.phase !== "recovered") {
+              useHelixStore.getState().setSessionRetryNotice(myCid, null);
             }
           }
         } catch (e) {
@@ -5925,19 +6038,25 @@ export function AgentFlowPanel() {
               // 进而新建出与本应对应的工具卡脱节的结果块。
               flushPending();
               uiRB((prev) => {
-                const callIdOf = (b: (typeof prev)[number]) =>
-                  b.type === "tool_group"
-                    ? (b.steps.find(
+                const matchStepIn = (b: (typeof prev)[number]) => {
+                  if (b.type !== "tool_group") return null;
+                  const targetId = resultCallId
+                    ? b.steps.find(
                         (s) =>
                           s.type === "tool_call" &&
-                          !!resultCallId &&
                           s.toolCallId === resultCallId,
-                      ) ?? null)
+                      )
                     : null;
+                  if (targetId) return targetId;
+                  return b.steps.find(
+                    (s) =>
+                      s.type === "tool_call" && s.status === "running",
+                  ) ?? null;
+                };
                 // id 精确匹配（事件带 id 且组里有对应 call）
                 let idx = -1;
                 if (resultCallId) {
-                  idx = prev.findIndex((b) => callIdOf(b) !== null);
+                  idx = prev.findIndex((b) => matchStepIn(b) !== null);
                 }
                 // 兜底：第一个尚未收到结果的组（旧行为，串行时即当前块）
                 if (idx === -1) {
@@ -5953,7 +6072,7 @@ export function AgentFlowPanel() {
                     ResponseBlock,
                     { type: "tool_group" }
                   >;
-                  const matchedCall = callIdOf(cur);
+                  const matchedCall = matchStepIn(cur);
                   const nb = prev.slice();
                   nb[idx] = {
                     type: "tool_group",
@@ -6996,6 +7115,51 @@ export function AgentFlowPanel() {
             timestamp: Date.now(),
           },
         ]);
+        // Hard failure (not user abort):
+        // - Partial model output → commit it so context stays and the user can
+        //   keep chatting in this session (F2).
+        // - Nothing produced → withdraw the optimistic user message and put the
+        //   draft (text / images / files / link cards) back so one-click resend
+        //   works without retyping (F1).
+        if (textBufferRef.current) {
+          const mid = useHelixStore.getState().addChatMessage({
+            role: "assistant",
+            content: textBufferRef.current + `\n\n*[执行中断：${message}]*`,
+            reasoning: thoughtBufferRef.current || undefined,
+            sessionId: activeSessionId,
+          });
+          useHelixStore.getState().setChatMessageStreaming(mid, false);
+          storeActions.showToast({
+            type: "error",
+            title: "回复中断",
+            description: "已保留部分内容，可在本会话继续追问",
+          });
+        } else {
+          useHelixStore.getState().deleteMessage(newUserMsgId);
+          const shouldRestoreInput =
+            !isBackground && !opts?.keepInput && !!baseTrimmed;
+          if (shouldRestoreInput) {
+            setInputSynced(baseTrimmed);
+            resetInputHeight();
+            requestAnimationFrame(() => inputRef.current?.focus());
+          }
+          setPendingImages(imagesSnapshot ?? []);
+          setPendingFiles(filesSnapshot ?? []);
+          const attachKey = currentSessionId ?? DRAFT_SESSION_KEY;
+          useHelixStore.getState().setTabAttachments(
+            attachKey,
+            imagesSnapshot ?? [],
+            filesSnapshot ?? [],
+            linkCards,
+          );
+          storeActions.showToast({
+            type: "error",
+            title: "发送失败",
+            description: shouldRestoreInput
+              ? "内容已放回输入框，可直接重发"
+              : message,
+          });
+        }
       }
     } finally {
       debug("[HelixTrace] handleRun finally ENTRY", {
@@ -7238,6 +7402,71 @@ export function AgentFlowPanel() {
     if (rec?.sessionId) handleStop(rec.sessionId);
   }, [bylineStopSignal, handleStop]);
 
+  // ── 输入队列（模型思考中发出的消息）─────────────────────────────────
+  const EMPTY_QUEUE: Array<{ id: string; text: string; ts: number }> = [];
+  const queueSessionKey = currentSessionId ?? DRAFT_SESSION_KEY;
+  const inputQueue =
+    useHelixStore((s) => s.inputQueue[queueSessionKey]) ?? EMPTY_QUEUE;
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
+  const [editingQueueText, setEditingQueueText] = useState("");
+  const editQueueRef = useRef<HTMLTextAreaElement | null>(null);
+  // 「立即发送」先 handleStop 再把这条消息挂在这里，等 run 真的停下来后
+  // 由下方的 effect 发出去（handleStop 是异步的，当场判忙一定还是忙）。
+  const pendingFlushRef = useRef<string | null>(null);
+  const [flushTick, setFlushTick] = useState(0);
+
+  const saveQueueEdit = useCallback((id: string) => {
+    const text = editingQueueText.trim();
+    setEditingQueueId(null);
+    if (!text) {
+      useHelixStore.getState().dequeueInput(queueSessionKey, id);
+      return;
+    }
+    useHelixStore.getState().updateQueueItem(queueSessionKey, id, text);
+  }, [editingQueueText, queueSessionKey]);
+
+  const cancelQueueEdit = useCallback(() => setEditingQueueId(null), []);
+
+  const flushQueueItem = useCallback((id: string) => {
+    const item = useHelixStore
+      .getState()
+      .inputQueue[queueSessionKey]
+      ?.find((i) => i.id === id);
+    if (!item) return;
+    useHelixStore.getState().dequeueInput(queueSessionKey, id);
+    if (editingQueueId === id) setEditingQueueId(null);
+    const prompt = item.text;
+    const st = useHelixStore.getState();
+    if (st.streamingDrafts[currentSessionId ?? ""]?.isAgentRunning) {
+      // 先停当前任务；handleStop 异步，稍等一拍再判忙重发。
+      handleStop();
+      pendingFlushRef.current = prompt;
+      window.setTimeout(() => setFlushTick((t) => t + 1), 250);
+    } else {
+      void handleRunRef.current({ prompt, keepInput: true });
+    }
+  }, [editingQueueId, queueSessionKey, handleStop, handleRunRef, currentSessionId]);
+
+  // 等待中的「立即发送」：run 一旦真正停下就把这条发出去。
+  useEffect(() => {
+    if (!pendingFlushRef.current) return;
+    const st = useHelixStore.getState();
+    if (st.streamingDrafts[currentSessionId ?? ""]?.isAgentRunning) return;
+    const prompt = pendingFlushRef.current;
+    pendingFlushRef.current = null;
+    void handleRunRef.current({ prompt, keepInput: true });
+  }, [flushTick, streamingDrafts, currentSessionId, handleRunRef]);
+
+  // 进入编辑态就聚焦编辑框
+  useEffect(() => {
+    if (editingQueueId && editQueueRef.current) editQueueRef.current.focus();
+  }, [editingQueueId]);
+
+  // 切会话时退出编辑态（编辑框绑定的是旧会话的队列条目）
+  useEffect(() => {
+    setEditingQueueId(null);
+  }, [queueSessionKey]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (showAtRef && filteredAtFiles.length > 0) {
@@ -7334,16 +7563,25 @@ export function AgentFlowPanel() {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         // Enter 只发送，绝不暂停/停止：与停止按钮同源的 isBusy 为真（本会话
-        // 正在跑，含 isChatLoading 覆盖的发起窗口）时忽略 Enter——要停用
-        // 输入框右侧的停止按钮。此前这里是「运行中→切停止」的 toggle，
-        // 误触 Enter 会把跑着的任务停掉。
-        if (isBusy) return;
-        handleRun();
+        // 正在跑，含 isChatLoading 覆盖的发起窗口）时**不忽略** Enter——有文本
+        // 就走 handleRun 里的入队闸门排进队列，要停用输入框右侧的停止按钮。
+        if (inputValueRef.current.trim()) {
+          handleRun();
+          return;
+        }
+        // 空闲 + 输入框为空 + 队列有货 → 刷入最老的一条（「立即发送」的
+        // 键盘路径，避免用户只盯着一行行卡片点按钮）。
+        if (!isBusy && inputQueue.length > 0) {
+          const oldest = inputQueue[0];
+          if (oldest) flushQueueItem(oldest.id);
+        }
       }
     },
     [
       handleRun,
       isBusy,
+      inputQueue,
+      flushQueueItem,
       showSlashMenu,
       filteredSkills,
       slashTotal,
@@ -7377,15 +7615,27 @@ export function AgentFlowPanel() {
       }
 
       if (newImages.length > 0) {
-        setPendingImages((prev) => [...prev, ...newImages]);
+        const next = [...pendingImages, ...newImages];
+        setPendingImages(next);
+        persistPendingAttachments(next, pendingFiles);
       }
     },
-    [pendingImages.length, storeActions.showToast],
+    [
+      pendingImages,
+      pendingFiles,
+      storeActions.showToast,
+      persistPendingAttachments,
+    ],
   );
 
-  const removePendingImage = useCallback((id: string) => {
-    setPendingImages((prev) => prev.filter((img) => img.id !== id));
-  }, []);
+  const removePendingImage = useCallback(
+    (id: string) => {
+      const next = pendingImages.filter((img) => img.id !== id);
+      setPendingImages(next);
+      persistPendingAttachments(next, pendingFiles);
+    },
+    [pendingImages, pendingFiles, persistPendingAttachments],
+  );
 
   // Turn a FileList (dropped or picked) into pending file attachments.
   const addFiles = useCallback(async (fileList: FileList | File[]) => {
@@ -7395,21 +7645,26 @@ export function AgentFlowPanel() {
       files.map((f) => fileToAttachment(f).catch(() => null)),
     );
     const valid = attachments.filter((a): a is FileAttachment => a !== null);
-    if (valid.length > 0)
-      setPendingFiles((prev) => {
-        // Deduplicate by name + size to prevent duplicates
-        const existing = new Set(prev.map((f) => `${f.name}:${f.size}`));
-        const newOnes = valid.filter(
-          (f) => !existing.has(`${f.name}:${f.size}`),
-        );
-        if (newOnes.length === 0) return prev;
-        return [...prev, ...newOnes];
-      });
-  }, []);
+    if (valid.length > 0) {
+      // Deduplicate by name + size to prevent duplicates
+      const existing = new Set(pendingFiles.map((f) => `${f.name}:${f.size}`));
+      const newOnes = valid.filter((f) => !existing.has(`${f.name}:${f.size}`));
+      if (newOnes.length > 0) {
+        const next = [...pendingFiles, ...newOnes];
+        setPendingFiles(next);
+        persistPendingAttachments(pendingImages, next);
+      }
+    }
+  }, [pendingImages, pendingFiles, persistPendingAttachments]);
 
-  const removePendingFile = useCallback((id: string) => {
-    setPendingFiles((prev) => prev.filter((f) => f.id !== id));
-  }, []);
+  const removePendingFile = useCallback(
+    (id: string) => {
+      const next = pendingFiles.filter((f) => f.id !== id);
+      setPendingFiles(next);
+      persistPendingAttachments(pendingImages, next);
+    },
+    [pendingImages, pendingFiles, persistPendingAttachments],
+  );
 
   const handleApproval = useCallback(
     async (approvalId: string, choice: ApprovalLevel) => {
@@ -7622,8 +7877,117 @@ export function AgentFlowPanel() {
   // steps. `displaySteps` is already session-filtered, so use that.
   const hasSteps = displaySteps.length > 0;
 
-  const renderChatInput = ({ isEmpty }: { isEmpty?: boolean } = {}) => {
-    const approvalModeButton = (
+  // 发送队列卡片：渲染在输入框**上方**（卡片之外），不是塞进输入框里面。
+  // 模型还在思考时发出的消息排在这里，可编辑 / 删除 / 立即发送。
+  const renderQueueList = () => {
+    if (inputQueue.length === 0) return null;
+    return (
+          <div className="mb-1.5 flex flex-col gap-1.5 max-h-48 overflow-y-auto">
+            {inputQueue.map((item) => {
+              const editing = editingQueueId === item.id;
+              return (
+                <div
+                  key={item.id}
+                  className="flex items-center gap-3 rounded-xl border border-border/30 bg-muted/20 px-3 py-2.5"
+                >
+                  <ListChecks className="size-4 shrink-0 text-muted-foreground/70" />
+                  {editing ? (
+                    <div className="flex-1 min-w-0">
+                      <textarea
+                        ref={editQueueRef}
+                        value={editingQueueText}
+                        onChange={(e) => {
+                          setEditingQueueText(e.target.value);
+                          const el = e.target;
+                          el.style.height = "auto";
+                          el.style.height =
+                            Math.min(el.scrollHeight, 140) + "px";
+                        }}
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            saveQueueEdit(item.id);
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            cancelQueueEdit();
+                          }
+                        }}
+                        rows={1}
+                        className="w-full resize-none bg-transparent text-[length:var(--helix-transcript-size)] leading-[1.45] break-all overflow-y-auto max-h-[140px] caret-foreground"
+                      />
+                      <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50 mt-0.5">
+                        Enter 保存 · Esc 取消
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="flex-1 min-w-0 text-[length:var(--helix-transcript-size)] whitespace-pre-wrap break-all line-clamp-3 text-foreground/90">
+                      {item.text}
+                    </p>
+                  )}
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {editing ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => saveQueueEdit(item.id)}
+                          className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                        >
+                          <Check className="size-3" />
+                          保存
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelQueueEdit}
+                          className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/40 bg-muted/30 text-muted-foreground hover:bg-muted/50 transition-colors"
+                        >
+                          <X className="size-3" />
+                          取消
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => flushQueueItem(item.id)}
+                        className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-orange-400/40 bg-orange-500/10 text-orange-500 hover:bg-orange-500/20 transition-colors"
+                      >
+                        <Send className="size-3" />
+                        立即发送
+                      </button>
+                    )}
+                    {!editing && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingQueueId(item.id);
+                          setEditingQueueText(item.text);
+                        }}
+                        className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/40 bg-muted/30 text-muted-foreground hover:bg-muted/50 transition-colors"
+                      >
+                        <Pencil className="size-3" />
+                        编辑
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (editingQueueId === item.id) setEditingQueueId(null);
+                        storeActions.dequeueInput(queueSessionKey, item.id);
+                      }}
+                      className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/40 bg-muted/30 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+                    >
+                      <Trash2 className="size-3" />
+                      删除
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+    );
+  };
+
+  const renderChatInput = ({ isEmpty }: { isEmpty?: boolean } = {}) => {    const approvalModeButton = (
       <div className="relative min-w-0" ref={approvalModeDropdownRef}>
         <button
           type="button"
@@ -8641,7 +9005,10 @@ export function AgentFlowPanel() {
                     </p>
                   </div>
                 ) : (
-                  renderChatInput({ isEmpty: true })
+                  <>
+                    {renderQueueList()}
+                    {renderChatInput({ isEmpty: true })}
+                  </>
                 )}
               </div>
             </div>
@@ -8735,8 +9102,6 @@ export function AgentFlowPanel() {
                     key={item.id}
                     className="flex w-full items-center justify-center gap-1.5 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60"
                   >
-                    <Archive className="size-3 shrink-0" />
-                    {/* pre-wrap：扩展播报自带换行，别被折成一段 */}
                     <span className="whitespace-pre-wrap">{item.text}</span>
                   </div>
                 ) : item.kind === "compressing" ? (
@@ -8766,10 +9131,7 @@ export function AgentFlowPanel() {
                     className="flex items-center gap-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60 animate-scale-in"
                   >
                     <div className="h-px flex-1 bg-border/60" />
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <Sparkles className="size-3 shrink-0" />
-                      <span>{item.text}</span>
-                    </div>
+                    <span className="shrink-0">{item.text}</span>
                     <div className="h-px flex-1 bg-border/60" />
                   </div>
                 ) : item.kind === "fileChanges" ? (
@@ -8915,18 +9277,19 @@ export function AgentFlowPanel() {
                             : [];
                         const answerSegments =
                           buildProcessSegments(answerBlocks);
-                        // 「思考中」脉冲只在该状态真实成立时亮：最后一个非
-                        // 文本/非文件更改块是 thinking 才算（工具执行/收尾时
-                        // 思考卡仅保持展开可读，不冒充思考中）。
-                        let thinkingActiveNow = false;
-                        for (let i = processBlocks.length - 1; i >= 0; i--) {
-                          const b = processBlocks[i];
-                          if (b.type === "text" || b.type === "file_change") {
-                            continue;
-                          }
-                          thinkingActiveNow = b.type === "thinking";
-                          break;
-                        }
+                        // 「思考中」脉冲只在**最后到达的那个块确实是思考**时才亮。
+                        //
+                        // 旧实现从尾部往前扫、**跳过 text / file_change 块**，于是
+                        // 「思考 → 正文」这个最常见的收尾形态里，正文正在流式输出时
+                        // 最后那个非文本块仍是 thinking ⇒ 思考卡一直脉冲「思考中」。
+                        // 叠加"收尾正文被提到过程卡下方"的排布，用户看到的顺序就变成
+                        // 「思考中（卡内最后一项）→ 总结（卡下方）」——正是
+                        // "思考中为什么不是最后、而是 思考中 总结 思考完成" 的由来。
+                        // 模型在写正文/跑工具时不处在思考状态，这里必须如实反映。
+                        const lastProcessBlock =
+                          processBlocks[processBlocks.length - 1];
+                        const thinkingActiveNow =
+                          lastProcessBlock?.type === "thinking";
                         return (
                           <>
                             <details
@@ -8955,21 +9318,6 @@ export function AgentFlowPanel() {
                                 active={streamingActive}
                                 dependency={displayResponseBlocks}
                               >
-                                {showStreamThinking && (
-                                  <ThinkingFold
-                                    content={thinkingBody}
-                                    fontSize={transcriptFontSize}
-                                    active
-                                    status={
-                                      isReconnecting
-                                        ? "重连"
-                                        : thinkingStatus || "思考中"
-                                    }
-                                    searchOpen={conversationSearchOpen}
-                                    searchQuery={conversationSearchQuery}
-                                    isSearchActive={false}
-                                  />
-                                )}
                                 {processSegments.map((seg, si) => {
                                   // 交替段渲染：思考段一张 ThinkingFold，工具段
                                   // 平铺工具卡，文本段渲染 markdown。
@@ -8985,6 +9333,15 @@ export function AgentFlowPanel() {
                                     if (!segContent.trim()) return null;
                                     const isLastSeg =
                                       si === processSegments.length - 1;
+                                    // 只有"**整条消息的最后一块**就在这一段里、且它是
+                                    // 思考"时才脉冲。少了 `trailingSegments.length === 0`
+                                    // 这个条件时：「思考 → 正文 → 工具 → 又一段思考」这种
+                                    // 轮次里，卡片内最后那段**旧**思考会一直脉冲「思考中」，
+                                    // 而真正在思考的那一段（排在卡片下方的尾段区）反而显示
+                                    // 成「思考」——用户看到的就是「思考中 在上面、思考 在
+                                    // 下面」。脉冲必须跟着最新内容走。
+                                    const isNewestSegment =
+                                      isLastSeg && trailingSegments.length === 0;
                                     return (
                                       <ThinkingFold
                                         key={si}
@@ -8993,9 +9350,9 @@ export function AgentFlowPanel() {
                                         active={
                                           streamingActive &&
                                           thinkingActiveNow &&
-                                          isLastSeg
+                                          isNewestSegment
                                         }
-                                        streaming={streamingActive && isLastSeg}
+                                        streaming={streamingActive && isNewestSegment}
                                         searchOpen={conversationSearchOpen}
                                         searchQuery={conversationSearchQuery}
                                         isSearchActive={false}
@@ -9239,10 +9596,22 @@ export function AgentFlowPanel() {
                                         ),
                                       );
                                       if (!c.trim()) return null;
+                                      // 尾段区里的思考：只有当它是**整条消息最新的
+                                      // 那一段**（最后一段尾段）且此刻真的在思考时才
+                                      // 脉冲——它才是「思考中」的归属者（卡片内那段
+                                      // 旧思考的脉冲已在上面被排除）。
+                                      const isLastTrail =
+                                        si === trailingSegments.length - 1;
                                       return (
                                         <ThinkingFold
                                           content={c}
                                           fontSize={transcriptFontSize}
+                                          active={
+                                            streamingActive &&
+                                            thinkingActiveNow &&
+                                            isLastTrail
+                                          }
+                                          streaming={streamingActive && isLastTrail}
                                           searchOpen={conversationSearchOpen}
                                           searchQuery={conversationSearchQuery}
                                           isSearchActive={false}
@@ -9340,6 +9709,21 @@ export function AgentFlowPanel() {
                                   )}
                                 </div>
                               ))}
+                              {showStreamThinking && (
+                                <ThinkingFold
+                                  content={thinkingBody}
+                                  fontSize={transcriptFontSize}
+                                  active
+                                  status={
+                                    isReconnecting
+                                      ? "重连"
+                                      : thinkingStatus || "思考中"
+                                  }
+                                  searchOpen={conversationSearchOpen}
+                                  searchQuery={conversationSearchQuery}
+                                  isSearchActive={false}
+                                />
+                              )}
                             </div>
                           </>
                         );
@@ -9413,10 +9797,16 @@ export function AgentFlowPanel() {
               {streamingActive && (
                 isReconnecting ? (
                   <div className="flex items-center gap-1.5 px-1 py-1 text-amber-500/90 text-xs">
+                    <span className="shrink-0">
+                      限流{" "}
+                      <span className="tabular-nums opacity-80">
+                        {sessionRetry?.attempt ?? connectionNotice?.attempt ?? 1}/
+                        {sessionRetry?.total ?? connectionNotice?.total ?? 5}
+                      </span>
+                    </span>
                     <div className="h-0.5 flex-1 rounded-full overflow-hidden bg-amber-500/15">
                       <div className="h-full w-1/3 rounded-full bg-amber-500/70 animate-[reconnect-slide_1.2s_ease-in-out_infinite]" />
                     </div>
-                    <span className="shrink-0">限流重试中</span>
                   </div>
                 ) : (
                   <div className="conversation-scan-line" />
@@ -9487,6 +9877,7 @@ export function AgentFlowPanel() {
               </div>
             )}
             <div className="w-full max-w-[700px] mx-auto">
+              {renderQueueList()}
               {renderChatInput()}
             </div>
           </div>

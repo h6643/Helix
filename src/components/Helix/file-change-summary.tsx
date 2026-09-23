@@ -9,7 +9,7 @@ import {
 } from "./diff-preview";
 import type { PendingChange } from "@/stores/helix-types";
 
-function DiffBody({ change }: { change: PendingChange }) {
+export function DiffBody({ change }: { change: PendingChange }) {
   const fallbackDiff = useMemo(
     () => computeDiff(change.oldContent || "", change.newContent || ""),
     [change.oldContent, change.newContent],

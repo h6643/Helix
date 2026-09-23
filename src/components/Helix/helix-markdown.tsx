@@ -472,27 +472,9 @@ export function CodeCard({
       {/* 代码内容区域：透明背景（helix-code-body：globals.css 恢复被
           .helix-md pre > div { padding:0 } 清零的左右内边距） */}
       <div className="px-3 py-2 bg-transparent helix-code-body">
-        <div className={foldable && collapsed ? "helix-code-collapsed" : ""}>
+        <div>
           {body}
         </div>
-        {foldable && (
-          <button
-            type="button"
-            className="helix-code-expand-btn"
-            onClick={() =>
-              setCollapsed((prev) => {
-                const next = !prev;
-                if (blockId) {
-                  if (next) expandedCodeBlocks.delete(blockId);
-                  else expandedCodeBlocks.add(blockId);
-                }
-                return next;
-              })
-            }
-          >
-            {collapsed ? "展开全部" : "收起"}
-          </button>
-        )}
       </div>
     </pre>
   );

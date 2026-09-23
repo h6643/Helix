@@ -449,7 +449,9 @@ pub fn apply_pi_provider_models(
     base_url: &str,
     api_key: Option<&str>,
     api: &str,
-    models: &[(String, Option<u64>)],
+    // (id, context_window, reasoning): reasoning == Some(true) turns the model's
+    // thinking mode ON in pi's models.json; None leaves any existing flag untouched.
+    models: &[(String, Option<u64>, Option<bool>)],
 ) -> (bool, bool) {
     let pi_provider = provider.trim();
     let base = base_url.trim().trim_end_matches('/');
@@ -460,8 +462,8 @@ pub fn apply_pi_provider_models(
     };
     let default_model = models
         .iter()
-        .find(|(id, _)| !id.trim().is_empty())
-        .map(|(id, _)| id.trim().to_string());
+        .find(|(id, _, _)| !id.trim().is_empty())
+        .map(|(id, _, _)| id.trim().to_string());
     if pi_provider.is_empty() || base.is_empty() || default_model.is_none() {
         return (false, false);
     }
@@ -507,7 +509,7 @@ pub fn apply_pi_provider_models(
         .and_then(|v| v.as_array())
         .map(|arr| arr.clone())
         .unwrap_or_default();
-    for (id, context_window) in models {
+    for (id, context_window, reasoning) in models {
         let id = id.trim().to_string();
         if id.is_empty() {
             continue;
@@ -521,6 +523,9 @@ pub fn apply_pi_provider_models(
         entry["name"] = serde_json::Value::String(id);
         if let Some(cw) = context_window {
             entry["contextWindow"] = serde_json::json!(cw);
+        }
+        if *reasoning == Some(true) {
+            entry["reasoning"] = serde_json::json!(true);
         }
         if entry.get("maxTokens").and_then(|v| v.as_u64()).is_none() {
             entry["maxTokens"] = serde_json::json!(65536);
@@ -582,6 +587,154 @@ pub fn apply_pi_provider_models(
         write_pi_models(&models_doc);
     }
     (changed, key_changed)
+}
+
+/// Register / refresh ONE provider's entry in pi's models.json **without**
+/// touching settings.json's defaultProvider/defaultModel and **without**
+/// respawning pi.
+///
+/// The chat input's per-conversation model switch uses this: the provider must
+/// be known to pi so a later per-session set_model can select it, but the
+/// GLOBAL default must stay whatever the Settings page set. Writing the default
+/// here (apply_pi_provider_models does) makes the last input-bar selection the
+/// default for every conversation that has no per-session override — "所有对话
+/// 共享一个模型配置".
+///
+/// Same merge semantics as apply_pi_provider_models (bundled entries survive a
+/// re-save); only the settings.json write is dropped. Returns whether models.json
+/// was actually rewritten. pi snapshots models.json at instance startup, so a
+/// brand-new endpoint only reaches the NEXT instance — an already-registered
+/// provider is usable immediately.
+pub fn register_pi_provider_models(
+    provider: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    api: &str,
+    // (id, context_window, reasoning): reasoning == Some(true) turns the model's
+    // thinking mode ON in pi's models.json; None leaves any existing flag untouched.
+    models: &[(String, Option<u64>, Option<bool>)],
+) -> bool {
+    let pi_provider = provider.trim();
+    let base = base_url.trim().trim_end_matches('/');
+    if pi_provider.is_empty() || base.is_empty() {
+        return false;
+    }
+
+    let mut models_doc = read_pi_models();
+    if models_doc
+        .get("providers")
+        .and_then(|v| v.as_object())
+        .is_none()
+    {
+        models_doc["providers"] = serde_json::json!({});
+    }
+    let old_entry: serde_json::Value = models_doc
+        .pointer(&format!("/providers/{pi_provider}"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    // 空 api = 调用方未指定协议（聊天选模型等）→ 保留 models.json 已有的
+    // api；只有设置页显式传入才覆盖。避免一次模型切换把用户设好的
+    // openai-completions / anthropic-messages 冲成默认值。
+    let api = {
+        let caller = api.trim();
+        if caller.is_empty() {
+            old_entry
+                .get("api")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("openai-completions")
+                .to_string()
+        } else {
+            caller.to_string()
+        }
+    };
+
+    // Keep the stored key when the caller sent nothing — a model switch must
+    // never rotate a live credential to an empty string.
+    let mut new_key = api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_default();
+    if new_key.is_empty() {
+        new_key = pi_provider_api_key(pi_provider);
+    }
+
+    let mut entries: Vec<serde_json::Value> = old_entry
+        .get("models")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.clone())
+        .unwrap_or_default();
+    for (id, context_window, reasoning) in models {
+        let id = id.trim().to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let mut entry = entries
+            .iter()
+            .position(|m| m.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
+            .map(|i| entries.remove(i))
+            .unwrap_or_else(|| serde_json::json!({ "id": id }));
+        entry["id"] = serde_json::Value::String(id.clone());
+        entry["name"] = serde_json::Value::String(id);
+        if let Some(cw) = context_window {
+            entry["contextWindow"] = serde_json::json!(cw);
+        }
+        if *reasoning == Some(true) {
+            entry["reasoning"] = serde_json::json!(true);
+        }
+        if entry.get("maxTokens").and_then(|v| v.as_u64()).is_none() {
+            entry["maxTokens"] = serde_json::json!(65536);
+        }
+        entries.push(entry);
+    }
+    if entries.is_empty() {
+        return false;
+    }
+
+    // settings.json is deliberately NOT compared or written here — that is what
+    // keeps the global default under Settings-page control.
+    let endpoint_changed = old_entry
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        != base
+        || old_entry
+            .get("api")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            != api.as_str();
+    let models_changed = old_entry
+        .get("models")
+        .and_then(|v| v.as_array())
+        .map(|old| {
+            serde_json::Value::Array(old.clone()) != serde_json::Value::Array(entries.clone())
+        })
+        .unwrap_or(true);
+    let key_changed = !new_key.is_empty() && new_key != pi_provider_api_key(pi_provider);
+    if !endpoint_changed && !models_changed && !key_changed {
+        return false;
+    }
+
+    let mut provider_entry = serde_json::json!({
+        "baseUrl": base,
+        "api": api,
+        "models": entries,
+    });
+    if !new_key.is_empty() {
+        provider_entry["apiKey"] = serde_json::Value::String(new_key.clone());
+    }
+    // Preserve extra fields the user may have set (compat, headers, …).
+    if let Some(old) = old_entry.as_object() {
+        for (k, v) in old {
+            if !provider_entry.as_object().unwrap().contains_key(k) {
+                provider_entry[k] = v.clone();
+            }
+        }
+    }
+    models_doc["providers"][pi_provider] = provider_entry;
+    write_pi_models(&models_doc);
+    true
 }
 
 /// Write model/provider/baseUrl/apiKey from the Settings page. Returns

@@ -124,6 +124,19 @@ export interface ConnectionNotice {
   ts: number;
 }
 
+// Per-conversation limit/retry state. The backend's model-retry / gateway-retry
+// signals are emitted WITHOUT a session tag, so a conversation-scoped
+// key (conversationId) is attached on the frontend while the run loop is
+// handling the event. Kept per session so two parallel runs don't clobber
+// each other's "限流重试中" banner.
+export interface SessionRetryInfo {
+  phase: "retrying" | "error" | "recovered";
+  attempt?: number;
+  total?: number;
+  message: string;
+  ts: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -266,6 +279,11 @@ export interface ApiProfile {
   config: ApiConfig;
   /** All models available under this provider. The first entry is the default. */
   models?: string[];
+  /** 每个模型各自的 contextWindow（models 数组只存 id，per-model 窗口
+   *  之前从不落盘——重开编辑时被 `p.models.map(id => ({id}))` 剥掉，
+   *  再保存就送 undefined，后端 256_000 回退把用户填的值重置掉。
+   *  键 = 模型 id。 */
+  modelContextWindows?: Record<string, number>;
 }
 
 /**

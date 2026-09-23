@@ -17,9 +17,10 @@ import {
 import { loadLanguage } from "@uiw/codemirror-extensions-langs";
 import CodeMirror from "@uiw/react-codemirror";
 import { FileCode2, AlertTriangle } from "lucide-react";
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { electronFS } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
+import { DiffBody } from "./file-change-summary";
 
 /* ── 跳转定位高亮（「已修改」卡片点文件名 → 滚到改动处并闪一下） ──────────
  * 用 StateField 而不是 ViewPlugin：行装饰（Decoration.line）允许由状态字段
@@ -148,8 +149,20 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
   const updateEditorTabContent = useHelixStore((s) => s.updateEditorTabContent);
   const markEditorTabSaved = useHelixStore((s) => s.markEditorTabSaved);
   const showToast = useHelixStore((s) => s.showToast);
+  const pendingChanges = useHelixStore((s) => s.pendingChanges);
 
   const active = editorTabs.find((t) => t.id === activeId) || null;
+  // 当前文件对应的 pending change（如果有）。用于 diff 视图 + 工具卡片统计。
+  const activeChange = useMemo(() => {
+    if (!active) return null;
+    return pendingChanges.find(
+      (c) => c.filePath === active.id || c.fileName === active.name,
+    ) ?? null;
+  }, [active, pendingChanges]);
+  // 差异视图开关：仅当该文件有 pending change 时可用。
+  // 切换文件时重置为编辑器视图（差异视图是临时查看，不应跨文件保持）。
+  const [showDiff, setShowDiff] = useState(false);
+  useEffect(() => { setShowDiff(false); }, [activeId]);
   const reveal = useHelixStore((s) => s.editorReveal);
   const viewRef = useRef<EditorView | null>(null);
   // 已消费的 nonce：同一条请求只处理一次（否则切走再切回来会重新滚动）。
@@ -307,31 +320,55 @@ export function CodeEditorPanel({ onClose }: { onClose: () => void }) {
       {/* Editor — the file name / close live in the unified right-sidebar tab
           strip (one row), so there is no duplicate per-file tab bar here. */}
       <div className="flex-1 min-h-0 overflow-hidden">
-        <CodeMirror
-          value={active.content}
-          height="100%"
-          theme={themeMode}
-          extensions={langExt}
-          onCreateEditor={(view) => {
-            viewRef.current = view;
-          }}
-          onChange={(val) => updateEditorTabContent(active.id, val)}
-          basicSetup={{
-            lineNumbers: true,
-            highlightActiveLine: true,
-            highlightActiveLineGutter: true,
-            foldGutter: true,
-            autocompletion: true,
-            bracketMatching: true,
-            indentOnInput: true,
-          }}
-          style={{
-            height: "100%",
-            fontSize: "var(--helix-font-size, 13px)",
-            fontFamily: "var(--helix-font-family, monospace)",
-          }}
-        />
+        {showDiff && activeChange ? (
+          <div className="h-full overflow-y-auto px-2 py-2">
+            <DiffBody change={activeChange} />
+          </div>
+        ) : showDiff && !activeChange ? (
+          <div className="h-full flex items-center justify-center text-muted-foreground/50">
+            <p className="text-[length:var(--helix-transcript-size)]">
+              该文件无变更记录
+            </p>
+          </div>
+        ) : (
+          <CodeMirror
+            value={active.content}
+            height="100%"
+            theme={themeMode}
+            extensions={langExt}
+            onCreateEditor={(view) => {
+              viewRef.current = view;
+            }}
+            onChange={(val) => updateEditorTabContent(active.id, val)}
+            basicSetup={{
+              lineNumbers: true,
+              highlightActiveLine: true,
+              highlightActiveLineGutter: true,
+              foldGutter: true,
+              autocompletion: true,
+              bracketMatching: true,
+              indentOnInput: true,
+            }}
+            style={{
+              height: "100%",
+              fontSize: "var(--helix-font-size, 13px)",
+              fontFamily: "var(--helix-font-family, monospace)",
+            }}
+          />
+        )}
       </div>
+
+      {/* 差异视图切换（仅当文件有 pending change 时显示） */}
+      {activeChange && (
+        <div className="shrink-0 flex items-center justify-end gap-2 px-2 py-1 border-t border-border/20 bg-muted/20">
+          <button
+            onClick={() => setShowDiff((v) => !v)}
+            className={`px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] rounded transition-colors ${showDiff ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground hover:text-foreground hover:bg-accent/50"}`}
+          >
+            {showDiff ? "代码" : "差异"}
+          </button>
+        </div>
+      )}
 
       {pendingClose && (
         <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/40">

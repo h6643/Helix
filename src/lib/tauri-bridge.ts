@@ -279,6 +279,8 @@ function buildTauriAPI(): ElectronAPI {
     setDelegationIdentities: (identities: unknown) =>
       invoke("helix_set_delegation_identities", { identities }),
     setModel: (params: unknown) => invoke("helix_set_model", { params }),
+    registerProviderModels: (config: unknown) =>
+      invoke("helix_register_provider_models", { config }),
     fetchModels: (params: { baseUrl: string; apiKey: string }) =>
       invoke("helix_fetch_models", {
         baseUrl: params.baseUrl,

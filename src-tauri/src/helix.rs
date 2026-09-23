@@ -7,8 +7,9 @@
 //! takes effect).
 
 use crate::config::{
-    apply_pi_provider_models, atomic_write, read_helix_config, set_model as config_set_model,
-    set_yaml_key, write_helix_config, HelixConfig,
+    apply_pi_provider_models, atomic_write, read_helix_config,
+    register_pi_provider_models, set_model as config_set_model, set_yaml_key,
+    write_helix_config, HelixConfig,
 };
 use crate::gateway::restart_gateway_soon;
 use crate::pi_gateway;
@@ -261,7 +262,7 @@ pub fn helix_set_provider_models(state: State<'_, Arc<AppState>>, config: Value)
         .and_then(|v| v.as_str())
         .unwrap_or("openai-completions")
         .to_string();
-    let models: Vec<(String, Option<u64>)> = config
+    let models: Vec<(String, Option<u64>, Option<bool>)> = config
         .get("models")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -275,7 +276,12 @@ pub fn helix_set_provider_models(state: State<'_, Arc<AppState>>, config: Value)
                     if id.is_empty() {
                         return None;
                     }
-                    Some((id, m.get("contextWindow").and_then(|v| v.as_u64())))
+                    let reasoning = m.get("reasoning").and_then(|v| v.as_bool());
+                    Some((
+                        id,
+                        m.get("contextWindow").and_then(|v| v.as_u64()),
+                        reasoning,
+                    ))
                 })
                 .collect()
         })
@@ -355,6 +361,76 @@ pub fn helix_set_model(state: State<'_, Arc<AppState>>, params: Option<Value>) -
         restart_gateway_soon(&arc);
     }
     json!({ "success": true, "applied": true })
+}
+
+/// Register a provider + its model list into pi's models.json WITHOUT changing
+/// pi's default model and WITHOUT respawning the gateway.
+///
+/// Used by the chat input's per-conversation model switch. Unlike
+/// `helix_set_model` this must not write settings.json's defaultProvider/
+/// defaultModel and must not `restart_gateway_soon`: both would turn the last
+/// input-bar selection into the global default (every conversation then shares
+/// one model) and would kill in-flight runs in other conversations. The actual
+/// per-conversation selection travels as a per-session `set_model` from
+/// handleRun, routed by session_id.
+///
+/// `models`: array of `{ id, contextWindow? }`.
+///
+/// The `_state` binding is there only because tauri::command requires a State
+/// argument to give the macro a concrete Deserialize type; this command itself
+/// only touches pi's files.
+#[tauri::command]
+pub fn helix_register_provider_models(
+    _state: State<'_, Arc<AppState>>,
+    config: Value,
+) -> Value {
+    let provider = config
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let base_url = config
+        .get("baseUrl")
+        .or_else(|| config.get("base_url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let api_key = config
+        .get("apiKey")
+        .or_else(|| config.get("api_key"))
+        .and_then(|v| v.as_str());
+    // 空串 = 调用方未指定协议（如聊天选模型只注册模型 id）：
+    // register_pi_provider_models 会保留 models.json 里已有的 api，而不是
+    // 用 openai-completions 覆盖。只有设置页显式传 api 才改格式。
+    let api = config
+        .get("api")
+        .or_else(|| config.get("apiFormat"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let models: Vec<(String, Option<u64>, Option<bool>)> = config
+        .get("models")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|m| {
+                    (
+                        m.get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        m.get("contextWindow")
+                            .or_else(|| m.get("context_window"))
+                            .and_then(|v| v.as_u64()),
+                        m.get("reasoning").and_then(|v| v.as_bool()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let wrote = register_pi_provider_models(&provider, &base_url, api_key, &api, &models);
+    json!({ "success": true, "wrote": wrote })
 }
 
 /// Live config push from the renderer (personality / reasoning effort / fast

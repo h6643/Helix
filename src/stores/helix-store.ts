@@ -20,6 +20,7 @@ import type {
   StreamingResponseBlock,
   StreamingDraft,
   ConnectionNotice,
+  SessionRetryInfo,
   ChatMessage,
   EditorTab,
   CursorPosition,
@@ -361,6 +362,12 @@ interface HelixState
   clearStreamingDraft: (sessionId: string) => void;
   connectionNotice: ConnectionNotice | null;
   setConnectionNotice: (notice: ConnectionNotice | null) => void;
+  /** Per-conversation retry/limit state — see SessionRetryInfo. */
+  sessionRetryNotices: Record<string, SessionRetryInfo>;
+  setSessionRetryNotice: (
+    sessionId: string,
+    notice: SessionRetryInfo | null,
+  ) => void;
   agentExecutionSteps: Array<{
     type: string;
     toolName?: string;
@@ -1360,6 +1367,21 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   setPendingUpdate: (version) => set({ pendingUpdate: version }),
   connectionNotice: null,
   setConnectionNotice: (notice) => set({ connectionNotice: notice }),
+  sessionRetryNotices: {},
+  setSessionRetryNotice: (sessionId, notice) =>
+    set((state) => {
+      if (notice) {
+        return {
+          sessionRetryNotices: {
+            ...state.sessionRetryNotices,
+            [sessionId]: notice,
+          },
+        };
+      }
+      const rest = { ...state.sessionRetryNotices };
+      delete rest[sessionId];
+      return { sessionRetryNotices: rest };
+    }),
   setStreamingDraft: (sessionId, draft) =>
     set((state) => {
       const existing = state.streamingDrafts[sessionId] || {
@@ -3527,6 +3549,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             timestamp: m.timestamp,
             isStreaming: m.isStreaming ?? false,
             fileChanges: m.fileChanges,
+            // Sent-message attachments: without these, reload drops pasted
+            // images/files that only lived on the in-memory ChatMessage.
+            images: m.images,
+            files: m.files,
           })),
           sessionId,
         ),
@@ -3590,6 +3616,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         ),
         persistence.saveSetting("selectedWorkDir", state.selectedWorkDir),
         persistence.saveSetting("hasOnboarded", state.hasOnboarded),
+        // Unsent composer attachments (pasted images / dropped files / link
+        // cards) — without this they only live in memory and die on restart.
+        persistence.saveSetting("tabAttachments", state.tabAttachments),
       ]);
     } catch (e) {
       logError("Failed to persist:", e);
@@ -3700,6 +3729,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         contextUsage,
         externalServices,
         compressionRecordsBySession,
+        tabAttachments,
       ] = await Promise.all([
         safeLoad(persistence.loadMemories(), "memories"),
         safeLoad(persistence.loadTasks(), "tasks"),
@@ -3902,6 +3932,19 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             > | null
           >("compressionRecords"),
           "compressionRecords",
+        ),
+        safeLoad(
+          persistence.loadSetting<
+            Record<
+              string,
+              {
+                images: ImageAttachment[];
+                files: FileAttachment[];
+                links: LinkAttachment[];
+              }
+            >
+          >("tabAttachments"),
+          "tabAttachments",
         ),
       ]);
 
@@ -4458,6 +4501,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         externalServices: (externalServices || []).filter(
           (s) => s && typeof s.id === "string" && typeof s.host === "string",
         ),
+        // Unsent composer attachments restored from disk (F3: pasted images
+        // survive restart). Empty object stays empty — no phantom drafts.
+        tabAttachments: tabAttachments ?? get().tabAttachments,
         customShortcuts: (() => {
           const customizedIds = new Set(customizedIdsArr || []);
           const defaults = { ...DEFAULT_SHORTCUTS };

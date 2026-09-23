@@ -790,6 +790,56 @@ fn index_remove(conversation_ids: &[String]) -> usize {
     removed
 }
 
+/// `conversation → sid` 方向的反查：前端 sessionMap 里的条目被清空（sid=""）
+/// 或整条丢失后，用它把绑定找回来。
+///
+/// 索引是 `sid → [conversation]` 的哈希表，反查要扫全表 —— 表很小（每个
+/// 绑定一条），O(entries) 可忽略。
+///
+/// 同一个 conversation 历史上可能绑过多个 sid（/clear、重建会让它换新 sid），
+/// 而这里返回的**每一个都是可 resume 的候选**：新的优先（jsonl 更可能是活的），
+/// 调用方逐个 try，第一个成功的就接回去。所以不返回单一 sid。
+fn index_lookup_conversation(conversation_id: &str) -> Value {
+    let Some(path) = conversation_index_path() else {
+        return json!({ "found": false });
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return json!({ "found": false });
+    };
+    let Ok(index) =
+        serde_json::from_str::<HashMap<String, Vec<ConversationIndexEntry>>>(&raw)
+    else {
+        return json!({ "found": false });
+    };
+    let mut hits: Vec<(&String, u64)> = Vec::new();
+    for (sid, list) in &index {
+        for e in list {
+            if e.conversation_id == conversation_id {
+                hits.push((sid, e.ts));
+            }
+        }
+    }
+    if hits.is_empty() {
+        return json!({ "found": false });
+    }
+    hits.sort_by(|a, b| b.1.cmp(&a.1));
+    let session_ids: Vec<&String> = hits.iter().map(|(sid, _)| *sid).collect();
+    log_spawn_diag(&format!(
+        "index_lookup_conversation: {} -> {} candidate(s) {:?}",
+        conversation_id,
+        session_ids.len(),
+        session_ids
+            .iter()
+            .map(|s| s.chars().take(8).collect::<String>())
+            .collect::<Vec<_>>()
+    ));
+    json!({
+        "found": true,
+        "conversation_id": conversation_id,
+        "session_ids": session_ids,
+    })
+}
+
 fn index_lookup(session_id: &str) -> Value {
     let Some(path) = conversation_index_path() else {
         return json!({ "found": false });
@@ -1988,6 +2038,17 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .ok_or("session/index_get is missing session_id")?
                 .to_string();
             Ok(index_lookup(&session_id))
+        }
+        "session/index_lookup_conversation" => {
+            // conversation → sid 反查（前端「有本地历史但无 SID」时的兜底）。
+            // 以前前端就在调这个名字，但网关没有这个分支 → 每次都是 unknown
+            // method → 反查恒失败 → 那种对话一律被判"永久失效"。
+            let conversation_id = params
+                .get("conversation_id")
+                .and_then(Value::as_str)
+                .ok_or("session/index_lookup_conversation is missing conversation_id")?
+                .to_string();
+            Ok(index_lookup_conversation(&conversation_id))
         }
         "session/index_del" => {
             // 删除对话时同步清理反向索引：按前端 conversation_id 全表移除，
@@ -4679,6 +4740,44 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         })
                         .unwrap_or(Value::Null);
                     if !tool_call_id.is_empty() {
+                        // write 的 diff 只能由网关事后合成（pi 的 write 结果里没有
+                        // diff，只有一句 "Successfully wrote to …"），合成依赖两样
+                        // 在 **工具执行前** 拿到的东西：完整 args（path + content）和
+                        // 覆盖前的旧内容。原来这两样只在 `tool_execution_start` 里抓，
+                        // 那个事件一旦缺失/迟到，write 卡片就永远没有 diff（实测症状：
+                        // 卡片里只剩一整篇「要写入的内容」预览）。`toolcall_end` 已经
+                        // 带着完整 arguments 而且必然早于执行 —— 在这里也备一份兜底。
+                        let call_name = tool_call
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if (call_name == "write" || call_name == "edit")
+                            && raw_input.is_object()
+                            && !instance
+                                .exec_tool_args
+                                .lock()
+                                .unwrap()
+                                .contains_key(&tool_call_id)
+                        {
+                            instance
+                                .exec_tool_args
+                                .lock()
+                                .unwrap()
+                                .insert(tool_call_id.clone(), raw_input.clone());
+                            if call_name == "write" {
+                                if let Some(path) = arg_path(&raw_input) {
+                                    let prior = read_prior_file_content(instance, path);
+                                    if let Some(prior) = prior {
+                                        instance
+                                            .exec_file_prior
+                                            .lock()
+                                            .unwrap()
+                                            .entry(tool_call_id.clone())
+                                            .or_insert(prior);
+                                    }
+                                }
+                            }
+                        }
                         emit_helix_event(
                             "session/update",
                             &json!({
@@ -5060,6 +5159,21 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 // 前端 write 卡片出不了 +N −n。用 execution_start 缓存的 args（path +
                 // content）**加上那一刻读到的旧内容**在网关侧合成真 diff。
                 if picked.is_empty() && tool_name == "write" && !is_error {
+                    // 诊断（每次 write 一行）：写入 diff 的合成链有四环——有没有
+                    // args（来自 execution_start / toolcall_end）、有没有 content、
+                    // 有没有读到覆盖前的旧内容、最终生成了多少字节的 patch。任何一环
+                    // 断掉症状都是"写入卡片没有 diff"，这行日志直接指出是哪一环。
+                    log_spawn_diag(&format!(
+                        "write-diff: id={} args={} content={} prior={}",
+                        tool_call_id,
+                        if arg_path(&exec_args).is_some() { "有" } else { "缺" },
+                        if exec_args.get("content").and_then(Value::as_str).is_some() { "有" } else { "缺" },
+                        match &prior_entry {
+                            None => "未知",
+                            Some(None) => "不存在(新建)",
+                            Some(Some(_)) => "读到",
+                        }
+                    ));
                     if let Some(path) = arg_path(&exec_args) {
                         if let Some(text) = exec_args.get("content").and_then(Value::as_str) {
                             // prior_entry: Some(None)=新建 / Some(Some)=旧内容 /
@@ -5073,6 +5187,12 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                                     if patch.len() > MAX_DIFF_BYTES {
                                         truncated_diff = true;
                                     }
+                                    log_spawn_diag(&format!(
+                                        "write-diff: id={} → patch {} 字节（{}）",
+                                        tool_call_id,
+                                        patch.len(),
+                                        if prior_entry.is_none() { "undoUnsafe" } else { "可撤销" }
+                                    ));
                                     picked.insert(
                                         "patch".to_string(),
                                         Value::String(truncate_diff(patch)),
@@ -5086,8 +5206,25 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                                 }
                                 // 内容与旧文件完全一致：这次 write 什么都没改，
                                 // 不该出现在「已修改」里。
-                                None => {}
+                                None => {
+                                    log_spawn_diag(&format!(
+                                        "write-diff: id={} → 内容与旧文件一致，不登记",
+                                        tool_call_id
+                                    ));
+                                }
                             }
+                        }
+                    }
+                }
+                // 文件身份的**权威来源**：工具参数里的目标路径。前端「已修改」
+                // 卡片用它决定"这次改了哪个文件"，不再从 diff 文本里猜——推断
+                // 曾把 diff 正文里的注释 `// 布局：chat → panel → …` 当成标签行，
+                // 解析出"文件" `布局：chat`，卡片里凭空多出一个模型从没生成过
+                // 的文件。edit/write 的参数名都是 `path`（arg_path 兼容别名）。
+                if is_diff_tool {
+                    if let Some(p) = arg_path(&exec_args) {
+                        if !p.is_empty() {
+                            picked.insert("path".to_string(), Value::String(p.to_string()));
                         }
                     }
                 }

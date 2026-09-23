@@ -253,9 +253,6 @@ export function ApiSettings({
     }
   }, [settingsPage, setSettingsPage]);
   const [localConfig, setLocalConfig] = useState<ApiConfig>({ ...apiConfig });
-  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
-    new Set(),
-  );
   const [appVersion, setAppVersion] = useState("");
   useEffect(() => {
     getCurrentVersion().then((v) => v && setAppVersion(v));
@@ -328,6 +325,33 @@ export function ApiSettings({
     setLocalConfig({ ...apiConfig });
   }, [apiConfig]);
 
+  // Profile 只存模型 id 字符串，contextWindow / reasoning 不在 profile 里。
+  // 重新灌入 addedModels 时必须保留内存里已有的 per-model 元数据，否则
+  // 保存触发 apiProfiles 变化 → 下方 effect 一跑就把它们洗成 { id }。
+  // 冷启动（prev 为空）时回退到 profile 落盘的 modelContextWindows：
+  // 若不单独存一份映射，重开编辑时 per-model 窗口全丢，再保存就送
+  // undefined，后端 256_000 回退把用户填过的值重置掉
+  // （"我之前填的上下文窗口被改掉了"根因）。
+  const seedAddedModels = useCallback(
+    (ids: string[], persistedWindows?: Record<string, number>) => {
+      setAddedModels((prev) =>
+        ids.map((id) => {
+          const old = prev.find((x) => x.id === id);
+          if (old) {
+            return {
+              id,
+              contextWindow: old.contextWindow,
+              reasoning: old.reasoning,
+            };
+          }
+          const cw = persistedWindows?.[id];
+          return cw !== undefined ? { id, contextWindow: cw } : { id };
+        }),
+      );
+    },
+    [],
+  );
+
   // 挂载时把 activeProfile 自动带进供应商列表 + 右侧编辑表单，用户一打开
   // 设置就能看到当前生效的供应商及其已添加的模型，不必先在左侧手动点一下
   // 才把 addedModels 灌进来。保存后 activeProfile 会指向刚保存的那一条，
@@ -339,8 +363,8 @@ export function ApiSettings({
     setSelectedProviderId(p.id);
     setEditingProfileId(p.id);
     setLocalConfig({ ...p.config });
-    setAddedModels((p.models || []).map((id) => ({ id })));
-  }, [activeProfileId, apiProfiles]);
+    seedAddedModels(p.models || [], p.modelContextWindows);
+  }, [activeProfileId, apiProfiles, seedAddedModels]);
 
   // Mirror the backend's actual config when running in Electron so the form
   // shows what Helix is really using.
@@ -407,12 +431,13 @@ export function ApiSettings({
   // 已添加的模型（第一个是默认模型）。每项的 contextWindow 单独落到
   // models.json 里对应模型条目上，所以不能复用 localConfig.contextWindow。
   const [addedModels, setAddedModels] = useState<
-    { id: string; contextWindow?: number }[]
+    { id: string; contextWindow?: number; reasoning?: boolean }[]
   >([]);
   const [showAddModelDialog, setShowAddModelDialog] = useState(false);
   const [pickedModel, setPickedModel] = useState("");
   const [pickedContext, setPickedContext] = useState("");
   const [manualModel, setManualModel] = useState("");
+  const [pickedReasoning, setPickedReasoning] = useState(false);
   type ModelTab = "main" | "vision" | "image";
   const [modelTab, setModelTab] = useState<ModelTab>("main");
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
@@ -498,6 +523,39 @@ export function ApiSettings({
     if (showAddModelModal) void loadPiModels();
   }, [showAddModelModal, loadPiModels]);
 
+  // 挂载即拉一次 pi 的模型列表：per-model 的 contextWindow / reasoning 只
+  // 持久化在 ~/.pi/agent/models.json，profile 重启后只剩 id，冷启动后编辑
+  // 弹窗要靠这份数据回填。
+  useEffect(() => {
+    void loadPiModels();
+  }, [loadPiModels]);
+
+  // 把 pi models.json 里该模型的 contextWindow / reasoning 回填进
+  // addedModels（只补空缺，不覆盖已有值——刚添加还没被 pi 刷新的值优先）。
+  useEffect(() => {
+    if (piModels.length === 0 || addedModels.length === 0) return;
+    const prov = localConfig.provider.trim().replace(/^custom:/, "");
+    setAddedModels((prev) => {
+      let changed = false;
+      const next = prev.map((m) => {
+        if (m.contextWindow !== undefined && m.reasoning !== undefined) return m;
+        const pm =
+          piModels.find(
+            (x) => x.id === m.id && (!prov || x.provider === prov),
+          ) ?? piModels.find((x) => x.id === m.id);
+        if (!pm) return m;
+        const contextWindow = m.contextWindow ?? pm.contextWindow;
+        const reasoning = m.reasoning ?? pm.reasoning;
+        if (contextWindow === m.contextWindow && reasoning === m.reasoning) {
+          return m;
+        }
+        changed = true;
+        return { ...m, contextWindow, reasoning };
+      });
+      return changed ? next : prev;
+    });
+  }, [piModels, addedModels, localConfig.provider]);
+
   /** Providers Pi actually has configured, with their model counts. */
   const piProviders = useMemo(() => {
     const counts = new Map<string, number>();
@@ -535,6 +593,32 @@ export function ApiSettings({
     return [...new Set(scoped.map((m) => m.id))];
   }, [piModels, localConfig.provider]);
 
+  /** Pi's registered wire format for the current provider. When a provider was
+   *  registered in Pi with a format other than the OpenAI default (a pi-messages
+   *  endpoint, anthropic-messages, …), adding/saving a model on this card must
+   *  inherit that format — otherwise Pi falls back to its built-in provider's
+   *  protocol (built-in `anthropic` = anthropic-messages), and an OpenAI-style
+   *  chat endpoint suddenly routes its requests to /v1/messages. */
+  const piFormatForProvider = useMemo(() => {
+    const prov = localConfig.provider.trim().replace(/^custom:/, "");
+    if (!prov) return undefined;
+    const match = piModels.find((m) => m.provider === prov);
+    return match?.api || undefined;
+  }, [piModels, localConfig.provider]);
+
+  /** When Pi reports a format for the selected provider, fill it in ONLY for
+   *  legacy profiles that never stored an apiFormat. Any stored value —
+   *  including the default chat (openai-completions) — is an explicit choice
+   *  and must win: treating chat as "unset" made the card flip back to Pi's
+   *  (possibly stale) registration every time it opened. */
+  useEffect(() => {
+    const fmt = piFormatForProvider;
+    if (!fmt) return;
+    setLocalConfig((prev) =>
+      prev.apiFormat ? prev : { ...prev, apiFormat: fmt },
+    );
+  }, [piFormatForProvider]);
+
   /** Union of the endpoint probe result and Pi's configured list, so neither
    *  source hides the other (probe first — the user asked for it explicitly). */
   const modelOptions = useMemo(() => {
@@ -542,13 +626,6 @@ export function ApiSettings({
     for (const id of piModelIds) if (!out.includes(id)) out.push(id);
     return out;
   }, [availableModels, piModelIds]);
-
-  /** Ids that came from Pi and were NOT in the probe result — tagged in the UI
-   *  so the user can tell which entries the backend already knows about. */
-  const piOnlyIds = useMemo(
-    () => new Set(piModelIds.filter((id) => !availableModels.includes(id))),
-    [piModelIds, availableModels],
-  );
 
   const applyYamlKey = useCallback(
     async (key: string, value: boolean) => {
@@ -776,6 +853,96 @@ export function ApiSettings({
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [apiView, setApiView] = useState<"list" | "edit">("list");
 
+  // API 格式下拉：即时持久化（profile + apiConfig + pi models.json）。
+  // 旧行为只改内存 localConfig，保存按钮又已移除 → 重开设置从 profile
+  // 灌回旧值；聊天选模型 / 添加模型还会把 profile 的旧 apiFormat 写回
+  // models.json，表现为「改成 openai-completions 又变回 anthropic」。
+  const handleApiFormatChange = useCallback(
+    async (fmt: string) => {
+      setLocalConfig((prev) => ({ ...prev, apiFormat: fmt }));
+      const pid = editingProfileId;
+      if (pid) {
+        const p = apiProfiles.find((x) => x.id === pid);
+        if (p) {
+          updateApiProfileConfig(pid, { ...p.config, apiFormat: fmt });
+          const st = useHelixStore.getState();
+          if (st.apiConfig.baseUrl === p.config.baseUrl) {
+            setApiConfig({ apiFormat: fmt });
+          }
+        }
+      }
+      try {
+        await persistToStorage();
+      } catch {
+        /* empty */
+      }
+      const prov = localConfig.provider.trim().replace(/^custom:/, "");
+      if (prov && localConfig.baseUrl.trim()) {
+        void window.electron?.helix
+          ?.registerProviderModels({
+            provider: prov,
+            baseUrl: localConfig.baseUrl.trim(),
+            apiKey: localConfig.apiKey || undefined,
+            api: fmt,
+            models: addedModels
+              .filter((m) => m.id.trim())
+              .map((m) => ({
+                id: m.id.trim(),
+                contextWindow: m.contextWindow,
+                ...(m.reasoning ? { reasoning: true } : {}),
+              })),
+          })
+          ?.catch((e) =>
+            console.warn("[Helix] registerProviderModels failed:", e),
+          );
+      }
+    },
+    [
+      editingProfileId,
+      apiProfiles,
+      updateApiProfileConfig,
+      setApiConfig,
+      persistToStorage,
+      localConfig.provider,
+      localConfig.baseUrl,
+      localConfig.apiKey,
+      addedModels,
+    ],
+  );
+
+  // 一次性对账：旧版 API_FORMATS label/value 错位把「Chat Completions」存成了
+  // anthropic-messages；pi models.json 才是实际跑的协议（用户可能已手改）。
+  // 首次拉到 pi 列表时，若 profile 存的 apiFormat 与 pi 注册值不一致，以 pi 为准
+  // 回写 profile，避免后续保存 / 聊天选模型再把脏值冲回 models.json。
+  const piFormatHealedRef = useRef(false);
+  useEffect(() => {
+    if (
+      piFormatHealedRef.current ||
+      piModels.length === 0 ||
+      apiProfiles.length === 0
+    )
+      return;
+    piFormatHealedRef.current = true;
+    const piApiByProvider = new Map<string, string>();
+    for (const m of piModels) {
+      if (m.provider && m.api && !piApiByProvider.has(m.provider)) {
+        piApiByProvider.set(m.provider, m.api);
+      }
+    }
+    if (piApiByProvider.size === 0) return;
+    let changed = false;
+    for (const p of apiProfiles) {
+      const prov = (p.config.provider || "").trim().replace(/^custom:/, "");
+      if (!prov || !p.config.apiFormat) continue;
+      const piFmt = piApiByProvider.get(prov);
+      if (piFmt && piFmt !== p.config.apiFormat) {
+        updateApiProfileConfig(p.id, { ...p.config, apiFormat: piFmt });
+        changed = true;
+      }
+    }
+    if (changed) void persistToStorage().catch(() => {});
+  }, [piModels, apiProfiles, updateApiProfileConfig, persistToStorage]);
+
   const handleFetchModels = useCallback(async () => {
     // Pi's list needs no credentials, so refresh it unconditionally — it is the
     // list the backend can actually serve.
@@ -920,10 +1087,10 @@ export function ApiSettings({
       setShowModelDropdown(false);
       // 编辑既有供应商时把已保存的模型带进卡片，否则列表会显示为空、
       // 保存一次就把 models 数组清空。
-      setAddedModels((p.models || []).map((id) => ({ id })));
+      seedAddedModels(p.models || [], p.modelContextWindows);
       setApiView("edit");
     },
-    [apiProfiles],
+    [apiProfiles, seedAddedModels],
   );
 
   const handleBackToList = useCallback(() => {
@@ -958,18 +1125,19 @@ export function ApiSettings({
     }
     const newModels = [
       ...addedModels.filter((m) => m.id !== id),
-      { id, contextWindow },
+      { id, contextWindow, reasoning: pickedReasoning || undefined },
     ];
     setAddedModels(newModels);
     setPickedModel("");
     setManualModel("");
     setPickedContext("");
+    setPickedReasoning(false);
     setModelSearch("");
     setShowAddModelDialog(false);
     // 保存按钮已移除：添加模型后立即自动持久化（传入刚更新好的列表，
-    // 避免 state 尚未刷新导致的闭包陈旧）。
+    // 避免 state 尚未刷新的闭包陈旧）。
     void saveApiRef.current?.(newModels);
-  }, [pickedModel, manualModel, pickedContext, addedModels, showToast]);
+  }, [pickedModel, manualModel, pickedContext, pickedReasoning, addedModels, showToast]);
 
   // 保存状态（与「保存 Hooks 配置」一致的行内反馈，不依赖 toast）
   const [apiSaving, setApiSaving] = useState(false);
@@ -1016,6 +1184,17 @@ export function ApiSettings({
     // 第一个模型是默认模型（写入 settings.json 的 defaultModel），其余只进
     // models.json 的模型列表；每个模型的上下文限制落在各自条目上。
     const firstModel = models.find((m) => m.id.trim())!;
+    // 每个模型各自的 contextWindow 必须随 profile 落盘：models 数组只存 id，
+    // 若不单独存一份映射，重开编辑时 `p.models.map(id => ({id}))` 会把所有
+    // per-model 窗口剥掉，再保存就送 undefined → 后端 256_000 回退把用户
+    // 填过的值重置（"我之前填的上下文窗口被改掉了"根因）。
+    const modelContextWindows: Record<string, number> = {};
+    for (const m of models) {
+      const id = m.id.trim();
+      if (id && m.contextWindow !== undefined && Number.isFinite(m.contextWindow)) {
+        modelContextWindows[id] = m.contextWindow;
+      }
+    }
     const finalConfig: ApiConfig = {
       ...localConfig,
       apiFormat: localConfig.apiFormat || DEFAULT_API_FORMAT,
@@ -1030,7 +1209,12 @@ export function ApiSettings({
     // profile or create a new named one.
     const profileName = localConfig.provider.trim().replace(/^custom:/, "") || "配置";
     if (editingProfileId) {
-      updateApiProfileConfig(editingProfileId, finalConfig, profileModels);
+      updateApiProfileConfig(
+        editingProfileId,
+        finalConfig,
+        profileModels,
+        modelContextWindows,
+      );
       renameApiProfile(editingProfileId, profileName);
       setActiveProfile(editingProfileId);
     } else {
@@ -1042,11 +1226,21 @@ export function ApiSettings({
       if (dup) {
         // Same endpoint — reuse that profile and let this card's list be the
         // provider's authoritative model list (deletions in the card apply).
-        updateApiProfileConfig(dup.id, finalConfig, profileModels);
+        updateApiProfileConfig(
+          dup.id,
+          finalConfig,
+          profileModels,
+          modelContextWindows,
+        );
         renameApiProfile(dup.id, profileName);
         setActiveProfile(dup.id);
       } else {
-        const id = addApiProfile(profileName, finalConfig, profileModels);
+        const id = addApiProfile(
+          profileName,
+          finalConfig,
+          profileModels,
+          modelContextWindows,
+        );
         setActiveProfile(id);
       }
     }
@@ -1136,6 +1330,7 @@ export function ApiSettings({
               .map((m) => ({
                 id: m.id.trim(),
                 contextWindow: m.contextWindow,
+                ...(m.reasoning ? { reasoning: true } : {}),
               })),
           });
         }
@@ -1798,10 +1993,11 @@ export function ApiSettings({
         return (
           <div className="flex-1 flex flex-col space-y-6">
             <PageHeader>模型设置</PageHeader>
-            {/* ── Left-right split layout（flex-1：撑满滚动视口剩余高度，三个 tab 高度一致）── */}
-            <div className="flex gap-5 items-stretch">
+            {/* ── Left-right split layout：容器固定高度（不随模型数量变动），左栏绝对定位贴合等高 ── */}
+            <div className="relative h-[460px]">
+              {/* 左栏脱离文档流：inset-y-0 与容器固定高度对齐；列表 flex-1 超出时内部滚动。 */}
               {/* Left sidebar — all models list */}
-              <div className="w-60 shrink-0 flex flex-col rounded-xl border border-border/40 bg-card/60 overflow-hidden">
+              <div className="absolute inset-y-0 left-0 w-60 min-h-0 flex flex-col rounded-xl border border-border/40 bg-card/60 overflow-hidden">
                 <div className="flex-1 overflow-y-auto px-2 py-1 space-y-0.5">
                   <button
                     onClick={() => setModelTab("vision")}
@@ -1849,9 +2045,7 @@ export function ApiSettings({
                           setSelectedProviderId(p.id);
                           setEditingProfileId(p.id);
                           setLocalConfig({ ...p.config });
-                          setAddedModels(
-                            (p.models || []).map((id) => ({ id })),
-                          );
+                          seedAddedModels(p.models || [], p.modelContextWindows);
                           setAvailableModels([]);
                           setShowModelDropdown(false);
                         }}
@@ -1874,7 +2068,7 @@ export function ApiSettings({
                     );
                   })}
                 </div>
-                <div className="px-2 pt-1 mb-4">
+                <div className="px-2 pt-1 mb-4 mt-auto">
                   <Button
                     variant="outline"
                     size="sm"
@@ -1900,12 +2094,15 @@ export function ApiSettings({
                 </div>
               </div>
 
-                {/* Right content */}
-                <div className="flex-1 min-w-0 flex flex-col">
+                {/* Right content：h-full 占满容器固定高度，内容超高时内部滚动 */}
+                <div className="ml-[16.25rem] w-[calc(100%-16.25rem)] h-full min-w-0 min-h-0 flex flex-col overflow-hidden">
                   {modelTab === "main" ? (
                     <>
-                      <SettingGroup className="flex flex-col">
-                    <div className="p-5 space-y-4 flex flex-col">
+                      <SettingGroup
+                        className="flex flex-col flex-1 min-h-0"
+                        bodyClassName="flex flex-col flex-1 min-h-0"
+                      >
+                    <div className="p-5 space-y-4 flex flex-col h-full overflow-y-auto">
                       <div className="flex items-center gap-3">
                         <input
                           type="text"
@@ -1981,12 +2178,7 @@ export function ApiSettings({
                         </label>
                         <PopupSelect
                           value={localConfig.apiFormat || DEFAULT_API_FORMAT}
-                          onChange={(v) =>
-                            setLocalConfig((prev) => ({
-                              ...prev,
-                              apiFormat: v,
-                            }))
-                          }
+                          onChange={(v) => void handleApiFormatChange(v)}
                           placeholder="请选择 API 格式"
                           className="w-full ui-text text-foreground border border-border/50 bg-muted/50 rounded-lg px-3 py-2"
                           options={API_FORMATS}
@@ -2033,6 +2225,7 @@ export function ApiSettings({
                               setPickedModel("");
                               setManualModel("");
                               setPickedContext("");
+                              setPickedReasoning(false);
                               setModelSearch("");
                               setShowAddModelDialog(true);
                             }}
@@ -2056,7 +2249,7 @@ export function ApiSettings({
                                 </span>
                                 {m.contextWindow !== undefined && (
                                   <span className="shrink-0 font-mono text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70">
-                                    {m.contextWindow.toLocaleString()} ctx
+                                    {m.contextWindow.toLocaleString()}
                                   </span>
                                 )}
                                 <button
@@ -2108,10 +2301,38 @@ export function ApiSettings({
                                 <button
                                   type="button"
                                   onClick={() => {
+                                    // 回填旧值：pickedModel 只在“已拉取到模型
+                                    // 列表”时才可见（列表高亮），而列表通常为空
+                                    // → 走手动输入分支。manualModel 同步回填，
+                                    // 编辑弹窗才能显示之前的模型名。
                                     setPickedModel(m.id);
-                                    setManualModel("");
+                                    setManualModel(m.id);
+                                    // 上次“获取”的列表若不含该模型，列表分支里
+                                    // 也看不到旧值（无高亮）——清掉让它回落到
+                                    // 已回填的手动输入分支。
+                                    if (!availableModels.includes(m.id)) {
+                                      setAvailableModels([]);
+                                    }
+                                    // 上下文/思考回填：优先 addedModels 自身，
+                                    // 缺失则回落到 pi models.json 的同名模型。
+                                    const prov = localConfig.provider
+                                      .trim()
+                                      .replace(/^custom:/, "");
+                                    const pm =
+                                      piModels.find(
+                                        (x) =>
+                                          x.id === m.id &&
+                                          (!prov || x.provider === prov),
+                                      ) ?? piModels.find((x) => x.id === m.id);
                                     setPickedContext(
-                                      m.contextWindow ? String(m.contextWindow) : "",
+                                      String(
+                                        m.contextWindow ??
+                                          pm?.contextWindow ??
+                                          "",
+                                      ),
+                                    );
+                                    setPickedReasoning(
+                                      !!(m.reasoning ?? pm?.reasoning),
                                     );
                                     setModelSearch("");
                                     setShowAddModelDialog(true);
@@ -2193,6 +2414,14 @@ export function ApiSettings({
                               <h3 className="ui-title font-semibold text-foreground">
                                 添加模型
                               </h3>
+                              {piFormatForProvider && (
+                                <span
+                                  className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground"
+                                  data-tip="该供应商在 Pi 后端注册的 API 格式（保存模型时自动沿用）"
+                                >
+                                  {piFormatForProvider}
+                                </span>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => setShowAddModelDialog(false)}
@@ -2292,9 +2521,6 @@ export function ApiSettings({
                                     placeholder="获取不到列表时手动输入模型名称"
                                     className="w-full rounded-lg border border-border/50 bg-muted/50 px-2.5 py-2 font-mono ui-text text-foreground placeholder:text-muted-foreground/40"
                                   />
-                                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60">
-                                    点「获取」会从该供应商的 Base URL 拉取可用模型，也可以直接输入名称。
-                                  </p>
                                 </div>
                               )}
                             </div>
@@ -2311,6 +2537,18 @@ export function ApiSettings({
                                 onChange={(e) => setPickedContext(e.target.value)}
                                 placeholder="默认 256000"
                                 className="w-full rounded-lg border border-border/50 bg-muted/50 px-3 py-2 font-mono ui-text text-foreground placeholder:text-muted-foreground/40"
+                              />
+                            </div>
+
+                            <div className="flex items-center justify-between rounded-lg border border-border/40 bg-muted/20 px-3 py-2">
+                              <div className="flex flex-col">
+                                <span className="ui-text font-medium text-foreground">
+                                  开启思考模式
+                                </span>
+                              </div>
+                              <Toggle
+                                enabled={pickedReasoning}
+                                onToggle={() => setPickedReasoning((v) => !v)}
                               />
                             </div>
 
@@ -2605,25 +2843,6 @@ export function ApiSettings({
         return (
           <div className="max-w-3xl space-y-6">
             <PageHeader>帮助</PageHeader>
-
-            {/* About */}
-            <section className="space-y-3">
-              <div className="overflow-hidden">
-                <button
-                  className="w-full px-4 py-3 bg-muted/30 border-b border-border/50 flex items-center justify-between gap-2 hover:bg-muted/50 transition-colors"
-                  onClick={() =>
-                    setCollapsedSections((s) => {
-                      const next = new Set(s);
-                      next.has("about")
-                        ? next.delete("about")
-                        : next.add("about");
-                      return next;
-                    })
-                  }
-                ></button>
-                <div></div>
-              </div>
-            </section>
           </div>
         );
 

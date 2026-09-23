@@ -1436,7 +1436,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                                             onClick={() =>
                                               handleLoadSession(session)
                                             }
-                                            className={`relative w-full group flex items-center gap-2 px-4 py-1 cursor-pointer transition-colors ${
+                                            className={`relative w-full group flex items-center gap-2 px-4 py-2 cursor-pointer transition-colors ${
                                               currentSessionId === session.id
                                                 ? "bg-primary/10 text-primary"
                                                 : "text-sidebar-foreground/50 hover:bg-sidebar-accent/30 hover:text-sidebar-foreground/80"
@@ -1622,7 +1622,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                         <div
                           key={session.id}
                           onClick={() => handleLoadSession(session)}
-                          className={`relative w-full group flex items-center gap-2 px-3 py-1 rounded-lg transition-colors cursor-pointer ${
+                          className={`relative w-full group flex items-center gap-2 px-3 py-2 rounded-lg transition-colors cursor-pointer ${
                             currentSessionId === session.id
                               ? "bg-primary/10 text-primary"
                               : "text-sidebar-foreground/70 hover:bg-sidebar-accent/40"

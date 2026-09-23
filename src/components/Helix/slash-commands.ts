@@ -2,7 +2,7 @@ import { helixApi } from "@/lib/electron-bridge";
 import { debug } from "@/lib/logger";
 import { buildAcpMcpServers } from "@/lib/mcp";
 import {
-  SESSION_MAP_KEY,
+  persistSessionMapEntries,
   resolveBackendSid,
   type SessionMapEntry,
 } from "@/lib/session-map";
@@ -52,14 +52,19 @@ export const BUILTIN_SLASH_COMMANDS: BuiltinCommand[] = [
 
 export const DRAFT_SESSION_KEY = "__draft__";
 
+/**
+ * 落盘 cid→sid 映射。
+ *
+ * **必须走 `persistSessionMapEntries`（按 key 合并），不能自己整表覆盖**：
+ * 这里传进来的 `map` 是调用方现拉的一份（旁路面板在 `byline-panel.tsx` 里
+ * 自己 `loadSessionMap()`，读盘失败会被 catch 成**空 Map**），整表写盘会把
+ * 其它对话的 sid 一起抹掉——那是"sid 凭空消失"的第二个独立制造者。
+ * 合并写 + `mergeSessionMapEntry` 的单调护栏（sid 不许由有变空）之后，这条
+ * 路径最坏也只是"这次没写进去"，不可能损坏别人的绑定。
+ */
 async function persistSessionMap(map: Map<string, SessionMapEntry>) {
   try {
-    const { persistence } = await import("@/lib/persist");
-    const obj: Record<string, SessionMapEntry> = {};
-    map.forEach((v, k) => {
-      obj[k] = v;
-    });
-    await persistence.saveSetting(SESSION_MAP_KEY, obj);
+    await persistSessionMapEntries(map);
   } catch {
     /* best-effort persistence — never block the UI on it */
   }
@@ -123,6 +128,20 @@ export async function runCompactCommand(
       return "busy";
     }
     useHelixStore.getState().setCompressionBusyForSession(busySessionKey, true);
+    // 后端在 turn 进行中会拒绝 session.compress；这里先挡住，避免用户看到
+    // “正在压缩…”却马上被后端取消。
+    const { isChatLoading, streamingDrafts } = useHelixStore.getState();
+    if (
+      isChatLoading ||
+      Object.values(streamingDrafts || {}).some((d) => d?.isAgentRunning)
+    ) {
+      useHelixStore.getState().showToast({
+        type: "warning",
+        title: "正在处理中",
+        description: "当前对话正在运行，请稍后再压缩",
+      });
+      return "busy";
+    }
     // session.compress 的 session_id 必须是后端 sid，不能直接传前端对话 id
     // （currentSessionId）——后端会话表里没有这个 id，必报 4001 "session not
     // found"。与 context-usage 的自动压缩路径保持一致：先解析映射拿 sid。

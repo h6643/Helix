@@ -27,6 +27,21 @@ export function GeneralSettingsPanel() {
     interfaceFont,
     transcriptFontSize,
     mcpServers,
+    themeStyle,
+    editorTheme,
+    approvalMode,
+    startupGreeting,
+    terminalShell,
+    agentMaxIterations,
+    autoCompactContext,
+    autoSaveSession,
+    reasoningEffort,
+    personality,
+    fastMode,
+    externalServices,
+    customShortcuts,
+    customizedShortcutIds,
+    scheduledTasks,
     gitAutoCommit,
     gitAutoPush,
     gitPushConfirm,
@@ -36,6 +51,81 @@ export function GeneralSettingsPanel() {
     gitBranchPrefix,
     persistToStorage,
   } = useHelixStore();
+
+  // 导出/导入共用的键列表（与 persistToStorage 落盘键对齐，apiKeys 不导出）。
+  const CONFIG_EXPORT_KEYS = [
+    "apiConfig",
+    "apiProfiles",
+    "activeProfileId",
+    "providers",
+    "activeModel",
+    "activeProviderId",
+    "providerModels",
+    "fontFamily",
+    "fontSize",
+    "interfaceFont",
+    "transcriptFontSize",
+    "themeStyle",
+    "editorTheme",
+    "mcpServers",
+    "approvalMode",
+    "startupGreeting",
+    "terminalShell",
+    "agentMaxIterations",
+    "autoCompactContext",
+    "autoSaveSession",
+    "reasoningEffort",
+    "personality",
+    "fastMode",
+    "externalServices",
+    "customShortcuts",
+    "customizedShortcutIds",
+    "scheduledTasks",
+    "gitAutoCommit",
+    "gitAutoPush",
+    "gitPushConfirm",
+    "gitAutoBranch",
+    "gitRemoteUrl",
+    "gitCommitTemplate",
+    "gitBranchPrefix",
+  ] as const;
+  // 从 store 取值用的映射（与 CONFIG_EXPORT_KEYS 一一对应）。
+  const exportSource = {
+    apiConfig,
+    apiProfiles,
+    activeProfileId,
+    providers,
+    activeModel,
+    activeProviderId,
+    providerModels,
+    fontFamily,
+    fontSize,
+    interfaceFont,
+    transcriptFontSize,
+    themeStyle,
+    editorTheme,
+    mcpServers,
+    approvalMode,
+    startupGreeting,
+    terminalShell,
+    agentMaxIterations,
+    autoCompactContext,
+    autoSaveSession,
+    reasoningEffort,
+    personality,
+    fastMode,
+    externalServices,
+    customShortcuts,
+    customizedShortcutIds: Array.from(customizedShortcutIds),
+    scheduledTasks,
+    gitAutoCommit,
+    gitAutoPush,
+    gitPushConfirm,
+    gitAutoBranch,
+    gitRemoteUrl,
+    gitCommitTemplate,
+    gitBranchPrefix,
+  } as Record<string, unknown>;
 
   const [dataRootInfo, setDataRootInfo] = useState<{
     dataRoot: string;
@@ -247,33 +337,25 @@ export function GeneralSettingsPanel() {
             )}
           </div>
         </SettingRow>
-        <SettingRow label="配置管理" hint="导出当前配置">
+        <SettingRow
+          label="配置管理"
+          hint="导出/导入不含 API Key；导入会覆盖同名设置项"
+        >
           <div className="flex flex-wrap gap-2 justify-end">
             <Button
               size="sm"
               variant="outline"
               onClick={async () => {
                 try {
+                  const payload: Record<string, unknown> = {};
+                  for (const k of CONFIG_EXPORT_KEYS)
+                    if (exportSource[k] !== undefined)
+                      payload[k] = exportSource[k];
                   const data = {
-                    apiConfig,
-                    apiProfiles,
-                    activeProfileId,
-                    providers,
-                    activeModel,
-                    activeProviderId,
-                    providerModels,
-                    fontFamily,
-                    fontSize,
-                    interfaceFont,
-                    transcriptFontSize,
-                    mcpServers,
-                    gitAutoCommit,
-                    gitAutoPush,
-                    gitPushConfirm,
-                    gitAutoBranch,
-                    gitRemoteUrl,
-                    gitCommitTemplate,
-                    gitBranchPrefix,
+                    type: "helix-config",
+                    version: 1,
+                    exportedAt: new Date().toISOString(),
+                    ...payload,
                   };
                   const blob = new Blob([JSON.stringify(data, null, 2)], {
                     type: "application/json",
@@ -305,35 +387,51 @@ export function GeneralSettingsPanel() {
                   try {
                     const text = await file.text();
                     const data = JSON.parse(text);
-                    if (!data || typeof data !== "object")
+                    if (!data || typeof data !== "object" || Array.isArray(data))
                       throw new Error("bad config file");
-                    const keys = [
-                      "apiConfig",
-                      "apiProfiles",
-                      "activeProfileId",
-                      "providers",
-                      "activeModel",
-                      "activeProviderId",
-                      "providerModels",
-                      "fontFamily",
-                      "fontSize",
-                      "interfaceFont",
-                      "transcriptFontSize",
-                      "mcpServers",
-                      "gitAutoCommit",
-                      "gitAutoPush",
-                      "gitPushConfirm",
-                      "gitAutoBranch",
-                      "gitRemoteUrl",
-                      "gitCommitTemplate",
-                      "gitBranchPrefix",
-                    ];
+                    // 新格式带信封；旧裸对象也放行（向后兼容）。
+                    if (
+                      data.type !== undefined &&
+                      data.type !== "helix-config"
+                    )
+                      throw new Error("unknown config type");
+                    if (
+                      typeof data.version === "number" &&
+                      data.version > 1
+                    )
+                      throw new Error("unsupported version");
                     const patch: Record<string, unknown> = {};
-                    for (const k of keys)
-                      if (data[k] !== undefined) patch[k] = data[k];
+                    let skippedApiKey = false;
+                    for (const k of CONFIG_EXPORT_KEYS) {
+                      if (data[k] === undefined) continue;
+                      // 防御：即便旧文件里塞了 apiKey 也不直接吃进 state
+                      // （apiConfig.apiKey 字段级剥离在下面做）。
+                      if (k === "apiConfig" && data[k] && typeof data[k] === "object") {
+                        const cfg = { ...(data[k] as Record<string, unknown>) };
+                        if (cfg.apiKey !== undefined) {
+                          delete cfg.apiKey;
+                          skippedApiKey = true;
+                        }
+                        patch[k] = cfg;
+                      } else {
+                        patch[k] = data[k];
+                      }
+                    }
+                    if (Object.keys(patch).length === 0)
+                      throw new Error("no recognizable keys");
+                    // customizedShortcutIds 运行时是 Set，JSON 里是数组。
+                    if (Array.isArray(patch.customizedShortcutIds))
+                      patch.customizedShortcutIds = new Set(
+                        patch.customizedShortcutIds as string[],
+                      );
                     useHelixStore.setState(patch);
                     await persistToStorage();
-                    showToast({ type: "success", title: "配置已导入" });
+                    showToast({
+                      type: "success",
+                      title: skippedApiKey
+                        ? "配置已导入（已跳过 API Key）"
+                        : "配置已导入",
+                    });
                   } catch {
                     showToast({
                       type: "error",

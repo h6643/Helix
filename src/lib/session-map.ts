@@ -18,6 +18,79 @@ export type SessionMapEntry = {
 
 export const SESSION_MAP_KEY = "conversationSessions";
 
+/**
+ * 一个 entry 里**所有还能用的**后端 sid，新→旧。
+ *
+ * `sid` 是"当前 live 的那个"，`sids[]` 是历史（`rebindSessionSid` 按
+ * `Set([...prev.sids, prev.sid, next.sid])` 追加 → 末尾最新）。sid 被清空后
+ * 历史仍然留着，它就是恢复这个对话的唯一凭据，所以两者合并去重后整体返回。
+ */
+export function sidCandidates(entry: SessionMapEntry | undefined): string[] {
+  if (!entry) return [];
+  const all = [...(entry.sids || []), ...(entry.sid ? [entry.sid] : [])];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const sid of all.reverse()) {
+    if (sid && !seen.has(sid)) {
+      seen.add(sid);
+      out.push(sid);
+    }
+  }
+  return out;
+}
+
+/**
+ * 磁盘条目的**单调合并**（写盘护栏）。
+ *
+ * 唯一的不变量：**一个对话的 sid 不允许从"有"变成"空"**。
+ *
+ * 清空 sid 只会发生在某条代码路径误判"这个对话的后端会话该作废"的时候——
+ * 例如 `selectedWorkDir` 变化的 effect：从历史里点开另一项目的对话会让
+ * selectedWorkDir 跟着变，于是它把**当前**对话的 sid 清掉（2026-09-21 用户报
+ * "该对话已失效"的元凶）。而清空的代价是对话永久失效：本地历史在、后端 jsonl
+ * 也在，前端却再也找不到它。
+ *
+ * 把不变量下沉到写盘这一层，就是为了让它不再依赖"每一处写入方都写对"——
+ * 将来（或被并行编辑的另一个会话）再引入一处清空代码，磁盘上的绑定也丢不了。
+ * 送进来的空 sid 会被保留为磁盘现值，其余字段（epoch/storedId/sids）照常合并，
+ * 所以 `epoch` 变新会让下一次 handleRun 走 resume 重新验证这个 sid——这正是
+ * "想作废这个 live 会话"时唯一正确的做法。
+ */
+export function mergeSessionMapEntry(
+  disk: SessionMapEntry | undefined,
+  incoming: SessionMapEntry,
+  cid?: string,
+): SessionMapEntry {
+  const diskSid = disk?.sid ?? "";
+  const rejectBlank = !incoming.sid && !!diskSid;
+  if (rejectBlank) {
+    console.warn(
+      "[Helix] 拒绝把 sid 写空：磁盘上是活的绑定，保留它（epoch 用新值以强制 resume）",
+      { cid: cid ?? "(unknown)", keptSid: diskSid },
+    );
+  }
+  const merged: SessionMapEntry = {
+    ...(disk ?? {}),
+    ...incoming,
+    sid: rejectBlank ? diskSid : incoming.sid,
+    storedId: incoming.storedId ?? disk?.storedId,
+  };
+  const all = new Set<string>();
+  // 并集里必须带上**磁盘上的 live sid**：换新 sid（重建/rekey）时它就是"上一个
+  // live sid"，也就是历史的一部分——旧 sid 名下的子 Agent 磁盘清单还要靠它归位。
+  for (const s of [
+    ...(disk?.sids ?? []),
+    ...(disk?.sid ? [disk.sid] : []),
+    ...(incoming.sids ?? []),
+  ]) {
+    if (s) all.add(s);
+  }
+  if (merged.sid) all.add(merged.sid);
+  if (all.size > 0) merged.sids = [...all];
+  else delete merged.sids;
+  return merged;
+}
+
 export async function loadSessionMap(): Promise<Map<string, SessionMapEntry>> {
   try {
     const { persistence } = await import("@/lib/persist");
@@ -28,8 +101,18 @@ export async function loadSessionMap(): Promise<Map<string, SessionMapEntry>> {
     const map = new Map<string, SessionMapEntry>();
     if (raw && typeof raw === "object") {
       for (const [k, v] of Object.entries(raw)) {
-        if (v && typeof v.sid === "string" && typeof v.epoch === "number")
+        if (!v || typeof v.sid !== "string" || typeof v.epoch !== "number")
+          continue;
+        // 自愈：live sid 是空的，但历史里还有 sid → 用最新的那个当 live sid，
+        // 并把 epoch 置 -1（≠ liveEpoch ⇒ 下一次 handleRun 走 resume）。不这样
+        // 做的话，历史里明明有凭据、界面却显示"该对话已失效"。
+        const sids = v.sids ?? [];
+        const newest = sids[sids.length - 1];
+        if (!v.sid && newest) {
+          map.set(k, { ...v, sid: newest, epoch: -1 });
+        } else {
           map.set(k, v);
+        }
       }
     }
     return map;
@@ -99,6 +182,10 @@ export function invalidateSessionMapCache(): void {
  * "明明之前有 SID，为什么 map 后来没了"——那是 handleRun 之外第二个独立的 SID
  * 丢失制造器。这里以磁盘现值为准，只落本次改动的 key（`null` = 删除该 key），
  * 未提及的 key 原样保留。
+ *
+ * 每个 key 的合并还走 `mergeSessionMapEntry`：**sid 不允许从"有"变成"空"**。
+ * 于是"某处代码想把 live sid 作废"最坏只会变成"保留 sid + epoch 变新"，
+ * 也就是下一次 handleRun 重新 resume 验证它 —— 而不是让对话永久失效。
  */
 export async function persistSessionMapEntries(
   patch: Iterable<readonly [string, SessionMapEntry | null]>,
@@ -106,7 +193,7 @@ export async function persistSessionMapEntries(
   const db = await loadSessionMap();
   for (const [key, value] of patch) {
     if (value === null) db.delete(key);
-    else db.set(key, value);
+    else db.set(key, mergeSessionMapEntry(db.get(key), value, key));
   }
   const obj: Record<string, SessionMapEntry> = {};
   db.forEach((value, key) => {
@@ -115,6 +202,32 @@ export async function persistSessionMapEntries(
   const { persistence } = await import("@/lib/persist");
   await persistence.saveSetting(SESSION_MAP_KEY, obj);
   invalidateSessionMapCache();
+  // 反向索引（sid → conversation）在**这里**统一刷新，而不是交给各个调用方：
+  // 它是磁盘上唯一能反查"这个 cid 原本绑的是哪个 sid"的东西，只要有一次 sid
+  // 绑定没同步过去，那条对话在"映射丢了"之后就只剩余重建一条路。放在这里 =
+  // 只要走的是本函数落盘，索引必然同步。
+  await pushConversationIndex(db);
+}
+
+/**
+ * 把整张映射冗余写进 `~/.pi/agent/conversation-index.json`（Rust 侧的
+ * `session/index_put` 按 sid 反查 conversation）。尽力而为：失败只是让兜底少
+ * 一层，绝不影响主流程。
+ */
+async function pushConversationIndex(
+  map: Map<string, SessionMapEntry>,
+): Promise<void> {
+  const entries: Array<{ conversation_id: string; session_id: string }> = [];
+  map.forEach((entry, cid) => {
+    if (entry.sid) entries.push({ conversation_id: cid, session_id: entry.sid });
+  });
+  if (entries.length === 0) return;
+  try {
+    const { electronHelix } = await import("@/lib/electron-bridge");
+    await electronHelix.send("session/index_put", { entries });
+  } catch {
+    /* best-effort */
+  }
 }
 
 /**

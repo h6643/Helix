@@ -312,9 +312,9 @@ export function ContextUsageIndicator() {
             isChatLoading ||
             Object.values(streamingDrafts || {}).some((d) => d?.isAgentRunning);
           // 闸门按会话判断：后端压缩锁是每会话的，别的会话在压缩不该挡住本会话
-          // 的自动压缩（全局单值时会被误挡）。key 沿用 compressionNotices 的
-          // 约定——有后端 sid 就用 sid，没有就落回前端会话 id。
-          const busySessionKey = sessionId || currentSessionId || "__draft__";
+          // 的自动压缩（全局单值时会被误挡）。这里刻意沿用 UI 的当前会话键，
+          // 避免压缩动画/忙态写到了后端 sid、而界面读的是 currentSessionId。
+          const busySessionKey = currentSessionId || "__draft__";
           if (
             autoCompactContext &&
             !useHelixStore.getState().compressionBusyBySession[busySessionKey] &&
@@ -347,8 +347,10 @@ export function ContextUsageIndicator() {
                   // 因为一次（常常是自动触发的）压缩就收缩。压缩的可见反馈交给下面的
                   // compressionNotice 分隔线（带前后 token 对比）就够。
                   // 这里只需要把锚点定到当前会话最后一条本地消息，让分隔线落在它后面。
-                  const currentSessionId =
-                    useHelixStore.getState().currentSessionId;
+                  // ⚠️ 必须用**发起压缩时**读到的 currentSessionId（上面的外层局部变量），
+                  // 绝不能再从 store 里现场重读：session.compress 可能跑几十秒/几分钟，
+                  // 期间用户可能已切到别的对话，重读会拿到新会话——于是后端压缩了 A，
+                  // 提示卡/环写回/自愈却全落在 B 上（"压缩错乱跑到别的对话中"根因）。
                   if (currentSessionId) {
                     const local = useHelixStore
                       .getState()
@@ -439,12 +441,16 @@ export function ContextUsageIndicator() {
 
   // 打开弹层时查询，并在打开期间每 5s 刷新一次：后端 agent 可能刚构建完成，
   // 分类数据不会在会话创建瞬间就绪，只查一次容易永久停留在"暂无上下文分类数据"。
+  // 关闭时如果开启了自动压缩，也保持低频轮询，否则达到 80% 也不会被检测到。
+  const currentSessionId = useHelixStore((s) => s.currentSessionId);
+  const autoCompactContext = useHelixStore((s) => s.autoCompactContext);
   useEffect(() => {
-    if (!open) return;
+    if (!open && !(autoCompactContext && currentSessionId)) return;
     fetchContextData();
-    const timer = setInterval(fetchContextData, 5000);
+    const interval = open ? 5000 : 15000;
+    const timer = setInterval(fetchContextData, interval);
     return () => clearInterval(timer);
-  }, [open, fetchContextData]);
+  }, [open, autoCompactContext, currentSessionId, fetchContextData]);
 
   // Quietly capture the category breakdown once per new live Helix session and
   // persist it into the local snapshot — WITHOUT overriding the displayed ring
@@ -452,7 +458,6 @@ export function ContextUsageIndicator() {
   // breakdown was only saved when the popover was opened mid-session, so a cold
   // restart always fell back to the "需要正在运行的 Helix 会话" empty state
   // even though the total percentage had been persisted.
-  const currentSessionId = useHelixStore((s) => s.currentSessionId);
   // 防重位只在成功写入后才置：会话创建瞬间 agent 尚未构建，后端返回空分类，
   // 若此时标记"已捕获"，该 sid 永不重试——run 结束后的权威分类就丢了
   // （"重启后有的会话分类消失"根因之一）。留空可在下次 dep 变化（新 run 换

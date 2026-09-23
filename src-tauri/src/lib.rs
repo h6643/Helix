@@ -130,11 +130,9 @@ pub fn run() {
             use tauri::Manager;
 
             let show_item = MenuItemBuilder::with_id("show", "显示窗口").build(app)?;
-            let new_item = MenuItemBuilder::with_id("new", "新建对话").build(app)?;
-            let recent_item = MenuItemBuilder::with_id("recent", "最近对话").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&show_item, &new_item, &recent_item, &quit_item])
+                .items(&[&show_item, &quit_item])
                 .build()?;
 
             let _tray = TrayIconBuilder::new()
@@ -214,6 +212,7 @@ pub fn run() {
             helix::poll_browser_requests,
             helix::browser_write_result,
             helix::helix_set_model,
+            helix::helix_register_provider_models,
             helix::helix_list_memories,
             helix::helix_add_memory_entry,
             helix::helix_remove_memory_entry,

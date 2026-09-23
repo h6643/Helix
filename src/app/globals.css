@@ -1472,37 +1472,6 @@ pre code.hljs {
   color: var(--shiki-dark, inherit);
 }
 
-/* ── 代码块折叠：长块（>15 行或 >800 字符）默认收起，底部渐隐遮罩 + 展开按钮
-   （参考上游桌面版 AgentMarkdown 的 chat-code-collapsed/expand-btn） ── */
-.helix-md .helix-code-collapsed {
-  max-height: 180px;
-  overflow: hidden;
-  mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
-  -webkit-mask-image: linear-gradient(to bottom, black 70%, transparent 100%);
-}
-
-.helix-md .helix-code-expand-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  padding: 6px 0 2px;
-  margin-top: 6px;
-  background: transparent;
-  border: none;
-  border-top: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
-  color: var(--muted-foreground);
-  font-size: calc(var(--helix-transcript-size, 14px) * 0.7857);
-  font-weight: 600;
-  cursor: pointer;
-  transition: color 150ms ease, background-color 150ms ease;
-}
-
-.helix-md .helix-code-expand-btn:hover {
-  color: var(--foreground);
-  background: color-mix(in oklch, var(--muted-foreground) 6%, transparent);
-}
-
 /* ── 盒图/树形图输出：箱线字符（U+2500–U+259F）≥ 半数行的围栏不走 shiki，
    原样渲染并保留对齐（white-space: pre 不折行，横向滚动） ── */
 .helix-md .helix-box-diagram {

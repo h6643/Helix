@@ -37,62 +37,29 @@ import { formatMergedSummary, isSubAgentTool } from "@/lib/tool-merge";
 
 // ── 过程块工具（与 agent-flow-panel 原有实现完全一致，两边共用一份）─────────
 
-// mergeAdjacentThinking merges runs of consecutive thinking blocks: a
-// cumulative superset replaces the earlier one, disjoint segments are
-// concatenated. Runs only become adjacent when there was no tool/text between
-// them, so interleaved thinking/tool turns stay chronologically separated —
-// each thinking segment keeps its own fold.
+// Preserve every thinking block as its own unit. Do not merge adjacent
+// thinking segments: the user-facing history should show the same number of
+// thinking folds as the source blocks, instead of collapsing repeated runs.
 export function mergeAdjacentThinking(
   blocks: StreamingResponseBlock[],
 ): StreamingResponseBlock[] {
-  const out: StreamingResponseBlock[] = [];
-  for (const block of blocks) {
-    const prev = out[out.length - 1];
-    if (block.type === "thinking" && prev && prev.type === "thinking") {
-      const prevC = String(prev.content || "");
-      const curC = String(block.content || "");
-      let content = curC;
-      if (prevC && curC) {
-        if (curC.includes(prevC)) {
-          // 累积重发：当前块已含前块全文 → 只保留当前
-          content = curC;
-        } else if (prevC.includes(curC)) {
-          // 前块是超集（当前块只是其子集/重发）→ 保留前块
-          continue;
-        } else {
-          // 无重叠：真正的独立思考段
-          content = `${prevC}\n\n${curC}`;
-        }
-      }
-      out[out.length - 1] = { ...prev, content };
-    } else {
-      out.push(block);
-    }
-  }
-  return out;
+  return blocks.map((block) => ({ ...block }));
 }
 
-// 交替段切分：按时间序把过程区切成「思考段 / 工具段 / 文本段」的交替序列，
-// 保住模型"思考→执行→总结→再思考→再执行→再总结"的叙事节奏。
+// 保留每个过程块自己的分段，避免相邻同类块被合并。
+// 这样模型多段思考 / 多段总结会按原始顺序各自展示，不会被折叠成一个长块。
 export function segmentizeProcessBlocks<T extends { type: string }>(
   blocks: T[],
 ): ProcessSegment<T>[] {
-  const segs: ProcessSegment<T>[] = [];
-  for (const block of blocks) {
+  return blocks.map((block) => {
     const kind: "thinking" | "tasks" | "text" =
       block.type === "thinking"
         ? "thinking"
         : block.type === "text"
           ? "text"
           : "tasks";
-    const prev = segs[segs.length - 1];
-    if (prev && prev.kind === kind) {
-      prev.blocks.push(block);
-    } else {
-      segs.push({ kind, blocks: [block] });
-    }
-  }
-  return segs;
+    return { kind, blocks: [block] };
+  });
 }
 
 export type ProcessSegment<T extends { type: string }> = {
@@ -704,26 +671,16 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                     : [];
                 const hasProcess =
                   processSegments.length > 0 || showInlineReasoning;
-                // 思考中脉冲：仅流式且最后一段是思考段（与主对话
-                // thinkingActiveNow 规则一致——工具执行/收尾时不冒充思考中）。
-                const lastSegIsThinking =
-                  isStreaming &&
-                  processSegments.length > 0 &&
-                  processSegments[processSegments.length - 1].kind ===
-                    "thinking";
-                // 整个消息的所有思考（含 msg.reasoning 兜底与尾段思考）合并为
-                // 一张限高滚轮折叠卡，不再按阶段拆成多张。
-                const mergedThinkingContent = mergeThinkingContents(
-                  allSegments
-                    .flatMap((seg) =>
-                      seg.kind === "thinking"
-                        ? seg.blocks.map((b) =>
-                            b.type === "thinking" ? String(b.content || "") : "",
-                          )
-                        : [],
-                    )
-                    .concat(reasoning.trim() ? [reasoning] : []),
-                );
+                // 「思考中」脉冲只在**最后到达的那个块确实是思考**时才亮。与流式
+                // 视图（agent-flow-panel 的 thinkingActiveNow）同一套判定，两条渲染
+                // 路径不各算一套。
+                // 【别跳过 text 块】：「思考 → 正文」是最常见的收尾形态，正文流式期间
+                // 最后那个非文本块仍是 thinking，旧实现（从尾部往前扫并跳过 text）
+                // 会让思考卡一直冒充「思考中」。
+                const lastProcessBlock =
+                  processBlocks[processBlocks.length - 1];
+                const thinkingActiveNow =
+                  lastProcessBlock?.type === "thinking";
                 const processDuration =
                   !isStreaming && (messageDuration ?? 0) > 0
                     ? formatDuration(messageDuration ?? 0)
@@ -754,11 +711,11 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                           )}
                         </summary>
                         <div className="mt-1">
-                          {mergedThinkingContent.trim() && (
+                          {showInlineReasoning && (
                             <ThinkingFold
-                              content={mergedThinkingContent}
+                              content={reasoning}
                               fontSize={fontSize}
-                              active={isStreaming && lastSegIsThinking}
+                              active={isStreaming}
                               searchOpen={searchOpen}
                               searchQuery={searchQuery}
                               isSearchActive={isSearchActive}
@@ -766,9 +723,43 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                           )}
                           <div className="my-2 space-y-2">
                             {processSegments.map((seg, si) => {
+                              // 交替段渲染：思考段一张 ThinkingFold，工具段平铺
+                              // 工具卡，文本段渲染 markdown——与流式视图
+                              // （agent-flow-panel 的 processSegments.map）同一套
+                              // segmentizeProcessBlocks 语义，落盘后不重排，
+                              // 保住"思考→执行→总结"的行为链。
                               if (seg.kind === "thinking") {
-                                // 思考段已并入上方唯一的限高滚轮卡
-                                return null;
+                                const segContent = mergeThinkingContents(
+                                  seg.blocks.map((b) =>
+                                    b.type === "thinking"
+                                      ? String(b.content || "")
+                                      : "",
+                                  ),
+                                );
+                                if (!segContent.trim()) return null;
+                                const isLastSeg =
+                                  si === processSegments.length - 1;
+                                // 与流式区同一套：只有"整条消息的最后一块就在这一段里、
+                                // 且它是思考"才脉冲（尾段非空时，最新内容在卡片下方，
+                                // 卡内最后那段旧思考不得冒充「思考中」）。
+                                const isNewestSegment =
+                                  isLastSeg && trailingSegments.length === 0;
+                                return (
+                                  <ThinkingFold
+                                    key={si}
+                                    content={segContent}
+                                    fontSize={fontSize}
+                                    active={
+                                      isStreaming &&
+                                      thinkingActiveNow &&
+                                      isNewestSegment
+                                    }
+                                    streaming={isStreaming && isNewestSegment}
+                                    searchOpen={searchOpen}
+                                    searchQuery={searchQuery}
+                                    isSearchActive={isSearchActive}
+                                  />
+                                );
                               }
                               const toolBlocks = seg.blocks.filter(
                                 (b) => b.type === "tool_group",
@@ -892,7 +883,33 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                     {trailingSegments.map((seg, si) => (
                       <div key={`trail-${si}`} className="my-2 space-y-1">
                         {seg.kind === "thinking"
-                          ? null
+                          ? (() => {
+                              const c = mergeThinkingContents(
+                                seg.blocks.map((b) =>
+                                  b.type === "thinking"
+                                    ? String(b.content || "")
+                                    : "",
+                                ),
+                              );
+                              if (!c.trim()) return null;
+                              // 与流式区同一套：尾段区里只有"最新的那一段 + 此刻
+                              // 真在思考"才脉冲——它才是「思考中」的归属者。
+                              const isLastTrail =
+                                si === trailingSegments.length - 1;
+                              return (
+                                <ThinkingFold
+                                  content={c}
+                                  fontSize={fontSize}
+                                  active={
+                                    isStreaming && thinkingActiveNow && isLastTrail
+                                  }
+                                  streaming={isStreaming && isLastTrail}
+                                  searchOpen={searchOpen}
+                                  searchQuery={searchQuery}
+                                  isSearchActive={isSearchActive}
+                                />
+                              );
+                            })()
                           : (() => {
                               const toolBlocks = seg.blocks.filter(
                                 (b) => b.type === "tool_group",

@@ -12,6 +12,16 @@ fn norm(p: &str) -> String {
     p.replace('\\', "/").trim_end_matches('/').to_string()
 }
 
+/// Case-insensitive path normalization for root-membership checks.
+/// Windows is a case-insensitive filesystem, but roots and incoming paths are
+/// compared as strings; a drive-letter/segment case difference (e.g. `D:\Project\Helix`
+/// vs `d:\project\helix`) would otherwise make a legitimately-in-project file fail
+/// the prefix check and report "outside working directory". Mirrors the separator
+/// and case normalization used by `pi_gateway::same_path` so comparisons agree.
+fn norm_ci(p: &str) -> String {
+    norm(p).to_lowercase()
+}
+
 /// Allowed roots: current workDir + user-selected projects + helix memories.
 fn allowed_roots(state: &AppState) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = vec![state.work_dir.read().unwrap().clone()];
@@ -58,8 +68,8 @@ fn safe_path(state: &AppState, file_path: &str) -> Option<PathBuf> {
 
     let roots = allowed_roots(state);
     let in_any_root = roots.iter().any(|root| {
-        let r = norm(&root.display().to_string());
-        let p = norm(&candidate.display().to_string());
+        let r = norm_ci(&root.display().to_string());
+        let p = norm_ci(&candidate.display().to_string());
         p == r || p.starts_with(&format!("{r}/"))
     });
     if !in_any_root {

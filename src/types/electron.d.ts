@@ -219,6 +219,16 @@ export interface ElectronAPI {
       apiKey?: string;
       provider?: string;
     }) => Promise<any>;
+    /** Register a provider + model list into pi's models.json WITHOUT changing
+     *  pi's default model and WITHOUT restarting the gateway. Per-conversation
+     *  model switching uses this instead of setModel. */
+    registerProviderModels: (config: {
+      provider: string;
+      baseUrl: string;
+      apiKey?: string;
+      api?: string;
+      models: Array<{ id: string; contextWindow?: number; reasoning?: boolean }>;
+    }) => Promise<{ success: boolean; wrote?: boolean }>;
     fetchModels: (params: any) => Promise<any>;
     onEvent: (callback: (method: any, params: any) => void) => () => void;
     // ── Memory sync (Helix backend memory_manager: MEMORY.md / USER.md) ──

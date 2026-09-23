@@ -2,7 +2,7 @@
 
 import { Copy, CheckCheck } from "lucide-react";
 import React, { useState } from "react";
-import { looksLikeUnifiedDiff } from "@/components/Helix/diff-preview";
+import { computeDiff, looksLikeUnifiedDiff } from "@/components/Helix/diff-preview";
 import { CodeCard } from "@/components/Helix/helix-markdown";
 import { formatDurationSeconds } from "@/lib/format";
 import { normalizeAcpContent, stripEmoji } from "@/lib/text-utils";
@@ -11,6 +11,7 @@ import {
   extractCommandSnippet,
   extractToolPath,
 } from "@/lib/tool-display-utils";
+import { useHelixStore } from "@/stores/helix-store";
 import type { ExecutionStep } from "@/stores/helix-store";
 
 const TOOL_RESULT_CLAMP = 20_000;
@@ -538,6 +539,30 @@ function ToolCard({
             const s = extractDiffStats(raw);
             added += s.added;
             removed += s.removed;
+          }
+          // 回退：write_file/edit 结果不含 unified diff（只是新内容），
+          // 从 pendingChanges 里按路径匹配，用 backend 带的 diff 或 old/new 算统计。
+          if (added === 0 && removed === 0) {
+            const tn = (step.toolName || "").toLowerCase();
+            if (tn.includes("write") || tn.includes("edit") || tn.includes("patch")) {
+              const p = extractToolPath(step);
+              if (p) {
+                const pc = useHelixStore.getState().pendingChanges.find(
+                  (c) => c.filePath === p || c.fileName === p,
+                );
+                if (pc) {
+                  if (pc.unifiedDiff && looksLikeUnifiedDiff(pc.unifiedDiff)) {
+                    const s = extractDiffStats(pc.unifiedDiff);
+                    added = s.added;
+                    removed = s.removed;
+                  } else if (pc.oldContent && pc.newContent) {
+                    const diffLines = computeDiff(pc.oldContent, pc.newContent);
+                    added = diffLines.filter((l) => l.type === "add").length;
+                    removed = diffLines.filter((l) => l.type === "remove").length;
+                  }
+                }
+              }
+            }
           }
           if (added === 0 && removed === 0) {
             const fb = step.content ? extractDiffStats(step.content) : null;

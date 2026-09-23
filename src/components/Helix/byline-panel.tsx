@@ -559,13 +559,25 @@ export function BylinePanel() {
                         key={m}
                         type="button"
                         onClick={() => {
+                          // 供应商归属要按所选模型解析（resolveModelProvider
+                          // 已按「当前端点 → 活跃供应商 → 全库」排序），不能
+                          // 直接抄全局 apiConfig.provider——那会把别的端点的
+                          // 模型挂到当前供应商名下。
+                          const owner =
+                            useHelixStore
+                              .getState()
+                              .resolveModelProvider(m)?.name ||
+                            (apiConfig?.provider &&
+                            apiConfig.provider !== "__custom__"
+                              ? apiConfig.provider
+                              : "custom");
                           setModelForSession(btwCid, {
-                            provider:
-                              apiConfig?.provider &&
-                              apiConfig.provider !== "__custom__"
-                                ? apiConfig.provider
-                                : "custom",
+                            provider: owner,
                             model: m,
+                          });
+                          showToast({
+                            type: "success",
+                            title: `本会话模型切换为 ${m}`,
                           });
                           setShowModelDropdown(false);
                         }}
