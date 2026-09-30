@@ -310,8 +310,6 @@ interface HelixState
 
   // Agent Execution
   isAgentRunning: boolean;
-  hasOnboarded: boolean;
-  setHasOnboarded: (v: boolean) => void;
   gatewayStatus: "connecting" | "ready" | "disconnected";
   setGatewayStatus: (v: "connecting" | "ready" | "disconnected") => void;
   setIsAgentRunning: (v: boolean) => void;
@@ -1248,18 +1246,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       injectInputSignal: { text, nonce: Date.now() },
       requestSendSignal: s.requestSendSignal + 1,
     })),
-  hasOnboarded: false,
-  setHasOnboarded: (v) => {
-    set({ hasOnboarded: v });
-    // Persist so the onboarding screen doesn't reappear on every restart.
-    // Without this, setHasOnboarded only mutates in-memory state, which resets
-    // to the default `false` on the next app launch — "每次重启都弹引导".
-    import("@/lib/persist")
-      .then(({ persistence }) => {
-        persistence.saveSetting("hasOnboarded", v).catch(() => {});
-      })
-      .catch(() => {});
-  },
   gatewayStatus: "connecting",
   setGatewayStatus: (v) => set({ gatewayStatus: v }),
   streamingDrafts: {},
@@ -3648,7 +3634,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           state.sessionHistoryIndex,
         ),
         persistence.saveSetting("selectedWorkDir", state.selectedWorkDir),
-        persistence.saveSetting("hasOnboarded", state.hasOnboarded),
         // Unsent composer attachments (pasted images / dropped files / link
         // cards) — without this they only live in memory and die on restart.
         persistence.saveSetting("tabAttachments", state.tabAttachments),
@@ -3758,7 +3743,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         savedSessionHistory,
         savedSessionHistoryIndex,
         savedSelectedWorkDir,
-        loadedHasOnboarded,
         contextUsage,
         externalServices,
         compressionRecordsBySession,
@@ -3942,10 +3926,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(
           persistence.loadSetting<string | null>("selectedWorkDir"),
           "selectedWorkDir",
-        ),
-        safeLoad(
-          persistence.loadSetting<boolean>("hasOnboarded"),
-          "hasOnboarded",
         ),
         safeLoad(
           persistence.loadSetting<{ size: number; used: number } | null>(
@@ -4341,11 +4321,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         sessionHistoryIndex: restoredIndex,
         // 没选项目时默认使用 Helix sessions 目录；恢复会话时跟随会话自己的目录。
         selectedWorkDir: latestSession?.workDir ?? defaultSessionsDir,
-        // Never downgrade a fresh true set while restore was still loading.
-        // Startup renders from the default false before IndexedDB finishes;
-        // clicking "skip/start" in that window must not be overwritten by the
-        // stale restored false.
-        hasOnboarded: get().hasOnboarded || loadedHasOnboarded === true,
         apiConfig: (() => {
           const resolve = (cfg: any) => {
             // Validation gate: reject stale/bad profiles so a poisoned IndexedDB

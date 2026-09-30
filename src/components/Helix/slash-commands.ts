@@ -1,6 +1,5 @@
 import { helixApi } from "@/lib/electron-bridge";
 import { debug } from "@/lib/logger";
-import { buildAcpMcpServers } from "@/lib/mcp";
 import {
   persistSessionMapEntries,
   resolveBackendSid,

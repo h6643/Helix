@@ -1272,11 +1272,18 @@ export class ServeGatewayClient {
     params?: Record<string, unknown>,
   ): Promise<SessionCreateResult> {
     await this.ensureModelSynced();
-    // 会话自动重建（session not found）等路径可能没带 mcpServers，此时回退到
-    // 应用当前保存的 MCP 列表，避免重建后的会话丢失工具。
-    const mcpServers = params?.mcpServers;
-    let resolvedMcpServers: unknown[] | undefined;
-    if (!Array.isArray(mcpServers)) {
+    // 调用方带了 mcpServers 就直接用它的（agent-flow-panel 建会话时传入，与
+    // serve-gateway 同源的 shape）；没带 —— 会话自动重建（session not found）
+    // 等路径 —— 回退到应用当前保存的 MCP 列表，避免重建后的会话丢失工具。
+    //
+    // 旧写法把 params?.mcpServers 只用于判断、从不透传：调用方带了数组时
+    // resolvedMcpServers 保持 undefined，下面的 spread 于是丢掉整个 mcpServers
+    // 字段，serve 模式下 UI 里配好的 MCP 服务器被静默丢弃。
+    const incomingMcp = params?.mcpServers;
+    let resolvedMcpServers: unknown[] | undefined = Array.isArray(incomingMcp)
+      ? incomingMcp
+      : undefined;
+    if (!resolvedMcpServers) {
       const { useHelixStore } = await import("@/stores/helix-store");
       resolvedMcpServers = buildAcpMcpServers(useHelixStore.getState().mcpServers);
     }

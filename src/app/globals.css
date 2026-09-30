@@ -2047,9 +2047,10 @@ nav::-webkit-scrollbar-thumb:hover {
   font-size: calc(var(--helix-transcript-size, 14px) - 2px);
 }
 
-/* ── Chat input toolbar collapse ───────────────────────────────────────────
-   拖拽右侧边栏把对话区压窄时，工具栏先截断文字、空间再不足就隐藏
-   非关键文字（模型名 / 审批模式 / 推理强度），发送按钮始终留在框内。 */
+/* ── Chat input toolbar ───────────────────────────────────────────────
+   旧版「压窄时逐级截断/隐藏非关键文字」的 @container 折叠规则已按用户
+   要求（2026-09-30「都不省略」）整体删除；.chat-toolbar-label 类名
+   留在 JSX 里但无任何样式效果。 */
 /* 与设置卡片（SettingGroup：rounded-xl bg-card shadow-sm）统一材质：
    实心卡片 + 轻阴影，去掉磨砂 / 渐变 / 内高光，避免对话浮层与设置浮窗观感不一。
    阴影交给元素自身的 shadow-sm（与 SettingGroup 同款），此处只负责底色。 */
@@ -2083,21 +2084,6 @@ nav::-webkit-scrollbar-thumb:hover {
   background: color-mix(in oklch, var(--card) 88%, transparent);
   backdrop-filter: blur(20px) saturate(1.2);
   -webkit-backdrop-filter: blur(20px) saturate(1.2);
-}
-@container (max-width: 620px) {
-  .chat-toolbar-label {
-    max-width: 96px;
-  }
-}
-@container (max-width: 520px) {
-  .chat-toolbar-label {
-    max-width: 56px;
-  }
-}
-@container (max-width: 440px) {
-  .chat-toolbar-label {
-    display: none;
-  }
 }
 
 

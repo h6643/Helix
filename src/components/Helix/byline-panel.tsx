@@ -10,7 +10,8 @@ import {
   FileText,
   ChevronDown,
   Check,
-  Paperclip,
+  Plus,
+  Cpu,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadSessionMap } from "@/lib/session-map";
@@ -613,10 +614,10 @@ export function BylinePanel() {
               <button
                 type="button"
                 onClick={() => uploadFileInputRef.current?.click()}
-                data-tip="添加文件"
-                className="h-7 shrink-0 px-1.5 rounded-lg transition-all duration-200 flex items-center text-muted-foreground hover:text-foreground hover:bg-muted/40 text-xs"
+                data-tip="上传附件"
+                className="p-2 rounded-xl text-muted-foreground/50 hover:text-foreground hover:bg-muted/40 transition-all duration-200"
               >
-                <Paperclip className="size-3.5" />
+                <Plus className="size-4" />
               </button>
               <input
                 ref={uploadFileInputRef}
@@ -635,20 +636,20 @@ export function BylinePanel() {
                       setShowModelDropdown(false);
                     }}
                     data-tip="审批模式（仅本旁路会话）"
-                    className="h-7 min-w-0 shrink px-1.5 rounded-lg transition-all duration-200 flex items-center gap-1 text-muted-foreground hover:text-foreground hover:bg-muted/40 text-xs"
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ui-text-sm2 transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
                   >
-                    {effectiveMode === "default" && <Hand className="size-3" />}
+                    {effectiveMode === "default" && <Hand className="size-3.5" />}
                     {effectiveMode === "accept_edits" && (
-                      <Clock className="size-3" />
+                      <Clock className="size-3.5" />
                     )}
                     {effectiveMode === "dont_ask" && (
-                      <AlertTriangle className="size-3" />
+                      <AlertTriangle className="size-3.5" />
                     )}
-                    {effectiveMode === "plan" && <FileText className="size-3" />}
-                    <span className="truncate min-w-0">
+                    {effectiveMode === "plan" && <FileText className="size-3.5" />}
+                    <span className="whitespace-nowrap">
                       {MODE_ITEMS.find((m) => m.id === effectiveMode)?.title}
                     </span>
-                    <ChevronDown className="size-2.5" />
+                    <ChevronDown className="size-3" />
                   </button>
                   <button
                     type="button"
@@ -656,13 +657,15 @@ export function BylinePanel() {
                       setShowModelDropdown((v) => !v);
                       setShowModeDropdown(false);
                     }}
-                    data-tip="模型（仅本旁路会话）"
-                    className="h-7 min-w-0 shrink px-1.5 rounded-lg transition-all duration-200 flex items-center gap-1 text-muted-foreground hover:text-foreground hover:bg-muted/40 text-xs"
+                    data-tip={
+                      effectiveModel
+                        ? `模型（仅本旁路会话）：${effectiveModel}`
+                        : "选择模型（仅本旁路会话）"
+                    }
+                    className="flex items-center justify-center h-7 w-7 rounded-lg bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
                   >
-                    <span className="truncate min-w-0 max-w-[120px]">
-                      {effectiveModel || "选择模型"}
-                    </span>
-                    <ChevronDown className="size-2.5" />
+                    {/* 用户定调：模型名不在工具条显示，只留图标；全名看 tooltip / 下拉 */}
+                    <Cpu className="size-3.5" />
                   </button>
                 </>
               )}

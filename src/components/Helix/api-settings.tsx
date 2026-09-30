@@ -2642,7 +2642,7 @@ export function ApiSettings({
                         return (
                           <div
                             key={name}
-                            className="flex items-center gap-3 px-4 py-3 border border-border/20 bg-muted/20 rounded-lg group"
+                            className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/70 bg-muted/20 hover:bg-muted/40 transition-colors group"
                           >
                             <div className="relative shrink-0">
                               <div
@@ -2694,7 +2694,7 @@ export function ApiSettings({
                     return (
                       <div
                         key={name}
-                        className="flex items-center gap-3 px-4 py-3 border-b border-border/30 last:border-b-0 hover:bg-muted/40 transition-colors group"
+                        className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/70 bg-muted/20 hover:bg-muted/40 transition-colors group"
                       >
                         <div className="relative shrink-0">
                           <div
@@ -2745,14 +2745,6 @@ export function ApiSettings({
                     );
                   })}
                 </div>
-
-                {mcpServerNames.length === 0 && (
-                  <div className="max-w-3xl flex flex-col items-center justify-center py-12 text-center">
-                    <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground/60">
-                      暂无 MCP 服务器
-                    </p>
-                  </div>
-                )}
               </>
             ) : (
               /* Editor — centered card, similar to model add */

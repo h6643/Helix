@@ -1,12 +1,17 @@
-//! Gateway MCP servers — read/write view of the pi MCP adapter's config.
+//! Gateway MCP servers — read/write view of pi's MCP config.
 //!
-//! The pi agent has no built-in MCP; the user-installed `pi-mcp-adapter`
-//! package reads servers from `~/.pi/agent/mcp.json` (`{ "mcpServers":
-//! {...} }`, ServerEntry schema: command/args/env/cwd/url/headers/disabled).
+//! pi ships built-in MCP (verified in 0.99.1): it reads `~/.pi/agent/mcp.json`
+//! itself — `{ "mcpServers": {...} }`, ServerEntry schema: command/args/env/
+//! cwd/url/headers/disabled — and registers the servers' tools as
+//! `mcp__<server>__<tool>`. No adapter extension is needed any more; the old
+//! `pi-mcp-adapter` / `pi-mcp-lite` bridges are gone (pi-mcp-lite duplicated
+//! the tools under a second `<server>__<tool>` naming).
+//!
 //! Helix keeps the canonical copy of the server list in the top-level
 //! `mcp_servers:` block of `~/.pi/agent/config.yaml` (the shared user config
 //! file, alongside vision/web_search/image/agent blocks), and mirrors it into
-//! mcp.json on every save so the adapter picks up the change on respawn.
+//! mcp.json on every save — which is exactly the file pi's built-in loader
+//! reads, so no extra plumbing is required.
 //!
 //! The renderer speaks the old shape: `{ name: { enabled?, ... } }`.
 //! `enabled: false` is written as `disabled: true` on disk and translated

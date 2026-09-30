@@ -35,6 +35,7 @@ import {
   User,
   Hash,
   KeyRound,
+  Cpu,
 } from "lucide-react";
 import React, {
   useState,
@@ -622,7 +623,7 @@ export function ReasoningEffortControl({
         ref={triggerRef}
         type="button"
         onClick={toggle}
-        className="ui-text-sm2 font-medium text-foreground/70 hover:text-foreground px-2 py-1.5 h-7 rounded-lg border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors min-w-11 text-center chat-toolbar-label"
+        className="ui-text-sm2 font-medium text-foreground/70 hover:text-foreground px-2 py-1.5 h-7 rounded-lg border border-border/60 bg-muted/40 hover:bg-muted/70 transition-colors min-w-11 text-center"
       >
         {current.label}
       </button>
@@ -2362,20 +2363,20 @@ export function AgentFlowPanel() {
   // model name while the backend was already on the new one.
   const renderModelSelector = () => {
     // 显示源：本对话的专属模型优先（每个对话可各选各的），没有才回落全局默认。
+    // 图标上不显示文字，名字只出现在 tooltip 与下拉里。
     const displayName =
       sessionModel || apiConfig.model || activeModel || "选择模型";
-    // 本会话有专属覆盖时用主色描边 + 圆点标记，一眼区分「不是全局默认」。
-    const hasSessionOverride = Boolean(sessionModelOverride?.model);
     return (
       <>
         <div className="relative min-w-0" ref={modelDropdownRef}>
           <button
             type="button"
             onClick={() => setShowModelDropdown(!showModelDropdown)}
-            className={`flex items-center justify-between gap-2 min-w-0 max-w-[140px] px-2.5 py-1.5 h-7 bg-muted/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 transition-all duration-200 font-mono border border-border/30 hover:border-border/30`}
+            className="flex items-center justify-center h-7 w-7 rounded-lg bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
             data-tip={
               (() => {
-                // 提示里的供应商必须跟「显示的模型」同源：本对话有专属模型时用
+                // 图标不显示文字后，tooltip 是唯一看得到当前模型名的地方，
+                // 供应商必须跟「显示的模型」同源：本对话有专属模型时用
                 // 该覆盖值的 provider（选择时就已解析），只有回落全局默认时才用
                 // activeProvider——否则对话覆盖指向硅基流动、全局还停在
                 // shangtang 时，悬停会显示成 shangtang · 硅基流动的模型。
@@ -2384,13 +2385,12 @@ export function AgentFlowPanel() {
                 const base = tipProvider
                   ? `${tipProvider} · ${displayName}`
                   : displayName;
-                return hasSessionOverride ? `${base}` : base;
+                return base;
               })()
             }
           >
-            <span className="truncate min-w-0 flex-1 text-left chat-toolbar-label">
-              {truncateModelLabel(displayName)}
-            </span>
+            {/* 用户定调：模型名不在工具条显示，只留图标；全名看 tooltip / 下拉 */}
+            <Cpu className="size-3.5" />
           </button>
           {showModelDropdown && (
             <div className="absolute bottom-full right-0 mb-2 w-44 overflow-visible rounded-xl border border-border/40 bg-card shadow-xl z-50 animate-scale-in">
@@ -8034,7 +8034,7 @@ export function AgentFlowPanel() {
             <AlertTriangle className="size-3.5" />
           )}
           {approvalMode === "plan" && <FileText className="size-3.5" />}
-          <span className="truncate min-w-0 chat-toolbar-label">
+          <span className="truncate min-w-0">
             {approvalMode === "default" && "请求批准"}
             {approvalMode === "accept_edits" && "替我审批"}
             {approvalMode === "dont_ask" && "完全访问"}
@@ -8952,55 +8952,67 @@ export function AgentFlowPanel() {
                                   return (
                                     <div
                                       key={svc.id}
-                                      className={`group flex items-center gap-1.5 px-3 py-2.5 hover:bg-accent transition-colors rounded-lg ${selectedWorkDir && selectedWorkDir.startsWith("ssh://" + svc.host) ? "bg-primary/10 text-primary font-medium" : "text-foreground/80"}`}
+                                      className="group flex items-center gap-1.5 px-3 py-2.5 hover:bg-accent transition-colors rounded-lg text-foreground/80"
                                     >
                                       <button
                                         type="button"
                                         className="flex-1 flex items-center gap-2.5 text-left ui-text-sm2"
                                         onClick={async () => {
                                         setShowFolderDropdown(false);
-                                        if (!isConnected) {
-                                          try {
-                                            const sshApi = (window as any)
-                                              .electron?.external?.sshConnect;
-                                            if (sshApi) {
-                                              const result = await sshApi({
-                                                host: svc.host,
-                                                port: svc.port,
-                                                username: svc.username,
-                                                authType: svc.authType,
-                                                secret: svc.secret ?? "",
-                                              });
-                                              if (result?.error) {
-                                                storeActions.showToast({
-                                                  type: "error",
-                                                  title: "SSH 连接失败",
-                                                  description: result.error,
-                                                });
-                                                return;
-                                              }
-                                              setExternalServiceConnected(
-                                                svc.id,
-                                                true,
-                                              );
-                                            }
-                                          } catch (e) {
+                                        try {
+                                          // sshConnect 只是一次性探测（`ssh -o
+                                          // BatchMode=yes ... echo connection_test`），不留会话；
+                                          // Helix 也没有远程执行能力（ssh.rs 里 ssh_exec 之类
+                                          // 早已删掉）。所以这里**不**试图把工作目录设成 ssh:// ——
+                                          // store.setWorkDir 会拦下它并报错，用户只看到一个
+                                          // 「绿点亮起 → 随即报错」的假动作。
+                                          const sshApi = (window as any)
+                                            .electron?.external?.sshConnect;
+                                          if (!sshApi) return;
+                                          const result = await sshApi({
+                                            host: svc.host,
+                                            port: svc.port,
+                                            username: svc.username,
+                                            authType: svc.authType,
+                                            secret: svc.secret ?? "",
+                                          });
+                                          if (result?.error) {
+                                            setExternalServiceConnected(
+                                              svc.id,
+                                              false,
+                                            );
                                             storeActions.showToast({
                                               type: "error",
                                               title: "SSH 连接失败",
-                                              description: String(e),
+                                              description: result.error,
                                             });
                                             return;
                                           }
+                                          setExternalServiceConnected(
+                                            svc.id,
+                                            true,
+                                          );
+                                          storeActions.showToast({
+                                            type: "info",
+                                            title: "SSH 可达（一次性探测，未建立会话）",
+                                            description:
+                                              "要在这台机器上远程开发：远端跑 remote-bridge.js，"
+                                              + "本地开 ssh -L 18800:127.0.0.1:18800 "
+                                              + `${svc.username}@${svc.host}，`
+                                              + "再把 config.yaml 的 pi.remote_rpc 设为 "
+                                              + '\n"127.0.0.1:18800"。',
+                                          });
+                                        } catch (e) {
+                                          setExternalServiceConnected(
+                                            svc.id,
+                                            false,
+                                          );
+                                          storeActions.showToast({
+                                            type: "error",
+                                            title: "SSH 连接失败",
+                                            description: String(e),
+                                          });
                                         }
-                                        const remotePath =
-                                          "ssh://" +
-                                          (svc.username ?? "user") +
-                                          "@" +
-                                          svc.host +
-                                          ":" +
-                                          svc.port;
-                                        await selectWorkDir(remotePath);
                                       }}
                                     >
                                       {isConnected ? (
@@ -9011,19 +9023,9 @@ export function AgentFlowPanel() {
                                       <span className="truncate flex-1">
                                         {displayName}
                                       </span>
-                                      {!isConnected && (
-                                        <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 shrink-0">
-                                          未连接
-                                        </span>
-                                      )}
-                                      {selectedWorkDir &&
-                                        selectedWorkDir.startsWith(
-                                          "ssh://" + svc.host,
-                                        ) && (
-                                          <span className="text-xs text-primary shrink-0">
-                                            ✓
-                                          </span>
-                                        )}
+                                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 shrink-0">
+                                        {isConnected ? "可达" : "未验证"}
+                                      </span>
                                       </button>
                                       <button
                                         type="button"
