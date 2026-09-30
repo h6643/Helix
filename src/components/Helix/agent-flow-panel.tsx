@@ -29,6 +29,12 @@ import {
   Trash2,
   Send,
   ListChecks,
+  ChevronLeft,
+  Tag,
+  Globe,
+  User,
+  Hash,
+  KeyRound,
 } from "lucide-react";
 import React, {
   useState,
@@ -910,6 +916,9 @@ export function AgentFlowPanel() {
   const [projectFolders, setProjectFolders] = useState<string[]>([]);
   const [showRemoteServers, setShowRemoteServers] = useState(false);
   const [showAddServerForm, setShowAddServerForm] = useState(false);
+  // 「远程项目 / 添加服务器」弹层是 bottom-full（向上展开）且被消息滚动区的顶部边界裁切：
+  // 表单变高后会顶出可视区、头部直接点不到。这里量出可用高度当 maxHeight，超出就让弹层自己滚。
+  const [remotePanelMaxH, setRemotePanelMaxH] = useState<number | null>(null);
   const [newServerHost, setNewServerHost] = useState("");
   const [newServerPort, setNewServerPort] = useState("22");
   const [newServerUser, setNewServerUser] = useState("");
@@ -945,6 +954,9 @@ export function AgentFlowPanel() {
   const [selectedAtFileIndex, setSelectedAtFileIndex] = useState(0);
   const externalServices = useHelixStore((s) => s.externalServices);
   const addExternalService = useHelixStore((s) => s.addExternalService);
+  const removeExternalService = useHelixStore(
+    (s) => s.removeExternalService,
+  );
   const setExternalServiceConnected = useHelixStore(
     (s) => s.setExternalServiceConnected,
   );
@@ -2159,6 +2171,27 @@ export function AgentFlowPanel() {
         document.removeEventListener("mousedown", handleClickOutside);
     }
   }, [showModelDropdown, showFolderDropdown, showApprovalModeDropdown]);
+
+  // 远程项目弹层的可用高度：触发器顶 − 消息滚动区顶（真正的裁切边界）− 余量。
+  // 不量的话，弹层比上方空间高时头部会被滚动区裁掉且**滚不到**（absolute 溢出到滚动区上方不可达）。
+  useEffect(() => {
+    if (!showFolderDropdown || !showRemoteServers) {
+      setRemotePanelMaxH(null);
+      return;
+    }
+    const measure = () => {
+      const anchor = folderDropdownRef.current;
+      if (!anchor) return;
+      const clipTop = scrollRef.current?.getBoundingClientRect().top ?? 0;
+      const avail = Math.floor(
+        anchor.getBoundingClientRect().top - clipTop - 12,
+      );
+      setRemotePanelMaxH(Math.max(160, avail));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [showFolderDropdown, showRemoteServers, showAddServerForm]);
 
   // The dropdown shows all providers' models grouped. If the current model
   // doesn't belong to any provider, snap to the first available model.
@@ -8692,78 +8725,155 @@ export function AgentFlowPanel() {
                       </span>
                     </button>
                     {showFolderDropdown && (
-                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-[220px] bg-card border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in overflow-hidden">
+                      <div
+                        className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-card border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in overflow-y-auto ${showRemoteServers ? "w-[280px]" : "w-[220px]"}`}
+                        style={
+                          remotePanelMaxH
+                            ? { maxHeight: remotePanelMaxH }
+                            : undefined
+                        }
+                      >
                         {showRemoteServers ? (
                           <div>
-                            <div className="px-3 py-2 border-b border-border/30 flex items-center gap-2">
+                            <div
+                              className="sticky top-0 z-10 flex items-center gap-2 px-3 py-2 border-b border-border/40"
+                              style={{
+                                background:
+                                  "color-mix(in oklch, var(--muted) 25%, var(--card))",
+                              }}
+                            >
                               <button
                                 type="button"
                                 onClick={() => {
                                   setShowRemoteServers(false);
                                   setShowAddServerForm(false);
                                 }}
-                                className="p-1 hover:bg-accent rounded transition-colors"
+                                className="p-1 -ml-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-accent transition-colors shrink-0"
+                                data-tip="返回"
                               >
-                                <svg
-                                  className="size-4"
-                                  xmlns="http://www.w3.org/2000/svg"
-                                  width="14"
-                                  height="14"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                >
-                                  <path d="m15 18-6-6 6-6" />
-                                </svg>
+                                <ChevronLeft className="size-3.5" />
                               </button>
-                              <p className="text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/70 uppercase tracking-wider flex-1">
-                                远程项目
+                              <Server className="size-3.5 text-muted-foreground/45 shrink-0" />
+                              <p className="flex-1 min-w-0 truncate ui-text-sm2 font-medium text-foreground/85">
+                                {showAddServerForm ? "添加服务器" : "远程项目"}
                               </p>
+                              {!showAddServerForm &&
+                                externalServices.length > 0 && (
+                                  <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 tabular-nums">
+                                    {externalServices.length}
+                                  </span>
+                                )}
                             </div>
                             {showAddServerForm ? (
-                              <div className="px-3 py-2.5 space-y-1.5 bg-muted/20">
-                                <input
-                                  type="text"
-                                  value={newServerName}
-                                  onChange={(e) =>
-                                    setNewServerName(e.target.value)
-                                  }
-                                  placeholder="名称（可选）"
-                                  className="w-full px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/40"
-                                />
-                                <input
-                                  type="text"
-                                  value={newServerHost}
-                                  onChange={(e) =>
-                                    setNewServerHost(e.target.value)
-                                  }
-                                  placeholder="主机地址（必填）"
-                                  className="w-full px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/40"
-                                />
-                                <div className="flex gap-2">
-                                  <input
-                                    type="text"
-                                    value={newServerUser}
-                                    onChange={(e) =>
-                                      setNewServerUser(e.target.value)
-                                    }
-                                    placeholder="用户名"
-                                    className="flex-1 px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/40"
-                                  />
-                                  <input
-                                    type="text"
-                                    value={newServerPort}
-                                    onChange={(e) =>
-                                      setNewServerPort(e.target.value)
-                                    }
-                                    placeholder="端口"
-                                    className="w-16 px-2.5 py-1.5 ui-text-sm2 bg-background border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/40"
-                                  />
+                              <div className="p-3 space-y-2.5">
+                                {/* 字段卡：三组字段共用一圈淡边框 + 浅底，与设置页表单同一套材质 */}
+                                <div className="rounded-xl border border-border/50 bg-muted/25 p-2.5 space-y-2.5">
+                                  <div className="space-y-1">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <label
+                                        htmlFor="helix-add-server-name"
+                                        className="text-[calc(var(--helix-transcript-size)*0.7857)] font-medium text-foreground/60"
+                                      >
+                                        名称
+                                      </label>
+                                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/35">
+                                        可选
+                                      </span>
+                                    </div>
+                                    <div className="relative">
+                                      <Tag className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
+                                      <input
+                                        id="helix-add-server-name"
+                                        type="text"
+                                        value={newServerName}
+                                        onChange={(e) =>
+                                          setNewServerName(e.target.value)
+                                        }
+                                        placeholder="默认为 用户名@主机"
+                                        className="w-full pl-8 pr-2.5 py-1.5 ui-text-sm2 bg-background border border-border/60 rounded-lg text-foreground placeholder:text-muted-foreground/35"
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <div className="space-y-1">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <label
+                                        htmlFor="helix-add-server-host"
+                                        className="text-[calc(var(--helix-transcript-size)*0.7857)] font-medium text-foreground/60"
+                                      >
+                                        主机地址
+                                      </label>
+                                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-primary/70">
+                                        必填
+                                      </span>
+                                    </div>
+                                    <div className="relative">
+                                      <Globe className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
+                                      <input
+                                        id="helix-add-server-host"
+                                        type="text"
+                                        value={newServerHost}
+                                        onChange={(e) =>
+                                          setNewServerHost(e.target.value)
+                                        }
+                                        placeholder="192.168.12.101"
+                                        className="w-full pl-8 pr-2.5 py-1.5 ui-text-sm2 bg-background border border-border/60 rounded-lg text-foreground placeholder:text-muted-foreground/35"
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <div className="flex gap-2">
+                                    <div className="flex-1 min-w-0 space-y-1">
+                                      <label
+                                        htmlFor="helix-add-server-user"
+                                        className="text-[calc(var(--helix-transcript-size)*0.7857)] font-medium text-foreground/60"
+                                      >
+                                        用户名
+                                      </label>
+                                      <div className="relative">
+                                        <User className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
+                                        <input
+                                          id="helix-add-server-user"
+                                          type="text"
+                                          value={newServerUser}
+                                          onChange={(e) =>
+                                            setNewServerUser(e.target.value)
+                                          }
+                                          placeholder="ruowu"
+                                          className="w-full pl-8 pr-2.5 py-1.5 ui-text-sm2 bg-background border border-border/60 rounded-lg text-foreground placeholder:text-muted-foreground/35"
+                                        />
+                                      </div>
+                                    </div>
+                                    <div className="w-[76px] shrink-0 space-y-1">
+                                      <label
+                                        htmlFor="helix-add-server-port"
+                                        className="text-[calc(var(--helix-transcript-size)*0.7857)] font-medium text-foreground/60"
+                                      >
+                                        端口
+                                      </label>
+                                      <div className="relative">
+                                        <Hash className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground/35" />
+                                        <input
+                                          id="helix-add-server-port"
+                                          type="text"
+                                          value={newServerPort}
+                                          onChange={(e) =>
+                                            setNewServerPort(e.target.value)
+                                          }
+                                          placeholder="22"
+                                          className="w-full pl-7 pr-1.5 py-1.5 ui-text-sm2 bg-background border border-border/60 rounded-lg text-foreground placeholder:text-muted-foreground/35"
+                                        />
+                                      </div>
+                                    </div>
+                                  </div>
                                 </div>
-                                <div className="flex items-center gap-2 justify-end pt-1">
+
+                                <p className="flex items-center gap-1.5 px-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/45">
+                                  <KeyRound className="size-3 shrink-0" />
+                                  使用本机 SSH 私钥（~/.ssh/id_rsa）认证
+                                </p>
+
+                                <div>
                                   <SaveBar
                                     saving={serverSaving}
                                     status={serverSaveState}
@@ -8820,16 +8930,17 @@ export function AgentFlowPanel() {
                                 </div>
                               </div>
                             ) : externalServices.length === 0 ? (
-                              <div className="px-3 py-6">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
+                              <div className="px-3 py-4">
+                                <button
                                   type="button"
-                                  className="w-full"
                                   onClick={() => setShowAddServerForm(true)}
+                                  className="group/empty w-full flex flex-col items-center gap-1.5 rounded-xl border border-dashed border-border/60 py-5 text-muted-foreground/55 hover:border-primary/40 hover:bg-primary/5 hover:text-primary transition-colors"
                                 >
-                                  添加服务器
-                                </Button>
+                                  <Plus className="size-4" />
+                                  <span className="ui-text-sm2 font-medium">
+                                    添加服务器
+                                  </span>
+                                </button>
                               </div>
                             ) : (
                               <div className="max-h-32 overflow-y-auto py-1">
@@ -8839,10 +8950,14 @@ export function AgentFlowPanel() {
                                     `${svc.username ?? ""}@${svc.host}`;
                                   const isConnected = svc.connected;
                                   return (
-                                    <button
+                                    <div
                                       key={svc.id}
-                                      type="button"
-                                      onClick={async () => {
+                                      className={`group flex items-center gap-1.5 px-3 py-2.5 hover:bg-accent transition-colors rounded-lg ${selectedWorkDir && selectedWorkDir.startsWith("ssh://" + svc.host) ? "bg-primary/10 text-primary font-medium" : "text-foreground/80"}`}
+                                    >
+                                      <button
+                                        type="button"
+                                        className="flex-1 flex items-center gap-2.5 text-left ui-text-sm2"
+                                        onClick={async () => {
                                         setShowFolderDropdown(false);
                                         if (!isConnected) {
                                           try {
@@ -8887,7 +9002,6 @@ export function AgentFlowPanel() {
                                           svc.port;
                                         await selectWorkDir(remotePath);
                                       }}
-                                      className={`w-full text-left px-3 py-2.5 ui-text-sm2 hover:bg-accent transition-colors flex items-center gap-2.5 ${selectedWorkDir && selectedWorkDir.startsWith("ssh://" + svc.host) ? "bg-primary/10 text-primary font-medium" : "text-foreground/80"}`}
                                     >
                                       {isConnected ? (
                                         <span className="size-2 rounded-full bg-green-500 shrink-0" />
@@ -8910,20 +9024,48 @@ export function AgentFlowPanel() {
                                             ✓
                                           </span>
                                         )}
-                                    </button>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (
+                                            confirm(
+                                              `确定删除服务器「${displayName}」？`,
+                                            )
+                                          ) {
+                                            removeExternalService(svc.id);
+                                            storeActions.showToast({
+                                              type: "success",
+                                              title: "已删除服务器",
+                                              description: displayName,
+                                            });
+                                          }
+                                        }}
+                                        className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-red-500 p-1 rounded shrink-0"
+                                        title="删除服务器"
+                                        aria-label={`删除 ${displayName}`}
+                                      >
+                                        <Trash2 className="size-4" />
+                                      </button>
+                                    </div>
                                   );
                                 })}
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  type="button"
-                                  className="w-full mt-1"
-                                  onClick={() => setShowAddServerForm(true)}
-                                >
-                                  添加服务器
-                                </Button>
                               </div>
                             )}
+                            {!showAddServerForm &&
+                              externalServices.length > 0 && (
+                                <div className="border-t border-border/30 p-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowAddServerForm(true)}
+                                    className="w-full flex items-center justify-center gap-1.5 rounded-lg py-2 ui-text-sm2 text-muted-foreground/55 hover:bg-accent hover:text-foreground transition-colors"
+                                  >
+                                    <Plus className="size-3.5" />
+                                    添加服务器
+                                  </button>
+                                </div>
+                              )}
                           </div>
                         ) : (
                           <div>

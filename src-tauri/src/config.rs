@@ -103,6 +103,71 @@ pub fn model_context_window_fallback() -> i64 {
         .unwrap_or(0)
 }
 
+/// The configured context window (in tokens) of **one specific model**, looked
+/// up in `~/.pi/agent/models.json`.
+///
+/// `provider` (the model's owning endpoint) is tried first because a model id
+/// can be registered under several endpoints with different windows; only when
+/// it misses do we scan every provider (a conversation's per-session model
+/// override may point anywhere). Returns 0 when the model is unknown, so the
+/// caller can keep falling back.
+///
+/// Why this exists next to `model_context_window_fallback`: that one resolves
+/// the **global default** model (`settings.json` defaultProvider/defaultModel),
+/// which is the wrong question for the usage ring — a conversation that
+/// overrides its model (chat input selector → per-session `set_model`) runs a
+/// different model than the global default, so the ring's denominator must come
+/// from the model the session is actually on ("我选了 1M，有时候自动变成 256k").
+pub fn model_context_window_for(model: &str, provider: Option<&str>) -> i64 {
+    context_window_in(&read_pi_models(), model, provider)
+}
+
+/// `model_context_window_for` 的纯函数内核：从一份**已解析**的 models.json 里
+/// 按「供应商 + 模型」取窗口。单独拆出来是为了能在不碰 `~/.pi/agent` 磁盘文件
+/// 的前提下做单元测试（写真实配置文件的测试在受限沙箱里会被拒写）。
+pub fn context_window_in(models_doc: &serde_json::Value, model: &str, provider: Option<&str>) -> i64 {
+    let model = model.trim();
+    if model.is_empty() {
+        return 0;
+    }
+    let Some(providers) = models_doc.get("providers").and_then(|v| v.as_object()) else {
+        return 0;
+    };
+    let lookup = |entry: &serde_json::Value| -> i64 {
+        entry
+            .get("models")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                // 精确命中优先，其次子串命中（与 pi_provider_model_context_window
+                // 的口径一致：models.json 里的 id 偶尔带前缀/后缀）。
+                arr.iter()
+                    .find(|m| {
+                        m.get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|id| id == model)
+                    })
+                    .or_else(|| {
+                        arr.iter().find(|m| {
+                            m.get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|id| id.contains(model))
+                        })
+                    })
+            })
+            .and_then(|m| m.get("contextWindow").and_then(serde_json::Value::as_i64))
+            .unwrap_or(0)
+    };
+    if let Some(p) = provider.map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some(entry) = providers.get(p) {
+            let w = lookup(entry);
+            if w > 0 {
+                return w;
+            }
+        }
+    }
+    providers.values().map(lookup).find(|w| *w > 0).unwrap_or(0)
+}
+
 /// Read the effective API key for a provider: models.json inline key, or
 /// Pi's auth.json credential store.
 fn pi_provider_api_key(provider: &str) -> String {
@@ -898,5 +963,49 @@ mod pi_roundtrip_tests {
         if let Some(raw) = models_backup {
             std::fs::write(pi_models_path(), raw).unwrap();
         }
+    }
+
+    /// `context_window_in`（`model_context_window_for` 的纯函数内核）必须按
+    /// 「供应商 + 模型」查：能解析到全局默认之外的模型（对话级模型覆盖的场景），
+    /// 同名模型挂多端点时取调用方给的那个，未知模型返回 0 让调用方回落。
+    ///
+    /// 喂**内存里**的合成 models.json，不碰 `~/.pi/agent`（受限沙箱会拒写真实
+    /// 配置文件，且不该让单元测试依赖用户当前配置）。
+    #[test]
+    fn model_context_window_for_resolves_by_provider_and_model() {
+        let synthetic = serde_json::json!({
+            "providers": {
+                "alpha": {
+                    "baseUrl": "https://alpha.example/v1",
+                    "models": [
+                        { "id": "big-model", "contextWindow": 1_000_000 },
+                        { "id": "small-model", "contextWindow": 256_000 }
+                    ]
+                },
+                "beta": {
+                    "baseUrl": "https://beta.example/v1",
+                    "models": [ { "id": "big-model", "contextWindow": 200_000 } ]
+                }
+            }
+        });
+        let w = |model: &str, provider: Option<&str>| {
+            context_window_in(&synthetic, model, provider)
+        };
+
+        // 同名模型挂两个端点：必须按调用方给的供应商取，不能全库首匹配。
+        assert_eq!(w("big-model", Some("alpha")), 1_000_000);
+        assert_eq!(w("big-model", Some("beta")), 200_000);
+        // 不带供应商：顺序扫描（alpha 在前）。
+        assert_eq!(w("big-model", None), 1_000_000);
+        // 供应商未知：回落全库扫描，而不是返回 0。
+        assert_eq!(w("big-model", Some("gamma")), 1_000_000);
+        assert_eq!(w("small-model", Some("alpha")), 256_000);
+        // 子串命中（models.json 里的 id 偶尔带前缀/后缀）。
+        assert_eq!(w("big", Some("alpha")), 1_000_000);
+        // 查不到 → 0（调用方据此继续回落，绝不凭空造窗口）。
+        assert_eq!(w("__no_such_model__", Some("alpha")), 0);
+        assert_eq!(w("   ", Some("alpha")), 0);
+        // 没有 providers 段（models.json 被清空/损坏）→ 0，不 panic。
+        assert_eq!(context_window_in(&serde_json::json!({}), "big-model", None), 0);
     }
 }

@@ -199,6 +199,18 @@ pub struct PiInstance {
     exec_file_prior: Mutex<HashMap<String, Option<String>>>,
     /// Model context window (get_state's model.contextWindow) for usage ring.
     context_window: Mutex<Option<i64>>,
+    /// 这个实例**当前实际在用的**模型 id / 供应商（get_state 的 model.id /
+    /// model.provider，以及每轮透传的 per-session `set_model` 参数）。
+    ///
+    /// 为什么必须记：上下文环的分母必须取「本会话正在跑的那个模型」的窗口。
+    /// 对话级模型覆盖（输入栏下拉 → 每轮 `set_model`）只作用在这个实例上，
+    /// 不会写进 settings.json 的全局 defaultModel —— 以前分母从全局默认模型
+    /// 解析，于是"会话在跑 1M 模型、全局默认是 256k 模型"时环显示 256k，
+    /// 且恢复时的权威快照会把数字直接压低（"我选了 1M，有时候自动变成 256k"）。
+    current_model: Mutex<Option<String>>,
+    /// 与 `current_model` 同源：模型 id 会在多个端点下重名（同一个 id 挂两个
+    /// baseUrl），窗口必须按「供应商 + 模型」一起解析，不能只按 id 全库首匹配。
+    current_provider: Mutex<Option<String>>,
     /// Last REAL context figure we saw for this instance: pi's per-call
     /// `totalTokens` (input+output+cache, i.e. what the provider actually
     /// loaded). The session-file estimate counts message text only (chars/4)
@@ -292,6 +304,8 @@ impl PiInstance {
             exec_tool_args: Mutex::new(HashMap::new()),
             exec_file_prior: Mutex::new(HashMap::new()),
             context_window: Mutex::new(None),
+            current_model: Mutex::new(None),
+            current_provider: Mutex::new(None),
             last_context_used: AtomicI64::new(0),
             initialized: AtomicBool::new(false),
             spawn_lock: Mutex::new(()),
@@ -507,7 +521,63 @@ impl PiInstance {
             if let Some(window) = data.pointer("/model/contextWindow").and_then(Value::as_i64) {
                 *self.context_window.lock().unwrap() = Some(window);
             }
+            // 本实例当前在用的模型：pi 的 get_state 带完整 Model 对象，id /
+            // provider 都要记 —— 窗口解析得按「供应商 + 模型」查 models.json。
+            if let Some(model_id) = data.pointer("/model/id").and_then(Value::as_str) {
+                if !model_id.is_empty() {
+                    *self.current_model.lock().unwrap() = Some(model_id.to_string());
+                }
+            }
+            if let Some(provider) = data.pointer("/model/provider").and_then(Value::as_str) {
+                if !provider.is_empty() {
+                    *self.current_provider.lock().unwrap() = Some(provider.to_string());
+                }
+            }
         }
+    }
+
+    /// 记录「本实例现在跑的是哪个模型」——透传 per-session `set_model` 时调用。
+    /// `get_state` 只在握手/恢复时刷新，对话级切换模型不会经过它，所以这是
+    /// 「本会话模型」的第二条（也是每轮都会重放的）写入源。
+    fn note_active_model(&self, model: Option<&str>, provider: Option<&str>) {
+        if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+            *self.current_model.lock().unwrap() = Some(m.to_string());
+        }
+        if let Some(p) = provider.map(str::trim).filter(|p| !p.is_empty()) {
+            *self.current_provider.lock().unwrap() = Some(p.to_string());
+        }
+    }
+
+    /// 上下文环的分母：**本实例自己的模型**的窗口，全局默认模型放最后。
+    ///
+    /// 优先级（逐级下降，只在前一级拿不到时才往下走）：
+    ///   ① `pi_hint`：pi 本次上报的、属于这个会话的窗口（`contextUsage.contextWindow`）
+    ///   ② models.json 里本实例当前模型的条目（`config::model_context_window_for`，
+    ///      按 current_provider + current_model 查）—— 对话级模型覆盖只存在这里
+    ///   ③ 本实例 `get_state` 报的窗口
+    ///   ④ 全局默认模型（`config::model_context_window_fallback`）——**最后**才用
+    ///
+    /// 旧顺序把 ④ 放第一，于是「会话覆盖成 1M 模型、全局默认是 256k 模型」时
+    /// 分母被解析成 256k；恢复路径是权威快照（`authoritative=true`），会把环
+    /// 直接压低，表现为「我选了 1M，有时候自动变成 256k」。
+    fn context_max(&self, pi_hint: Option<i64>) -> i64 {
+        if let Some(w) = pi_hint.filter(|w| *w > 0) {
+            return w;
+        }
+        let model = self.current_model.lock().unwrap().clone();
+        if let Some(m) = model.as_deref() {
+            let provider = self.current_provider.lock().unwrap().clone();
+            let w = crate::config::model_context_window_for(m, provider.as_deref());
+            if w > 0 {
+                return w;
+            }
+        }
+        if let Some(w) = self.context_window() {
+            if w > 0 {
+                return w;
+            }
+        }
+        crate::config::model_context_window_fallback()
     }
 
     /// The model's context window, when known from get_state.
@@ -2169,16 +2239,13 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // Restore-time context read for the frontend's context ring:
             // session/new's seed-history replay can re-shape the active
             // branch, so estimate AFTER the switch has landed. `context_max`
-            // comes from the model's window when stamped; a restored instance
-            // whose stamp predates the model config carries no window, so
-            // fetch it from the config fallback table (same source as the
-            // ring's pre-prompt estimate).
+            // resolves against THIS session's own model (per-session override
+            // included); the global default is only the last resort — see
+            // `PiInstance::context_max`.
             let (jsonl_estimate, jsonl_categories, jsonl_anchor) =
                 jsonl_active_branch_estimate(&instance);
             let estimated = jsonl_estimate;
-            let ctx_max = instance
-                .context_window()
-                .unwrap_or(crate::config::model_context_window_fallback());
+            let ctx_max = instance.context_max(None);
             // Floor the estimate with the last REAL per-call figure. Priority:
             // chars/4 estimate → persisted jsonl usage anchor (last provider
             // `totalTokens` written into the session file, survives a gateway
@@ -2909,6 +2976,15 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
         | "get_fork_messages"
         | "get_last_assistant_text" => {
             let instance = routed_instance(&params, &state).await?;
+            // 每轮重放的 per-session 模型切换：先记下本实例现在跑的是哪个
+            // 模型，上下文环的分母（context_max）才会跟着切（否则一直按
+            // 全局默认模型的窗口算 → "我选了 1M，有时候自动变成 256k"）。
+            if method == "set_model" {
+                instance.note_active_model(
+                    params.get("modelId").and_then(Value::as_str),
+                    params.get("provider").and_then(Value::as_str),
+                );
+            }
             // Bare `compact`（pi_compact 命令）与 session.compress 里的是同一
             // 个长 LLM 总结调用，同样吃扩展预算；其余保持通用超时。
             let timeout = if method == "compact" {
@@ -3119,7 +3195,12 @@ fn restore_session_instance(
     // records of the most recent complete turns and switch to the trimmed
     // copy. O(file), no model involved, sub-second. Best-effort — on any
     // failure the session restores with the original oversized context.
-    if let Some(window) = instance.context_window() {
+    // 用「本会话自己那个模型」的窗口判断是否超限（与上下文环同一个解析口径，
+    // 见 PiInstance::context_max）：用户给这个模型配了 1M，就不该按别处
+    // 256k 的窗口把 300k 的会话裁掉。
+    let session_window = instance.context_max(None);
+    if session_window > 0 {
+        let window = session_window;
         let trimmed = trim_session_if_oversized(&session_file, window)?;
         if let Some(trimmed_path) = trimmed {
             log_spawn_diag(&format!(
@@ -4020,10 +4101,13 @@ async fn context_breakdown(stats: &Value, instance: &Arc<PiInstance>) -> Result<
         .get("cacheWrite")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    let context_max = context
-        .get("contextWindow")
-        .and_then(Value::as_i64)
-        .unwrap_or_else(|| instance.context_window().unwrap_or(0));
+    // 分母：本会话自己那个模型的窗口（pi 本次上报的 per-session 窗口优先，
+    // 其次 models.json 里本实例模型的条目）。全局默认模型只作最后兜底 ——
+    // 旧代码把全局放第一，于是"会话覆盖成 1M 模型、全局默认是 256k 模型"时
+    // 分母被解析成 256k。
+    let context_max = instance.context_max(
+        context.get("contextWindow").and_then(Value::as_i64),
+    );
     let mut context_used = context.get("tokens").and_then(Value::as_i64).unwrap_or(0);
     // True next-prompt replay size from the session file — same estimator the
     // restore-time trim uses. Cheaper than a stale 2k figure hiding a 276k
@@ -4315,16 +4399,6 @@ fn handle_line(instance: &Arc<PiInstance>, line: &str) {
             // 流式事件」时，这几行能立刻二分定位——网关侧完全没打 = pi 的输出
             // 没到 reader；网关打了但前端没内容 = 丢在 emit → Tauri → 前端过滤
             // 这一段。只挑回合边界事件，delta 不打（否则刷屏）。
-            if matches!(
-                event_type,
-                "agent_start" | "agent_end" | "agent_settled" | "turn_start" | "turn_end"
-            ) {
-                eprintln!(
-                    "[pi agent] turn event: type={} sid={}",
-                    event_type,
-                    instance.current_session_id()
-                );
-            }
             emit_pi_event(instance, event_type, &message);
         }
     }
@@ -5773,7 +5847,9 @@ fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
     // basis (`totalTokens || input+output+cacheRead+cacheWrite`). `input+output`
     // alone badly under-reports cached sessions (cacheRead is often 80%+ of the
     // real context).
-    let context_max = instance.context_window.lock().unwrap().unwrap_or(0);
+    // 分母：本会话自己那个模型的窗口（见 PiInstance::context_max）。全局默认
+    // 模型只作最后兜底 —— 以前它排第一，会话级模型覆盖的窗口因此被无视。
+    let context_max = instance.context_max(None);
     // pi's last-reported totalTokens under-counts a cached/long session — it is
     // a single request's usage, not what the NEXT prompt will replay. Take the
     // jsonl active-branch estimate (same basis as context_breakdown) so the ring

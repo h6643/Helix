@@ -5,7 +5,6 @@
 //! these commands; without them `invoke('helix_list_skills')` rejects and no
 //! skills show up in the composer.
 
-use crate::paths::helix_data_dir;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,19 +43,6 @@ fn plugins_dir() -> PathBuf {
         .join("extensions")
 }
 
-/// Per-skill invocation counters, persisted outside the skills dir so user
-/// deletions/edits of skill folders never wipe usage history.
-fn usage_path() -> PathBuf {
-    helix_data_dir().join("skill_usage.json")
-}
-
-fn read_usage() -> HashMap<String, u64> {
-    std::fs::read_to_string(usage_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
-}
-
 #[derive(Serialize)]
 pub struct DirEntryInfo {
     pub name: String,
@@ -77,8 +63,6 @@ pub struct SkillEntry {
     /// the bundling npm package name (e.g. "pi-subagents").
     pub source: String,
     pub path: String,
-    #[serde(rename = "callCount")]
-    pub call_count: u64,
 }
 
 #[tauri::command]
@@ -136,25 +120,65 @@ pub fn helix_delete_dir(dir_path: String) -> bool {
 /// Directories starting with `.` are listed with `isBuiltin: true`.
 #[tauri::command]
 pub fn helix_list_skills() -> Vec<SkillEntry> {
-    let usage = read_usage();
     let mut out: Vec<SkillEntry> = Vec::new();
 
     // ── Pi user skills (~/.pi/agent/skills/) ──
     if let Ok(top) = std::fs::read_dir(skills_dir()) {
-        collect_skills_from_dir(top, &mut out, &usage, "pi", false);
+        collect_skills_from_dir(top, &mut out, "pi", false);
     }
 
+    // ── Skills from pi's settings.json `skills` roots ──
+    // pi 自己会读 ~/.pi/agent/settings.json 的 `skills` 数组作为额外加载根
+    // （例如 C:/Users/hyt/ppt-master/skills）。Helix 列表必须跟上同一套根，
+    // 否则技能面板 / 输入框 "/" 菜单看不到这些已安装技能。
+    collect_settings_skills(&mut out);
+
     // ── Skills bundled with pi npm packages ──
-    collect_package_skills(&mut out, &usage);
+    collect_package_skills(&mut out);
 
     out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 
+/// `~/.pi/agent/settings.json` — pi's user settings (its `skills` array lists
+/// additional skill roots pi loads, e.g. `C:/Users/hyt/ppt-master/skills`).
+fn pi_settings_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".pi").join("agent").join("settings.json"))
+}
+
+/// Scan each directory listed in settings.json's `skills` array, mirroring
+/// pi's own loading rule. Missing/unreadable roots are skipped silently.
+fn collect_settings_skills(out: &mut Vec<SkillEntry>) {
+    let Some(settings_path) = pi_settings_path() else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(settings_path) else {
+        return;
+    };
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let Some(roots) = settings
+        .get("skills")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return;
+    };
+    for root in roots {
+        let Some(dir) = root.as_str() else {
+            continue;
+        };
+        let Ok(top) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        collect_skills_from_dir(top, out, "pi", false);
+    }
+}
+
 /// Scan `~/.pi/agent/npm/node_modules/<dep>/` for skills declared via the
 /// `pi.skills` manifest field (same rule pi itself uses — undeclared `skills/`
 /// directories are NOT loaded, so they are not listed either).
-fn collect_package_skills(out: &mut Vec<SkillEntry>, usage: &HashMap<String, u64>) {
+fn collect_package_skills(out: &mut Vec<SkillEntry>) {
     let npm = pi_npm_dir();
     let Ok(content) = std::fs::read_to_string(npm.join("package.json")) else {
         return;
@@ -194,7 +218,7 @@ fn collect_package_skills(out: &mut Vec<SkillEntry>, usage: &HashMap<String, u64
         };
         for root in roots {
             if let Ok(top) = std::fs::read_dir(&root) {
-                collect_skills_from_dir(top, out, usage, dep_name, true);
+                collect_skills_from_dir(top, out, dep_name, true);
             }
         }
     }
@@ -203,7 +227,6 @@ fn collect_package_skills(out: &mut Vec<SkillEntry>, usage: &HashMap<String, u64
 fn collect_skills_from_dir(
     top: std::fs::ReadDir,
     out: &mut Vec<SkillEntry>,
-    usage: &HashMap<String, u64>,
     source: &str,
     builtin: bool,
 ) {
@@ -215,7 +238,7 @@ fn collect_skills_from_dir(
         let builtin = builtin || dir_name.starts_with('.');
         // Depth 1: <skills>/<skill>/SKILL.md
         if let Some(skill) =
-            read_skill_dir(&entry.path(), &dir_name, &dir_name, builtin, source, usage)
+            read_skill_dir(&entry.path(), &dir_name, &dir_name, builtin, source)
         {
             out.push(skill);
             continue;
@@ -231,7 +254,7 @@ fn collect_skills_from_dir(
             let child_name = child.file_name().to_string_lossy().into_owned();
             let id = format!("{dir_name}/{child_name}");
             if let Some(skill) =
-                read_skill_dir(&child.path(), &id, &child_name, builtin, source, usage)
+                read_skill_dir(&child.path(), &id, &child_name, builtin, source)
             {
                 out.push(skill);
             }
@@ -249,12 +272,10 @@ fn read_skill_dir(
     fallback_name: &str,
     builtin: bool,
     source: &str,
-    usage: &HashMap<String, u64>,
 ) -> Option<SkillEntry> {
     let content = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
     let (name, description) = parse_skill_frontmatter(&content);
     let name = name.unwrap_or_else(|| fallback_name.to_string());
-    let call_count = usage.get(&name).copied().unwrap_or(0);
     Some(SkillEntry {
         id: id.to_string(),
         name: name.clone(),
@@ -265,21 +286,7 @@ fn read_skill_dir(
         is_builtin: builtin,
         source: source.to_string(),
         path: dir.to_string_lossy().into_owned(),
-        call_count,
     })
-}
-
-/// Record one invocation of `skill_name`; returns the new call count.
-#[tauri::command]
-pub fn helix_track_skill_call(skill_name: String) -> u64 {
-    let mut usage = read_usage();
-    let count = usage.entry(skill_name).or_insert(0);
-    *count += 1;
-    let new_count = *count;
-    if let Ok(raw) = serde_json::to_string(&usage) {
-        let _ = std::fs::write(usage_path(), raw);
-    }
-    new_count
 }
 
 /// Extract `name` / `description` from a SKILL.md YAML frontmatter block.

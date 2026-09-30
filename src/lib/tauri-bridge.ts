@@ -181,8 +181,6 @@ function buildTauriAPI(): ElectronAPI {
     readFile: (filePath: string) => invoke("helix_read_file", { filePath }),
     deleteDir: (dirPath: string) => invoke("helix_delete_dir", { dirPath }),
     listSkills: () => invoke("helix_list_skills"),
-    trackSkillCall: (skillName: string) =>
-      invoke("helix_track_skill_call", { skillName }),
   };
 
   // ── shell ───────────────────────────────────────────────────────────────
@@ -441,6 +439,11 @@ function buildTauriAPI(): ElectronAPI {
   api.subagentMap = {
     list: (sessionId?: string) =>
       invoke("subagent_map", { sessionId: sessionId ?? null }),
+  };
+
+  // ── self-improve health check report ────────────────────────────────────
+  api.selfImprove = {
+    report: () => invoke("self_improve_report"),
   };
 
   // ── background tasks (pi-background-tasks extension registry) ───────────

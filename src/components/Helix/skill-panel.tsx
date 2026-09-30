@@ -52,7 +52,6 @@ interface HelixSkill {
    * or the bundling npm package name. */
   source?: string;
   path: string;
-  callCount: number;
 }
 
 interface PackageResult {
@@ -107,6 +106,16 @@ export function SkillPanel({}: SkillPanelProps) {
   const [showBrowse, setShowBrowse] = useState(false);
   const [sortBy, setSortBy] = useState<"downloads" | "date">("downloads");
   const [filterType, setFilterType] = useState<string>("all");
+
+  // 面板挂载或请求号变化时跳到目标 tab，并预填搜索词。
+  const skillPanelRequest = useHelixStore((s) => s.skillPanelRequest);
+  useEffect(() => {
+    if (!skillPanelRequest?.ts) return;
+    setActiveTab(skillPanelRequest.tab);
+    if (skillPanelRequest.query !== undefined) {
+      setSearchQuery(skillPanelRequest.query);
+    }
+  }, [skillPanelRequest]);
 
   // Plugins state
   const [items, setItems] = useState<InstalledItem[]>([]);
@@ -847,11 +856,6 @@ export function SkillPanel({}: SkillPanelProps) {
                               data-tip={`来源: ${skill.source}`}
                             >
                               {skill.source}
-                            </span>
-                          )}
-                          {skill.callCount > 0 && (
-                            <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 font-mono">
-                              {skill.callCount}次
                             </span>
                           )}
                         </div>

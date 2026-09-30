@@ -270,7 +270,7 @@ export function AppearanceSettingsPanel({
       <PageHeader>外观</PageHeader>
 
       <SettingGroup>
-        <SettingRow label="配色风格" hint="选择浅色、深色或跟随系统主题。">
+        <SettingRow label="配色风格" hint="选择主题。">
           <ThemeStylePicker value={themeStyle} onChange={onSelectThemeStyle} />
         </SettingRow>
       </SettingGroup>

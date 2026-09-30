@@ -28,6 +28,7 @@ pub mod pi_gateway_test_hooks {
 mod image_model;
 mod profile;
 mod proxy;
+mod self_improve;
 mod scheduled_tasks;
 mod security;
 mod skills;
@@ -240,7 +241,6 @@ pub fn run() {
             skills::helix_set_subagent_enabled,
             skills::helix_set_subagent_model,
             skills::helix_delete_subagent,
-            skills::helix_track_skill_call,
             // auxiliary vision model (image → description)
             vision::vision_config_list,
             vision::vision_config_save,
@@ -257,6 +257,8 @@ pub fn run() {
             delegations::delegations_read_log,
             delegations::subagent_timeline,
             pi_gateway::subagent_map,
+            // self-improve health check report
+            self_improve::self_improve_report,
             // background tasks (pi-background-tasks extension registry)
             background_tasks::tasks_list,
             background_tasks::tasks_read,

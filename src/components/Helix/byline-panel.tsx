@@ -10,6 +10,7 @@ import {
   FileText,
   ChevronDown,
   Check,
+  Paperclip,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadSessionMap } from "@/lib/session-map";
@@ -140,6 +141,7 @@ export function BylinePanel() {
 
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const uploadFileInputRef = useRef<HTMLInputElement>(null);
   const bylineFocusSignal = useHelixStore((s) => s.bylineFocusSignal);
   // ── 按会话的审批模式 / 模型覆盖（与主线同款语义，只作用于旁路会话）──
   // 覆盖值挂在旁路会话自己的 cid（btw- 前缀）上，handleRun 每轮解析：
@@ -297,6 +299,32 @@ export function BylinePanel() {
     if (inputRef.current) inputRef.current.style.height = "36px";
   };
 
+  // 上传文件：读取文本内容追加到草稿，二进制文件跳过。
+  const TEXTUAL_EXT = /\.(txt|md|markdown|mdx|json|yml|yaml|toml|csv|ts|tsx|js|jsx|py|java|c|cpp|h|hpp|go|rs|rb|php|sh|bash|zsh|sql|html|htm|css|scss|less|xml|log|env|gitignore|dockerfile|makefile|rst|tex)$/i;
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    const parts: string[] = [];
+    for (const file of Array.from(files)) {
+      if (TEXTUAL_EXT.test(file.name)) {
+        try {
+          const text = await file.text();
+          if (text.trim()) {
+            parts.push(`\n\n[附件: ${file.name}]\n${text}`);
+          }
+        } catch {
+          parts.push(`\n\n[附件: ${file.name} 读取失败]`);
+        }
+      } else {
+        parts.push(`\n\n[附件: ${file.name} (${file.size} 字节)]`);
+      }
+    }
+    if (parts.length > 0) {
+      setDraft((prev) => prev + parts.join(""));
+    }
+    e.target.value = "";
+  };
+
   const handleSend = () => {
     const q = draft.trim();
     if (!q) return;
@@ -348,6 +376,111 @@ export function BylinePanel() {
           description:
             "这里已是旁路问答面板：直接在输入框输入问题（Enter 发送）即可，也可多轮追问。",
         });
+        return;
+      }
+      if (cmd?.action === "init") {
+        // /init 是项目级命令，从旁路面板发也行（与主对话同一套处理逻辑）。
+        setDraft("");
+        resetInputHeight();
+        const st = useHelixStore.getState();
+        const workDir = st.activeSessionWorkDir ?? st.selectedWorkDir;
+        if (!workDir) {
+          showToast({
+            type: "warning",
+            title: "未选择工作目录",
+            description: "请先选择一个项目目录再生成 pi.md",
+          });
+          return;
+        }
+        void (async () => {
+          try {
+            const pkg = await window.electron?.fs?.read?.(`${workDir}/package.json`);
+            const existingPi = await window.electron?.fs?.read?.(`${workDir}/pi.md`);
+            if (existingPi) {
+              showToast({
+                type: "warning",
+                title: "pi.md 已存在",
+                description: "该目录已存在 pi.md 文件，已跳过生成",
+              });
+              return;
+            }
+            let projectName = "";
+            let projectDesc = "";
+            let scripts: string[] = [];
+            let frameworks: string[] = [];
+            if (pkg) {
+              try {
+                const pkgObj = JSON.parse(pkg);
+                projectName = pkgObj.name || "";
+                projectDesc = pkgObj.description || "";
+                if (pkgObj.scripts && typeof pkgObj.scripts === "object") {
+                  scripts = Object.keys(pkgObj.scripts);
+                }
+                const deps = { ...(pkgObj.dependencies || {}), ...(pkgObj.devDependencies || {}) };
+                if (deps.next) frameworks.push("Next.js");
+                if (deps.vite) frameworks.push("Vite");
+                if (deps.react) frameworks.push("React");
+                if (deps.vue) frameworks.push("Vue");
+                if (deps.svelte) frameworks.push("Svelte");
+                if (deps.tailwindcss) frameworks.push("Tailwind CSS");
+                if (deps.typescript) frameworks.push("TypeScript");
+              } catch { /* empty */ }
+            }
+            const now = new Date().toISOString().split("T")[0];
+            const L: string[] = [];
+            L.push("# pi.md — " + (projectName || "项目"));
+            L.push("");
+            L.push("> 生成时间：" + now);
+            L.push("> 此文件由 /init 命令自动生成，供 AI 助手了解项目上下文。");
+            L.push("");
+            L.push("## 项目概览");
+            L.push("");
+            L.push(projectDesc ? "- " + projectDesc : "（请补充项目描述）");
+            L.push("");
+            L.push("## 技术栈");
+            L.push("");
+            frameworks.forEach((f) => L.push("- " + f));
+            if (!frameworks.length) L.push("（请补充技术栈）");
+            L.push("");
+            L.push("## 常用脚本");
+            L.push("");
+            scripts.forEach((s) => L.push("- `npm run " + s + "`"));
+            if (!scripts.length) L.push("（无脚本定义）");
+            L.push("");
+            L.push("## 项目结构");
+            L.push("");
+            L.push("```");
+            L.push(workDir + "/");
+            L.push("  ├── pi.md          ← 本文件");
+            L.push("  ├── package.json");
+            L.push("  └── src/");
+            L.push("```");
+            L.push("");
+            L.push("## 开发约定");
+            L.push("");
+            L.push("- 使用 Prettier 格式化代码");
+            L.push("- 提交前运行 lint");
+            L.push("- 遵循项目现有的代码风格");
+            L.push("");
+            L.push("## 注意事项");
+            L.push("");
+            L.push("- （请补充项目特定的注意事项）");
+            L.push("");
+            const piMd = L.join(String.fromCharCode(10));
+            await window.electron?.fs?.write?.(`${workDir}/pi.md`, piMd);
+            showToast({
+              type: "success",
+              title: "pi.md 已生成",
+              description: `已生成 ${workDir}/pi.md，请编辑补充项目特定信息`,
+            });
+          } catch (e) {
+            showToast({
+              type: "error",
+              title: "生成 pi.md 失败",
+              description: String(e),
+            });
+          }
+        })();
         return;
       }
     }
@@ -461,7 +594,7 @@ export function BylinePanel() {
               const nextHeight = ch > min ? Math.min(ch, 300) : min;
               target.style.height = nextHeight + "px";
             }}
-            placeholder="随心输入...（/ 查看快捷命令）"
+            placeholder="随心输入..."
             className="chat-input w-full min-w-0 resize-none bg-transparent caret-foreground text-left placeholder:text-left placeholder:text-muted-foreground/60 text-[length:var(--helix-transcript-size)] min-h-[36px] max-h-[300px] px-2.5 pt-1.5 pb-0.5 leading-[1.45] break-all overflow-x-hidden overflow-y-auto text-foreground outline-none"
             style={{
               overflowX: "hidden",
@@ -476,7 +609,24 @@ export function BylinePanel() {
                 覆盖值写入 modelBySession / approvalModeBySession 的 btw-cid 键，
                 handleRun 每轮经 set_mode / set_model 透传到该会话的实例。 */}
             <div className="relative min-w-0 flex items-center gap-1" ref={toolbarRef}>
-              {btwCid && (
+              {/* 上传文件按钮 */}
+              <button
+                type="button"
+                onClick={() => uploadFileInputRef.current?.click()}
+                data-tip="添加文件"
+                className="h-7 shrink-0 px-1.5 rounded-lg transition-all duration-200 flex items-center text-muted-foreground hover:text-foreground hover:bg-muted/40 text-xs"
+              >
+                <Paperclip className="size-3.5" />
+              </button>
+              <input
+                ref={uploadFileInputRef}
+                type="file"
+                multiple
+                accept="*/*"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+              {(
                 <>
                   <button
                     type="button"

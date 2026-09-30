@@ -16,6 +16,12 @@ import type { ExecutionStep } from "@/stores/helix-store";
 
 const TOOL_RESULT_CLAMP = 20_000;
 
+// 运行中实时输出预览保留的尾部长度。容器 max-h-40 约能显示 8 行，这里按略宽于
+// 一屏的余量取尾巴；更早的内容交给展开后的完整结果卡。
+// 之前是 slice(-200) + max-h-16 overflow-hidden：0.85em×leading-relaxed 一行
+// ≈19.3px，64px 刚好卡 3.3 行，四行以上的输出被静默砍掉、连滚动条都没有。
+const PREVIEW_TAIL_CHARS = 1200;
+
 // ── Sub-step grouping ───────────────────────────────────────────────────
 
 const TOOL_CATEGORY: Record<string, string> = {
@@ -287,10 +293,12 @@ function toolActionText(step: ExecutionStep): string {
           cmd,
         );
       if (looksLikeError) return "";
-      // bash/terminal：标题返回命令完整首行（不手动截断 50）——命令卡已不可
-      // 展开、标题是唯一查看入口，截断太短会看不到命令本体；视觉过长由外层
-      // CSS truncate 省略，完整命令放 title 悬停可见。
-      return cmd.split("\n")[0];
+      // bash/terminal：标题返回**完整命令**——不手动截断 50、也不只取首行。
+      // 标题是命令本体的唯一查看入口，只取首行 / 横向 CSS truncate 会让后端
+      // 实际跑满、前端却少显示好几行的情况被误读成「命令没执行完」。过长由外层
+      // 容器折行 + max-h-40 overflow-y-auto 兜底（能滚动，不静默丢内容），
+      // title 属性保证悬停也能拿到全文。
+      return cmd;
     }
     return "";
   }
@@ -503,7 +511,8 @@ function ToolCard({
           </span>
         )}
         <span
-          className={`flex-1 min-w-0 truncate text-foreground/60 ${running ? "text-foreground/85" : ""}`}
+          title={titleLabel}
+          className={`flex-1 min-w-0 max-h-40 overflow-y-auto break-all whitespace-pre-wrap text-foreground/60 ${running ? "text-foreground/85" : ""}`}
         >
           {verbText} {titleLabel}
         </span>
@@ -593,8 +602,8 @@ function ToolCard({
 
       {/* 命令类不可展开：运行中的实时输出与失败错误直接外露在标题下，不依赖展开。 */}
       {!canExpand && running && step.content && (
-        <div className="ml-1 mt-1 text-[0.85em] text-foreground/40 font-mono max-h-16 overflow-hidden leading-relaxed whitespace-pre-wrap break-all">
-          {stripAnsi(step.content.slice(-200))}
+        <div className="ml-1 mt-1 text-[0.85em] text-foreground/40 font-mono max-h-40 overflow-y-auto leading-relaxed whitespace-pre-wrap break-all">
+          {stripAnsi(step.content.slice(-PREVIEW_TAIL_CHARS))}
         </div>
       )}
       {!canExpand && results.some((r) => r.type === "error") && (
@@ -619,8 +628,8 @@ function ToolCard({
               tool.progress → tool_call_update(in_progress) → tool_output_delta 把
               实时输出追加到 step.content（agent-flow-panel），这里显示它的末尾。 */}
           {running && step.content && (
-            <div className="text-[0.85em] text-foreground/40 font-mono max-h-16 overflow-hidden leading-relaxed whitespace-pre-wrap break-all">
-              {stripAnsi(step.content.slice(-200))}
+            <div className="text-[0.85em] text-foreground/40 font-mono max-h-40 overflow-y-auto leading-relaxed whitespace-pre-wrap break-all">
+              {stripAnsi(step.content.slice(-PREVIEW_TAIL_CHARS))}
             </div>
           )}
           {/* Sub-agent sub-steps */}

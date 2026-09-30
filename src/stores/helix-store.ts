@@ -230,9 +230,9 @@ interface HelixState
   setBrowserHomeUrl: (url: string) => void;
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: "browser" | "code" | "diff" | "agent" | "byline" | null;
+  rightSidebarTab: "browser" | "code" | "diff" | "agent" | "byline" | "self-improve" | null;
   setRightSidebarTab: (
-    tab: "browser" | "code" | "diff" | "agent" | "byline" | null,
+    tab: "browser" | "code" | "diff" | "agent" | "byline" | "self-improve" | null,
   ) => void;
   // 右侧栏的「子 Agent 工作内容」视图：点击工作面板里的某个 agent 时写入，
   // RightSidebar 据此渲染该 agent 的任务 / live 日志。null = 未选中。
@@ -1769,6 +1769,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           showPreviewRail: false,
           editorOpen: false,
         };
+      if (tab === "self-improve")
+        return {
+          rightSidebarTab: "self-improve",
+          showPreviewRail: false,
+          editorOpen: false,
+        };
       return {
         rightSidebarTab: null,
         showPreviewRail: false,
@@ -1911,6 +1917,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         m.id === messageId ? { ...m, rowId } : m,
       ),
     })),
+
 
   deleteMessage: (messageId) =>
     set((state) => ({
@@ -2272,6 +2279,18 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     const isDriveRoot =
       typeof relativePath === "string" &&
       /^[a-zA-Z]:[\\/]?$/.test(relativePath);
+    // 远程连接串（ssh://、git://、file:// …）不是本地目录。Helix 是本地 Tauri
+    // 应用，工作目录只能是本机路径。这类输入透传到后端会被当成相对路径 join
+    // 到当前 work_dir 后面（Windows 下无盘符不算绝对路径），而 `:` 与 `/` 在
+    // Windows 文件名里非法 → create_dir_all 报 os error 123。
+    const isUrlScheme = /^[a-zA-Z][\w+.-]*:\/\//.test(relativePath);
+    if (isUrlScheme) {
+      get().showToast({
+        title: "工作目录只支持本机目录：这是远程连接串，Helix 不支持 SSH 远程工作区",
+        type: "error",
+      });
+      return;
+    }
     if (
       !relativePath ||
       relativePath === "/" ||
@@ -2306,7 +2325,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         // 轻量对齐（不杀 Pi 实例、不重启网关）——与注释中“不打断运行中对话”的
         // 意图一致。重型的 setWorkDir 会 kill+restart 全部后端实例，绝不能用于此。
         const res = await api.app.syncWorkDir(relativePath);
-        const absDir = res?.workDir || relativePath;
+        // 后端创建目录失败时会返回 success:false 并保留原 work_dir。必须看这个
+        // 标志位——否则会用 res.workDir 回退到 relativePath（用户输入的原串）
+        // 写进 selectedWorkDir，把一个非法/不存在的路径当成当前项目展示出来。
+        if (!res?.success) {
+          get().showToast({ title: res?.error || "切换工作目录失败", type: "error" });
+          return;
+        }
+        const absDir = res.workDir;
         set({ selectedWorkDir: absDir });
         // 显式传目录扫描（与非运行分支一致），失败要看得见而不是静默吞掉。
         try {
@@ -2339,7 +2365,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }
     try {
       const res = await api.app.setWorkDir(relativePath);
-      const absDir = res?.workDir || relativePath;
+      // 同上：必须看 success。后端 create_dir_all 失败（非法字符、不可写）时会
+      // 拒绝变更并保留原 work_dir；这里若继续走，会把非法路径设进
+      // selectedWorkDir 并 bump workDirEpoch，触发一连串基于错目录的副作用。
+      if (!res?.success) {
+        get().showToast({ title: res?.error || "切换工作目录失败", type: "error" });
+        return;
+      }
+      const absDir = res.workDir;
       // Don't auto-save the current session when switching projects.
       // Just clear the current session so new messages go to the new project.
       get().setCurrentSessionId(null);

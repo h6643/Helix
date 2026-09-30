@@ -33,7 +33,7 @@ import { useHelixStore } from "@/stores/helix-store";
 export interface BuiltinCommand {
   name: string;
   description: string;
-  action: "compact" | "btw";
+  action: "compact" | "btw" | "init";
 }
 
 export const BUILTIN_SLASH_COMMANDS: BuiltinCommand[] = [
@@ -47,6 +47,12 @@ export const BUILTIN_SLASH_COMMANDS: BuiltinCommand[] = [
     name: "btw",
     description: "旁路提问：打开右侧面板",
     action: "btw",
+  },
+  {
+    // 初始化生成 pi.md
+    name: "init",
+    description: "初始化生成 pi.md",
+    action: "init",
   },
 ];
 

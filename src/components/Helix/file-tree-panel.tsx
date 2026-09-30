@@ -492,14 +492,14 @@ export function FileTreePanel({
   const handleFileClick = (item: FileTreeItem) => {
     if (item.isDirectory) {
       toggleExpand(item);
-    } else {
-      // Open the editor panel synchronously on click so the user ALWAYS gets a
-      // visible response — the read/checks below run async and may fail, but the
-      // panel must not stay hidden (previously onOpenFile ran only after a
-      // successful read, so any read error left the sidebar closed = "no response").
-      onOpenFile?.();
-      openFileInEditorAction(item);
+      return;
     }
+    // Open the editor panel synchronously on click so the user ALWAYS gets a
+    // visible response — the read/checks below run async and may fail, but the
+    // panel must not stay hidden (previously onOpenFile ran only after a
+    // successful read, so any read error left the sidebar closed = "no response").
+    onOpenFile?.();
+    openFileInEditorAction(item);
   };
 
   // Known non-text (binary) extensions — opened in the editor would be garbage.

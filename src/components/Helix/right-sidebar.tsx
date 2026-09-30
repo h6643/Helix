@@ -1,6 +1,6 @@
 "use client";
 
-import { Globe, Plus, X, Maximize2, Minimize2, Zap } from "lucide-react";
+import { Globe, Plus, X, Maximize2, Minimize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AgentWorkPanel } from "./agent-work-panel";
@@ -9,11 +9,12 @@ import { CodeEditorPanel } from "./code-editor-panel";
 import { DiffSidebarPanel } from "./diff-sidebar-panel";
 import { MoreActionsMenu } from "./more-actions-menu";
 import { BrowserView } from "./preview-rail";
+import { SelfImprovePanel } from "./self-improve-panel";
 import { cleanUrl } from "@/lib/url-utils";
 import { summarizeUrl } from "@/lib/url-utils";
 import { useHelixStore } from "@/stores/helix-store";
 
-type PageKind = "browser" | "code" | "diff" | "agent" | "byline";
+type PageKind = "browser" | "code" | "diff" | "agent" | "byline" | "self-improve";
 interface PanelPage {
   id: string;
   kind: PageKind;
@@ -60,6 +61,8 @@ export function RightSidebar() {
     if (tab === "agent") return [{ id: newPageId(), kind: "agent", url: "" }];
     if (tab === "byline")
       return [{ id: newPageId(), kind: "byline", url: "" }];
+    if (tab === "self-improve")
+      return [{ id: newPageId(), kind: "self-improve", url: "" }];
     if (tab === "browser")
       return [{ id: newPageId(), kind: "browser", url: start }];
     return [];
@@ -137,7 +140,9 @@ export function RightSidebar() {
             ? "agent"
             : tab === "byline"
               ? "byline"
-              : null;
+              : tab === "self-improve"
+                ? "self-improve"
+                : null;
     if (!kind) return;
     const existing = pagesRef.current.find((p) => p.kind === kind);
     if (existing) {
@@ -380,7 +385,9 @@ export function RightSidebar() {
                   ? activeAgentView?.name || "子 Agent"
                   : p.kind === "byline"
                     ? "旁路问答"
-                    : "更改";
+                    : p.kind === "self-improve"
+                      ? "体检"
+                      : "更改";
             const active = p.id === activePageId;
             return (
               <div
@@ -391,9 +398,6 @@ export function RightSidebar() {
               >
                 {p.kind === "browser" && (
                   <Globe className="size-3.5 shrink-0 opacity-60" />
-                )}
-                {p.kind === "byline" && (
-                  <Zap className="size-3.5 shrink-0 opacity-60 text-violet-500" />
                 )}
                 <span className="flex-1 min-w-0 truncate">{label}</span>
                 <button
@@ -498,6 +502,7 @@ export function RightSidebar() {
                 {p.kind === "diff" && <DiffSidebarPanel />}
                 {p.kind === "agent" && <AgentWorkPanel />}
                 {p.kind === "byline" && <BylinePanel />}
+                {p.kind === "self-improve" && <SelfImprovePanel />}
               </div>
             );
             });

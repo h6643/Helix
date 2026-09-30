@@ -16,7 +16,6 @@ import {
   Check,
   Copy,
   GitFork,
-  Undo2,
   FileText,
 } from "lucide-react";
 import {
@@ -66,6 +65,47 @@ export type ProcessSegment<T extends { type: string }> = {
   kind: "text" | "thinking" | "tasks";
   blocks: T[];
 };
+
+/** 纯工具段：段内全是 tool_group 块（没有文本/思考/文件改动夹在中间）。 */
+function isToolRunSegment<T extends { type: string }>(
+  seg: ProcessSegment<T>,
+): boolean {
+  return (
+    seg.kind === "tasks" &&
+    seg.blocks.length > 0 &&
+    seg.blocks.every((b) => b.type === "tool_group")
+  );
+}
+
+/**
+ * 把**连续的纯工具段**并成一段（只做渲染前的整理，块本身一个不动）。
+ *
+ * 为什么需要：`segmentizeProcessBlocks` 是"一个 block 一段"，而工具块又是
+ * "一个工具调用一块"（agent-flow-panel 有意为之 —— 这样工具卡能与思考/正文严格
+ * 按事件顺序交叉显示）。两者相乘 ⇒ **一轮里连续 N 个工具调用会渲染出 N 行折叠
+ * 摘要**（`编辑 · 1 编辑` ×N），而不是一行 `编辑 · 6 编辑, 终端 · 1 命令` ——
+ * 因为 `ToolStreamFold` 的摘要是**在段范围内**聚合的，而每个段里只有一个工具。
+ *
+ * 只在渲染前合并相邻的纯工具段：思考段/正文段照旧隔断（"思考→编辑→思考→编辑"
+ * 仍分成两行），工具块自身的顺序与"折叠区内按事件序渲染"的语义都不变。
+ */
+export function mergeToolRuns<T extends { type: string }>(
+  segs: ProcessSegment<T>[],
+): ProcessSegment<T>[] {
+  const out: ProcessSegment<T>[] = [];
+  for (const seg of segs) {
+    const last = out[out.length - 1];
+    if (isToolRunSegment(seg) && last && isToolRunSegment(last)) {
+      out[out.length - 1] = {
+        ...last,
+        blocks: [...last.blocks, ...seg.blocks],
+      };
+      continue;
+    }
+    out.push(seg);
+  }
+  return out;
+}
 
 // 不再分段，所有 blocks 放在一个段落里
 export function buildProcessSegments<T extends { type: string }>(
@@ -283,7 +323,10 @@ export const ThinkingFold = React.memo(function ThinkingFold({
   }, [body, streaming]);
 
   const [userOpen, setUserOpen] = useState(false);
-  const open = active || userOpen;
+  // 展开与否完全由用户点击决定：默认折叠，active（思考中）只驱动标题脉冲与
+  // 摘要行更新，不再强制展开——否则思考中无法手动折叠，思考→正文/工具时还会
+  // 出现"自动展开/收起"的闪动。
+  const open = userOpen;
   const bodyRef = React.useRef<HTMLDivElement | null>(null);
 
   // 流式思考（active）时 body 受 max-h 限高 + 滚轮，增量内容要把视图钉到底部，
@@ -299,11 +342,9 @@ export const ThinkingFold = React.memo(function ThinkingFold({
       {/* 用受控 div 替代原生 <details>：WebKit/Chromium 里 <details> 包裹
           overflow:auto 子元素时存在高度计算循环依赖，内部滚动条不出现、内容被
           直接裁断（"截断无滚轮"）。这里用普通 div + inline maxHeight 限高，
-          让滚动条稳定出现。点击标题仅在不活跃（active=false）时切换展开。 */}
+          让滚动条稳定出现。点击标题随时切换展开/收起（默认折叠）。 */}
       <div
-        onClick={() => {
-          if (!active) setUserOpen((v) => !v);
-        }}
+        onClick={() => setUserOpen((v) => !v)}
         className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors"
       >
         <ThinkGlyph active={active} />
@@ -633,7 +674,9 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                 );
                 const processBlocks = consolidatedBlocks;
                 const answerBlocks = consolidatedBlocks.slice(0, 0);
-                const allSegments = segmentizeProcessBlocks(processBlocks);
+                const allSegments = mergeToolRuns(
+                  segmentizeProcessBlocks(processBlocks),
+                );
                 let lastTextIdx = -1;
                 for (let i = allSegments.length - 1; i >= 0; i--) {
                   if (allSegments[i].kind === "text") {
@@ -1158,15 +1201,6 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
           </div>
           {/* Action buttons below user message */}
           <div className="flex justify-end items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
-            {onUndo && (
-              <button
-                onClick={() => onUndo()}
-                className="p-1 rounded-lg text-muted-foreground/40 hover:text-amber-500 hover:bg-amber-500/10 transition-colors"
-                data-tip="撤回本轮对话"
-              >
-                <Undo2 className="size-3" />
-              </button>
-            )}
             <CopyButton text={content} />
           </div>
         </div>

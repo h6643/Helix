@@ -8,6 +8,13 @@ import { generateId } from "@/lib/format";
 export interface SkillSlice {
   skills: Skill[];
   showSkillPanel: boolean;
+  /** 面板切换时跳到指定 tab / 预填搜索词 */
+  skillPanelRequest: {
+    tab: "plugins" | "skills";
+    query?: string;
+    ts: number;
+  };
+  openSkillPanelTab: (tab: "plugins" | "skills", query?: string) => void;
   addSkill: (skill: Omit<Skill, "id" | "createdAt">) => string;
   updateSkill: (skillId: string, updates: Partial<Skill>) => void;
   removeSkill: (skillId: string) => void;
@@ -19,6 +26,12 @@ export const createSkillSlice: StateCreator<SkillSlice, [], [], SkillSlice> = (
 ) => ({
   skills: [],
   showSkillPanel: false,
+  skillPanelRequest: { tab: "plugins", ts: 0 },
+  openSkillPanelTab: (tab, query) =>
+    set((s) => ({
+      showSkillPanel: true,
+      skillPanelRequest: { tab, query, ts: s.skillPanelRequest.ts + 1 },
+    })),
 
   addSkill: (skill) => {
     const id = generateId();

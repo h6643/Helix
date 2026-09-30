@@ -119,9 +119,6 @@ const RuntimePanel = lazy(() =>
 const ActivityFeed = lazy(() =>
   import("./activity-feed").then((m) => ({ default: m.ActivityFeed })),
 );
-const Onboarding = lazy(() =>
-  import("./onboarding").then((m) => ({ default: m.Onboarding })),
-);
 const BootOverlay = lazy(() =>
   import("./boot-overlay").then((m) => ({ default: m.BootOverlay })),
 );
@@ -708,16 +705,16 @@ export function HelixLayout() {
       : null;
   // Stable action references — these never change so getState() is safe
   const storeActions = useMemo(() => useHelixStore.getState(), []);
-  const [restoreReady, setRestoreReady] = useState(startupSyncDone);
   const [delegations, setDelegations] = useState<
     Array<{ id: string; tasks: Array<{ name: string; modified: number }> }>
   >([]);
   const [hasDelegations, setHasDelegations] = useState(false);
-  // 后台任务（pi-background-tasks 扩展注册表）：面板打开时 3s 轮询，平时
-  // 10s 慢轮询维持按钮徽标。数据经 Rust tasks_list 读共享 tasks.json。
+  // 后台任务（pi-background-tasks 扩展注册表）：10s 轮询供「工作面板」的
+  // 后台任务区使用。这里全量收，按会话过滤 / 「其他来源」分区交给面板内部。
+  // 数据经 Rust tasks_list 读共享 tasks.json。
+  // 标题栏右上角那个带数量角标的按钮入口已删，bgTasksOpen / bgTasksRef /
+  // runningBgTasks 三个随之作废。
   const [bgTasksAll, setBgTasks] = useState<BgTask[]>([]);
-  const [bgTasksOpen, setBgTasksOpen] = useState(false);
-  const bgTasksRef = useRef<HTMLDivElement>(null);
   const helixSessionId = useGatewayStore((s) => s.helixSessionId);
   const loadBgTasks = useCallback(async () => {
     if (!isElectron()) return;
@@ -730,27 +727,9 @@ export function HelixLayout() {
   useEffect(() => {
     if (!isElectron()) return;
     loadBgTasks();
-    const interval = setInterval(loadBgTasks, bgTasksOpen ? 3000 : 10000);
+    const interval = setInterval(loadBgTasks, 10000);
     return () => clearInterval(interval);
-  }, [bgTasksOpen, loadBgTasks]);
-  // 后台任务按会话隔离：registry 里的 session_id 是 pi 后端 sid，与全局
-  // helixSessionId（当前对话绑定的后端会话）比对。独立的后台任务面板不
-  // 在这里过滤（它自己分「本会话 / 其他来源」，收全量 bgTasksAll）。
-  // 工作面板下拉的后台任务区：仅本会话任务。其它会话 / unknown 的去右上
-  // 角独立「后台任务」按钮看（那是全局视图）——工作面板是会话语境，混入
-  // 别的会话的任务会被读成"子 Agent 里冒出了后台任务"。
-  const workPanelBgTasks = useMemo(
-    () =>
-      helixSessionId
-        ? bgTasksAll.filter((t) => t.session_id === helixSessionId).slice(0, 8)
-        : [],
-    [bgTasksAll, helixSessionId],
-  );
-  // 独立「后台任务」按钮的徽标：全局运行数（它是全局面板，非会话私有）。
-  const runningBgTasks = useMemo(
-    () => bgTasksAll.filter((t) => t.status === "running"),
-    [bgTasksAll],
-  );
+  }, [loadBgTasks]);
   // 右上角「更改」胶囊：当前工作区未提交改动的行数统计。
   // 数据 = git diff --numstat 各文件 +/- 求和（二进制文件输出 "-\t-" 会被跳过）。
   // 无会话/项目目录、非 git 仓库、或零改动时置空 → 胶囊不渲染。
@@ -1011,22 +990,6 @@ export function HelixLayout() {
       await storeActions.restoreFromStorage();
       if (cancelled) return;
       const st = useHelixStore.getState();
-      // Model setup counts as having completed first-run onboarding. Avoid a
-      // first-use modal when the user already configured providers/models but
-      // the old race never persisted hasOnboarded=true.
-      if (!st.hasOnboarded) {
-        const hasConfiguredModel =
-          st.apiProfiles.length > 0 ||
-          st.apiHistory.length > 0 ||
-          st.providers.length > 0 ||
-          !!(
-            st.apiConfig?.baseUrl &&
-            st.apiConfig?.model &&
-            st.apiConfig?.apiKey
-          );
-        if (hasConfiguredModel) st.setHasOnboarded(true);
-      }
-      setRestoreReady(true);
       if (!isElectron()) return;
       const cfg = st.apiConfig;
       if (!cfg || !cfg.model) return;
@@ -2437,53 +2400,21 @@ export function HelixLayout() {
                     )}
                     {/* 后台任务区：独立 section，不属于「子 Agent」——它们是
                         pi-background-tasks 的 shell 进程，不是子代理。
-                        仅本会话用 background 工具启动的任务；其它会话的在
-                        右上角「后台任务」按钮的全局面板里。 */}
-                    {workPanelBgTasks.length > 0 && (
-                      <section className="p-1.5">
-                        <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
-                          <Terminal className="size-4 shrink-0 text-foreground/50" />
-                          <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
-                            后台任务
-                          </span>
-                          <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums text-foreground/50">
-                            {workPanelBgTasks.filter((t) => t.status === "running")
-                              .length}{" "}
-                            运行 / {workPanelBgTasks.length}
-                          </span>
-                        </div>
-                        <div className="max-h-56 overflow-auto px-1.5">
-                          {workPanelBgTasks.map((t) => (
-                            <button
-                              key={t.id}
-                              type="button"
-                              onClick={() => {
-                                setBgTasksOpen(true);
-                                setWorkPanelOpen(false);
-                              }}
-                              className="w-full text-left px-2 py-2 rounded-xl hover:bg-accent/60 transition-colors"
-                              data-tip="在后台任务面板查看详情"
-                            >
-                              <div className="flex items-center gap-2">
-                                {t.status === "running" ? (
-                                  <Loader2 className="size-3.5 text-primary shrink-0 animate-spin" />
-                                ) : t.status === "completed" ? (
-                                  <CheckCircle2 className="size-3.5 text-emerald-500 shrink-0" />
-                                ) : (
-                                  <XCircle className="size-3.5 text-destructive shrink-0" />
-                                )}
-                                <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-mono text-foreground/80">
-                                  {t.command}
-                                </span>
-                                <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
-                                  {t.status}
-                                </span>
-                              </div>
-                            </button>
-                          ))}
-                        </div>
-                      </section>
-                    )}
+                        标题栏右上角那个带数量角标的按钮入口已删，工作面板是
+                        唯一入口，所以直接嵌 BackgroundTasksPanel（inline 模式）
+                        而不是自己再写一份只列本会话的行：运行中优先 + 已结束 +
+                        「其他来源」，每行都能看输出 / 刷新 / 终止；空态面板自己出。 */}
+                    <section className="p-1.5">
+                      <BackgroundTasksPanel
+                        inline
+                        tasks={bgTasksAll}
+                        activeSessionId={helixSessionId}
+                        onClose={() => {
+                          // inline 模式没有关闭按钮，这个回调不会触发
+                        }}
+                        onRefresh={loadBgTasks}
+                      />
+                    </section>
                 </div>
                 </div>,
                 document.body,
@@ -2572,31 +2503,6 @@ export function HelixLayout() {
                   </div>
                 </div>
               </>
-            )}
-            {(runningBgTasks.length > 0 || bgTasksOpen) && (
-              <div className="relative" ref={bgTasksRef}>
-                <button
-                  onClick={() => setBgTasksOpen((v) => !v)}
-                  data-tauri-drag-region="false"
-                  className={`relative p-1.5 rounded-lg transition-colors ${bgTasksOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
-                  data-tip="后台任务"
-                >
-                  <Loader2 className="size-[18px]" />
-                  {runningBgTasks.length > 0 && (
-                    <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full bg-primary text-primary-foreground text-[calc(var(--helix-transcript-size)*0.6429)] font-medium flex items-center justify-center">
-                      {runningBgTasks.length}
-                    </span>
-                  )}
-                </button>
-                {bgTasksOpen && (
-                  <BackgroundTasksPanel
-                    tasks={bgTasksAll}
-                    activeSessionId={helixSessionId}
-                    onClose={() => setBgTasksOpen(false)}
-                    onRefresh={loadBgTasks}
-                  />
-                )}
-              </div>
             )}
             <button
               onClick={() => storeActions.toggleTerminal()}
@@ -2881,7 +2787,6 @@ export function HelixLayout() {
             onClose={() => storeActions.toggleArtifactsBrowser()}
           />
         )}
-        {restoreReady && <Onboarding />}
         {/* BootOverlay 单独包一层：它自己的 chunk 到之前先铺主题底色，
             避免主界面先露出来、全屏玻璃面板后突然出现。 */}
         <Suspense fallback={<div className="fixed inset-0 z-[10000] bg-background" />}>

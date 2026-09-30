@@ -147,11 +147,26 @@ pub fn set_work_dir(state: State<'_, Arc<AppState>>, dir: Option<String>) -> Val
         base.join(&d)
     };
     // Ensure the directory exists — explicit_cwd requires isdir() == true.
+    //
+    // 失败必须中止并返回错误：继续往下走会把一个不存在的/非法的路径写进
+    // workdir.json 并持久化，之后每次 pi 子进程都以不存在的 cwd 启动 →
+    // 反复 respawn → 全部 fallback 到 home。而 work_dir 本身也已被污染，
+    // 下次调用时 base 就是那个非法路径，join 一次就多一层。
+    //
+    // 典型触发：用户把工作目录填成 `ssh://user@host:port` 这类远程串。
+    // Windows 下它不是绝对路径（无盘符、无 UNC），会走到 base.join(&d)；
+    // 而 `:` 和 `/` 在 Windows 文件名里非法（os error 123 / ERROR_INVALID_NAME）。
+    // Helix 是本地 Tauri 应用，只支持本地目录——这类输入应在创建时就拦下。
     if let Err(e) = std::fs::create_dir_all(&target) {
         eprintln!(
             "[setWorkDir] failed to create directory: {} {e}",
             target.display()
         );
+        return json!({
+            "success": false,
+            "workDir": display_path(&state.work_dir.read().unwrap().clone()),
+            "error": format!("无法创建目录：{}（Windows 下 `:` 与 `/` 不能出现在路径中间，请填本地目录的绝对路径）", target.display()),
+        });
     }
     // Canonicalize so the path returned to the renderer matches the canonicalized
     // form stored in allowed_roots. Windows paths are case-insensitive but compared

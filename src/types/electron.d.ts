@@ -41,7 +41,6 @@ export interface ElectronAPI {
     readFile: (filePath: string) => Promise<string | null>;
     deleteDir: (dirPath: string) => Promise<boolean>;
     listSkills: () => Promise<any>;
-    trackSkillCall: (skillName: string) => Promise<number>;
   };
 
   shell: {
@@ -71,6 +70,15 @@ export interface ElectronAPI {
     onData: (
       callback: (payload: { id: number; data: string }) => void,
     ) => () => void;
+  };
+
+  // Self-improve health check report (~/.pi/agent/helix/self-improve/reports/latest.json)
+  selfImprove: {
+    report: () => Promise<{
+      ok: boolean;
+      report?: Record<string, any> | null;
+      error?: string;
+    }>;
   };
 
   // Background tasks (pi-background-tasks extension's shared registry
@@ -150,10 +158,10 @@ export interface ElectronAPI {
       platform: string;
       workDir: string;
     }>;
-    setWorkDir: (dir: string) => Promise<{ success: boolean; workDir: string }>;
+    setWorkDir: (dir: string) => Promise<{ success: boolean; workDir: string; error?: string }>;
     syncWorkDir: (
       dir: string,
-    ) => Promise<{ success: boolean; workDir: string }>;
+    ) => Promise<{ success: boolean; workDir: string; error?: string }>;
     getDataRoot: () => Promise<{
       dataRoot: string;
       dataRootDefault: string;
