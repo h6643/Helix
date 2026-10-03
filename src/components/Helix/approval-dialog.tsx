@@ -217,12 +217,39 @@ interface ClarifyBarProps {
   onRespond: (requestId: string, answer: string) => void;
 }
 
+// ── 权限询问（pi-permission-system）────────────────────────────────────
+// 扩展用 ui.select 提问，选项是英文字面量（"Yes" / "Yes, for this session" /
+// "No" / "No, provide reason"）。Helix 把 select 路由到 ClarifyBar，所以这里
+// 识别出来换成中文显示；**回传仍是原始英文**——扩展按 `===` 比对选项。
+const PERMISSION_TITLE_RE = /^Permission Required/;
+
+/** 权限选项 → 中文显示。未命中的原样显示（扩展可能加新选项）。 */
+const PERMISSION_OPTION_LABELS: Record<string, string> = {
+  Yes: "允许这一次",
+  "Yes, for this session": "本会话内都允许",
+  No: "拒绝",
+  "No, provide reason": "拒绝，并说明原因",
+};
+
+function isPermissionPrompt(question: string): boolean {
+  return PERMISSION_TITLE_RE.test(question.trimStart());
+}
+
+/** 权限询问不预选任何一项：回车＝放行是危险的默认。 */
+function permissionOptionsLabel(option: string): string {
+  return PERMISSION_OPTION_LABELS[option] ?? option;
+}
+
 export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
   const [freeText, setFreeText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const choices = request.choices || [];
+  // 权限询问（bash/写文件 放行还是拒绝）默认不选中任何一项：
+  // ClarifyBar 捕获了全局 Enter，若默认停在第 1 项，用户在输入框里随手敲
+  // 个回车就会「允许」—— 对权限来说这是最坏的默认值。
+  const isPermission = isPermissionPrompt(request.question || "");
   const [selectedIdx, setSelectedIdx] = useState<number | null>(
-    choices.length > 0 ? 0 : null,
+    choices.length > 0 && !isPermission ? 0 : null,
   );
 
   const submit = useCallback(
@@ -270,7 +297,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
       <div className="pointer-events-auto w-full max-w-[700px] mx-auto bg-card text-foreground border border-border/40 rounded-2xl shadow-2xl p-4">
         <div className="flex items-center justify-between gap-3 mb-2">
           <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
-            需要你的确认
+            {isPermission ? "权限确认" : "需要你的确认"}
           </h3>
           <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
             等待确认
@@ -310,7 +337,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
                     {idx + 1}
                   </span>
                   <span className="text-[calc(var(--helix-transcript-size)*0.9286)] truncate">
-                    {c}
+                    {isPermission ? permissionOptionsLabel(c) : c}
                   </span>
                 </button>
               );
@@ -318,6 +345,11 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
           </div>
         )}
 
+        {isPermission ? (
+          <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50">
+            用 ↑↓ 选择，Enter 确认；或直接点选项。
+          </p>
+        ) : (
         <div className="flex items-center gap-2">
           <input
             value={freeText}
@@ -339,6 +371,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
             )}
           </Button>
         </div>
+        )}
 
         <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-2">
           内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · Enter 确认 · 也可自由输入

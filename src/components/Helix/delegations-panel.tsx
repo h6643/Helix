@@ -10,11 +10,13 @@ import {
   RefreshCw,
   Terminal,
   Users,
+  Wand2,
   X,
   XCircle,
 } from "lucide-react";
 import React, { useState, useEffect, useCallback } from "react";
 import { isElectron } from "@/lib/electron-bridge";
+import { AgentOrchestrationPanel } from "./agent-orchestration-panel";
 import { timeAgo } from "@/lib/format";
 import { resolveBackendSids } from "@/lib/session-map";
 import { isSyntheticSubAgentToolRow } from "@/lib/tool-display-utils";
@@ -44,6 +46,8 @@ interface Delegation {
 
 interface DelegationsPanelProps {
   onClose?: () => void;
+  /** 编排面板点「插入输入框」时把指令回填到主对话（agent-flow-panel 注入） */
+  onInsertPrompt?: (text: string) => void;
 }
 
 // ── 实时子代理卡片（来自 store.subAgents，由 subagent.* 事件驱动）──────
@@ -208,7 +212,10 @@ function LiveSubAgentCard({ agent }: { agent: SubAgent }) {
   );
 }
 
-export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
+export function DelegationsPanel({
+  onClose,
+  onInsertPrompt,
+}: DelegationsPanelProps) {
   // 实时子代理：由 subagent.* 事件写入 store（agent-flow-panel.onEvent）。
   // 只显示当前会话的：spawn 时快照了归属 sessionId，无该字段的旧数据回退可见。
   const subAgentsAll = useHelixStore((s) => s.subAgents);
@@ -228,6 +235,23 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
   } | null>(null);
   const [logContent, setLogContent] = useState<string>("");
   const [logLoading, setLogLoading] = useState(false);
+  const [orchestrateOpen, setOrchestrateOpen] = useState(false);
+
+  // 编排指令回填：默认走 window 事件，由 agent-flow-panel 接收（避免面板与
+  // 主输入框之间产生直接 props 依赖链）。
+  const insertPrompt = useCallback(
+    (text: string) => {
+      if (onInsertPrompt) {
+        onInsertPrompt(text);
+      } else {
+        window.dispatchEvent(
+          new CustomEvent("helix:fill-input", { detail: { text } }),
+        );
+      }
+      setOrchestrateOpen(false);
+    },
+    [onInsertPrompt],
+  );
 
   // 磁盘记录按当前对话的后端 sid 过滤（manifest.json 里的命名空间）。
   const loadDelegations = useCallback(async (silent = false) => {
@@ -341,6 +365,27 @@ export function DelegationsPanel({ onClose }: DelegationsPanelProps) {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-3 space-y-4">
+        {/* 编排区：把「勾哪些子代理、各自干什么」编译成结构化指令插回输入框 */}
+        <section>
+          <button
+            onClick={() => setOrchestrateOpen((v) => !v)}
+            className="w-full flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/70 mb-1.5 hover:text-foreground transition-colors"
+          >
+            {orchestrateOpen ? (
+              <ChevronDown className="size-3.5 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="size-3.5 text-muted-foreground" />
+            )}
+            <Wand2 className="size-3.5 text-muted-foreground" />
+            编排
+          </button>
+          {orchestrateOpen && (
+            <div className="border border-border/30 rounded-lg p-3">
+              <AgentOrchestrationPanel onInsert={insertPrompt} />
+            </div>
+          )}
+        </section>
+
         {/* 实时区：本次会话正在运行 / 刚完成的子任务 */}
         {showLive && (
           <section>

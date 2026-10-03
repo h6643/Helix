@@ -1,6 +1,6 @@
 "use client";
 
-import { FileCode, Undo2 } from "lucide-react";
+import { FileCode, History, Undo2 } from "lucide-react";
 import React, { useMemo, useState } from "react";
 import { countDiffLines, firstChangedLineRange } from "./diff-preview";
 import { electronFS, getElectronAPI } from "@/lib/electron-bridge";
@@ -61,6 +61,7 @@ export function FileChangeSummaryCard({
 }) {
   const [undone, setUndone] = useState<Set<string>>(new Set());
   const [undoing, setUndoing] = useState(false);
+  const [rollingBack, setRollingBack] = useState(false);
   const visibleChanges = useMemo(
     () => changes.filter((c) => !undone.has(c.fileId)),
     [changes, undone],
@@ -250,6 +251,64 @@ export function FileChangeSummaryCard({
     }
   };
 
+  /**
+   * 回滚本轮：走会话级快照（run 开始前存的「改动前」原文）。
+   *
+   * 与上面「撤销」的区别：撤销是逐文件反推 diff，遇到 `undoUnsafe`
+   * （write 覆盖前内容没取到 / diff 被截断）会直接拒绝；快照存的是原文，
+   * 因此能一次性把本轮所有改动整体还原，**包括新建的文件**（快照时不存在
+   * → 回滚时删掉）。两者互补，不是替代关系。
+   */
+  const handleRollbackRun = async () => {
+    const api = getElectronAPI();
+    if (!api?.fs?.snapshotList) {
+      useHelixStore
+        .getState()
+        .showToast({ type: "error", title: "快照功能不可用" });
+      return;
+    }
+    setRollingBack(true);
+    try {
+      const list = await api.fs.snapshotList();
+      const runId = list?.runs?.[0]?.runId;
+      if (!runId) {
+        useHelixStore.getState().showToast({
+          type: "info",
+          title: "没有可回滚的快照",
+          description:
+            "快照在每轮开始前建立；项目未初始化 git 或本轮没有待改文件时不会有快照",
+        });
+        return;
+      }
+      const res = await api.fs.snapshotRestore(runId);
+      if (res?.ok) {
+        useHelixStore.getState().showToast({
+          type: "success",
+          title: "已回滚本轮改动",
+          description: `已恢复 ${res.restored?.length ?? 0} 个文件到本轮开始前的状态`,
+        });
+        // 快照已被消耗：把本卡片登记的待撤销项一并清掉，避免重复回滚
+        const ids = new Set(visibleChanges.map((c) => c.fileId));
+        setUndone((prev) => new Set([...prev, ...ids]));
+        useHelixStore.setState((s) => ({
+          pendingChanges: s.pendingChanges.filter((c) => !ids.has(c.fileId)),
+        }));
+      } else {
+        useHelixStore.getState().showToast({
+          type: "error",
+          title: "回滚失败",
+          description: res?.failed?.join("；") || res?.error || "部分文件无法还原",
+        });
+      }
+    } catch (e) {
+      useHelixStore
+        .getState()
+        .showToast({ type: "error", title: "回滚失败", description: String(e) });
+    } finally {
+      setRollingBack(false);
+    }
+  };
+
   return (
     <div className="overflow-hidden rounded-lg border border-border/40 bg-card/40">
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border/30 text-[length:var(--helix-transcript-size)] text-foreground/70">
@@ -265,6 +324,18 @@ export function FileChangeSummaryCard({
             <span className="text-red-500">-{totalRemoved}</span>
           )}
         </span>
+        <button
+          type="button"
+          onClick={handleRollbackRun}
+          disabled={rollingBack}
+          className="ml-1.5 flex items-center gap-1 px-1.5 py-0.5 rounded text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
+          title="把工作区整体还原到本轮开始前（含删除本轮新建的文件）"
+        >
+          <History
+            className={`size-3.5 ${rollingBack ? "animate-pulse" : ""}`}
+          />
+          {rollingBack ? "回滚中" : "回滚本轮"}
+        </button>
         <button
           type="button"
           onClick={handleUndoAll}

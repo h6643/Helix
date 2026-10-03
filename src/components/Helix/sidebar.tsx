@@ -1085,9 +1085,8 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       const st = useHelixStore.getState();
       if (st.currentSessionId && deletedIds.has(st.currentSessionId)) {
         useHelixStore.getState().setCurrentSessionId(null);
-        // 当前会话随项目一起被删：同样回到"无当前会话"占位，
-        // 由用户显式新建或选择会话后才可输入。
-        useHelixStore.getState().setNoActiveConversation(true);
+        // 当前会话随项目一起被删：直接落在「新对话」草稿态（不占位）。
+        useHelixStore.getState().setNoActiveConversation(false);
       }
       if (st.activeSessionWorkDir === deleteProjectDir) {
         useHelixStore.setState({ activeSessionWorkDir: null });

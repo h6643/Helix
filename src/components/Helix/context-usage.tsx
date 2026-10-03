@@ -594,7 +594,7 @@ function ContextUsageRing({ used, total }: { used: number; total: number }) {
         : "text-primary";
 
   return (
-    <div className="relative size-7 flex items-center justify-center">
+    <div className="relative size-7 flex items-center justify-center shrink-0">
       <svg className="size-6 -rotate-90" viewBox="0 0 20 20">
         <circle
           cx="10"

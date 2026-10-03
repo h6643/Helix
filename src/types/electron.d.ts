@@ -31,6 +31,27 @@ export interface ElectronAPI {
       }>
     >;
     allowRoot: (dirPath: string) => Promise<{ success: boolean }>;
+    /** 会话级文件快照：run 前存「改动前」内容，整轮可一键回滚 */
+    snapshotSave: (
+      runId: string,
+      files: string[],
+    ) => Promise<{
+      ok: boolean;
+      saved?: number;
+      skipped?: string[];
+      error?: string;
+    }>;
+    snapshotRestore: (runId: string) => Promise<{
+      ok: boolean;
+      restored?: string[];
+      failed?: string[];
+      error?: string;
+    }>;
+    snapshotDiscard: (runId: string) => Promise<{ ok: boolean }>;
+    snapshotList: () => Promise<{
+      ok: boolean;
+      runs: Array<{ runId: string; files: number; modified: number }>;
+    }>;
   };
 
   helixSkills: {
@@ -70,15 +91,6 @@ export interface ElectronAPI {
     onData: (
       callback: (payload: { id: number; data: string }) => void,
     ) => () => void;
-  };
-
-  // Self-improve health check report (~/.pi/agent/helix/self-improve/reports/latest.json)
-  selfImprove: {
-    report: () => Promise<{
-      ok: boolean;
-      report?: Record<string, any> | null;
-      error?: string;
-    }>;
   };
 
   // Background tasks (pi-background-tasks extension's shared registry
@@ -291,6 +303,27 @@ export interface ElectronAPI {
     setSubagentModel: (name: string, model: string) => Promise<void>;
     // Delete a custom agent's .md (the extension's Delete unlinks the file).
     deleteSubagent: (name: string) => Promise<void>;
+    /**
+     * `@gotgenes/pi-permission-system` 的策略读写。
+     * pi 官方没有权限体系（见其 docs/security.md），工具级权限全靠这个扩展
+     * 注册 `tool_call` 实现，所以设置页读写的是**它的配置文件**，不是 Helix
+     * 自己另存一份 —— 两份并存会出现「设置里放行了、实际仍弹窗」的分裂。
+     *
+     * `policy` 就是配置文件里的 `permission` 对象；`null` 表示用 Helix 默认
+     * 策略。语义由扩展解释：规则**后匹配覆盖先匹配**，所以键的顺序有意义
+     * （宽规则在前、`deny` 在后）。
+     */
+    piPermissionsRead: () => Promise<{
+      installed: boolean;
+      configPath: string;
+      policy: any | null;
+      yoloMode: boolean;
+      raw: any;
+    }>;
+    piPermissionsWrite: (
+      policy?: any | null,
+      yoloMode?: boolean,
+    ) => Promise<{ ok: boolean; configPath: string }>;
     // Pi agent commands (extensions / skills / prompts / models)
     piListInstalled: () => Promise<{
       items: Array<{
@@ -337,7 +370,16 @@ export interface ElectronAPI {
       }>;
     }>;
     piSetThinkingLevelAll: (level: string) => Promise<{ success: boolean }>;
-    piSearchPackages: (query: string) => Promise<{
+    /**
+     * pi.dev 官方包目录搜索。
+     * query 为空 = 不限（返回最热门）；pkgType / sort / page 直接下推给服务端。
+     */
+    piSearchPackages: (
+      query?: string,
+      pkgType?: string,
+      sort?: string,
+      page?: number,
+    ) => Promise<{
       packages: Array<{
         name: string;
         description: string;
@@ -348,7 +390,13 @@ export interface ElectronAPI {
         installCmd: string;
         downloads: number;
         date: string;
+        piUrl?: string;
       }>;
+      /** 过滤后的总数（服务端筛选后的命中数） */
+      total?: number;
+      page?: number;
+      pageSize?: number;
+      source?: string;
     }>;
     piInstallPackage: (pkg: string) => Promise<{
       success: boolean;

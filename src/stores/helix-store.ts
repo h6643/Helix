@@ -230,9 +230,9 @@ interface HelixState
   setBrowserHomeUrl: (url: string) => void;
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: "browser" | "code" | "diff" | "agent" | "byline" | "self-improve" | null;
+  rightSidebarTab: "browser" | "code" | "diff" | "agent" | "byline" | null;
   setRightSidebarTab: (
-    tab: "browser" | "code" | "diff" | "agent" | "byline" | "self-improve" | null,
+    tab: "browser" | "code" | "diff" | "agent" | "byline" | null,
   ) => void;
   // 右侧栏的「子 Agent 工作内容」视图：点击工作面板里的某个 agent 时写入，
   // RightSidebar 据此渲染该 agent 的任务 / live 日志。null = 未选中。
@@ -1398,7 +1398,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   bumpSessionMapVersion: () =>
     set((st) => ({ sessionMapVersion: st.sessionMapVersion + 1 })),
   currentSessionId: null,
-  noActiveConversation: true,
+  // 启动即停在「新对话」草稿态（等价于点了「新对话」）：没有可恢复会话时
+  // 不再显示「没有进行中的对话」占位页，直接可输入（首条消息才建后端会话）。
+  noActiveConversation: false,
   brokenSessionIds: [],
   brokenSessionReasons: {},
   activeSessionWorkDir: null,
@@ -1752,12 +1754,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       if (tab === "byline")
         return {
           rightSidebarTab: "byline",
-          showPreviewRail: false,
-          editorOpen: false,
-        };
-      if (tab === "self-improve")
-        return {
-          rightSidebarTab: "self-improve",
           showPreviewRail: false,
           editorOpen: false,
         };
@@ -4311,11 +4307,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         notes: notes || "",
         goal: goal,
         // 恢复上次打开的会话和它的历史，避免重启后模型/界面都变成新对话。
-        // 没有可恢复的会话时（restoredSessionId 为 null）置 noActiveConversation，
-        // 界面停在「无会话」占位：用户必须显式点「新对话」或选会话才进入草稿，
-        // 避免首条消息悄悄创建后端会话文件（"自己建文件"的根因）。
+        // 没有可恢复的会话时（restoredSessionId 为 null）直接落在「新对话」
+        // 草稿态（noActiveConversation=false + currentSessionId=null），与用户
+        // 点「新对话」完全同态；后端会话文件仍推迟到首条消息才创建。
         currentSessionId: restoredSessionId,
-        noActiveConversation: !restoredSessionId,
+        noActiveConversation: false,
         activeSessionWorkDir: latestSession?.workDir ?? null,
         sessionHistory: restoredHistory,
         sessionHistoryIndex: restoredIndex,

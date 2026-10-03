@@ -282,14 +282,14 @@ export function GeneralSettingsPanel() {
       <SettingGroup>
         <SettingRow
           label="HTTP 代理"
-          hint="模型 / MCP / 浏览器抓取 / npm 检查均经此代理；localhost 直连；支持 socks5；保存后需重启应用"
+          hint="模型 / MCP / 浏览器抓取 / npm 检查均经此代理"
         >
           <div className="flex flex-wrap items-center gap-2 justify-end">
             <input
               type="text"
               value={proxyUrl}
               onChange={(e) => setProxyUrl(e.target.value)}
-              placeholder="例如 http://127.0.0.1:7890"
+              placeholder="例如 http://127.0.0.1:10809"
               className="w-64 ui-text-sm2 px-2 py-1 rounded-md border border-border bg-background text-foreground"
             />
             <Button

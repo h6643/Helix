@@ -11,7 +11,6 @@ import {
   ChevronDown,
   Check,
   Plus,
-  Cpu,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadSessionMap } from "@/lib/session-map";
@@ -651,21 +650,20 @@ export function BylinePanel() {
                     </span>
                     <ChevronDown className="size-3" />
                   </button>
+                  <ContextUsageIndicator />
                   <button
                     type="button"
                     onClick={() => {
                       setShowModelDropdown((v) => !v);
                       setShowModeDropdown(false);
                     }}
-                    data-tip={
-                      effectiveModel
-                        ? `模型（仅本旁路会话）：${effectiveModel}`
-                        : "选择模型（仅本旁路会话）"
-                    }
-                    className="flex items-center justify-center h-7 w-7 rounded-lg bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                    data-tip="模型（仅本旁路会话）"
+                    className="flex items-center justify-between gap-2 min-w-0 max-w-[240px] px-2.5 py-1.5 h-7 bg-muted/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 transition-all duration-200 font-mono border border-border/30 hover:border-border/30"
                   >
-                    {/* 用户定调：模型名不在工具条显示，只留图标；全名看 tooltip / 下拉 */}
-                    <Cpu className="size-3.5" />
+                    {/* 空间够就显示全名；放不下时随 flex 收缩出省略号（…），与主对话一致 */}
+                    <span className="truncate min-w-0 text-left">
+                      {effectiveModel || "选择模型"}
+                    </span>
                   </button>
                 </>
               )}
@@ -748,8 +746,10 @@ export function BylinePanel() {
                 </div>
               )}
             </div>
-            <div className="flex items-center gap-1.5 min-w-0 shrink">
-              <ContextUsageIndicator />
+            {/* 右簇必须 shrink-0：全是刚性按钮（shrink-0），若允许收缩，
+                盒子会被压到比内容小 → 内容向右溢出 → 发送按钮被裁掉。
+                空间不足时由左簇的模型芯片（min-w-0 + truncate）吸收全部压缩。 */}
+            <div className="flex items-center gap-1.5 shrink-0">
               <ReasoningEffortControl
                 value={reasoningEffort}
                 onChange={(v) => setReasoningEffort(v)}

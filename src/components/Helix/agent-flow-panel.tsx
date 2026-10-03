@@ -35,7 +35,6 @@ import {
   User,
   Hash,
   KeyRound,
-  Cpu,
 } from "lucide-react";
 import React, {
   useState,
@@ -141,6 +140,7 @@ import {
   formatBytes,
   formatDuration,
 } from "./transcript-message";
+import { isDegenerateReasoning } from "@/lib/reasoning-health";
 import { useGatewayStore } from "@/stores/gateway-store";
 import { loadCompressionNoticesFromPersistence } from "@/stores/slices/compression-records-slice";
 import {
@@ -399,25 +399,10 @@ function classifyApproval(
 ): "auto" | "ask" {
   const patternKey = String(params?.pattern_key || "");
   const command = String(params?.command || "");
+  const description = String(params?.description || "");
   const blob = `${toolName} ${patternKey} ${command} ${params?.description || ""} ${params?.reason || ""}`;
   const workNorm = workDir ? normPathForCompare(workDir) : "";
-
-  // 0) 计划模式：只读查询放行，其余全部弹。计划审批的意义就是让用户先看方案，
-  //    因此文件写入/命令执行/外部访问（甚至项目内读写）都要求确认。
-  if (mode === "plan") {
-    if (DANGEROUS_CMD_RE.test(command)) return "ask";
-    if (EXFIL_CMD_RE.test(command)) return "ask";
-    if (SENSITIVE_PATH_RE.test(blob)) return "ask";
-    if (FILE_WRITE_TOOL_RE.test(blob)) return "ask";
-    for (const p of extractAbsPaths(blob)) {
-      if (/^~\//.test(p)) return "ask";
-      if (!workNorm) return "ask";
-      const pn = normPathForCompare(p);
-      if (pn !== workNorm && !pn.startsWith(workNorm + "/")) return "ask";
-    }
-    if (patternKey.includes("read_file:outside_project:")) return "ask";
-    return "ask"; // 计划模式下非只读查询一律弹，让用户批准后才真正执行
-  }
+  const paths = extractAbsPaths(blob);
 
   // 1) 危险命令（删除/格式化）→ 弹
   if (DANGEROUS_CMD_RE.test(command)) return "ask";
@@ -427,7 +412,7 @@ function classifyApproval(
   if (SENSITIVE_PATH_RE.test(blob)) return "ask";
 
   // 4) 项目外文件访问（读也弹）：blob 里出现的绝对路径不在项目根内 → 弹
-  for (const p of extractAbsPaths(blob)) {
+  for (const p of paths) {
     if (/^~\//.test(p)) return "ask"; // ~ 开头一律视为项目外（home 下的东西）
     if (!workNorm) return "ask"; // 不知道项目根时，任何绝对路径访问都弹
     const pn = normPathForCompare(p);
@@ -436,6 +421,12 @@ function classifyApproval(
 
   // 5) 项目外文件读取（后端检测到的）→ 弹
   if (patternKey.includes("read_file:outside_project:")) return "ask";
+
+  // 5.2) 计划模式：只读查询放行，其余全部弹。计划审批的意义就是让用户先看方案，
+  //      因此文件写入/命令执行/外部访问（甚至项目内读写）都要求确认。
+  //      放在规则之后：规则可以「更严」（上面的 deny/ask 已提前返回），
+  //      但不能把 plan 降级成自动放行。
+  if (mode === "plan") return "ask";
 
   // 6) 项目内文件修改 → 视模式：accept_edits/dont_ask 自动批准（diff 记录走 tool.complete
   //    inline_diff，不受影响）；default 模式一律弹，让用户确认
@@ -1005,7 +996,11 @@ export function AgentFlowPanel() {
     Array<{ id: string; ts: number; text: string }>
   >([]);
   const workspaceFilesRef = useRef<Array<{ name: string; path: string }>>([]);
-  const workspaceFilesLoadedRef = useRef(false);
+  // 已加载过 @ 候选的项目目录（换项目才重扫）
+  const workspaceFilesLoadedFor = useRef<string | null>(null);
+  // 本轮（最近一次 prompt）快照的 runId 与文件数，供「回滚本轮改动」入口使用
+  const runSnapshotIdRef = useRef<string | null>(null);
+  const runSnapshotFilesRef = useRef<number>(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const inputValueRef = useRef(input);
   const chatInputWrapRef = useRef<HTMLDivElement>(null);
@@ -1400,6 +1395,8 @@ export function AgentFlowPanel() {
   const [conversationSearchQuery, setConversationSearchQuery] = useState("");
   const [conversationSearchActive, setConversationSearchActive] = useState(0);
   const conversationSearchInputRef = useRef<HTMLInputElement>(null);
+  // 跨会话搜索跳转：待定位的消息 id（事件到达时目标消息可能还没渲染出来）
+  const pendingSearchTargetRef = useRef<string | null>(null);
 
   const searchMatches = useMemo(() => {
     if (!conversationSearchOpen) return [];
@@ -1466,7 +1463,22 @@ export function AgentFlowPanel() {
   );
 
   useEffect(() => {
-    const handler = () => openConversationSearch();
+    // 支持两种触发：
+    //  ① 无 detail —— 快捷键 Ctrl+F：只打开搜索框。
+    //  ② 带 detail {query, messageId} —— 跨会话搜索结果跳转：预填关键词并
+    //     直接把 active 落到目标消息（见下方 setConversationSearchActive）。
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { query?: string; messageId?: string }
+        | undefined;
+      openConversationSearch();
+      if (detail?.query) {
+        setConversationSearchQuery(detail.query);
+      }
+      if (detail?.messageId) {
+        pendingSearchTargetRef.current = detail.messageId;
+      }
+    };
     window.addEventListener("helix:conversation-search", handler);
     return () =>
       window.removeEventListener("helix:conversation-search", handler);
@@ -1474,11 +1486,27 @@ export function AgentFlowPanel() {
 
   useEffect(() => {
     if (!conversationSearchOpen || !conversationSearchActiveId) return;
+    // 跨会话跳转：目标消息刚挂载 → 把 active 指到它，让高亮和滚动都落在它身上
+    const target = pendingSearchTargetRef.current;
+    if (target && target === conversationSearchActiveId) {
+      pendingSearchTargetRef.current = null;
+    } else if (target) {
+      const idx = searchMatches.findIndex((m) => m.messageId === target);
+      if (idx >= 0) {
+        pendingSearchTargetRef.current = null;
+        setConversationSearchActive(idx);
+        return;
+      }
+    }
     const el = scrollRef.current?.querySelector(
       `[data-message-id="${conversationSearchActiveId}"]`,
     );
     el?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [conversationSearchActiveId, conversationSearchOpen]);
+  }, [
+    conversationSearchActiveId,
+    conversationSearchOpen,
+    searchMatches,
+  ]);
 
   // ── Fork branch info for current session ──────────────────────────────
   // 分支导航数据：当前会话的分叉元信息 + 可跳转的亲属会话（父 + 兄弟分支）。
@@ -2368,14 +2396,13 @@ export function AgentFlowPanel() {
       sessionModel || apiConfig.model || activeModel || "选择模型";
     return (
       <>
-        <div className="relative min-w-0" ref={modelDropdownRef}>
+        <div className="relative min-w-0 max-w-[240px]" ref={modelDropdownRef}>
           <button
             type="button"
             onClick={() => setShowModelDropdown(!showModelDropdown)}
-            className="flex items-center justify-center h-7 w-7 rounded-lg bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+            className="flex w-full items-center justify-between gap-2 min-w-0 px-2.5 py-1.5 h-7 bg-muted/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 transition-all duration-200 font-mono border border-border/30 hover:border-border/30"
             data-tip={
               (() => {
-                // 图标不显示文字后，tooltip 是唯一看得到当前模型名的地方，
                 // 供应商必须跟「显示的模型」同源：本对话有专属模型时用
                 // 该覆盖值的 provider（选择时就已解析），只有回落全局默认时才用
                 // activeProvider——否则对话覆盖指向硅基流动、全局还停在
@@ -2389,8 +2416,10 @@ export function AgentFlowPanel() {
               })()
             }
           >
-            {/* 用户定调：模型名不在工具条显示，只留图标；全名看 tooltip / 下拉 */}
-            <Cpu className="size-3.5" />
+            {/* 空间够就显示全名；工具条放不下时随 flex 收缩出省略号（…） */}
+            <span className="truncate min-w-0 text-left">
+              {displayName}
+            </span>
           </button>
           {showModelDropdown && (
             <div className="absolute bottom-full right-0 mb-2 w-44 overflow-visible rounded-xl border border-border/40 bg-card shadow-xl z-50 animate-scale-in">
@@ -2740,53 +2769,92 @@ export function AgentFlowPanel() {
     prevMsgLen.current = chatMessages.length;
   }, [chatMessages.length]);
 
-  // Scan workspace files for @ file references
+  // 外部面板回填输入框（子代理编排面板的「插入输入框」）。
+  // 用 setInputSynced 而非 setInput：它同时同步 inputValueRef，
+  // 否则 @ 补全/Enter 发送读到的还是旧值。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { text?: string } | undefined;
+      if (!detail?.text) return;
+      setInputSynced(detail.text);
+      inputRef.current?.focus();
+    };
+    window.addEventListener("helix:fill-input", handler);
+    return () => window.removeEventListener("helix:fill-input", handler);
+  }, [setInputSynced]);
+
+  // Scan workspace files for @ file references.
+  // NOTE: 必须跟随 selectedWorkDir 重跑。旧实现依赖数组是 `[]` 且用
+  // `workspaceFilesLoadedRef` 永久上锁（只拉一次），而挂载时后端 workDir 还没
+  // 同步完 → git status 非仓库、scanTree(".") 扫的是默认目录；此后切换项目
+  // 也不会重扫，@ 候选要么空要么永远是上一个项目的文件。
   useEffect(() => {
     if (!window.electron?.isElectron) return;
-    if (workspaceFilesLoadedRef.current) return;
-    workspaceFilesLoadedRef.current = true;
+    const root = selectedWorkDir;
+    if (!root) {
+      workspaceFilesRef.current = [];
+      return;
+    }
+    // 同一目录不重复拉；换项目才失效重扫。
+    if (workspaceFilesLoadedFor.current === root) return;
+    workspaceFilesLoadedFor.current = root;
+    let cancelled = false;
     (async () => {
+      const files: Array<{ name: string; path: string }> = [];
+      const push = (raw: string) => {
+        const p = raw.trim();
+        if (!p) return;
+        const full = /^[a-zA-Z]:[\\/]/.test(p)
+          ? p
+          : root.replace(/[/\\]+$/, "") + "/" + p;
+        const parts = full.split(/[/\\]/);
+        const name = parts[parts.length - 1];
+        if (name && !files.some((f) => f.path === full)) files.push({ name, path: full });
+      };
       try {
-        // First try getting git status for most recent files
-        const gitResult = await window.electron.git.status();
-        if (gitResult?.ok) {
-          const files: Array<{ name: string; path: string }> = [];
-          for (const line of gitResult.output!.split("\n")) {
-            const m = line.match(/\s+(\S+)$/);
-            if (m && !files.some((f) => f.path === m[1])) {
-              const parts = m[1].split(/[/\\]/);
-              files.push({ name: parts[parts.length - 1], path: m[1] });
+        // 优先 git status（改动过的文件最可能被引用）。显式传 cwd：后端状态机里的
+        // workDir 可能还没切过来。
+        const gitResult = await window.electron.git.status(root);
+        if (!cancelled && gitResult?.ok) {
+          for (const line of (gitResult.output ?? "").split("\n")) {
+            // porcelain=v2：`1 <XY> ... <path>` / `2 ... <old>\t<new>` / `? <path>`
+            const tab = line.indexOf("\t");
+            if (tab >= 0) {
+              const m = line.slice(tab + 1).match(/(\S+)$/); // rename/copy：取新路径
+              if (m) push(m[1]);
+              continue;
             }
+            const m = line.match(/^(?:\d+|\?)\s+\S*\s*(?:\S+\s+)*?(\S+)$/);
+            if (m) push(m[1]);
           }
           if (files.length > 0) {
             workspaceFilesRef.current = files;
             return;
           }
         }
-      } catch { /* empty */}
+      } catch { /* 非 git 仓库 / git 不可用 → 走全树扫描 */ }
       try {
-        // Fallback: scan workspace tree
-        const tree = await window.electron.fs.scanTree(".");
-        if (Array.isArray(tree)) {
-          const files: Array<{ name: string; path: string }> = [];
-          function walk(nodes: any[], prefix: string) {
-            for (const n of nodes) {
-              if (n.type === "file") {
-                files.push({
-                  name: n.name,
-                  path: prefix ? prefix + "/" + n.name : n.name,
-                });
-              } else if (n.type === "folder" && n.children) {
-                walk(n.children, prefix ? prefix + "/" + n.name : n.name);
-              }
+        // 兜底：扫描工作区全树。显式传绝对路径（同 file-tree-panel 的理由）。
+        await window.electron.fs.allowRoot?.(root);
+        const tree = await window.electron.fs.scanTree(root);
+        if (cancelled || !Array.isArray(tree)) return;
+        function walk(nodes: any[], prefix: string) {
+          for (const n of nodes) {
+            if (n.type === "file") {
+              push(prefix ? `${prefix}/${n.name}` : n.name);
+            } else if (n.type === "folder" && n.children) {
+              walk(n.children, prefix ? `${prefix}/${n.name}` : n.name);
             }
           }
-          walk(tree, "");
-          workspaceFilesRef.current = files;
         }
-      } catch { /* empty */}
+        walk(tree, "");
+        workspaceFilesRef.current = files;
+      } catch { /* 扫描失败：@ 候选保持为空 */ }
     })();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedWorkDir]);
 
   // Clear flow
 
@@ -3243,6 +3311,53 @@ export function AgentFlowPanel() {
     [storeActions, buildBtwTranscript, buildBtwPrompt],
   );
 
+  // 整轮文件快照：prompt 发出前存一份「改动前」的工作区状态。
+  //
+  // 为什么需要：`git revert` 只能单文件回滚，而 tool_call 事件里只有 unified
+  // diff、没有 oldText，diff 被截断时连 `reverseUnifiedDiff` 都会标
+  // undoUnsafe 而拒绝撤销 —— 一轮改了十几个文件就没有「全部还原」的出路。
+  //
+  // 为什么只快照 git 视角下有改动的文件：全量扫树几十万文件读不动。
+  // 未初始化 git 的项目 `git status` 失败 → 空快照，此时回滚入口会提示
+  // 「本轮无快照」，不给出虚假的安全感。
+  const takeRunSnapshot = useCallback(async () => {
+    try {
+      const root =
+        useHelixStore.getState().activeSessionWorkDir ??
+        useHelixStore.getState().selectedWorkDir;
+      if (!root) return;
+      const runId = `run-${Date.now().toString(36)}`;
+      const gitRes = await window.electron?.git?.status(root);
+      if (!gitRes?.ok || !gitRes.output) return;
+      const files: string[] = [];
+      for (const line of gitRes.output.split("\n")) {
+        const tab = line.indexOf("\t");
+        let rel: string | null = null;
+        if (tab >= 0) {
+          const m = line.slice(tab + 1).match(/(\S+)$/); // rename/copy 取新路径
+          rel = m?.[1] ?? null;
+        } else {
+          const m = line.match(/^(?:\d+|\?)\s+\S*\s*(?:\S+\s+)*?(\S+)$/);
+          rel = m?.[1] ?? null;
+        }
+        if (!rel) continue;
+        files.push(
+          /^[a-zA-Z]:[\\/]/.test(rel)
+            ? rel
+            : root.replace(/[/\\]+$/, "") + "/" + rel,
+        );
+      }
+      if (files.length === 0) return;
+      const res = await window.electron?.fs?.snapshotSave(runId, files);
+      if (res?.ok) {
+        runSnapshotIdRef.current = runId;
+        runSnapshotFilesRef.current = res.saved ?? files.length;
+      }
+    } catch {
+      /* 快照失败不阻塞 run：回滚是可选能力，不能因此拦住用户发消息 */
+    }
+  }, []);
+
   // Run agent task
   // opts 供「后台旁路提问」复用本函数而不影响主线 UI：
   //  - sessionId：把这一发跑在指定会话上（不切换 currentSessionId），于是
@@ -3380,11 +3495,6 @@ export function AgentFlowPanel() {
         useHelixStore.setState({ isChatLoading: false });
         return;
       }
-    }
-
-    // Track skill invocation count
-    if (cmd) {
-      window.electron?.helixSkills?.trackSkillCall(cmd.name).catch?.(() => {});
     }
 
     // If the CURRENT session is running AND receiving a new send, stop it first
@@ -5595,6 +5705,12 @@ export function AgentFlowPanel() {
       // Fire the prompt — events stream back via onEvent (don't await the promise itself).
       // ACP expects prompt as a list of content blocks, not a plain string
       promptSentAtRef.current = Date.now();
+      // 整轮快照：在 prompt 发出**之前**把「工作区里可能被改的文件」原样存一份。
+      // 为什么不是等 tool_call 再存：那时文件已经被改了，存到的是新内容。
+      // 为什么不全量扫树：几十万文件读不动。只快照 git 视角下「有改动」的
+      // 文件（覆盖绝大多数实际编辑），未初始化 git 的项目退化为空快照
+      // （回滚按钮会提示"无快照"，不误导用户）。
+      void takeRunSnapshot();
       helixApi()!
         .send("session/prompt", {
           session_id: sessionId,
@@ -6583,13 +6699,27 @@ export function AgentFlowPanel() {
                 //（无正文 + responseBlocks 里已有 thinking/tool 块）不把思考塞进
                 // 正文——保留 blocks 让已完成消息按折叠的「思考过程」渲染，而不是
                 // 所有思考过程平铺冒出来。
+                //
+                // 但**退化思考不能这么干**（2026-10-03 修）：小模型在 high 思考
+                // 预算下会陷进「Let me do it / Let me run」的自重复循环，整轮
+                // aborted + usage 0/0，一个 toolCall 都没发出来。把它提升成正文
+                // 会让用户看到 978 行自我催促，还以为那是模型的回答。改成给一句
+                // 明确的失败说明 + 保留折叠的思考过程（排查用）。
                 if (
                   !content &&
                   reasoning &&
                   responseBlocksRef.current.length === 0
                 ) {
-                  content = reasoning;
-                  reasoning = "";
+                  if (isDegenerateReasoning(reasoning)) {
+                    content =
+                      "⚠️ 本轮没有产出任何内容：模型的思考陷入了重复循环（自说自话地宣布要调用工具，但始终没有真正调用），这一轮已被中断。\n\n" +
+                      "常见原因：思考级别过高而模型能力不足。可以把思考级别降到 中/低，或换一个模型后重试。\n\n" +
+                      "下方折叠的思考过程仅为便于排查，不是模型的回答。";
+                    // reasoning 有意**不清空**：留着让它按折叠的「思考过程」渲染。
+                  } else {
+                    content = reasoning;
+                    reasoning = "";
+                  }
                 }
                 // Detect scheduled-task declarations in AI output. Don't auto-create —
                 // collect them and show a confirm dialog so the user approves first.
@@ -7047,18 +7177,18 @@ export function AgentFlowPanel() {
                   useHelixStore.getState().selectedWorkDir,
                 useHelixStore.getState().approvalMode,
               );
+              const autoSid =
+                (myCid && sessionMapRef.current.get(myCid)?.sid) ||
+                (currentSessionId &&
+                  sessionMapRef.current.get(currentSessionId)?.sid) ||
+                helixSessionIdRef.current;
               if (verdict === "auto") {
-                const sid =
-                  (myCid && sessionMapRef.current.get(myCid)?.sid) ||
-                  (currentSessionId &&
-                    sessionMapRef.current.get(currentSessionId)?.sid) ||
-                  helixSessionIdRef.current;
-                if (sid) {
+                if (autoSid) {
                   // 自动批准也走新 RPC（2026-08-17 起后端弃用 session/approve）：
                   // approval.respond + choice: once/session/always/deny。
                   helixApi()!
                     .send("approval.respond", {
-                      session_id: sid,
+                      session_id: autoSid,
                       choice: "once",
                       request_id: parsed.approvalId || "",
                     })
@@ -8996,11 +9126,9 @@ export function AgentFlowPanel() {
                                             type: "info",
                                             title: "SSH 可达（一次性探测，未建立会话）",
                                             description:
-                                              "要在这台机器上远程开发：远端跑 remote-bridge.js，"
-                                              + "本地开 ssh -L 18800:127.0.0.1:18800 "
-                                              + `${svc.username}@${svc.host}，`
-                                              + "再把 config.yaml 的 pi.remote_rpc 设为 "
-                                              + '\n"127.0.0.1:18800"。',
+                                              "仅验证 SSH 连通性，未建立会话。"
+                                              + `如需在 ${svc.host} 上开发，请先把远程项目`
+                                              + "克隆/挂载到本地路径，再在本地打开该目录。",
                                           });
                                         } catch (e) {
                                           setExternalServiceConnected(

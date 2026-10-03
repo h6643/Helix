@@ -13,6 +13,8 @@ mod mcp;
 mod memory;
 mod page_fetch;
 mod paths;
+mod pi_catalog;
+mod pi_permissions;
 mod pi_gateway;
 /// Test-only re-exports of pi_gateway's session-trim helpers (integration
 /// tests in tests/trim_session.rs). Not part of the app surface.
@@ -28,7 +30,6 @@ pub mod pi_gateway_test_hooks {
 mod image_model;
 mod profile;
 mod proxy;
-mod self_improve;
 mod scheduled_tasks;
 mod security;
 mod skills;
@@ -42,6 +43,24 @@ mod window;
 use crate::state::{AppState, APP_HANDLE};
 use std::sync::Arc;
 use tauri::Emitter;
+
+/// Read the `@gotgenes/pi-permission-system` policy that Helix's
+/// Settings → 权限 page edits. Thin wrapper so the command name lives
+/// next to the registration.
+#[tauri::command]
+fn pi_permissions_read() -> serde_json::Value {
+    pi_permissions::read_policy()
+}
+
+/// Write the policy back. `policy: null` restores Helix's defaults;
+/// keys the frontend doesn't manage are preserved verbatim.
+#[tauri::command]
+fn pi_permissions_write(
+    policy: Option<serde_json::Value>,
+    yolo_mode: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    pi_permissions::write_policy(policy, yolo_mode)
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -231,6 +250,11 @@ pub fn run() {
             fs::scan_tree,
             fs::allow_root,
             fs::helix_memory_dir,
+            // 会话级文件快照：一轮 run 前存「改动前」的内容，可整轮回滚
+            fs::snapshot_save,
+            fs::snapshot_restore,
+            fs::snapshot_discard,
+            fs::snapshot_list,
             // file-based skills (slash-command picker / skill panel)
             skills::helix_get_skills_dir,
             skills::helix_read_dir,
@@ -257,8 +281,6 @@ pub fn run() {
             delegations::delegations_read_log,
             delegations::subagent_timeline,
             pi_gateway::subagent_map,
-            // self-improve health check report
-            self_improve::self_improve_report,
             // background tasks (pi-background-tasks extension registry)
             background_tasks::tasks_list,
             background_tasks::tasks_read,
@@ -344,6 +366,8 @@ pub fn run() {
             helix::pi_install_package,
             helix::pi_uninstall_package,
             helix::pi_check_updates,
+            pi_permissions_read,
+            pi_permissions_write,
             // gateway MCP servers (config.yaml mcp_servers, read/write)
             mcp::mcp_config_list,
             mcp::mcp_config_save,

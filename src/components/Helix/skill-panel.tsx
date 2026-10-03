@@ -11,6 +11,7 @@ import {
   Loader2,
   Check,
   Wrench,
+  ChevronDown,
 } from "lucide-react";
 import React, {
   useState,
@@ -19,8 +20,9 @@ import React, {
   useCallback,
   useRef,
 } from "react";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { PopupSelect } from "./settings-ui";
+import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { helixApi } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
@@ -64,6 +66,8 @@ interface PackageResult {
   installCmd: string;
   downloads: number;
   date: string;
+  /** pi.dev 上的详情页（后端会带，缺省不影响渲染） */
+  piUrl?: string;
 }
 
 type TabKey = "plugins" | "skills";
@@ -126,6 +130,11 @@ export function SkillPanel({}: SkillPanelProps) {
   const [browseQuery, setBrowseQuery] = useState("");
   const [searchResults, setSearchResults] = useState<PackageResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  /** 目录筛选后的总命中数（服务端算好；null = 还没拿到/没筛选） */
+  const [total, setTotal] = useState<number | null>(null);
+  /** 当前已加载到第几页（1 起） */
+  const [page, setPage] = useState(1);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(null);
 
@@ -170,48 +179,87 @@ export function SkillPanel({}: SkillPanelProps) {
     }
   }, []);
 
-  const doSearch = useCallback(async (query: string) => {
-    if (!query.trim()) {
-      setSearchResults([]);
-      return;
-    }
-    setSearchLoading(true);
-    try {
-      const api = helixApi();
-      if (!api?.piSearchPackages) return;
-      // npm 搜索 API 将 "-" 视为分隔符，所以搜索 "lens" 不会匹配到 "pi-lens"。
-      // 为了提高搜索结果的准确性，我们同时搜索原始查询和替换 "-" 为空格后的查询，
-      // 然后合并结果并去重。
-      const normalizedQuery = query.replace(/-/g, " ");
-      const [res1, res2] = await Promise.all([
-        api.piSearchPackages(query),
-        normalizedQuery !== query
-          ? api.piSearchPackages(normalizedQuery)
-          : null,
-      ]);
-      const packages1 = Array.isArray(res1?.packages) ? res1.packages : [];
-      const packages2 = Array.isArray(res2?.packages) ? res2.packages : [];
-      const seen = new Set<string>();
-      const merged: PackageResult[] = [];
-      for (const pkg of [...packages1, ...packages2]) {
-        if (!seen.has(pkg.name)) {
-          seen.add(pkg.name);
-          merged.push(pkg);
-        }
+  // 拉 pi.dev 官方目录。
+  //
+  // 与旧实现的差别（都值得记住）：
+  // 1. **不再需要「`-` 换空格再搜一遍」的 hack** —— 那是 npm 搜索分词器的怪癖
+  //    （搜 `lens` 匹配不到 `pi-lens`）；pi.dev 的 `name` 是子串匹配，天然没这问题。
+  // 2. **类型筛选 / 排序 / 分页下推服务端**。以前在前端对 20 条结果做过滤和排序，
+  //    过滤完常常只剩 0-2 条，且顺序不是全局序。现在交给服务端，翻页才能真的看到全量。
+  // 3. **空 query 返回最热门**（旧实现直接清空，等于白屏）。浏览页默认就有内容。
+  const doSearch = useCallback(
+    async (opts?: { append?: boolean }) => {
+      const append = !!opts?.append;
+      if (!append) {
+        setPage(1);
+        setTotal(null);
       }
-      setSearchResults(merged);
-    } catch {
-      setSearchResults([]);
-    } finally {
-      setSearchLoading(false);
-    }
-  }, []);
+      const targetPage = append ? page + 1 : 1;
+      if (!append) setSearchLoading(true);
+      else setLoadingMore(true);
+      try {
+        const api = helixApi();
+        if (!api?.piSearchPackages) return;
+        const res = await api.piSearchPackages(
+          browseQuery.trim(),
+          filterType === "all" ? "" : filterType,
+          sortBy === "date" ? "recent" : sortBy,
+          targetPage,
+        );
+        const list: PackageResult[] = Array.isArray(res?.packages)
+          ? res.packages
+          : [];
+        setTotal(typeof res?.total === "number" ? res.total : null);
+        setPage(targetPage);
+        setSearchResults((prev) => {
+          if (!append) return list;
+          // 翻页去重：目录内容可能在两次请求之间变动
+          const seen = new Set(prev.map((p) => p.name));
+          return [...prev, ...list.filter((p) => !seen.has(p.name))];
+        });
+      } catch {
+        if (!append) {
+          setSearchResults([]);
+          setTotal(null);
+        }
+      } finally {
+        setSearchLoading(false);
+        setLoadingMore(false);
+      }
+    },
+    [browseQuery, filterType, sortBy, page],
+  );
+
+  // 打开浏览页时若还没拉过内容，先取一次最热门（空 query）。
+  useEffect(() => {
+    if (!showBrowse) return;
+    if (searchResults.length > 0 || searchLoading) return;
+    void doSearch();
+    // 只在「从无到有」这一刻触发一次；后续翻页/改筛选由各自 handler 驱动。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showBrowse]);
 
   const handleBrowseSearchChange = useCallback(
     (value: string) => {
       setBrowseQuery(value);
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
-      searchTimerRef.current = setTimeout(() => void doSearch(value), 400);
+      searchTimerRef.current = setTimeout(() => void doSearch(), 400);
+    },
+    [doSearch],
+  );
+
+  // 改类型 / 排序都直接重新查询（服务端筛选排序，前端不再做二次过滤）
+  const handleFilterTypeChange = useCallback(
+    (value: string) => {
+      setFilterType(value);
+      setTimeout(() => void doSearch(), 0);
+    },
+    [doSearch],
+  );
+  const handleSortChange = useCallback(
+    (value: string) => {
+      setSortBy(value as typeof sortBy);
+      setTimeout(() => void doSearch(), 0);
     },
     [doSearch],
   );
@@ -413,20 +461,10 @@ export function SkillPanel({}: SkillPanelProps) {
 
   const extensions = filteredItems.filter((i) => i.type === "extension");
 
-  // ── Browse: filtered + sorted results ──
-  const filteredResults = useMemo(() => {
-    let list = [...searchResults];
-    if (filterType !== "all") {
-      list = list.filter((pkg) => pkg.type === filterType);
-    }
-    list.sort((a, b) => {
-      if (sortBy === "downloads")
-        return (b.downloads || 0) - (a.downloads || 0);
-      if (sortBy === "date") return (b.date || "").localeCompare(a.date || "");
-      return 0;
-    });
-    return list;
-  }, [searchResults, filterType, sortBy]);
+  // ── Browse 结果 ──
+  // 类型筛选与排序都已下推给 pi.dev（见 doSearch 注释），这里**不再**做前端
+  // 二次过滤/排序 —— 那会把「服务端全局序」打乱成「本页内序」，翻页时顺序跳变。
+  const hasMore = total != null && searchResults.length < total;
 
   // ── Render helpers ──
   const renderItem = (item: InstalledItem, idx: number) => {
@@ -743,7 +781,7 @@ export function SkillPanel({}: SkillPanelProps) {
                       type="text"
                       value={browseQuery}
                       onChange={(e) => handleBrowseSearchChange(e.target.value)}
-                      placeholder="搜索 npm 上的 Pi 插件..."
+                      placeholder="搜索 pi.dev 上的 Pi 插件..."
                       className="w-[95%] h-10 pl-10 pr-4 rounded border border-border/60 bg-card/40 text-[length:var(--helix-transcript-size)] transition-all"
                     />
                     {searchLoading && (
@@ -752,7 +790,7 @@ export function SkillPanel({}: SkillPanelProps) {
                   </div>
                   <PopupSelect
                     value={filterType}
-                    onChange={setFilterType}
+                    onChange={handleFilterTypeChange}
                     className="h-10 min-w-[110px] rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground transition-all"
                     options={[
                       { label: "全部类型", value: "all" },
@@ -764,7 +802,7 @@ export function SkillPanel({}: SkillPanelProps) {
                   />
                   <PopupSelect
                     value={sortBy}
-                    onChange={(v) => setSortBy(v as typeof sortBy)}
+                    onChange={handleSortChange}
                     className="h-10 min-w-[130px] rounded border border-border/60 bg-background text-[length:var(--helix-transcript-size)] text-muted-foreground transition-all"
                     options={[
                       { label: "最多下载", value: "downloads" },
@@ -776,22 +814,43 @@ export function SkillPanel({}: SkillPanelProps) {
                 {searchResults.length > 0 ? (
                   <div className="space-y-1.5">
                     <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50 px-1">
-                      找到 {filteredResults.length} 个包
+                      {total != null ? `共 ${total} 个包` : "结果"}
+                      {searchResults.length < (total ?? 0) &&
+                        `（已显示 ${searchResults.length}）`}
+                      <span className="text-muted-foreground/30 ml-1.5">
+                        来源 pi.dev
+                      </span>
                     </p>
-                    {filteredResults.map((pkg) => renderPackageResult(pkg))}
+                    {searchResults.map((pkg) => renderPackageResult(pkg))}
+                    {hasMore && (
+                      <div className="flex justify-center pt-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 gap-1.5"
+                          disabled={loadingMore}
+                          onClick={() => void doSearch({ append: true })}
+                        >
+                          {loadingMore ? (
+                            <Loader2 className="size-3 animate-spin" />
+                          ) : (
+                            <ChevronDown className="size-3" />
+                          )}
+                          {loadingMore ? "加载中" : "加载更多"}
+                        </Button>
+                      </div>
+                    )}
                   </div>
-                ) : browseQuery && !searchLoading ? (
+                ) : searchLoading ? null : (
                   <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-muted-foreground/60">
                     未找到相关插件
+                    {browseQuery && (
+                      <p className="mt-2 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40">
+                        pi.dev 共收录 5400+ 个包，换个关键词试试
+                      </p>
+                    )}
                   </div>
-                ) : !browseQuery ? (
-                  <div className="text-center py-12 text-[length:var(--helix-transcript-size)] text-muted-foreground/60">
-                    输入关键词搜索 Pi 插件
-                    <p className="mt-2 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40">
-                      例如: memory, web, subagent, plan
-                    </p>
-                  </div>
-                ) : null}
+                )}
               </>
             ) : (
               <>

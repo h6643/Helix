@@ -1,9 +1,9 @@
 "use client";
 
-import { Activity, FileDiff, Globe } from "lucide-react";
+import { FileDiff, Globe } from "lucide-react";
 
 interface MoreActionsMenuProps {
-  onToggleTab: (kind: "browser" | "diff" | "self-improve") => void;
+  onToggleTab: (kind: "browser" | "diff") => void;
   /** 点「浏览器」时总是新开一个浏览器页（多开）。缺省时退化为 onToggleTab（切换）。 */
   onAddBrowser?: () => void;
 }
@@ -33,14 +33,6 @@ export function MoreActionsMenu({
       >
         <FileDiff className="size-3.5" />
         <span className="flex-1 text-left">更改</span>
-      </button>
-      <button
-        data-tip="体检"
-        onClick={() => onToggleTab("self-improve")}
-        className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground hover:bg-accent/60 hover:text-foreground transition-colors"
-      >
-        <Activity className="size-3.5" />
-        <span className="flex-1 text-left">体检</span>
       </button>
     </div>
   );

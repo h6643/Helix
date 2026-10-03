@@ -776,7 +776,7 @@ export function HelixLayout() {
         const commitRes = await electronGit.commit(
           message && message.trim().length > 0
             ? message.trim()
-            : `chore: auto-commit (${new Date().toLocaleString("zh-CN")})`,
+            : ``,
         );
         if (!commitRes.ok) {
           storeActions.showToast({
@@ -1635,13 +1635,6 @@ export function HelixLayout() {
           closeWindowMenu();
         },
       },
-      {
-        label: "打开代码编辑器",
-        action: () => {
-          storeActions.setRightSidebarTab("code");
-          closeWindowMenu();
-        },
-      },
       { divider: true },
       {
         label: "设置",
@@ -1672,15 +1665,6 @@ export function HelixLayout() {
         shortcut: shortcutLabel("go-forward", customShortcuts),
         action: () => {
           storeActions.navigateHistory("forward");
-          closeWindowMenu();
-        },
-      },
-      { divider: true },
-      {
-        label: "切换全屏",
-        shortcut: "F11",
-        action: () => {
-          toggleFullscreen();
           closeWindowMenu();
         },
       },
@@ -2113,7 +2097,7 @@ export function HelixLayout() {
                         type="button"
                         onClick={() => {
                           setCommitMessage(
-                            `chore: auto-commit (${new Date().toLocaleString("zh-CN")})`,
+                            ``,
                           );
                           setWorkPanelOpen(false);
                           setCommitDialogOpen(true);
@@ -2423,12 +2407,14 @@ export function HelixLayout() {
             </div>
             )}
             {/* 提交弹窗：点「提交并推送」弹出，含提交信息输入框 + 提交 / 提交并推送 两个动作 */}
-            {commitDialogOpen && typeof window !== "undefined" && (
+            {commitDialogOpen && typeof window !== "undefined" &&
+              createPortal(
               <>
                 <div
                   className="fixed inset-0 bg-black/30 z-[300]"
                   onClick={() => !isCommitting && setCommitDialogOpen(false)}
                   data-tauri-drag-region="false"
+                  style={{ WebkitAppRegion: "no-drag" } as any}
                 />
                 {/* data-tauri-drag-region="false"：本弹窗渲染在上方 deep 拖拽区
                     （顶部图标行）的子树里，WebView2 的 app-region:drag 会覆盖到
@@ -2437,6 +2423,7 @@ export function HelixLayout() {
                 <div
                   className="fixed z-[310] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] max-h-[80vh] bg-card rounded-xl border border-border/50 shadow-2xl flex flex-col overflow-hidden"
                   data-tauri-drag-region="false"
+                  style={{ WebkitAppRegion: "no-drag" } as any}
                 >
                   <div className="shrink-0 px-5 pt-5 pb-3 flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -2472,6 +2459,8 @@ export function HelixLayout() {
                       onChange={(e) => setCommitMessage(e.target.value)}
                       rows={3}
                       autoFocus
+                      data-tauri-drag-region="false"
+                      style={{ WebkitAppRegion: "no-drag" } as any}
                       className="w-full resize-none rounded-lg border border-border/30 bg-muted/20 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground outline-none focus:border-primary/50 transition-colors"
                     />
                   </div>
@@ -2502,7 +2491,8 @@ export function HelixLayout() {
                     </button>
                   </div>
                 </div>
-              </>
+              </>,
+              document.body,
             )}
             <button
               onClick={() => storeActions.toggleTerminal()}

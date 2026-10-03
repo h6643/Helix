@@ -11,8 +11,15 @@ import {
   Loader2,
   Search,
   AlertTriangle,
+  MessageSquare,
 } from "lucide-react";
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+} from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { timeAgo } from "@/lib/format";
@@ -281,6 +288,67 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
     return allText.includes(q);
   });
 
+  // 跨会话消息命中：搜索框下方按会话列出「命中消息」而不是只列出会话。
+  // 点击后切到该会话 → 打开会话内搜索（Ctrl+F 同一套 UI）→ 定位并高亮该条。
+  const messageHits = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (q.length < 2) return [];
+    const out: {
+      session: PersistedSession;
+      messageId: string;
+      role: string;
+      snippet: string;
+      timestamp: number;
+    }[] = [];
+    for (const s of sessions) {
+      // 会话名命中就整会话展示（没有更细的定位价值）
+      if (s.label?.toLowerCase().includes(q)) continue;
+      for (const m of s.chatMessages) {
+        const text = m.content || "";
+        const lower = text.toLowerCase();
+        const at = lower.indexOf(q);
+        if (at < 0) continue;
+        // 以命中处为中心截一段，带前后省略号
+        const start = Math.max(0, at - 28);
+        const end = Math.min(text.length, at + q.length + 60);
+        out.push({
+          session: s,
+          messageId: m.id,
+          role: m.role,
+          snippet:
+            (start > 0 ? "…" : "") +
+            text.slice(start, end).replace(/\s+/g, " ").trim() +
+            (end < text.length ? "…" : ""),
+          timestamp: m.timestamp || 0,
+        });
+        if (out.length >= 100) return out; // 上限保护，避免大库卡顿
+      }
+    }
+    return out;
+  }, [sessions, searchQuery]);
+
+  // 切会话 → 打开会话内搜索并定位到命中消息。
+  // 复用 agent-flow-panel 已有的 `helix:conversation-search` 通道：先派发带
+  // query/messageId 的事件，等面板渲染出该消息后再触发滚动定位。
+  const handleJumpToMessage = useCallback(
+    async (session: PersistedSession, messageId: string, query: string) => {
+      await handleOpenSession(session);
+      // 等待目标消息挂载（切会话是异步的，DOM 里还没有 data-message-id）
+      let waited = 0;
+      while (waited < 2000) {
+        await new Promise((r) => setTimeout(r, 60));
+        waited += 60;
+        if (document.querySelector(`[data-message-id="${messageId}"]`)) break;
+      }
+      window.dispatchEvent(
+        new CustomEvent("helix:conversation-search", {
+          detail: { query, messageId },
+        }),
+      );
+    },
+    [handleOpenSession],
+  );
+
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center">
       <div
@@ -341,9 +409,58 @@ export function SessionManager({ onClose }: { onClose: () => void }) {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="搜索会话（按名称或内容）..."
+                placeholder="搜索消息内容或会话名..."
                 className="w-full pl-8 pr-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-muted/50 border border-border/50 rounded-lg"
               />
+            </div>
+          </div>
+        )}
+
+        {/* 消息命中：跨会话搜正文。放在会话列表之上，一眼看到「哪句话在哪」。 */}
+        {messageHits.length > 0 && (
+          <div className="border-b border-border/50 max-h-[38vh] overflow-y-auto">
+            <div className="px-5 pt-2 pb-1 flex items-center gap-2">
+              <MessageSquare className="size-3 text-muted-foreground" />
+              <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground">
+                消息命中 {messageHits.length}
+                {messageHits.length >= 100 ? "（仅显示前 100 条）" : ""}
+              </span>
+            </div>
+            <div className="p-2 space-y-0.5">
+              {messageHits.map((hit) => (
+                <button
+                  key={`${hit.session.id}:${hit.messageId}`}
+                  onClick={() =>
+                    handleJumpToMessage(
+                      hit.session,
+                      hit.messageId,
+                      searchQuery.trim(),
+                    )
+                  }
+                  className="w-full text-left px-3 py-2 hover:bg-accent/30 rounded-lg transition-colors cursor-pointer group"
+                >
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <span
+                      className={`text-[calc(var(--helix-transcript-size)*0.7143)] px-1 py-px rounded shrink-0 ${
+                        hit.role === "user"
+                          ? "bg-blue-500/10 text-blue-600 dark:text-blue-400"
+                          : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                      }`}
+                    >
+                      {hit.role === "user" ? "我" : "AI"}
+                    </span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground truncate">
+                      {hit.session.label}
+                    </span>
+                    <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 shrink-0 ml-auto">
+                      {timeAgo(hit.timestamp)}
+                    </span>
+                  </div>
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/75 line-clamp-2 group-hover:text-foreground transition-colors">
+                    {hit.snippet}
+                  </p>
+                </button>
+              ))}
             </div>
           </div>
         )}

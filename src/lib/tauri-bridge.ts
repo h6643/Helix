@@ -172,6 +172,12 @@ function buildTauriAPI(): ElectronAPI {
     scanTree: (dirPath?: string) =>
       invoke("scan_tree", { relativePath: dirPath ?? null }),
     allowRoot: (dirPath: string) => invoke("allow_root", { dir: dirPath }),
+    // 会话级文件快照：一轮 run 前存「改动前」内容，可整轮回滚
+    snapshotSave: (runId: string, files: string[]) =>
+      invoke("snapshot_save", { runId, files }),
+    snapshotRestore: (runId: string) => invoke("snapshot_restore", { runId }),
+    snapshotDiscard: (runId: string) => invoke("snapshot_discard", { runId }),
+    snapshotList: () => invoke("snapshot_list"),
   };
 
   // ── helixSkills ────────────────────────────────────────────────────────
@@ -304,13 +310,32 @@ function buildTauriAPI(): ElectronAPI {
     setSubagentModel: (name: string, model: string) =>
       invoke("helix_set_subagent_model", { name, model }),
     deleteSubagent: (name: string) => invoke("helix_delete_subagent", { name }),
+    // pi-permission-system 的策略（pi 自己没有权限体系，见 pi docs/security.md）
+    piPermissionsRead: () => invoke("pi_permissions_read"),
+    piPermissionsWrite: (policy?: unknown, yoloMode?: boolean) =>
+      invoke("pi_permissions_write", {
+        policy: policy ?? null,
+        yoloMode: yoloMode ?? null,
+      }),
     // Pi agent commands (extensions / skills / prompts / models)
     piListInstalled: () => invoke("pi_list_installed"),
     piGetAvailableModels: () => invoke("pi_get_available_models"),
     piSetThinkingLevelAll: (level: string) =>
       invoke("pi_set_thinking_level_all", { level }),
-    piSearchPackages: (query: string) =>
-      invoke("pi_search_packages", { query }),
+    // pi.dev 官方目录（不是 npm 全量搜索 —— 那个搜 `pi` 会满屏数学库）。
+    // 参数全部可选：空 query = 最热门，type/sort/page 下推服务端。
+    piSearchPackages: (
+      query?: string,
+      pkgType?: string,
+      sort?: string,
+      page?: number,
+    ) =>
+      invoke("pi_search_packages", {
+        query: query ?? null,
+        pkgType: pkgType ?? null,
+        sort: sort ?? null,
+        page: page ?? null,
+      }),
     piInstallPackage: (pkg: string) =>
       invoke("pi_install_package", { package: pkg }),
     piUninstallPackage: (pkg: string) =>
@@ -439,11 +464,6 @@ function buildTauriAPI(): ElectronAPI {
   api.subagentMap = {
     list: (sessionId?: string) =>
       invoke("subagent_map", { sessionId: sessionId ?? null }),
-  };
-
-  // ── self-improve health check report ────────────────────────────────────
-  api.selfImprove = {
-    report: () => invoke("self_improve_report"),
   };
 
   // ── background tasks (pi-background-tasks extension registry) ───────────

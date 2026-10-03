@@ -9,12 +9,11 @@ import { CodeEditorPanel } from "./code-editor-panel";
 import { DiffSidebarPanel } from "./diff-sidebar-panel";
 import { MoreActionsMenu } from "./more-actions-menu";
 import { BrowserView } from "./preview-rail";
-import { SelfImprovePanel } from "./self-improve-panel";
 import { cleanUrl } from "@/lib/url-utils";
 import { summarizeUrl } from "@/lib/url-utils";
 import { useHelixStore } from "@/stores/helix-store";
 
-type PageKind = "browser" | "code" | "diff" | "agent" | "byline" | "self-improve";
+type PageKind = "browser" | "code" | "diff" | "agent" | "byline";
 interface PanelPage {
   id: string;
   kind: PageKind;
@@ -61,8 +60,6 @@ export function RightSidebar() {
     if (tab === "agent") return [{ id: newPageId(), kind: "agent", url: "" }];
     if (tab === "byline")
       return [{ id: newPageId(), kind: "byline", url: "" }];
-    if (tab === "self-improve")
-      return [{ id: newPageId(), kind: "self-improve", url: "" }];
     if (tab === "browser")
       return [{ id: newPageId(), kind: "browser", url: start }];
     return [];
@@ -140,9 +137,7 @@ export function RightSidebar() {
             ? "agent"
             : tab === "byline"
               ? "byline"
-              : tab === "self-improve"
-                ? "self-improve"
-                : null;
+              : null;
     if (!kind) return;
     const existing = pagesRef.current.find((p) => p.kind === kind);
     if (existing) {
@@ -385,9 +380,7 @@ export function RightSidebar() {
                   ? activeAgentView?.name || "子 Agent"
                   : p.kind === "byline"
                     ? "旁路问答"
-                    : p.kind === "self-improve"
-                      ? "体检"
-                      : "更改";
+                    : "更改";
             const active = p.id === activePageId;
             return (
               <div
@@ -502,7 +495,6 @@ export function RightSidebar() {
                 {p.kind === "diff" && <DiffSidebarPanel />}
                 {p.kind === "agent" && <AgentWorkPanel />}
                 {p.kind === "byline" && <BylinePanel />}
-                {p.kind === "self-improve" && <SelfImprovePanel />}
               </div>
             );
             });

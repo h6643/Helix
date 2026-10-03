@@ -1565,97 +1565,29 @@ pub async fn pi_set_thinking_level_all(level: String) -> Result<Value, String> {
 
 // ── Pi Package Manager ─────────────────────────────────────────────
 
-/// Search npm for Pi packages (extensions, skills, themes, prompts).
-/// Uses the npm registry search API.
+/// Search the Pi package catalog at <https://pi.dev/packages>.
+///
+/// 这条命令以前打 npm registry 的全量搜索（`-/v1/search?text=`），那个接口不
+/// 区分 pi 生态：搜 `pi` 首屏是数学库 `pi` 和遥测包，真插件被埋在后面；而且
+/// 类型只能靠 keywords 猜。现在改抓 pi.dev 官方目录（服务端渲染 + 结构化
+/// data-* 属性），并把类型过滤 / 排序 / 分页下推给服务端。
+///
+/// 参数全部可选：不传 query 就是「最热门」（浏览页的默认态），传 type/sort/page
+/// 做筛选与翻页。实际抓取与 HTML 解析在 `pi_catalog` 模块（含单测）。
 #[tauri::command]
-pub async fn pi_search_packages(query: String) -> Result<Value, String> {
-    if query.trim().is_empty() {
-        return Err("query cannot be empty".into());
-    }
-    let url = format!(
-        "https://registry.npmjs.org/-/v1/search?text={}&size=20",
-        urlencoding::encode(&query)
-    );
-    let resp = crate::proxy::proxy_aware_client_builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("failed to build http client: {e}"))?
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("npm registry request failed: {e}"))?;
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse npm response: {e}"))?;
-
-    let mut packages = Vec::new();
-    if let Some(objects) = body.get("objects").and_then(Value::as_array) {
-        for obj in objects {
-            if let Some(pkg) = obj.get("package") {
-                let name = pkg.get("name").and_then(Value::as_str).unwrap_or("");
-                let description = pkg.get("description").and_then(Value::as_str).unwrap_or("");
-                let version = pkg.get("version").and_then(Value::as_str).unwrap_or("");
-                // Extract keywords to determine type
-                let keywords: Vec<String> = pkg
-                    .get("keywords")
-                    .and_then(Value::as_array)
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let pkg_type = if keywords.iter().any(|k| k == "pi-extension") {
-                    "extension"
-                } else if keywords.iter().any(|k| k == "pi-skill") {
-                    "skill"
-                } else if keywords.iter().any(|k| k == "pi-theme") {
-                    "theme"
-                } else if keywords.iter().any(|k| k == "pi-prompt") {
-                    "prompt"
-                } else {
-                    "package"
-                };
-                // Get author
-                let author = pkg
-                    .get("author")
-                    .and_then(|a| a.get("name").or(Some(a)).and_then(Value::as_str))
-                    .unwrap_or("")
-                    .to_string();
-                // Get npm link
-                let npm_url = format!("https://www.npmjs.com/package/{name}");
-
-                // Get download count (weekly) from score.detail.downloads
-                let downloads = obj
-                    .get("score")
-                    .and_then(|s| s.get("detail"))
-                    .and_then(|d| d.get("downloads"))
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0) as u64;
-
-                // Get publish date
-                let date = pkg
-                    .get("date")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-
-                packages.push(json!({
-                    "name": name,
-                    "description": description,
-                    "version": version,
-                    "type": pkg_type,
-                    "author": author,
-                    "npmUrl": npm_url,
-                    "installCmd": format!("pi install npm:{name}"),
-                    "downloads": downloads,
-                    "date": date,
-                }));
-            }
-        }
-    }
-    Ok(json!({ "packages": packages }))
+pub async fn pi_search_packages(
+    query: Option<String>,
+    pkg_type: Option<String>,
+    sort: Option<String>,
+    page: Option<u32>,
+) -> Result<Value, String> {
+    crate::pi_catalog::fetch_catalog(
+        query.as_deref().unwrap_or(""),
+        pkg_type.as_deref(),
+        sort.as_deref().unwrap_or("downloads"),
+        page.unwrap_or(1),
+    )
+    .await
 }
 
 /// Install a Pi package via `pi install npm:<package>`. For an installed
