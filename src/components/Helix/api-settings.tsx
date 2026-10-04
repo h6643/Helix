@@ -16,7 +16,6 @@ import {
   Activity,
   Workflow,
   RefreshCw,
-  ShieldCheck,
 } from "lucide-react";
 import React, {
   useState,
@@ -26,7 +25,6 @@ import React, {
   useMemo,
 } from "react";
 import { AgentsSettings } from "./agents-settings";
-import { PermissionsSettingsPanel } from "./permissions-settings-panel";
 import { AppearanceSettingsPanel } from "./appearance-settings-panel";
 import { GeneralSettingsPanel } from "./general-settings-panel";
 import { HookSettings } from "./hook-settings";
@@ -100,7 +98,6 @@ type SettingsPage =
   | "hook"
   | "usage"
   | "help"
-  | "permissions"
   | "agents";
 
 interface NavItem {
@@ -130,7 +127,6 @@ const NAV_GROUPS: NavGroup[] = [
       { id: "mcp", label: "MCP", icon: Plug },
       { id: "usage", label: "用量", icon: Activity },
       { id: "agents", label: "子智能体", icon: Bot },
-      { id: "permissions", label: "权限", icon: ShieldCheck },
     ],
   },
   {
@@ -2646,7 +2642,7 @@ export function ApiSettings({
                         return (
                           <div
                             key={name}
-                            className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/70 bg-muted/20 hover:bg-muted/40 transition-colors group"
+                            className="group flex items-center gap-3 rounded-xl border border-border/40 bg-card/60 px-4 py-3 transition-colors hover:border-border/70"
                           >
                             <div className="relative shrink-0">
                               <div
@@ -2698,7 +2694,7 @@ export function ApiSettings({
                     return (
                       <div
                         key={name}
-                        className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/70 bg-muted/20 hover:bg-muted/40 transition-colors group"
+                        className="group flex items-center gap-3 rounded-xl border border-border/40 bg-card/60 px-4 py-3 transition-colors hover:border-border/70"
                       >
                         <div className="relative shrink-0">
                           <div
@@ -2844,9 +2840,6 @@ export function ApiSettings({
 
       case "agents":
         return <AgentsSettings />;
-
-      case "permissions":
-        return <PermissionsSettingsPanel />;
     }
   };
 

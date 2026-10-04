@@ -223,7 +223,28 @@ type AgentEngine = "helix";
 export type ReasoningEffortLevel =
   "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
-export type ApprovalMode = "default" | "accept_edits" | "dont_ask" | "plan";
+/**
+ * 审批模式。
+ *
+ * 四个值分属**两条正交的轴**，别把它们当一维梯队看：
+ *
+ * - 权限档 `ask` / `auto` / `full` —— 真正决定「工具调用要不要先问」。
+ *   落地方式是写 `@zhushanwen/pi-permission` 的
+ *   `config/permission-ext-config.json`（Rust: `helix_set_permission_mode`）。
+ *   pi 官方没有工具级审批（`docs/security.md`："does not ask for approval
+ *   before every tool call"），**唯一**能 block 工具执行的是扩展的
+ *   `tool_call` 钩子，所以档位必须写进那个扩展才有效。
+ *   映射：`ask → strict`、`auto → auto`、`full → yolo`。
+ * - `plan` —— 走 pi-plan-mode 扩展（`/plan start`），模型只产出方案，
+ *   用户批准后才切回执行。**不碰权限档**（它不改变谁被问）。
+ *
+ * 历史上的 `default` / `accept_edits` / `dont_ask` 全部归一掉：
+ * `default → auto`，`accept_edits → auto`，`dont_ask → full`。
+ * 那些是 Python serve-gateway 时代的自造语义 —— 靠分类一个 pi 永不触发的
+ * `approval_request` 事件来放行，于是「选了完全访问照样被弹窗拦」。
+ * 同一个坑不能再踩：档位 UI 与真正生效的门禁**必须是同一条通路**。
+ */
+export type ApprovalMode = "ask" | "auto" | "full" | "plan";
 
 // Tool approval choices written back to the backend approval state machine.
 export type ApprovalLevel = "once" | "session" | "always" | "deny";
@@ -543,3 +564,44 @@ export const DEFAULT_SHORTCUTS: Record<string, CustomShortcutEntry> = {
     description: "切换文件树",
   },
 };
+
+/**
+ * 审批档位的**唯一**展示表（主输入框下拉与旁路面板共用）。
+ *
+ * 放在这里而不是各组件本地：这两个下拉曾经各写一份档位表，结果主输入框显示
+ * 两档、旁路面板显示四档，用户在两个界面看到不同的东西。同一类「判定/清单
+ * 写两份必然对不上」的分裂。
+ *
+ * 前三档是权限档（落到 pi-permission 的 config），`plan` 是独立的一轴。
+ */
+export const APPROVAL_MODE_ITEMS: ReadonlyArray<{
+  id: ApprovalMode;
+  icon: "ShieldCheck" | "ShieldQuestion" | "Zap" | "FileText";
+  title: string;
+  desc: string;
+}> = [
+  {
+    id: "ask",
+    icon: "ShieldQuestion",
+    title: "询问审批",
+    desc: "执行命令、修改 Workspace 外文件或访问网络前，始终询问",
+  },
+  {
+    id: "auto",
+    icon: "ShieldCheck",
+    title: "自动审批",
+    desc: "仅在检测到潜在风险时询问",
+  },
+  {
+    id: "full",
+    icon: "Zap",
+    title: "完全访问",
+    desc: "不再询问，可自由访问你的文件、终端和网络",
+  },
+  {
+    id: "plan",
+    icon: "FileText",
+    title: "制定计划",
+    desc: "先规划后做，批准后再执行",
+  },
+] as const;

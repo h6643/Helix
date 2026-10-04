@@ -656,13 +656,18 @@ export const persistence = {
     }
   },
 
-  async reorderSessions(workDir: string, orderedIds: string[]): Promise<void> {
+  /**
+   * 按给定顺序重排对话（拖拽排序）。只认 id，不按 workDir 过滤 —— 侧边栏的一个
+   * 项目分组可能横跨多个 workDir（远程项目：同一台服务器上的不同远端目录），按
+   * workDir 过滤会认不出这批 id，排序静默失效。
+   */
+  async reorderSessions(orderedIds: string[]): Promise<void> {
     // Re-save sessions with adjusted createdAt to match new order
     const all = await this.loadSessions();
-    const sessions = all.filter((s) => s.workDir === workDir);
+    const byId = new Map(all.map((s) => [s.id, s]));
     const now = Date.now();
     for (let i = 0; i < orderedIds.length; i++) {
-      const s = sessions.find((x) => x.id === orderedIds[i]);
+      const s = byId.get(orderedIds[i]);
       if (s && s.createdAt !== now - i * 1000) {
         s.createdAt = now - i * 1000;
         // 拖拽排序不是"使用"——不动 savedAt。

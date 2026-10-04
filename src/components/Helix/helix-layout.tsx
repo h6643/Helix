@@ -28,6 +28,8 @@ import {
   GitCommit,
   Send,
   Pencil,
+  // 远程模式信息条里的 Server 芯片用到（此前未导入，tsc 报 TS2304）。
+  Server,
 } from "lucide-react";
 import React, {
   useState,
@@ -46,11 +48,13 @@ import { CommandPalette } from "./command-palette";
 import { ContextMenuProvider } from "./context-menu";
 import { GlobalTooltip } from "./global-tooltip";
 import { KeyboardShortcuts } from "./keyboard-shortcuts";
+import { RemoteConnectWizard } from "./remote-connect-wizard";
 import { Sidebar } from "./sidebar";
 import { ToastContainer } from "./toast-container";
 import { getCurrentVersion } from "@/hooks/use-check-update";
 import { useCheckUpdate } from "@/hooks/use-check-update";
 import { useGitChangeStat } from "@/hooks/use-git-change-stat";
+import { useRemoteTunnelReconcile } from "@/hooks/use-remote-tunnel-reconcile";
 import {
   BrowserExecFrame,
   useBrowserAutomation,
@@ -66,6 +70,7 @@ import {
   electronShell,
   electronGit,
 } from "@/lib/electron-bridge";
+import { isRemoteWorkDir, parseRemoteWorkDir } from "@/lib/remote-projects";
 import { startScheduledTaskRunner } from "@/lib/scheduled-task-runner";
 import { isServeActive, getServeClient } from "@/lib/serve-gateway";
 import { resolveBackendSid, resolveBackendSids } from "@/lib/session-map";
@@ -610,6 +615,12 @@ export function HelixLayout() {
   const codeFullscreen = useHelixStore((s) => s.codeFullscreen);
   const isTerminalOpen = useHelixStore((s) => s.isTerminalOpen);
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
+  // 远程隧道对账（写全局 remoteMode）。挂在宿主而不是只挂在远程列表上：侧边栏
+  // 的远程分组可折叠、输入框下拉里的列表只在展开时挂载，那些位置随时会卸载，
+  // 对账就停了 —— remoteMode 停在 null，文件树/git 芯片会显示本地目录而 agent
+  // 其实在远端。
+  const externalServices = useHelixStore((s) => s.externalServices);
+  useRemoteTunnelReconcile(externalServices);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   useEffect(() => {
     if (!selectedWorkDir) {
@@ -659,9 +670,15 @@ export function HelixLayout() {
   // first message is sent (gitBranch is already probed from selectedWorkDir).
   // Project-outside conversations (loaded, activeSessionWorkDir empty) stay
   // hidden, matching the project chip next to it.
-  const branchPickerWorkDir =
-    activeSessionWorkDir ??
-    (currentSessionId === null ? selectedWorkDir : null);
+  //
+  // 远程项目的 activeSessionWorkDir 是 `remote://…` 虚拟键，**必须在这里挡掉**：
+  // 它下面一行是 `useGitChangeStat(branchPickerWorkDir, …)`，而 git.* IPC 只认
+  // 本机仓库 —— 拿虚拟键当 cwd 会恒定返回「非 git 仓库」，界面永远不显示分支
+  // （且看不出是远程导致的）。远程分支要等远端 git IPC 落地。
+  const branchPickerWorkDir = isRemoteWorkDir(activeSessionWorkDir)
+    ? null
+    : (activeSessionWorkDir ??
+      (currentSessionId === null ? selectedWorkDir : null));
   const navigationHistory = useHelixStore((s) => s.navigationHistory);
   const navigationIndex = useHelixStore((s) => s.navigationIndex);
   const customShortcuts = useHelixStore((s) => s.customShortcuts);
@@ -1703,6 +1720,8 @@ export function HelixLayout() {
       <CommandPalette />
       <ContextMenuProvider />
       <ToastContainer />
+      {/* 三步远程连接向导：全局单例，侧边栏与输入框按钮共用同一个弹窗。 */}
+      <RemoteConnectWizard />
 
       {/* Two-region layout: the titlebar and navigation sidebar form the left
           region; the conversation/settings area owns the right region. */}
@@ -2588,8 +2607,11 @@ export function HelixLayout() {
                           <div className="shrink-0 h-10 flex items-center justify-between gap-2 px-3 pr-44">
                             {!showSettings && !hideConversationActions && (
                               <div className="flex items-center gap-3 min-w-0 mt-[2px] ml-2">
-                                {/* 项目外对话（activeSessionWorkDir 为空）不显示项目目录与分支 */}
-                                {activeSessionWorkDir && (
+                                {/* 项目外对话（activeSessionWorkDir 为空）不显示项目目录与分支。
+                                    远程对话走下面那条 Server 芯片 —— 它的 workDir 是
+                                    虚拟键，点「在资源管理器打开」毫无意义。 */}
+                                {activeSessionWorkDir &&
+                                  !isRemoteWorkDir(activeSessionWorkDir) && (
                                   <button
                                     onClick={handleOpenLocation}
                                     className="flex items-center gap-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 hover:text-foreground hover:bg-accent/60 px-2 py-1 rounded-lg transition-colors shrink-0"
@@ -2614,6 +2636,25 @@ export function HelixLayout() {
                                         : "未选择位置"}
                                     </span>
                                   </button>
+                                )}
+                                {/* 远程项目：显示远端路径，且**不能**用
+                                    handleOpenLocation（那是"在资源管理器里打开"，
+                                    对远端路径毫无意义）。远端编辑能力要等
+                                    远端 fs IPC 落地。 */}
+                                {isRemoteWorkDir(activeSessionWorkDir) && (
+                                  <span
+                                    className="flex items-center gap-1.5 px-2 py-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70 shrink-0"
+                                    data-tip={`agent 实际工作目录：${
+                                      parseRemoteWorkDir(activeSessionWorkDir)
+                                        ?.remotePath ?? "远端 home"
+                                    }`}
+                                  >
+                                    <Server className="size-4 text-emerald-500" />
+                                    <span className="max-w-[200px] truncate">
+                                      {parseRemoteWorkDir(activeSessionWorkDir)
+                                        ?.remotePath ?? "远端 home"}
+                                    </span>
+                                  </span>
                                 )}
                                 {branchPickerWorkDir && gitBranch && (
                                   <BranchPicker

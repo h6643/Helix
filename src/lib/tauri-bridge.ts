@@ -280,6 +280,45 @@ function buildTauriAPI(): ElectronAPI {
     getConfig: () => invoke("helix_get_config"),
     setYamlKey: (key: string, value: unknown) =>
       invoke("helix_set_yaml_key", { key, value }),
+    // 一键远程连接（agent 远程跑）：scp bridge + 远端起 node + 本机 ssh -L 隧道
+    // + 写 pi.remote_rpc / pi.remote_cwd，gateway 自动切到远端模式。
+    remoteConnect: (params: {
+      host: string;
+      port: number;
+      username: string;
+      remote_path: string;
+    }) => invoke("remote_connect", {
+      host: params.host,
+      port: params.port,
+      username: params.username,
+      remotePath: params.remote_path,
+    }),
+    remoteDisconnect: () => invoke("remote_disconnect"),
+    remoteTunnelStatus: () => invoke("remote_tunnel_status"),
+    remotePreflight: (params: {
+      host: string;
+      port: number;
+      username: string;
+    }) =>
+      invoke("remote_preflight", {
+        host: params.host,
+        port: params.port,
+        username: params.username,
+      }),
+    remoteListPaths: (params: {
+      host: string;
+      port: number;
+      username: string;
+      path: string;
+      include_hidden?: boolean;
+    }) =>
+      invoke("remote_list_paths", {
+        host: params.host,
+        port: params.port,
+        username: params.username,
+        path: params.path,
+        includeHidden: params.include_hidden ?? false,
+      }),
     setDelegationIdentities: (identities: unknown) =>
       invoke("helix_set_delegation_identities", { identities }),
     setModel: (params: unknown) => invoke("helix_set_model", { params }),
@@ -300,6 +339,12 @@ function buildTauriAPI(): ElectronAPI {
       invoke("helix_set_config_key_value", { params }),
     approvalRespond: (params: unknown) =>
       invoke("helix_approval_respond", { params }),
+    // 审批档位 ⇄ @zhushanwen/pi-permission 的 config/permission-ext-config.json。
+    // 真正阻断工具执行的是那个扩展的 tool_call 钩子，所以前端下拉必须写它的
+    // 配置，而不是维护一份自己的状态（那会导致「设置显示放行、实际仍弹窗」）。
+    getPermissionMode: () => invoke("helix_get_permission_mode"),
+    setPermissionMode: (mode: string) =>
+      invoke("helix_set_permission_mode", { mode }),
     update: () => invoke("helix_update"),
     // Subagent presets bundled with the pi-subagents extension (surfaced in the
     // Subagent settings page alongside user identities). deleteSubagent moves
@@ -310,13 +355,6 @@ function buildTauriAPI(): ElectronAPI {
     setSubagentModel: (name: string, model: string) =>
       invoke("helix_set_subagent_model", { name, model }),
     deleteSubagent: (name: string) => invoke("helix_delete_subagent", { name }),
-    // pi-permission-system 的策略（pi 自己没有权限体系，见 pi docs/security.md）
-    piPermissionsRead: () => invoke("pi_permissions_read"),
-    piPermissionsWrite: (policy?: unknown, yoloMode?: boolean) =>
-      invoke("pi_permissions_write", {
-        policy: policy ?? null,
-        yoloMode: yoloMode ?? null,
-      }),
     // Pi agent commands (extensions / skills / prompts / models)
     piListInstalled: () => invoke("pi_list_installed"),
     piGetAvailableModels: () => invoke("pi_get_available_models"),

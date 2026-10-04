@@ -42,7 +42,39 @@ import type {
 } from "./helix-types";
 import { DEFAULT_SHORTCUTS } from "./helix-types";
 import { helixApi } from "@/lib/electron-bridge";
+import { makeRemoteWorkDir } from "@/lib/remote-projects";
 import { normalizeAcpContent } from "@/lib/text-utils";
+
+/**
+ * 归一持久化里读到的审批模式。
+ *
+ * pi 官方没有工具级审批体系，`accept_edits` / `dont_ask` 这两档是 Helix 在
+ * Python serve-gateway 时代自造的语义，靠分类 `approval_request` 事件放行；
+ * pi 路径下该事件永不发生，所以两档都是纯装饰。磁盘上可能还留着旧值，
+ * 这里统一降级为 `default`，避免 UI 展示一个已不存在的模式。
+ */
+function normalizeApprovalMode(v: unknown): ApprovalMode | undefined {
+  // plan 是独立一轴，原样保留。
+  if (v === "plan") return "plan";
+  // 权限档。`default` 是最早的「正常执行」＝不主动问，即 auto；
+  // `accept_edits`（替我审批）/ `dont_ask`（完全访问）分别归 auto / full。
+  // 未知值一律 auto —— 宁可多问一次，也不要因为解析失败就静默全放行。
+  if (v === "ask" || v === "strict") return "ask";
+  if (v === "full" || v === "yolo" || v === "dont_ask") return "full";
+  return "auto";
+}
+
+function normalizeApprovalModeMap(
+  m: Record<string, ApprovalMode> | null | undefined,
+): Record<string, ApprovalMode> | undefined {
+  if (!m || typeof m !== "object") return undefined;
+  const out: Record<string, ApprovalMode> = {};
+  for (const [k, v] of Object.entries(m)) {
+    const n = normalizeApprovalMode(v);
+    if (n) out[k] = n;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 
 /** A server / virtual machine the user can connect to from the breadcrumb. */
 export interface ExternalService {
@@ -56,6 +88,11 @@ export interface ExternalService {
   /** Secret (password or private key). Stored encrypted when safeStorage is available. */
   secret?: string;
   secretEncrypted?: boolean;
+  /**
+   * 上次在向导第 3 步选定的远端项目目录（绝对路径）。存了它，点列表项才能
+   * 一步直连；没存则打开向导让用户浏览选择。
+   */
+  remotePath?: string;
   connected: boolean;
   createdAt: number;
 }
@@ -291,6 +328,51 @@ interface HelixState
 
   // External services (servers / virtual machines) connected from the breadcrumb.
   externalServices: ExternalService[];
+
+  // ── 远程工作区模式（全局单例）────────────────────────────────────────
+  // 连上远程服务器后，**所有**会话的 agent 都在远端跑：网关的
+  // `open_remote_transport(_cwd)` 刻意忽略会话自己的 cwd（参数名带下划线），
+  // 永远读 config.yaml 的 `pi.remote_cwd`。于是凡是「数据源是本地 fs /
+  // 本地 git」的界面，在远程模式下显示的都是**与 agent 实际工作目录无关的
+  // 东西**——界面在撒谎。这个字段就是那份「撒谎」的单一开关：非 null = 远程。
+  //
+  // 谁写：`useRemoteTunnelReconcile`（src/hooks/use-remote-tunnel-reconcile.ts）
+  // 现查后端 `remote_tunnel_status`，挂在 helix-layout 上保证永不卸载。
+  // 谁读：文件树 / git 芯片 / @ 候选 / 项目下拉 —— 全部只在本地模式下渲染或执行。
+  remoteMode: {
+    /** 展示名（`user@host` 或用户起的名字） */
+    label: string;
+    host: string;
+    username?: string;
+    /** 远端项目目录 = agent 的真实 cwd。 */
+    remotePath?: string;
+    /** 对应 externalServices 里的哪一项（由 status 三元组反查）。 */
+    serviceId: string | null;
+  } | null;
+  setRemoteMode: (v: HelixState["remoteMode"]) => void;
+
+  // ── 三步远程连接向导（模态弹窗）──────────────────────────────────────
+  // ①服务器信息 → ②连接体检 → ③选远端目录。全局单例挂载在 helix-layout，
+  // 侧边栏和输入框的按钮都只是 `openRemoteWizard()` 的触发器 —— 两处各挂一份
+  // 弹窗会出现「关掉一个另一个还在」。
+  remoteWizard: {
+    open: boolean;
+    /** null = 新增服务器（从第 1 步开始）；非 null = 针对已存服务器继续。 */
+    serviceId: string | null;
+    step: 1 | 2 | 3;
+  };
+  openRemoteWizard: (opts?: {
+    serviceId?: string | null;
+    step?: 1 | 2 | 3;
+  }) => void;
+  setRemoteWizardStep: (step: 1 | 2 | 3) => void;
+  closeRemoteWizard: () => void;
+  /**
+   * 隧道状态刷新信号。连接/断开是后端动作，前端只能轮询发现（30s）；向导刚
+   * 连上就关掉弹窗，列表却要再等半分钟才亮「已连接」。+1 让列表立刻重查一次。
+   */
+  remoteStatusVersion: number;
+  bumpRemoteStatusVersion: () => void;
 
   // SSH live-session state: whether a real ssh2 session is currently established,
   // and which external service it belongs to.
@@ -664,7 +746,7 @@ interface HelixState
   // Actions - External Services (server / VM)
   addExternalService: (
     svc: Omit<ExternalService, "id" | "createdAt" | "connected">,
-  ) => Promise<void>;
+  ) => Promise<string>;
   updateExternalService: (
     id: string,
     patch: Partial<ExternalService>,
@@ -883,13 +965,25 @@ let sessionPersistTimer: ReturnType<typeof setTimeout> | null = null;
 //     leaves selectedWorkDir = that dir, so clicking a project-less conversation
 //     next would silently attach it to the picked directory.
 //   - Brand-new session (no disk record): home it to the current project.
+//     远程模式优先：agent 在远端跑，对话就属于**那个远程项目**，身份是
+//     `remote://<serviceId>/<path>` 虚拟键（见 lib/remote-projects.ts）。不能
+//     用本地 selectedWorkDir —— 那会把对话归到本地项目下，而它实际跑在远端，
+//     侧边栏分组立刻变成假信息。
+function remoteWorkDirKey(
+  remoteMode: { serviceId: string | null; remotePath?: string } | null,
+): string | null {
+  if (!remoteMode?.serviceId) return null;
+  return makeRemoteWorkDir(remoteMode.serviceId, remoteMode.remotePath);
+}
+
 function resolveSessionWorkDir(
   existing: { workDir?: string | null } | undefined,
   activeSessionWorkDir: string | null,
   selectedWorkDir: string | null,
+  remoteKey: string | null = null,
 ): string | null {
   if (existing) return existing.workDir ?? null;
-  return activeSessionWorkDir ?? selectedWorkDir;
+  return remoteKey ?? activeSessionWorkDir ?? selectedWorkDir;
 }
 function collectFiles(nodes: FileNode[]) {
   return nodes.map((n) => ({
@@ -1039,6 +1133,7 @@ async function persistCurrentSessionNow(): Promise<void> {
         existing,
         snapshot.activeSessionWorkDir,
         snapshot.selectedWorkDir,
+        remoteWorkDirKey(snapshot.remoteMode),
       ),
       goal: snapshot.goal,
       memories: snapshot.memories,
@@ -1155,6 +1250,7 @@ async function persistSessionById(sessionId: string): Promise<void> {
         existing,
         state.activeSessionWorkDir,
         state.selectedWorkDir,
+        remoteWorkDirKey(state.remoteMode),
       ),
       goal: existing?.goal ?? null,
       memories: existing?.memories || [],
@@ -1460,7 +1556,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   activeAgentView: null,
   directoryProjectDir: null,
   codeFullscreen: false,
-  approvalMode: "accept_edits" as const,
+  // 默认「自动审批」：只在有风险时问。**不是**「完全访问」——默认全放行
+  // 意味着新装用户第一次跑工具就没有任何确认，那是更危险的默认值。
+  approvalMode: "auto" as const,
   approvalModeBySession: {},
   modelBySession: {},
   bylineReplies: {},
@@ -1490,6 +1588,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
   // External services (servers / VMs)
   externalServices: [],
+
+  // 远程工作区模式：null = 本地模式（唯一正常状态）。非 null 时本地
+  // fs/git 驱动的界面必须让位，见字段注释。
+  remoteMode: null,
+
+  // 三步远程连接向导：关着、没选服务器、停在第 1 步。
+  remoteWizard: { open: false, serviceId: null, step: 1 },
 
   // SSH live-session state (real ssh2 session, distinct from gateway mode)
   sshConnected: false,
@@ -2571,7 +2676,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // 访问权限跟随会话：每个对话记住自己的审批模式。
       const draftMode = state.approvalModeBySession?.["__draft__"];
       const approvalMode =
-        state.approvalModeBySession?.[id] ?? draftMode ?? state.approvalMode;
+        normalizeApprovalMode(state.approvalModeBySession?.[id]) ??
+        normalizeApprovalMode(draftMode) ??
+        state.approvalMode;
       const approvalModeBySession = { ...state.approvalModeBySession };
       if (draftMode && !approvalModeBySession[id])
         approvalModeBySession[id] = draftMode;
@@ -3294,6 +3401,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     import("@/lib/persist").then(({ persistence }) =>
       persistence.saveSetting("externalServices", get().externalServices),
     );
+    // 返回 id：三步向导第 1 步存完服务器要立刻带着这个 id 进第 2 步体检。
+    return entry.id;
   },
   updateExternalService: async (id, patch) => {
     let secret = patch.secret;
@@ -3349,6 +3458,27 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   setSshConnected: (connected, serviceId = null) => {
     set({ sshConnected: connected, sshServiceId: serviceId });
   },
+  // 刻意**不持久化**：远程模式的事实源是 config.yaml 的 pi.remote_rpc +
+  // 后端隧道进程，重启后由 useRemoteTunnelReconcile 现查 status 重建。落盘一份
+  // 过期快照会出现「界面说在远程、隧道其实已经没了」的分裂。
+  setRemoteMode: (v) => set({ remoteMode: v }),
+
+  openRemoteWizard: (opts) =>
+    set({
+      remoteWizard: {
+        open: true,
+        serviceId: opts?.serviceId ?? null,
+        step: opts?.step ?? (opts?.serviceId ? 2 : 1),
+      },
+    }),
+  setRemoteWizardStep: (step) =>
+    set((state) => ({ remoteWizard: { ...state.remoteWizard, step } })),
+  closeRemoteWizard: () =>
+    set({ remoteWizard: { open: false, serviceId: null, step: 1 } }),
+
+  remoteStatusVersion: 0,
+  bumpRemoteStatusVersion: () =>
+    set((state) => ({ remoteStatusVersion: state.remoteStatusVersion + 1 })),
 
   // Actions - Webhooks/Artifacts — removed (unused features)
 
@@ -4547,9 +4677,13 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitRemoteUrl: gitRemoteUrl || get().gitRemoteUrl,
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
-        approvalMode: (approvalMode as any) || get().approvalMode,
-        approvalModeBySession:
-          approvalModeBySession ?? get().approvalModeBySession,
+        // 旧版本持久化过 "accept_edits" / "dont_ask"（Helix serve-gateway 时代
+        // 的自造模式）。它们在 pi 路径下没有任何效果，统一降级为 "default"，
+        // 免得残留值让 UI 显示一个不存在的模式。
+        approvalMode: normalizeApprovalMode(approvalMode) ?? get().approvalMode,
+        approvalModeBySession: normalizeApprovalModeMap(
+          approvalModeBySession,
+        ),
         modelBySession: modelBySession ?? get().modelBySession,
         startupGreeting: healedStartupGreeting,
         bootBackgroundImage: bootBackgroundImage ?? get().bootBackgroundImage,

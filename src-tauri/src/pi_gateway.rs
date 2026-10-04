@@ -35,6 +35,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -45,32 +46,49 @@ use tauri::Emitter;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-/// 子进程句柄：本进程直接 spawn `pi --mode rpc`，stdio pipe 收发 JSONL，
-/// pi 的 cwd 由 `Command::current_dir` 指定。
+/// 子进程句柄。
+///
+/// `Local` 是传统路径：本进程直接 spawn `pi --mode rpc`，stdio pipe 收发
+/// JSONL，pi 的 cwd 由 `Command::current_dir` 指定。
+///
+/// `Remote` 是远程工作区路径：一条 TCP 连接，对面跑 remote-bridge.js
+/// （fork-per-connection：每个连接 exec 一个新的 `pi --mode rpc`）。所以
+/// 一条连接 == 一个 pi 实例，和本地的「一会话一子进程」模型同形。
+/// 远端 pi 的 cwd 经连接握手行（`cwd:<path>`）下发，而不是 `current_dir`。
+/// 远端没有 exit code 概念 —— 连接 EOF 就是实例没了。
 enum ChildHandle {
     Local(Child),
+    Remote(TcpStream),
 }
 
-/// RPC 传输的读写两端（本地子进程 pipe）。
+/// RPC 传输的读写两端。`Local` 是子进程 pipe，`Remote` 是 TcpStream 的 clone，
+/// 统一抹成 trait object，reader/writer 线程两边零改动。
 type RpcWrite = Box<dyn std::io::Write + Send + Sync + 'static>;
 type RpcRead = Box<dyn std::io::Read + Send + Sync + 'static>;
 
 impl ChildHandle {
-    /// 终止实例：SIGKILL/TerminateProcess + `wait()` 收尸（保持与原实现
-    /// 在 kill() 前 wait 的行为一致，避免 Unix 下留僵尸进程）。
+    /// 终止实例。Local = SIGKILL/TerminateProcess + `wait()` 收尸（保持与
+    /// 原实现在 kill() 前 wait 的行为一致，避免 Unix 下留僵尸进程）；
+    /// Remote = 断掉 TCP 连接，对面 bridge 随 stdin EOF 退出它 spawn 的 pi
+    /// 子进程。Remote 没有 exit code 可等，也不该等 —— 对面挂死时这里
+    /// 不能跟着挂，所以 shutdown 后立刻返回。
     fn kill(&mut self) {
         match self {
             Self::Local(c) => {
                 let _ = c.kill();
                 let _ = c.wait();
             }
+            Self::Remote(s) => {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
         }
     }
 
-    /// 子进程是否已退出（退出码）。
+    /// Local 子进程是否已退出（退出码）。Remote 无 exit code，恒为 None。
     fn try_wait_status(&mut self) -> Option<std::process::ExitStatus> {
         match self {
             Self::Local(c) => c.try_wait().ok().flatten(),
+            Self::Remote(_) => None,
         }
     }
 }
@@ -1290,6 +1308,29 @@ fn spawn_instance(
                             "get_state retry failed (initial: {reason}): {e2}"
                         ));
                         instance.kill();
+                        // 远程模式连续两次 get_state 秒退：隧道本地监听还活着
+                        // 但远端已不可达（或远端 pi 起不来）。标记冷却，本轮
+                        // 回退本地 pi —— 冷却后自动再试远端，远端恢复即自动回连。
+                        if remote_rpc_endpoint().is_some() {
+                            mark_remote_down(30_000);
+                            log_spawn_diag(
+                                "remote endpoint 连续两次 get_state 秒退 — 冷却 30s，本轮回退本地 pi",
+                            );
+                            spawn_process(&instance, state)?;
+                            match instance.request_sync("get_state", Value::Null, HANDSHAKE_TIMEOUT) {
+                                Ok(data) => {
+                                    instance.stamp_session_from_state(Some(&data));
+                                    instance.initialized.store(true, Ordering::SeqCst);
+                                    log_spawn_diag("本地回退 get_state OK（远端冷却中）");
+                                    return Ok(Arc::clone(&instance));
+                                }
+                                Err(e3) => {
+                                    log_spawn_diag(&format!("本地回退 get_state 也失败: {e3}"));
+                                    instance.kill();
+                                    return Err(e3);
+                                }
+                            }
+                        }
                         return Err(e2);
                     }
                 }
@@ -1385,8 +1426,84 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
     // Record the RESOLVED dir — a spare's claim check compares against it.
     *instance.cwd.lock().unwrap() = Some(cwd.to_string_lossy().into_owned());
 
-    let (stdin, stdout, child_handle): (RpcWrite, RpcRead, ChildHandle) = {
-        let mut command = pi_command();
+    // 远程工作区且端点可达 → 走 TCP；端点配了但连不上 / 未配远程 / 冷却中 → 本地 spawn。
+    if let Some(endpoint) = remote_rpc_endpoint() {
+        if remote_marked_down() {
+            log_spawn_diag(&format!(
+                "spawn_process({}): remote {endpoint} 冷却中（上次 get_state 秒退）— 本轮本地 pi，冷却后自动 re-attach",
+                instance.key()
+            ));
+        } else {
+            log_spawn_diag(&format!(
+                "spawn_process({}): remote RPC mode → {endpoint} cwd={}",
+                instance.key(),
+                cwd.to_string_lossy()
+            ));
+            match open_remote_transport(&cwd) {
+                Ok((writer, reader, control)) => {
+                    let child_handle = ChildHandle::Remote(control);
+                    *instance.child.lock().unwrap() = Some(child_handle);
+                    // 远程模式：把 TCP 两半接上 I/O 线程（下面统一的 writer/reader 接管）。
+                    let (writer_tx, writer_rx) = mpsc::channel::<String>();
+                    *instance.writer.lock().unwrap() = Some(writer_tx);
+                    thread::spawn(move || {
+                        let mut w = writer;
+                        for line in writer_rx {
+                            if w.write_all(line.as_bytes()).is_err() {
+                                break;
+                            }
+                            let _ = w.flush();
+                        }
+                    });
+                    let instance_clone = Arc::clone(instance);
+                    thread::spawn(move || {
+                        let mut reader = BufReader::new(reader);
+                        let mut line = String::new();
+                        loop {
+                            line.clear();
+                            match reader.read_line(&mut line) {
+                                Ok(0) => break,
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                            let record = line.trim_end_matches(['\n', '\r']);
+                            if !record.is_empty() {
+                                handle_line(&instance_clone, record);
+                            }
+                        }
+                        // 远程 child 没有 exit code，仅通知死亡簿记（若 gen 未变）。
+                        if instance_clone.generation.load(Ordering::SeqCst) == _generation {
+                            instance_clone.initialized.store(false, Ordering::SeqCst);
+                            *instance_clone.writer.lock().unwrap() = None;
+                            instance_clone.pending.lock().unwrap().clear();
+                            let sid = instance_clone.current_session_id();
+                            if instance_clone.streaming.swap(false, Ordering::SeqCst) {
+                                emit_helix_event(
+                                    "error",
+                                    &json!({
+                                        "session_id": sid,
+                                        "message": "remote pi agent connection closed",
+                                    }),
+                                );
+                            }
+                        }
+                    });
+                    return Ok(());
+                }
+                Err(e) => {
+                    log_spawn_diag(&format!(
+                        "spawn_process({}): remote endpoint {endpoint} unreachable ({e}) — \
+                         falling back to LOCAL pi this spawn; re-attach remote next time",
+                        instance.key()
+                    ));
+                    // 回退本地：落到下面的本地 spawn 路径。
+                }
+            }
+        }
+    }
+
+    // ── 本地 spawn（含远程不可达的回退）──────────────────────────────────
+    let mut command = pi_command();
     command
         .current_dir(cwd)
         // Pi's embedded RPC gateway owns configuration and model refresh; the
@@ -1451,9 +1568,7 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
         .stdin
         .take()
         .ok_or_else(|| "Failed to open pi agent stdin".to_string())?;
-    (Box::new(stdin), Box::new(stdout), ChildHandle::Local(child))
-    };
-    *instance.child.lock().unwrap() = Some(child_handle);
+    *instance.child.lock().unwrap() = Some(ChildHandle::Local(child));
 
     let (writer_tx, writer_rx) = mpsc::channel::<String>();
     *instance.writer.lock().unwrap() = Some(writer_tx);
@@ -2304,12 +2419,14 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                     "aggregate": true,
                 });
             }
-            let resumed_id = instance
-                .current_session
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or(session_id);
+            // 回给前端的身份**固定是请求的 sid**，不是 current_session。
+            //
+            // `current_session` 在 restore 的 rekey→switch_session 窗口内可能
+            // 还是 pi 启动时自建的内存态幽灵 sid（从无 jsonl）；把它回传出去，
+            // 前端就会拿它 rebind 映射，之后每次 resume 都是
+            // `no session file`。而且前端拿到的 map key 本来就是这个 sid，
+            // 后续所有 RPC 也都按它路由，回传别的值只会让身份漂移。
+            let resumed_id = session_id.clone();
             // The resync path replaces the visible transcript with the
             // backend's authoritative history — return it in the shape
             // mapBackendMessages reads (role + text/content). Plain user /
@@ -2506,9 +2623,10 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             //     gates write tools until the user approves implementation)
             //   - leaving "plan"   → /plan exit (clears the active/saved plan
             //     and unlocks the tools)
-            // Other mode values stay no-ops — their semantics are enforced
-            // prompt-side by the renderer (read-only prefix) or are simply
-            // not expressible in pi.
+            // "default" stays a no-op — it just means "not in plan mode".
+            // There is no other mode: pi has no tool-level approval, and the
+            // former "accept_edits" / "dont_ask" modes only ever fed the
+            // renderer's classifyApproval, which pi never triggers.
             let mut mode = params
                 .get("mode_id")
                 .and_then(Value::as_str)
@@ -3095,7 +3213,16 @@ async fn instance_for_session(
     }
     if let Some(instance) = INSTANCES.lock().unwrap().get(session_id) {
         if instance.initialized.load(Ordering::SeqCst) {
-            return Ok(Arc::clone(instance));
+            // 快路径的身份校验：map key 是「我们声称的 sid」，current_session 是
+            // 「pi 报告的 sid」。两者不一致说明这个实例还没真正切到目标会话
+            // （restore 的 rekey→switch_session 窗口、或 rekey 后 switch 失败），
+            // 此时返回它会让 `session/resume` 把 current_session 当作 resumed_id
+            // 回给前端 —— 那是一个从无 jsonl 的幽灵 sid。宁可让它继续往下走
+            // 锁定路径重新 restore，也不能把错 sid 交出去。
+            let on_target = instance.current_session_id().as_str() == Some(session_id);
+            if on_target {
+                return Ok(Arc::clone(instance));
+            }
         }
     }
     let lock = {
@@ -3191,6 +3318,26 @@ fn restore_session_instance(
     } else {
         spawn_instance(session_id.to_string(), None, state)?
     };
+    // 把「本实例跑的是哪个 sid」**立刻**对齐到要恢复的目标 sid，在
+    // switch_session 之前。
+    //
+    // 为什么必须提前：pi 子进程启动时会自己建一个初始会话（内存态、从不落盘），
+    // spawn_instance 的握手 get_state 已经把它 stamp 进 current_session。上面
+    // 的 rekey 又让实例**立刻**以真 sid 的身份出现在 INSTANCES 里且
+    // initialized=true —— 于是从 rekey 到下面 switch_session+get_state 完成
+    // 之间存在一个窗口：`instance_for_session` 的快路径不拿锁、只看
+    // initialized，会把本实例当成"真 sid 已经就绪"直接返回，而
+    // `session/resume` 又用 `current_session` 当作 resumed_id 回给前端。
+    // 那个窗口里前端会拿到一个**从无 jsonl 的幽灵 sid**并写进
+    // conversation-index.json，之后每次 resume  都是
+    // `no session file (cache miss + scan miss)`，直到某次恢复阶梯把它换掉。
+    //
+    // 这里预置 sid = 声明"本实例从此就是 session_id"，让窗口期的
+    // current_session 与 map key 自洽；下面的 get_state 若真给出别的 sid，
+    // stamp 会以 pi 为准覆盖（那说明 switch 真的换了会话，按 pi 走）。
+    if instance.current_session_id().as_str() != Some(session_id) {
+        *instance.current_session.lock().unwrap() = Some(session_id.to_string());
+    }
     let data = match instance.request_sync(
         "switch_session",
         json!({ "sessionPath": session_file }),
@@ -6146,6 +6293,102 @@ pub fn pi_cli_debug_summary() -> String {
         ),
         None => "pi cli = `pi` from PATH".to_string(),
     }
+}
+
+/// `pi.remote_rpc` from config.yaml — a `host:port` RPC endpoint. When set,
+/// every pi instance is reached over TCP instead of being spawned locally.
+/// Read with the same hand-rolled `pi:` block parser `pi.cli_path` uses
+/// (config.yaml is deliberately never parsed with a real YAML library).
+///
+/// 典型用法是 SSH 端口转发：
+///   ssh -L 18800:127.0.0.1:18800 user@host
+///   config.yaml: pi: remote_rpc: "127.0.0.1:18800"
+/// 这样 Helix 以为连的是本地端口，实际上对面是远程主机上的 pi（remote-bridge.js）。
+fn remote_rpc_endpoint() -> Option<String> {
+    let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).ok()?;
+    let block = crate::config::read_yaml_block(&yaml, "pi");
+    let v = block.get("remote_rpc")?.as_str()?.trim();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
+/// 远端连续两次 get_state 秒退后进入冷却：冷却期内直接本地 spawn，冷却结束
+/// 自动再试远端（远端恢复即自动 re-attach）。兜住「隧道本地监听还活着、但
+/// 远端已不可达」的情况——这种时候本地端口连得上，普通「不可达回退」不触发，
+/// 会无限重试刷错误。
+static REMOTE_DEAD_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+
+fn mark_remote_down(cooldown_ms: u64) {
+    REMOTE_DEAD_UNTIL_MS.store(now_ms() + cooldown_ms, Ordering::SeqCst);
+}
+
+fn remote_marked_down() -> bool {
+    now_ms() < REMOTE_DEAD_UNTIL_MS.load(Ordering::SeqCst)
+}
+
+/// 远端项目路径（`pi.remote_cwd`）。远程模式下 gateway 仍把**本地** work dir
+/// 当 cwd 解析出来传给 bridge，但远程项目其实在远端——设了这个键就用它
+/// 覆盖握手下发的 `cwd:` 行，让远端 pi 落在真实的项目目录。没设就发 "~"
+/// （远端 bridge 落到远端 home）；**不要把本地路径当 cwd 发过去**：远端
+/// spawn 会 ENOENT，bridge 关掉连接，网关误报「进程死亡」。
+fn remote_cwd_override() -> Option<String> {
+    let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).ok()?;
+    let block = crate::config::read_yaml_block(&yaml, "pi");
+    let v = block.get("remote_cwd")?.as_str()?.trim();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
+/// 远程传输：连一条 TCP，握手行下发本实例 cwd，然后把 socket 拆成读/写两半。
+///
+/// 读一半、写一半各一个 handle，第三个专给 `ChildHandle::Remote` 做 shutdown。
+/// 三者共享同一个 socket，任一个 shutdown 都让另外两个看到 EOF。
+///
+/// 握手行**不**是协议的一部分 —— pi 的 RPC 是纯 JSONL，任何额外前缀都会
+/// 毒掉流。对面（remote-bridge.js）必须读走这一行再开始透传。
+fn open_remote_transport(_cwd: &std::path::Path) -> Result<(RpcWrite, RpcRead, TcpStream), String> {
+    let endpoint = remote_rpc_endpoint().unwrap_or_default();
+    let _addr = endpoint
+        .to_socket_addrs()
+        .map_err(|e| {
+            format!(
+                "Failed to resolve remote RPC endpoint {endpoint}: {e} — check \"pi.remote_rpc\" in config.yaml"
+            )
+        })?
+        .next()
+        .ok_or_else(|| format!("Failed to resolve remote RPC endpoint {endpoint}"))?;
+    let mut stream = TcpStream::connect_timeout(&_addr, Duration::from_secs(10)).map_err(|e| {
+        format!(
+            "Failed to connect to remote RPC endpoint {endpoint}: {e} — is the ssh -L tunnel and remote-bridge.js running?"
+        )
+    })?;
+    // `pi.remote_cwd` 优先：远程项目路径。没设就发 "~"（远端 home）——本地
+    // 路径（Windows 盘符等）在远端不存在，spawn ENOENT，bridge 关连接。
+    let effective_cwd = remote_cwd_override().unwrap_or_else(|| "~".to_string());
+    let mut frame = String::from("cwd:");
+    frame.push_str(&effective_cwd);
+    frame.push('\n');
+    stream
+        .write_all(frame.as_bytes())
+        .map_err(|e| format!("Failed to send remote cwd handshake: {e}"))?;
+    stream
+        .flush()
+        .map_err(|e| format!("Failed to flush remote cwd handshake: {e}"))?;
+    let reader = stream
+        .try_clone()
+        .map_err(|e| format!("Failed to open remote RPC transport: {e}"))?;
+    // 第三个 handle 专给 ChildHandle::Remote 用来 shutdown（同一个 socket 的
+    // 三个 handle，任一个 shutdown 都让另外两个看到 EOF）。
+    let control = stream
+        .try_clone()
+        .map_err(|e| format!("Failed to open remote RPC transport: {e}"))?;
+    Ok((Box::new(stream), Box::new(reader), control))
 }
 
 /// pi CLI program + base argv as plain strings, for tokio::process::Command

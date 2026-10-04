@@ -3,20 +3,23 @@
 import {
   Circle,
   FileText,
+  ShieldCheck,
+  ShieldQuestion,
+  Zap,
   Copy,
   Check,
   ChevronRight,
   ChevronDown,
   Search,
-  Folder,
   Server,
+  Folder,
+  Cloud,
   ArrowDown,
   ArrowUp,
   X,
   Square,
   Plus,
   FolderPlus,
-  Clock,
   Hand,
   AlertTriangle,
   GitBranch,
@@ -29,12 +32,6 @@ import {
   Trash2,
   Send,
   ListChecks,
-  ChevronLeft,
-  Tag,
-  Globe,
-  User,
-  Hash,
-  KeyRound,
 } from "lucide-react";
 import React, {
   useState,
@@ -55,11 +52,15 @@ import { ContextUsageIndicator } from "./context-usage";
 import { FileChangeSummary } from "./file-change-summary";
 import { FileChangeSummaryCard } from "./file-change-summary-card";
 import { HelixMarkdown } from "./helix-markdown";
+import {
+  disconnectRemoteProject,
+  isRemoteWorkDir,
+  remoteAvailable,
+} from "@/lib/remote-projects";
 import { HistoryStrip } from "./history-strip";
 import { InlineToolGroup, summarizeGroupDiff } from "./inline-tool-group";
 import { ScheduledTaskConfirm } from "./scheduled-task-confirm";
 import { Button } from "@/components/ui/button";
-import { SaveBar } from "./settings-ui";
 import { pushModelConfig } from "@/lib/config-sync";
 import { captureContextBreakdown } from "@/lib/context-capture";
 import {
@@ -68,6 +69,7 @@ import {
   electronHelix,
   electronGit,
   helixApi,
+  getElectronAPI,
 } from "@/lib/electron-bridge";
 import { generateId } from "@/lib/format";
 import {
@@ -153,6 +155,7 @@ import {
 } from "@/stores/helix-store";
 import type { ApprovalLevel } from "@/stores/helix-types";
 import type { PlanStep } from "@/stores/helix-types";
+import { APPROVAL_MODE_ITEMS } from "@/stores/helix-types";
 import type {
   ChatMessage,
   HelixTodo,
@@ -172,6 +175,18 @@ import type { PersistedChatMessage, PersistedSession } from "@/lib/persist";
 // @/lib/session-map 模块，供多个组件复用；这里仅导入所需引用。
 import type { ApprovalMode, ReasoningEffortLevel } from "@/stores/helix-types";
 import { useProviderStore } from "@/stores/slices/provider-store";
+
+/**
+ * 档位表里的 icon 名（`helix-types` 不依赖 lucide，所以那边存字符串）→ 组件。
+ * 与 `APPROVAL_MODE_ITEMS` 一一对应；缺项会在 tsc 报错（`as const` 的 key
+ * 集合受 `icon` 联合类型约束）。
+ */
+const APPROVAL_MODE_ICONS = {
+  ShieldQuestion,
+  ShieldCheck,
+  Zap,
+  FileText,
+} as const;
 
 async function persistSessionMap(map: Map<string, SessionMapEntry>) {
   try {
@@ -361,11 +376,6 @@ const EXFIL_CMD_RE =
 /** 敏感文件路径片段 */
 const SENSITIVE_PATH_RE =
   /(.ssh[/\\]|id_rsa|id_ed25519|.pem\b|.key\b|.env\b|credentials|.aws[/\\]|.gnupg[/\\]|.kube[/\\]config|ntuser\.dat|sam$)/i;
-/** 项目内文件写工具名（这些命中且路径在项目内 → auto） */
-const FILE_WRITE_TOOL_RE =
-  /write_file|create_file|edit|patch|str_replace|apply_patch/i;
-/** 项目内文件读工具名（这些命中且路径在项目内 → auto） */
-const _FILE_READ_TOOL_RE = /read_file|cat|head|tail/i;
 
 /** 从命令/描述文本里提取形如绝对路径的片段（用于“项目外访问”判断） */
 function extractAbsPaths(text: string): string[] {
@@ -387,6 +397,12 @@ function normPathForCompare(p: string): string {
 
 /**
  * 审批分流。
+ *
+ * ⚠️ 在 pi 路径下这个函数**几乎不会被调用**：`approval_request` 只由扩展的
+ * `ui.confirm` 合成（网关 `pi_gateway.rs` 的 permission_request 分支），pi
+ * 自己的工具调用不产生任何审批事件。所以 `mode` 参数实际只影响 plan 一档。
+ * 保留它是因为 subagents 扩展删 agent / 覆盖文件时仍会走 confirm。
+ *
  * @param toolName approval.request 的 toolName（pattern_key 或 command）
  * @param params   toolParams（command / description / pattern_key / reason）
  * @param workDir  当前项目根（selectedWorkDir）
@@ -428,18 +444,8 @@ function classifyApproval(
   //      但不能把 plan 降级成自动放行。
   if (mode === "plan") return "ask";
 
-  // 6) 项目内文件修改 → 视模式：accept_edits/dont_ask 自动批准（diff 记录走 tool.complete
-  //    inline_diff，不受影响）；default 模式一律弹，让用户确认
-  if (FILE_WRITE_TOOL_RE.test(blob)) {
-    if (mode === "accept_edits" || mode === "dont_ask") return "auto";
-    return "ask";
-  }
-
-  // 模式相关分流
-  if (mode === "dont_ask") return "auto"; // 后端一般不发请求，前端兜底放行
-  if (mode === "accept_edits") return "auto"; // 替我审批：已排除危险/项目外/敏感，安全操作自动批准
-
-  // 默认：弹（审批的意义就是未知操作要人确认；明确安全的上面已 auto）
+  // 6) 扩展主动 confirm（subagents 删 agent / 覆盖文件）→ 一律弹。
+  //    工具调用本身不经过这里，别指望选个模式能跳过。
   return "ask";
 }
 
@@ -892,33 +898,25 @@ export function AgentFlowPanel() {
     }>
   >([]);
   // 计划审批（plan 模式）：模型产出方案后先弹浮条让用户决定“批准执行”或“继续调整”，
-  // 用户批准后才以 accept_edits 模式真正跑 handleRun（done 时由它触发 + handleApprovePlan）。
+  // 用户批准后才以 default 模式真正跑 handleRun（done 时由它触发 + handleApprovePlan）。
   const [pendingPlanReview, setPendingPlanReview] =
     useState<PlanReviewRequest | null>(null);
 
   const [showModelDropdown, setShowModelDropdown] = useState(false);
-  const [showFolderDropdown, setShowFolderDropdown] = useState(false);
   const [showApprovalModeDropdown, setShowApprovalModeDropdown] =
     useState(false);
+  // 新对话屏的「选择项目」芯片（只在新对话屏渲染，见 renderProjectChip 的调用处）。
+  const [showFolderDropdown, setShowFolderDropdown] = useState(false);
+  const folderDropdownRef = useRef<HTMLDivElement>(null);
   // 历史条悬停时淡出对话内容，避免展开的标题与模型输出重叠
   const [historyStripHover, setHistoryStripHover] = useState(false);
 
-  // 项目选择器状态
-  const [projectFoldersLoaded, setProjectFoldersLoaded] = useState(false);
-  const [projectFolders, setProjectFolders] = useState<string[]>([]);
-  const [showRemoteServers, setShowRemoteServers] = useState(false);
-  const [showAddServerForm, setShowAddServerForm] = useState(false);
-  // 「远程项目 / 添加服务器」弹层是 bottom-full（向上展开）且被消息滚动区的顶部边界裁切：
-  // 表单变高后会顶出可视区、头部直接点不到。这里量出可用高度当 maxHeight，超出就让弹层自己滚。
-  const [remotePanelMaxH, setRemotePanelMaxH] = useState<number | null>(null);
-  const [newServerHost, setNewServerHost] = useState("");
-  const [newServerPort, setNewServerPort] = useState("22");
-  const [newServerUser, setNewServerUser] = useState("");
-  const [newServerName, setNewServerName] = useState("");
-  // 保存状态（与「保存 Hooks 配置」一致的行内反馈，不依赖 toast）
-  const [serverSaving, setServerSaving] = useState(false);
-  const [serverSaveState, setServerSaveState] = useState<null | "ok" | "err">(null);
-  const [serverSaveErr, setServerSaveErr] = useState<string | null>(null);
+  // 全局远程模式开关（由 useRemoteTunnelReconcile 现查后端 tunnel status 后写
+  // store；挂在 helix-layout，宿主永不卸载）。
+  // 非 null = agent 跑在远端，本地 fs/git 驱动的 UI 一律让位。
+  const remoteMode = useHelixStore((s) => s.remoteMode);
+  const openRemoteWizard = useHelixStore((s) => s.openRemoteWizard);
+
   const approvalMode = useHelixStore((s) => s.approvalMode);
   const setApprovalMode = useHelixStore((s) => s.setApprovalMode);
   // 压缩完成提示 divider（手动 /compact 与自动压缩都会写入，持久化显示，切会话时清空）
@@ -944,14 +942,6 @@ export function AgentFlowPanel() {
     Array<{ name: string; path: string }>
   >([]);
   const [selectedAtFileIndex, setSelectedAtFileIndex] = useState(0);
-  const externalServices = useHelixStore((s) => s.externalServices);
-  const addExternalService = useHelixStore((s) => s.addExternalService);
-  const removeExternalService = useHelixStore(
-    (s) => s.removeExternalService,
-  );
-  const setExternalServiceConnected = useHelixStore(
-    (s) => s.setExternalServiceConnected,
-  );
   // Detected scheduled tasks awaiting user confirmation (AI asked to create them).
   const [pendingTaskCreations, setPendingTaskCreations] = useState<
     DetectedTask[]
@@ -1079,7 +1069,6 @@ export function AgentFlowPanel() {
   const liveStateOwnerRef = useRef<string | null>(null);
   const uploadFileInputRef = useRef<HTMLInputElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
-  const folderDropdownRef = useRef<HTMLDivElement>(null);
   const approvalModeDropdownRef = useRef<HTMLDivElement>(null);
 
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
@@ -2182,45 +2171,24 @@ export function AgentFlowPanel() {
         setShowModelDropdown(false);
       }
       if (
-        folderDropdownRef.current &&
-        !folderDropdownRef.current.contains(event.target as Node)
-      ) {
-        setShowFolderDropdown(false);
-      }
-      if (
         approvalModeDropdownRef.current &&
         !approvalModeDropdownRef.current.contains(event.target as Node)
       ) {
         setShowApprovalModeDropdown(false);
       }
+      if (
+        folderDropdownRef.current &&
+        !folderDropdownRef.current.contains(event.target as Node)
+      ) {
+        setShowFolderDropdown(false);
+      }
     };
-    if (showModelDropdown || showFolderDropdown || showApprovalModeDropdown) {
+    if (showModelDropdown || showApprovalModeDropdown || showFolderDropdown) {
       document.addEventListener("mousedown", handleClickOutside);
       return () =>
         document.removeEventListener("mousedown", handleClickOutside);
     }
-  }, [showModelDropdown, showFolderDropdown, showApprovalModeDropdown]);
-
-  // 远程项目弹层的可用高度：触发器顶 − 消息滚动区顶（真正的裁切边界）− 余量。
-  // 不量的话，弹层比上方空间高时头部会被滚动区裁掉且**滚不到**（absolute 溢出到滚动区上方不可达）。
-  useEffect(() => {
-    if (!showFolderDropdown || !showRemoteServers) {
-      setRemotePanelMaxH(null);
-      return;
-    }
-    const measure = () => {
-      const anchor = folderDropdownRef.current;
-      if (!anchor) return;
-      const clipTop = scrollRef.current?.getBoundingClientRect().top ?? 0;
-      const avail = Math.floor(
-        anchor.getBoundingClientRect().top - clipTop - 12,
-      );
-      setRemotePanelMaxH(Math.max(160, avail));
-    };
-    measure();
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, [showFolderDropdown, showRemoteServers, showAddServerForm]);
+  }, [showModelDropdown, showApprovalModeDropdown, showFolderDropdown]);
 
   // The dropdown shows all providers' models grouped. If the current model
   // doesn't belong to any provider, snap to the first available model.
@@ -2788,8 +2756,19 @@ export function AgentFlowPanel() {
   // `workspaceFilesLoadedRef` 永久上锁（只拉一次），而挂载时后端 workDir 还没
   // 同步完 → git status 非仓库、scanTree(".") 扫的是默认目录；此后切换项目
   // 也不会重扫，@ 候选要么空要么永远是上一个项目的文件。
+  //
+  // 远程模式下**必须整个跳过**：`git.status` / `scanTree` 都是本机 IPC，扫出
+  // 的是本地文件树，而 agent 在远端跑。照旧渲染等于给用户一份「@ 就能引用」
+  // 的假清单——插进 prompt 的本地路径在远端根本不存在，模型必然读不到。
+  // 远程模式的文件引用得等远端 fs IPC 落地（`remote_list_paths` 目前只覆盖
+  // 目录浏览，不含递归文件树）。
   useEffect(() => {
     if (!window.electron?.isElectron) return;
+    if (useHelixStore.getState().remoteMode) {
+      workspaceFilesRef.current = [];
+      workspaceFilesLoadedFor.current = null;
+      return;
+    }
     const root = selectedWorkDir;
     if (!root) {
       workspaceFilesRef.current = [];
@@ -2863,6 +2842,17 @@ export function AgentFlowPanel() {
   // workDirEpoch bumps — otherwise the hook keeps reusing the stale
   // session rooted at the old cwd, so the UI shows the new dir while the backend
   // actually operates in the old one.
+  //
+  // 远程模式下的语义（这里曾经是个真 bug）：`applyRemoteCwd` 把**本地
+  // Windows 路径**写进 `pi.remote_cwd`，而那个键是发给**远端** bridge 的
+  // 握手行（`cwd:<path>`）。远端没有 D:\... 这个路径 → bridge 的 resolveCwd
+  // 静默回退到 home → agent 跑在完全无关的目录里，而界面显示着你刚点的本地
+  // 项目。两者对不上，且没有任何提示。
+  //
+  // 现在：远程模式下选本地目录 = 明确表达「我要回本地干活」，那就断开远程，
+  // 让一切回到本地模式（本地 cwd 天然跟着 work dir 走，不需要写任何 yaml）。
+  // 反过来，想在远端换目录请走「远程项目」列表，那里的路径本来就会经过
+  // bridge 的 existsSync 校验。
   const selectWorkDir = useCallback(
     async (dir: string | null) => {
       if (!dir) {
@@ -2871,9 +2861,104 @@ export function AgentFlowPanel() {
       }
       useHelixStore.getState().setCurrentSessionId(null);
       useHelixStore.getState().setNoActiveConversation(false);
+      if (useHelixStore.getState().remoteMode) {
+        const label = useHelixStore.getState().remoteMode!.label;
+        const ok = confirm(
+          `当前 agent 跑在远程项目「${label}」。\n\n切到本地项目会断开远程连接并重启网关，正在运行的对话会被打断。\n\n继续？`,
+        );
+        if (!ok) return;
+        try {
+          await disconnectRemoteProject();
+          // 立刻让对账 hook 重查一次：否则芯片上的远程标签要等 30s 轮询才消失，
+          // 表现为「已经断开了一会儿了界面还说在远端」。
+          useHelixStore.getState().bumpRemoteStatusVersion();
+        } catch (e) {
+          storeActions.showToast({
+            type: "error",
+            title: "断开远程失败",
+            description: String(e),
+          });
+          return;
+        }
+      }
       await storeActions.setWorkDir(dir);
     },
-    [storeActions.setWorkDir, storeActions.setSelectedWorkDir],
+    [storeActions],
+  );
+
+  // 新对话屏的「选择项目」芯片。**只在新对话屏渲染**：一条正在进行的对话已经绑
+  // 定了一个 cwd（resume 以 jsonl 头部的 cwd 为准），在对话里切项目只会让「界面
+  // 显示的项目」和「这条对话实际干活的项目」分家 —— 要换项目就新建对话。
+  //
+  // 下拉里**不列已有项目**（芯片自己就是当前项目，再列一遍是第二份真相；已存
+  // 远程服务器列在侧边栏「项目」里）：只有两个动作 —— 挑一个本机目录、加一台远程
+  // 项目。
+  const renderProjectChip = () => (
+    <div className="relative" ref={folderDropdownRef}>
+      <button
+        type="button"
+        onClick={() => setShowFolderDropdown((v) => !v)}
+        className="flex items-center gap-1.5 px-2 py-1 rounded-lg ui-text-sm2 text-foreground/60 hover:text-foreground hover:bg-muted/40 transition-colors"
+        data-tip="选择项目目录"
+      >
+        {remoteMode ? (
+          <Server className="size-3.5 shrink-0 text-emerald-500" />
+        ) : (
+          <Folder className="size-3.5 shrink-0 text-amber-500" />
+        )}
+        <span
+          className="max-w-[160px] truncate"
+          title={
+            remoteMode
+              ? `agent 在远端：${remoteMode.username ? remoteMode.username + "@" : ""}${remoteMode.host}:${remoteMode.remotePath ?? "home"}`
+              : (selectedWorkDir ?? "")
+          }
+        >
+          {remoteMode
+            ? remoteMode.label
+            : selectedWorkDir
+              ? selectedWorkDir.split(/[\\/]/).pop() || selectedWorkDir
+              : "选择项目"}
+        </span>
+        <ChevronDown className="size-3 opacity-60" />
+      </button>
+      {showFolderDropdown && (
+        <div className="absolute bottom-full left-0 mb-2 w-[220px] bg-card border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in p-1.5">
+          <button
+            type="button"
+            onClick={async () => {
+              setShowFolderDropdown(false);
+              if (!isElectron()) return;
+              try {
+                const dir = await electronDialog.openDirectory();
+                if (dir) await selectWorkDir(dir);
+              } catch (e) {
+                console.error("[selectWorkDir] openDirectory failed:", e);
+              }
+            }}
+            className="w-full flex items-center gap-2 px-2 py-1.5 ui-text-sm2 rounded-lg text-foreground/70 hover:bg-accent hover:text-foreground transition-colors"
+          >
+            <FolderPlus className="size-3.5 shrink-0" />
+            选择本地目录…
+          </button>
+          {remoteAvailable() && (
+            <div className="mt-1.5 pt-1.5 border-t border-border/30">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowFolderDropdown(false);
+                  openRemoteWizard();
+                }}
+                className="w-full flex items-center gap-2 px-2 py-1.5 ui-text-sm2 rounded-lg text-foreground/70 hover:bg-accent hover:text-foreground transition-colors"
+              >
+                <Cloud className="size-3.5 shrink-0" />
+                添加远程项目
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 
   // Stop running agent (accepts optional sessionId to target specific session)
@@ -3907,6 +3992,18 @@ export function AgentFlowPanel() {
       useHelixStore.setState({
         activeSessionWorkDir: useHelixStore.getState().selectedWorkDir,
       });
+      // 草稿期在输入框选过的模型（记在 DRAFT_SESSION_KEY 上）此刻立刻搬到新 cid：
+      // 否则 currentSessionId 一变成新 cid，模型芯片就会在「本对话覆盖值缺失」的
+      // 间隙回落到全局默认（表现为发消息后模型名闪成全局默认模型，过会再跳回）。
+      // 下方 set_model 重放段（每轮都跑）仍按 activeSessionId 优先命中，行为不变。
+      const draftModelOverride = useHelixStore
+        .getState()
+        .modelBySession[DRAFT_SESSION_KEY];
+      if (draftModelOverride?.model) {
+        useHelixStore
+          .getState()
+          .setModelForSession(activeSessionId, draftModelOverride);
+      }
       useHelixStore.getState().persistToStorage();
     }
     runningSessionIdRef.current = activeSessionId;
@@ -4157,11 +4254,15 @@ export function AgentFlowPanel() {
 
         // ④ pi 磁盘扫描 + 首条用户消息指纹。指纹精确（同一对话/分叉共享），所以
         //    必须跳过已被**别的**对话占用的 sid，否则会把别人的会话抢过来续写。
-        const cwd =
+        //    远程项目的 workDir 是 `remote://…` 虚拟键，本机磁盘上没有对应目录，
+        //    拿它当 cwd 去扫只会恒 miss —— 远程会话的 sid 归属由后端
+        //    conversation-index 管，不走这条本地指纹。
+        const rawCwd =
           record?.workDir ??
           useHelixStore.getState().activeSessionWorkDir ??
           selectedWorkDir ??
           undefined;
+        const cwd = isRemoteWorkDir(rawCwd) ? undefined : rawCwd;
         if (!sessionId && cwd && firstUserText) {
           try {
             const r = (await helixApi()!.send("session/latest_for_cwd", {
@@ -4210,7 +4311,13 @@ export function AgentFlowPanel() {
         const res = (await helixApi()!.send("session/new", {
           mcpServers: buildAcpMcpServers(st0.mcpServers),
           mode_id: st0.approvalModeBySession?.[myCid] ?? st0.approvalMode,
-          cwd: st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined,
+          // 远程项目下不能把 `remote://…` 虚拟键当 cwd 发给后端：本地模式下它
+          // 会被 join 到当前 work_dir 后面（Windows 下无盘符不算绝对路径），
+          // 而 `:` / `/` 在 Windows 文件名里非法 → create_dir_all 报 os error
+          // 123。远程模式的 cwd 由 `pi.remote_cwd` 决定，与这里无关，发 undefined。
+          cwd: isRemoteWorkDir(st0.activeSessionWorkDir)
+            ? undefined
+            : (st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined),
           ...(seedMessages.length > 0 ? { messages: seedMessages } : {}),
         })) as any;
         sessionId =
@@ -5691,10 +5798,10 @@ export function AgentFlowPanel() {
       }
       const promptText = (trimmed + fileContext).trim() || trimmed;
       // 计划模式（plan）：handleRun 被批准流程重新触发时（approvalMode 已是
-      // accept_edits），这里取 live getState() 而非闭包——避免闭包里还是旧的
+      // default），这里取 live getState() 而非闭包——避免闭包里还是旧的
       // plan 模式，导致批准后仍带上只读前缀，模型继续只读规划不执行。
       // plan 模式前缀明确告诉模型：只做只读分析、给出方案，不要改文件/跑命令；
-      // 用户批准后（accept_edits）前缀消失，模型才真正动手。
+      // 用户批准后（default）前缀消失，模型才真正动手。
       const liveMode = useHelixStore.getState().approvalMode;
       const finalPromptText =
         liveMode === "plan"
@@ -6836,7 +6943,7 @@ export function AgentFlowPanel() {
                 curState.setChatMessageStreaming(msgId, false);
                 // 计划模式产出方案后必须停在人工审查；只有用户点击批准才切换执行模式。
                 // 计划模式产出方案后停在人工审查；弹出 PlanReviewBar，
-                // 用户点批准才切换到 accept_edits 并执行。
+                // 用户点批准才切换到 default 并执行。
                 if (
                   content &&
                   useHelixStore.getState().approvalMode === "plan"
@@ -7175,7 +7282,12 @@ export function AgentFlowPanel() {
                 parsed.toolParams || {},
                 useHelixStore.getState().activeSessionWorkDir ??
                   useHelixStore.getState().selectedWorkDir,
-                useHelixStore.getState().approvalMode,
+                // 审批模式按会话解析（与 handleRun 的 runApprovalMode 同口径）：
+                // 旁路面板写入的 approvalModeBySession[btw-cid] 优先，没有再回落全局。
+                // 原来直接读全局 approvalMode，导致旁路面板选的模式对审批分流完全无效。
+                useHelixStore.getState().approvalModeBySession?.[
+                  myCid || currentSessionId || ""
+                ] ?? useHelixStore.getState().approvalMode,
               );
               const autoSid =
                 (myCid && sessionMapRef.current.get(myCid)?.sid) ||
@@ -7891,15 +8003,17 @@ export function AgentFlowPanel() {
     [currentSessionId, bumpPendingUserRequests],
   );
 
-  // 批准计划：关掉审批浮条，把 approvalMode 切到 accept_edits（用 live store + 后端
-  // set_mode 双保险，让后端/前端都进入“替我审批”模式），然后用 pi 计划扩展的
+  // 批准计划：关掉审批浮条，把 approvalMode 切到 default（用 live store + 后端
+  // set_mode 双保险，让后端/前端都退出只读规划态），然后用 pi 计划扩展的
   // /plan implement 命令真正启动实现（扩展会把已完成的方案交接给实现阶段并解锁
   // 写工具）。plan_approved: true 告诉网关“这是批准”——不要发 /plan exit，
   // 否则会把刚批准、正要执行的计划清掉。
   const handleApprovePlan = useCallback(async () => {
     setPendingPlanReview(null);
     const cid = useHelixStore.getState().currentSessionId;
-    setApprovalMode("accept_edits");
+    // 回到「自动审批」：方案已获批准，接下来是执行阶段。**不**改成「完全访问」
+    // —— 执行期仍可能碰工作区外文件/网络，那些该问还是要问。
+    setApprovalMode("auto");
     // 批准即进入实施阶段：从 {workDir}/plan.md 读结构化步骤填入 activePlan，
     // 工作面板随即显示「执行计划」区块。异步加载，失败静默（plan.md 缺失时
     // 区块不显示，不阻塞批准流程）。
@@ -7910,18 +8024,18 @@ export function AgentFlowPanel() {
       const steps = await loadPlanSteps(workDir);
       useHelixStore.getState().setActivePlan(steps ?? []);
     })();
-    // 后端模式同步：让 yolo/只读模式下的 session 真正解锁到可写状态。
+    // 后端模式同步：让 session 真正解锁到可写状态。
     const helixSid =
       (cid && sessionMapRef.current.get(cid)?.sid) || helixSessionIdRef.current;
     if (helixSid) {
       helixApi()!
         .send("session/set_mode", {
           session_id: helixSid,
-          mode_id: "accept_edits",
+          mode_id: "default",
           plan_approved: true,
         })
         .catch((e: any) => {
-          console.warn("[Helix] set_mode(accept_edits) failed:", e);
+          console.warn("[Helix] set_mode(default) failed:", e);
         });
     }
     // 批准动作即 /plan implement：pi 计划扩展接管后续，从已保存的方案开始实现。
@@ -8150,6 +8264,7 @@ export function AgentFlowPanel() {
     );
   };
 
+
   const renderChatInput = ({ isEmpty }: { isEmpty?: boolean } = {}) => {    const approvalModeButton = (
       <div className="relative min-w-0" ref={approvalModeDropdownRef}>
         <button
@@ -8158,49 +8273,26 @@ export function AgentFlowPanel() {
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ui-text-sm2 transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
           data-tip="审批模式"
         >
-          {approvalMode === "default" && <Hand className="size-3.5" />}
-          {approvalMode === "accept_edits" && <Clock className="size-3.5" />}
-          {approvalMode === "dont_ask" && (
-            <AlertTriangle className="size-3.5" />
-          )}
-          {approvalMode === "plan" && <FileText className="size-3.5" />}
-          <span className="truncate min-w-0">
-            {approvalMode === "default" && "请求批准"}
-            {approvalMode === "accept_edits" && "替我审批"}
-            {approvalMode === "dont_ask" && "完全访问"}
-            {approvalMode === "plan" && "制定计划"}
-          </span>
+          {(() => {
+            const cur = APPROVAL_MODE_ITEMS.find(
+              (m) => m.id === approvalMode,
+            );
+            const Icon = cur ? APPROVAL_MODE_ICONS[cur.icon] : null;
+            return (
+              <>
+                {Icon && <Icon className="size-3.5 shrink-0" />}
+                <span className="truncate min-w-0">
+                  {cur?.title ?? "自动审批"}
+                </span>
+              </>
+            );
+          })()}
           <ChevronDown className="size-3" />
         </button>
         {showApprovalModeDropdown && (
-          <div className="absolute bottom-full left-0 mb-2 w-44 bg-card rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
-            {[
-              {
-                id: "default" as const,
-                icon: Hand,
-                title: "请求批准",
-                desc: "全部需批准",
-              },
-              {
-                id: "accept_edits" as const,
-                icon: Clock,
-                title: "替我审批",
-                desc: "风险才批准",
-              },
-              {
-                id: "dont_ask" as const,
-                icon: AlertTriangle,
-                title: "完全访问",
-                desc: "完全放开",
-              },
-              {
-                id: "plan" as const,
-                icon: FileText,
-                title: "制定计划",
-                desc: "先规划后做",
-              },
-            ].map((mode) => {
-              const Icon = mode.icon;
+          <div className="absolute bottom-full left-0 mb-2 w-[300px] bg-card rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
+            {APPROVAL_MODE_ITEMS.map((mode) => {
+              const Icon = APPROVAL_MODE_ICONS[mode.icon];
               const active = approvalMode === mode.id;
               return (
                 <button
@@ -8209,23 +8301,29 @@ export function AgentFlowPanel() {
                   onClick={() => {
                     setApprovalMode(mode.id);
                     setShowApprovalModeDropdown(false);
-                    // Immediately apply to current session if one exists
-                    const helixSid =
-                      (currentSessionId &&
-                        sessionMapRef.current.get(currentSessionId)?.sid) ||
-                      helixSessionIdRef.current;
-                    if (helixSid) {
-                      helixApi()!
-                        .send("session/set_mode", {
-                          session_id: helixSid,
-                          mode_id: mode.id,
-                        })
-                        .catch((e: any) => {
-                          console.warn(
-                            "[Helix] set_mode(" + mode.id + ") failed:",
-                            e,
-                          );
-                        });
+                    // 「权限档」必须写进 pi-permission 的配置才真正生效——
+                    // 阻断工具执行的是那个扩展的 tool_call 钩子，而它只读自己
+                    // 的配置文件。这里不写就等于又做了一份装饰状态。
+                    if (mode.id !== "plan") {
+                      void helixApi()?.setPermissionMode?.(mode.id);
+                    }
+                    // plan 档是另一条轴：靠 pi-plan-mode 扩展的 /plan start
+                    // 通知后端，不是权限配置。
+                    if (mode.id === "plan") {
+                      const helixSid =
+                        (currentSessionId &&
+                          sessionMapRef.current.get(currentSessionId)?.sid) ||
+                        helixSessionIdRef.current;
+                      if (helixSid) {
+                        helixApi()!
+                          .send("session/set_mode", {
+                            session_id: helixSid,
+                            mode_id: "plan",
+                          })
+                          .catch((e: any) => {
+                            console.warn("[Helix] set_mode(plan) failed:", e);
+                          });
+                      }
                     }
                   }}
                   className={`w-full flex items-start gap-2.5 px-3 py-1.5 text-left hover:bg-muted transition-colors ${active ? "bg-primary/5" : ""}`}
@@ -8823,438 +8921,15 @@ export function AgentFlowPanel() {
                   {startupGreeting}
                 </p>
 
-                {/* 项目选择器 — 在输入框上方，左对齐 */}
+                {/* 新对话屏的状态行：项目选择器 + 「现在在哪个分支」这类事实。
+                    选择器只在这一屏出现 —— 对话一旦开始，它的 cwd 就定死了
+                    （resume 以 jsonl 头部为准），在这里切项目等于让界面说谎。
+                    远程模式下不再显示本地分支芯片：`currentBranch` 来自本机
+                    `git.status(selectedWorkDir)`，而 agent 在远端跑，那是跟本次
+                    执行无关的本地分支。远程状态由芯片自己表达（绿色 + 服务器名）。 */}
                 <div className="flex items-center gap-1.5 mb-3 justify-start">
-                  <div className="relative" ref={folderDropdownRef}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const opening = !showFolderDropdown;
-                        setShowFolderDropdown(opening);
-                        if (opening && !projectFoldersLoaded && isElectron()) {
-                          import("@/lib/persist").then(({ persistence }) => {
-                            persistence
-                              .getProjectFolders()
-                              .then((folders) => {
-                                setProjectFolders(folders);
-                                setProjectFoldersLoaded(true);
-                              })
-                              .catch(() => {});
-                          });
-                        }
-                      }}
-                      className="flex items-center gap-1.5 px-2 py-1 rounded-lg ui-text-sm2 text-foreground/60 hover:text-foreground hover:bg-muted/40 transition-colors"
-                      data-tip="选择项目目录"
-                    >
-                      <Folder className="size-3.5 text-amber-500" />
-                      <span className="max-w-[160px] truncate">
-                        {selectedWorkDir
-                          ? selectedWorkDir.split(/[\\/\\]/).pop() ||
-                            selectedWorkDir
-                          : "选择项目"}
-                      </span>
-                    </button>
-                    {showFolderDropdown && (
-                      <div
-                        className={`absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-card border border-border/40 rounded-xl shadow-xl z-50 animate-scale-in overflow-y-auto ${showRemoteServers ? "w-[280px]" : "w-[220px]"}`}
-                        style={
-                          remotePanelMaxH
-                            ? { maxHeight: remotePanelMaxH }
-                            : undefined
-                        }
-                      >
-                        {showRemoteServers ? (
-                          <div>
-                            <div
-                              className="sticky top-0 z-10 flex items-center gap-2 px-3 py-2 border-b border-border/40"
-                              style={{
-                                background:
-                                  "color-mix(in oklch, var(--muted) 25%, var(--card))",
-                              }}
-                            >
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setShowRemoteServers(false);
-                                  setShowAddServerForm(false);
-                                }}
-                                className="p-1 -ml-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-accent transition-colors shrink-0"
-                                data-tip="返回"
-                              >
-                                <ChevronLeft className="size-3.5" />
-                              </button>
-                              <Server className="size-3.5 text-muted-foreground/45 shrink-0" />
-                              <p className="flex-1 min-w-0 truncate ui-text-sm2 font-medium text-foreground/85">
-                                {showAddServerForm ? "添加服务器" : "远程项目"}
-                              </p>
-                              {!showAddServerForm &&
-                                externalServices.length > 0 && (
-                                  <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/40 tabular-nums">
-                                    {externalServices.length}
-                                  </span>
-                                )}
-                            </div>
-                            {showAddServerForm ? (
-                              <div className="p-3 space-y-2.5">
-                                {/* 字段卡：三组字段共用一圈淡边框 + 浅底，与设置页表单同一套材质 */}
-                                <div className="rounded-xl border border-border/50 bg-muted/25 p-2.5 space-y-2.5">
-                                  <div className="space-y-1">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <label
-                                        htmlFor="helix-add-server-name"
-                                        className="text-[calc(var(--helix-transcript-size)*0.7857)] font-medium text-foreground/60"
-                                      >
-                                        名称
-                                      </label>
-                                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/35">
-                                        可选
-                                      </span>
-                                    </div>
-                                    <div className="relative">
-                                      <Tag className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
-                                      <input
-                                        id="helix-add-server-name"
-                                        type="text"
-                                        value={newServerName}
-                                        onChange={(e) =>
-                                          setNewServerName(e.target.value)
-                                        }
-                                        placeholder="默认为 用户名@主机"
-                                        className="w-full pl-8 pr-2.5 py-1.5 ui-text-sm2 bg-background border border-border/60 rounded-lg text-foreground placeholder:text-muted-foreground/35"
-                                      />
-                                    </div>
-                                  </div>
-
-                                  <div className="space-y-1">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <label
-                                        htmlFor="helix-add-server-host"
-                                        className="text-[calc(var(--helix-transcript-size)*0.7857)] font-medium text-foreground/60"
-                                      >
-                                        主机地址
-                                      </label>
-                                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-primary/70">
-                                        必填
-                                      </span>
-                                    </div>
-                                    <div className="relative">
-                                      <Globe className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
-                                      <input
-                                        id="helix-add-server-host"
-                                        type="text"
-                                        value={newServerHost}
-                                        onChange={(e) =>
-                                          setNewServerHost(e.target.value)
-                                        }
-                                        placeholder="192.168.12.101"
-                                        className="w-full pl-8 pr-2.5 py-1.5 ui-text-sm2 bg-background border border-border/60 rounded-lg text-foreground placeholder:text-muted-foreground/35"
-                                      />
-                                    </div>
-                                  </div>
-
-                                  <div className="flex gap-2">
-                                    <div className="flex-1 min-w-0 space-y-1">
-                                      <label
-                                        htmlFor="helix-add-server-user"
-                                        className="text-[calc(var(--helix-transcript-size)*0.7857)] font-medium text-foreground/60"
-                                      >
-                                        用户名
-                                      </label>
-                                      <div className="relative">
-                                        <User className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
-                                        <input
-                                          id="helix-add-server-user"
-                                          type="text"
-                                          value={newServerUser}
-                                          onChange={(e) =>
-                                            setNewServerUser(e.target.value)
-                                          }
-                                          placeholder="ruowu"
-                                          className="w-full pl-8 pr-2.5 py-1.5 ui-text-sm2 bg-background border border-border/60 rounded-lg text-foreground placeholder:text-muted-foreground/35"
-                                        />
-                                      </div>
-                                    </div>
-                                    <div className="w-[76px] shrink-0 space-y-1">
-                                      <label
-                                        htmlFor="helix-add-server-port"
-                                        className="text-[calc(var(--helix-transcript-size)*0.7857)] font-medium text-foreground/60"
-                                      >
-                                        端口
-                                      </label>
-                                      <div className="relative">
-                                        <Hash className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground/35" />
-                                        <input
-                                          id="helix-add-server-port"
-                                          type="text"
-                                          value={newServerPort}
-                                          onChange={(e) =>
-                                            setNewServerPort(e.target.value)
-                                          }
-                                          placeholder="22"
-                                          className="w-full pl-7 pr-1.5 py-1.5 ui-text-sm2 bg-background border border-border/60 rounded-lg text-foreground placeholder:text-muted-foreground/35"
-                                        />
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-
-                                <p className="flex items-center gap-1.5 px-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/45">
-                                  <KeyRound className="size-3 shrink-0" />
-                                  使用本机 SSH 私钥（~/.ssh/id_rsa）认证
-                                </p>
-
-                                <div>
-                                  <SaveBar
-                                    saving={serverSaving}
-                                    status={serverSaveState}
-                                    errorText={serverSaveErr}
-                                    saveLabel="保存"
-                                    disabled={!newServerHost.trim()}
-                                    onSave={async () => {
-                                      setServerSaving(true);
-                                      setServerSaveState(null);
-                                      setServerSaveErr(null);
-                                      try {
-                                        const host = newServerHost.trim();
-                                        const port =
-                                          parseInt(newServerPort) || 22;
-                                        const username =
-                                          newServerUser.trim() || "user";
-                                        const name =
-                                          newServerName.trim() ||
-                                          `${username}@${host}`;
-                                        await addExternalService({
-                                          name,
-                                          host,
-                                          port,
-                                          username,
-                                          authType: "key",
-                                        });
-                                        setServerSaveState("ok");
-                                        setNewServerHost("");
-                                        setNewServerPort("22");
-                                        setNewServerUser("");
-                                        setNewServerName("");
-                                        setTimeout(() => {
-                                          setServerSaveState(null);
-                                          setShowAddServerForm(false);
-                                        }, 1200);
-                                      } catch (e) {
-                                        setServerSaveErr(
-                                          (e as Error)?.message ||
-                                            "添加失败，请重试",
-                                        );
-                                        setServerSaveState("err");
-                                      } finally {
-                                        setServerSaving(false);
-                                      }
-                                    }}
-                                    onCancel={() => {
-                                      setShowAddServerForm(false);
-                                      setNewServerHost("");
-                                      setNewServerPort("22");
-                                      setNewServerUser("");
-                                      setNewServerName("");
-                                    }}
-                                  />
-                                </div>
-                              </div>
-                            ) : externalServices.length === 0 ? (
-                              <div className="px-3 py-4">
-                                <button
-                                  type="button"
-                                  onClick={() => setShowAddServerForm(true)}
-                                  className="group/empty w-full flex flex-col items-center gap-1.5 rounded-xl border border-dashed border-border/60 py-5 text-muted-foreground/55 hover:border-primary/40 hover:bg-primary/5 hover:text-primary transition-colors"
-                                >
-                                  <Plus className="size-4" />
-                                  <span className="ui-text-sm2 font-medium">
-                                    添加服务器
-                                  </span>
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="max-h-32 overflow-y-auto py-1">
-                                {externalServices.map((svc) => {
-                                  const displayName =
-                                    svc.name ||
-                                    `${svc.username ?? ""}@${svc.host}`;
-                                  const isConnected = svc.connected;
-                                  return (
-                                    <div
-                                      key={svc.id}
-                                      className="group flex items-center gap-1.5 px-3 py-2.5 hover:bg-accent transition-colors rounded-lg text-foreground/80"
-                                    >
-                                      <button
-                                        type="button"
-                                        className="flex-1 flex items-center gap-2.5 text-left ui-text-sm2"
-                                        onClick={async () => {
-                                        setShowFolderDropdown(false);
-                                        try {
-                                          // sshConnect 只是一次性探测（`ssh -o
-                                          // BatchMode=yes ... echo connection_test`），不留会话；
-                                          // Helix 也没有远程执行能力（ssh.rs 里 ssh_exec 之类
-                                          // 早已删掉）。所以这里**不**试图把工作目录设成 ssh:// ——
-                                          // store.setWorkDir 会拦下它并报错，用户只看到一个
-                                          // 「绿点亮起 → 随即报错」的假动作。
-                                          const sshApi = (window as any)
-                                            .electron?.external?.sshConnect;
-                                          if (!sshApi) return;
-                                          const result = await sshApi({
-                                            host: svc.host,
-                                            port: svc.port,
-                                            username: svc.username,
-                                            authType: svc.authType,
-                                            secret: svc.secret ?? "",
-                                          });
-                                          if (result?.error) {
-                                            setExternalServiceConnected(
-                                              svc.id,
-                                              false,
-                                            );
-                                            storeActions.showToast({
-                                              type: "error",
-                                              title: "SSH 连接失败",
-                                              description: result.error,
-                                            });
-                                            return;
-                                          }
-                                          setExternalServiceConnected(
-                                            svc.id,
-                                            true,
-                                          );
-                                          storeActions.showToast({
-                                            type: "info",
-                                            title: "SSH 可达（一次性探测，未建立会话）",
-                                            description:
-                                              "仅验证 SSH 连通性，未建立会话。"
-                                              + `如需在 ${svc.host} 上开发，请先把远程项目`
-                                              + "克隆/挂载到本地路径，再在本地打开该目录。",
-                                          });
-                                        } catch (e) {
-                                          setExternalServiceConnected(
-                                            svc.id,
-                                            false,
-                                          );
-                                          storeActions.showToast({
-                                            type: "error",
-                                            title: "SSH 连接失败",
-                                            description: String(e),
-                                          });
-                                        }
-                                      }}
-                                    >
-                                      {isConnected ? (
-                                        <span className="size-2 rounded-full bg-green-500 shrink-0" />
-                                      ) : (
-                                        <span className="size-2 rounded-full bg-amber-400 shrink-0" />
-                                      )}
-                                      <span className="truncate flex-1">
-                                        {displayName}
-                                      </span>
-                                      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 shrink-0">
-                                        {isConnected ? "可达" : "未验证"}
-                                      </span>
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          if (
-                                            confirm(
-                                              `确定删除服务器「${displayName}」？`,
-                                            )
-                                          ) {
-                                            removeExternalService(svc.id);
-                                            storeActions.showToast({
-                                              type: "success",
-                                              title: "已删除服务器",
-                                              description: displayName,
-                                            });
-                                          }
-                                        }}
-                                        className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-red-500 p-1 rounded shrink-0"
-                                        title="删除服务器"
-                                        aria-label={`删除 ${displayName}`}
-                                      >
-                                        <Trash2 className="size-4" />
-                                      </button>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
-                            {!showAddServerForm &&
-                              externalServices.length > 0 && (
-                                <div className="border-t border-border/30 p-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => setShowAddServerForm(true)}
-                                    className="w-full flex items-center justify-center gap-1.5 rounded-lg py-2 ui-text-sm2 text-muted-foreground/55 hover:bg-accent hover:text-foreground transition-colors"
-                                  >
-                                    <Plus className="size-3.5" />
-                                    添加服务器
-                                  </button>
-                                </div>
-                              )}
-                          </div>
-                        ) : (
-                          <div>
-                            <div className="px-3 py-2 border-b border-border/30">
-                              <p className="text-[calc(var(--helix-transcript-size)*0.7143)] font-semibold text-muted-foreground/70 uppercase tracking-wider">
-                                本地项目
-                              </p>
-                            </div>
-                            <div className="px-3 py-2">
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  setShowFolderDropdown(false);
-                                  if (!isElectron()) return;
-                                  try {
-                                    const dir =
-                                      await electronDialog.openDirectory();
-                                    if (dir) await selectWorkDir(dir);
-                                  } catch (e) {
-                                    console.error(
-                                      "[selectWorkDir] openDirectory failed:",
-                                      e,
-                                    );
-                                  }
-                                }}
-                                className="w-full flex items-center gap-2.5 px-3 py-2.5 ui-text-sm2 text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
-                              >
-                                <Folder className="size-4 text-muted-foreground shrink-0" />
-                                <span>本地项目</span>
-                              </button>
-                            </div>
-                            <div className="px-3 py-2 border-t border-border/30">
-                              <button
-                                type="button"
-                                onClick={() => setShowRemoteServers(true)}
-                                className="w-full flex items-center gap-2.5 px-3 py-2.5 ui-text-sm2 text-foreground/80 hover:bg-accent hover:text-foreground rounded-lg transition-colors"
-                              >
-                                <Server className="size-4 text-muted-foreground shrink-0" />
-                                <span>
-                                  {externalServices.length > 0
-                                    ? `远程项目 (${externalServices.length})`
-                                    : "远程项目"}
-                                </span>
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  {/* Branch chip — the empty (new-conversation) state had no
-                      branch UI at all: the header branch picker only renders
-                      once the conversation has messages, and the in-transcript
-                      indicator lives in the messages branch below. The probe
-                      (`currentBranch`/`gitAvailable`) runs on every
-                      selectedWorkDir change regardless, so show it here too.
-                      NOTE: `currentBranchInfo` is conversation-fork metadata
-                      (null without a session) — NOT the git branch. */}
-                  {gitAvailable && currentBranch && (
+                  {renderProjectChip()}
+                  {!remoteMode && gitAvailable && currentBranch && (
                     <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[calc(var(--helix-transcript-size)*0.7857)] text-blue-600 dark:text-blue-400 bg-blue-500/10 shrink-0">
                       <GitBranch className="size-3" />
                       <span className="max-w-[120px] truncate">
@@ -10190,7 +9865,7 @@ export function AgentFlowPanel() {
       )}
 
       {/* 计划审批浮条（plan 模式）：模型产出方案后先弹给
-          用户审阅，批准才切换 accept_edits 重新执行，调整则关闭浮条让用户改输入。 */}
+          用户审阅，批准才切换 default 重新执行，调整则关闭浮条让用户改输入。 */}
       {pendingPlanReview && pendingPlanReview.sessionId === approvalKey && (
         <PlanReviewBar
           content={pendingPlanReview.content}

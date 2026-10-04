@@ -8,7 +8,10 @@ import {
   PopupSelect,
 } from "./settings-ui";
 import { Button } from "@/components/ui/button";
-import { electronApp, electronDialog } from "@/lib/electron-bridge";
+import {
+  electronApp,
+  electronDialog,
+} from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
 export function GeneralSettingsPanel() {
@@ -138,6 +141,7 @@ export function GeneralSettingsPanel() {
   // HTTP 代理（持久化在 pi 全局 settings.json 的 httpProxy 键，重启应用后生效）。
   const [proxyUrl, setProxyUrl] = useState("");
   const [proxyBusy, setProxyBusy] = useState(false);
+
 
   // 常规面板的开关/选项改动即生效（无保存按钮），防抖写入 IndexedDB，
   // 避免设置项重启后丢失。
@@ -303,6 +307,7 @@ export function GeneralSettingsPanel() {
           </div>
         </SettingRow>
       </SettingGroup>
+
 
       <SettingGroup>
         <SettingRow label="数据存储路径" hint={`应用数据的根目录`}>

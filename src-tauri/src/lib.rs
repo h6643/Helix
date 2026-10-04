@@ -1,6 +1,7 @@
 //! Helix Tauri backend crate.
 
 mod app;
+mod approval_policy;
 mod background_tasks;
 mod config;
 mod delegations;
@@ -14,7 +15,6 @@ mod memory;
 mod page_fetch;
 mod paths;
 mod pi_catalog;
-mod pi_permissions;
 mod pi_gateway;
 /// Test-only re-exports of pi_gateway's session-trim helpers (integration
 /// tests in tests/trim_session.rs). Not part of the app surface.
@@ -30,6 +30,7 @@ pub mod pi_gateway_test_hooks {
 mod image_model;
 mod profile;
 mod proxy;
+mod remote_connect;
 mod scheduled_tasks;
 mod security;
 mod skills;
@@ -43,24 +44,6 @@ mod window;
 use crate::state::{AppState, APP_HANDLE};
 use std::sync::Arc;
 use tauri::Emitter;
-
-/// Read the `@gotgenes/pi-permission-system` policy that Helix's
-/// Settings → 权限 page edits. Thin wrapper so the command name lives
-/// next to the registration.
-#[tauri::command]
-fn pi_permissions_read() -> serde_json::Value {
-    pi_permissions::read_policy()
-}
-
-/// Write the policy back. `policy: null` restores Helix's defaults;
-/// keys the frontend doesn't manage are preserved verbatim.
-#[tauri::command]
-fn pi_permissions_write(
-    policy: Option<serde_json::Value>,
-    yolo_mode: Option<bool>,
-) -> Result<serde_json::Value, String> {
-    pi_permissions::write_policy(policy, yolo_mode)
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -227,6 +210,9 @@ pub fn run() {
             helix::helix_set_delegation_identities,
             helix::helix_set_config_key_value,
             helix::helix_approval_respond,
+            // 审批档位 ⇄ pi-permission 扩展配置（真正阻断工具执行的那一层）
+            approval_policy::helix_get_permission_mode,
+            approval_policy::helix_set_permission_mode,
             // embedded sidebar browser
             helix::open_browser_url,
             helix::poll_browser_requests,
@@ -273,6 +259,12 @@ pub fn run() {
             image_model::image_config_save,
             // SSH connections
             ssh::ssh_connect,
+            // 一键远程连接（agent 远程跑）
+            remote_connect::remote_connect,
+            remote_connect::remote_disconnect,
+            remote_connect::remote_tunnel_status,
+            remote_connect::remote_list_paths,
+            remote_connect::remote_preflight,
             // hooks (hooks: block in config.yaml)
             hooks::hooks_list,
             hooks::hooks_save,
@@ -366,8 +358,6 @@ pub fn run() {
             helix::pi_install_package,
             helix::pi_uninstall_package,
             helix::pi_check_updates,
-            pi_permissions_read,
-            pi_permissions_write,
             // gateway MCP servers (config.yaml mcp_servers, read/write)
             mcp::mcp_config_list,
             mcp::mcp_config_save,

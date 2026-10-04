@@ -32,7 +32,7 @@ export function McpEditorForm({
 }) {
   return (
     <div
-      className={`rounded-2xl border border-border/60 bg-card overflow-hidden flex flex-col ${fullScreen ? "flex-1" : ""}`}
+      className={`rounded-xl border border-border/40 bg-card/60 overflow-hidden flex flex-col ${fullScreen ? "flex-1" : ""}`}
     >
       <div
         className={`p-4 space-y-4 ${fullScreen ? "flex-1 overflow-y-auto" : ""}`}

@@ -230,6 +230,75 @@ export interface ElectronAPI {
     }) => Promise<any>;
     getConfig: () => Promise<any>;
     setYamlKey: (key: string, value: any) => Promise<any>;
+    // 一键远程连接（agent 远程跑）：scp bridge + 远端起 node + 本机 ssh -L 隧道
+    // + 写 pi.remote_rpc / pi.remote_cwd。
+    remoteConnect: (params: {
+      host: string;
+      port: number;
+      username: string;
+      remote_path: string;
+    }) => Promise<{
+      ok: boolean;
+      local_port?: number;
+      remote_host?: string;
+      remote_port?: number;
+      username?: string;
+      remote_path?: string;
+    }>;
+    remoteDisconnect: () => Promise<{ ok: boolean }>;
+    remotePreflight: (params: {
+      host: string;
+      port: number;
+      username: string;
+    }) => Promise<{
+      ok: boolean;
+      home: string;
+      uname: string;
+      node_path: string;
+      node_version: string;
+      pi_path: string;
+      pi_cli_js: string;
+      error: string;
+    }>;
+    remoteListPaths: (params: {
+      host: string;
+      port: number;
+      username: string;
+      path: string;
+      include_hidden?: boolean;
+    }) => Promise<{ cwd: string; paths: string[] }>;
+    remoteTunnelStatus: () => Promise<{
+      connected: boolean;
+      local_port?: number;
+      remote_host?: string;
+      remote_port?: number;
+      username?: string;
+      remote_path?: string | null;
+    }>;
+    /** 审批档位 ⇄ pi-permission 扩展配置。前端下拉直写扩展的 config，
+     *  因为真正 block 工具执行的是扩展的 tool_call 钩子。 */
+    getPermissionMode: () => Promise<{
+      ok: boolean;
+      /** Helix 档位：ask（询问审批）/ auto（自动审批）/ full（完全访问） */
+      mode: string;
+      /** 扩展原生档位：strict / auto / approve / yolo */
+      extension_mode?: string;
+      /** false 等价 yolo（扩展约定），必须读出来否则会显示错 */
+      enabled?: boolean;
+      config_path?: string;
+      reason?: string;
+    }>;
+    setPermissionMode: (
+      mode: string,
+    ) => Promise<{
+      ok: boolean;
+      mode?: string;
+      extension_mode?: string;
+      enabled?: boolean;
+      changed?: boolean;
+      config_path?: string;
+      error?: string;
+    }>;
     setDelegationIdentities: (
       identities: Array<{ name: string; system_prompt: string }>,
     ) => Promise<{ success: boolean; changed?: boolean; error?: string }>;
@@ -303,27 +372,6 @@ export interface ElectronAPI {
     setSubagentModel: (name: string, model: string) => Promise<void>;
     // Delete a custom agent's .md (the extension's Delete unlinks the file).
     deleteSubagent: (name: string) => Promise<void>;
-    /**
-     * `@gotgenes/pi-permission-system` 的策略读写。
-     * pi 官方没有权限体系（见其 docs/security.md），工具级权限全靠这个扩展
-     * 注册 `tool_call` 实现，所以设置页读写的是**它的配置文件**，不是 Helix
-     * 自己另存一份 —— 两份并存会出现「设置里放行了、实际仍弹窗」的分裂。
-     *
-     * `policy` 就是配置文件里的 `permission` 对象；`null` 表示用 Helix 默认
-     * 策略。语义由扩展解释：规则**后匹配覆盖先匹配**，所以键的顺序有意义
-     * （宽规则在前、`deny` 在后）。
-     */
-    piPermissionsRead: () => Promise<{
-      installed: boolean;
-      configPath: string;
-      policy: any | null;
-      yoloMode: boolean;
-      raw: any;
-    }>;
-    piPermissionsWrite: (
-      policy?: any | null,
-      yoloMode?: boolean,
-    ) => Promise<{ ok: boolean; configPath: string }>;
     // Pi agent commands (extensions / skills / prompts / models)
     piListInstalled: () => Promise<{
       items: Array<{
@@ -544,6 +592,7 @@ export interface ElectronAPI {
       cb: (data: { host: string; username: string }) => void,
     ) => () => void;
   };
+
   isElectron: boolean;
 
   // ── Hooks (written into Helix' config.yaml `hooks:` block; backend fires them) ──

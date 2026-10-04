@@ -4,10 +4,9 @@ import {
   ArrowUp,
   Square,
   Zap,
-  Hand,
-  Clock,
-  AlertTriangle,
   FileText,
+  ShieldCheck,
+  ShieldQuestion,
   ChevronDown,
   Check,
   Plus,
@@ -16,12 +15,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { loadSessionMap } from "@/lib/session-map";
 import { useHelixStore } from "@/stores/helix-store";
 import type { ApprovalMode } from "@/stores/helix-types";
+import { APPROVAL_MODE_ITEMS } from "@/stores/helix-types";
 import { normalizeAcpContent } from "@/lib/text-utils";
 import { TranscriptMessage, formatDuration } from "./transcript-message";
 import {
   BUILTIN_SLASH_COMMANDS,
   runCompactCommand,
 } from "./slash-commands";
+
+/** 档位表里的 icon 是字符串（为了让 helix-types 不依赖 lucide），这里落地成组件。 */
+const MODE_ICONS = {
+  ShieldQuestion,
+  ShieldCheck,
+  Zap,
+  FileText,
+} as const;
 import { ContextUsageIndicator } from "./context-usage";
 import { ReasoningEffortControl } from "./agent-flow-panel";
 
@@ -199,8 +207,10 @@ export function BylinePanel() {
   // 工具条目标：覆盖值挂在旁路会话自己的 cid 上。还没有旁路会话时下拉
   // 禁用（写入没有落点；首个问题仍用全局默认起会话）。
   const btwCid = byCid ?? null;
-  const effectiveMode: ApprovalMode =
+  // 归一：磁盘上可能残留已删除的 accept_edits / dont_ask，落到 default。
+  const rawMode: ApprovalMode =
     (btwCid && approvalModeBySession[btwCid]) || approvalMode;
+  const effectiveMode: ApprovalMode = rawMode;
   const modelOverride = btwCid ? modelBySession[btwCid] : undefined;
   const effectiveModel = modelOverride?.model || apiConfig?.model || activeModel;
   // 候选列表与主线同一来源（provider store 的模型目录），另把当前生效值
@@ -221,17 +231,12 @@ export function BylinePanel() {
     return Array.from(set);
   }, [providers, providerModels, apiConfig?.model, activeModel, modelOverride]);
 
-  const MODE_ITEMS: Array<{
-    id: ApprovalMode;
-    icon: typeof Hand;
-    title: string;
-    desc: string;
-  }> = [
-    { id: "default", icon: Hand, title: "请求批准", desc: "全部需批准" },
-    { id: "accept_edits", icon: Clock, title: "替我审批", desc: "风险才批准" },
-    { id: "dont_ask", icon: AlertTriangle, title: "完全访问", desc: "完全放开" },
-    { id: "plan", icon: FileText, title: "制定计划", desc: "先规划后做" },
-  ];
+  // 档位表与主输入框共用同一份（helix-types 的 APPROVAL_MODE_ITEMS）——本地
+  // 复制一份必然出现「主界面两档、旁路四档」的对不上。
+  const MODE_ITEMS = APPROVAL_MODE_ITEMS.map((m) => ({
+    ...m,
+    icon: MODE_ICONS[m.icon],
+  }));
   const msgs = byCid
     ? chatMessages.filter((m) => m.sessionId === byCid)
     : [];
@@ -637,17 +642,20 @@ export function BylinePanel() {
                     data-tip="审批模式（仅本旁路会话）"
                     className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ui-text-sm2 transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
                   >
-                    {effectiveMode === "default" && <Hand className="size-3.5" />}
-                    {effectiveMode === "accept_edits" && (
-                      <Clock className="size-3.5" />
-                    )}
-                    {effectiveMode === "dont_ask" && (
-                      <AlertTriangle className="size-3.5" />
-                    )}
-                    {effectiveMode === "plan" && <FileText className="size-3.5" />}
-                    <span className="whitespace-nowrap">
-                      {MODE_ITEMS.find((m) => m.id === effectiveMode)?.title}
-                    </span>
+                    {(() => {
+                      const cur = MODE_ITEMS.find(
+                        (m) => m.id === effectiveMode,
+                      );
+                      const Icon = cur?.icon;
+                      return (
+                        <>
+                          {Icon && <Icon className="size-3.5" />}
+                          <span className="whitespace-nowrap">
+                            {cur?.title ?? "自动审批"}
+                          </span>
+                        </>
+                      );
+                    })()}
                     <ChevronDown className="size-3" />
                   </button>
                   <ContextUsageIndicator />
@@ -680,6 +688,16 @@ export function BylinePanel() {
                         onClick={() => {
                           setApprovalModeForSession(btwCid, mode.id);
                           setShowModeDropdown(false);
+                          // 权限档必须落到 pi-permission 的配置才真正生效
+                          // （真正 block 工具执行的是那个扩展的 tool_call 钩子）。
+                          // 旁路面板的档位是**全局**的（扩展按配置判定，不区分
+                          // 会话），所以这里也会改全局档 —— 与主输入框同一份状态，
+                          // 不会出现「主界面自动审批、旁路完全访问」。
+                          if (mode.id !== "plan") {
+                            void (window as any).electron?.helix?.setPermissionMode?.(
+                              mode.id,
+                            );
+                          }
                         }}
                         className={`w-full px-3 py-1.5 flex items-start gap-2 text-left hover:bg-muted/60 transition-colors ${
                           active ? "text-foreground" : "text-muted-foreground"

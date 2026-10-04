@@ -102,8 +102,29 @@ export async function resumeSession(sid: string): Promise<ResumeResult> {
       debug("[SessionResume] resume failed:", sid, kind, res.error);
       return { ok: false, code, error: String(res.error ?? "") };
     }
-    const restoredId = res?.session_id || res?.sessionID || sid;
-    return { ok: true, sessionId: restoredId, messages: res?.messages };
+    // 身份**永远以请求的 sid 为准**，不采纳后端回的那个值。
+    //
+    // 后端 `session/resume` 返回的 `session_id` 取自实例的 `current_session`，
+    // 而它与 map key 之间存在一个短窗口（restore 里 rekey → switch_session
+    // 之间，见 pi_gateway.rs::restore_session_instance）：窗口内 resume 会把
+    // pi 启动时自建的**内存态幽灵 sid**回传。那个 sid 从无 jsonl，一旦被采纳
+    // 写进 conversationSessions，之后每次都是 `no session file`。
+    //
+    // 契约上 resume = "按这个 sid 把原会话恢复起来"：实例在网关里就是以这个
+    // sid 注册的（map key 是路由键），所以后续所有 RPC 用请求值一定路由对。
+    // 后端给出别的值只说明它内部切了载体（如超窗会话的 `.trimmed.jsonl` 副
+    // 本），那属于实现细节，不该让前端的身份跟着漂移——那正是幽灵 sid 的入口。
+    // 真要换 sid 的路径只有 session/new，它自己会 rebind。
+    const returnedId = res?.session_id || res?.sessionID;
+    if (returnedId && returnedId !== sid) {
+      debug(
+        "[SessionResume] 后端返回的 sid 与请求不符，仍以请求值为准：",
+        sid,
+        "→",
+        returnedId,
+      );
+    }
+    return { ok: true, sessionId: sid, messages: res?.messages };
   } catch (err) {
     // serve/ACP 模式：RPC 失败直接 throw。
     debug("[SessionResume] resume threw:", sid, String(err));

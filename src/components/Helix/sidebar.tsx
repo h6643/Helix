@@ -10,10 +10,14 @@ import {
   Trash2,
   Folder,
   FolderOpen,
+  FolderPlus,
   FolderTree,
   Archive,
   Pin,
   RotateCcw,
+  Server,
+  Cloud,
+  Unplug,
   MoreVertical,
   Pencil,
   Copy,
@@ -31,13 +35,28 @@ import { createPortal } from "react-dom";
 import { useShallow } from "zustand/react/shallow";
 import { FileTreePanel } from "./file-tree-panel";
 import { captureContextBreakdown } from "@/lib/context-capture";
-import { isElectron, electronShell, helixApi } from "@/lib/electron-bridge";
+import {
+  isElectron,
+  electronShell,
+  electronDialog,
+  helixApi,
+} from "@/lib/electron-bridge";
 import { timeAgo } from "@/lib/format";
 import { persistence, type PersistedSession } from "@/lib/persist";
+import {
+  connectRemoteProject,
+  disconnectRemoteProject,
+  isRemoteWorkDir,
+  makeRemoteWorkDir,
+  parseRemoteWorkDir,
+  remoteAvailable,
+  remoteProjectLabel,
+  remoteProjectSubtitle,
+} from "@/lib/remote-projects";
 import { resolveBackendSid, removeConversationIndex } from "@/lib/session-map";
 import { mapBackendMessages } from "@/lib/session-resync";
 import { useGatewayStore } from "@/stores/gateway-store";
-import { useHelixStore } from "@/stores/helix-store";
+import { useHelixStore, type ExternalService } from "@/stores/helix-store";
 
 // Module-level in-flight dedup for session/prepare: the backend dedupes live
 // instances but not in-flight restore calls, so two concurrent prepares for
@@ -410,6 +429,55 @@ function ProjectActionsMenu({
   );
 }
 
+/**
+ * 远程模式下的「本地目录浏览器」占位。
+ *
+ * 存在的理由：所有本地 fs 驱动的视图（文件树、代码编辑器、diff 预览）在远程
+ * 模式下显示的都是**与 agent 实际工作目录无关**的本地内容。隐藏它们是对的，
+ * 但必须**说清为什么没了**，否则用户会以为侧边栏坏了。
+ */
+function RemoteModeNotice() {
+  const remoteMode = useHelixStore((s) => s.remoteMode);
+  if (!remoteMode) return null;
+  return (
+    <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+      <Server className="size-5 shrink-0 text-emerald-500/70" />
+      <p className="text-[calc(var(--helix-transcript-size)*0.9286)] font-medium text-sidebar-foreground/60">
+        远程模式
+      </p>
+      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] leading-relaxed text-sidebar-foreground/40">
+        agent 跑在
+        <br />
+        <span className="text-sidebar-foreground/60">{remoteMode.label}</span>
+        <br />
+        的
+        <span className="text-foreground/70">
+          {remoteMode.remotePath ?? "远端 home"}
+        </span>
+        <br />
+        本地文件与分支不再显示。
+      </p>
+    </div>
+  );
+}
+
+/**
+ * 「项目」列表的一行。本地行 `dir` 是本机绝对路径；远程行是
+ * `remote://<serviceId>` 虚拟键（见 lib/remote-projects.ts），**绝不能**把它
+ * 传给任何本地 fs / git / setWorkDir 调用。
+ */
+interface SidebarProject {
+  dir: string;
+  label: string;
+  kind: "local" | "remote";
+  sessions: PersistedSession[];
+  isPinned: boolean;
+  /** 远程行对应的服务器；本地行为 undefined。 */
+  service?: ExternalService;
+  /** 远程行：当前 agent 是否就跑在这台上（后端隧道状态对账结果）。 */
+  connected?: boolean;
+}
+
 export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   const {
     clearChat,
@@ -436,6 +504,22 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   const directoryProjectDir = useHelixStore((s) => s.directoryProjectDir);
   const toggleDirectoryProject = useHelixStore((s) => s.toggleDirectoryProject);
   const setRightSidebarTab = useHelixStore((s) => s.setRightSidebarTab);
+  // 远程服务器列表 = 「项目」里的远程行。连接态不在这里判：`remoteMode` 由
+  // useRemoteTunnelReconcile（挂在 helix-layout）现查后端 tunnel status 后写入，
+  // 侧边栏只读它的 serviceId，避免列表与实际连接各说各话。
+  const externalServices = useHelixStore((s) => s.externalServices);
+  const removeExternalService = useHelixStore((s) => s.removeExternalService);
+  const openRemoteWizard = useHelixStore((s) => s.openRemoteWizard);
+  const bumpRemoteStatusVersion = useHelixStore(
+    (s) => s.bumpRemoteStatusVersion,
+  );
+  // 远程模式：agent 在远端跑，本地 fs/git 驱动的视图全部让位（见 RemoteModeNotice）。
+  const remoteMode = useHelixStore((s) => s.remoteMode);
+  // 「项目」标题右侧 ＋ 的菜单（添加本地 / 远程项目），同一时刻最多开一个。
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  // 连接/断开是后端动作（要重启网关），期间该行显示 spinner 并禁点。
+  const [remoteBusyId, setRemoteBusyId] = useState<string | null>(null);
 
   // Re-render every minute so the relative '上次使用' timestamps stay fresh
   const [, setNowTick] = useState(0);
@@ -566,17 +650,23 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   }, [selectedWorkDir]);
 
   // Projects = unique workDirs from sessions + persisted folders + current selection
+  //
+  // 远程项目的对话用 `remote://<serviceId>/<path>` 虚拟键当 workDir（目录在另一台
+  // 机器上，本地没有对应路径）。它们**不进这个列表** —— 混进来会让 label 变成一串
+  // 乱码、点进去还会走本地 fs IPC。它们的对话归「远程项目」分段显示。
   const projects = useMemo(() => {
     const groups = new Map<string, PersistedSession[]>();
     for (const s of sessions) {
       if (s.isArchived) continue;
       if (!s.workDir || s.workDir === "/" || s.workDir === "\\") continue;
+      if (isRemoteWorkDir(s.workDir)) continue;
       const list = groups.get(s.workDir) || [];
       list.push(s);
       groups.set(s.workDir, list);
     }
     // Ensure all persisted folders appear, even with no sessions
     for (const folder of persistedFolders) {
+      if (isRemoteWorkDir(folder)) continue;
       if (!groups.has(folder)) {
         groups.set(folder, []);
       }
@@ -608,6 +698,49 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         );
       });
   }, [sessions, persistedFolders, pinnedProjectDirs]);
+
+  // ── 「项目」统一列表：本地目录 + 远程服务器 ─────────────────────────────
+  // 远程对话的 workDir 是 `remote://<serviceId>/<远端路径>` 虚拟键（目录在另一台
+  // 机器上），按 serviceId 归拢到该服务器名下 —— 于是远程行和本地行一样能展开看
+  // 对话，不必另开一个「远程项目」分段（两个列表就是两份真相）。
+  // 语义差别仍然保留：远程工作区是**全局单例**，连哪台由 config.yaml 决定、切换会
+  // 重启网关并打断正在跑的对话，所以点远程行只展开/收起，连接要显式按那个按钮。
+  const projectGroups = useMemo<SidebarProject[]>(() => {
+    const local: SidebarProject[] = projects.map((p) => ({
+      ...p,
+      kind: "local",
+    }));
+    const byService = new Map<string, PersistedSession[]>();
+    for (const s of sessions) {
+      if (s.isArchived) continue;
+      const parsed = parseRemoteWorkDir(s.workDir);
+      if (!parsed?.serviceId) continue;
+      const list = byService.get(parsed.serviceId) ?? [];
+      list.push(s);
+      byService.set(parsed.serviceId, list);
+    }
+    const remote: SidebarProject[] = externalServices.map((svc) => {
+      const sorted = (byService.get(svc.id) ?? []).sort((a, b) => {
+        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+        return (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt);
+      });
+      return {
+        dir: makeRemoteWorkDir(svc.id),
+        label: remoteProjectLabel(svc),
+        kind: "remote",
+        sessions: sorted,
+        isPinned: false,
+        service: svc,
+        connected: remoteMode?.serviceId === svc.id,
+      };
+    });
+    const lastUsed = (g: SidebarProject) =>
+      g.sessions[0]?.createdAt ?? g.sessions[0]?.savedAt ?? 0;
+    return [...local, ...remote].sort((a, b) => {
+      if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+      return lastUsed(b) - lastUsed(a);
+    });
+  }, [projects, sessions, externalServices, remoteMode]);
 
   // Standalone conversations (no workDir only)
   const conversations = useMemo(() => {
@@ -764,19 +897,31 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           activeSessionWorkDir: fresh.workDir ?? null,
         });
         if (fresh.workDir) {
-          await persistence.saveProjectFolder(fresh.workDir);
-          // 加载对话后把 selectedWorkDir 也切到对话所属项目，让 Git 分支选择器
-          // （agent-flow-panel 用 selectedWorkDir 作为 cwd）跟着对话走。只同步
-          // selectedWorkDir，绝不走 setWorkDir——那会触发"切换项目"副作用。
-          useHelixStore.getState().setSelectedWorkDir(fresh.workDir);
-          // 对齐主进程 workDir：历史对话只改前端 selectedWorkDir，主进程会残留在旧
-          // 项目 → 相对路径的 fs IPC（打开文件/diff 预览等）被拼到旧目录 → ENOENT。
-          // 用轻量 syncWorkDir（不重启网关、不持久化），绝不能走 setWorkDir——那会
-          // 触发“切换项目”副作用，打断正在运行的对话。
-          try {
-            await window.electron?.app?.syncWorkDir?.(fresh.workDir);
-          } catch {
-            /* best-effort */
+          // 远程项目的 workDir 是 `remote://<id>/<path>` 虚拟键，**不是本机
+          // 目录**。把它喂给下面三个本地通道会直接踩坑：
+          //   - saveProjectFolder → 进「本地项目」列表，下次渲染出一个乱码项目
+          //   - setSelectedWorkDir / syncWorkDir → 主进程 create_dir_all 报
+          //     os error 123（`:` 与 `/` 在 Windows 文件名里非法）
+          // 远程对话的「所属项目」由 workDir 里的 serviceId 表达，显示在
+          // 「远程项目」分段；这里只把它记成 activeSessionWorkDir，供
+          // session/new 判定「不要发 cwd」等逻辑用。
+          if (isRemoteWorkDir(fresh.workDir)) {
+            useHelixStore.getState().setSelectedWorkDir(null);
+          } else {
+            await persistence.saveProjectFolder(fresh.workDir);
+            // 加载对话后把 selectedWorkDir 也切到对话所属项目，让 Git 分支选择器
+            // （agent-flow-panel 用 selectedWorkDir 作为 cwd）跟着对话走。只同步
+            // selectedWorkDir，绝不走 setWorkDir——那会触发"切换项目"副作用。
+            useHelixStore.getState().setSelectedWorkDir(fresh.workDir);
+            // 对齐主进程 workDir：历史对话只改前端 selectedWorkDir，主进程会残留在旧
+            // 项目 → 相对路径的 fs IPC（打开文件/diff 预览等）被拼到旧目录 → ENOENT。
+            // 用轻量 syncWorkDir（不重启网关、不持久化），绝不能走 setWorkDir——那会
+            // 触发“切换项目”副作用，打断正在运行的对话。
+            try {
+              await window.electron?.app?.syncWorkDir?.(fresh.workDir);
+            } catch {
+              /* best-effort */
+            }
           }
         }
         useHelixStore.getState().setNoActiveConversation(false);
@@ -997,6 +1142,160 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     [setWorkDir, setSelectedWorkDir],
   );
 
+  // ＋ 菜单：点到菜单（含那颗 ＋）之外任意处就收起。
+  useEffect(() => {
+    if (!addMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (addMenuRef.current?.contains(e.target as Node)) return;
+      setAddMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [addMenuOpen]);
+
+  // 展开/收起某行的对话（远程行专用）。本地行走 handleSelectProject：它顺带把
+  // selectedWorkDir 切过去，而远程行不能 —— 远程工作区是全局单例，改连哪台要
+  // 重启网关、打断正在跑的对话，所以那件事必须留在显式的连接按钮上。
+  const toggleProjectExpanded = useCallback((dir: string) => {
+    setExpandedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(dir)) next.delete(dir);
+      else next.add(dir);
+      return next;
+    });
+  }, []);
+
+  // 远程行：连接 / 断开。连上后 agent 就跑在那台机器上（config.yaml 的
+  // pi.remote_rpc + pi.remote_cwd），网关会重启 —— 这是这个列表里唯一的
+  // 破坏性动作，所以只有这一颗按钮会做它，点行名只展开对话。
+  const handleRemoteToggle = useCallback(
+    async (project: SidebarProject) => {
+      const svc = project.service;
+      if (!svc || remoteBusyId) return;
+      if (project.connected) {
+        setRemoteBusyId(svc.id);
+        try {
+          await disconnectRemoteProject();
+          showToast({
+            type: "success",
+            title: "已断开远程项目",
+            description: `${remoteProjectLabel(svc)} — agent 回到本机运行。`,
+          });
+        } catch (e) {
+          showToast({
+            type: "error",
+            title: "断开失败",
+            description: String(e),
+          });
+        } finally {
+          setRemoteBusyId(null);
+          bumpRemoteStatusVersion();
+        }
+        return;
+      }
+      if (!svc.remotePath) {
+        // 没选过远端目录：回向导做体检 + 浏览，而不是拿 `~` 硬连（那会把 agent
+        // 丢到远端 home，用户以为连上了却在错误的项目里跑）。
+        openRemoteWizard({ serviceId: svc.id, step: 2 });
+        return;
+      }
+      setRemoteBusyId(svc.id);
+      try {
+        const { localPort } = await connectRemoteProject(svc, svc.remotePath);
+        showToast({
+          type: "success",
+          title: "已连接远程项目",
+          description: `${remoteProjectLabel(svc)}${
+            localPort ? `（隧道 127.0.0.1:${localPort}）` : ""
+          } — agent 现在远端跑。`,
+        });
+      } catch (e) {
+        showToast({ type: "error", title: "连接失败", description: String(e) });
+      } finally {
+        setRemoteBusyId(null);
+        bumpRemoteStatusVersion();
+      }
+    },
+    [
+      bumpRemoteStatusVersion,
+      openRemoteWizard,
+      remoteBusyId,
+      showToast,
+    ],
+  );
+
+  const handleRemoteDelete = useCallback(
+    (project: SidebarProject) => {
+      const svc = project.service;
+      if (!svc) return;
+      const label = remoteProjectLabel(svc);
+      if (!confirm(`确定删除远程项目「${label}」？`)) return;
+      // 正连着这台时先断开，否则 config.yaml 里的 remote_rpc 还指着一条
+      // 已经没有对应条目的隧道，下次启动会连到一个「幽灵远程」。
+      if (project.connected) {
+        void disconnectRemoteProject().catch(() => {});
+      }
+      removeExternalService(svc.id);
+      bumpRemoteStatusVersion();
+      showToast({ type: "success", title: "已删除远程项目", description: label });
+    },
+    [bumpRemoteStatusVersion, removeExternalService, showToast],
+  );
+
+  // ＋ → 添加本地项目：选一个已存在的本机目录当项目。远程模式下先确认再断开，
+  // 否则会出现「selectedWorkDir 指着本地、agent 还在远端」的两份真相。
+  const handleAddLocalProject = useCallback(async () => {
+    setAddMenuOpen(false);
+    if (!isElectron()) {
+      showToast({ type: "warning", title: "浏览器预览模式不能选择目录" });
+      return;
+    }
+    let dir: string | null = null;
+    try {
+      dir = await electronDialog.openDirectory(selectedWorkDir ?? undefined);
+    } catch (e) {
+      console.error("Failed to open directory picker:", e);
+      showToast({ type: "error", title: "打开目录选择器失败" });
+      return;
+    }
+    if (!dir) return;
+    if (remoteMode) {
+      const ok = confirm(
+        `当前 agent 跑在远程项目「${remoteMode.label}」。\n\n选择本地项目会断开远程连接并重启网关，正在运行的对话会被打断。\n\n继续？`,
+      );
+      if (!ok) return;
+      try {
+        await disconnectRemoteProject();
+        bumpRemoteStatusVersion();
+      } catch (e) {
+        showToast({
+          type: "error",
+          title: "断开远程失败",
+          description: String(e),
+        });
+        return;
+      }
+    }
+    try {
+      await persistence.saveProjectFolder(dir);
+      void loadPersistedFolders();
+      setExpandedProjects((prev) => new Set(prev).add(dir as string));
+      useHelixStore.getState().setCurrentSessionId(null);
+      useHelixStore.getState().setNoActiveConversation(false);
+      await setWorkDir(dir);
+    } catch (e) {
+      console.error("Failed to add local project:", e);
+      showToast({ type: "error", title: "添加本地项目失败" });
+    }
+  }, [
+    bumpRemoteStatusVersion,
+    loadPersistedFolders,
+    remoteMode,
+    selectedWorkDir,
+    setWorkDir,
+    showToast,
+  ]);
+
   const handlePinProject = useCallback(
     async (dir: string) => {
       try {
@@ -1191,14 +1490,22 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         /* Full-area directory explorer: takes over the ENTIRE left sidebar
            (not a small inset panel) while active. The header (back / name /
            refresh) and the search box both live inside FileTreePanel, with the
-           search box rendered above the header. */
-        <FileTreePanel
-          rootDir={directoryProjectDir}
-          reloadKey={dirReloadKey}
-          onOpenFile={() => setRightSidebarTab("code")}
-          onBack={() => toggleDirectoryProject(directoryProjectDir)}
-          onRefresh={() => setDirReloadKey((k) => k + 1)}
-        />
+           search box rendered above the header.
+
+           远程模式下**不渲染**：`rootDir` 是本地路径，FileTreePanel 走
+           `fs.scanTree`（本机 IPC），展示的是本机文件树 —— 而 agent 在远端
+           改的是远端文件。给一份「打开就能编辑」错觉的本地树，比不给更糟。 */
+        remoteMode ? (
+          <RemoteModeNotice />
+        ) : (
+          <FileTreePanel
+            rootDir={directoryProjectDir}
+            reloadKey={dirReloadKey}
+            onOpenFile={() => setRightSidebarTab("code")}
+            onBack={() => toggleDirectoryProject(directoryProjectDir)}
+            onRefresh={() => setDirReloadKey((k) => k + 1)}
+          />
+        )
       ) : (
         <>
           {/* Top actions */}
@@ -1230,7 +1537,13 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
 
           {/* Unified scroll: single scrollbar covers projects + standalone conversations */}
           <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
-            <div className="flex items-center px-4 pt-1.5 pb-0.5 group/section">
+            {/* 「项目」= 本地目录 + 远程服务器，一张列表一套行渲染。标题右侧的 ＋
+                是唯一的添加入口（本地挑目录 / 远程走三步向导），行内不再挂「添加
+                远程项目」占位行 —— 列表里每一行都是一个真实项目。 */}
+            <div
+              ref={addMenuRef}
+              className="relative flex items-center px-4 pt-1.5 pb-0.5 group/section"
+            >
               <button
                 onClick={() => setRecentCollapsed((prev) => !prev)}
                 className="flex items-center gap-1 flex-1 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium tracking-normal text-sidebar-foreground/50 hover:text-sidebar-foreground/70 transition-colors"
@@ -1244,8 +1557,38 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                 >
                   <path d="m9 18 6-6-6-6" />
                 </svg>
-                <span>最近</span>
+                <span>项目</span>
               </button>
+              <button
+                onClick={() => setAddMenuOpen((v) => !v)}
+                className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                data-tip="添加项目"
+              >
+                <Plus className="size-3.5" />
+              </button>
+              {addMenuOpen && (
+                <div className="absolute right-2 top-full z-[120] mt-0.5 w-40 bg-card border border-border/80 rounded-lg shadow-xl py-1">
+                  <button
+                    onClick={() => void handleAddLocalProject()}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                  >
+                    <FolderPlus className="size-3.5 shrink-0" />
+                    添加本地项目
+                  </button>
+                  {remoteAvailable() && (
+                    <button
+                      onClick={() => {
+                        setAddMenuOpen(false);
+                        openRemoteWizard();
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                    >
+                      <Cloud className="size-3.5 shrink-0" />
+                      添加远程项目
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
             {!recentCollapsed && (
@@ -1254,13 +1597,18 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                   <div className="flex items-center justify-center py-4">
                     <Loader2 className="size-4 animate-spin text-sidebar-foreground/30" />
                   </div>
-                ) : projects.length > 0 ? (
+                ) : projectGroups.length > 0 ? (
                   <div className="space-y-1">
-                    {projects.map((project) => {
+                    {projectGroups.map((project) => {
+                      const isRemote = project.kind === "remote";
+                      const svc = project.service;
+                      const connected = !!project.connected;
+                      const remoteBusy = !!svc && remoteBusyId === svc.id;
                       const isExpanded = expandedProjects.has(project.dir);
                       // 点击对话后项目不高亮：只有「未打开任何对话、正在浏览所选项目」时
                       // 才高亮该项目的目录行，避免点开对话后某项目行一直亮着。
                       const isSelectedProject =
+                        !isRemote &&
                         !currentSessionId &&
                         selectedWorkDir === project.dir &&
                         // 计划/插件/看板等全屏面板打开时，项目不高亮——避免两处同时亮
@@ -1275,62 +1623,144 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                             className={`w-full flex items-center rounded-lg px-3 py-1.5 transition-colors ${
                               isSelectedProject
                                 ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                                : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground/90"
+                                : connected
+                                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground/90"
                             }`}
                           >
                             <div
-                              onClick={() => handleSelectProject(project.dir)}
-                              className="flex items-center gap-2 flex-1 cursor-pointer"
+                              onClick={() =>
+                                isRemote
+                                  ? toggleProjectExpanded(project.dir)
+                                  : handleSelectProject(project.dir)
+                              }
+                              className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
                             >
                               {isSelectedProject && (
                                 <div className="w-[3px] h-4 bg-primary rounded-full shrink-0 -ml-1.5 mr-0.5" />
                               )}
-                              <Folder
-                                className={`size-3.5 shrink-0 ${isSelectedProject ? "text-primary" : "text-sidebar-foreground/30"}`}
-                              />
+                              {isRemote ? (
+                                <Cloud
+                                  className={`size-3.5 shrink-0 ${connected ? "" : "text-sidebar-foreground/30"}`}
+                                />
+                              ) : (
+                                <Folder
+                                  className={`size-3.5 shrink-0 ${isSelectedProject ? "text-primary" : "text-sidebar-foreground/30"}`}
+                                />
+                              )}
                               <span
                                 className="text-[calc(var(--helix-transcript-size)*0.8929)] truncate flex-1"
-                                data-tip={project.label}
+                                data-tip={
+                                  isRemote && svc
+                                    ? `${remoteProjectSubtitle(svc)}${
+                                        svc.remotePath ? ` · ${svc.remotePath}` : ""
+                                      }`
+                                    : project.label
+                                }
                               >
                                 {project.label.length > 12
                                   ? project.label.slice(0, 12) + "…"
                                   : project.label}
                               </span>
+                              {/* 远程行的状态是**事实**，常驻不随 hover 隐藏：
+                                  连着 = agent 正跑在这台；没选过目录 = 点连接会
+                                  先去向导挑目录。 */}
+                              {isRemote && connected && (
+                                <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] opacity-80">
+                                  已连接
+                                </span>
+                              )}
+                              {isRemote && !connected && !svc?.remotePath && (
+                                <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] text-sidebar-foreground/30">
+                                  未选目录
+                                </span>
+                              )}
                             </div>
                             <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleNewProjectChat(project.dir);
-                                }}
-                                className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
-                                data-tip="新建对话"
-                              >
-                                <Plus className="size-3.5" />
-                              </button>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleDirectoryProject(project.dir);
-                                }}
-                                className={`shrink-0 p-1 rounded-lg transition-colors ${directoryProjectDir === project.dir ? "text-primary bg-primary/10" : "text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"}`}
-                                data-tip="打开目录"
-                              >
-                                <FolderTree className="size-3.5" />
-                              </button>
-                              <ProjectActionsMenu
-                                isPinned={project.isPinned}
-                                onPin={() => handlePinProject(project.dir)}
-                                onArchive={() =>
-                                  handleArchiveProject(project.dir)
-                                }
-                                onDelete={() =>
-                                  handleDeleteProject(project.dir)
-                                }
-                                onShowInExplorer={() =>
-                                  handleRevealInExplorer(project.dir)
-                                }
-                              />
+                              {isRemote ? (
+                                <>
+                                  {connected && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleNewTask();
+                                      }}
+                                      className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                                      data-tip="新建对话"
+                                    >
+                                      <Plus className="size-3.5" />
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void handleRemoteToggle(project);
+                                    }}
+                                    disabled={remoteBusy}
+                                    className={`shrink-0 p-1 rounded-lg transition-colors ${
+                                      connected
+                                        ? "text-red-500/70 hover:text-red-500 hover:bg-red-500/10"
+                                        : "text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
+                                    } disabled:opacity-50`}
+                                    data-tip={
+                                      connected
+                                        ? "断开（网关会重启）"
+                                        : svc?.remotePath
+                                          ? `连接（${svc.remotePath}）`
+                                          : "去向导选择远端目录"
+                                    }
+                                  >
+                                    {remoteBusy ? (
+                                      <Loader2 className="size-3.5 animate-spin" />
+                                    ) : connected ? (
+                                      <Unplug className="size-3.5" />
+                                    ) : (
+                                      <Cloud className="size-3.5" />
+                                    )}
+                                  </button>
+                                  <ProjectActionsMenu
+                                    onDelete={() =>
+                                      handleRemoteDelete(project)
+                                    }
+                                  />
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleNewProjectChat(project.dir);
+                                    }}
+                                    className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                                    data-tip="新建对话"
+                                  >
+                                    <Plus className="size-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleDirectoryProject(project.dir);
+                                    }}
+                                    className={`shrink-0 p-1 rounded-lg transition-colors ${directoryProjectDir === project.dir ? "text-primary bg-primary/10" : "text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"}`}
+                                    data-tip="打开目录"
+                                  >
+                                    <FolderTree className="size-3.5" />
+                                  </button>
+                                  <ProjectActionsMenu
+                                    isPinned={project.isPinned}
+                                    onPin={() => handlePinProject(project.dir)}
+                                    onArchive={() =>
+                                      handleArchiveProject(project.dir)
+                                    }
+                                    onDelete={() =>
+                                      handleDeleteProject(project.dir)
+                                    }
+                                    onShowInExplorer={() =>
+                                      handleRevealInExplorer(project.dir)
+                                    }
+                                  />
+                                </>
+                              )}
                             </div>
                           </div>
                           {isExpanded && (
@@ -1424,7 +1854,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                                                 // Update order in persistence by re-saving with createdAt shuffle
                                                 try {
                                                   await persistence.reorderSessions(
-                                                    project.dir,
                                                     updated.map((s) => s.id),
                                                   );
                                                 } catch {
