@@ -297,7 +297,7 @@ function WizardBody() {
                   <input
                     value={host}
                     onChange={(e) => setHost(e.target.value)}
-                    placeholder="192.168.12.130"
+                    placeholder="192.168.xx.xx"
                     className={cn(inputCls, "pl-8")}
                   />
                   <Globe className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
@@ -309,7 +309,7 @@ function WizardBody() {
                     <input
                       value={user}
                       onChange={(e) => setUser(e.target.value)}
-                      placeholder="ruowu"
+                      placeholder="xxx"
                       className={cn(inputCls, "pl-8")}
                     />
                     <User className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/35" />
@@ -465,14 +465,6 @@ function WizardBody() {
                     ))
                   )}
                 </div>
-              </div>
-
-              <div className="flex items-start gap-1.5 px-2.5 py-2 rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-400 text-[calc(var(--helix-transcript-size)*0.8571)]">
-                <Server className="size-3.5 shrink-0 mt-0.5" />
-                <span>
-                  选定后一次完成：传 bridge → 远端起 node → 本机开隧道 → 切远程模式。
-                  这会重启网关，正在跑的对话会被打断。
-                </span>
               </div>
               {connErr && <ErrorLine text={connErr} />}
             </>

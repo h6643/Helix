@@ -1,6 +1,18 @@
 import type { HooksConfig } from "@/lib/hooks-config";
 import type { ScheduledTask } from "@/stores/helix-store";
 
+/**
+ * `git.diffNumstatFull` 失败时后端给的原因分类（`src-tauri/src/git.rs`）。
+ * 前端据此分别说人话：把这些都渲染成「没有未提交的更改」会让「云端对话 /
+ * 不是 git 仓库 / 找不到 git / 目录不存在」看起来像「确实没改动」。
+ */
+export type GitNumstatFailureCode =
+  | "work_dir_not_found"
+  | "git_unavailable"
+  | "git_timeout"
+  | "not_a_repository"
+  | "git_failed";
+
 export interface ElectronAPI {
   fs: {
     read: (filePath: string) => Promise<string>;
@@ -279,9 +291,14 @@ export interface ElectronAPI {
      *  因为真正 block 工具执行的是扩展的 tool_call 钩子。 */
     getPermissionMode: () => Promise<{
       ok: boolean;
-      /** Helix 档位：ask（询问审批）/ auto（自动审批）/ full（完全访问） */
-      mode: string;
-      /** 扩展原生档位：strict / auto / approve / yolo */
+      /** Helix 档位：ask（询问审批）/ auto（自动审批）/ full（完全访问）。
+       *  ok=false 时为 null —— 读不到真相，调用方自己决定怎么显示。 */
+      mode: string | null;
+      /** ok=false 时给出：配置文件是否存在。false ⇒ 扩展会自建 yolo 默认；
+       *  true（坏 JSON/不可读）⇒ 扩展回落 yolo。两种都是「实际全放行」。 */
+      exists?: boolean;
+      /** 扩展原生档位：strict / auto / yolo（扩展另有 Helix 不用的 approve 档）。
+       *  `mode` 是它归一后的 Helix 档位，两个都要读：归一会抹平差异。 */
       extension_mode?: string;
       /** false 等价 yolo（扩展约定），必须读出来否则会显示错 */
       enabled?: boolean;
@@ -498,6 +515,7 @@ export interface ElectronAPI {
       cwd?: string | null,
     ) => Promise<{
       ok: boolean;
+      code?: GitNumstatFailureCode;
       files?: {
         path: string;
         added: number;

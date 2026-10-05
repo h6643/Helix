@@ -63,6 +63,7 @@ const TOOL_LABELS: Record<string, string> = {
   browser_type: "浏览器输入",
   browser_screenshot: "浏览器截图",
   browser_get_html: "获取页面HTML",
+  describe_image: "视觉读图",
 };
 
 export function getToolLabel(toolName: string): string {
@@ -98,6 +99,7 @@ export function extractCommandSnippet(
     "tool_input",
     "pattern",
     "file_glob",
+    "image_path",
     "path",
     "file_path",
     "context",

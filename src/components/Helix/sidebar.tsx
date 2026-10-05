@@ -15,7 +15,6 @@ import {
   Archive,
   Pin,
   RotateCcw,
-  Server,
   Cloud,
   Unplug,
   MoreVertical,
@@ -46,12 +45,12 @@ import { persistence, type PersistedSession } from "@/lib/persist";
 import {
   connectRemoteProject,
   disconnectRemoteProject,
+  findServiceByRemoteWorkDir,
   isRemoteWorkDir,
-  makeRemoteWorkDir,
-  parseRemoteWorkDir,
   remoteAvailable,
   remoteProjectLabel,
   remoteProjectSubtitle,
+  remoteWorkDirForService,
 } from "@/lib/remote-projects";
 import { resolveBackendSid, removeConversationIndex } from "@/lib/session-map";
 import { mapBackendMessages } from "@/lib/session-resync";
@@ -430,40 +429,8 @@ function ProjectActionsMenu({
 }
 
 /**
- * 远程模式下的「本地目录浏览器」占位。
- *
- * 存在的理由：所有本地 fs 驱动的视图（文件树、代码编辑器、diff 预览）在远程
- * 模式下显示的都是**与 agent 实际工作目录无关**的本地内容。隐藏它们是对的，
- * 但必须**说清为什么没了**，否则用户会以为侧边栏坏了。
- */
-function RemoteModeNotice() {
-  const remoteMode = useHelixStore((s) => s.remoteMode);
-  if (!remoteMode) return null;
-  return (
-    <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
-      <Server className="size-5 shrink-0 text-emerald-500/70" />
-      <p className="text-[calc(var(--helix-transcript-size)*0.9286)] font-medium text-sidebar-foreground/60">
-        远程模式
-      </p>
-      <p className="text-[calc(var(--helix-transcript-size)*0.8571)] leading-relaxed text-sidebar-foreground/40">
-        agent 跑在
-        <br />
-        <span className="text-sidebar-foreground/60">{remoteMode.label}</span>
-        <br />
-        的
-        <span className="text-foreground/70">
-          {remoteMode.remotePath ?? "远端 home"}
-        </span>
-        <br />
-        本地文件与分支不再显示。
-      </p>
-    </div>
-  );
-}
-
-/**
  * 「项目」列表的一行。本地行 `dir` 是本机绝对路径；远程行是
- * `remote://<serviceId>` 虚拟键（见 lib/remote-projects.ts），**绝不能**把它
+ * `remote://<user@host:port>` 虚拟键（见 lib/remote-projects.ts），**绝不能**把它
  * 传给任何本地 fs / git / setWorkDir 调用。
  */
 interface SidebarProject {
@@ -513,7 +480,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   const bumpRemoteStatusVersion = useHelixStore(
     (s) => s.bumpRemoteStatusVersion,
   );
-  // 远程模式：agent 在远端跑，本地 fs/git 驱动的视图全部让位（见 RemoteModeNotice）。
+  // 远程隧道状态：只用来给远程行判「连没连」（serviceId）。本地 fs/git 视图
+  // （文件树浏览器、@ 候选、分支芯片）**不读它** —— 双通道下它们跟着当前对话
+  // 的 workDir 走，见 agent-flow-panel 的 conversationIsRemote。
   const remoteMode = useHelixStore((s) => s.remoteMode);
   // 「项目」标题右侧 ＋ 的菜单（添加本地 / 远程项目），同一时刻最多开一个。
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -590,7 +559,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     new Set(),
   );
-  const [recentCollapsed, setRecentCollapsed] = useState(false);
   // Bumped to force the full-area directory view's FileTreePanel to reload.
   const [dirReloadKey, setDirReloadKey] = useState(0);
 
@@ -651,9 +619,10 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
 
   // Projects = unique workDirs from sessions + persisted folders + current selection
   //
-  // 远程项目的对话用 `remote://<serviceId>/<path>` 虚拟键当 workDir（目录在另一台
-  // 机器上，本地没有对应路径）。它们**不进这个列表** —— 混进来会让 label 变成一串
-  // 乱码、点进去还会走本地 fs IPC。它们的对话归「远程项目」分段显示。
+  // 远程项目的对话用 `remote://<user@host:port>/<path>` 虚拟键当 workDir（目录在
+  // 另一台机器上，本地没有对应路径）。它们**不进这个列表** —— 混进来会让 label
+  // 变成一串乱码、点进去还会走本地 fs IPC。它们归下面「项目」里那台服务器的
+  // 远程行（见 remoteBuckets）。
   const projects = useMemo(() => {
     const groups = new Map<string, PersistedSession[]>();
     for (const s of sessions) {
@@ -700,9 +669,34 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   }, [sessions, persistedFolders, pinnedProjectDirs]);
 
   // ── 「项目」统一列表：本地目录 + 远程服务器 ─────────────────────────────
-  // 远程对话的 workDir 是 `remote://<serviceId>/<远端路径>` 虚拟键（目录在另一台
-  // 机器上），按 serviceId 归拢到该服务器名下 —— 于是远程行和本地行一样能展开看
+  // 远程对话的 workDir 是 `remote://<user@host:port>/<远端路径>` 虚拟键（目录在另
+  // 一台机器上），按机器身份归拢到该服务器名下 —— 于是远程行和本地行一样能展开看
   // 对话，不必另开一个「远程项目」分段（两个列表就是两份真相）。
+  // 对不上任何服务器的键（历史上用行 id 当身份、服务器被删过）进 orphan：它们仍然
+  // 能在「对话」里打开。认不出主人 ≠ 不存在，静默丢掉用户的对话是不可接受的。
+  const remoteBuckets = useMemo(() => {
+    const byService = new Map<string, PersistedSession[]>();
+    const orphan: PersistedSession[] = [];
+    for (const s of sessions) {
+      if (s.isArchived) continue;
+      if (!isRemoteWorkDir(s.workDir)) continue;
+      const svc = findServiceByRemoteWorkDir(externalServices, s.workDir);
+      if (!svc) {
+        orphan.push(s);
+        continue;
+      }
+      const list = byService.get(svc.id) ?? [];
+      list.push(s);
+      byService.set(svc.id, list);
+    }
+    const sort = (list: PersistedSession[]) =>
+      [...list].sort((a, b) => {
+        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+        return (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt);
+      });
+    return { byService, orphan: sort(orphan) };
+  }, [sessions, externalServices]);
+
   // 语义差别仍然保留：远程工作区是**全局单例**，连哪台由 config.yaml 决定、切换会
   // 重启网关并打断正在跑的对话，所以点远程行只展开/收起，连接要显式按那个按钮。
   const projectGroups = useMemo<SidebarProject[]>(() => {
@@ -710,47 +704,34 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       ...p,
       kind: "local",
     }));
-    const byService = new Map<string, PersistedSession[]>();
-    for (const s of sessions) {
-      if (s.isArchived) continue;
-      const parsed = parseRemoteWorkDir(s.workDir);
-      if (!parsed?.serviceId) continue;
-      const list = byService.get(parsed.serviceId) ?? [];
-      list.push(s);
-      byService.set(parsed.serviceId, list);
-    }
-    const remote: SidebarProject[] = externalServices.map((svc) => {
-      const sorted = (byService.get(svc.id) ?? []).sort((a, b) => {
-        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
-        return (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt);
-      });
-      return {
-        dir: makeRemoteWorkDir(svc.id),
-        label: remoteProjectLabel(svc),
-        kind: "remote",
-        sessions: sorted,
-        isPinned: false,
-        service: svc,
-        connected: remoteMode?.serviceId === svc.id,
-      };
-    });
+    const remote: SidebarProject[] = externalServices.map((svc) => ({
+      dir: remoteWorkDirForService(svc),
+      label: remoteProjectLabel(svc),
+      kind: "remote",
+      sessions: remoteBuckets.byService.get(svc.id) ?? [],
+      isPinned: false,
+      service: svc,
+      connected: remoteMode?.serviceId === svc.id,
+    }));
     const lastUsed = (g: SidebarProject) =>
       g.sessions[0]?.createdAt ?? g.sessions[0]?.savedAt ?? 0;
     return [...local, ...remote].sort((a, b) => {
+      // 云端项目恒在最上面：整台 Helix 同时只连一台远端，它才是「当前项目」，
+      // 不该被本地目录的活跃时间挤下去。
+      if (a.kind !== b.kind) return a.kind === "remote" ? -1 : 1;
       if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
       return lastUsed(b) - lastUsed(a);
     });
-  }, [projects, sessions, externalServices, remoteMode]);
+  }, [projects, remoteBuckets, externalServices, remoteMode]);
 
-  // Standalone conversations (no workDir only)
+  // Standalone conversations: 没有项目的对话 + 认不出服务器的远程对话。
   const conversations = useMemo(() => {
-    return sessions
-      .filter((s) => !s.isArchived && !s.workDir)
-      .sort((a, b) => {
-        if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
-        return (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt);
-      });
-  }, [sessions]);
+    const local = sessions.filter((s) => !s.isArchived && !s.workDir);
+    return [...local, ...remoteBuckets.orphan].sort((a, b) => {
+      if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+      return (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt);
+    });
+  }, [sessions, remoteBuckets]);
 
   // Concurrent multi-session design: switching / creating conversations NEVER
   // interrupts a running agent. Each run streams into its own per-session
@@ -786,6 +767,20 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         await useHelixStore.getState().flushSessionPersist();
         useHelixStore.getState().clearExecutionFlow();
         clearChat();
+        useHelixStore.getState().setNoActiveConversation(false);
+        useHelixStore.getState().setCurrentSessionId(null);
+        // 远程项目行：`dir` 是 `remote://…` 虚拟键，**不是本机目录**。走下面任何
+        // 一条本地通道都会炸：setWorkDir → 主进程 create_dir_all 把 `remote://…`
+        // 当相对路径 join（Windows 下 `:` `/` 非法 → os error 123）；
+        // saveProjectFolder → 远程键混进「本地项目」列表。
+        // 远程草稿的项目身份只写 activeSessionWorkDir —— 发消息时 session/new 从
+        // 那里读出 remote_cwd，落盘时 resolveSessionWorkDir 用它当 workDir。
+        // 隧道不在这个函数里连：没连上的远程行走远程行的连接按钮。
+        if (isRemoteWorkDir(dir)) {
+          useHelixStore.getState().setSelectedWorkDir(null);
+          useHelixStore.setState({ activeSessionWorkDir: dir });
+          return;
+        }
         if (isElectron()) {
           try {
             await setWorkDir(dir);
@@ -798,8 +793,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         }
         // Double-check: clearChat wipes selectedWorkDir, restore it to the target project.
         useHelixStore.getState().setSelectedWorkDir(dir);
-        useHelixStore.getState().setNoActiveConversation(false);
-        useHelixStore.getState().setCurrentSessionId(null);
         await persistence.saveProjectFolder(dir);
       } catch (e) {
         console.error("Failed to switch project for new chat:", e);
@@ -902,9 +895,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           //   - saveProjectFolder → 进「本地项目」列表，下次渲染出一个乱码项目
           //   - setSelectedWorkDir / syncWorkDir → 主进程 create_dir_all 报
           //     os error 123（`:` 与 `/` 在 Windows 文件名里非法）
-          // 远程对话的「所属项目」由 workDir 里的 serviceId 表达，显示在
-          // 「远程项目」分段；这里只把它记成 activeSessionWorkDir，供
-          // session/new 判定「不要发 cwd」等逻辑用。
+          // 远程对话的「所属项目」由 workDir 里的机器身份（`user@host:port`）表达，
+          // 在「项目」列表里对应那台服务器那一行；这里只把它记成
+          // activeSessionWorkDir，供 session/new 判定「不要发 cwd」等逻辑用。
           if (isRemoteWorkDir(fresh.workDir)) {
             useHelixStore.getState().setSelectedWorkDir(null);
           } else {
@@ -1129,6 +1122,12 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           else next.add(dir);
           return next;
         });
+        // 草稿（没打开对话）跟着项目行走：把可能残留的远程草稿键清掉，否则
+        // 「界面显示本地项目、新对话却按 remote:// 键 spawn」。打开着的对话不动
+        // —— 它的 cwd 在 jsonl 头部就定死了，改它只会让界面说谎。
+        if (!useHelixStore.getState().currentSessionId) {
+          useHelixStore.setState({ activeSessionWorkDir: null });
+        }
         await persistence.saveProjectFolder(dir);
         if (isElectron()) {
           await setWorkDir(dir);
@@ -1242,8 +1241,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     [bumpRemoteStatusVersion, removeExternalService, showToast],
   );
 
-  // ＋ → 添加本地项目：选一个已存在的本机目录当项目。远程模式下先确认再断开，
-  // 否则会出现「selectedWorkDir 指着本地、agent 还在远端」的两份真相。
+  // ＋ → 添加本地项目：选一个已存在的本机目录当项目。双通道下这**不动**隧道：
+  // 加一个本地项目跟「有一条远程隧道开着」是两件不相干的事，旧实现先 confirm 再
+  // disconnectRemoteProject 是因为那时远程是全局单开关，选本地目录就等于放弃远程。
   const handleAddLocalProject = useCallback(async () => {
     setAddMenuOpen(false);
     if (!isElectron()) {
@@ -1259,23 +1259,6 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       return;
     }
     if (!dir) return;
-    if (remoteMode) {
-      const ok = confirm(
-        `当前 agent 跑在远程项目「${remoteMode.label}」。\n\n选择本地项目会断开远程连接并重启网关，正在运行的对话会被打断。\n\n继续？`,
-      );
-      if (!ok) return;
-      try {
-        await disconnectRemoteProject();
-        bumpRemoteStatusVersion();
-      } catch (e) {
-        showToast({
-          type: "error",
-          title: "断开远程失败",
-          description: String(e),
-        });
-        return;
-      }
-    }
     try {
       await persistence.saveProjectFolder(dir);
       void loadPersistedFolders();
@@ -1287,14 +1270,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       console.error("Failed to add local project:", e);
       showToast({ type: "error", title: "添加本地项目失败" });
     }
-  }, [
-    bumpRemoteStatusVersion,
-    loadPersistedFolders,
-    remoteMode,
-    selectedWorkDir,
-    setWorkDir,
-    showToast,
-  ]);
+  }, [loadPersistedFolders, selectedWorkDir, setWorkDir, showToast]);
 
   const handlePinProject = useCallback(
     async (dir: string) => {
@@ -1492,20 +1468,16 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
            refresh) and the search box both live inside FileTreePanel, with the
            search box rendered above the header.
 
-           远程模式下**不渲染**：`rootDir` 是本地路径，FileTreePanel 走
-           `fs.scanTree`（本机 IPC），展示的是本机文件树 —— 而 agent 在远端
-           改的是远端文件。给一份「打开就能编辑」错觉的本地树，比不给更糟。 */
-        remoteMode ? (
-          <RemoteModeNotice />
-        ) : (
-          <FileTreePanel
-            rootDir={directoryProjectDir}
-            reloadKey={dirReloadKey}
-            onOpenFile={() => setRightSidebarTab("code")}
-            onBack={() => toggleDirectoryProject(directoryProjectDir)}
-            onRefresh={() => setDirReloadKey((k) => k + 1)}
-          />
-        )
+           `directoryProjectDir` 恒为**本机路径**（只有本地项目行给「打开目录」
+           按钮），所以它展示什么与隧道在不在无关 —— 双通道下远程对话照样可以
+           浏览本地项目。 */
+        <FileTreePanel
+          rootDir={directoryProjectDir}
+          reloadKey={dirReloadKey}
+          onOpenFile={() => setRightSidebarTab("code")}
+          onBack={() => toggleDirectoryProject(directoryProjectDir)}
+          onRefresh={() => setDirReloadKey((k) => k + 1)}
+        />
       ) : (
         <>
           {/* Top actions */}
@@ -1544,24 +1516,19 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
               ref={addMenuRef}
               className="relative flex items-center px-4 pt-1.5 pb-0.5 group/section"
             >
-              <button
-                onClick={() => setRecentCollapsed((prev) => !prev)}
-                className="flex items-center gap-1 flex-1 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium tracking-normal text-sidebar-foreground/50 hover:text-sidebar-foreground/70 transition-colors"
-              >
-                <svg
-                  className={`size-3 transition-transform ${recentCollapsed ? "" : "rotate-90"}`}
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                >
-                  <path d="m9 18 6-6-6-6" />
-                </svg>
-                <span>项目</span>
-              </button>
+              <span className="flex-1 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium tracking-normal text-sidebar-foreground/50">
+                项目
+              </span>
+              {/* ＋ 平时不占视觉（悬停到这一行才出现），打开菜单期间常驻——否则
+                  鼠标从按钮移进菜单的瞬间它会消失。不可见时连点击一起关掉，避免
+                  留一个看不见的命中区。 */}
               <button
                 onClick={() => setAddMenuOpen((v) => !v)}
-                className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                className={`shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-opacity ${
+                  addMenuOpen
+                    ? ""
+                    : "opacity-0 pointer-events-none group-hover/section:opacity-100 group-hover/section:pointer-events-auto"
+                }`}
                 data-tip="添加项目"
               >
                 <Plus className="size-3.5" />
@@ -1591,447 +1558,440 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
               )}
             </div>
 
-            {!recentCollapsed && (
-              <div className="px-2">
-                {loading ? (
-                  <div className="flex items-center justify-center py-4">
-                    <Loader2 className="size-4 animate-spin text-sidebar-foreground/30" />
-                  </div>
-                ) : projectGroups.length > 0 ? (
-                  <div className="space-y-1">
-                    {projectGroups.map((project) => {
-                      const isRemote = project.kind === "remote";
-                      const svc = project.service;
-                      const connected = !!project.connected;
-                      const remoteBusy = !!svc && remoteBusyId === svc.id;
-                      const isExpanded = expandedProjects.has(project.dir);
-                      // 点击对话后项目不高亮：只有「未打开任何对话、正在浏览所选项目」时
-                      // 才高亮该项目的目录行，避免点开对话后某项目行一直亮着。
-                      const isSelectedProject =
-                        !isRemote &&
-                        !currentSessionId &&
-                        selectedWorkDir === project.dir &&
-                        // 计划/插件/看板等全屏面板打开时，项目不高亮——避免两处同时亮
-                        !showScheduledTasksPanel &&
-                        !showSkillPanel;
-                      return (
+            <div className="px-2">
+              {loading ? (
+                <div className="flex items-center justify-center py-4">
+                  <Loader2 className="size-4 animate-spin text-sidebar-foreground/30" />
+                </div>
+              ) : projectGroups.length > 0 ? (
+                <div className="space-y-1">
+                  {projectGroups.map((project) => {
+                    const isRemote = project.kind === "remote";
+                    const svc = project.service;
+                    const connected = !!project.connected;
+                    const remoteBusy = !!svc && remoteBusyId === svc.id;
+                    const isExpanded = expandedProjects.has(project.dir);
+                    // 点击对话后项目不高亮：只有「未打开任何对话、正在浏览所选项目」时
+                    // 才高亮该项目的目录行，避免点开对话后某项目行一直亮着。
+                    const isSelectedProject =
+                      !isRemote &&
+                      !currentSessionId &&
+                      selectedWorkDir === project.dir &&
+                      // 计划/插件/看板等全屏面板打开时，项目不高亮——避免两处同时亮
+                      !showScheduledTasksPanel &&
+                      !showSkillPanel;
+                    return (
+                      <div
+                        key={project.dir}
+                        className="group rounded-lg overflow-hidden"
+                      >
                         <div
-                          key={project.dir}
-                          className="group rounded-lg overflow-hidden"
+                          className={`w-full flex items-center rounded-lg px-3 py-1.5 transition-colors ${
+                            isSelectedProject
+                              ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                              : connected
+                                ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                                : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground/90"
+                          }`}
                         >
                           <div
-                            className={`w-full flex items-center rounded-lg px-3 py-1.5 transition-colors ${
-                              isSelectedProject
-                                ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                                : connected
-                                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground/90"
-                            }`}
+                            onClick={() =>
+                              isRemote
+                                ? toggleProjectExpanded(project.dir)
+                                : handleSelectProject(project.dir)
+                            }
+                            className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
                           >
-                            <div
-                              onClick={() =>
-                                isRemote
-                                  ? toggleProjectExpanded(project.dir)
-                                  : handleSelectProject(project.dir)
+                            {isSelectedProject && (
+                              <div className="w-[3px] h-4 bg-primary rounded-full shrink-0 -ml-1.5 mr-0.5" />
+                            )}
+                            {isRemote ? (
+                              <Cloud
+                                className={`size-3.5 shrink-0 ${connected ? "" : "text-sidebar-foreground/30"}`}
+                              />
+                            ) : (
+                              <Folder
+                                className={`size-3.5 shrink-0 ${isSelectedProject ? "text-primary" : "text-sidebar-foreground/30"}`}
+                              />
+                            )}
+                            <span
+                              className="text-[calc(var(--helix-transcript-size)*0.8929)] truncate flex-1"
+                              data-tip={
+                                isRemote && svc
+                                  ? `${remoteProjectSubtitle(svc)}${
+                                      svc.remotePath ? ` · ${svc.remotePath}` : ""
+                                    }`
+                                  : project.label
                               }
-                              className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
                             >
-                              {isSelectedProject && (
-                                <div className="w-[3px] h-4 bg-primary rounded-full shrink-0 -ml-1.5 mr-0.5" />
-                              )}
-                              {isRemote ? (
-                                <Cloud
-                                  className={`size-3.5 shrink-0 ${connected ? "" : "text-sidebar-foreground/30"}`}
-                                />
-                              ) : (
-                                <Folder
-                                  className={`size-3.5 shrink-0 ${isSelectedProject ? "text-primary" : "text-sidebar-foreground/30"}`}
-                                />
-                              )}
-                              <span
-                                className="text-[calc(var(--helix-transcript-size)*0.8929)] truncate flex-1"
-                                data-tip={
-                                  isRemote && svc
-                                    ? `${remoteProjectSubtitle(svc)}${
-                                        svc.remotePath ? ` · ${svc.remotePath}` : ""
-                                      }`
-                                    : project.label
-                                }
-                              >
-                                {project.label.length > 12
-                                  ? project.label.slice(0, 12) + "…"
-                                  : project.label}
+                              {project.label.length > 12
+                                ? project.label.slice(0, 12) + "…"
+                                : project.label}
+                            </span>
+                            {/* 连着 = 整行已经变绿，不必再写一遍「已连接」。
+                                没选过目录是另一回事：它说的是这台还没配好，
+                                点连接会先进向导挑目录。 */}
+                            {isRemote && !connected && !svc?.remotePath && (
+                              <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] text-sidebar-foreground/30">
+                                未选目录
                               </span>
-                              {/* 远程行的状态是**事实**，常驻不随 hover 隐藏：
-                                  连着 = agent 正跑在这台；没选过目录 = 点连接会
-                                  先去向导挑目录。 */}
-                              {isRemote && connected && (
-                                <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] opacity-80">
-                                  已连接
-                                </span>
-                              )}
-                              {isRemote && !connected && !svc?.remotePath && (
-                                <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] text-sidebar-foreground/30">
-                                  未选目录
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
-                              {isRemote ? (
-                                <>
-                                  {connected && (
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleNewTask();
-                                      }}
-                                      className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
-                                      data-tip="新建对话"
-                                    >
-                                      <Plus className="size-3.5" />
-                                    </button>
-                                  )}
+                            )}
+                          </div>
+                          <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
+                            {isRemote ? (
+                              <>
+                                {connected && (
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      void handleRemoteToggle(project);
-                                    }}
-                                    disabled={remoteBusy}
-                                    className={`shrink-0 p-1 rounded-lg transition-colors ${
-                                      connected
-                                        ? "text-red-500/70 hover:text-red-500 hover:bg-red-500/10"
-                                        : "text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
-                                    } disabled:opacity-50`}
-                                    data-tip={
-                                      connected
-                                        ? "断开（网关会重启）"
-                                        : svc?.remotePath
-                                          ? `连接（${svc.remotePath}）`
-                                          : "去向导选择远端目录"
-                                    }
-                                  >
-                                    {remoteBusy ? (
-                                      <Loader2 className="size-3.5 animate-spin" />
-                                    ) : connected ? (
-                                      <Unplug className="size-3.5" />
-                                    ) : (
-                                      <Cloud className="size-3.5" />
-                                    )}
-                                  </button>
-                                  <ProjectActionsMenu
-                                    onDelete={() =>
-                                      handleRemoteDelete(project)
-                                    }
-                                  />
-                                </>
-                              ) : (
-                                <>
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleNewProjectChat(project.dir);
+                                      void handleNewProjectChat(project.dir);
                                     }}
                                     className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
                                     data-tip="新建对话"
                                   >
                                     <Plus className="size-3.5" />
                                   </button>
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      toggleDirectoryProject(project.dir);
-                                    }}
-                                    className={`shrink-0 p-1 rounded-lg transition-colors ${directoryProjectDir === project.dir ? "text-primary bg-primary/10" : "text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"}`}
-                                    data-tip="打开目录"
-                                  >
-                                    <FolderTree className="size-3.5" />
-                                  </button>
-                                  <ProjectActionsMenu
-                                    isPinned={project.isPinned}
-                                    onPin={() => handlePinProject(project.dir)}
-                                    onArchive={() =>
-                                      handleArchiveProject(project.dir)
-                                    }
-                                    onDelete={() =>
-                                      handleDeleteProject(project.dir)
-                                    }
-                                    onShowInExplorer={() =>
-                                      handleRevealInExplorer(project.dir)
-                                    }
-                                  />
-                                </>
-                              )}
-                            </div>
+                                )}
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleRemoteToggle(project);
+                                  }}
+                                  disabled={remoteBusy}
+                                  className={`shrink-0 p-1 rounded-lg transition-colors ${
+                                    connected
+                                      ? "text-red-500/70 hover:text-red-500 hover:bg-red-500/10"
+                                      : "text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"
+                                  } disabled:opacity-50`}
+                                  data-tip={
+                                    connected
+                                      ? "断开（网关会重启）"
+                                      : svc?.remotePath
+                                        ? `连接（${svc.remotePath}）`
+                                        : "去向导选择远端目录"
+                                  }
+                                >
+                                  {remoteBusy ? (
+                                    <Loader2 className="size-3.5 animate-spin" />
+                                  ) : connected ? (
+                                    <Unplug className="size-3.5" />
+                                  ) : (
+                                    <Cloud className="size-3.5" />
+                                  )}
+                                </button>
+                                <ProjectActionsMenu
+                                  onDelete={() =>
+                                    handleRemoteDelete(project)
+                                  }
+                                />
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleNewProjectChat(project.dir);
+                                  }}
+                                  className="shrink-0 p-1 rounded-lg text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+                                  data-tip="新建对话"
+                                >
+                                  <Plus className="size-3.5" />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleDirectoryProject(project.dir);
+                                  }}
+                                  className={`shrink-0 p-1 rounded-lg transition-colors ${directoryProjectDir === project.dir ? "text-primary bg-primary/10" : "text-sidebar-foreground/40 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"}`}
+                                  data-tip="打开目录"
+                                >
+                                  <FolderTree className="size-3.5" />
+                                </button>
+                                <ProjectActionsMenu
+                                  isPinned={project.isPinned}
+                                  onPin={() => handlePinProject(project.dir)}
+                                  onArchive={() =>
+                                    handleArchiveProject(project.dir)
+                                  }
+                                  onDelete={() =>
+                                    handleDeleteProject(project.dir)
+                                  }
+                                  onShowInExplorer={() =>
+                                    handleRevealInExplorer(project.dir)
+                                  }
+                                />
+                              </>
+                            )}
                           </div>
-                          {isExpanded && (
-                            <div>
-                              {project.sessions.length === 0 ? (
-                                <div className="px-4 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/30">
-                                  暂无对话
-                                </div>
-                              ) : (
-                                (() => {
-                                  const totalPages = Math.max(
-                                    1,
-                                    Math.ceil(
-                                      project.sessions.length / PAGE_SIZE,
-                                    ),
-                                  );
-                                  const page = clampPage(
-                                    projectPages[project.dir] ?? 1,
-                                    totalPages,
-                                  );
-                                  const pageStart = (page - 1) * PAGE_SIZE;
-                                  const pageSessions = project.sessions.slice(
-                                    pageStart,
-                                    pageStart + PAGE_SIZE,
-                                  );
-                                  return (
-                                    <>
-                                      {pageSessions.map(
-                                        (session, sessionIdx) => (
-                                          <div
-                                            key={session.id}
-                                            draggable
-                                            onDragStart={(e) => {
-                                              e.dataTransfer.setData(
+                        </div>
+                        {isExpanded && (
+                          <div>
+                            {project.sessions.length === 0 ? (
+                              <div className="px-4 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/30">
+                                暂无对话
+                              </div>
+                            ) : (
+                              (() => {
+                                const totalPages = Math.max(
+                                  1,
+                                  Math.ceil(
+                                    project.sessions.length / PAGE_SIZE,
+                                  ),
+                                );
+                                const page = clampPage(
+                                  projectPages[project.dir] ?? 1,
+                                  totalPages,
+                                );
+                                const pageStart = (page - 1) * PAGE_SIZE;
+                                const pageSessions = project.sessions.slice(
+                                  pageStart,
+                                  pageStart + PAGE_SIZE,
+                                );
+                                return (
+                                  <>
+                                    {pageSessions.map(
+                                      (session, sessionIdx) => (
+                                        <div
+                                          key={session.id}
+                                          draggable
+                                          onDragStart={(e) => {
+                                            e.dataTransfer.setData(
+                                              "text/session-reorder",
+                                              JSON.stringify({
+                                                sessionId: session.id,
+                                                fromDir: project.dir,
+                                                fromIdx:
+                                                  pageStart + sessionIdx,
+                                              }),
+                                            );
+                                          }}
+                                          onDragOver={(e) => {
+                                            const data =
+                                              e.dataTransfer.types.includes(
                                                 "text/session-reorder",
-                                                JSON.stringify({
-                                                  sessionId: session.id,
-                                                  fromDir: project.dir,
-                                                  fromIdx:
-                                                    pageStart + sessionIdx,
-                                                }),
                                               );
-                                            }}
-                                            onDragOver={(e) => {
-                                              const data =
-                                                e.dataTransfer.types.includes(
-                                                  "text/session-reorder",
-                                                );
-                                              if (data) {
-                                                e.preventDefault();
-                                                e.stopPropagation();
-                                              }
-                                            }}
-                                            onDrop={async (e) => {
+                                            if (data) {
                                               e.preventDefault();
                                               e.stopPropagation();
-                                              const raw =
-                                                e.dataTransfer.getData(
-                                                  "text/session-reorder",
-                                                );
-                                              if (!raw) return;
-                                              let draggedId: string;
-                                              try {
-                                                ({ sessionId: draggedId } =
-                                                  JSON.parse(raw));
-                                              } catch {
-                                                // malformed drag payload — nothing to reorder
-                                                return;
-                                              }
-                                              if (draggedId === session.id)
-                                                return;
-                                              // Reorder: move dragged session before this one
-                                              const updated =
-                                                project.sessions.filter(
-                                                  (s) => s.id !== draggedId,
-                                                );
-                                              const dragged =
-                                                project.sessions.find(
-                                                  (s) => s.id === draggedId,
-                                                );
-                                              if (dragged) {
-                                                const targetIdx =
-                                                  updated.findIndex(
-                                                    (s) => s.id === session.id,
-                                                  );
-                                                updated.splice(
-                                                  targetIdx,
-                                                  0,
-                                                  dragged,
-                                                );
-                                                // Update order in persistence by re-saving with createdAt shuffle
-                                                try {
-                                                  await persistence.reorderSessions(
-                                                    updated.map((s) => s.id),
-                                                  );
-                                                } catch {
-                                                  // best-effort reorder; ignore persistence failure
-                                                }
-                                              }
-                                            }}
-                                            onClick={() =>
-                                              handleLoadSession(session)
                                             }
-                                            className={`relative w-full group flex items-center gap-2 px-4 py-2 cursor-pointer transition-colors ${
-                                              currentSessionId === session.id
-                                                ? "bg-primary/10 text-primary"
-                                                : "text-sidebar-foreground/50 hover:bg-sidebar-accent/30 hover:text-sidebar-foreground/80"
-                                            }`}
-                                            onContextMenu={(e) => {
-                                              e.preventDefault();
-                                              e.stopPropagation();
-                                              setSessionMenuId(session.id);
-                                            }}
-                                          >
-                                            {streamingDrafts[session.id]
-                                              ?.isAgentRunning ? (
-                                              <div className="w-4 flex items-center justify-center shrink-0">
-                                                <span className="size-2.5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-                                              </div>
-                                            ) : (
-                                              <div className="w-4 shrink-0" />
-                                            )}
-                                            <div className="flex-1 min-w-0">
-                                              {renamingId === session.id ? (
-                                                <input
-                                                  autoFocus
-                                                  defaultValue={session.label}
-                                                  onClick={(e) =>
-                                                    e.stopPropagation()
-                                                  }
-                                                  onBlur={(e) =>
+                                          }}
+                                          onDrop={async (e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            const raw =
+                                              e.dataTransfer.getData(
+                                                "text/session-reorder",
+                                              );
+                                            if (!raw) return;
+                                            let draggedId: string;
+                                            try {
+                                              ({ sessionId: draggedId } =
+                                                JSON.parse(raw));
+                                            } catch {
+                                              // malformed drag payload — nothing to reorder
+                                              return;
+                                            }
+                                            if (draggedId === session.id)
+                                              return;
+                                            // Reorder: move dragged session before this one
+                                            const updated =
+                                              project.sessions.filter(
+                                                (s) => s.id !== draggedId,
+                                              );
+                                            const dragged =
+                                              project.sessions.find(
+                                                (s) => s.id === draggedId,
+                                              );
+                                            if (dragged) {
+                                              const targetIdx =
+                                                updated.findIndex(
+                                                  (s) => s.id === session.id,
+                                                );
+                                              updated.splice(
+                                                targetIdx,
+                                                0,
+                                                dragged,
+                                              );
+                                              // Update order in persistence by re-saving with createdAt shuffle
+                                              try {
+                                                await persistence.reorderSessions(
+                                                  updated.map((s) => s.id),
+                                                );
+                                              } catch {
+                                                // best-effort reorder; ignore persistence failure
+                                              }
+                                            }
+                                          }}
+                                          onClick={() =>
+                                            handleLoadSession(session)
+                                          }
+                                          className={`relative w-full group flex items-center gap-2 px-4 py-2 cursor-pointer transition-colors ${
+                                            currentSessionId === session.id
+                                              ? "bg-primary/10 text-primary"
+                                              : "text-sidebar-foreground/50 hover:bg-sidebar-accent/30 hover:text-sidebar-foreground/80"
+                                          }`}
+                                          onContextMenu={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            setSessionMenuId(session.id);
+                                          }}
+                                        >
+                                          {streamingDrafts[session.id]
+                                            ?.isAgentRunning ? (
+                                            <div className="w-4 flex items-center justify-center shrink-0">
+                                              <span className="size-2.5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                                            </div>
+                                          ) : (
+                                            <div className="w-4 shrink-0" />
+                                          )}
+                                          <div className="flex-1 min-w-0">
+                                            {renamingId === session.id ? (
+                                              <input
+                                                autoFocus
+                                                defaultValue={session.label}
+                                                onClick={(e) =>
+                                                  e.stopPropagation()
+                                                }
+                                                onBlur={(e) =>
+                                                  handleCommitRename(
+                                                    session.id,
+                                                    e.target.value,
+                                                  )
+                                                }
+                                                onKeyDown={(e) => {
+                                                  if (e.key === "Enter") {
+                                                    e.preventDefault();
                                                     handleCommitRename(
                                                       session.id,
-                                                      e.target.value,
-                                                    )
+                                                      (
+                                                        e.target as HTMLInputElement
+                                                      ).value,
+                                                    );
+                                                  } else if (
+                                                    e.key === "Escape"
+                                                  ) {
+                                                    setRenamingId(null);
                                                   }
-                                                  onKeyDown={(e) => {
-                                                    if (e.key === "Enter") {
-                                                      e.preventDefault();
-                                                      handleCommitRename(
-                                                        session.id,
-                                                        (
-                                                          e.target as HTMLInputElement
-                                                        ).value,
-                                                      );
-                                                    } else if (
-                                                      e.key === "Escape"
-                                                    ) {
-                                                      setRenamingId(null);
-                                                    }
-                                                  }}
-                                                  className="text-[calc(var(--helix-transcript-size)*0.8571)] w-full bg-background outline-none border border-primary rounded px-1 py-0.5"
-                                                />
-                                              ) : (
-                                                <div className="flex items-center gap-1.5 min-w-0">
-                                                  {session.branchName && (
-                                                    <span className="shrink-0 inline-flex items-center gap-0.5 px-1 py-px rounded text-[calc(var(--helix-transcript-size)*0.6429)] font-medium bg-blue-500/10 text-blue-500 dark:text-blue-400">
-                                                      <GitBranch className="size-2" />
-                                                      {session.branchName}
-                                                    </span>
-                                                  )}
-                                                  <p
-                                                    className="text-[calc(var(--helix-transcript-size)*0.8571)] truncate flex-1"
-                                                    data-tip="双击重命名"
-                                                    onDoubleClick={(e) => {
-                                                      e.stopPropagation();
-                                                      setRenamingId(session.id);
-                                                    }}
-                                                  >
-                                                    {session.label.length > 14
-                                                      ? session.label.slice(
-                                                          0,
-                                                          14,
-                                                        ) + "…"
-                                                      : session.label}
-                                                  </p>
-                                                </div>
-                                              )}
-                                            </div>
-                                            {sessionPendingApproval[
-                                              session.id
-                                            ] && (
-                                              <span
-                                                className="shrink-0 size-2 rounded-full bg-amber-500"
-                                                data-tip="需要确认"
+                                                }}
+                                                className="text-[calc(var(--helix-transcript-size)*0.8571)] w-full bg-background outline-none border border-primary rounded px-1 py-0.5"
                                               />
+                                            ) : (
+                                              <div className="flex items-center gap-1.5 min-w-0">
+                                                {session.branchName && (
+                                                  <span className="shrink-0 inline-flex items-center gap-0.5 px-1 py-px rounded text-[calc(var(--helix-transcript-size)*0.6429)] font-medium bg-blue-500/10 text-blue-500 dark:text-blue-400">
+                                                    <GitBranch className="size-2" />
+                                                    {session.branchName}
+                                                  </span>
+                                                )}
+                                                <p
+                                                  className="text-[calc(var(--helix-transcript-size)*0.8571)] truncate flex-1"
+                                                  data-tip="双击重命名"
+                                                  onDoubleClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setRenamingId(session.id);
+                                                  }}
+                                                >
+                                                  {session.label.length > 14
+                                                    ? session.label.slice(
+                                                        0,
+                                                        14,
+                                                      ) + "…"
+                                                    : session.label}
+                                                </p>
+                                              </div>
                                             )}
-                                            <span
-                                              className="ml-auto shrink-0 text-right text-[calc(var(--helix-transcript-size)*0.7143)] text-sidebar-foreground/40 transition-opacity group-hover:opacity-0"
-                                              data-tip={`上次使用：${new Date(session.savedAt).toLocaleString("zh-CN")}`}
-                                            >
-                                              {timeAgo(session.savedAt)}
-                                            </span>
-                                            <SessionActionsMenu
-                                              isPinned={session.isPinned}
-                                              open={sessionMenuId === session.id}
-                                              onOpenChange={(v) =>
-                                                setSessionMenuId(
-                                                  v ? session.id : null,
-                                                )
-                                              }
-                                              onCopyId={() =>
-                                                copySessionId(session.id)
-                                              }
-                                              onArchive={() =>
-                                                handleToggleArchive(session.id)
-                                              }
-                                              onPin={() =>
-                                                handleTogglePin(session.id)
-                                              }
-                                              onDelete={() =>
-                                                handleDeleteSession(session.id)
-                                              }
-                                              onRename={() =>
-                                                setRenamingId(session.id)
-                                              }
-                                            />
                                           </div>
-                                        ),
-                                      )}
-                                      {/* 项目内会话分页控件 */}
-                                      {project.sessions.length > PAGE_SIZE && (
-                                        <div className="flex items-center justify-center gap-1 pt-1">
-                                          <button
-                                            type="button"
-                                            disabled={page <= 1}
-                                            onClick={() =>
-                                              setProjectPages((prev) => ({
-                                                ...prev,
-                                                [project.dir]: page - 1,
-                                              }))
-                                            }
-                                            className="px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/50 hover:text-sidebar-foreground disabled:opacity-30 disabled:hover:text-sidebar-foreground/50 rounded transition-colors"
+                                          {sessionPendingApproval[
+                                            session.id
+                                          ] && (
+                                            <span
+                                              className="shrink-0 size-2 rounded-full bg-amber-500"
+                                              data-tip="需要确认"
+                                            />
+                                          )}
+                                          <span
+                                            className="ml-auto shrink-0 text-right text-[calc(var(--helix-transcript-size)*0.7143)] text-sidebar-foreground/40 transition-opacity group-hover:opacity-0"
+                                            data-tip={`上次使用：${new Date(session.savedAt).toLocaleString("zh-CN")}`}
                                           >
-                                            上一页
-                                          </button>
-                                          <span className="px-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/40">
-                                            {page} / {totalPages}
+                                            {timeAgo(session.savedAt)}
                                           </span>
-                                          <button
-                                            type="button"
-                                            disabled={page >= totalPages}
-                                            onClick={() =>
-                                              setProjectPages((prev) => ({
-                                                ...prev,
-                                                [project.dir]: page + 1,
-                                              }))
+                                          <SessionActionsMenu
+                                            isPinned={session.isPinned}
+                                            open={sessionMenuId === session.id}
+                                            onOpenChange={(v) =>
+                                              setSessionMenuId(
+                                                v ? session.id : null,
+                                              )
                                             }
-                                            className="px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/50 hover:text-sidebar-foreground disabled:opacity-30 disabled:hover:text-sidebar-foreground/50 rounded transition-colors"
-                                          >
-                                            下一页
-                                          </button>
+                                            onCopyId={() =>
+                                              copySessionId(session.id)
+                                            }
+                                            onArchive={() =>
+                                              handleToggleArchive(session.id)
+                                            }
+                                            onPin={() =>
+                                              handleTogglePin(session.id)
+                                            }
+                                            onDelete={() =>
+                                              handleDeleteSession(session.id)
+                                            }
+                                            onRename={() =>
+                                              setRenamingId(session.id)
+                                            }
+                                          />
                                         </div>
-                                      )}
-                                    </>
-                                  );
-                                })()
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.9286)] text-sidebar-foreground/30">
-                    暂无项目
-                  </div>
-                )}
-              </div>
-            )}
+                                      ),
+                                    )}
+                                    {/* 项目内会话分页控件 */}
+                                    {project.sessions.length > PAGE_SIZE && (
+                                      <div className="flex items-center justify-center gap-1 pt-1">
+                                        <button
+                                          type="button"
+                                          disabled={page <= 1}
+                                          onClick={() =>
+                                            setProjectPages((prev) => ({
+                                              ...prev,
+                                              [project.dir]: page - 1,
+                                            }))
+                                          }
+                                          className="px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/50 hover:text-sidebar-foreground disabled:opacity-30 disabled:hover:text-sidebar-foreground/50 rounded transition-colors"
+                                        >
+                                          上一页
+                                        </button>
+                                        <span className="px-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/40">
+                                          {page} / {totalPages}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          disabled={page >= totalPages}
+                                          onClick={() =>
+                                            setProjectPages((prev) => ({
+                                              ...prev,
+                                              [project.dir]: page + 1,
+                                            }))
+                                          }
+                                          className="px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-sidebar-foreground/50 hover:text-sidebar-foreground disabled:opacity-30 disabled:hover:text-sidebar-foreground/50 rounded transition-colors"
+                                        >
+                                          下一页
+                                        </button>
+                                      </div>
+                                    )}
+                                  </>
+                                );
+                              })()
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="px-3 py-2 text-[calc(var(--helix-transcript-size)*0.9286)] text-sidebar-foreground/30">
+                  暂无项目
+                </div>
+              )}
+            </div>
 
             {/* Conversations */}
             {conversations.length > 0 && (

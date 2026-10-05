@@ -335,6 +335,43 @@ fn stat_untracked_file(cwd: &std::path::Path, rel: &str) -> Option<(u64, bool)> 
     ))
 }
 
+/// 失败原因的可读分类，随 `{ ok: false, code }` 给前端。
+/// 之前所有失败在前端都是同一句「没有未提交的更改」，于是「云端对话 / 不是 git
+/// 仓库 / 找不到 git / 目录不存在」全被渲染成「确实没改动」，用户只能瞎猜。
+const CODE_WORK_DIR_NOT_FOUND: &str = "work_dir_not_found";
+const CODE_GIT_UNAVAILABLE: &str = "git_unavailable";
+const CODE_GIT_TIMEOUT: &str = "git_timeout";
+const CODE_NOT_A_REPOSITORY: &str = "not_a_repository";
+const CODE_GIT_FAILED: &str = "git_failed";
+
+/// 能从错误串直接判定的两种：git 起不来（不在 PATH），以及 30s 超时。
+fn git_failure_code(err: &str) -> Option<&'static str> {
+    if err.starts_with("git spawn failed") || err.starts_with("git wait failed") {
+        return Some(CODE_GIT_UNAVAILABLE);
+    }
+    if err.contains("timed out") {
+        return Some(CODE_GIT_TIMEOUT);
+    }
+    None
+}
+
+/// 剩下的失败用一次 `rev-parse --is-inside-work-tree` 分类：**不去匹配 git 的
+/// stderr 文本**（"not a git repository" 会随 git 版本和本地化翻译变化）。
+/// 探针本身起不来/超时也算相应码，其余说明是仓库但 diff 失败。
+fn classify_git_failure(
+    state: &AppState,
+    target_cwd: Option<&str>,
+    err: &str,
+) -> &'static str {
+    if let Some(code) = git_failure_code(err) {
+        return code;
+    }
+    match git_exec(state, &["rev-parse", "--is-inside-work-tree"], target_cwd) {
+        Ok(_) => CODE_GIT_FAILED,
+        Err(probe) => git_failure_code(&probe).unwrap_or(CODE_NOT_A_REPOSITORY),
+    }
+}
+
 /// 「未提交的更改」完整明细：已跟踪文件 vs `HEAD`（含删除、含已暂存）
 /// **加上未跟踪的新文件**。
 ///
@@ -350,7 +387,11 @@ pub fn diff_numstat_full(
 ) -> Value {
     let cwd = git_cwd(&state, target_cwd.as_deref());
     if !cwd.exists() {
-        return json!({ "ok": false, "error": "work dir not found" });
+        return json!({
+            "ok": false,
+            "code": CODE_WORK_DIR_NOT_FOUND,
+            "error": "work dir not found",
+        });
     }
     let mut files: Vec<NumstatFile> = Vec::new();
     let mut numstat = git_exec(
@@ -374,7 +415,10 @@ pub fn diff_numstat_full(
                 }
             }
         }
-        Err(e) => return json!({ "ok": false, "error": e }),
+        Err(e) => {
+            let code = classify_git_failure(&state, target_cwd.as_deref(), &e);
+            return json!({ "ok": false, "code": code, "error": e });
+        }
     }
     // 未跟踪文件单独算：`-z` 输出，路径含空格 / 中文也不会串行。
     if let Ok((stdout, _)) = git_exec(

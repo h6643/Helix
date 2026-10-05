@@ -1,6 +1,6 @@
 import { getServeHelixFacade } from "@/lib/serve-gateway";
 import { installTauriBridge, isTauri } from "@/lib/tauri-bridge";
-import type { ElectronAPI } from "@/types/electron";
+import type { ElectronAPI, GitNumstatFailureCode } from "@/types/electron";
 
 /**
  * Check if running in Electron (or the Tauri build, which shims the same
@@ -536,6 +536,7 @@ export const electronGit = {
     cwd?: string | null,
   ): Promise<{
     ok: boolean;
+    code?: GitNumstatFailureCode;
     files?: {
       path: string;
       added: number;
@@ -549,7 +550,11 @@ export const electronGit = {
   }> {
     const api = getElectronAPI();
     if (api?.git) return api.git.diffNumstatFull(cwd);
-    return { ok: false, error: "Git not available in browser mode" };
+    return {
+      ok: false,
+      code: "git_unavailable",
+      error: "Git not available in browser mode",
+    };
   },
 
   async revert(filePath?: string): Promise<{ ok: boolean; error?: string }> {

@@ -158,8 +158,30 @@ export function RightSidebar() {
     activePageIdRef.current = np.id;
     setPages((prev) => [...prev, np]);
     setActivePageId(np.id);
-     
   }, [tab]);
+
+  // 「旁路问答」面板的打开落点统一在这里：标题栏「更多操作」、侧栏「＋」、裸
+  // `/btw` 都递增 bylineFocusSignal。只靠上面的 tab effect 不够——面板页被 ✕ 关掉
+  // 过时 tab 仍停在 "byline"，tab 不变就不会再建页，点入口看起来就没反应。
+  const bylineFocusSignal = useHelixStore((s) => s.bylineFocusSignal);
+  const lastBylineFocusRef = useRef(bylineFocusSignal);
+  useEffect(() => {
+    const isIncrease = bylineFocusSignal > lastBylineFocusRef.current;
+    lastBylineFocusRef.current = bylineFocusSignal;
+    if (!isIncrease) return;
+    const existing = pagesRef.current.find((p) => p.kind === "byline");
+    if (existing) {
+      activePageIdRef.current = existing.id;
+      setActivePageId(existing.id);
+    } else {
+      const np: PanelPage = { id: newPageId(), kind: "byline", url: "" };
+      activePageIdRef.current = np.id;
+      setPages((prev) => [...prev, np]);
+      setActivePageId(np.id);
+    }
+    setTab("byline");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bylineFocusSignal]);
 
   // External link (e.g. a message link click) → open / navigate a browser page.
   // Keyed off the monotonically increasing nav sequence (NOT the URL value), so
@@ -539,6 +561,11 @@ export function RightSidebar() {
                 }}
                 onAddBrowser={() => {
                   useHelixStore.getState().requestAddBrowserPage();
+                  setPlusMenuOpen(false);
+                }}
+                onOpenByline={() => {
+                  // 建页 / 激活 / 切 tab 由上面的 bylineFocusSignal effect 统一做。
+                  useHelixStore.getState().focusBylineInput();
                   setPlusMenuOpen(false);
                 }}
               />

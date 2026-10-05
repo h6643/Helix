@@ -25,6 +25,7 @@ import React, {
 } from "react";
 import { useHelixStore, type FileNode } from "@/stores/helix-store";
 import { DEFAULT_SHORTCUTS } from "@/stores/helix-types";
+import { isRemoteWorkDir } from "@/lib/remote-projects";
 
 function getShortcutLabel(
   id: string,
@@ -63,7 +64,11 @@ export function CommandPalette() {
     getAllFiles,
     getFilePath,
     customShortcuts,
+    activeSessionWorkDir,
   } = useHelixStore();
+  // 云端对话没有本机终端可开（同标题栏/文件树那处的判定），命令也一并藏起来，
+  // 否则执行它只是翻转一个不显示的面板。
+  const conversationIsRemote = isRemoteWorkDir(activeSessionWorkDir);
 
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -141,15 +146,19 @@ export function CommandPalette() {
         },
         category: "action",
       },
-      {
-        id: "action-toggle-terminal",
-        label: "切换终端",
-        description: "显示或隐藏终端面板",
-        icon: <Terminal className="size-4 text-amber-400" />,
-        action: toggleTerminal,
-        category: "action",
-        shortcut: getShortcutLabel("toggle-terminal", customShortcuts),
-      },
+      ...(conversationIsRemote
+        ? []
+        : [
+            {
+              id: "action-toggle-terminal",
+              label: "切换终端",
+              description: "显示或隐藏终端面板",
+              icon: <Terminal className="size-4 text-amber-400" />,
+              action: toggleTerminal,
+              category: "action" as const,
+              shortcut: getShortcutLabel("toggle-terminal", customShortcuts),
+            },
+          ]),
       {
         id: "action-clear-chat",
         label: "清空对话",

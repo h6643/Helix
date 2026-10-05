@@ -21,9 +21,11 @@
 //! | 自动审批   | `auto`   | 安全规则放行 + 非安全过 AI 风险判定，判定为风险才问 |
 //! | 完全访问   | `yolo`   | 全放行 |
 //!
-//! pi-permission 还有第四档 `approve`（规则匹配、无 AI 那一层）。前端暂不
-//! 暴露：它与 `auto` 的差别只是「要不要过 AI」，而 AI 判定要额外一次模型调用，
-//! 不该由一个下拉静默决定。
+//! pi-permission 还有第四档 `approve`（规则匹配、无 AI 那一层）。Helix 不提供
+//! 这一档，也从不写它：它与 `auto` 的差别只是「要不要过 AI」，而 AI 判定要额外
+//! 一次模型调用，不该由一个下拉静默决定。万一磁盘上被人写成 `approve`，读路径
+//! 落到 `_` → `auto` 显示；别指望这种文件只靠改名就对得上 —— 扩展把认不出的
+//! mode 一律回落成它的 `DEFAULT_CONFIG.mode` = yolo，也就是实际全放行。
 //!
 //! # 生效时机
 //!
@@ -53,17 +55,23 @@ fn to_extension_mode(mode: &str) -> &'static str {
 }
 
 /// 扩展 mode → Helix 档位（读回时用）。
+///
+/// `approve`（Helix 不提供、也从不写的那一档）落到 `_` → `auto`。
 fn from_extension_mode(mode: &str) -> &'static str {
     match mode {
         "strict" => "ask",
         "yolo" => "full",
-        // `approve` 与 `auto` 都归到「自动审批」：对用户而言都是「只在有风险时问」
-        "approve" | "auto" => "auto",
         _ => "auto",
     }
 }
 
-/// 读当前档位。文件不存在 / 坏 JSON → 返回 `auto` 并说明原因。
+/// 读当前档位。
+///
+/// 读不到时**不要**编一个档位回去：`ok:false` + `mode:null` + `exists`，让调用
+/// 方自己决定怎么说实话。原因就写在下面那个历史 bug 里 —— 曾经这里坏 JSON 也
+/// 返回 `mode:"auto"`，前端拿去显示「自动审批」，而扩展在文件缺失/坏 JSON 时
+/// 一律回落它自己的 `DEFAULT_CONFIG`（`mode:"yolo"`，全放行）。显示会问、实际
+/// 不问，是这一层最坏的错法。
 #[tauri::command]
 pub fn helix_get_permission_mode() -> Value {
     let path = config_path();
@@ -72,7 +80,8 @@ pub fn helix_get_permission_mode() -> Value {
         Err(e) => {
             return json!({
                 "ok": false,
-                "mode": "auto",
+                "mode": Value::Null,
+                "exists": path.exists(),
                 "reason": format!("配置文件不可读: {e}"),
                 "config_path": path.to_string_lossy(),
             })
@@ -93,7 +102,9 @@ pub fn helix_get_permission_mode() -> Value {
         }
         Err(e) => json!({
             "ok": false,
-            "mode": "auto",
+            "mode": Value::Null,
+            // 文件在、内容坏：扩展此刻跑 yolo，前端必须按「实际全放行」显示。
+            "exists": true,
             "reason": format!("配置 JSON 解析失败: {e}"),
             "config_path": path.to_string_lossy(),
         }),
@@ -180,6 +191,7 @@ mod tests {
         assert_eq!(from_extension_mode("strict"), "ask");
         assert_eq!(from_extension_mode("yolo"), "full");
         assert_eq!(from_extension_mode("auto"), "auto");
+        // approve 是扩展侧 Helix 不提供的档位；和认不出的值一样落到 auto。
         assert_eq!(from_extension_mode("approve"), "auto");
         assert_eq!(from_extension_mode("garbage"), "auto");
     }

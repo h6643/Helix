@@ -1,7 +1,7 @@
 "use client";
 
 import { Copy, CheckCheck } from "lucide-react";
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { computeDiff, looksLikeUnifiedDiff } from "@/components/Helix/diff-preview";
 import { CodeCard } from "@/components/Helix/helix-markdown";
 import { formatDurationSeconds } from "@/lib/format";
@@ -295,9 +295,9 @@ function toolActionText(step: ExecutionStep): string {
       if (looksLikeError) return "";
       // bash/terminal：标题返回**完整命令**——不手动截断 50、也不只取首行。
       // 标题是命令本体的唯一查看入口，只取首行 / 横向 CSS truncate 会让后端
-      // 实际跑满、前端却少显示好几行的情况被误读成「命令没执行完」。过长由外层
-      // 容器折行 + max-h-40 overflow-y-auto 兜底（能滚动，不静默丢内容），
-      // title 属性保证悬停也能拿到全文。
+      // 实际跑满、前端却少显示好几行的情况被误读成「命令没执行完」。
+      // 折叠态由外层 CSS 裁到 2 行（line-clamp，末尾自带省略号）+ 行尾「展开全文」
+      // 入口，点开即恢复全文并可滚动；悬停 title 始终给全文。
       return cmd;
     }
     return "";
@@ -405,6 +405,11 @@ function ToolCard({
   isRunning: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  // 命令标题裁行只影响折叠态；展开后必须回到全文，所以测量只在折叠时跑，
+  // 展开期间保留最后一次结果（否则 titleClipped 会在展开瞬间自己翻成 false，
+  // 连带 expandable 变 false、刚点开的面板又被自己关掉）。
+  const titleRef = useRef<HTMLSpanElement>(null);
+  const [titleClipped, setTitleClipped] = useState(false);
   const path = extractToolPath(step);
   const hasSubSteps = step.subSteps && step.subSteps.length > 0;
   const isCommandTool = /bash|terminal|shell|run|execute|command/i.test(
@@ -434,7 +439,15 @@ function ToolCard({
   const hasImageResult = results.some(
     (r) => detectResultKind(r.toolName || "", r.content || "") === "image",
   );
-  const expandable = hasExpandableContent && (!isReadTool || hasImageResult);
+  // 折叠态的命令标题只占 2 行（长 grep/管道命令原本能吃到 5 行以上），展开后回到
+  // 全文。裁行让「展开全文」成为唯一入口，所以被裁过的行必须可点，哪怕它还没有结果。
+  const clampTitle = isCommandTool && !open;
+  const expandable =
+    (hasExpandableContent && (!isReadTool || hasImageResult)) ||
+    (clampTitle && titleClipped);
+  // 展开态下裁行让标题自己变成全文容器（没有结果面板可开），此时行仍然可点，
+  // 所以光标不能退回 default 骗人「点不动」。
+  const clickable = expandable || (open && titleClipped);
   const stepStatus =
     results.length > 0
       ? step.status === "failed"
@@ -469,6 +482,18 @@ function ToolCard({
     (fallbackLabel.startsWith(verb) && step.toolName
       ? step.toolName
       : fallbackLabel);
+  // 「有没有被裁」只能实测：按字符数猜会在窄面板下漏判、宽面板下误报，
+  // 而这两种情况都会让行尾那个入口变成谎话。
+  useEffect(() => {
+    if (!clampTitle) return;
+    const el = titleRef.current;
+    if (!el) return;
+    const measure = () => setTitleClipped(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [clampTitle, titleLabel]);
   // 卡片首部文本（"输入"）：命令类 → `$ 命令`；其余工具 → 参数。与结果合并为同一张
   // 卡片，避免"参数卡 + 结果卡"分裂成两张。单参数且其值已作为标题展示（如 read/list
   // 的 path、grep 的 query）时不再重复，仅在输入尚未见于标题时才并入卡片首部。
@@ -497,9 +522,9 @@ function ToolCard({
       <button
         type="button"
         onClick={() => {
-          if (expandable) setOpen((prev) => !prev);
+          if (clickable) setOpen((prev) => !prev);
         }}
-        className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${expandable ? "" : "cursor-default"}`}
+        className={`w-full flex items-center gap-1.5 text-left text-[0.9em] text-foreground/80 ${clickable ? "" : "cursor-default"}`}
       >
         {failed ? (
           <span className="tool-glyph tool-glyph-failed" aria-hidden>
@@ -511,11 +536,19 @@ function ToolCard({
           </span>
         )}
         <span
+          ref={titleRef}
           title={titleLabel}
-          className={`flex-1 min-w-0 max-h-40 overflow-y-auto break-all whitespace-pre-wrap text-foreground/60 ${running ? "text-foreground/85" : ""}`}
+          className={`flex-1 min-w-0 break-all whitespace-pre-wrap text-foreground/60 ${
+            clampTitle ? "line-clamp-2" : "max-h-40 overflow-y-auto"
+          } ${running ? "text-foreground/85" : ""}`}
         >
           {verbText} {titleLabel}
         </span>
+        {titleClipped && (
+          <span className="text-[0.72em] text-primary/70 shrink-0 select-none">
+            {open ? "收起 ⌃" : "展开全文 ⌄"}
+          </span>
+        )}
         {step.duration_s != null && step.duration_s > 0 && (
           <span className="text-[0.72em] text-muted-foreground shrink-0">
             {formatDurationSeconds(step.duration_s)}

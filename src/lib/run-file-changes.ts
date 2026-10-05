@@ -166,7 +166,68 @@ export type FileChangeSink = {
   ) => string;
   /** 登记成功后的收尾（刷新流式草稿）。 */
   afterRegister?: () => void;
+  /**
+   * 本轮的项目根（本机语义）。卡片只登记项目内的文件，见
+   * `changeBelongsToProject`。远程对话传 null（本机前缀判断不了远端路径）。
+   */
+  projectRoot?: string | null;
 };
+
+/** 绝对路径（本机 Windows 盘符或 POSIX 根）。 */
+function isAbsolutePath(p: string): boolean {
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
+}
+
+/**
+ * 前缀比较用的归一：统一分隔符、压掉重复斜杠、**折叠 `.`/`..`**、去尾部分隔符。
+ * 只有 Windows 盘符路径转小写 —— POSIX 大小写敏感，一律 toLowerCase 会把
+ * `/home/A` 和 `/home/a` 判成同一个目录。
+ *
+ * `..` 必须折叠：`D:/Project/Helix/../../Windows/x` 的字符串前缀就是项目根，
+ * 不解析的话"跳出项目"的写法会被判成项目内。
+ */
+function normalizeForPrefix(p: string): string {
+  let s = p.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  if (/^[A-Za-z]:\//.test(s)) s = s.toLowerCase();
+  // 前导锚点单独留着：POSIX 的 `/` 与 Windows 的 `c:/` 都不能参与 `..` 折叠。
+  const isDrive = /^[a-z]:\//i.test(s);
+  const head = s.startsWith("/") ? "/" : isDrive ? s.slice(0, 3) : "";
+  const rest = head ? s.slice(head.length) : s;
+  const parts: string[] = [];
+  for (const seg of rest.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === ".." && parts.length > 0 && parts[parts.length - 1] !== "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(seg);
+  }
+  return (head + parts.join("/")).replace(/\/+$/, "");
+}
+
+/**
+ * 这条改动算不算「本项目内的」。
+ *
+ * 卡片是「本轮改了哪些文件」的清单，越界的文件混进来不只是难看：它让「撤销」
+ * 去打项目外的路径、让一次项目内 git 重算被项目外的写入触发（真实症状：改完
+ * `~/.pi/agent/config/permission-ext-config.json` 也出现在卡片里）。
+ *
+ * - 相对路径 ⇒ 算在内：pi 的工具参数按会话 cwd 解析，那个 cwd 就是项目根。
+ * - 绝对路径 + 知道项目根 ⇒ 必须在根之下（含根本身）。
+ * - 绝对路径 + 不知道根（远程对话的 `remote://…` 虚拟键、或还没选项目目录）⇒
+ *   **保守放行**：拿本机前缀去比远端路径必然全不匹配，那会把用户真实的改动整条
+ *   藏掉。宁可卡片多一行，不少一行。
+ */
+export function changeBelongsToProject(
+  filePath: string,
+  projectRoot: string | null | undefined,
+): boolean {
+  if (!isAbsolutePath(filePath)) return true;
+  if (!projectRoot) return true;
+  const root = normalizeForPrefix(projectRoot);
+  const p = normalizeForPrefix(filePath);
+  return p === root || p.startsWith(root + "/");
+}
 
 /**
  * 工具完成事件 → 登记文件改动。返回是否登记成功（0/1），便于调用方/诊断使用。
@@ -203,6 +264,12 @@ export function registerFileChangesFromToolUpdate(
   );
   if (!picked) return 0;
   const { diff, filePath } = picked;
+  // 项目外的改动不进卡片（也不进 pendingChanges、不触发 git 重算）——
+  // 判据与「为什么不知道根时放行」见 changeBelongsToProject。
+  if (!changeBelongsToProject(filePath, sink.projectRoot)) {
+    console.debug("[Helix] 卡片忽略项目外的改动:", filePath);
+    return 0;
+  }
   const fileName = filePath.split(/[/\\]/).pop() || filePath;
   // undoUnsafe：网关明确标了（write 覆盖前内容没取到 / diff 截断）才算；
   // 旧 ACP 的 inlineDiff 是按渲染结果给的，没有这个标记 → 保持可撤销。

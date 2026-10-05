@@ -53,9 +53,11 @@ import { FileChangeSummary } from "./file-change-summary";
 import { FileChangeSummaryCard } from "./file-change-summary-card";
 import { HelixMarkdown } from "./helix-markdown";
 import {
-  disconnectRemoteProject,
+  findServiceByRemoteWorkDir,
   isRemoteWorkDir,
+  parseRemoteWorkDir,
   remoteAvailable,
+  remoteProjectLabel,
 } from "@/lib/remote-projects";
 import { HistoryStrip } from "./history-strip";
 import { InlineToolGroup, summarizeGroupDiff } from "./inline-tool-group";
@@ -128,6 +130,7 @@ import {
   TranscriptMessage,
   mergeAdjacentThinking,
   segmentizeProcessBlocks,
+  mergeToolRuns,
   buildProcessSegments,
   normalizeTextBlocks,
   mergeThinkingContents,
@@ -155,7 +158,7 @@ import {
 } from "@/stores/helix-store";
 import type { ApprovalLevel } from "@/stores/helix-types";
 import type { PlanStep } from "@/stores/helix-types";
-import { APPROVAL_MODE_ITEMS } from "@/stores/helix-types";
+import { APPROVAL_MODE_ITEMS, approvalModeOf } from "@/stores/helix-types";
 import type {
   ChatMessage,
   HelixTodo,
@@ -173,7 +176,7 @@ import type { PersistedChatMessage, PersistedSession } from "@/lib/persist";
 // and the context-usage indicator falls back to the per-conversation store).
 // SessionMapEntry / SESSION_MAP_KEY / loadSessionMap / resolveBackendSid 已迁移到
 // @/lib/session-map 模块，供多个组件复用；这里仅导入所需引用。
-import type { ApprovalMode, ReasoningEffortLevel } from "@/stores/helix-types";
+import type { ReasoningEffortLevel } from "@/stores/helix-types";
 import { useProviderStore } from "@/stores/slices/provider-store";
 
 /**
@@ -360,93 +363,14 @@ function rebindSessionSid(
 // 事件时调一次。**别把这段逻辑再写回本文件**：2026-09-22 它整块丢过一次，
 // 结果卡片静默消失（剩下的两条旧登记路径在 pi 后端下永远不成立）。
 
-// ── 审批分流：按操作类型决定弹窗 or 自动批准 ─────────────────────────────
-// yolo 关（default 模式）时后端对每个需要授权的工具调用发 approval.request，
-// 前端在这里分类：项目内文件修改 → auto（直接批准，不弹窗）；危险命令 /
-// 项目外文件访问（读也弹）/ 敏感文件 / 上传外发 → ask（入队弹审批条）。
-// approval.request 没有干净工具名，只有 pattern_key（plugin_rule:terminal:hash
-// 等）+ command 文本 + description，分类靠三者综合判断。
-
-/** 删除/格式化类危险命令（用户确认的范围：删除、格式化） */
-const DANGEROUS_CMD_RE =
-  /\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)?|\bdel\s+\/|\berase\s|\bformat\b|\bmkfs\b|\bdd\s+if=|Remove-Item\b.*-Recurse|\brd\s+\/s|\brmdir\s+\/s|diskpart/i;
-/** 上传/外发类命令 */
-const EXFIL_CMD_RE =
-  /\bcurl\b[^\n]*\s(-T|-F|--upload-file|--data-binary|--data @)|\bscp\b|\brsync\b|\bgit\s+push\b|\bnc\s+-|\bncat\b|\bftp\b.*\bput\b/i;
-/** 敏感文件路径片段 */
-const SENSITIVE_PATH_RE =
-  /(.ssh[/\\]|id_rsa|id_ed25519|.pem\b|.key\b|.env\b|credentials|.aws[/\\]|.gnupg[/\\]|.kube[/\\]config|ntuser\.dat|sam$)/i;
-
-/** 从命令/描述文本里提取形如绝对路径的片段（用于“项目外访问”判断） */
-function extractAbsPaths(text: string): string[] {
-  const out: string[] = [];
-  // Windows 绝对路径 C:\... 或 C:/...
-  for (const m of text.matchAll(/[a-zA-Z]:[\\/][^\s"'|><;&]*/g)) out.push(m[0]);
-  // POSIX 绝对路径 /home/...、/etc/...、~/.ssh/...（~ 开头单独处理）
-  for (const m of text.matchAll(
-    /(?:^|[\s"'=])((?:\/(?:home|etc|var|usr|root|tmp|opt|Users)\/|~\/)[^\s"'|><;&]*)/g,
-  ))
-    out.push(m[1]);
-  return out;
-}
-
-/** 规范化路径做 startsWith 比较（分隔符统一、去尾斜杠、小写——Windows 不区分大小写） */
-function normPathForCompare(p: string): string {
-  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-}
-
 /**
- * 审批分流。
- *
- * ⚠️ 在 pi 路径下这个函数**几乎不会被调用**：`approval_request` 只由扩展的
- * `ui.confirm` 合成（网关 `pi_gateway.rs` 的 permission_request 分支），pi
- * 自己的工具调用不产生任何审批事件。所以 `mode` 参数实际只影响 plan 一档。
- * 保留它是因为 subagents 扩展删 agent / 覆盖文件时仍会走 confirm。
- *
- * @param toolName approval.request 的 toolName（pattern_key 或 command）
- * @param params   toolParams（command / description / pattern_key / reason）
- * @param workDir  当前项目根（selectedWorkDir）
+ * 项目根，但只在**本机**语义下有意义：远程对话（workDir 是 `remote://…` 虚拟键）
+ * 返回 null。这类值喂给本地 fs/git IPC 要么报路径非法、要么静默扫到别的仓库；
+ * 用来判断「这个绝对路径在不在项目内」也同样错（远端 `/home/...` 不可能有本机
+ * 前缀）。调用方拿到 null 应当走「本机什么都不知道」的保守分支。
  */
-function classifyApproval(
-  toolName: string,
-  params: Record<string, any>,
-  workDir: string | null,
-  mode: ApprovalMode,
-): "auto" | "ask" {
-  const patternKey = String(params?.pattern_key || "");
-  const command = String(params?.command || "");
-  const description = String(params?.description || "");
-  const blob = `${toolName} ${patternKey} ${command} ${params?.description || ""} ${params?.reason || ""}`;
-  const workNorm = workDir ? normPathForCompare(workDir) : "";
-  const paths = extractAbsPaths(blob);
-
-  // 1) 危险命令（删除/格式化）→ 弹
-  if (DANGEROUS_CMD_RE.test(command)) return "ask";
-  // 2) 上传/外发 → 弹
-  if (EXFIL_CMD_RE.test(command)) return "ask";
-  // 3) 敏感文件 → 弹
-  if (SENSITIVE_PATH_RE.test(blob)) return "ask";
-
-  // 4) 项目外文件访问（读也弹）：blob 里出现的绝对路径不在项目根内 → 弹
-  for (const p of paths) {
-    if (/^~\//.test(p)) return "ask"; // ~ 开头一律视为项目外（home 下的东西）
-    if (!workNorm) return "ask"; // 不知道项目根时，任何绝对路径访问都弹
-    const pn = normPathForCompare(p);
-    if (pn !== workNorm && !pn.startsWith(workNorm + "/")) return "ask";
-  }
-
-  // 5) 项目外文件读取（后端检测到的）→ 弹
-  if (patternKey.includes("read_file:outside_project:")) return "ask";
-
-  // 5.2) 计划模式：只读查询放行，其余全部弹。计划审批的意义就是让用户先看方案，
-  //      因此文件写入/命令执行/外部访问（甚至项目内读写）都要求确认。
-  //      放在规则之后：规则可以「更严」（上面的 deny/ask 已提前返回），
-  //      但不能把 plan 降级成自动放行。
-  if (mode === "plan") return "ask";
-
-  // 6) 扩展主动 confirm（subagents 删 agent / 覆盖文件）→ 一律弹。
-  //    工具调用本身不经过这里，别指望选个模式能跳过。
-  return "ask";
+function localProjectRoot(dir: string | null): string | null {
+  return dir && !isRemoteWorkDir(dir) ? dir : null;
 }
 
 // ==== Types ============================================================================================
@@ -911,14 +835,34 @@ export function AgentFlowPanel() {
   // 历史条悬停时淡出对话内容，避免展开的标题与模型输出重叠
   const [historyStripHover, setHistoryStripHover] = useState(false);
 
-  // 全局远程模式开关（由 useRemoteTunnelReconcile 现查后端 tunnel status 后写
-  // store；挂在 helix-layout，宿主永不卸载）。
-  // 非 null = agent 跑在远端，本地 fs/git 驱动的 UI 一律让位。
-  const remoteMode = useHelixStore((s) => s.remoteMode);
+  // 全局隧道状态（由 useRemoteTunnelReconcile 现查后端 tunnel status 后写 store；
+  // 挂在 helix-layout，宿主永不卸载）。双通道之后这里**不读它**——它只回答
+  // 「隧道在不在」（侧边栏远程行变绿、断开按钮用它），不回答「本对话在哪台机器」。
+  //
+  // 后者由对话自己的 workDir 表达（`remote://user@host:port/<远端路径>` 或本机
+  // 路径）。真值 = `activeSessionWorkDir ?? selectedWorkDir`：加载对话时前者是
+  // 会话的 workDir，新对话草稿时前者为空，回落到已选本地项目。
+  const projectWorkDir = useHelixStore(
+    (s) => s.activeSessionWorkDir ?? s.selectedWorkDir,
+  );
+  const conversationIsRemote = isRemoteWorkDir(projectWorkDir);
+  const externalServices = useHelixStore((s) => s.externalServices);
   const openRemoteWizard = useHelixStore((s) => s.openRemoteWizard);
 
-  const approvalMode = useHelixStore((s) => s.approvalMode);
-  const setApprovalMode = useHelixStore((s) => s.setApprovalMode);
+  // 审批相关的两条轴（详见 helix-types 的 ApprovalMode 文档）：
+  // - 权限档 `permissionMode`：**全局一档**，值是从 pi-permission 扩展配置文件
+  //   回读来的缓存。它不是本地状态，所以没有「按会话记住」一说——扩展只读
+  //   一个文件，按会话存一份就是第二条真相（历史 bug：显示完全访问、照样弹窗）。
+  // - `plan`：按会话的独立轴（pi 实例级），只有下拉/批准会写它。
+  // 芯片显示的是两者合成的那一个值。
+  const permissionMode = useHelixStore((s) => s.permissionMode);
+  const planModeBySession = useHelixStore((s) => s.planModeBySession);
+  const setPermissionMode = useHelixStore((s) => s.setPermissionMode);
+  const setPlanModeForSession = useHelixStore((s) => s.setPlanModeForSession);
+  // 芯片/下拉的查找键：与 modelBySession 同一约定（新对话未分配 id 时用草稿键）。
+  const modeKey = currentSessionId ?? DRAFT_SESSION_KEY;
+  const planOn = !!planModeBySession[modeKey];
+  const approvalMode = approvalModeOf(permissionMode, planOn);
   // 压缩完成提示 divider（手动 /compact 与自动压缩都会写入，持久化显示，切会话时清空）
   const compressionNotice = useHelixStore(
     (s) => s.compressionNotices[currentSessionId ?? DRAFT_SESSION_KEY],
@@ -966,13 +910,18 @@ export function AgentFlowPanel() {
         t.cronExpression,
       );
     }
-    setPendingTaskCreations([]);
+    // 只移除本次确认的这几条：队列里可能还留着别的对话待确认的任务。
+    setPendingTaskCreations((prev) => prev.filter((p) => !tasks.includes(p)));
     st.showToast({
       type: "success",
       title: `已创建 ${tasks.length} 个定时任务`,
     });
   };
-  const handleDismissTasks = () => setPendingTaskCreations([]);
+  // 忽略 = 只清掉本视图（当前对话 + 其旁路）的那几条，别的对话继续挂着。
+  const handleDismissTasks = () =>
+    setPendingTaskCreations((prev) =>
+      prev.filter((p) => !isPendingHere(p.sessionId)),
+    );
   // Inline notices for automatic context compression events (shown inside transcript).
   const [autoCompressNotices, setAutoCompressNotices] = useState<
     Array<{ id: string; ts: number; text: string }>
@@ -1118,17 +1067,33 @@ export function AgentFlowPanel() {
   const setSessionPendingApproval = useHelixStore(
     (s) => s.setSessionPendingApproval,
   );
-  // 仅显示/统计当前会话的待确认（审批/反问/定时任务），避免切会话时串台。
-  // 统一用 currentSessionId ?? DRAFT_SESSION_KEY 作为查找键：新建对话（id 未分配）
-  // 时 handleRun 的自动批准/审批回调拿到的也是这个 fallback 键，双方对齐才能命中。
+  // 仅显示/统计「归属本视图」的待确认（审批/反问/定时任务），避免切会话串台。
+  // 归属键 = 请求所属的对话（入队时写的是本轮 run 自己的 cid，见 handleRun 的
+  // myCid），不是「事件到达时谁在前台」。用后者会让后台并行 run 的审批挂到前台
+  // 对话头上，而点批准时取的 sid 也是前台会话的——网关按 session_id 严格路由
+  // （pi_gateway.rs `routed_instance_or_ui_owner`），真正等待的实例永远收不到
+  // 回应，那条 run 就死在自己的 ui.confirm 上。
+  // 前台键用 currentSessionId ?? DRAFT_SESSION_KEY：新建对话还没分配 id 时，
+  // plan 标记等按会话的状态也写在这个键上，双方对齐才命中。
   const approvalKey = currentSessionId ?? DRAFT_SESSION_KEY;
+  // 旁路（/btw）会话不落侧边栏，切不过去，所以它名下那条 btw cid 的请求要在
+  // 主线视图里弹——否则审批条无处显示，旁路 run 永远卡住。
+  const bylineCid = useHelixStore(
+    (s) => s.bylineReplies[approvalKey]?.sessionId,
+  );
+  // 归属判定唯一入口：本对话自己的请求 + 本对话名下旁路的请求。
+  const isPendingHere = useCallback(
+    (owner?: string) =>
+      !!owner && (owner === approvalKey || owner === bylineCid),
+    [approvalKey, bylineCid],
+  );
   const approvalRequest =
-    approvalQueue.find((r) => r.sessionId === approvalKey) || null;
-  const pendingApprovalCount = approvalQueue.filter(
-    (r) => r.sessionId === approvalKey,
+    approvalQueue.find((r) => isPendingHere(r.sessionId)) || null;
+  const pendingApprovalCount = approvalQueue.filter((r) =>
+    isPendingHere(r.sessionId),
   ).length;
   const clarifyRequest =
-    clarifyQueue.find((c) => c.sessionId === approvalKey) || null;
+    clarifyQueue.find((c) => isPendingHere(c.sessionId)) || null;
   // 把每个会话的待确认状态同步到全局 store，供侧边栏标记
   useEffect(() => {
     const map: Record<string, boolean> = {};
@@ -1576,20 +1541,27 @@ export function AgentFlowPanel() {
       runningSessionIdRef.current = sid;
     }
   }, [currentSessionId, streamingDrafts]);
-  // 切换会话时把该会话的审批模式同步到后端实例。每个对话在 pi 侧是独立
-  // 进程、各自记模式；前端 setCurrentSessionId 只恢复本地 approvalMode，
-  // 从不通知后端 —— 切回一个"计划模式"的旧对话时，后端仍停在上次的模式，
-  // 模型直接执行而不等批准（根因）。此处用 set_mode 兜底同步；尚无 sid 的
-  // 新草稿不适用（session/new 会带 mode_id，网关已消费）。
+  // 进/换会话时把两条轴各自对齐一次：
+  // 1) 权限档的真相是 pi-permission 的配置文件（用户可能手改、另一个 pi 客户端
+  //    也可能改过）。不回读就是拿缓存骗界面。
+  // 2) plan 的真相是该会话 pi 实例的状态，前端只有一份影子。切回一个「规划中」
+  //    的旧对话时，只改前端不通知后端，后端仍停在上次的模式，模型直接执行而不
+  //    等批准（这正是当初的根因）。set_mode 带合成值：进 plan → 网关发 /plan
+  //    start，离开 plan → 发 /plan exit；无变化时网关两边都不发（no-op）。
+  //    尚无 sid 的新草稿跳过（session/new 自带 mode_id，网关已消费）。
   useEffect(() => {
+    void useHelixStore.getState().syncPermissionMode();
     const cid = currentSessionId;
     if (!cid) return;
-    const entry = sessionMapRef.current.get(cid);
-    const sid = entry?.sid;
+    const sid = sessionMapRef.current.get(cid)?.sid;
     if (!sid) return;
-    const mode = useHelixStore.getState().approvalMode;
+    const st = useHelixStore.getState();
+    const mode_id = approvalModeOf(
+      st.permissionMode,
+      !!st.planModeBySession[cid],
+    );
     helixApi()
-      ?.send("session/set_mode", { session_id: sid, mode_id: mode })
+      ?.send("session/set_mode", { session_id: sid, mode_id })
       .catch((e: unknown) => {
         console.warn("[Helix] set_mode(sync on switch) failed:", e);
       });
@@ -2752,26 +2724,25 @@ export function AgentFlowPanel() {
   }, [setInputSynced]);
 
   // Scan workspace files for @ file references.
-  // NOTE: 必须跟随 selectedWorkDir 重跑。旧实现依赖数组是 `[]` 且用
+  // NOTE: 必须跟随**本对话的**项目目录重跑。旧实现依赖数组是 `[]` 且用
   // `workspaceFilesLoadedRef` 永久上锁（只拉一次），而挂载时后端 workDir 还没
   // 同步完 → git status 非仓库、scanTree(".") 扫的是默认目录；此后切换项目
   // 也不会重扫，@ 候选要么空要么永远是上一个项目的文件。
   //
-  // 远程模式下**必须整个跳过**：`git.status` / `scanTree` 都是本机 IPC，扫出
-  // 的是本地文件树，而 agent 在远端跑。照旧渲染等于给用户一份「@ 就能引用」
-  // 的假清单——插进 prompt 的本地路径在远端根本不存在，模型必然读不到。
-  // 远程模式的文件引用得等远端 fs IPC 落地（`remote_list_paths` 目前只覆盖
-  // 目录浏览，不含递归文件树）。
+  // 远程对话**必须整个跳过**：`git.status` / `scanTree` 都是本机 IPC，扫出的是
+  // 本地文件树，而这条对话的 agent 在远端跑。照旧渲染等于给用户一份「@ 就能
+  // 引用」的假清单——插进 prompt 的本地路径在远端根本不存在，模型必然读不到。
+  // 远程对话的文件引用得等远端 fs IPC 落地（`remote_list_paths` 目前只覆盖目录
+  // 浏览，不含递归文件树）。
+  //
+  // 判定用**本对话**的 workDir，不用全局隧道状态：隧道连着时本地对话照样要能
+  // @ 本地文件（真·双通道）。
   useEffect(() => {
     if (!window.electron?.isElectron) return;
-    if (useHelixStore.getState().remoteMode) {
-      workspaceFilesRef.current = [];
-      workspaceFilesLoadedFor.current = null;
-      return;
-    }
-    const root = selectedWorkDir;
+    const root = conversationIsRemote ? null : projectWorkDir;
     if (!root) {
       workspaceFilesRef.current = [];
+      workspaceFilesLoadedFor.current = null;
       return;
     }
     // 同一目录不重复拉；换项目才失效重扫。
@@ -2833,26 +2804,22 @@ export function AgentFlowPanel() {
     return () => {
       cancelled = true;
     };
-  }, [selectedWorkDir]);
+  }, [conversationIsRemote, projectWorkDir]);
 
   // Clear flow
 
-  // Select project directory. Must go through setWorkDir (not just
-  // setSelectedWorkDir) so the Electron main process workDir is synced AND
-  // workDirEpoch bumps — otherwise the hook keeps reusing the stale
-  // session rooted at the old cwd, so the UI shows the new dir while the backend
-  // actually operates in the old one.
+  // 选本地项目目录。必须走 setWorkDir（不只是 setSelectedWorkDir）：主进程
+  // workDir 同步 + workDirEpoch bump，否则 hook 会复用挂在旧 cwd 上的后端
+  // 会话 —— 界面显示新目录、agent 却在旧目录干活。
   //
-  // 远程模式下的语义（这里曾经是个真 bug）：`applyRemoteCwd` 把**本地
-  // Windows 路径**写进 `pi.remote_cwd`，而那个键是发给**远端** bridge 的
-  // 握手行（`cwd:<path>`）。远端没有 D:\... 这个路径 → bridge 的 resolveCwd
-  // 静默回退到 home → agent 跑在完全无关的目录里，而界面显示着你刚点的本地
-  // 项目。两者对不上，且没有任何提示。
+  // 双通道之后这里**不再断开远程**：隧道和「这条对话跑在哪台机器」是两件事实。
+  // 选本地目录只是给新对话挑一个本地项目，远程隧道、远程对话都不受影响。
+  // （旧实现要先 confirm + disconnectRemoteProject，是因为那时 `pi.remote_cwd`
+  // 是全局的，本地路径会被写进远端握手行，bridge 静默回退到 home。）
   //
-  // 现在：远程模式下选本地目录 = 明确表达「我要回本地干活」，那就断开远程，
-  // 让一切回到本地模式（本地 cwd 天然跟着 work dir 走，不需要写任何 yaml）。
-  // 反过来，想在远端换目录请走「远程项目」列表，那里的路径本来就会经过
-  // bridge 的 existsSync 校验。
+  // `setCurrentSessionId(null)` 顺带把 activeSessionWorkDir 清成 null，这一步是
+  // 必要的：草稿可能绑着远程项目（侧边栏远程行的「新建对话」），不清掉的话界面
+  // 显示本地项目、新对话却仍按远程键去 spawn。
   const selectWorkDir = useCallback(
     async (dir: string | null) => {
       if (!dir) {
@@ -2861,26 +2828,6 @@ export function AgentFlowPanel() {
       }
       useHelixStore.getState().setCurrentSessionId(null);
       useHelixStore.getState().setNoActiveConversation(false);
-      if (useHelixStore.getState().remoteMode) {
-        const label = useHelixStore.getState().remoteMode!.label;
-        const ok = confirm(
-          `当前 agent 跑在远程项目「${label}」。\n\n切到本地项目会断开远程连接并重启网关，正在运行的对话会被打断。\n\n继续？`,
-        );
-        if (!ok) return;
-        try {
-          await disconnectRemoteProject();
-          // 立刻让对账 hook 重查一次：否则芯片上的远程标签要等 30s 轮询才消失，
-          // 表现为「已经断开了一会儿了界面还说在远端」。
-          useHelixStore.getState().bumpRemoteStatusVersion();
-        } catch (e) {
-          storeActions.showToast({
-            type: "error",
-            title: "断开远程失败",
-            description: String(e),
-          });
-          return;
-        }
-      }
       await storeActions.setWorkDir(dir);
     },
     [storeActions],
@@ -2890,9 +2837,16 @@ export function AgentFlowPanel() {
   // 定了一个 cwd（resume 以 jsonl 头部的 cwd 为准），在对话里切项目只会让「界面
   // 显示的项目」和「这条对话实际干活的项目」分家 —— 要换项目就新建对话。
   //
+  // 芯片显示的是**本对话**的项目（`projectWorkDir`），不是隧道状态：远程草稿
+  // （从侧边栏远程行「新建对话」进来）显示那台服务器，本地草稿显示所选目录。
+  //
   // 下拉里**不列已有项目**（芯片自己就是当前项目，再列一遍是第二份真相；已存
   // 远程服务器列在侧边栏「项目」里）：只有两个动作 —— 挑一个本机目录、加一台远程
   // 项目。
+  const chipRemoteKey = parseRemoteWorkDir(projectWorkDir);
+  const chipService = chipRemoteKey
+    ? findServiceByRemoteWorkDir(externalServices, projectWorkDir)
+    : null;
   const renderProjectChip = () => (
     <div className="relative" ref={folderDropdownRef}>
       <button
@@ -2901,7 +2855,7 @@ export function AgentFlowPanel() {
         className="flex items-center gap-1.5 px-2 py-1 rounded-lg ui-text-sm2 text-foreground/60 hover:text-foreground hover:bg-muted/40 transition-colors"
         data-tip="选择项目目录"
       >
-        {remoteMode ? (
+        {chipRemoteKey ? (
           <Server className="size-3.5 shrink-0 text-emerald-500" />
         ) : (
           <Folder className="size-3.5 shrink-0 text-amber-500" />
@@ -2909,15 +2863,17 @@ export function AgentFlowPanel() {
         <span
           className="max-w-[160px] truncate"
           title={
-            remoteMode
-              ? `agent 在远端：${remoteMode.username ? remoteMode.username + "@" : ""}${remoteMode.host}:${remoteMode.remotePath ?? "home"}`
-              : (selectedWorkDir ?? "")
+            chipRemoteKey
+              ? `agent 在远端：${chipRemoteKey.targetKey}/${chipRemoteKey.remotePath ?? "home"}`
+              : (projectWorkDir ?? "")
           }
         >
-          {remoteMode
-            ? remoteMode.label
-            : selectedWorkDir
-              ? selectedWorkDir.split(/[\\/]/).pop() || selectedWorkDir
+          {chipRemoteKey
+            ? chipService
+              ? remoteProjectLabel(chipService)
+              : chipRemoteKey.targetKey
+            : projectWorkDir
+              ? projectWorkDir.split(/[\\/]/).pop() || projectWorkDir
               : "选择项目"}
         </span>
         <ChevronDown className="size-3 opacity-60" />
@@ -3262,7 +3218,7 @@ export function AgentFlowPanel() {
   // 旁路提示词（首问）：**问题放在第一行**——session label 取首条 user 消息
   // 前 50 字，所以「旁路：<问题>」会成为这条会话的名字。整段作为**一条**
   // prompt 发出，旁路会话里就只有这一条 user 消息；主线转录跟在后面，模型
-  // 按指令只依据它作答。强制只读、简洁、只答所问——不依赖 approvalMode，
+  // 按指令只依据它作答。强制只读、简洁、只答所问——不依赖审批档位，
   // 主线可能在 plan 模式，但旁路永远不该动文件。
   const buildBtwPrompt = useCallback(
     (question: string, transcript: string): string =>
@@ -3405,11 +3361,16 @@ export function AgentFlowPanel() {
   // 为什么只快照 git 视角下有改动的文件：全量扫树几十万文件读不动。
   // 未初始化 git 的项目 `git status` 失败 → 空快照，此时回滚入口会提示
   // 「本轮无快照」，不给出虚假的安全感。
+  //
+  // 远程对话跳过快照：`git.status` 是本机 IPC，而这条对话改的是远端文件 —— 快照
+  // 出来的会是「无关本地仓库」或一个路径错误，撤销按钮于是会还原错东西。远端
+  // 回滚要等远端 git/fs IPC。
   const takeRunSnapshot = useCallback(async () => {
     try {
-      const root =
+      const root = localProjectRoot(
         useHelixStore.getState().activeSessionWorkDir ??
-        useHelixStore.getState().selectedWorkDir;
+          useHelixStore.getState().selectedWorkDir,
+      );
       if (!root) return;
       const runId = `run-${Date.now().toString(36)}`;
       const gitRes = await window.electron?.git?.status(root);
@@ -3825,48 +3786,29 @@ export function AgentFlowPanel() {
         });
       }
     };
-    // Tracks whether THIS run is the one currently driving the shared UI state.
-    // On a background→front transition the accumulated snapshot is pushed first
-    // so the live state never mixes two runs' data.
-    let wasFront = isFrontRun();
+    // 三个 setter 的共同契约：本 run 的私有累加器是**唯一真相**，React state
+    // 只是它在「前台」时的投影。旧写法把同一个 updater 再施加一次
+    // （setResponseBlocks(u)），等于让 state 长成第二份独立副本——任何外部
+    // `setResponseBlocks([])`（如 chatMessages 被清空的那个 effect）之后，
+    // state 从空数组重新累积，屏幕上就只剩「重置之后的第一块」，而 run 的累加器
+    // 与草稿仍是全的（"思考过程好端端地只剩一个思考中"的根因）。
     const uiRB = (u: any) => {
       responseBlocksRef.current =
         typeof u === "function" ? u(responseBlocksRef.current) : u;
-      if (!isFrontRun()) {
-        wasFront = false;
-        return;
-      }
-      if (!wasFront) {
-        wasFront = true;
-        setResponseBlocks(responseBlocksRef.current);
-      }
-      setResponseBlocks(u);
+      if (!isFrontRun()) return;
+      setResponseBlocks(responseBlocksRef.current);
       liveStateOwnerRef.current = activeSessionId;
     };
     const uiSteps = (u: any) => {
       stepsRef.current = typeof u === "function" ? u(stepsRef.current) : u;
-      if (!isFrontRun()) {
-        wasFront = false;
-        return;
-      }
-      if (!wasFront) {
-        wasFront = true;
-        setSteps(stepsRef.current);
-      }
-      setSteps(u);
+      if (!isFrontRun()) return;
+      setSteps(stepsRef.current);
       liveStateOwnerRef.current = activeSessionId;
     };
-    const uiST = (u: any) => {
+    const uiST = (u: string) => {
       streamThinkingRef.current = u;
-      if (!isFrontRun()) {
-        wasFront = false;
-        return;
-      }
-      if (!wasFront) {
-        wasFront = true;
-        setStreamThinking(streamThinkingRef.current);
-      }
-      setStreamThinking(u);
+      if (!isFrontRun()) return;
+      setStreamThinking(streamThinkingRef.current);
       liveStateOwnerRef.current = activeSessionId;
     };
     // Push this run's accumulated state into its own per-session draft so the
@@ -3987,10 +3929,16 @@ export function AgentFlowPanel() {
       activeSessionId =
         "session-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
       useHelixStore.getState().setCurrentSessionId(activeSessionId);
-      // 新对话归属当前所选项目：activeSessionWorkDir 从此始终反映「当前对话所属项目」
+      // 新对话归属当前项目：activeSessionWorkDir 从此始终反映「当前对话所属项目」
       // （加载的项目外对话为 null），界面据此决定是否显示项目目录与分支。
+      //
+      // 草稿已有的值优先 —— 远程草稿（远程行「新建对话」）的项目是
+      // `remote://…` 虚拟键，而 selectedWorkDir 恒为本机路径/空。用 `?? selected`
+      // 覆盖会把远程草稿在发消息那一刻变成远程键丢失、进而落到本地项目。
       useHelixStore.setState({
-        activeSessionWorkDir: useHelixStore.getState().selectedWorkDir,
+        activeSessionWorkDir:
+          useHelixStore.getState().activeSessionWorkDir ??
+          useHelixStore.getState().selectedWorkDir,
       });
       // 草稿期在输入框选过的模型（记在 DRAFT_SESSION_KEY 上）此刻立刻搬到新 cid：
       // 否则 currentSessionId 一变成新 cid，模型芯片就会在「本对话覆盖值缺失」的
@@ -4236,11 +4184,14 @@ export function AgentFlowPanel() {
       // （`loadSessions()` 要反序列化全部对话的转录，不能放在常规路径上）。
       let localTurns: PersistedChatMessage[] = [];
       let hasContent = false;
+      // ⑤ 也要用它：远程/本地通道的判定看**这条对话自己的** workDir，界面记的
+      // activeSessionWorkDir 在跨视图重建时可能是上一个会话留下的。
+      let record: PersistedSession | undefined;
       if (!sessionId && myCid) {
         const { persistence } = await import("@/lib/persist");
-        const record: PersistedSession | undefined = (
-          await persistence.loadSessions()
-        ).find((s) => s.id === myCid);
+        record = (await persistence.loadSessions()).find(
+          (s) => s.id === myCid,
+        );
         localTurns = (record?.chatMessages ?? []).filter(
           (m) => m.role === "user" || m.role === "assistant",
         );
@@ -4308,16 +4259,33 @@ export function AgentFlowPanel() {
               .slice(-40)
           : [];
         const st0 = useHelixStore.getState();
+        // 这条对话的项目身份，与上面 `rawCwd` 同一条链（落盘的 workDir 优先于
+        // 界面记的）。远程对话走重建时 activeSessionWorkDir 可能是上一个视图
+        // 留下的值，只读它会发错通道。
+        const ownWorkDir =
+          record?.workDir ??
+          st0.activeSessionWorkDir ??
+          st0.selectedWorkDir ??
+          null;
+        // 本对话属于远程项目吗？虚拟键 `remote://<机器>/<远端路径>` 只有前端认得
+        // （见 lib/remote-projects.ts），网关只吃「走哪条通道 + 远端绝对路径」。
+        const remoteKey = isRemoteWorkDir(ownWorkDir)
+          ? parseRemoteWorkDir(ownWorkDir)
+          : null;
         const res = (await helixApi()!.send("session/new", {
           mcpServers: buildAcpMcpServers(st0.mcpServers),
-          mode_id: st0.approvalModeBySession?.[myCid] ?? st0.approvalMode,
-          // 远程项目下不能把 `remote://…` 虚拟键当 cwd 发给后端：本地模式下它
-          // 会被 join 到当前 work_dir 后面（Windows 下无盘符不算绝对路径），
-          // 而 `:` / `/` 在 Windows 文件名里非法 → create_dir_all 报 os error
-          // 123。远程模式的 cwd 由 `pi.remote_cwd` 决定，与这里无关，发 undefined。
-          cwd: isRemoteWorkDir(st0.activeSessionWorkDir)
-            ? undefined
-            : (st0.activeSessionWorkDir ?? st0.selectedWorkDir ?? undefined),
+          mode_id: approvalModeOf(
+            st0.permissionMode,
+            !!st0.planModeBySession[myCid],
+          ),
+          // 远程对话发 `remote_cwd`（远端机器上的绝对路径），**不发 cwd**：
+          // cwd 是本地语义，会被 join 到当前 work_dir 后面（Windows 下
+          // `remote://…` 的 `:` `/` 非法 → create_dir_all 报 os error 123）。
+          // 本地对话照旧只发 cwd —— 于是隧道开着时，本地项目的对话仍然在
+          // 本机 spawn 的 pi 里跑，不再被整体搬到远端。
+          ...(remoteKey
+            ? { remote_cwd: remoteKey.remotePath || "~" }
+            : { cwd: ownWorkDir ?? undefined }),
           ...(seedMessages.length > 0 ? { messages: seedMessages } : {}),
         })) as any;
         sessionId =
@@ -4356,17 +4324,16 @@ export function AgentFlowPanel() {
           );
         }
       }
-      // Auto-approve edits for this session (no manual approval UI): switch
-      // the backend into "don"t ask" mode. Sent on EVERY run (not just
-      // session creation) — a reused conversation's pi instance keeps its own
-      // mode, and the switch-session effect above only fires on focus change;
-      // re-syncing here makes the mode badge and backend state agree even
-      // after gateway restarts or drift.
-      // 审批模式按会话解析：approvalModeBySession[本会话] 优先（旁路面板
-      // 写入的覆盖值），没有再回落全局 approvalMode。
-      const runApprovalMode =
-        useHelixStore.getState().approvalModeBySession?.[activeSessionId] ??
-        approvalMode;
+      // 每轮都同步一次模式（不只是建会话时）：复用中的对话，它的 pi 实例留着
+      // 上次的 plan 状态，而上面的切会话 effect 只在焦点变化时跑；这里补一次，
+      // 芯片和后端实例在网关重启/漂移之后仍然一致。
+      // 两条轴各自解析：权限档**全局一档**，且发消息前回读扩展配置（真相在那
+      // 个文件里，别的进程可能改过；一次小 JSON 读取，代价可忽略）；plan 按会话。
+      const runTier = await useHelixStore.getState().syncPermissionMode();
+      const runPlanOn = !!useHelixStore.getState().planModeBySession[
+        activeSessionId
+      ];
+      const runApprovalMode = approvalModeOf(runTier, runPlanOn);
       try {
         await helixApi()!.send("session/set_mode", {
           session_id: sessionId,
@@ -5568,7 +5535,10 @@ export function AgentFlowPanel() {
             if (su === "plan_complete") {
               const planText = String(params?.update?.plan ?? "");
               if (planText.trim()) {
-                const cid = useHelixStore.getState().currentSessionId;
+                // 键用**本轮 run 的 cid**（myCid），和上面 run 结束时的兜底浮条
+                // 同一口径：后台跑完的计划属于那条对话，切过去才显示。写
+                // currentSessionId 会把别的对话的方案挂到当前对话上。
+                const cid = myCid ?? useHelixStore.getState().currentSessionId;
                 setPendingPlanReview({
                   sessionId: cid ?? DRAFT_SESSION_KEY,
                   content: planText,
@@ -5636,11 +5606,34 @@ export function AgentFlowPanel() {
             // 两者都在 registerFileChangesFromToolUpdate 里按优先级处理；本文件不再
             // 自己实现校验/路径推断 —— 那段逻辑 2026-09-22 整块丢失过一次，卡片因此静默消失。
             if (su === "tool_call_update") {
-              registerFileChangesFromToolUpdate(params?.update, {
-                runChanges: runFileChangesRef.current,
-                addPendingChange: storeActions.addPendingChange,
-                afterRegister: syncDraft,
-              });
+              // 这条对话的项目根，与 ⑤ 的 `ownWorkDir` 同一条链（落盘的 workDir
+              // 优先于界面记的）。两点差别：
+              //   - 只在「本对话就是前台对话」时才用界面值。后台 run 读
+              //     activeSessionWorkDir 会拿到**别的项目**的根，于是把自己的
+              //     合法改动判成"项目外"滤掉 —— 比不过滤更糟。
+              //   - 判不出来就传 null：远程对话（`remote://…` 没有本机前缀语义）
+              //     和根未知的对话一律保守放行，宁可不滤也不丢卡片。
+              const st = useHelixStore.getState();
+              const isFront = !myCid || st.currentSessionId === myCid;
+              const runRoot = localProjectRoot(
+                record?.workDir ??
+                  (isFront
+                    ? st.activeSessionWorkDir ?? st.selectedWorkDir
+                    : null) ??
+                  null,
+              );
+              const registered = registerFileChangesFromToolUpdate(
+                params?.update,
+                {
+                  runChanges: runFileChangesRef.current,
+                  addPendingChange: storeActions.addPendingChange,
+                  afterRegister: syncDraft,
+                  projectRoot: runRoot,
+                },
+              );
+              // 工作区的文件确实变了 → 让「更改」列表与右上角胶囊立刻重算，
+              // 不必等它的 5s 轮询（hook 里 400ms 合并，一轮多次写不会各起一个 git）。
+              if (registered) storeActions.bumpGitChangeRevision();
             }
           }
           if (parsed && parsed.type === "done" && doneProcessedRef.current) {
@@ -5797,14 +5790,16 @@ export function AgentFlowPanel() {
         }
       }
       const promptText = (trimmed + fileContext).trim() || trimmed;
-      // 计划模式（plan）：handleRun 被批准流程重新触发时（approvalMode 已是
-      // default），这里取 live getState() 而非闭包——避免闭包里还是旧的
-      // plan 模式，导致批准后仍带上只读前缀，模型继续只读规划不执行。
+      // 计划模式（plan）：handleRun 被批准流程重新触发时（本会话的 plan 标记
+      // 已被清成 false），这里取 live store 而非闭包——避免闭包里还是旧的 plan
+      // 态，导致批准后仍带上只读前缀，模型继续只读规划不执行。
       // plan 模式前缀明确告诉模型：只做只读分析、给出方案，不要改文件/跑命令；
-      // 用户批准后（default）前缀消失，模型才真正动手。
-      const liveMode = useHelixStore.getState().approvalMode;
+      // 用户批准后前缀消失，模型才真正动手。
+      const runIsPlan = !!useHelixStore.getState().planModeBySession[
+        activeSessionId
+      ];
       const finalPromptText =
-        liveMode === "plan"
+        runIsPlan
           ? `[计划模式] 请只做只读分析并给出可执行的实施计划，不要修改任何文件、不要执行任何命令，也不要在没有明确请求时下载或访问外部资源。请以清晰的步骤列出你的方案，供用户审阅批准后再执行。\n\n${promptText}`
           : promptText;
       promptItems.push({ type: "text", text: finalPromptText });
@@ -6837,9 +6832,8 @@ export function AgentFlowPanel() {
                     ...prev,
                     ...detected.tasks.map((t) => ({
                       ...t,
-                      sessionId:
-                        useHelixStore.getState().currentSessionId ??
-                        DRAFT_SESSION_KEY,
+                      // 归属本轮 run 的对话，不是「此刻谁在前台」（同审批队列）
+                      sessionId: myCid,
                     })),
                   ]);
                 }
@@ -6941,14 +6935,16 @@ export function AgentFlowPanel() {
                 thinkingStartTimeRef.current = 0;
                 thinkingDurationRef.current = 0;
                 curState.setChatMessageStreaming(msgId, false);
-                // 计划模式产出方案后必须停在人工审查；只有用户点击批准才切换执行模式。
-                // 计划模式产出方案后停在人工审查；弹出 PlanReviewBar，
-                // 用户点批准才切换到 default 并执行。
+                // 计划模式产出方案后必须停在人工审查：plan 是按会话那一轴，
+                // 所以查**本轮 run 的 cid**（后台跑的不是当前对话，读全局或
+                // currentSessionId 都会弹错会话的浮条）。用户点批准才退出 plan。
                 if (
                   content &&
-                  useHelixStore.getState().approvalMode === "plan"
+                  !!useHelixStore.getState().planModeBySession[
+                    activeSessionId ?? DRAFT_SESSION_KEY
+                  ]
                 ) {
-                  const cid = useHelixStore.getState().currentSessionId;
+                  const cid = activeSessionId;
                   // 如果 plan_complete 事件已经用真实 plan 工件（plan_mode_complete
                   // 工具的 args.plan）弹过浮条，这里就不再覆盖。
                   setPendingPlanReview((prev) => {
@@ -7273,61 +7269,28 @@ export function AgentFlowPanel() {
             } else if (parsed.type === "available_commands") {
               useHelixStore.getState().setAvailableCommands(parsed.commands);
             } else if (parsed.type === "approval_request") {
-              // 审批分流：项目内文件修改 → 直接回 approve（不弹窗，diff 记录走
-              // tool.complete inline_diff 独立路径不受影响）；危险命令/项目外文件/
-              // 敏感文件/上传外发 → 入队弹审批条。完全访问档（yolo 开）时后端
-              // 不发本事件，前端无物可分。
-              const verdict = classifyApproval(
-                String(parsed.toolName || ""),
-                parsed.toolParams || {},
-                useHelixStore.getState().activeSessionWorkDir ??
-                  useHelixStore.getState().selectedWorkDir,
-                // 审批模式按会话解析（与 handleRun 的 runApprovalMode 同口径）：
-                // 旁路面板写入的 approvalModeBySession[btw-cid] 优先，没有再回落全局。
-                // 原来直接读全局 approvalMode，导致旁路面板选的模式对审批分流完全无效。
-                useHelixStore.getState().approvalModeBySession?.[
-                  myCid || currentSessionId || ""
-                ] ?? useHelixStore.getState().approvalMode,
-              );
-              const autoSid =
-                (myCid && sessionMapRef.current.get(myCid)?.sid) ||
-                (currentSessionId &&
-                  sessionMapRef.current.get(currentSessionId)?.sid) ||
-                helixSessionIdRef.current;
-              if (verdict === "auto") {
-                if (autoSid) {
-                  // 自动批准也走新 RPC（2026-08-17 起后端弃用 session/approve）：
-                  // approval.respond + choice: once/session/always/deny。
-                  helixApi()!
-                    .send("approval.respond", {
-                      session_id: autoSid,
-                      choice: "once",
-                      request_id: parsed.approvalId || "",
-                    })
-                    .catch((e: any) =>
-                      console.warn("[Helix] auto-approve failed:", e),
-                    );
-                }
-              } else {
-                bumpPendingUserRequests(1);
-                setApprovalQueue((prev) => [
-                  ...prev,
-                  {
-                    id: parsed.approvalId,
-                    sessionId: currentSessionId ?? undefined,
-                    toolName: parsed.toolName,
-                    params: parsed.toolParams || {},
-                    timestamp: Date.now(),
-                  },
-                ]);
-              }
+              // `approval_request` 只来自扩展的 ui.confirm（subagents 删 agent /
+              // 覆盖文件那一类）：它主动请求确认就是要人拍板，没有自动放行分支。
+              // 权限档不参与——门禁在 pi-permission 那一侧，它自己的配置决定问不
+              // 问；前端在这里再判一次就是第二条真相。
+              bumpPendingUserRequests(1);
+              setApprovalQueue((prev) => [
+                ...prev,
+                {
+                  id: parsed.approvalId,
+                  sessionId: myCid,
+                  toolName: parsed.toolName,
+                  params: parsed.toolParams || {},
+                  timestamp: Date.now(),
+                },
+              ]);
             } else if (parsed.type === "clarify_request") {
               bumpPendingUserRequests(1);
               setClarifyQueue((prev) => [
                 ...prev,
                 {
                   id: parsed.requestId,
-                  sessionId: currentSessionId ?? undefined,
+                  sessionId: myCid,
                   question: parsed.question || "",
                   choices: parsed.choices || null,
                 },
@@ -7942,7 +7905,11 @@ export function AgentFlowPanel() {
   );
 
   const handleApproval = useCallback(
-    async (approvalId: string, choice: ApprovalLevel) => {
+    async (
+      approvalId: string,
+      choice: ApprovalLevel,
+      ownerCid?: string,
+    ) => {
       // 先出队（fail-closed）：无论 RPC 是否成功，approval 弹条立即从 UI 移除，
       // 避免后端已 resolve 但响应延迟/超时时，用户看到一条永远转圈"提交中"的弹条
       //（RPC_TIMEOUT_MS=60s，agent 已继续但审批仍在占屏）。未送达时 agent 会再发
@@ -7950,9 +7917,11 @@ export function AgentFlowPanel() {
       setApprovalQueue((prev) => prev.filter((r) => r.id !== approvalId));
       bumpPendingUserRequests(-1);
       try {
-        // 用 getState() 拿当前会话，避免 useCallback([]) 闭包里的 currentSessionId
-        // 因依赖变化而读到旧值（弹条常跨会话存活，出队必须删对的会话）。
-        const cid = useHelixStore.getState().currentSessionId;
+        // sid 按**请求归属的对话**查：后端 approval.respond 用 session_id 严格
+        // 路由（pi_gateway.rs `routed_instance_or_ui_owner`），送到别的实例上
+        // 就是「Unknown pi UI request」报错 + 真正等回应的那条 run 永久卡死。
+        // 没带归属（草稿态等旧调用方）才退回当前会话。
+        const cid = ownerCid ?? useHelixStore.getState().currentSessionId;
         const sid =
           (cid && sessionMapRef.current.get(cid)?.sid) ||
           helixSessionIdRef.current;
@@ -7980,11 +7949,13 @@ export function AgentFlowPanel() {
 
   // 回应模型的 clarify 反问：把选中项/输入文本发回 clarify/respond 解锁后端，然后出队。
   const handleClarifyRespond = useCallback(
-    async (requestId: string, answer: string) => {
+    async (requestId: string, answer: string, ownerCid?: string) => {
       try {
+        // sid 按反问归属的对话查（同 handleApproval）：后台并行 run 和旁路的反
+        // 问都带着自己的 cid，送到前台会话的实例上就解不开那个等待。
+        const cid = ownerCid ?? currentSessionId;
         const sid =
-          (currentSessionId &&
-            sessionMapRef.current.get(currentSessionId)?.sid) ||
+          (cid && sessionMapRef.current.get(cid)?.sid) ||
           helixSessionIdRef.current;
         if (sid) {
           await helixApi()!.send("clarify/respond", {
@@ -8003,23 +7974,25 @@ export function AgentFlowPanel() {
     [currentSessionId, bumpPendingUserRequests],
   );
 
-  // 批准计划：关掉审批浮条，把 approvalMode 切到 default（用 live store + 后端
-  // set_mode 双保险，让后端/前端都退出只读规划态），然后用 pi 计划扩展的
-  // /plan implement 命令真正启动实现（扩展会把已完成的方案交接给实现阶段并解锁
-  // 写工具）。plan_approved: true 告诉网关“这是批准”——不要发 /plan exit，
-  // 否则会把刚批准、正要执行的计划清掉。
+  // 批准计划：关掉审批浮条，**只**清本会话的 plan 标记 —— 权限档是全局那一档，
+  // 批准一个计划不该把用户的「询问审批」静默改成「自动审批」（旧代码这里写死
+  // auto，等于每次批准都改一次全局门禁）。然后用 pi 计划扩展的 /plan implement
+  // 启动实现（扩展把已完成的方案交接给实现阶段并解锁写工具）。
+  // plan_approved: true 告诉网关「这是批准」：不要补发 /plan exit（会把刚批准、
+  // 正要执行的方案清掉）。这里必须 await：handleRun 紧接着也会发一次 set_mode，
+  // 若那轮先被处理，网关见到实例仍在 plan 就会发 exit 清掉方案。
   const handleApprovePlan = useCallback(async () => {
     setPendingPlanReview(null);
-    const cid = useHelixStore.getState().currentSessionId;
-    // 回到「自动审批」：方案已获批准，接下来是执行阶段。**不**改成「完全访问」
-    // —— 执行期仍可能碰工作区外文件/网络，那些该问还是要问。
-    setApprovalMode("auto");
+    const st = useHelixStore.getState();
+    const cid = st.currentSessionId;
+    st.setPlanModeForSession(cid ?? DRAFT_SESSION_KEY, false);
     // 批准即进入实施阶段：从 {workDir}/plan.md 读结构化步骤填入 activePlan，
     // 工作面板随即显示「执行计划」区块。异步加载，失败静默（plan.md 缺失时
     // 区块不显示，不阻塞批准流程）。
-    const workDir =
+    const workDir = localProjectRoot(
       useHelixStore.getState().activeSessionWorkDir ??
-      useHelixStore.getState().selectedWorkDir;
+        useHelixStore.getState().selectedWorkDir,
+    );
     void (async () => {
       const steps = await loadPlanSteps(workDir);
       useHelixStore.getState().setActivePlan(steps ?? []);
@@ -8028,20 +8001,22 @@ export function AgentFlowPanel() {
     const helixSid =
       (cid && sessionMapRef.current.get(cid)?.sid) || helixSessionIdRef.current;
     if (helixSid) {
-      helixApi()!
-        .send("session/set_mode", {
+      try {
+        await helixApi()!.send("session/set_mode", {
           session_id: helixSid,
-          mode_id: "default",
+          // 非 plan 的任意档位都表示「离开规划态」；权限档本身由扩展配置生效，
+          // 网关只看它是不是 "plan"。
+          mode_id: st.permissionMode,
           plan_approved: true,
-        })
-        .catch((e: any) => {
-          console.warn("[Helix] set_mode(default) failed:", e);
         });
+      } catch (e) {
+        console.warn("[Helix] set_mode(plan_approved) failed:", e);
+      }
     }
     // 批准动作即 /plan implement：pi 计划扩展接管后续，从已保存的方案开始实现。
     setInputSynced("/plan implement");
     setTimeout(() => handleRun(), 0);
-  }, [setApprovalMode, setInputSynced, handleRun]);
+  }, [setInputSynced, handleRun]);
 
   // 调整计划：只关闭审批浮条（保持 plan 模式），用户自己修改输入后重新触发即可；
   // 后端 session 模式不变，仍是只读规划模式。
@@ -8062,25 +8037,30 @@ export function AgentFlowPanel() {
   );
 
   const handleApproveAll = useCallback(async () => {
-    if (approvalQueue.length === 0) return;
-    // 先把队列清空（fail-closed），让弹条立即消失；RPC 逐个发，任一个失败不阻塞整体。
-    bumpPendingUserRequests(-approvalQueue.length);
-    setApprovalQueue([]);
+    // 「全部批准」只作用于本视图（当前对话 + 其旁路）的条目：别的对话正等在
+    // 自己的审批上，一次点击不该替它们做决定。
+    const mine = approvalQueue.filter((r) => isPendingHere(r.sessionId));
+    if (mine.length === 0) return;
+    // 先出队（fail-closed），让弹条立即消失；RPC 逐个发，任一个失败不阻塞整体。
+    bumpPendingUserRequests(-mine.length);
+    setApprovalQueue((prev) => prev.filter((r) => !isPendingHere(r.sessionId)));
     try {
-      const cid = useHelixStore.getState().currentSessionId;
-      const sid =
-        (cid && sessionMapRef.current.get(cid)?.sid) ||
-        helixSessionIdRef.current;
-      if (sid) {
-        for (const req of approvalQueue) {
-          // 新 RPC（2026-08-17 起后端弃用 session/approve）：approval.respond +
-          // choice: once/session/always/deny，由 agent 侧状态机 resolve。
-          await helixApi()!.send("approval.respond", {
-            session_id: sid,
-            choice: "once",
-            request_id: req.id,
-          });
-        }
+      const fallbackCid = useHelixStore.getState().currentSessionId;
+      for (const req of mine) {
+        // 每条按自己的归属对话取 sid：队列里可以混着后台对话/旁路的请求，共用
+        // 一个 sid 等于把它们全送到同一个实例（同 handleApproval 的路由约束）。
+        const cid = req.sessionId ?? fallbackCid;
+        const sid =
+          (cid && sessionMapRef.current.get(cid)?.sid) ||
+          helixSessionIdRef.current;
+        if (!sid) continue;
+        // 新 RPC（2026-08-17 起后端弃用 session/approve）：approval.respond +
+        // choice: once/session/always/deny，由 agent 侧状态机 resolve。
+        await helixApi()!.send("approval.respond", {
+          session_id: sid,
+          choice: "once",
+          request_id: req.id,
+        });
       }
     } catch (err) {
       console.error("Approve all error:", err);
@@ -8090,19 +8070,26 @@ export function AgentFlowPanel() {
         description: String(err),
       });
     }
-  }, [approvalQueue]);
+  }, [approvalQueue, isPendingHere, bumpPendingUserRequests]);
 
   // Listen for keyboard shortcut approve/decline events
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (approvalQueue.length === 0) return;
-      const first = approvalQueue[0];
-      handleApproval(first.id, detail.approved ? "once" : "deny");
+      // 快捷键只处理**本视图能看到**的那条（当前对话或其旁路）。之前取
+      // approvalQueue[0]，队首属于后台对话时，用户按确认批准的是另一条对话的
+      // 请求，而且 sid 还是前台会话的 → 两边都不对。
+      const first = approvalQueue.find((r) => isPendingHere(r.sessionId));
+      if (!first) return;
+      handleApproval(
+        first.id,
+        detail.approved ? "once" : "deny",
+        first.sessionId,
+      );
     };
     window.addEventListener("helix:approve-request", handler);
     return () => window.removeEventListener("helix:approve-request", handler);
-  }, [approvalQueue, handleApproval]);
+  }, [approvalQueue, handleApproval, isPendingHere]);
 
   // Allow other UI surfaces (sidebar session switch, etc.) to request an
   // immediate stop of the in-flight run without tight coupling.
@@ -8271,7 +8258,11 @@ export function AgentFlowPanel() {
           type="button"
           onClick={() => setShowApprovalModeDropdown(!showApprovalModeDropdown)}
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ui-text-sm2 transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
-          data-tip="审批模式"
+          data-tip={
+            planOn
+              ? "制定计划：只对本对话生效，选一个权限档即退出"
+              : "审批模式：全局一档，所有对话共用（值来自 pi-permission 的配置）"
+          }
         >
           {(() => {
             const cur = APPROVAL_MODE_ITEMS.find(
@@ -8299,21 +8290,15 @@ export function AgentFlowPanel() {
                   key={mode.id}
                   type="button"
                   onClick={() => {
-                    setApprovalMode(mode.id);
                     setShowApprovalModeDropdown(false);
-                    // 「权限档」必须写进 pi-permission 的配置才真正生效——
-                    // 阻断工具执行的是那个扩展的 tool_call 钩子，而它只读自己
-                    // 的配置文件。这里不写就等于又做了一份装饰状态。
-                    if (mode.id !== "plan") {
-                      void helixApi()?.setPermissionMode?.(mode.id);
-                    }
-                    // plan 档是另一条轴：靠 pi-plan-mode 扩展的 /plan start
-                    // 通知后端，不是权限配置。
+                    const helixSid =
+                      (currentSessionId &&
+                        sessionMapRef.current.get(currentSessionId)?.sid) ||
+                      helixSessionIdRef.current;
                     if (mode.id === "plan") {
-                      const helixSid =
-                        (currentSessionId &&
-                          sessionMapRef.current.get(currentSessionId)?.sid) ||
-                        helixSessionIdRef.current;
+                      // plan 是**按会话**那一轴：写本会话的标记，并让网关发
+                      // /plan start 把该实例锁成只读（实例已 armed 时网关 no-op）。
+                      setPlanModeForSession(modeKey, true);
                       if (helixSid) {
                         helixApi()!
                           .send("session/set_mode", {
@@ -8322,6 +8307,30 @@ export function AgentFlowPanel() {
                           })
                           .catch((e: any) => {
                             console.warn("[Helix] set_mode(plan) failed:", e);
+                          });
+                      }
+                      return;
+                    }
+                    // 权限档：唯一写路径是 pi-permission 的配置文件（阻断工具
+                    // 执行的是那个扩展的 tool_call 钩子，它只读这一个文件）。
+                    // setPermissionMode 写完会回读，芯片显示的是文件里的值，
+                    // 不是「用户刚才点了什么」。
+                    void setPermissionMode(mode.id);
+                    // 选权限档 = 离开 plan：清本会话标记，并让网关补发 /plan exit
+                    // 解锁写工具（本来不在 plan 时它是 no-op，所以不必多发）。
+                    if (planOn) {
+                      setPlanModeForSession(modeKey, false);
+                      if (helixSid) {
+                        helixApi()!
+                          .send("session/set_mode", {
+                            session_id: helixSid,
+                            mode_id: mode.id,
+                          })
+                          .catch((e: any) => {
+                            console.warn(
+                              "[Helix] set_mode(exit plan) failed:",
+                              e,
+                            );
                           });
                       }
                     }
@@ -8924,12 +8933,15 @@ export function AgentFlowPanel() {
                 {/* 新对话屏的状态行：项目选择器 + 「现在在哪个分支」这类事实。
                     选择器只在这一屏出现 —— 对话一旦开始，它的 cwd 就定死了
                     （resume 以 jsonl 头部为准），在这里切项目等于让界面说谎。
-                    远程模式下不再显示本地分支芯片：`currentBranch` 来自本机
-                    `git.status(selectedWorkDir)`，而 agent 在远端跑，那是跟本次
-                    执行无关的本地分支。远程状态由芯片自己表达（绿色 + 服务器名）。 */}
+                    远程对话不再显示分支芯片：`currentBranch` 来自本机
+                    `git.status(本地目录)`，而这条对话的 agent 在远端跑，那是与
+                    本次执行无关的本地分支。远程状态由芯片自己表达（云图标 +
+                    服务器名）。 */}
                 <div className="flex items-center gap-1.5 mb-3 justify-start">
                   {renderProjectChip()}
-                  {!remoteMode && gitAvailable && currentBranch && (
+                  {!conversationIsRemote &&
+                    gitAvailable &&
+                    currentBranch && (
                     <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[calc(var(--helix-transcript-size)*0.7857)] text-blue-600 dark:text-blue-400 bg-blue-500/10 shrink-0">
                       <GitBranch className="size-3" />
                       <span className="max-w-[120px] truncate">
@@ -9184,8 +9196,9 @@ export function AgentFlowPanel() {
                           !normalizedBlocks.some((b) => b.type === "thinking");
                         const processBlocks = consolidatedBlocks;
                         const answerBlocks = consolidatedBlocks.slice(0, 0);
-                        const allSegments =
-                          segmentizeProcessBlocks(processBlocks);
+                        const allSegments = mergeToolRuns(
+                          segmentizeProcessBlocks(processBlocks),
+                        );
                         let lastTextIdx = -1;
                         for (let i = allSegments.length - 1; i >= 0; i--) {
                           if (allSegments[i].kind === "text") {
@@ -9835,17 +9848,19 @@ export function AgentFlowPanel() {
         <ApprovalDialog
           request={approvalRequest}
           pendingCount={pendingApprovalCount}
-          onApprove={(id, level) => handleApproval(id, level)}
-          onReject={(id) => handleApproval(id, "deny")}
+          onApprove={(id, level) =>
+            handleApproval(id, level, approvalRequest.sessionId)
+          }
+          onReject={(id) => handleApproval(id, "deny", approvalRequest.sessionId)}
           onApproveAll={handleApproveAll}
         />
       )}
 
       {/* Scheduled task creation confirmation */}
-      {pendingTaskCreations.some((t) => t.sessionId === approvalKey) && (
+      {pendingTaskCreations.some((t) => isPendingHere(t.sessionId)) && (
         <ScheduledTaskConfirm
-          tasks={pendingTaskCreations.filter(
-            (t) => t.sessionId === approvalKey,
+          tasks={pendingTaskCreations.filter((t) =>
+            isPendingHere(t.sessionId),
           )}
           onConfirm={handleConfirmTasks}
           onDismiss={handleDismissTasks}
@@ -9860,7 +9875,9 @@ export function AgentFlowPanel() {
           // 残留 UI 挡在第二条上面（ApprovalBar 的 pendingCount 同样依赖重建）。
           key={clarifyRequest.id}
           request={clarifyRequest}
-          onRespond={handleClarifyRespond}
+          onRespond={(id, answer) =>
+            handleClarifyRespond(id, answer, clarifyRequest.sessionId)
+          }
         />
       )}
 

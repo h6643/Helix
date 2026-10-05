@@ -15,6 +15,7 @@ mod memory;
 mod page_fetch;
 mod paths;
 mod pi_catalog;
+mod pi_extensions;
 mod pi_gateway;
 /// Test-only re-exports of pi_gateway's session-trim helpers (integration
 /// tests in tests/trim_session.rs). Not part of the app surface.
@@ -114,6 +115,11 @@ pub fn run() {
             // (mirror applyActiveProfileCache) so the backend matches the
             // user's last saved model choice.
             crate::profile::apply_active_profile_cache();
+            // Write out Helix's forked pi-aux-vision (its vision model comes
+            // from config.yaml's `vision:` block) before the gateway spawns, so
+            // the first pi session already loads this copy instead of an
+            // upstream one `pi update` may have restored.
+            pi_extensions::install_aux_vision();
 
             // Apply the HTTP proxy to the renderer (WebKitGTK default context)
             // BEFORE the gateway spawns so the webview fetches already honor it.
@@ -141,7 +147,30 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().cloned().unwrap())
                 .menu(&menu)
+                // 左键 = 唤回窗口，右键才出菜单。Tauri 的
+                // `show_menu_on_left_click` 默认是 true，所以之前左键点托盘弹的是
+                // 那个只有「显示窗口 / 退出」两项的菜单，而不是直接打开软件。
+                .show_menu_on_left_click(false)
                 .tooltip("Helix")
+                .on_tray_icon_event(|tray, event| {
+                    use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+                    if !matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        }
+                    ) {
+                        return;
+                    }
+                    use tauri::Manager;
+                    if let Some(window) = tray.app_handle().get_webview_window("main") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                })
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "quit" => {
                         if let Some(state) =

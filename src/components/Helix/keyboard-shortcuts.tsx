@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect } from "react";
 import { useHelixStore } from "@/stores/helix-store";
+import { isRemoteWorkDir } from "@/lib/remote-projects";
 
 // Parse key string like "Ctrl+Shift+X" into a normalized format
 function parseKeyString(keys: string[]): {
@@ -51,7 +52,12 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
 
     "toggle-skill-panel": () => state.toggleSkillPanel(),
     "toggle-scheduled-tasks-panel": () => state.toggleScheduledTasksPanel(),
-    "toggle-terminal": () => state.toggleTerminal(),
+    "toggle-terminal": () => {
+      // 云端对话没有本机终端可开（与标题栏/文件树/命令面板同一判定），快捷键
+      // 对它不生效，而不是去翻转一个不会显示的面板。
+      if (isRemoteWorkDir(state.activeSessionWorkDir)) return;
+      state.toggleTerminal();
+    },
     "toggle-settings": () => state.toggleSettings(),
     "toggle-file-tree": () => {
       if (state.selectedWorkDir)

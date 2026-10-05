@@ -15,7 +15,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { loadSessionMap } from "@/lib/session-map";
 import { useHelixStore } from "@/stores/helix-store";
 import type { ApprovalMode } from "@/stores/helix-types";
-import { APPROVAL_MODE_ITEMS } from "@/stores/helix-types";
+import {
+  APPROVAL_MODE_ITEMS,
+  approvalModeOf,
+} from "@/stores/helix-types";
 import { normalizeAcpContent } from "@/lib/text-utils";
 import { TranscriptMessage, formatDuration } from "./transcript-message";
 import {
@@ -151,13 +154,17 @@ export function BylinePanel() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const uploadFileInputRef = useRef<HTMLInputElement>(null);
   const bylineFocusSignal = useHelixStore((s) => s.bylineFocusSignal);
-  // ── 按会话的审批模式 / 模型覆盖（与主线同款语义，只作用于旁路会话）──
-  // 覆盖值挂在旁路会话自己的 cid（btw- 前缀）上，handleRun 每轮解析：
-  // set_mode / set_model 都带 session_id，网关路由到该会话的 pi 实例。
-  const approvalMode = useHelixStore((s) => s.approvalMode);
-  const approvalModeBySession = useHelixStore((s) => s.approvalModeBySession);
-  const setApprovalModeForSession = useHelixStore(
-    (s) => s.setApprovalModeForSession,
+  // ── 旁路会话的两条轴（与主线同款语义）──────────────────────────────
+  // 权限档：全局一档，真相是 pi-permission 的配置文件，这里只是回读缓存，
+  // 所以旁路改了全局跟着变（扩展不区分会话，做不出「按会话的权限档」）。
+  // plan：按会话那一轴，写旁路自己的 cid（btw- 前缀）。每轮 run 前
+  // agent-flow-panel 的 handleRun 会把合成值经 session/set_mode 送到该会话的
+  // pi 实例（网关按 session_id 路由），所以这里只写状态、不另发 RPC。
+  const permissionMode = useHelixStore((s) => s.permissionMode);
+  const planModeBySession = useHelixStore((s) => s.planModeBySession);
+  const setPermissionMode = useHelixStore((s) => s.setPermissionMode);
+  const setPlanModeForSession = useHelixStore(
+    (s) => s.setPlanModeForSession,
   );
   const modelBySession = useHelixStore((s) => s.modelBySession);
   const setModelForSession = useHelixStore((s) => s.setModelForSession);
@@ -207,10 +214,12 @@ export function BylinePanel() {
   // 工具条目标：覆盖值挂在旁路会话自己的 cid 上。还没有旁路会话时下拉
   // 禁用（写入没有落点；首个问题仍用全局默认起会话）。
   const btwCid = byCid ?? null;
-  // 归一：磁盘上可能残留已删除的 accept_edits / dont_ask，落到 default。
-  const rawMode: ApprovalMode =
-    (btwCid && approvalModeBySession[btwCid]) || approvalMode;
-  const effectiveMode: ApprovalMode = rawMode;
+  // 芯片显示的是两条轴合成的那一个值（plan 优先）。合成规则只在
+  // helix-types 的 approvalModeOf 里写一次，两个面板共用。
+  const effectiveMode: ApprovalMode = approvalModeOf(
+    permissionMode,
+    !!btwCid && !!planModeBySession[btwCid],
+  );
   const modelOverride = btwCid ? modelBySession[btwCid] : undefined;
   const effectiveModel = modelOverride?.model || apiConfig?.model || activeModel;
   // 候选列表与主线同一来源（provider store 的模型目录），另把当前生效值
@@ -610,9 +619,9 @@ export function BylinePanel() {
             }}
           />
           <div className="flex items-center justify-between px-2 pb-1.5 pt-0">
-            {/* 会话级工具条：审批模式 + 模型，只作用于当前旁路会话。
-                覆盖值写入 modelBySession / approvalModeBySession 的 btw-cid 键，
-                handleRun 每轮经 set_mode / set_model 透传到该会话的实例。 */}
+            {/* 会话级工具条：plan 与模型只作用于当前旁路会话（写 planModeBySession /
+                modelBySession 的 btw-cid 键，handleRun 每轮经 set_mode / set_model
+                透传到该会话的实例）；权限档是全局一档，写扩展配置。 */}
             <div className="relative min-w-0 flex items-center gap-1" ref={toolbarRef}>
               {/* 上传文件按钮 */}
               <button
@@ -639,7 +648,11 @@ export function BylinePanel() {
                       setShowModeDropdown((v) => !v);
                       setShowModelDropdown(false);
                     }}
-                    data-tip="审批模式（仅本旁路会话）"
+                    data-tip={
+                      effectiveMode === "plan"
+                        ? "制定计划：只对本旁路会话生效，选一个权限档即退出"
+                        : "审批模式：全局一档，所有对话共用（值来自 pi-permission 的配置）"
+                    }
                     className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ui-text-sm2 transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
                   >
                     {(() => {
@@ -686,18 +699,18 @@ export function BylinePanel() {
                         key={mode.id}
                         type="button"
                         onClick={() => {
-                          setApprovalModeForSession(btwCid, mode.id);
                           setShowModeDropdown(false);
-                          // 权限档必须落到 pi-permission 的配置才真正生效
-                          // （真正 block 工具执行的是那个扩展的 tool_call 钩子）。
-                          // 旁路面板的档位是**全局**的（扩展按配置判定，不区分
-                          // 会话），所以这里也会改全局档 —— 与主输入框同一份状态，
-                          // 不会出现「主界面自动审批、旁路完全访问」。
-                          if (mode.id !== "plan") {
-                            void (window as any).electron?.helix?.setPermissionMode?.(
-                              mode.id,
-                            );
+                          if (mode.id === "plan") {
+                            // plan 只作用于这条旁路会话（下一轮 run 经 set_mode
+                            // 送到它的 pi 实例）。
+                            setPlanModeForSession(btwCid, true);
+                            return;
                           }
+                          // 权限档写的是扩展配置 = **全局**生效。旁路和主线共用
+                          // 同一档，不会出现「主界面自动审批、旁路完全访问」——
+                          // 那个分裂本来就不可能存在，pi-permission 只读一个文件。
+                          setPlanModeForSession(btwCid, false);
+                          void setPermissionMode(mode.id);
                         }}
                         className={`w-full px-3 py-1.5 flex items-start gap-2 text-left hover:bg-muted/60 transition-colors ${
                           active ? "text-foreground" : "text-muted-foreground"

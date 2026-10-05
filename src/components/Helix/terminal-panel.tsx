@@ -5,6 +5,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { Plus, Terminal, X } from "lucide-react";
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { isElectron, electronTerminal, helixApi } from "@/lib/electron-bridge";
+import { isRemoteWorkDir } from "@/lib/remote-projects";
 import { useHelixStore } from "@/stores/helix-store";
 import "@xterm/xterm/css/xterm.css";
 
@@ -119,6 +120,16 @@ interface TerminalTabViewProps {
 }
 
 /**
+ * 这条对话是不是云端对话。远程对话的 workDir 是 `remote://…` 虚拟键，本机 PTY
+ * cd 不进去（会落在应用的 cwd，用户在一个跟对话无关的目录里打字），所以终端
+ * 面板对它整体不显示、也不启动 shell。标题栏按钮 / 文件树按钮 / 窗口菜单 /
+ * 命令面板 / 快捷键用的是同一个 `isRemoteWorkDir(activeSessionWorkDir)` 判定。
+ */
+function useConversationIsRemote(): boolean {
+  return useHelixStore((s) => isRemoteWorkDir(s.activeSessionWorkDir));
+}
+
+/**
  * One terminal tab. Kept mounted permanently (like the old single-terminal
  * panel) so each tab keeps its full scrollback and live shell across
  * conversation switches and tab switches. The PTY is only spawned once the tab
@@ -127,6 +138,7 @@ interface TerminalTabViewProps {
 function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
   const { activeSessionWorkDir, isTerminalOpen } =
     useHelixStore();
+  const conversationIsRemote = useConversationIsRemote();
   // No-project conversations pin to ~/.pi/agent/scratch — the SAME dir the
   // gateway spawns their pi instance in. Resolved asynchronously from the
   // backend; falls back to null until loaded.
@@ -347,7 +359,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
   // has resolved. Hidden tabs have a 0-size container, so the shell is only
   // spawned once the tab shows AND we know the right cwd.
   useEffect(() => {
-    if (!isActive || !isTerminalOpen) return;
+    if (!isActive || !isTerminalOpen || conversationIsRemote) return;
     // Don't start yet if we still need the no-project default and haven't got it.
     if (!terminalCwd) return;
     const term = termRef.current;
@@ -385,7 +397,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
     });
     return () => cancelAnimationFrame(raf);
      
-  }, [id, isActive, isTerminalOpen, terminalCwd]);
+  }, [id, isActive, isTerminalOpen, terminalCwd, conversationIsRemote]);
 
   // Pipe backend output for THIS tab into its xterm instance.
   useEffect(() => {
@@ -444,18 +456,22 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
 
 export function TerminalPanel({ onClose }: TerminalPanelProps) {
   const { selectedWorkDir, isTerminalOpen } = useHelixStore();
+  // 云端对话下整个面板不显示，也不去建 tab（建了就会启动一个 cd 不进去的本机
+  // shell）。已经开着的本地 shell 只是被藏起来，进程不动。
+  const conversationIsRemote = useConversationIsRemote();
+  const visible = isTerminalOpen && !conversationIsRemote;
   const [tabs, setTabs] = useState<{ id: number }[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const nextIdRef = useRef(1);
 
   // Ensure at least one tab exists whenever the panel is open.
   useEffect(() => {
-    if (isTerminalOpen && tabs.length === 0) {
+    if (visible && tabs.length === 0) {
       const id = nextIdRef.current++;
       setTabs([{ id }]);
       setActiveId(id);
     }
-  }, [isTerminalOpen, tabs.length]);
+  }, [visible, tabs.length]);
 
   const addTab = useCallback(() => {
     const id = nextIdRef.current++;
@@ -492,7 +508,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
       // helix-surface 提供与对话卡同一层 --surface-bg 底盘（背景图激活时
       // 88% 半透明、无背景图时实色 --card），保证终端"周围"不直接透出壁纸。
       // 不能删 relative：背景图是 absolute z-0，非定位后代会被整层盖住。
-      className={`helix-terminal-panel helix-surface relative shrink-0 h-64 flex flex-col border-t border-border/40 overflow-hidden ${isTerminalOpen ? "" : "hidden"}`}
+      className={`helix-terminal-panel helix-surface relative shrink-0 h-64 flex flex-col border-t border-border/40 overflow-hidden ${visible ? "" : "hidden"}`}
     >
       {/* Tab bar — Windows Terminal style */}
       <div className="helix-terminal-tabbar flex items-center h-8 bg-muted shrink-0 select-none">

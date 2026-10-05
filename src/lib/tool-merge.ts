@@ -11,6 +11,7 @@ const TOOL_STEP_RULES: Array<{ test: RegExp; verb: string; kind: string }> = [
   { test: /browser_scroll/i, verb: "浏览器", kind: "滚动" },
   { test: /browser_screenshot/i, verb: "浏览器", kind: "截图" },
   { test: /browser_read|browser_get_html|browser_extract|browser_snapshot/i, verb: "浏览器", kind: "读取" },
+  { test: /describe_image|vision/i, verb: "视觉", kind: "读图" },
   { test: /memory/i, verb: "记忆", kind: "记忆" },
   { test: /sub_agent|spawn_agent|delegation/i, verb: "子代理", kind: "子代理" },
   { test: /task_|todo_|plan_|run_task/i, verb: "任务", kind: "任务" },

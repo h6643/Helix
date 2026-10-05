@@ -236,6 +236,8 @@ export function FileChangeSummaryCard({
     setUndoing(false);
 
     const st = useHelixStore.getState();
+    // 文件真的写回磁盘了 → 「更改」列表立刻重算，不等 5s 轮询。
+    if (restoredIds.length > 0) st.bumpGitChangeRevision();
     if (failed.length === 0) {
       st.showToast({
         type: "success",
@@ -293,6 +295,7 @@ export function FileChangeSummaryCard({
         useHelixStore.setState((s) => ({
           pendingChanges: s.pendingChanges.filter((c) => !ids.has(c.fileId)),
         }));
+        useHelixStore.getState().bumpGitChangeRevision();
       } else {
         useHelixStore.getState().showToast({
           type: "error",

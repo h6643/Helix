@@ -3,9 +3,11 @@
  *
  * # 为什么需要这一层
  *
- * 远程工作区在 Helix 里是**全局单例**：`config.yaml` 的 `pi.remote_rpc`（本机
- * 隧道口）+ `pi.remote_cwd`（远端目录）决定「现在整台 Helix 的 agent 跑在哪」。
- * 一次只能连一台。
+ * 远程工作区是**双通道**：后端同时维持本机 `pi` 子进程和**最多一条**通往远端
+ * `pi --mode rpc` 的 SSH 隧道。走哪条由**每条会话自己**决定（它的 workDir 是不是
+ * `remote://…`），不是由「隧道在不在」决定。所以隧道这一层仍然是单例：
+ * `config.yaml` 的 `pi.remote_rpc`（本机隧道口）+ `pi.remote_cwd`（默认远端目录）
+ * 一次只能描述一台机器。
  *
  * 但「有哪些服务器可选」是**列表**语义，存放在 `externalServices`（store +
  * `projectFolders` 之外的独立 key，带 safeStorage 加密的 secret）。列表在
@@ -13,10 +15,12 @@
  * 出现「侧边栏显示已连接、输入框显示未连接」这类无法排查的分裂。所以：
  *
  * - **列表** = `externalServices`（store 是事实源）
- * - **当前连接** = `remote_tunnel_status`（后端是事实源，它读的是真正生效的
+ * - **当前隧道** = `remote_tunnel_status`（后端是事实源，它读的是真正生效的
  *   config.yaml + 隧道进程）
  * - 本模块负责把两者**对账**：用 (host, port, username) 三元组把 status 反查成
  *   列表里的某一项，得出 `activeId`。列表里其余项一律视为未连接。
+ * - **每条对话在哪台机器** = `session.workDir`（`remote://…` 或本机路径），
+ *   见下面的身份层。
  *
  * 关键：**不引入第三份状态**。`externalServices[].connected` 这个字段是历史
  * 遗留（旧的「一次性 SSH 探测」语义），本模块不写它——连接态一律现查 status。
@@ -188,33 +192,74 @@ export function remoteAvailable(): boolean {
 // 项目的目录在**另一台机器**上，本地不存在 —— 没有一个本地路径能代表它。所以
 // 用一个带前缀的**虚拟键**当身份：
 //
-//   remote://<serviceId>/<远端路径>
+//   remote://<user@host:port>/<远端路径>
 //
 // 选它而不是复用本地路径的原因：本地路径会进 `fs.*` / `git.*` IPC 的 cwd
 // 参数，那些后端只认本机磁盘；`remote://…` 一眼可辨且绝不与真实路径混淆。
 // 见到这个前缀的代码，一律**不要**把它当目录传给任何本地 fs/git 调用。
+//
+// 身份为什么是「机器 + 路径」而不是 `externalServices[].id`：id 是服务器**那一行**
+// 的代理键，删掉重加就换一个。对话记得却是旧 id，于是删除一次服务器就会把它名下
+// 所有对话变成孤儿（哪个远程行都不认它）。`user@host:port` 是这台机器的事实，
+// 换行、改名、重加都不受影响。
 export const REMOTE_WORKDIR_PREFIX = "remote://";
 
+/** 远程项目的稳定身份键（与服务器列表行的 id 无关）。 */
+export function remoteTargetKey(
+  svc: Pick<ExternalService, "host" | "port" | "username">,
+): string {
+  const port = svc.port || 22;
+  return `${svc.username || "unknown"}@${svc.host}:${port}`;
+}
+
+/** 某台服务器（可选远端目录）对应的 workDir 虚拟键。 */
+export function remoteWorkDirForService(
+  svc: Pick<ExternalService, "host" | "port" | "username">,
+  remotePath?: string,
+): string {
+  return makeRemoteWorkDir(remoteTargetKey(svc), remotePath);
+}
+
 export function makeRemoteWorkDir(
-  serviceId: string,
+  targetKey: string,
   remotePath?: string,
 ): string {
   const p = (remotePath ?? "").trim();
   const suffix = p && p !== "~" ? `/${p.replace(/^\/+/, "")}` : "";
-  return `${REMOTE_WORKDIR_PREFIX}${serviceId}${suffix}`;
+  return `${REMOTE_WORKDIR_PREFIX}${targetKey}${suffix}`;
 }
 
 export function isRemoteWorkDir(dir: string | null | undefined): boolean {
   return !!dir && dir.startsWith(REMOTE_WORKDIR_PREFIX);
 }
 
-/** 从虚拟键里取回 serviceId；不是远程键则返回 null。 */
+/** 远程键的机器身份部分（第一段）；不是远程键则返回 null。 */
 export function parseRemoteWorkDir(
   dir: string | null | undefined,
-): { serviceId: string; remotePath?: string } | null {
+): { targetKey: string; remotePath?: string } | null {
   if (!isRemoteWorkDir(dir)) return null;
   const rest = dir!.slice(REMOTE_WORKDIR_PREFIX.length);
   const slash = rest.indexOf("/");
-  if (slash < 0) return { serviceId: rest };
-  return { serviceId: rest.slice(0, slash), remotePath: rest.slice(slash + 1) };
+  if (slash < 0) return { targetKey: rest };
+  return { targetKey: rest.slice(0, slash), remotePath: rest.slice(slash + 1) };
+}
+
+/**
+ * 这个远程对话属于列表里的哪台服务器。
+ *
+ * 两种键都要认：现在的 `user@host:port`，以及历史上写进库的 `ext_<id>`（当时用
+ * 服务器行的代理键当身份）。@param services 当前列表。
+ * @returns 匹配到的服务器；对不上任何一项（服务器已删除）时返回 null。
+ */
+export function findServiceByRemoteWorkDir(
+  services: ExternalService[],
+  dir: string | null | undefined,
+): ExternalService | null {
+  const parsed = parseRemoteWorkDir(dir);
+  if (!parsed) return null;
+  const byTarget = services.find(
+    (s) => remoteTargetKey(s) === parsed.targetKey,
+  );
+  if (byTarget) return byTarget;
+  return services.find((s) => s.id === parsed.targetKey) ?? null;
 }

@@ -32,7 +32,6 @@ export function GeneralSettingsPanel() {
     mcpServers,
     themeStyle,
     editorTheme,
-    approvalMode,
     startupGreeting,
     terminalShell,
     agentMaxIterations,
@@ -71,7 +70,9 @@ export function GeneralSettingsPanel() {
     "themeStyle",
     "editorTheme",
     "mcpServers",
-    "approvalMode",
+    // 审批档位不导出：它的真相是 pi-permission 的配置文件
+    // （<pi 数据根>/config/permission-ext-config.json），不在 store 里，
+    // 导出一份副本等于制造第二条真相。要迁移档位请复制那个文件。
     "startupGreeting",
     "terminalShell",
     "agentMaxIterations",
@@ -108,7 +109,6 @@ export function GeneralSettingsPanel() {
     themeStyle,
     editorTheme,
     mcpServers,
-    approvalMode,
     startupGreeting,
     terminalShell,
     agentMaxIterations,

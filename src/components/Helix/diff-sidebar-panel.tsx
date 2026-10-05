@@ -2,7 +2,10 @@
 
 import { Aperture, Settings } from "lucide-react";
 import type { SVGProps } from "react";
-import { useGitChangeStat } from "@/hooks/use-git-change-stat";
+import {
+  useGitChangeStat,
+  type GitStatUnavailable,
+} from "@/hooks/use-git-change-stat";
 import { useHelixStore } from "@/stores/helix-store";
 
 /* ── brand icons (inline SVG) ─────────────────────────────────────────── */
@@ -130,6 +133,21 @@ function splitFilePath(filePath: string) {
 }
 
 /**
+ * 「统计不了」各自的说明。以前所有失败都是同一句「没有未提交的更改」，于是
+ * 「云端对话 / 不是仓库 / 没 git / 目录没了」全被当成「确实没改动」。
+ * 悬停还能看到后端的原始错误（`detail`）。
+ */
+const UNAVAILABLE_TEXT: Record<GitStatUnavailable, string> = {
+  no_work_dir: "这条对话不在项目目录里，没有可统计的仓库",
+  remote: "云端对话的仓库在远端机器上，本机 git 看不到它——逐文件改动看消息里的「已修改」卡片",
+  not_a_repository: "这个目录不是 git 仓库，没有可比对的基准版本",
+  work_dir_not_found: "工作目录不存在，可能被删除或移动了",
+  git_unavailable: "本机找不到 git 可执行文件",
+  git_timeout: "git 统计超时（仓库过大或磁盘繁忙）",
+  git_failed: "git 没能给出改动列表",
+};
+
+/**
  * Right-sidebar "更改" tab：git 工作区「未提交的更改」的真实状态，逐文件
  * +N/-M（二进制标注）。工作面板（右上角）只显示总体数字，明细统一放在这里。
  *
@@ -144,7 +162,8 @@ export function DiffSidebarPanel() {
 
   const gitWorkDir =
     activeSessionWorkDir ?? (currentSessionId === null ? currentWorkDir : null);
-  const gitStat = useGitChangeStat(gitWorkDir);
+  const git = useGitChangeStat(gitWorkDir);
+  const gitStat = git.stat;
 
   return (
     <div className="h-full w-full flex flex-col min-h-0 bg-background/50">
@@ -196,8 +215,13 @@ export function DiffSidebarPanel() {
           </ul>
         </section>
       ) : (
-        <div className="flex-1 min-h-0 flex items-center justify-center px-4 text-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
-          没有未提交的更改
+        <div
+          className="flex-1 min-h-0 flex items-center justify-center px-4 text-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70"
+          data-tip={git.detail ?? undefined}
+        >
+          {git.unavailable
+            ? UNAVAILABLE_TEXT[git.unavailable]
+            : "没有未提交的更改"}
         </div>
       )}
     </div>

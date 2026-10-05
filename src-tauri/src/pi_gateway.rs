@@ -38,7 +38,7 @@ use std::path::PathBuf;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tauri::Emitter;
@@ -206,7 +206,14 @@ pub struct PiInstance {
     key: Mutex<String>,
     /// cwd this instance's pi process runs in (per-conversation project dir;
     /// None = follow the global work_dir on each spawn).
+    ///
+    /// 远程实例里这个字段是**远端**绝对路径（`/home/user/proj`），本机磁盘上并不
+    /// 存在 —— 绝不能拿它去 `create_dir_all` 或本地 `current_dir`。
     cwd: Mutex<Option<String>>,
+    /// 这个实例的 pi 跑在远端（经 SSH 隧道连 remote-bridge.js），而不是本机子进程。
+    /// 决定 `spawn_process` 走哪条通道 —— 双通道的关键：**不能**再看全局
+    /// `pi.remote_rpc` 是否配置，否则隧道一开，本地项目的对话也会被搬到远端去跑。
+    remote: AtomicBool,
     writer: Mutex<Option<mpsc::Sender<String>>>,
     /// pi command ids → pending responders.
     pending: Mutex<HashMap<String, PendingRequest>>,
@@ -279,7 +286,9 @@ pub struct PiInstance {
     /// Last RPC activity (ms epoch) for idle reaping.
     last_active_ms: AtomicU64,
     /// Plan-mode extension armed? (@narumitw/pi-plan-mode). Tracks whether
-    /// `/plan start` was sent without a matching `/plan exit`.
+    /// `/plan start` was sent without a matching `/plan exit`. An approved
+    /// plan (`plan_approved: true`) also clears it: the renderer follows up
+    /// with `/plan implement`, which leaves plan mode inside the extension.
     plan_mode: Mutex<bool>,
     /// Last pi EVENT arrival (ms epoch) — any non-response line on stdout,
     /// refreshed by the reader thread. The turn watchdog distinguishes a
@@ -336,10 +345,11 @@ struct SubAgentRecord {
 }
 
 impl PiInstance {
-    fn new(key: String, cwd: Option<String>) -> Arc<Self> {
+    fn new(key: String, cwd: Option<String>, remote: bool) -> Arc<Self> {
         Arc::new(Self {
             key: Mutex::new(key),
             cwd: Mutex::new(cwd),
+            remote: AtomicBool::new(remote),
             writer: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             child: Mutex::new(None),
@@ -1053,7 +1063,7 @@ pub fn restart_overlapping(state: &Arc<AppState>) -> Result<(), String> {
     // those — this one must not be reaped mid-handshake).
     let old_main = INSTANCES.lock().unwrap().get("").map(Arc::clone);
     let pending_key = format!("restart-{}", REQUEST_ID.fetch_add(1, Ordering::SeqCst));
-    match spawn_instance(pending_key.clone(), None, state) {
+    match spawn_instance(pending_key.clone(), None, false, state) {
         Ok(new_main) => {
             // Rename the old main's key field so its reader thread treats the
             // upcoming kill as a session-instance death (no gateway.disconnected
@@ -1105,7 +1115,7 @@ pub fn restart_overlapping(state: &Arc<AppState>) -> Result<(), String> {
             if old_main.is_none() {
                 // No previous main either (first spawn failed) — retry a plain
                 // spawn so the app is not left without a backend.
-                let _ = spawn_instance(String::new(), None, state);
+                let _ = spawn_instance(String::new(), None, false, state);
             }
             rearm_warm_spares(state);
             Err(e)
@@ -1129,7 +1139,7 @@ pub fn spawn(state: &Arc<AppState>) -> Result<(), String> {
     log_spawn_diag("spawn: acquired LIFECYCLE_LOCK, spawning main instance");
     start_reaper();
     warm_session_file_index();
-    let result = spawn_instance(String::new(), None, state).map(|_| ());
+    let result = spawn_instance(String::new(), None, false, state).map(|_| ());
     log_spawn_diag(&match &result {
         Ok(()) => "spawn: main instance initialized, gateway ready".to_string(),
         Err(e) => format!("spawn: main instance FAILED: {e}"),
@@ -1169,7 +1179,7 @@ fn rearm_warm_spares(state: &Arc<AppState>) {
     thread::spawn(move || {
         let key = format!("spare-{}", REQUEST_ID.fetch_add(1, Ordering::SeqCst));
         // Spares follow the global work dir (cwd = None).
-        match spawn_instance(key, None, &state) {
+        match spawn_instance(key, None, false, &state) {
             Ok(instance) => {
                 // Another refill may have won the race — kill the loser.
                 let mut spares = WARM_SPARES.lock().unwrap();
@@ -1259,9 +1269,10 @@ pub fn set_thinking_level_all(level: String) {
 fn spawn_instance(
     key: String,
     cwd: Option<String>,
+    remote: bool,
     state: &Arc<AppState>,
 ) -> Result<Arc<PiInstance>, String> {
-    let instance = get_or_create_instance(key, cwd);
+    let instance = get_or_create_instance(key, cwd, remote);
     if instance.initialized.load(Ordering::SeqCst) {
         return Ok(instance);
     }
@@ -1308,28 +1319,18 @@ fn spawn_instance(
                             "get_state retry failed (initial: {reason}): {e2}"
                         ));
                         instance.kill();
-                        // 远程模式连续两次 get_state 秒退：隧道本地监听还活着
-                        // 但远端已不可达（或远端 pi 起不来）。标记冷却，本轮
-                        // 回退本地 pi —— 冷却后自动再试远端，远端恢复即自动回连。
-                        if remote_rpc_endpoint().is_some() {
+                        // 远程实例连续两次 get_state 秒退：隧道本地监听还活着，但
+                        // 远端已不可达（或远端 pi 起不来）。标记冷却，让后续 30s 内
+                        // 快速失败而不是反复重连。
+                        //
+                        // **不**回退本地 spawn：那是把一次远程对话悄悄搬到本机某个
+                        // 目录去跑（另一个项目、另一份文件），比直接失败危险。双通道
+                        // 之前这个回退是"能用"的（整台 Helix 只有一个通道），现在不行。
+                        if instance.remote.load(Ordering::SeqCst) {
                             mark_remote_down(30_000);
                             log_spawn_diag(
-                                "remote endpoint 连续两次 get_state 秒退 — 冷却 30s，本轮回退本地 pi",
+                                "remote endpoint 连续两次 get_state 秒退 — 冷却 30s，本次直接失败（不回退本地）",
                             );
-                            spawn_process(&instance, state)?;
-                            match instance.request_sync("get_state", Value::Null, HANDSHAKE_TIMEOUT) {
-                                Ok(data) => {
-                                    instance.stamp_session_from_state(Some(&data));
-                                    instance.initialized.store(true, Ordering::SeqCst);
-                                    log_spawn_diag("本地回退 get_state OK（远端冷却中）");
-                                    return Ok(Arc::clone(&instance));
-                                }
-                                Err(e3) => {
-                                    log_spawn_diag(&format!("本地回退 get_state 也失败: {e3}"));
-                                    instance.kill();
-                                    return Err(e3);
-                                }
-                            }
                         }
                         return Err(e2);
                     }
@@ -1376,15 +1377,94 @@ fn spawn_instance(
 }
 
 /// Find the instance under `key`, or create it (registering it in the map).
-fn get_or_create_instance(key: String, cwd: Option<String>) -> Arc<PiInstance> {
+fn get_or_create_instance(
+    key: String,
+    cwd: Option<String>,
+    remote: bool,
+) -> Arc<PiInstance> {
     let mut instances = INSTANCES.lock().unwrap();
     if let Some(existing) = instances.get(&key) {
         Arc::clone(existing)
     } else {
-        let instance = PiInstance::new(key.clone(), cwd);
+        let instance = PiInstance::new(key.clone(), cwd, remote);
         instances.insert(key, Arc::clone(&instance));
         instance
     }
+}
+
+/// 远程实例的通道：连本机 SSH 隧道，握手行下发**这个会话自己的**远端目录。
+///
+/// 失败一律直接返回错误，**不**回退本地 spawn。回退等于把一次远程对话悄悄搬到
+/// 本机某个目录去跑（那是另一个项目、另一份文件），比直接失败危险得多 —— 远端不
+/// 可达时该由用户决定重连还是换本地项目，不该由网关替他决定。
+fn spawn_remote(
+    instance: &Arc<PiInstance>,
+    generation: u64,
+    remote_dir: &str,
+) -> Result<(), String> {
+    let Some(endpoint) = remote_rpc_endpoint() else {
+        return Err(format!(
+            "会话 {} 属于远程项目，但当前没有 SSH 隧道（config.yaml 的 pi.remote_rpc 为空）。\
+             请先在侧边栏连接该服务器。",
+            instance.key()
+        ));
+    };
+    if remote_marked_down() {
+        return Err(format!(
+            "远程端点 {endpoint} 在冷却中（此前连续两次握手失败）。请检查隧道与远端 pi，\
+             或改用本地项目。"));
+    }
+    log_spawn_diag(&format!(
+        "spawn_process({}): remote RPC → {endpoint} cwd={remote_dir}",
+        instance.key(),
+    ));
+    let (writer, reader, control) = open_remote_transport(remote_dir)?;
+    *instance.child.lock().unwrap() = Some(ChildHandle::Remote(control));
+    let (writer_tx, writer_rx) = mpsc::channel::<String>();
+    *instance.writer.lock().unwrap() = Some(writer_tx);
+    thread::spawn(move || {
+        let mut w = writer;
+        for line in writer_rx {
+            if w.write_all(line.as_bytes()).is_err() {
+                break;
+            }
+            let _ = w.flush();
+        }
+    });
+    let instance_clone = Arc::clone(instance);
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            let record = line.trim_end_matches(['\n', '\r']);
+            if !record.is_empty() {
+                handle_line(&instance_clone, record);
+            }
+        }
+        // 远程 child 没有 exit code，仅通知死亡簿记（若 gen 未变）。
+        if instance_clone.generation.load(Ordering::SeqCst) == generation {
+            instance_clone.initialized.store(false, Ordering::SeqCst);
+            *instance_clone.writer.lock().unwrap() = None;
+            instance_clone.pending.lock().unwrap().clear();
+            let sid = instance_clone.current_session_id();
+            if instance_clone.streaming.swap(false, Ordering::SeqCst) {
+                emit_helix_event(
+                    "error",
+                    &json!({
+                        "session_id": sid,
+                        "message": "remote pi agent connection closed",
+                    }),
+                );
+            }
+        }
+    });
+    Ok(())
 }
 
 /// Spawn (or replace) the child process + I/O threads for one instance.
@@ -1398,6 +1478,24 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
         instance.key(),
         pi_cli_debug_summary(),
     ));
+
+    // 走哪条通道由**这个实例**决定，不是由全局配置决定。以前只看 `pi.remote_rpc`
+    // 是否配置，于是 SSH 隧道一开，本地项目的对话也被搬到远端跑 —— 用户看到的正是
+    // 「界面选的是本地目录，agent 实际在远程项目」。
+    //
+    // 必须在下面那段本地 cwd 解析**之前**分流：那段会把空 cwd 兜到全局 work_dir，
+    // 那是本机路径，发给远端只会 ENOENT。
+    if instance.remote.load(Ordering::SeqCst) {
+        let remote_dir = instance
+            .cwd
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|c| !c.is_empty())
+            .or_else(remote_cwd_override)
+            .unwrap_or_else(|| "~".to_string());
+        return spawn_remote(instance, _generation, &remote_dir);
+    }
 
     // Per-conversation cwd when set; otherwise the global work dir. A stale
     // persisted work dir (folder deleted/moved) falls back to the home dir.
@@ -1426,83 +1524,7 @@ fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<()
     // Record the RESOLVED dir — a spare's claim check compares against it.
     *instance.cwd.lock().unwrap() = Some(cwd.to_string_lossy().into_owned());
 
-    // 远程工作区且端点可达 → 走 TCP；端点配了但连不上 / 未配远程 / 冷却中 → 本地 spawn。
-    if let Some(endpoint) = remote_rpc_endpoint() {
-        if remote_marked_down() {
-            log_spawn_diag(&format!(
-                "spawn_process({}): remote {endpoint} 冷却中（上次 get_state 秒退）— 本轮本地 pi，冷却后自动 re-attach",
-                instance.key()
-            ));
-        } else {
-            log_spawn_diag(&format!(
-                "spawn_process({}): remote RPC mode → {endpoint} cwd={}",
-                instance.key(),
-                cwd.to_string_lossy()
-            ));
-            match open_remote_transport(&cwd) {
-                Ok((writer, reader, control)) => {
-                    let child_handle = ChildHandle::Remote(control);
-                    *instance.child.lock().unwrap() = Some(child_handle);
-                    // 远程模式：把 TCP 两半接上 I/O 线程（下面统一的 writer/reader 接管）。
-                    let (writer_tx, writer_rx) = mpsc::channel::<String>();
-                    *instance.writer.lock().unwrap() = Some(writer_tx);
-                    thread::spawn(move || {
-                        let mut w = writer;
-                        for line in writer_rx {
-                            if w.write_all(line.as_bytes()).is_err() {
-                                break;
-                            }
-                            let _ = w.flush();
-                        }
-                    });
-                    let instance_clone = Arc::clone(instance);
-                    thread::spawn(move || {
-                        let mut reader = BufReader::new(reader);
-                        let mut line = String::new();
-                        loop {
-                            line.clear();
-                            match reader.read_line(&mut line) {
-                                Ok(0) => break,
-                                Ok(_) => {}
-                                Err(_) => break,
-                            }
-                            let record = line.trim_end_matches(['\n', '\r']);
-                            if !record.is_empty() {
-                                handle_line(&instance_clone, record);
-                            }
-                        }
-                        // 远程 child 没有 exit code，仅通知死亡簿记（若 gen 未变）。
-                        if instance_clone.generation.load(Ordering::SeqCst) == _generation {
-                            instance_clone.initialized.store(false, Ordering::SeqCst);
-                            *instance_clone.writer.lock().unwrap() = None;
-                            instance_clone.pending.lock().unwrap().clear();
-                            let sid = instance_clone.current_session_id();
-                            if instance_clone.streaming.swap(false, Ordering::SeqCst) {
-                                emit_helix_event(
-                                    "error",
-                                    &json!({
-                                        "session_id": sid,
-                                        "message": "remote pi agent connection closed",
-                                    }),
-                                );
-                            }
-                        }
-                    });
-                    return Ok(());
-                }
-                Err(e) => {
-                    log_spawn_diag(&format!(
-                        "spawn_process({}): remote endpoint {endpoint} unreachable ({e}) — \
-                         falling back to LOCAL pi this spawn; re-attach remote next time",
-                        instance.key()
-                    ));
-                    // 回退本地：落到下面的本地 spawn 路径。
-                }
-            }
-        }
-    }
-
-    // ── 本地 spawn（含远程不可达的回退）──────────────────────────────────
+    // ── 本地 spawn ────────────────────────────────────────────────────────
     let mut command = pi_command();
     command
         .current_dir(cwd)
@@ -1754,6 +1776,114 @@ fn request_frame(method: &str, params: Value) -> Result<(String, String), String
 /// - `prompt` as an array of blocks: `{type:"text", text}` +
 ///   `{type:"image_url", image_url:{url}}` (data: URLs)
 /// - `images` (array of data URLs) also accepted.
+// ── 粘贴图片 → describe_image 分流（见 session/prompt）──────────────────────
+// 最早的逻辑是在 session/prompt 里无条件对粘贴图跑 `vision_describe_core` 自动
+// 转述。现在改为按序分流：
+//   ① 多模态主模型     → 原生透传 images，不转述不提示（模型自己读图）
+//   ② 文本模型 + 工具可用 → 图片落盘成文件 + prompt 给路径提示，模型按需调
+//                          describe_image（可自定义提问，省一次固定视觉调用）
+//
+// ③（旧的「网关无条件自动转述」）已于 2026-10-06 移除。理由：
+//   - 它与 ② 读**同一份** `vision:` 配置、调**同一个**视觉模型、产出**同一种**
+//     「图的文字描述」——两份实现，同一件事。
+//   - 质量明显更差：`vision.rs` 那份没有 system prompt，只有一句写死的
+//     "Describe this image in detail"；而 describe_image 带「穷尽转写底座契约」
+//     （先分类 → 逐字转写 → 标注布局 → 再回答 → 完整性声明），且撞 max_tokens
+//     时会显式声明截断。
+//   - 每张图白跑一次视觉调用，不管模型需不需要。
+// 现在②是**唯一**的识图通路；工具不可用时图片仍落盘，但提示里会明说「你看不懂」
+// —— 静默丢弃比明说更坏，模型至少知道自己缺了什么。
+//
+// 工具可用判定 = pi ≥ 1.0.0（pi-aux-vision 的硬要求）且 settings.json
+// packages 里登记了 pi-aux-vision。describe_image 的 gating 只把工具暴露给
+// 不支持图片输入的模型，与 ① 的判定天然互补。
+
+/// pi CLI 是否 ≥ 1.0.0（describe_image 工具所在的 pi-aux-vision 的硬要求）。
+/// 用与 spawn 相同的 pi_cli_args 探测，结果缓存；任何失败都按 false 处理
+/// （保守 → 走自动转述兜底，不阻断贴图）。
+fn pi_describe_image_supported() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        let (mut cmd, _) = pi_cli_args();
+        let Ok(out) = cmd.arg("--version").output() else {
+            return false;
+        };
+        String::from_utf8_lossy(&out.stdout)
+            .split(['.', ' ', '\n'])
+            .find_map(|t| t.parse::<u32>().ok())
+            .map(|major| major >= 1)
+            .unwrap_or(false)
+    })
+}
+
+/// settings.json `packages` 里是否登记了 pi-aux-vision。
+fn pi_aux_vision_registered() -> bool {
+    crate::config::read_pi_settings()
+        .get("packages")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .any(|p| p.as_str().map(|s| s.contains("pi-aux-vision")).unwrap_or(false))
+        })
+        .unwrap_or(false)
+}
+
+/// 本实例当前模型是否原生支持图片输入。
+fn current_model_supports_images(instance: &PiInstance) -> bool {
+    let model = instance.current_model.lock().unwrap().clone();
+    let provider = instance.current_provider.lock().unwrap().clone();
+    crate::config::model_supports_image_input(model.as_deref().unwrap_or(""), provider.as_deref())
+}
+
+/// 把粘贴图片（pi ImageContent `{type:"image", data, mimeType}`）解码落盘到
+/// `~/.pi/agent/paste-images/`（pi_agent_dir，和其他 pi 配置同级），返回可读的
+/// 绝对路径列表。顺带 best-effort 清理 7 天前的旧文件，防目录无限膨胀。
+/// 返回空 Vec = 全部失败。
+fn save_pasted_images(images: &[Value]) -> Vec<String> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    let dir = crate::paths::pi_agent_dir().join("paste-images");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return Vec::new();
+    }
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(Duration::from_secs(7 * 24 * 3600))
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        for e in entries.flatten() {
+            if let Ok(md) = e.metadata() {
+                if md.modified().map(|t| t < cutoff).unwrap_or(false) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    for (i, img) in images.iter().enumerate() {
+        let Some(data) = img.get("data").and_then(Value::as_str) else { continue };
+        let Ok(bytes) = B64.decode(data) else { continue };
+        let mime = img
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .unwrap_or("image/png");
+        let ext = match mime {
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/bmp" => "bmp",
+            _ => "png",
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = dir.join(format!("paste-{nanos:x}-{}.{ext}", i + 1));
+        if std::fs::write(&path, &bytes).is_ok() {
+            paths.push(path.to_string_lossy().into_owned());
+        }
+    }
+    paths
+}
+
 fn prompt_parts(params: &Value) -> Result<(String, Vec<Value>), String> {
     let mut text = String::new();
     let mut images: Vec<Value> = Vec::new();
@@ -2104,6 +2234,15 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .and_then(Value::as_str)
                 .filter(|c| !c.is_empty())
                 .map(str::to_string);
+            // 远程对话：前端把**远端**绝对路径放在 `remote_cwd` 里（只有它知道 ——
+            // session.workDir 是 `remote://<机器>/<路径>` 虚拟键，见前端
+            // lib/remote-projects.ts）。这条会话走隧道，并且**不能**认领预热
+            // spare：池子里清一色是本地子进程。
+            let remote_cwd = params
+                .get("remote_cwd")
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
             // No project picked: the conversation must NOT inherit the last
             // used project (persisted workdir.json — the global work_dir).
             // That's how a brand-new chat landed in e.g. the LangGraph dir
@@ -2111,28 +2250,37 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // (`~/.pi/agent/scratch`, outside sessions/) is the neutral home;
             // a warm spare (spawned in the global dir) is never claimed for
             // such a conversation either.
-            let spawn_cwd = cwd.clone().or_else(|| {
+            let spawn_cwd = remote_cwd.clone().or_else(|| cwd.clone()).or_else(|| {
                 Some(
                     crate::state::pi_sessions_default_dir()
                         .to_string_lossy()
                         .into_owned(),
                 )
             });
-            let instance = match take_warm_spare(spawn_cwd.as_deref()) {
-                Some(spare) => {
-                    // Claimed — rearm a replacement for the next session.
-                    rearm_warm_spares(&state);
-                    spare
-                }
-                None => {
-                    // Pool empty or dir mismatch: spawn on demand + rearm so
-                    // the NEXT session/new finds a warm spare.
-                    rearm_warm_spares(&state);
-                    let temp_key = format!(
-                        "pending-{}",
-                        REQUEST_ID.fetch_add(1, Ordering::SeqCst)
-                    );
-                    spawn_instance(temp_key, spawn_cwd, &state)?
+            let instance = if remote_cwd.is_some() {
+                rearm_warm_spares(&state);
+                let temp_key = format!(
+                    "pending-{}",
+                    REQUEST_ID.fetch_add(1, Ordering::SeqCst)
+                );
+                spawn_instance(temp_key, spawn_cwd, true, &state)?
+            } else {
+                match take_warm_spare(spawn_cwd.as_deref()) {
+                    Some(spare) => {
+                        // Claimed — rearm a replacement for the next session.
+                        rearm_warm_spares(&state);
+                        spare
+                    }
+                    None => {
+                        // Pool empty or dir mismatch: spawn on demand + rearm so
+                        // the NEXT session/new finds a warm spare.
+                        rearm_warm_spares(&state);
+                        let temp_key = format!(
+                            "pending-{}",
+                            REQUEST_ID.fetch_add(1, Ordering::SeqCst)
+                        );
+                        spawn_instance(temp_key, spawn_cwd, false, &state)?
+                    }
                 }
             };
             instance
@@ -2183,6 +2331,11 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // request it raises) must already be routable under the real
             // session id.
             rekey_instance(&instance, session_id.clone());
+            // 登记「这个 sid 是远程会话，目录在远端 …」——实例被回收后重新 spawn
+            // 时靠它选对通道（session/prompt 不带 cwd，无从判断）。
+            if let Some(dir) = &remote_cwd {
+                remember_remote_session_dir(&session_id, dir);
+            }
             // seedHistory (gateway restart / reaped conversation rebuild): pi
             // has no RPC to inject prior history into a session, so replay it
             // as the session-opening user message. Only user/assistant turns
@@ -2623,10 +2776,13 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             //     gates write tools until the user approves implementation)
             //   - leaving "plan"   → /plan exit (clears the active/saved plan
             //     and unlocks the tools)
-            // "default" stays a no-op — it just means "not in plan mode".
-            // There is no other mode: pi has no tool-level approval, and the
-            // former "accept_edits" / "dont_ask" modes only ever fed the
-            // renderer's classifyApproval, which pi never triggers.
+            // Any other mode_id only means "not in plan mode" (no-op when the
+            // instance was already unlocked). The permission tier (ask/auto/
+            // full) is NOT handled here: the gate that actually blocks tool
+            // calls is @zhushanwen/pi-permission, which reads its own config
+            // file — see approval_policy.rs. Never invent a second tier state
+            // on this path; that is how "UI says full access, still prompts"
+            // happened once already.
             let mut mode = params
                 .get("mode_id")
                 .and_then(Value::as_str)
@@ -2670,6 +2826,16 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // approved execution — the extension itself leaves plan mode.
             if plan_approved && mode == "plan" {
                 mode = "accept_edits";
+            }
+            // plan_approved=true ⇒ drop the tracked flag WITHOUT sending
+            // `/plan exit` (exit would delete the plan the user just approved;
+            // the renderer's next prompt is `/plan implement`, and the
+            // extension leaves plan mode itself). The flag still has to go
+            // false: the run loop calls set_mode before EVERY prompt, and with
+            // a stale true the next non-plan call would fire `/plan exit` right
+            // after `/plan implement` — wiping the plan mid-implementation.
+            if plan_approved {
+                *instance.plan_mode.lock().unwrap() = false;
             }
             Ok(json!({ "status": "mode-applied", "mode_id": mode }))
         }
@@ -2833,32 +2999,6 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
         }
         "session/prompt" => {
             let (message, images) = prompt_parts(&params)?;
-            // 粘贴的图片先过视觉模型转成文字描述，拼进 prompt——主模型（agnes 等
-            // 非多模态）看不见原图，只有描述能进上下文。视觉模型未配置/失败时
-            // 静默跳过（不阻断普通文字提问），仍透传 images 给 pi（多模态主模型可直接读）。
-            let message = if images.is_empty() {
-                message
-            } else {
-                let mut descriptions = Vec::new();
-                for img in &images {
-                    if let Some(data_url) = crate::vision::image_to_data_url(img) {
-                        if let Ok(desc) = crate::vision::vision_describe_core(data_url, None).await {
-                            descriptions.push(desc);
-                        }
-                    }
-                }
-                if descriptions.is_empty() {
-                    message
-                } else {
-                    let combined = descriptions
-                        .iter()
-                        .enumerate()
-                        .map(|(i, d)| format!("[图片 {} 描述]\n{}", i + 1, d))
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    format!("{message}\n\n{combined}")
-                }
-            };
             let instance = routed_instance(&params, &state).await?;
             let session_id = instance
                 .current_session
@@ -2866,6 +3006,49 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                 .unwrap()
                 .clone()
                 .unwrap_or_default();
+
+            // 粘贴图片的分流（替代旧的无条件自动转述；详见上方 helper 注释）。
+            let message = if images.is_empty() {
+                message
+            } else if current_model_supports_images(&instance) {
+                // ① 多模态主模型：原生透传 images，模型直接读图，不需要转述
+                message
+            } else {
+                // ② 纯文本主模型：落盘 + 路径提示，模型自己决定调不调 describe_image。
+                //    工具不可用时也走这里，只是提示改成「你没有看图能力」——图片
+                //    已经落盘，模型至少知道它们存在、缺的是什么。
+                let tool_available =
+                    pi_describe_image_supported() && pi_aux_vision_registered();
+                let paths = save_pasted_images(&images);
+                if paths.is_empty() {
+                    message
+                } else {
+                    let listing = paths
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| format!("  {}. {}", i + 1, p))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let hint = if tool_available {
+                        format!(
+                            "[用户粘贴了 {} 张图片，已落盘到以下路径。如需查看图片内容，用 \
+describe_image 工具逐个分析（可附具体问题，如“读出图里的报错文字”）:\n{}\n]",
+                            paths.len(),
+                            listing
+                        )
+                    } else {
+                        format!(
+                            "[用户粘贴了 {} 张图片，已落盘到以下路径。\n\
+警告：当前 describe_image 工具不可用（pi 版本过低或扩展未注册），\
+你**无法**查看这些图片的内容，只能看到路径。如果任务依赖图里的信息，\
+请直接告诉用户「我看不到这些图片」，不要猜测内容。\n{}]",
+                            paths.len(),
+                            listing
+                        )
+                    };
+                    format!("{message}\n\n{hint}")
+                }
+            };
 
             let mut pi_params = json!({ "message": message });
             if !images.is_empty() {
@@ -3209,7 +3392,7 @@ async fn instance_for_session(
     state: &Arc<AppState>,
 ) -> Result<Arc<PiInstance>, String> {
     if session_id.is_empty() {
-        return spawn_instance(String::new(), None, state);
+        return spawn_instance(String::new(), None, false, state);
     }
     if let Some(instance) = INSTANCES.lock().unwrap().get(session_id) {
         if instance.initialized.load(Ordering::SeqCst) {
@@ -3281,8 +3464,16 @@ fn restore_session_instance(
             f
         }
         None => {
+            // 远程会话的 jsonl 在**远端**机器的 sessions 目录里，本机扫不到 ——
+            // 扫不到不等于对话不存在。这里仍按「本机无此会话文件」上抛，让前端走
+            // 它已有的 seedHistory 重建阶梯（session/new 带 messages，会重新登记
+            // remote_cwd，于是重建后依旧跑在远端）。
             log_spawn_diag(&format!(
-                "restore FAILED sid={session_id}: no session file (cache miss + scan miss)"
+                "restore FAILED sid={session_id}: no session file (cache miss + scan miss){}",
+                match remote_session_dir(session_id) {
+                    Some(d) => format!(" — 这是远程会话，jsonl 在远端 {d}"),
+                    None => String::new(),
+                }
             ));
             return Err(format!("no session file for {session_id}"));
         }
@@ -3312,11 +3503,11 @@ fn restore_session_instance(
             // resume in the global work dir finds a warm spare.
             None => {
                 rearm_warm_spares(state);
-                spawn_instance(session_id.to_string(), Some(cwd.to_string()), state)?
+                spawn_instance(session_id.to_string(), Some(cwd.to_string()), false, state)?
             }
         }
     } else {
-        spawn_instance(session_id.to_string(), None, state)?
+        spawn_instance(session_id.to_string(), None, false, state)?
     };
     // 把「本实例跑的是哪个 sid」**立刻**对齐到要恢复的目标 sid，在
     // switch_session 之前。
@@ -6329,10 +6520,11 @@ fn remote_marked_down() -> bool {
     now_ms() < REMOTE_DEAD_UNTIL_MS.load(Ordering::SeqCst)
 }
 
-/// 远端项目路径（`pi.remote_cwd`）。远程模式下 gateway 仍把**本地** work dir
-/// 当 cwd 解析出来传给 bridge，但远程项目其实在远端——设了这个键就用它
-/// 覆盖握手下发的 `cwd:` 行，让远端 pi 落在真实的项目目录。没设就发 "~"
-/// （远端 bridge 落到远端 home）；**不要把本地路径当 cwd 发过去**：远端
+/// 隧道当前指向的远端项目目录（`pi.remote_cwd`），由远程向导写入。
+///
+/// 双通道之后它只是**兜底值**：每条远程会话自己的远端目录来自 `remote_cwd`
+/// 参数（session/new）或 `REMOTE_SESSIONS` 登记表，只有两者都没有时才用它。
+/// 没设就发 "~"（远端 bridge 落到远端 home）；**不要把本地路径发过去**：远端
 /// spawn 会 ENOENT，bridge 关掉连接，网关误报「进程死亡」。
 fn remote_cwd_override() -> Option<String> {
     let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).ok()?;
@@ -6345,14 +6537,87 @@ fn remote_cwd_override() -> Option<String> {
     }
 }
 
-/// 远程传输：连一条 TCP，握手行下发本实例 cwd，然后把 socket 拆成读/写两半。
+/// 会话 id → 该会话的**远端**项目目录。
+///
+/// 为什么必须落盘：`session/prompt` 只带 session_id，不带 cwd；实例被空闲回收后
+/// 重新 spawn 时，网关得能再次判断「这个会话是远程的，目录在远端 `/home/...`」，
+/// 否则它会在**本机**把远程会话拉起来 —— 同样的对话，跑到另一台机器、另一个目录
+/// 上去。远端绝对路径本身没有可辨识的特征（`/home/x` 在 Linux 本机也合法），所以
+/// 只能显式记。
+///
+/// 存在数据目录的 `remote-sessions.json`，与 `workdir.json` 同级。
+static REMOTE_SESSIONS: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new({
+        let mut map = HashMap::new();
+        if let Some(path) = remote_sessions_path() {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(obj) = serde_json::from_str::<Value>(&raw) {
+                    if let Some(m) = obj.as_object() {
+                        for (k, v) in m {
+                            if let Some(s) = v.as_str() {
+                                map.insert(k.clone(), s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        map
+    }));
+
+fn remote_sessions_path() -> Option<PathBuf> {
+    Some(crate::state::user_data_dir()?.join("remote-sessions.json"))
+}
+
+fn persist_remote_sessions() {
+    let Some(path) = remote_sessions_path() else {
+        return;
+    };
+    let snapshot: Value = {
+        let map = REMOTE_SESSIONS.lock().unwrap();
+        Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect(),
+        )
+    };
+    let _ = std::fs::write(path, snapshot.to_string());
+}
+
+/// 记下「会话 sid 是远程的，目录 = dir」。
+fn remember_remote_session_dir(session_id: &str, dir: &str) {
+    if session_id.is_empty() || dir.is_empty() {
+        return;
+    }
+    {
+        let mut map = REMOTE_SESSIONS.lock().unwrap();
+        if map.get(session_id).map(String::as_str) == Some(dir) {
+            return;
+        }
+        map.insert(session_id.to_string(), dir.to_string());
+    }
+    persist_remote_sessions();
+}
+
+/// 这个会话是远程的吗？是则返回它的远端目录。
+fn remote_session_dir(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    REMOTE_SESSIONS.lock().unwrap().get(session_id).cloned()
+}
+
+/// 远程传输：连一条 TCP，握手行下发**本实例**的远端 cwd，然后把 socket 拆成读/写两半。
 ///
 /// 读一半、写一半各一个 handle，第三个专给 `ChildHandle::Remote` 做 shutdown。
 /// 三者共享同一个 socket，任一个 shutdown 都让另外两个看到 EOF。
 ///
 /// 握手行**不**是协议的一部分 —— pi 的 RPC 是纯 JSONL，任何额外前缀都会
 /// 毒掉流。对面（remote-bridge.js）必须读走这一行再开始透传。
-fn open_remote_transport(_cwd: &std::path::Path) -> Result<(RpcWrite, RpcRead, TcpStream), String> {
+///
+/// `remote_cwd` 必须是远端机器上的绝对路径（或 `~`）。**绝不能**传本地路径过去：
+/// 远端 spawn 会 ENOENT，bridge 关掉连接，网关于是误报「进程死亡」。
+fn open_remote_transport(remote_cwd: &str) -> Result<(RpcWrite, RpcRead, TcpStream), String> {
     let endpoint = remote_rpc_endpoint().unwrap_or_default();
     let _addr = endpoint
         .to_socket_addrs()
@@ -6368,9 +6633,11 @@ fn open_remote_transport(_cwd: &std::path::Path) -> Result<(RpcWrite, RpcRead, T
             "Failed to connect to remote RPC endpoint {endpoint}: {e} — is the ssh -L tunnel and remote-bridge.js running?"
         )
     })?;
-    // `pi.remote_cwd` 优先：远程项目路径。没设就发 "~"（远端 home）——本地
-    // 路径（Windows 盘符等）在远端不存在，spawn ENOENT，bridge 关连接。
-    let effective_cwd = remote_cwd_override().unwrap_or_else(|| "~".to_string());
+    let effective_cwd = if remote_cwd.trim().is_empty() {
+        "~".to_string()
+    } else {
+        remote_cwd.to_string()
+    };
     let mut frame = String::from("cwd:");
     frame.push_str(&effective_cwd);
     frame.push('\n');

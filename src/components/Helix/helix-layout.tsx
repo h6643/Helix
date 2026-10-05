@@ -325,6 +325,8 @@ export function HelixLayout() {
   const dragStartW = useRef(0);
   const rightDragStartX = useRef(0);
   const rightDragStartW = useRef(0);
+  // 打开「旁路问答」之前用户原本的右栏宽度（null = 没有待恢复的临时加宽）。
+  const rightWidthBeforeBylineRef = useRef<number | null>(null);
 
   // Refs for keyboard shortcut handler (avoids stale closures)
   const showSidebarRef = useRef(showSidebar);
@@ -571,6 +573,8 @@ export function HelixLayout() {
         saveRightSidebarWidth(w);
         return w;
       });
+      // 用户亲手拖过 = 以他的选择为准，离开「旁路问答」时不再把宽度还原回去。
+      rightWidthBeforeBylineRef.current = null;
     };
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
@@ -612,13 +616,32 @@ export function HelixLayout() {
     showSkillPanel ||
     showScheduledTasksPanel;
   const rightSidebarTab = useHelixStore((s) => s.rightSidebarTab);
+  // 「旁路问答」面板本身是一段对话，浏览器/更改那一档 280~400px 的侧栏宽度装不下
+  // 它的问题与回答：打开它时把右栏拉到当前窗口允许的最宽（rightSidebarCap），切走
+  // 时恢复用户原本的宽度。宽度的写入者仍然只有「拖拽 + localStorage」，这里只是
+  // 临时覆盖、不写盘。
+  useEffect(() => {
+    if (rightSidebarTab === "byline") {
+      const cap = rightSidebarCap(sidebarWidthRef.current);
+      if (rightSidebarWidthRef.current >= cap) return;
+      if (rightWidthBeforeBylineRef.current === null)
+        rightWidthBeforeBylineRef.current = rightSidebarWidthRef.current;
+      setRightSidebarWidth(cap);
+      return;
+    }
+    const before = rightWidthBeforeBylineRef.current;
+    if (before === null) return;
+    rightWidthBeforeBylineRef.current = null;
+    setRightSidebarWidth(before);
+  }, [rightSidebarTab]);
   const codeFullscreen = useHelixStore((s) => s.codeFullscreen);
   const isTerminalOpen = useHelixStore((s) => s.isTerminalOpen);
   const selectedWorkDir = useHelixStore((s) => s.selectedWorkDir);
-  // 远程隧道对账（写全局 remoteMode）。挂在宿主而不是只挂在远程列表上：侧边栏
-  // 的远程分组可折叠、输入框下拉里的列表只在展开时挂载，那些位置随时会卸载，
-  // 对账就停了 —— remoteMode 停在 null，文件树/git 芯片会显示本地目录而 agent
-  // 其实在远端。
+  // 远程隧道对账（写全局 remoteMode = 「隧道在不在」）。挂在宿主而不是只挂在
+  // 远程列表上：侧边栏的远程分组可折叠、输入框下拉里的列表只在展开时挂载，那些
+  // 位置随时会卸载，对账就停了 —— remoteMode 停在 null，明明连着远程，远程行却
+  // 不绿、断开按钮也点不出来。
+  // 注意它**不**参与「这条对话在哪台机器」的判定：那由 session.workDir 说。
   const externalServices = useHelixStore((s) => s.externalServices);
   useRemoteTunnelReconcile(externalServices);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
@@ -679,6 +702,10 @@ export function HelixLayout() {
     ? null
     : (activeSessionWorkDir ??
       (currentSessionId === null ? selectedWorkDir : null));
+  // 这条对话的代码在不在本机。远程对话的 workDir 是 `remote://…` 虚拟键，本机
+  // 终端 cd 不进去（PTY 会落在应用的 cwd，用户在一个跟对话无关的目录里打字），
+  // 所以「终端」对它不出现——标题栏按钮、文件树按钮和面板本体用同一个判定。
+  const conversationIsRemote = isRemoteWorkDir(activeSessionWorkDir);
   const navigationHistory = useHelixStore((s) => s.navigationHistory);
   const navigationIndex = useHelixStore((s) => s.navigationIndex);
   const customShortcuts = useHelixStore((s) => s.customShortcuts);
@@ -750,12 +777,12 @@ export function HelixLayout() {
   // 右上角「更改」胶囊：当前工作区未提交改动的行数统计。
   // 数据 = git diff --numstat 各文件 +/- 求和（二进制文件输出 "-\t-" 会被跳过）。
   // 无会话/项目目录、非 git 仓库、或零改动时置空 → 胶囊不渲染。
-  // agent 编辑文件很频繁，5s 轮询跟上；workDir 变化（切会话/项目）立即重算。
-  // 「更改」胶囊重新统计的信号：提交成功后 +1 立即刷新，无需等 5s 轮询。
-  const [gitRevision, setGitRevision] = useState(0);
+  // agent 编辑文件很频繁，5s 轮询跟上；workDir 变化（切会话/项目）与
+  // `gitChangeRevision` 递增（edit/write 登记、卡片撤销、提交完成）立即重算。
   // 未提交改动（git diff --numstat）。这里只取总计，「更改」tab 用同一 hook
-  // 拿文件明细。无改动 / 非 git 仓库 → null → 胶囊不渲染。
-  const gitChangeStat = useGitChangeStat(branchPickerWorkDir, gitRevision);
+  // 拿文件明细与「为什么统计不了」。无改动 / 非 git 仓库 → null → 胶囊不渲染。
+  const gitChanges = useGitChangeStat(branchPickerWorkDir);
+  const gitChangeStat = gitChanges.stat;
   // 右上角「提交 / 提交并推送」的提交中状态。
   const [isCommitting, setIsCommitting] = useState(false);
   // 提交弹窗（点「提交并推送」时弹出，内含提交信息输入框 + 提交 / 提交并推送 两个动作）。
@@ -818,8 +845,8 @@ export function HelixLayout() {
           type: "success",
           title: pushAfter ? "提交并推送成功" : "提交成功",
         });
-        // 改动已落库，立即刷新「更改」胶囊。
-        setGitRevision((r) => r + 1);
+        // 改动已落库，立即刷新「更改」胶囊与面板。
+        storeActions.bumpGitChangeRevision();
         setCommitDialogOpen(false);
       } catch (e) {
         storeActions.showToast({
@@ -1635,14 +1662,19 @@ export function HelixLayout() {
           closeWindowMenu();
         },
       },
-      {
-        label: "打开终端",
-        shortcut: shortcutLabel("toggle-terminal", customShortcuts),
-        action: () => {
-          useHelixStore.setState({ isTerminalOpen: true });
-          closeWindowMenu();
-        },
-      },
+      // 云端对话开不了本机终端（见 conversationIsRemote），菜单项跟着隐藏。
+      ...(conversationIsRemote
+        ? []
+        : [
+            {
+              label: "打开终端",
+              shortcut: shortcutLabel("toggle-terminal", customShortcuts),
+              action: () => {
+                useHelixStore.setState({ isTerminalOpen: true });
+                closeWindowMenu();
+              },
+            },
+          ]),
       {
         label: "切换文件树",
         shortcut: shortcutLabel("toggle-file-tree", customShortcuts),
@@ -1692,6 +1724,7 @@ export function HelixLayout() {
       toggleFullscreen,
       closeWindowMenu,
       customShortcuts,
+      conversationIsRemote,
     ],
   );
 
@@ -2513,14 +2546,16 @@ export function HelixLayout() {
               </>,
               document.body,
             )}
-            <button
-              onClick={() => storeActions.toggleTerminal()}
-              data-tauri-drag-region="false"
-              className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
-              data-tip="终端"
-            >
-              <Terminal className="size-4" />
-            </button>
+            {!conversationIsRemote && (
+              <button
+                onClick={() => storeActions.toggleTerminal()}
+                data-tauri-drag-region="false"
+                className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
+                data-tip="终端"
+              >
+                <Terminal className="size-4" />
+              </button>
+            )}
             <button
               ref={browserMenuButtonRef}
               onClick={() => setBrowserMenuOpen((v) => !v)}
@@ -2707,6 +2742,18 @@ export function HelixLayout() {
                                         }}
                                         onAddBrowser={() => {
                                           storeActions.requestAddBrowserPage();
+                                          setBrowserMenuOpen(false);
+                                        }}
+                                        // 等价于裸 /btw：打开右侧「旁路问答」面板并
+                                        // 聚焦它的输入框（问题在面板里输入，多轮追问
+                                        // 也在面板里）。setTab 负责让侧栏可见；面板页
+                                        // 被 ✕ 关掉过时 tab 不变，那一页由 right-sidebar
+                                        // 的 bylineFocusSignal effect 补建。
+                                        onOpenByline={() => {
+                                          storeActions.setRightSidebarTab(
+                                            "byline",
+                                          );
+                                          storeActions.focusBylineInput();
                                           setBrowserMenuOpen(false);
                                         }}
                                       />

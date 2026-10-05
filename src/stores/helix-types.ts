@@ -226,17 +226,19 @@ export type ReasoningEffortLevel =
 /**
  * 审批模式。
  *
- * 四个值分属**两条正交的轴**，别把它们当一维梯队看：
+ * **两条正交的轴**，别把它们当一维梯队看：
  *
- * - 权限档 `ask` / `auto` / `full` —— 真正决定「工具调用要不要先问」。
- *   落地方式是写 `@zhushanwen/pi-permission` 的
- *   `config/permission-ext-config.json`（Rust: `helix_set_permission_mode`）。
- *   pi 官方没有工具级审批（`docs/security.md`："does not ask for approval
- *   before every tool call"），**唯一**能 block 工具执行的是扩展的
- *   `tool_call` 钩子，所以档位必须写进那个扩展才有效。
+ * - 权限档 `PermissionTier`（`ask` / `auto` / `full`）—— 决定「工具调用要不要
+ *   先问」，而且**全局只有一档**：它是 `@zhushanwen/pi-permission` 的配置
+ *   （`config/permission-ext-config.json`），那个扩展只读一个文件，不区分会话。
+ *   所以前端必须把它当「外部真相的缓存」：唯一写路径是
+ *   `helix_set_permission_mode`，唯一读路径是 `helix_get_permission_mode`，
+ *   并且**不再落 IndexedDB** —— 落一份自己的副本就制造第二条真相，历史教训
+ *   是「设置显示完全访问、实际照样弹窗」。
  *   映射：`ask → strict`、`auto → auto`、`full → yolo`。
- * - `plan` —— 走 pi-plan-mode 扩展（`/plan start`），模型只产出方案，
- *   用户批准后才切回执行。**不碰权限档**（它不改变谁被问）。
+ * - `plan` —— 走 pi-plan-mode 扩展（`/plan start`），模型只产出方案，用户批准
+ *   后才切回执行。**不碰权限档**，且**按会话**：它是 pi 实例级状态（网关
+ *   `PiInstance.plan_mode`），实例没了它就没了，所以同样不落盘。
  *
  * 历史上的 `default` / `accept_edits` / `dont_ask` 全部归一掉：
  * `default → auto`，`accept_edits → auto`，`dont_ask → full`。
@@ -244,7 +246,22 @@ export type ReasoningEffortLevel =
  * `approval_request` 事件来放行，于是「选了完全访问照样被弹窗拦」。
  * 同一个坑不能再踩：档位 UI 与真正生效的门禁**必须是同一条通路**。
  */
-export type ApprovalMode = "ask" | "auto" | "full" | "plan";
+export type PermissionTier = "ask" | "auto" | "full";
+
+/** UI 下拉的值域 = 权限档 ∪ plan 轴；由两条轴合成，不是存储状态。 */
+export type ApprovalMode = PermissionTier | "plan";
+
+/**
+ * 两条轴 → 下拉/芯片显示的那一个值：plan 优先（它意味着「现在只做只读规划」，
+ * 权限档此刻用不上）。合成规则只有这一处，组件里不要再各写一份
+ * `plan ? "plan" : tier`。
+ */
+export function approvalModeOf(
+  tier: PermissionTier,
+  planOn: boolean,
+): ApprovalMode {
+  return planOn ? "plan" : tier;
+}
 
 // Tool approval choices written back to the backend approval state machine.
 export type ApprovalLevel = "once" | "session" | "always" | "deny";
@@ -572,7 +589,9 @@ export const DEFAULT_SHORTCUTS: Record<string, CustomShortcutEntry> = {
  * 两档、旁路面板显示四档，用户在两个界面看到不同的东西。同一类「判定/清单
  * 写两份必然对不上」的分裂。
  *
- * 前三档是权限档（落到 pi-permission 的 config），`plan` 是独立的一轴。
+ * 前三档是权限档：写 pi-permission 的 config，**全局一档、所有对话共用**
+ * （扩展只读那一个文件，做不出按会话的权限档）。`plan` 是独立的一轴，
+ * **按会话**生效；选中它不改权限档，选任一权限档则退出该会话的 plan。
  */
 export const APPROVAL_MODE_ITEMS: ReadonlyArray<{
   id: ApprovalMode;

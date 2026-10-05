@@ -35,45 +35,32 @@ import type {
   SubAgent,
   ProviderConfig,
   McpServerConfig,
-  ApprovalMode,
+  PermissionTier,
   BylineReply,
   HelixTodo,
   PlanStep,
 } from "./helix-types";
 import { DEFAULT_SHORTCUTS } from "./helix-types";
 import { helixApi } from "@/lib/electron-bridge";
-import { makeRemoteWorkDir } from "@/lib/remote-projects";
 import { normalizeAcpContent } from "@/lib/text-utils";
 
 /**
- * 归一持久化里读到的审批模式。
+ * 归一 `helix_get_permission_mode` 返回的权限档。
  *
- * pi 官方没有工具级审批体系，`accept_edits` / `dont_ask` 这两档是 Helix 在
- * Python serve-gateway 时代自造的语义，靠分类 `approval_request` 事件放行；
- * pi 路径下该事件永不发生，所以两档都是纯装饰。磁盘上可能还留着旧值，
- * 这里统一降级为 `default`，避免 UI 展示一个已不存在的模式。
+ * `strict` / `yolo` 是 pi-permission 扩展自己的档位名，
+ * `default` / `accept_edits` / `dont_ask` 是磁盘上可能残留的 Helix 旧值
+ * （Python serve-gateway 时代自造，pi 路径下从不生效）。
+ * 扩展另有 `approve` 档，Helix 不提供也不认它（Rust 读路径已经把它归成
+ * `auto` 才发过来）；这里再见到 `approve` 就按「认不出来」处理。
+ *
+ * 认不出来返回 `undefined` —— 表示「这次读到的东西不可信，保留上一次缓存」，
+ * 绝不因为解析失败就把 UI 上的档位改掉（那会让显示与实际再度分裂）。
  */
-function normalizeApprovalMode(v: unknown): ApprovalMode | undefined {
-  // plan 是独立一轴，原样保留。
-  if (v === "plan") return "plan";
-  // 权限档。`default` 是最早的「正常执行」＝不主动问，即 auto；
-  // `accept_edits`（替我审批）/ `dont_ask`（完全访问）分别归 auto / full。
-  // 未知值一律 auto —— 宁可多问一次，也不要因为解析失败就静默全放行。
+function normalizePermissionTier(v: unknown): PermissionTier | undefined {
   if (v === "ask" || v === "strict") return "ask";
   if (v === "full" || v === "yolo" || v === "dont_ask") return "full";
-  return "auto";
-}
-
-function normalizeApprovalModeMap(
-  m: Record<string, ApprovalMode> | null | undefined,
-): Record<string, ApprovalMode> | undefined {
-  if (!m || typeof m !== "object") return undefined;
-  const out: Record<string, ApprovalMode> = {};
-  for (const [k, v] of Object.entries(m)) {
-    const n = normalizeApprovalMode(v);
-    if (n) out[k] = n;
-  }
-  return Object.keys(out).length ? out : undefined;
+  if (v === "auto" || v === "default" || v === "accept_edits") return "auto";
+  return undefined;
 }
 
 /** A server / virtual machine the user can connect to from the breadcrumb. */
@@ -262,6 +249,12 @@ interface HelixState
   browserAddSeq: number;
   requestAddBrowserPage: () => void;
 
+  // 「工作区的文件可能变了」的单调信号：agent 的 edit/write 登记成功、汇总卡片
+  // 撤销、提交完成后递增。`useGitChangeStat` 订阅它，改动立刻进「更改」列表与
+  // 右上角胶囊，而不是等它的 5s 轮询。
+  gitChangeRevision: number;
+  bumpGitChangeRevision: () => void;
+
   // Browser settings
   browserHomeUrl: string;
   setBrowserHomeUrl: (url: string) => void;
@@ -285,12 +278,27 @@ interface HelixState
   // tree) stays visible. Driven by the maximize button in the right sidebar.
   codeFullscreen: boolean;
   toggleCodeFullscreen: () => void;
-  approvalMode: ApprovalMode;
-  approvalModeBySession: Record<string, ApprovalMode>;
-  setApprovalMode: (v: ApprovalMode) => void;
-  // 仅写单条会话的覆盖值（不动全局默认）：旁路面板的审批模式下拉用，
-  // 只影响那条旁路会话；主线 setApprovalMode 保持「全局 + 当前对话」语义。
-  setApprovalModeForSession: (sessionId: string, mode: ApprovalMode) => void;
+  /**
+   * 全局权限档 = pi-permission 扩展配置的**只读缓存**。
+   * 写只走 `helix_set_permission_mode` 那一条 IPC（前端封装 = `setPermissionMode`；
+   * 首次建文件时 syncPermissionMode 也走同一条），读只走 `syncPermissionMode`。
+   * 不写 IndexedDB：那份副本没人读，只会变成第二条真相。
+   */
+  permissionMode: PermissionTier;
+  /**
+   * 从扩展配置回读权限档。读不到时的显示必须说实话：扩展在文件缺失/坏 JSON 时
+   * 一律跑它自己的 yolo 默认，所以按「完全访问」显示；文件还没人写过就先落下
+   * Helix 的默认档（auto），让两边从第一次读起就是同一个值。
+   */
+  syncPermissionMode: () => Promise<PermissionTier>;
+  /** 写权限档到扩展配置，成功后用回读结果更新缓存。 */
+  setPermissionMode: (v: PermissionTier) => Promise<PermissionTier>;
+  /**
+   * plan 轴：按会话（cid → 是否处于只读规划态）。这是 pi 实例级状态的前端
+   * 影子（网关 `PiInstance.plan_mode`），实例销毁即失效，所以不落 IndexedDB。
+   */
+  planModeBySession: Record<string, boolean>;
+  setPlanModeForSession: (sessionId: string, on: boolean) => void;
   // 按会话的模型覆盖：cid → { provider, model }（pi 侧身份）。旁路面板的
   // 模型下拉写这里；handleRun 每轮经 set_model 透传到该会话的 pi 实例，
   // 不写全局 config.yaml（全局默认仍由设置页/主线模型切换管理）。
@@ -329,22 +337,22 @@ interface HelixState
   // External services (servers / virtual machines) connected from the breadcrumb.
   externalServices: ExternalService[];
 
-  // ── 远程工作区模式（全局单例）────────────────────────────────────────
-  // 连上远程服务器后，**所有**会话的 agent 都在远端跑：网关的
-  // `open_remote_transport(_cwd)` 刻意忽略会话自己的 cwd（参数名带下划线），
-  // 永远读 config.yaml 的 `pi.remote_cwd`。于是凡是「数据源是本地 fs /
-  // 本地 git」的界面，在远程模式下显示的都是**与 agent 实际工作目录无关的
-  // 东西**——界面在撒谎。这个字段就是那份「撒谎」的单一开关：非 null = 远程。
+  // ── 远程隧道状态（全局，一台机器一条隧道）─────────────────────────────
+  // 后端同一时刻只维持**一条** SSH 隧道（config.yaml 的 `pi.remote_rpc`），所以
+  // 「连着哪台」是全局事实。但它只回答「隧道在不在」，**不回答某条对话跑在哪**
+  // —— 双通道之后：会话属于远程项目（workDir 是 `remote://…`）才走隧道，否则在
+  // 本机 spawn pi。谁的机器由 `session.workDir` 说，见 lib/remote-projects.ts。
   //
   // 谁写：`useRemoteTunnelReconcile`（src/hooks/use-remote-tunnel-reconcile.ts）
   // 现查后端 `remote_tunnel_status`，挂在 helix-layout 上保证永不卸载。
-  // 谁读：文件树 / git 芯片 / @ 候选 / 项目下拉 —— 全部只在本地模式下渲染或执行。
+  // 谁读：侧边栏远程行的绿色 / 连接·断开按钮 / 向导。本地 fs、git 这类界面**不
+  // 再**读它（它们按当前对话的 workDir 判断）。
   remoteMode: {
     /** 展示名（`user@host` 或用户起的名字） */
     label: string;
     host: string;
     username?: string;
-    /** 远端项目目录 = agent 的真实 cwd。 */
+    /** 隧道当前指向的远端项目目录（后端 `pi.remote_cwd`）。 */
     remotePath?: string;
     /** 对应 externalServices 里的哪一项（由 status 三元组反查）。 */
     serviceId: string | null;
@@ -965,25 +973,21 @@ let sessionPersistTimer: ReturnType<typeof setTimeout> | null = null;
 //     leaves selectedWorkDir = that dir, so clicking a project-less conversation
 //     next would silently attach it to the picked directory.
 //   - Brand-new session (no disk record): home it to the current project.
-//     远程模式优先：agent 在远端跑，对话就属于**那个远程项目**，身份是
-//     `remote://<serviceId>/<path>` 虚拟键（见 lib/remote-projects.ts）。不能
-//     用本地 selectedWorkDir —— 那会把对话归到本地项目下，而它实际跑在远端，
-//     侧边栏分组立刻变成假信息。
-function remoteWorkDirKey(
-  remoteMode: { serviceId: string | null; remotePath?: string } | null,
-): string | null {
-  if (!remoteMode?.serviceId) return null;
-  return makeRemoteWorkDir(remoteMode.serviceId, remoteMode.remotePath);
-}
-
+//     真值是 `activeSessionWorkDir`（远程对话为 `remote://<user@host:port>/<路径>`
+//     虚拟键，见 lib/remote-projects.ts；本地对话为本机路径），再回落
+//     selectedWorkDir。
+//
+// 这里**不看全局 remoteMode**：双通道下隧道开着只说明「有一条隧道在」，本地项目
+// 的对话仍在本地跑。曾经优先用 remoteMode 生成键，于是连着服务器时新建的本地
+// 对话被写成远程键 —— 侧边栏把它归到远程行、发消息时又被路由到远端，即用户报的
+// 「在本地项目里对话却跑到了远程项目」。
 function resolveSessionWorkDir(
   existing: { workDir?: string | null } | undefined,
   activeSessionWorkDir: string | null,
   selectedWorkDir: string | null,
-  remoteKey: string | null = null,
 ): string | null {
   if (existing) return existing.workDir ?? null;
-  return remoteKey ?? activeSessionWorkDir ?? selectedWorkDir;
+  return activeSessionWorkDir ?? selectedWorkDir;
 }
 function collectFiles(nodes: FileNode[]) {
   return nodes.map((n) => ({
@@ -1133,7 +1137,6 @@ async function persistCurrentSessionNow(): Promise<void> {
         existing,
         snapshot.activeSessionWorkDir,
         snapshot.selectedWorkDir,
-        remoteWorkDirKey(snapshot.remoteMode),
       ),
       goal: snapshot.goal,
       memories: snapshot.memories,
@@ -1250,7 +1253,6 @@ async function persistSessionById(sessionId: string): Promise<void> {
         existing,
         state.activeSessionWorkDir,
         state.selectedWorkDir,
-        remoteWorkDirKey(state.remoteMode),
       ),
       goal: existing?.goal ?? null,
       memories: existing?.memories || [],
@@ -1551,15 +1553,17 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   previewRailNavSeq: 0,
   lastPreviewRailQuiet: false,
   browserAddSeq: 0,
+  gitChangeRevision: 0,
   browserHomeUrl: "",
   rightSidebarTab: null,
   activeAgentView: null,
   directoryProjectDir: null,
   codeFullscreen: false,
-  // 默认「自动审批」：只在有风险时问。**不是**「完全访问」——默认全放行
+  // 权限档默认「自动审批」：只在有风险时问。**不是**「完全访问」——默认全放行
   // 意味着新装用户第一次跑工具就没有任何确认，那是更危险的默认值。
-  approvalMode: "auto" as const,
-  approvalModeBySession: {},
+  // 起步值只是首次回读完成前的占位；真相由 syncPermissionMode 从扩展配置读。
+  permissionMode: "auto" as const,
+  planModeBySession: {},
   modelBySession: {},
   bylineReplies: {},
   bylineAskSignal: 0,
@@ -1821,6 +1825,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       editorOpen: false,
       browserAddSeq: s.browserAddSeq + 1,
     })),
+  bumpGitChangeRevision: () =>
+    set((s) => ({ gitChangeRevision: s.gitChangeRevision + 1 })),
   setBrowserHomeUrl: (url: string) => {
     const trimmed = url.trim();
     set(() => ({ browserHomeUrl: trimmed }));
@@ -1881,33 +1887,71 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     })),
   toggleCodeFullscreen: () =>
     set((s) => ({ codeFullscreen: !s.codeFullscreen })),
-  setApprovalMode: (v: ApprovalMode) => {
+  syncPermissionMode: async () => {
+    try {
+      const res = await helixApi()?.getPermissionMode?.();
+      if (!res) return get().permissionMode;
+      if (!res.ok) {
+        // 读不到真相。此刻扩展跑的是它自己的 DEFAULT_CONFIG = **yolo**（文件
+        // 缺失时它会建一份 yolo，坏 JSON 时回落 yolo），所以「显示自动审批」
+        // 就是骗人——设置说会问、实际全放行，正是当初那个 bug 的形状。
+        if (res.exists === false) {
+          // 还没有人写过这份文件：落下 Helix 的默认档 auto（只在有风险时问，
+          // 比扩展自带的 yolo 保守），扩展热加载同一份文件 → 界面与实际同源。
+          // 直接写 IPC，不走 setPermissionMode —— 它失败时会回调进本函数，绕成死循环。
+          try {
+            const seeded = await helixApi()?.setPermissionMode?.("auto");
+            if (seeded?.ok) {
+              const t = normalizePermissionTier(seeded.mode) ?? "auto";
+              set({ permissionMode: t });
+              return t;
+            }
+          } catch {
+            /* 写不下去：按下面扩展的实际行为（yolo）显示 */
+          }
+        }
+        set({ permissionMode: "full" });
+        return "full" as const;
+      }
+      // enabled=false 在扩展里等价 yolo（它的约定），而配置里的 mode 可能还
+      // 写着 auto —— 只看 mode 就会显示「自动审批」而实际全放行。
+      const tier =
+        res.enabled === false ? "full" : normalizePermissionTier(res.mode);
+      // ok=true 但 mode 认不出来（扩展加了新档位名之类）：不动缓存，也不谎报。
+      if (tier) {
+        if (get().permissionMode !== tier) set({ permissionMode: tier });
+        return tier;
+      }
+    } catch {
+      /* 桥不可用（如纯浏览器 dev）：沿用缓存 */
+    }
+    return get().permissionMode;
+  },
+  setPermissionMode: async (v: PermissionTier) => {
+    const api = helixApi();
+    if (!api?.setPermissionMode) return get().permissionMode;
+    try {
+      const res = await api.setPermissionMode(v);
+      if (res?.ok) {
+        const tier = normalizePermissionTier(res.mode) ?? v;
+        set({ permissionMode: tier });
+        return tier;
+      }
+    } catch {
+      /* 落盘失败：下面回读真相 */
+    }
+    // 写失败（权限/磁盘问题）时绝不能停在用户刚点的那档 —— 那正是「设置显示
+    // 完全访问、实际照样弹窗」的反向版本。回读一次让 UI 说真话。
+    return get().syncPermissionMode();
+  },
+  setPlanModeForSession: (sessionId, on) =>
     set((s) => {
-      // 新对话尚未分配 id 时先存到草稿键，避免选择后重启丢失。
-      const sid = s.currentSessionId || "__draft__";
-      const bySession = { ...s.approvalModeBySession, [sid]: v };
-      return { approvalMode: v, approvalModeBySession: bySession };
-    });
-    import("@/lib/persist").then(({ persistence }) => {
-      const st = get();
-      persistence.saveSetting("approvalMode", st.approvalMode).catch(() => {});
-      persistence
-        .saveSetting("approvalModeBySession", st.approvalModeBySession)
-        .catch(() => {});
-    });
-  },
-  // 旁路面板的审批模式下拉：只写该旁路会话的覆盖值，不碰全局。旁路 cid
-  // （btw- 前缀）不参与 setCurrentSessionId 的恢复逻辑，所以直接落 map。
-  setApprovalModeForSession: (sessionId, mode) => {
-    set((s) => ({
-      approvalModeBySession: { ...s.approvalModeBySession, [sessionId]: mode },
-    }));
-    import("@/lib/persist").then(({ persistence }) => {
-      persistence
-        .saveSetting("approvalModeBySession", get().approvalModeBySession)
-        .catch(() => {});
-    });
-  },
+      if (on === !!s.planModeBySession[sessionId]) return {};
+      const next = { ...s.planModeBySession };
+      if (on) next[sessionId] = true;
+      else delete next[sessionId];
+      return { planModeBySession: next };
+    }),
   // 按会话的模型选择：输入框模型下拉与旁路面板都写它。handleRun 每轮把
   // modelBySession[会话cid] 经 set_model 透传到该会话的 pi 实例（网关按
   // session_id 路由），不改全局 config.yaml——所以每个对话可以各选各的模型，
@@ -2663,26 +2707,28 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }),
   setCurrentSessionId: (id) =>
     set((state) => {
-      if (!id)
+      if (!id) {
+        // 「新建对话」回到无 plan 的默认态：丢掉草稿期（DRAFT_SESSION_KEY）
+        // 选过的 plan，否则下一个新对话一上来就是只读规划态。
+        const planModeBySession = { ...state.planModeBySession };
+        delete planModeBySession.__draft__;
         return {
           currentSessionId: id,
           activeSessionWorkDir: null,
           helixTodos: [],
+          planModeBySession,
         };
+      }
       // Skip if clicking the same session that's already loaded
       if (id === state.currentSessionId) return {};
       // 任务清单跟随会话：恢复目标会话缓存的 todo 列表（无则清空）
       const helixTodos = state.helixTodosBySession?.[id] ?? [];
-      // 访问权限跟随会话：每个对话记住自己的审批模式。
-      const draftMode = state.approvalModeBySession?.["__draft__"];
-      const approvalMode =
-        normalizeApprovalMode(state.approvalModeBySession?.[id]) ??
-        normalizeApprovalMode(draftMode) ??
-        state.approvalMode;
-      const approvalModeBySession = { ...state.approvalModeBySession };
-      if (draftMode && !approvalModeBySession[id])
-        approvalModeBySession[id] = draftMode;
-      delete approvalModeBySession["__draft__"];
+      // plan 轴的草稿迁移：新对话分配出真 cid 时，把草稿期选的 plan 搬过去
+      //（与 modelBySession 同一约定）。权限档是全局的，没有按会话恢复一说。
+      const planModeBySession = { ...state.planModeBySession };
+      if (planModeBySession.__draft__ && !planModeBySession[id])
+        planModeBySession[id] = true;
+      delete planModeBySession.__draft__;
       const history = [...state.sessionHistory];
       const idx = state.sessionHistoryIndex;
       // Check if the target ID already exists at the current position (deduplicate)
@@ -2691,8 +2737,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         return {
           currentSessionId: id,
           helixTodos,
-          approvalMode,
-          approvalModeBySession,
+          planModeBySession,
         };
       }
       // Remove any forward history when navigating to a new session
@@ -2705,8 +2750,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         sessionHistory: newHistory,
         sessionHistoryIndex: newHistory.length - 1,
         helixTodos,
-        approvalMode,
-        approvalModeBySession,
+        planModeBySession,
       };
     }),
   navigateSession: async (direction, targetId) => {
@@ -3735,11 +3779,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting("personality", state.personality),
         persistence.saveSetting("fastMode", state.fastMode),
         persistence.saveSetting("terminalShell", state.terminalShell),
-        persistence.saveSetting("approvalMode", state.approvalMode),
-        persistence.saveSetting(
-          "approvalModeBySession",
-          state.approvalModeBySession,
-        ),
+        // 权限档**不落盘**：真相在 pi-permission 的配置文件里，起进程时
+        // syncPermissionMode 回读。这里再存一份就是第二条真相。
         persistence.saveSetting("modelBySession", state.modelBySession),
         persistence.saveSetting("startupGreeting", state.startupGreeting),
         persistence.saveSetting(
@@ -3858,8 +3899,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitRemoteUrl,
         gitCommitTemplate,
         gitBranchPrefix,
-        approvalMode,
-        approvalModeBySession,
         modelBySession,
         startupGreeting,
         bootBackgroundImage,
@@ -4004,16 +4043,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(
           persistence.loadSetting<string>("gitBranchPrefix"),
           "gitBranchPrefix",
-        ),
-        safeLoad(
-          persistence.loadSetting<string>("approvalMode"),
-          "approvalMode",
-        ),
-        safeLoad(
-          persistence.loadSetting<Record<string, ApprovalMode>>(
-            "approvalModeBySession",
-          ),
-          "approvalModeBySession",
         ),
         safeLoad(
           persistence.loadSetting<
@@ -4677,13 +4706,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitRemoteUrl: gitRemoteUrl || get().gitRemoteUrl,
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
-        // 旧版本持久化过 "accept_edits" / "dont_ask"（Helix serve-gateway 时代
-        // 的自造模式）。它们在 pi 路径下没有任何效果，统一降级为 "default"，
-        // 免得残留值让 UI 显示一个不存在的模式。
-        approvalMode: normalizeApprovalMode(approvalMode) ?? get().approvalMode,
-        approvalModeBySession: normalizeApprovalModeMap(
-          approvalModeBySession,
-        ),
+        // 权限档 / plan 轴不从这里恢复：前者由 syncPermissionMode 在设置加载
+        // 完成后回读扩展配置（真相只有那一份文件），后者是 pi 实例级状态，
+        // 进程重启即失效。旧版本持久化过的 "approvalMode" /
+        // "approvalModeBySession" 键就此作废，不再被读。
         modelBySession: modelBySession ?? get().modelBySession,
         startupGreeting: healedStartupGreeting,
         bootBackgroundImage: bootBackgroundImage ?? get().bootBackgroundImage,

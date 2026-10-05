@@ -25,6 +25,7 @@ import {
   electronFS,
   electronShell,
 } from "@/lib/electron-bridge";
+import { isRemoteWorkDir } from "@/lib/remote-projects";
 import { useHelixStore } from "@/stores/helix-store";
 
 interface FileTreeItem {
@@ -232,6 +233,10 @@ export function FileTreePanel({
   const openFileInEditor = useHelixStore((s) => s.openFileInEditor);
   const isTerminalOpen = useHelixStore((s) => s.isTerminalOpen);
   const toggleTerminal = useHelixStore((s) => s.toggleTerminal);
+  // 云端对话没有本机终端可开（同标题栏/窗口菜单/命令面板的判定），按钮藏起来。
+  const conversationIsRemote = useHelixStore((s) =>
+    isRemoteWorkDir(s.activeSessionWorkDir),
+  );
   const [items, setItems] = useState<FileTreeItem[]>([]);
   const [gitStatus, setGitStatus] = useState<Map<string, string>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -752,13 +757,15 @@ export function FileTreePanel({
               return n.length > 12 ? n.slice(0, 12) + "…" : n;
             })()}
           </span>
-          <button
-            onClick={toggleTerminal}
-            className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? "text-primary bg-sidebar-accent/50" : "text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40"}`}
-            data-tip={isTerminalOpen ? "关闭终端" : "终端"}
-          >
-            <Terminal className="size-4" />
-          </button>
+          {!conversationIsRemote && (
+            <button
+              onClick={toggleTerminal}
+              className={`p-1.5 rounded-lg transition-colors ${isTerminalOpen ? "text-primary bg-sidebar-accent/50" : "text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40"}`}
+              data-tip={isTerminalOpen ? "关闭终端" : "终端"}
+            >
+              <Terminal className="size-4" />
+            </button>
+          )}
         </div>
       )}
       {/* Tree */}

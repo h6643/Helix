@@ -122,6 +122,47 @@ pub fn model_context_window_for(model: &str, provider: Option<&str>) -> i64 {
     context_window_in(&read_pi_models(), model, provider)
 }
 
+/// 模型条目是否声明支持图片输入（models.json 条目的 `input` 数组含 "image"）。
+/// 供「粘贴图片走 describe_image、由模型按需读」分流使用：多模态主模型原生
+/// 透传 images 即可，不需要转述/路径提示；纯文本模型才需要视觉管道。
+/// 找不到条目或没有 input 字段 = 视为纯文本模型。
+pub fn model_supports_image_input(model: &str, provider: Option<&str>) -> bool {
+    let model_id = model.trim();
+    if model_id.is_empty() {
+        return false;
+    }
+    let doc = read_pi_models();
+    let Some(providers) = doc.get("providers").and_then(|v| v.as_object()) else {
+        return false;
+    };
+    let find = |models: &serde_json::Value| -> Option<serde_json::Value> {
+        models
+            .as_array()?
+            .iter()
+            .find(|mm| mm.get("id").and_then(serde_json::Value::as_str) == Some(model_id))
+            .cloned()
+    };
+    let entry = match provider {
+        Some(p) => providers
+            .get(p)
+            .and_then(|pv| pv.get("models"))
+            .and_then(find),
+        None => None,
+    }
+    .or_else(|| {
+        // provider 缺失/没查到：全找一遍（per-session 模型覆盖可能指向任意 provider）
+        providers.values().filter_map(|pv| pv.get("models")).find_map(find)
+    });
+    match entry {
+        Some(mm) => mm
+            .get("input")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| a.iter().any(|x| x.as_str() == Some("image")))
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
 /// `model_context_window_for` 的纯函数内核：从一份**已解析**的 models.json 里
 /// 按「供应商 + 模型」取窗口。单独拆出来是为了能在不碰 `~/.pi/agent` 磁盘文件
 /// 的前提下做单元测试（写真实配置文件的测试在受限沙箱里会被拒写）。

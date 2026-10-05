@@ -1,0 +1,16 @@
+{
+  "name": "pi-aux-vision",
+  "version": "0.5.1-helix",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "description": "describe_image：把磁盘上的图片交给 Helix 配置的视觉模型（config.yaml 的 vision: 块）",
+  "license": "MIT"
+}
