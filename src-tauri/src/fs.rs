@@ -283,54 +283,187 @@ pub fn allow_root(state: State<'_, Arc<AppState>>, dir: String) -> Value {
 // `reverseUnifiedDiff` 都会标 undoUnsafe 而拒绝撤销。快照在 run **开始前**
 // 把「即将被改的文件」原样存一份，整轮一句话就能全部还原。
 //
-// 落点：`helix_data_dir()/snapshots/<runId>/`。绝不能放
+// 落点：`helix_data_dir()/snapshots/`。绝不能放
 // `~/.pi/agent/sessions/`——pi 按 cwd 编码分桶且会 create_dir_all，
 // 混进去会被当成真会话。
+//
+// 目录布局（内容寻址 + 每个对话留最近 N 轮）：
+//   snapshots/blobs/<hash>-<len>          同一份内容全盘只存一次
+//   snapshots/runs/<runId>/manifest.json  {"session","entries"}：本轮属于哪个
+//                                        对话、引用了哪些 blob
+//
+// 为什么要去重：每轮存的都是「当时所有脏文件」，而一个大文件可以连着几百轮
+// 不提交 —— 旧布局于是每轮再拷一份全量（实测 4 天堆到 155MB，其中
+// agent-flow-panel.tsx / pi_gateway.rs / helix-store.ts 三个文件占 106MB）。
+// 按内容寻址后同样的轮次只有一份，再叠加「每个对话超出 N 轮的老快照连 manifest
+// 一起丢、没人引用的 blob 回收掉」，占用被钉在「留下来的轮次里出现过的不同内容」
+// 这个量级。
+//
+// 为什么按对话计数而不是全局计数：全局上限会让一条活跃对话把另一条对话的快照挤
+// 掉——用户切回旧对话点「撤销本轮」时，那份还原数据早就没了。
 
 /// 超过这个大小或非 UTF-8 的文件跳过快照（二进制/大文件还原风险大于收益）。
 const SNAPSHOT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-fn snapshot_dir(run_id: &str) -> std::path::PathBuf {
-    crate::paths::helix_data_dir()
-        .join("snapshots")
-        .join(run_id)
+/// 每个对话最多保留多少轮的快照；更老的连 manifest 一起删，blob 由 gc 回收。
+const SNAPSHOT_MAX_KEEP_RUNS_PER_SESSION: usize = 10;
+
+fn snap_root() -> std::path::PathBuf {
+    crate::paths::helix_data_dir().join("snapshots")
 }
 
-/// 快照键：把绝对路径压成「盘符/下划线 + 相对路径」，保证能当文件名。
-/// Windows 保留字符（`< > : " | ? *` 与路径分隔符）一律换成下划线。
-fn snapshot_key(abs_path: &str) -> String {
-    abs_path
-        .chars()
-        .map(|c| match c {
-            ':' | '\\' | '/' | '*' | '?' | '<' | '>' | '"' | '|' => '_',
-            _ => c,
-        })
-        .collect()
+fn blob_dir() -> std::path::PathBuf {
+    snap_root().join("blobs")
 }
 
-/// 快照落盘：存的是「文件绝对路径 → 内容」对，逐个 atomic_write。
-/// 读文件同样过 safe_path：快照只能覆盖工作区内的文件。
+fn runs_root() -> std::path::PathBuf {
+    snap_root().join("runs")
+}
+
+fn run_dir(run_id: &str) -> std::path::PathBuf {
+    runs_root().join(run_id)
+}
+
+/// 轮次 id 与 blob 文件名都会直接当路径片段用（而且这里做的是**删除**）：
+/// 空串会让路径退化成上级目录、`..` 能跳出去，所以宁可在入口处就拒掉。
+/// 只认自家生成器用得上的字符：`run-<base36>` 与 `<hex>-<len>`。
+fn is_safe_id(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// blob 键 = FNV-1a 64 位摘要 + 字节长度。这里只是「内容相同 ⇒ 文件名相同」的
+/// 复用键，不是安全摘要；正确性由 `store_blob` 里"命中同名 blob 就先读回来
+/// 逐字节比对"那一步兜住 —— 真撞上就把这份内容另存一个 `-altN` 变体，绝不会
+/// 把 A 的内容当成 B 还原出去。
+fn blob_key(content: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in content.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}-{}", h, content.len())
+}
+
+/// 写入 blob，命中已有同名同内容的直接复用。返回最终文件名。
+fn store_blob(content: &str) -> Result<String, String> {
+    let base = blob_key(content);
+    let dir = blob_dir();
+    let mut name = base.clone();
+    let mut alt = 1u32;
+    loop {
+        let path = dir.join(&name);
+        if !path.exists() {
+            // atomic_write 自己会建父目录
+            crate::config::atomic_write(&path, content).map_err(|e| e.to_string())?;
+            return Ok(name);
+        }
+        // 同名已存在：内容一致就省掉这一份拷贝；读不出来或不同（哈希撞了）
+        // 就换下一个候选名，总之绝不覆盖别人正在引用的 blob。
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            if existing == content {
+                return Ok(name);
+            }
+        }
+        name = format!("{base}-alt{alt}");
+        alt += 1;
+    }
+}
+
+/// 按目录 mtime 从新到旧排列的轮次目录。
+fn run_dirs() -> Vec<std::path::PathBuf> {
+    let mut scored: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(runs_root()) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            scored.push((modified, path));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.into_iter().map(|(_, p)| p).collect()
+}
+
+/// 一轮快照的 manifest：这轮属于哪个对话、引用了哪些 blob。
+/// `session` 只当分组键用（不进路径），所以对话 id 里有什么字符都无所谓。
+struct RunRecord {
+    session: String,
+    entries: Vec<serde_json::Value>,
+}
+
+fn read_run(dir: &std::path::Path) -> Option<RunRecord> {
+    let raw = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let entries = value.get("entries")?.as_array()?.clone();
+    Some(RunRecord {
+        session: value
+            .get("session")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        entries,
+    })
+}
+
+/// 回收：没有一份 manifest 再引用这份内容，它就不可能被还原了 → 删。
+fn gc_blobs() {
+    let mut alive: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for dir in run_dirs() {
+        for e in read_run(&dir).map(|r| r.entries).unwrap_or_default() {
+            if let Some(b) = e.get("blob").and_then(|v| v.as_str()) {
+                alive.insert(b.to_string());
+            }
+        }
+    }
+    let Ok(rd) = std::fs::read_dir(blob_dir()) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !alive.contains(&name) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// 快照落盘：manifest 记本轮属于哪个对话 +「文件绝对路径 → blob」映射，内容
+/// 本身按内容寻址共用。读文件同样过 safe_path：快照只能覆盖工作区内的文件。
 #[tauri::command]
 pub fn snapshot_save(
     state: State<'_, Arc<AppState>>,
     run_id: String,
+    session_id: String,
     files: Vec<String>,
 ) -> Value {
-    if run_id.trim().is_empty() {
-        return json!({ "ok": false, "error": "run_id 不能为空" });
+    let id = run_id.trim();
+    if !is_safe_id(id) {
+        return json!({ "ok": false, "error": "非法的快照 id" });
     }
-    let dir = snapshot_dir(run_id.trim());
-    let mut manifest: Vec<String> = Vec::new();
+    let dir = run_dir(id);
+    let mut entries: Vec<serde_json::Value> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     for f in &files {
         let Some(resolved) = safe_path(&state, f) else {
             skipped.push(f.clone());
             continue;
         };
-        // 本轮快照的是「改动之前」的状态：文件不存在 = 当时是新建，
-        // 记进 manifest 但不存内容，回滚时直接删掉即可。
+        let path = resolved.display().to_string();
+        // 文件当时不存在 → 它属于「本轮会被新建」的那类：记进 manifest 但不存
+        // 内容，撤销时直接删掉，还原成"新建之前"。
         if !resolved.exists() {
-            manifest.push(resolved.display().to_string());
+            entries.push(json!({ "path": path, "existed": false }));
             continue;
         }
         let Ok(meta) = std::fs::metadata(&resolved) else {
@@ -346,49 +479,50 @@ pub fn snapshot_save(
             skipped.push(f.clone());
             continue;
         };
-        let key = snapshot_key(&resolved.display().to_string());
-        if crate::config::atomic_write(&dir.join(&key), &content).is_err() {
-            skipped.push(f.clone());
-            continue;
+        match store_blob(&content) {
+            Ok(blob) => entries.push(json!({ "path": path, "existed": true, "blob": blob })),
+            Err(_) => skipped.push(f.clone()),
         }
-        manifest.push(resolved.display().to_string());
     }
-    // manifest 存 key → 原路径的映射；不存在 = 该文件快照时还不存在
-    let mf: Vec<serde_json::Value> = manifest
-        .iter()
-        .map(|p| {
-            let key = snapshot_key(p);
-            json!({ "key": key, "path": p, "existed": dir.join(&key).exists() })
-        })
-        .collect();
+    let saved = entries.len();
+    let manifest = json!({ "session": session_id.trim(), "entries": entries });
     let _ = crate::config::atomic_write(
         &dir.join("manifest.json"),
-        &serde_json::to_string_pretty(&mf).unwrap_or_else(|_| "[]".into()),
+        &serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".into()),
     );
-    json!({ "ok": true, "saved": mf.len(), "skipped": skipped })
+    // 每轮存完顺手收口：按对话分组、每组只留最近 N 轮（run_dirs 已按 mtime 从新
+    // 到旧），超量的连目录一起丢；再回收没人引用的 blob。
+    let mut per_session: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for old in run_dirs() {
+        // manifest 读不出来（损坏 / 半截写）没有归属，落到 "" 这一组，同样按
+        // N 轮淘汰，不会永久赖在盘上。
+        let session = read_run(&old).map(|r| r.session).unwrap_or_default();
+        let n = per_session.entry(session).or_insert(0);
+        *n += 1;
+        if *n > SNAPSHOT_MAX_KEEP_RUNS_PER_SESSION {
+            let _ = std::fs::remove_dir_all(&old);
+        }
+    }
+    gc_blobs();
+    json!({ "ok": true, "saved": saved, "skipped": skipped })
 }
 
-/// 整轮回滚：把快照里的内容写回；快照时不存在的一律删除（还原成"新建前"）。
+/// 把某轮快照写回工作区（「撤销本轮」的兜底段）：存过内容的还原成原文，
+/// 快照时还不存在的（本轮新建的）删掉。
 #[tauri::command]
 pub fn snapshot_restore(state: State<'_, Arc<AppState>>, run_id: String) -> Value {
-    let dir = snapshot_dir(run_id.trim());
-    let mf_path = dir.join("manifest.json");
-    let Ok(raw) = std::fs::read_to_string(&mf_path) else {
+    let id = run_id.trim();
+    if !is_safe_id(id) {
+        return json!({ "ok": false, "error": "非法的快照 id" });
+    }
+    let Some(run) = read_run(&run_dir(id)) else {
         return json!({ "ok": false, "error": "快照不存在或已清理" });
-    };
-    let Ok(entries) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return json!({ "ok": false, "error": "快照清单损坏" });
-    };
-    let Some(list) = entries.as_array() else {
-        return json!({ "ok": false, "error": "快照清单格式错误" });
     };
     let mut restored: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
-    for e in list {
-        let (Some(key), Some(path)) = (
-            e.get("key").and_then(|v| v.as_str()),
-            e.get("path").and_then(|v| v.as_str()),
-        ) else {
+    for e in &run.entries {
+        let Some(path) = e.get("path").and_then(|v| v.as_str()) else {
             continue;
         };
         // 回滚是写操作，同样必须过 safe_path（防止快照被篡改后写到工作区外）
@@ -396,65 +530,72 @@ pub fn snapshot_restore(state: State<'_, Arc<AppState>>, run_id: String) -> Valu
             failed.push(path.to_string());
             continue;
         };
-        let snap = dir.join(key);
-        if snap.exists() {
-            // 两步各自报错即可：读快照失败 或 写回失败 都算这一文件回滚失败
-            let outcome = std::fs::read_to_string(&snap)
-                .map_err(|e| e.to_string())
-                .and_then(|c| crate::config::atomic_write(&resolved, &c).map_err(|e| e.to_string()));
-            match outcome {
-                Ok(()) => restored.push(path.to_string()),
-                Err(_) => failed.push(path.to_string()),
+        // blob 名也过一遍 id 校验：manifest 是磁盘上的文件，被改成 `../x` 时
+        // 不能让它跳出 blobs/。
+        let outcome = if e
+            .get("existed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let content = e
+                .get("blob")
+                .and_then(|v| v.as_str())
+                .filter(|b| is_safe_id(b))
+                .and_then(|b| std::fs::read_to_string(blob_dir().join(b)).ok());
+            match content {
+                Some(c) => crate::config::atomic_write(&resolved, &c),
+                // blob 不在了（被手工清过 / 键被删）：如实报失败，绝不能当成
+                // "本轮新建的文件"把用户已有的文件删掉。
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "快照内容缺失",
+                )),
             }
         } else if resolved.exists() {
-            // 快照时不存在 → 本轮是新建出来的，回滚 = 删掉
-            match std::fs::remove_file(&resolved) {
-                Ok(()) => restored.push(path.to_string()),
-                Err(_) => failed.push(path.to_string()),
-            }
+            std::fs::remove_file(&resolved)
+        } else {
+            Ok(())
+        };
+        match outcome {
+            Ok(()) => restored.push(path.to_string()),
+            Err(_) => failed.push(path.to_string()),
         }
     }
     json!({ "ok": failed.is_empty(), "restored": restored, "failed": failed })
 }
 
-/// 清理某轮快照（回滚成功后调用，避免无限涨盘）。
+/// 清理某轮快照（「撤销本轮」还原成功后调用，避免无限涨盘）。
 #[tauri::command]
 pub fn snapshot_discard(run_id: String) -> Value {
-    let dir = snapshot_dir(run_id.trim());
-    let _ = std::fs::remove_dir_all(&dir);
+    let id = run_id.trim();
+    // runId 直接当目录名用：空串会让路径退化成上级目录，删除又是不可逆的。
+    if !is_safe_id(id) {
+        return json!({ "ok": false, "error": "非法的快照 id" });
+    }
+    let _ = std::fs::remove_dir_all(run_dir(id));
+    gc_blobs();
     json!({ "ok": true })
 }
 
-/// 列出仍保留的快照轮次（runId + 时间），供 UI 展示"可回滚的轮次"。
-#[tauri::command]
-pub fn snapshot_list() -> Value {
-    let base = crate::paths::helix_data_dir().join("snapshots");
-    let Ok(rd) = std::fs::read_dir(&base) else {
-        return json!({ "ok": true, "runs": [] });
-    };
-    let mut runs: Vec<serde_json::Value> = Vec::new();
-    for entry in rd.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
-        let count = std::fs::read_dir(entry.path())
-            .map(|it| it.flatten().filter(|e| e.file_name() != "manifest.json").count())
-            .unwrap_or(0);
-        let modified = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        runs.push(json!({ "runId": name, "files": count, "modified": modified }));
+#[cfg(test)]
+mod tests {
+    use super::{blob_key, is_safe_id};
+
+    #[test]
+    fn blob_keys_are_stable_and_content_specific() {
+        assert_eq!(blob_key("abc"), blob_key("abc"));
+        assert_ne!(blob_key("abc"), blob_key("abd"));
+        // 长度进键：摘要之外还能区分前缀相同的内容
+        assert_ne!(blob_key("abc"), blob_key("abcd"));
     }
-    runs.sort_by(|a, b| {
-        b.get("modified")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0)
-            .cmp(&a.get("modified").and_then(|v| v.as_u64()).unwrap_or(0))
-    });
-    json!({ "ok": true, "runs": runs })
+
+    #[test]
+    fn only_generator_shaped_ids_are_accepted() {
+        assert!(is_safe_id("run-1f2e3d4c"));
+        assert!(is_safe_id(&blob_key("x")));
+        assert!(!is_safe_id(""));
+        assert!(!is_safe_id(".."));
+        assert!(!is_safe_id("../blobs"));
+        assert!(!is_safe_id("a/b"));
+    }
 }

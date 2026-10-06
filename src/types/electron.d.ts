@@ -43,9 +43,10 @@ export interface ElectronAPI {
       }>
     >;
     allowRoot: (dirPath: string) => Promise<{ success: boolean }>;
-    /** 会话级文件快照：run 前存「改动前」内容，整轮可一键回滚 */
+    /** 会话级文件快照：run 前存「改动前」内容，供卡片「撤销本轮」整体还原 */
     snapshotSave: (
       runId: string,
+      sessionId: string,
       files: string[],
     ) => Promise<{
       ok: boolean;
@@ -60,10 +61,6 @@ export interface ElectronAPI {
       error?: string;
     }>;
     snapshotDiscard: (runId: string) => Promise<{ ok: boolean }>;
-    snapshotList: () => Promise<{
-      ok: boolean;
-      runs: Array<{ runId: string; files: number; modified: number }>;
-    }>;
   };
 
   helixSkills: {

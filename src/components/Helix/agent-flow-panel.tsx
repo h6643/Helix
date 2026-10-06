@@ -781,6 +781,35 @@ function SummarizedHistoryBlock({
 // per-session persist/restore effects work for unsent drafts too.
 const EMPTY_LINKS: LinkAttachment[] = [];
 
+// ── 终端式输入历史 ──────────────────────────────────────────────────────────
+// 空输入时按 ↑/↓ 浏览历史（像终端 readline 的 history）；localStorage 持久化、
+// 跨会话复用。记录规则见 pushInputHistory（斜杠命令不入历史）。
+const INPUT_HISTORY_KEY = "helix.inputHistory";
+const INPUT_HISTORY_MAX = 50;
+
+function loadInputHistory(): string[] {
+  try {
+    const raw = window.localStorage.getItem(INPUT_HISTORY_KEY);
+    const arr: unknown = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(arr)) {
+      return arr
+        .filter((s): s is string => typeof s === "string")
+        .slice(-INPUT_HISTORY_MAX);
+    }
+  } catch {
+    /* 存储损坏就当空历史 */
+  }
+  return [];
+}
+
+function saveInputHistory(list: string[]): void {
+  try {
+    window.localStorage.setItem(INPUT_HISTORY_KEY, JSON.stringify(list));
+  } catch {
+    /* localStorage 不可用时历史不持久化，不影响输入 */
+  }
+}
+
 export function AgentFlowPanel() {
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
   // 重启后没有可恢复会话时为 true：界面停在"无当前会话"占位，不发消息、
@@ -806,6 +835,29 @@ export function AgentFlowPanel() {
     stepsRef.current = steps;
   }, [steps]);
   const [input, setInput] = useState("");
+  // 终端式输入历史：historyIndexRef=-1 = 未在浏览（输入框是实时内容）。
+  const inputHistoryRef = useRef<string[]>(loadInputHistory());
+  const historyIndexRef = useRef(-1);
+
+  // 首次播种：localStorage 历史为空时，用当前对话已有的用户消息填充历史，
+  // 让 ↑ 在任何带历史的对话里都能立刻翻（终端无法回填旧命令，但聊天语境下
+  // 复用旧消息价值更高）。之后新发送的消息仍由 pushInputHistory 累积。
+  useEffect(() => {
+    if (inputHistoryRef.current.length > 0) return;
+    const st = useHelixStore.getState();
+    const sid = st.currentSessionId;
+    const users = st.chatMessages
+      .filter(
+        (m) =>
+          (sid ? m.sessionId === sid : !m.sessionId) && m.role === "user",
+      )
+      .map((m) => (typeof m.content === "string" ? m.content : "").trim())
+      .filter((t) => t && !t.startsWith("/"));
+    if (users.length === 0) return;
+    const next = [...users].slice(-INPUT_HISTORY_MAX);
+    inputHistoryRef.current = next;
+    saveInputHistory(next);
+  }, []);
   // Per-session streaming drafts let the running thinking/steps survive
   // conversation switches. `isRunning` is derived from the current session's draft.
   const streamingDrafts = useHelixStore((s) => s.streamingDrafts);
@@ -937,9 +989,10 @@ export function AgentFlowPanel() {
   const workspaceFilesRef = useRef<Array<{ name: string; path: string }>>([]);
   // 已加载过 @ 候选的项目目录（换项目才重扫）
   const workspaceFilesLoadedFor = useRef<string | null>(null);
-  // 本轮（最近一次 prompt）快照的 runId 与文件数，供「回滚本轮改动」入口使用
+  // 本轮（最近一次 prompt）快照的 runId。挂到本轮的助手消息上（msg.runSnapshotId），
+  // 「已修改」卡片的「撤销本轮」据此找回**自己那轮**的快照——不能事后再去列目录取
+  // 最新，否则用户在 A 项目又跑了一轮之后撤销 B 项目的旧卡片会还原错东西。
   const runSnapshotIdRef = useRef<string | null>(null);
-  const runSnapshotFilesRef = useRef<number>(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const inputValueRef = useRef(input);
   const chatInputWrapRef = useRef<HTMLDivElement>(null);
@@ -2585,10 +2638,22 @@ export function AgentFlowPanel() {
     !input.includes(" ");
 
   // Handle input change for skill detection
+  /** 记录一条用户发送的输入（斜杠命令不入历史，连续重复去重，上限 50）。 */
+  const pushInputHistory = useCallback((text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.startsWith("/")) return;
+    const list = inputHistoryRef.current;
+    if (list[list.length - 1] === trimmed) return;
+    const next = [...list, trimmed].slice(-INPUT_HISTORY_MAX);
+    inputHistoryRef.current = next;
+    saveInputHistory(next);
+  }, []);
+
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const value = e.target.value;
       setInputSynced(value);
+      historyIndexRef.current = -1; // 手动输入/编辑 → 退出历史浏览
       setSelectedSkillIndex(0); // Reset selection when input changes
       setSlashMenuOpen(true); // typing re-opens the slash menu
       // Detect @ file reference trigger
@@ -3359,13 +3424,17 @@ export function AgentFlowPanel() {
   // undoUnsafe 而拒绝撤销 —— 一轮改了十几个文件就没有「全部还原」的出路。
   //
   // 为什么只快照 git 视角下有改动的文件：全量扫树几十万文件读不动。
-  // 未初始化 git 的项目 `git status` 失败 → 空快照，此时回滚入口会提示
-  // 「本轮无快照」，不给出虚假的安全感。
+  // 未初始化 git 的项目 `git status` 失败 → 本轮没有快照，此时卡片的「撤销本
+  // 轮」只剩逐文件反推这一条路（不会去还原错东西，但也兜不住 undoUnsafe）。
   //
   // 远程对话跳过快照：`git.status` 是本机 IPC，而这条对话改的是远端文件 —— 快照
   // 出来的会是「无关本地仓库」或一个路径错误，撤销按钮于是会还原错东西。远端
   // 回滚要等远端 git/fs IPC。
-  const takeRunSnapshot = useCallback(async () => {
+  const takeRunSnapshot = useCallback(async (sessionId: string) => {
+    // 先清成"本轮无快照"：任何提前 return（非本地项目 / git status 失败 / 没有
+    // 脏文件）都必须让上一轮的 runId 留在地上，否则它会被挂到本轮消息上，
+    // 「撤销本轮」于是还原到更早一轮的状态。
+    runSnapshotIdRef.current = null;
     try {
       const root = localProjectRoot(
         useHelixStore.getState().activeSessionWorkDir ??
@@ -3394,11 +3463,8 @@ export function AgentFlowPanel() {
         );
       }
       if (files.length === 0) return;
-      const res = await window.electron?.fs?.snapshotSave(runId, files);
-      if (res?.ok) {
-        runSnapshotIdRef.current = runId;
-        runSnapshotFilesRef.current = res.saved ?? files.length;
-      }
+      const res = await window.electron?.fs?.snapshotSave(runId, sessionId, files);
+      if (res?.ok) runSnapshotIdRef.current = runId;
     } catch {
       /* 快照失败不阻塞 run：回滚是可选能力，不能因此拦住用户发消息 */
     }
@@ -3421,6 +3487,8 @@ export function AgentFlowPanel() {
   }) => {
     const isBackground = !!opts?.sessionId;
     const currentInput = opts?.prompt ?? inputValueRef.current;
+    // 终端式输入历史：记录用户从输入框发送的文本（程序化 prompt / 斜杠命令除外）。
+    if (!opts?.prompt) pushInputHistory(currentInput);
     const cmd = resolveCommand(currentInput.trim());
     const baseTrimmed = currentInput.trim();
     // Fold any web-link cards (picked from the in-app browser) into the text the
@@ -5809,10 +5877,12 @@ export function AgentFlowPanel() {
       promptSentAtRef.current = Date.now();
       // 整轮快照：在 prompt 发出**之前**把「工作区里可能被改的文件」原样存一份。
       // 为什么不是等 tool_call 再存：那时文件已经被改了，存到的是新内容。
-      // 为什么不全量扫树：几十万文件读不动。只快照 git 视角下「有改动」的
-      // 文件（覆盖绝大多数实际编辑），未初始化 git 的项目退化为空快照
-      // （回滚按钮会提示"无快照"，不误导用户）。
-      void takeRunSnapshot();
+      // 为什么只存 git 视角下有改动的文件：全量扫树几十万文件读不动。未初始化
+      // git 的项目退化为没有快照——那条卡片的「撤销本轮」只剩逐文件反推这一条
+      // 路，不误导用户。
+      // sessionId 一起交给后端：快照按对话留最近 N 轮，全局计数会让一条活跃
+      // 对话把别的对话的还原数据挤掉。
+      void takeRunSnapshot(sessionId);
       helixApi()!
         .send("session/prompt", {
           session_id: sessionId,
@@ -6904,6 +6974,7 @@ export function AgentFlowPanel() {
                   reasoning: reasoning || undefined,
                   steps: completedSteps.length ? completedSteps : undefined,
                   fileChanges: fileChanges.length ? fileChanges : undefined,
+                  runSnapshotId: runSnapshotIdRef.current || undefined,
                   blocks: finalBlocks,
                   sessionId: activeSessionId,
                   duration: totalSecs > 0 ? totalSecs : undefined,
@@ -7065,6 +7136,7 @@ export function AgentFlowPanel() {
                     reasoning: reasoning || undefined,
                     steps: errorSteps.length ? errorSteps : undefined,
                     fileChanges: fileChanges.length ? fileChanges : undefined,
+                    runSnapshotId: runSnapshotIdRef.current || undefined,
                     blocks: responseBlocksRef.current.length
                       ? responseBlocksRef.current
                       : undefined,
@@ -7576,6 +7648,7 @@ export function AgentFlowPanel() {
     setInputSynced,
     handleStop,
     streamingDrafts,
+    pushInputHistory,
   ]);
 
   // External "send" trigger (Command Center / Review panel call injectAndSend,
@@ -7797,6 +7870,36 @@ export function AgentFlowPanel() {
           setInputSynced("");
           return;
         }
+      }
+      // 终端式历史浏览：输入框为空（或已在历史浏览中）时 ↑ 翻旧、↓ 翻新。
+      // @ 补全 / 斜杠菜单已在上面占用 ↑/↓，走到这里时它们都未激活。
+      if (
+        e.key === "ArrowUp" &&
+        (inputValueRef.current.trim() === "" || historyIndexRef.current >= 0)
+      ) {
+        e.preventDefault();
+        const list = inputHistoryRef.current;
+        if (list.length === 0) return;
+        const cur = historyIndexRef.current;
+        const next = cur === -1 ? list.length - 1 : Math.max(0, cur - 1);
+        historyIndexRef.current = next;
+        setInputSynced(list[next]);
+        return;
+      }
+      if (e.key === "ArrowDown" && historyIndexRef.current >= 0) {
+        e.preventDefault();
+        const list = inputHistoryRef.current;
+        const cur = historyIndexRef.current;
+        if (cur >= list.length - 1) {
+          // 已是最新 → 恢复空输入
+          historyIndexRef.current = -1;
+          setInputSynced("");
+        } else {
+          const next = cur + 1;
+          historyIndexRef.current = next;
+          setInputSynced(list[next]);
+        }
+        return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -9095,7 +9198,10 @@ export function AgentFlowPanel() {
                   </div>
                 ) : item.kind === "fileChanges" ? (
                   <div key={item.id} className="px-1">
-                    <FileChangeSummaryCard changes={item.changes} />
+                    <FileChangeSummaryCard
+                      changes={item.changes}
+                      runSnapshotId={item.msg.runSnapshotId}
+                    />
                   </div>
                 ) : (
                   <React.Fragment key={item.msg.id}>

@@ -18,22 +18,6 @@ export function isElectron(): boolean {
   return false;
 }
 
-/**
- * True ONLY in a real Electron runtime (where the contextBridge exposed
- * `window.electron.isElectron === true`). Distinct from `isElectron()`:
- * in the Tauri build `isElectron()` is forced true (shim) but Tauri's WebView2
- * engine does NOT support the Electron `<webview>` *guest* tag, so any code that
- * needs a real Electron webview (the embedded browser in preview-rail) must use
- * this guard and fall back to `<iframe>` in Tauri.
- */
-export function isRealElectron(): boolean {
-  if (typeof window === "undefined") return false;
-  // The Tauri bridge also sets window.electron.isElectron = true (shim), so the
-  // flag alone can't distinguish runtimes — must exclude Tauri explicitly.
-  if (isTauri()) return false;
-  return !!window.electron?.isElectron;
-}
-
 // serve 模式下包裹 window.electron 的 Proxy 缓存：
 // 拦截 `.helix` 返回网关门面，其余属性透传原 contextBridge 对象。
 // （contextBridge 暴露的 window.electron 不可重赋值，只能在读取层分流。）

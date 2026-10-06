@@ -3,7 +3,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { captureContextBreakdown } from "@/lib/context-capture";
 import { helixApi } from "@/lib/electron-bridge";
-import { formatTokens } from "@/lib/format";
+import { formatTokens, promptCacheHit } from "@/lib/format";
 import { debug } from "@/lib/logger";
 import { resolveBackendSid } from "@/lib/session-map";
 import {
@@ -152,6 +152,7 @@ function ContextUsagePanel({
   total,
   categories,
   toolsets,
+  cache,
   onClose,
 }: {
   used: number;
@@ -162,9 +163,11 @@ function ContextUsagePanel({
     tool_count: number;
     schema_tokens: number;
   }>;
+  cache?: { input: number; cacheRead: number; cacheWrite: number };
   onClose: () => void;
 }) {
   const [showToolsets, setShowToolsets] = useState(false);
+  const cacheHit = promptCacheHit(cache);
   // Raw per-toolset schema estimates; they describe schema size, not the exact
   // provider token cost, so they remain unnormalized.
   const toolsetList = toolsets ?? [];
@@ -212,6 +215,20 @@ function ContextUsagePanel({
       {aggregateOnly && (
         <div className="mt-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/80 leading-snug">
           整体占用：本轮会话记录尚未落盘，暂时拿不到按内容拆分的分类
+        </div>
+      )}
+      {cache && (
+        <div className="mt-3 pt-2 border-t border-border/40">
+          <div className="flex items-center justify-between">
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/70">
+              缓存命中
+            </span>
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground tabular-nums">
+              {cacheHit.reported && cacheHit.percent !== null
+                ? `${cacheHit.percent.toFixed(1)}%`
+                : "未上报"}
+            </span>
+          </div>
         </div>
       )}
       {toolsetList.length > 0 && (
@@ -488,6 +505,8 @@ export function ContextUsageIndicator() {
             legacy.used,
             legacy.categories,
             legacy.toolsets,
+            false,
+            legacy.usageStats,
           );
         }
       }
@@ -571,6 +590,9 @@ export function ContextUsageIndicator() {
           total={total}
           categories={categories}
           toolsets={toolsets}
+          // 缓存命中只读本地快照，与环同一个口径（见上面「统一口径」注释）：
+          // 弹窗的 RPC 不直接喂显示，否则开/关弹窗会让这个数字自己跳。
+          cache={localCtx?.usageStats}
           onClose={() => setOpen(false)}
         />
       )}

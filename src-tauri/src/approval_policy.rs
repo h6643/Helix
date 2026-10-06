@@ -21,27 +21,39 @@
 //! | 自动审批   | `auto`   | 安全规则放行 + 非安全过 AI 风险判定，判定为风险才问 |
 //! | 完全访问   | `yolo`   | 全放行 |
 //!
-//! pi-permission 还有第四档 `approve`（规则匹配、无 AI 那一层）。Helix 不提供
-//! 这一档，也从不写它：它与 `auto` 的差别只是「要不要过 AI」，而 AI 判定要额外
-//! 一次模型调用，不该由一个下拉静默决定。万一磁盘上被人写成 `approve`，读路径
-//! 落到 `_` → `auto` 显示；别指望这种文件只靠改名就对得上 —— 扩展把认不出的
+//! 上游另有第四档 `approve`（规则匹配、无 AI 那一层）；本机装的是就地补丁版，
+//! 扩展源码里已经删掉它，但 `pi update` 会带回来，所以这里的归一必须继续认得。
+//! Helix 不提供这一档，也从不写它：它与 `auto` 的差别只是「要不要过 AI」，而 AI
+//! 判定要额外一次模型调用，不该由一个下拉静默决定。万一磁盘上被人写成 `approve`，
+//! 读路径落到 `_` → `auto` 显示；别指望这种文件只靠改名就对得上 —— 扩展把认不出的
 //! mode 一律回落成它的 `DEFAULT_CONFIG.mode` = yolo，也就是实际全放行。
 //!
 //! # 生效时机
 //!
 //! **不需要重启网关**：扩展的 `tool_call` 处理器每次调用都
 //! `loadAndWatchConfig()`（mtime+size 缓存），改文件下一次调用即生效。
+//!
+//! # 存储位置（2026-10-06 本地定制）
+//!
+//! pi-permission 扩展已改为读写 `settings.json` 顶层 `permission` 键
+//! （不再用 `config/permission-ext-config.json`）。这里的读写必须与扩展一致，
+//! 否则又是「两套系统」。旧路径 `config/permission-ext-config.json` 的目录
+//! 曾因旧版 ensureConfigFile / 本模块旧路径反复重建，已废弃。
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-/// 配置文件路径：`<pi 数据根>/config/permission-ext-config.json`。
-/// 与 pi-permission 内部 `getAgentDir()/config/permission-ext-config.json`
-/// 必须一致 —— 路径错了会写到一份没人读的文件，那就又变成「两套系统」。
+/// 配置文件路径：`<pi 数据根>/settings.json`（顶层 `permission` 键）。
+/// 与 pi-permission（本地定制版）的 src/config.ts 一致——扩展已改为读
+/// settings.json，不再用 config/permission-ext-config.json。
 fn config_path() -> PathBuf {
-    crate::paths::pi_agent_dir()
-        .join("config")
-        .join("permission-ext-config.json")
+    crate::paths::pi_agent_dir().join("settings.json")
+}
+
+/// 从 settings.json 里取 `permission` 对象；缺键返回 None。
+fn read_permission_block(root: &Value) -> Option<Value> {
+    let p = root.get("permission")?;
+    p.is_object().then(|| p.clone())
 }
 
 /// Helix 档位 → 扩展 mode。未知值一律落到 `auto`（最保守的「会问」档，
@@ -82,33 +94,43 @@ pub fn helix_get_permission_mode() -> Value {
                 "ok": false,
                 "mode": Value::Null,
                 "exists": path.exists(),
-                "reason": format!("配置文件不可读: {e}"),
+                "reason": format!("settings.json 不可读: {e}"),
                 "config_path": path.to_string_lossy(),
             })
         }
     };
-    match serde_json::from_str::<Value>(&raw) {
-        Ok(v) => {
-            let m = v.get("mode").and_then(Value::as_str).unwrap_or("auto");
-            json!({
-                "ok": true,
-                "mode": from_extension_mode(m),
-                "extension_mode": m,
-                // enabled=false 等价 yolo（扩展自己的约定），必须一并读出来，
-                // 否则前端显示「自动审批」而实际全放行。
-                "enabled": v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+    let root = match serde_json::from_str::<Value>(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({
+                "ok": false,
+                "mode": Value::Null,
+                "exists": true,
+                "reason": format!("settings.json JSON 解析失败: {e}"),
                 "config_path": path.to_string_lossy(),
             })
         }
-        Err(e) => json!({
+    };
+    let Some(v) = read_permission_block(&root) else {
+        // settings.json 里还没有 permission 键：如实说没有，不编档位。
+        return json!({
             "ok": false,
             "mode": Value::Null,
-            // 文件在、内容坏：扩展此刻跑 yolo，前端必须按「实际全放行」显示。
-            "exists": true,
-            "reason": format!("配置 JSON 解析失败: {e}"),
+            "exists": false,
+            "reason": "settings.json 中尚无 permission 键",
             "config_path": path.to_string_lossy(),
-        }),
-    }
+        });
+    };
+    let m = v.get("mode").and_then(Value::as_str).unwrap_or("auto");
+    json!({
+        "ok": true,
+        "mode": from_extension_mode(m),
+        "extension_mode": m,
+        // enabled=false 等价 yolo（扩展自己的约定），必须一并读出来，
+        // 否则前端显示「自动审批」而实际全放行。
+        "enabled": v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        "config_path": path.to_string_lossy(),
+    })
 }
 
 /// 写档位。只改 `mode` 与 `enabled`，其余字段（`classifier` / `userRules`）
@@ -118,28 +140,30 @@ pub fn helix_set_permission_mode(mode: String) -> Value {
     let ext_mode = to_extension_mode(&mode);
     let path = config_path();
 
-    // 读现有配置；不存在就用扩展自己的默认值起一份。
-    let mut cfg: Value = std::fs::read_to_string(&path)
+    // 读 settings.json（保留全部键，defaultModel/packages 等不能被覆盖）；
+    // permission 键缺失时用扩展默认值起一份。
+    let mut root: Value = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or_else(|| {
-            json!({
-                "mode": "auto",
-                "enabled": true,
-                "classifier": {
-                    "enabled": true,
-                    "model": "auto",
-                    "timeout": 90,
-                    "autoApproveLowRisk": true,
-                    "autoDenyHighRisk": true,
-                    "thinkingLevel": "off"
-                },
-                "userRules": []
-            })
-        });
-    if !cfg.is_object() {
-        cfg = json!({});
+        .unwrap_or_else(|| json!({}));
+    if !root.is_object() {
+        root = json!({});
     }
+    let mut cfg = read_permission_block(&root).unwrap_or_else(|| {
+        json!({
+            "mode": "auto",
+            "enabled": true,
+            "classifier": {
+                "enabled": true,
+                "model": "auto",
+                "timeout": 90,
+                "autoApproveLowRisk": true,
+                "autoDenyHighRisk": true,
+                "thinkingLevel": "off"
+            },
+            "userRules": []
+        })
+    });
 
     let prev = cfg.get("mode").and_then(Value::as_str).unwrap_or("").to_string();
     // 只有 yolo 档才把 enabled 置 false（等价语义）；其余档必须 enabled=true，
@@ -151,8 +175,11 @@ pub fn helix_set_permission_mode(mode: String) -> Value {
         obj.insert("mode".into(), Value::String(ext_mode.into()));
         obj.insert("enabled".into(), Value::Bool(enabled));
     }
+    if let Some(obj) = root.as_object_mut() {
+        obj.insert("permission".into(), cfg);
+    }
 
-    let body = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
+    let body = serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".into());
     if let Err(e) = crate::config::atomic_write(&path, &format!("{body}\n")) {
         return json!({
             "ok": false,

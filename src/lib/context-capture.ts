@@ -33,6 +33,14 @@ interface ContextBreakdownData {
     tool_count: number;
     schema_tokens: number;
   }>;
+  /** 本会话累计计费侧计数（后端从 pi `get_session_stats` 直取，不是估算）。
+   *  缓存命中率靠它；`input` 是净未缓存数，见 `promptCacheHit` 的分母口径。 */
+  usage_stats?: {
+    input?: number;
+    output?: number;
+    cache_read?: number;
+    cache_write?: number;
+  };
 }
 
 /**
@@ -72,6 +80,7 @@ export async function captureContextBreakdown(
     });
     if (!result || typeof result !== "object") return false;
     const data = result as ContextBreakdownData;
+    const us = data.usage_stats;
     const hasBreakdown =
       (data.categories?.length ?? 0) > 0 ||
       ((data.context_used ?? 0) > 0 && (data.context_max ?? 0) > 0);
@@ -101,6 +110,18 @@ export async function captureContextBreakdown(
         schema_tokens: t.schema_tokens,
       })),
       true,
+      // 全 0 当作「这次没给」：实例刚重启时后端这组计数确实是 0，而本地快照里
+      // 存着这个会话更早的真实计数 —— 和 categories/toolsets 的空值同一处理，
+      // 不能让一次冷查询把命中率抹成「未上报」。
+      us &&
+      (us.input || us.output || us.cache_read || us.cache_write)
+        ? {
+            input: us.input || 0,
+            output: us.output || 0,
+            cacheRead: us.cache_read || 0,
+            cacheWrite: us.cache_write || 0,
+          }
+        : undefined,
     );
     return true;
   } catch {

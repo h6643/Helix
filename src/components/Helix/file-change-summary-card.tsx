@@ -1,6 +1,6 @@
 "use client";
 
-import { FileCode, History, Undo2 } from "lucide-react";
+import { FileCode, Undo2 } from "lucide-react";
 import React, { useMemo, useState } from "react";
 import { countDiffLines, firstChangedLineRange } from "./diff-preview";
 import { electronFS, getElectronAPI } from "@/lib/electron-bridge";
@@ -53,15 +53,19 @@ function reverseUnifiedDiff(
 
 /**
  * 单条回复末尾的修改汇总卡片：外层卡片 + 每个文件一行，点击行展开该文件的 diff。
+ *
+ * `runSnapshotId`：本轮开跑前那次整轮快照的 id（见 agent-flow-panel 的
+ * takeRunSnapshot）。有它才能兜底撤销 `undoUnsafe` 的改动。
  */
 export function FileChangeSummaryCard({
   changes,
+  runSnapshotId,
 }: {
   changes: PendingChange[];
+  runSnapshotId?: string;
 }) {
   const [undone, setUndone] = useState<Set<string>>(new Set());
   const [undoing, setUndoing] = useState(false);
-  const [rollingBack, setRollingBack] = useState(false);
   const visibleChanges = useMemo(
     () => changes.filter((c) => !undone.has(c.fileId)),
     [changes, undone],
@@ -76,16 +80,11 @@ export function FileChangeSummaryCard({
   const totalAdded = stats.reduce((sum, s) => sum + s.added, 0);
   const totalRemoved = stats.reduce((sum, s) => sum + s.removed, 0);
 
+  /**
+   * 逐文件撤销：把这一条改动还原成改动前的内容（本轮新建的文件直接删掉）。
+   * 调用方必须已经排除 `undoUnsafe` 的条目——反推原理与拒绝理由见 handleUndoRun。
+   */
   const undoChange = async (change: PendingChange) => {
-    // undoUnsafe：网关标了"这份 diff 不能拿去反推撤销"—— pi 的 write 结果不带
-    // diff，若工具执行前读不到旧内容，合成出来的 patch 只是"假想原文件为空"；
-    // diff 过长被截断时也置位。reverseUnifiedDiff 是按行号 splice 的，拿这类
-    // diff 反推会静默切坏文件，宁可拒绝并说清原因。
-    if (change.undoUnsafe) {
-      throw new Error(
-        "缺少可靠的改动内容（write 覆盖前内容未取到或 diff 被截断），无法自动撤销（请用编辑器或 Git 恢复）",
-      );
-    }
     if (!change.filePath) throw new Error("缺少文件路径");
     const st = useHelixStore.getState();
     const workDir = st.selectedWorkDir ?? st.activeSessionWorkDir ?? "";
@@ -219,96 +218,92 @@ export function FileChangeSummaryCard({
     }
   };
 
-  const handleUndoAll = async () => {
-    if (undoing || visibleChanges.length === 0) return;
+  /**
+   * 「撤销本轮」= 两段式还原，缺一不可：
+   *
+   * 1. **逐文件反推 diff**：覆盖本轮真正改过的文件，**包括本轮新建的**（diff 里
+   *    的 `--- /dev/null` → 直接删）。
+   * 2. **本轮快照兜底**：`undoUnsafe` 的条目在第 1 步被跳过——那是网关标的"这份
+   *    diff 不能拿去反推撤销"（pi 的 write 结果不带 diff，覆盖前读不到旧内容时
+   *    只能按"原文件为空"假想一个 patch；diff 过长被截断时也置位）。
+   *    `reverseUnifiedDiff` 按行号 splice，拿这类 diff 撤销会**静默切坏文件**，
+   *    只能绕开它，用快照里存着的原文还原。
+   *
+   * 顺序不能反：快照只覆盖"本轮开始前 git 已认为脏"的文件，本轮新建的文件压根
+   * 不在它的清单里，只有第 1 步会删。
+   *
+   * 没有快照（远程对话、未初始化 git 的项目）时只剩第 1 步：能撤的都撤掉，
+   * undoUnsafe 的那些如实报错，不给出虚假的安全感。
+   */
+  const handleUndoRun = async () => {
+    if (undoing) return;
     setUndoing(true);
+    const api = getElectronAPI();
     const failed: string[] = [];
-    const restoredIds: string[] = [];
+    const undoneIds = new Set<string>();
+
     for (const change of visibleChanges) {
+      if (change.undoUnsafe) continue;
       try {
         await undoChange(change);
-        restoredIds.push(change.fileId);
+        undoneIds.add(change.fileId);
       } catch (e) {
         failed.push(`${change.fileName}（${String(e)}）`);
       }
     }
-    setUndone((prev) => new Set([...prev, ...restoredIds]));
+
+    let snapshotRestored = false;
+    if (runSnapshotId) {
+      try {
+        const res = await api?.fs?.snapshotRestore(runSnapshotId);
+        if (res?.ok) snapshotRestored = true;
+        else if (res?.error && /不存在|已清理|损坏|格式错误/.test(res.error)) {
+          // 消息是从磁盘恢复的旧对话，快照早没了（或当时根本没建成）：
+          // 逐文件那一段该撤的已经撤了，不该再报"撤销失败"。
+        } else if (res) {
+          failed.push(...(res.failed ?? []));
+          if (res.error) failed.push(res.error);
+        } else failed.push("快照功能不可用");
+      } catch (e) {
+        failed.push(String(e));
+      }
+    } else {
+      for (const c of visibleChanges) {
+        if (c.undoUnsafe)
+          failed.push(`${c.fileName}（改动内容不可靠且本轮无快照，请用 Git 恢复）`);
+      }
+    }
+
+    if (snapshotRestored && runSnapshotId) {
+      // 快照整体还原成功 → 卡片剩余条目（含被跳过的 undoUnsafe）也已回到本轮
+      // 开始前，一并销账，别让卡片继续显示"还能撤销"的假状态。
+      for (const c of visibleChanges) undoneIds.add(c.fileId);
+      useHelixStore.setState((s) => ({
+        pendingChanges: s.pendingChanges.filter((c) => !undoneIds.has(c.fileId)),
+      }));
+      // 快照已消费，留着只会一直涨盘。只在还原成功时删——失败时它还是这些文件
+      // 唯一的"改动前"副本。
+      void api?.fs?.snapshotDiscard(runSnapshotId);
+    }
+
     setUndoing(false);
+    setUndone((prev) => new Set([...prev, ...undoneIds]));
 
     const st = useHelixStore.getState();
     // 文件真的写回磁盘了 → 「更改」列表立刻重算，不等 5s 轮询。
-    if (restoredIds.length > 0) st.bumpGitChangeRevision();
+    if (undoneIds.size > 0) st.bumpGitChangeRevision();
     if (failed.length === 0) {
       st.showToast({
         type: "success",
-        title: "已撤销",
-        description: `已恢复本次回复修改的 ${restoredIds.length} 个文件`,
+        title: "已撤销本轮",
+        description: `已恢复 ${undoneIds.size} 个文件到本轮开始前的状态`,
       });
     } else {
       st.showToast({
         type: "error",
-        title: "部分撤销失败",
+        title: undoneIds.size > 0 ? "部分撤销失败" : "撤销失败",
         description: failed.join("；"),
       });
-    }
-  };
-
-  /**
-   * 回滚本轮：走会话级快照（run 开始前存的「改动前」原文）。
-   *
-   * 与上面「撤销」的区别：撤销是逐文件反推 diff，遇到 `undoUnsafe`
-   * （write 覆盖前内容没取到 / diff 被截断）会直接拒绝；快照存的是原文，
-   * 因此能一次性把本轮所有改动整体还原，**包括新建的文件**（快照时不存在
-   * → 回滚时删掉）。两者互补，不是替代关系。
-   */
-  const handleRollbackRun = async () => {
-    const api = getElectronAPI();
-    if (!api?.fs?.snapshotList) {
-      useHelixStore
-        .getState()
-        .showToast({ type: "error", title: "快照功能不可用" });
-      return;
-    }
-    setRollingBack(true);
-    try {
-      const list = await api.fs.snapshotList();
-      const runId = list?.runs?.[0]?.runId;
-      if (!runId) {
-        useHelixStore.getState().showToast({
-          type: "info",
-          title: "没有可回滚的快照",
-          description:
-            "快照在每轮开始前建立；项目未初始化 git 或本轮没有待改文件时不会有快照",
-        });
-        return;
-      }
-      const res = await api.fs.snapshotRestore(runId);
-      if (res?.ok) {
-        useHelixStore.getState().showToast({
-          type: "success",
-          title: "已回滚本轮改动",
-          description: `已恢复 ${res.restored?.length ?? 0} 个文件到本轮开始前的状态`,
-        });
-        // 快照已被消耗：把本卡片登记的待撤销项一并清掉，避免重复回滚
-        const ids = new Set(visibleChanges.map((c) => c.fileId));
-        setUndone((prev) => new Set([...prev, ...ids]));
-        useHelixStore.setState((s) => ({
-          pendingChanges: s.pendingChanges.filter((c) => !ids.has(c.fileId)),
-        }));
-        useHelixStore.getState().bumpGitChangeRevision();
-      } else {
-        useHelixStore.getState().showToast({
-          type: "error",
-          title: "回滚失败",
-          description: res?.failed?.join("；") || res?.error || "部分文件无法还原",
-        });
-      }
-    } catch (e) {
-      useHelixStore
-        .getState()
-        .showToast({ type: "error", title: "回滚失败", description: String(e) });
-    } finally {
-      setRollingBack(false);
     }
   };
 
@@ -329,24 +324,17 @@ export function FileChangeSummaryCard({
         </span>
         <button
           type="button"
-          onClick={handleRollbackRun}
-          disabled={rollingBack}
-          className="ml-1.5 flex items-center gap-1 px-1.5 py-0.5 rounded text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
-          title="把工作区整体还原到本轮开始前（含删除本轮新建的文件）"
-        >
-          <History
-            className={`size-3.5 ${rollingBack ? "animate-pulse" : ""}`}
-          />
-          {rollingBack ? "回滚中" : "回滚本轮"}
-        </button>
-        <button
-          type="button"
-          onClick={handleUndoAll}
+          onClick={handleUndoRun}
           disabled={undoing}
           className="ml-1.5 flex items-center gap-1 px-1.5 py-0.5 rounded text-[length:var(--helix-transcript-size)] text-foreground/50 hover:text-foreground hover:bg-red-500/10 disabled:opacity-50 transition-colors"
+          title={
+            runSnapshotId
+              ? "把这些文件还原到本轮开始前（本轮新建的一并删除），并用本轮快照兜底 diff 反推不了的改动"
+              : "把这些文件还原到本轮开始前（本轮新建的一并删除）；本轮没有快照，diff 反推不了的改动不会被还原"
+          }
         >
           <Undo2 className={`size-3.5 ${undoing ? "animate-pulse" : ""}`} />
-          {undoing ? "撤销中" : "撤销"}
+          {undoing ? "撤销中" : "撤销本轮"}
         </button>
       </div>
       {visibleChanges.map((change, idx) => {

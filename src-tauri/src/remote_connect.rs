@@ -1,7 +1,8 @@
 //! 一键远程连接（agent 远程跑）：把「手动三步」收口成一步。
 //!
 //! 用户在设置里填 `host / port / username / remote_path`，点「连接」后这里：
-//!   1) scp 把 `remote-bridge.js` 拷到远端 home；
+//!   1) scp 把 `remote-bridge.js` 拷到远端 home（源在 `src-tauri/vendor/`，
+//!      编译进二进制、连接前写出到 `<Helix 数据根>/bridge/`）；
 //!   2) ssh 在远端后台起 `node remote-bridge.js`；
 //!   3) 本机开 `ssh -N -L <本地口>:127.0.0.1:<远端口> user@host`（进程内持 Child）；
 //!   4) 写 config.yaml：`pi.remote_rpc = "127.0.0.1:<本地口>"` + `pi.remote_cwd = <远端路径>`；
@@ -56,21 +57,27 @@ fn tunnel_target_state() -> &'static Mutex<Option<RemoteTunnelTarget>> {
     REMOTE_TUNNEL_TARGET.get_or_init(|| Mutex::new(None))
 }
 
-/// 找 `remote-bridge.js`：从 exe 所在目录往上走最多 8 级（覆盖 dev 时
-/// `target/debug/helix`、`src-tauri`、repo 根），取第一个存在的。找不到返回
-/// None → 调用方报「应用目录缺该文件」。
-fn find_remote_bridge() -> Option<std::path::PathBuf> {
-    let mut dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    for _ in 0..8 {
-        let candidate = dir.join("remote-bridge.js");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !dir.pop() {
-            break;
-        }
+/// bridge 源随二进制编译（`src-tauri/vendor/remote-bridge.js` 是唯一权威副本）：
+/// dev 和打包后都拿到同一份内容，不依赖磁盘上的仓库布局。
+/// 打包版过去找不到 repo 根的那个文件，远程连接只在 dev 可用 —— 现在不会了。
+const REMOTE_BRIDGE_JS: &str = include_str!("../vendor/remote-bridge.js");
+
+/// 写出 bridge 并返回本地路径（scp 只吃真实文件，不接受内存里的字符串）。
+/// 内容相同就不写，稳态连接不碰磁盘。
+fn materialize_remote_bridge() -> Result<std::path::PathBuf, String> {
+    let path = crate::paths::helix_data_dir()
+        .join("bridge")
+        .join("remote-bridge.js");
+    if std::fs::read_to_string(&path)
+        .ok()
+        .as_deref()
+        .is_some_and(|existing| existing == REMOTE_BRIDGE_JS)
+    {
+        return Ok(path);
     }
-    None
+    crate::config::atomic_write(&path, REMOTE_BRIDGE_JS)
+        .map_err(|e| format!("写出 bridge 到 {} 失败: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// 从 18800 起探测一个可绑定的本地口（避免与既有进程冲突）。
@@ -122,8 +129,7 @@ fn push_and_start_remote_bridge(
     port: u32,
     username: &str,
 ) -> Result<(), String> {
-    let local_bridge = find_remote_bridge()
-        .ok_or_else(|| "找不到 remote-bridge.js（请确认应用目录含该文件）".to_string())?;
+    let local_bridge = materialize_remote_bridge()?;
 
     // 先杀可能残留的旧远端 bridge（端口冲突会让新 bridge 起不来）。
     // 坑位两个：

@@ -172,12 +172,12 @@ function buildTauriAPI(): ElectronAPI {
     scanTree: (dirPath?: string) =>
       invoke("scan_tree", { relativePath: dirPath ?? null }),
     allowRoot: (dirPath: string) => invoke("allow_root", { dir: dirPath }),
-    // 会话级文件快照：一轮 run 前存「改动前」内容，可整轮回滚
-    snapshotSave: (runId: string, files: string[]) =>
-      invoke("snapshot_save", { runId, files }),
+    // 会话级文件快照：一轮 run 前存「改动前」内容，供卡片「撤销本轮」整体还原。
+    // sessionId 只用于「每个对话留最近 N 轮」的分组，不参与寻址。
+    snapshotSave: (runId: string, sessionId: string, files: string[]) =>
+      invoke("snapshot_save", { runId, sessionId, files }),
     snapshotRestore: (runId: string) => invoke("snapshot_restore", { runId }),
     snapshotDiscard: (runId: string) => invoke("snapshot_discard", { runId }),
-    snapshotList: () => invoke("snapshot_list"),
   };
 
   // ── helixSkills ────────────────────────────────────────────────────────
@@ -339,7 +339,8 @@ function buildTauriAPI(): ElectronAPI {
       invoke("helix_set_config_key_value", { params }),
     approvalRespond: (params: unknown) =>
       invoke("helix_approval_respond", { params }),
-    // 审批档位 ⇄ @zhushanwen/pi-permission 的 config/permission-ext-config.json。
+    // 审批档位 ⇄ @zhushanwen/pi-permission（本地定制版读 settings.json 顶层
+    // permission 键，不再是 config/permission-ext-config.json）。
     // 真正阻断工具执行的是那个扩展的 tool_call 钩子，所以前端下拉必须写它的
     // 配置，而不是维护一份自己的状态（那会导致「设置显示放行、实际仍弹窗」）。
     getPermissionMode: () => invoke("helix_get_permission_mode"),

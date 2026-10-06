@@ -128,8 +128,8 @@ pub fn helix_list_skills() -> Vec<SkillEntry> {
     }
 
     // ── Skills from pi's settings.json `skills` roots ──
-    // pi 自己会读 ~/.pi/agent/settings.json 的 `skills` 数组作为额外加载根
-    // （例如 C:/Users/hyt/ppt-master/skills）。Helix 列表必须跟上同一套根，
+    // pi 自己会读 ~/.pi/agent/settings.json 的 `skills` 数组作为额外加载根。
+    // Helix 列表必须跟上同一套根，
     // 否则技能面板 / 输入框 "/" 菜单看不到这些已安装技能。
     collect_settings_skills(&mut out);
 
@@ -141,7 +141,7 @@ pub fn helix_list_skills() -> Vec<SkillEntry> {
 }
 
 /// `~/.pi/agent/settings.json` — pi's user settings (its `skills` array lists
-/// additional skill roots pi loads, e.g. `C:/Users/hyt/ppt-master/skills`).
+/// additional skill roots pi loads).
 fn pi_settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".pi").join("agent").join("settings.json"))
 }

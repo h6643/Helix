@@ -271,6 +271,11 @@ function ImageRenderer({ content }: { content: string }) {
 
 // The tool's concrete action: the command/script for bash, the path for
 // file tools, etc. — shown WITHOUT the Chinese action prefix.
+//
+// extractCommandSnippet 里属于「命令本体」的键：命中这些键的值是模型自己要跑的
+// 命令，标题必须照原样显示，不做错误文案过滤。
+const COMMAND_BODY_KEYS = ["command", "cmd", "script", "code"];
+
 function toolActionText(step: ExecutionStep): string {
   // 非命令工具（GUI/浏览器/MCP 等）的参数经常把正文/代码/错误说明塞在 text/input
   // 里，直接拿它当标题会显示 "Clear the draft's responseBlocks" 这类内容。非命令
@@ -285,10 +290,20 @@ function toolActionText(step: ExecutionStep): string {
   if (isCommandTool) {
     const cmd = extractCommandSnippet(step.toolParams);
     if (cmd) {
+      // 参数里真的有命令本体时，字面内容就是模型要跑的命令，一律照原样显示。
+      // 只有当命令类工具其实没给命令（工具名撞上 /run|execute/，参数是 GUI/MCP
+      // 塞在 text/input 里的说明）才需要下面的错误文案防呆 —— 否则 `grep
+      // permission`、`--timeout 30`、任何含 error/failed 字样的正常命令都会被判
+      // 成错误，标题掉回「执行 bash」，而展开区的 `$ 命令` 依旧完整（它不经这里）。
+      const hasCommandBody = COMMAND_BODY_KEYS.some((k) => {
+        const v = step.toolParams?.[k];
+        return typeof v === "string" && v.trim() !== "";
+      });
       // 非命令工具（GUI/浏览器/MCP 等）的参数可能把错误文案放在 text/input 里，
       // 直接拿它当标题会变成 "指令完成 (gui.lock) prevented..."。明显是错误/拦截
       // 说明时不当作命令标题，回退到工具名。
       const looksLikeError =
+        !hasCommandBody &&
         /^\(|prevented|failed|error|cannot|unable|permission|denied|timeout/i.test(
           cmd,
         );
@@ -296,8 +311,8 @@ function toolActionText(step: ExecutionStep): string {
       // bash/terminal：标题返回**完整命令**——不手动截断 50、也不只取首行。
       // 标题是命令本体的唯一查看入口，只取首行 / 横向 CSS truncate 会让后端
       // 实际跑满、前端却少显示好几行的情况被误读成「命令没执行完」。
-      // 折叠态由外层 CSS 裁到 2 行（line-clamp，末尾自带省略号）+ 行尾「展开全文」
-      // 入口，点开即恢复全文并可滚动；悬停 title 始终给全文。
+      // 折叠态由外层 CSS 裁到 1 行（line-clamp，末尾自带省略号），点开这一行即
+      // 恢复全文并可滚动；悬停 title 始终给全文。
       return cmd;
     }
     return "";
@@ -439,9 +454,11 @@ function ToolCard({
   const hasImageResult = results.some(
     (r) => detectResultKind(r.toolName || "", r.content || "") === "image",
   );
-  // 折叠态的命令标题只占 2 行（长 grep/管道命令原本能吃到 5 行以上），展开后回到
-  // 全文。裁行让「展开全文」成为唯一入口，所以被裁过的行必须可点，哪怕它还没有结果。
-  const clampTitle = isCommandTool && !open;
+  // 折叠态标题一律只占 1 行：长 grep/管道命令原本能吃到 5 行以上，读取类的长路径
+  // 也会按 break-all 自然折行成两三行，两种都会把时间线撑开。展开后回到全文。
+  // 行尾不放文字入口（一行标题 + 省略号已经说明可点），所以被裁过的行必须自己
+  // 可点，哪怕它还没有结果 —— 读取类没有结果面板，点开就是标题换成全文容器。
+  const clampTitle = !open;
   const expandable =
     (hasExpandableContent && (!isReadTool || hasImageResult)) ||
     (clampTitle && titleClipped);
@@ -539,16 +556,11 @@ function ToolCard({
           ref={titleRef}
           title={titleLabel}
           className={`flex-1 min-w-0 break-all whitespace-pre-wrap text-foreground/60 ${
-            clampTitle ? "line-clamp-2" : "max-h-40 overflow-y-auto"
+            clampTitle ? "line-clamp-1" : "max-h-40 overflow-y-auto"
           } ${running ? "text-foreground/85" : ""}`}
         >
           {verbText} {titleLabel}
         </span>
-        {titleClipped && (
-          <span className="text-[0.72em] text-primary/70 shrink-0 select-none">
-            {open ? "收起 ⌃" : "展开全文 ⌄"}
-          </span>
-        )}
         {step.duration_s != null && step.duration_s > 0 && (
           <span className="text-[0.72em] text-muted-foreground shrink-0">
             {formatDurationSeconds(step.duration_s)}

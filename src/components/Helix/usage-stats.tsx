@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { DailyUsageChart, type DailyUsagePoint } from "./usage-daily-chart";
 import { UsageHeatmap } from "./usage-heatmap";
-import { formatTokens } from "@/lib/format";
+import { formatTokens, promptCacheHit } from "@/lib/format";
 import { useHelixStore } from "@/stores/helix-store";
 
 export function ModelUsageStats() {
@@ -247,20 +247,51 @@ export function TokenUsagePanel() {
       )
     : [];
 
+  // 缓存命中率：prompt 侧口径，分母含缓存两项（`inputTokens` 在 pi 里是**净**
+  // 未缓存数）。与上下文环弹窗共用 promptCacheHit，两处数字必须同语义。
+  const cacheHit = promptCacheHit({
+    input: stats.inputTokens,
+    cacheRead: stats.cachedReadTokens,
+    cacheWrite: stats.cachedWriteTokens,
+  });
+  const promptTotal =
+    stats.inputTokens + stats.cachedReadTokens + stats.cachedWriteTokens;
+
   return (
     <section className="space-y-4">
-      {/* Total consumed tokens — large hero card */}
-      <div className="rounded-xl border border-border/40 bg-card/60 p-5">
-        <div className="min-w-0">
-          <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
-            真实消耗 Tokens
-          </p>
-          <p className="text-[calc(var(--helix-transcript-size)*2.1429)] font-semibold tabular-nums text-foreground mt-1">
-            {stats.totalTokens.toLocaleString()}
-          </p>
-          <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 mt-0.5">
-            ≈ {formatBig(stats.totalTokens)}
-          </p>
+      {/* Total consumed tokens + cache hit rate — two hero cards */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-xl border border-border/40 bg-card/60 p-5">
+          <div className="min-w-0">
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
+              真实消耗 Tokens
+            </p>
+            <p className="text-[calc(var(--helix-transcript-size)*2.1429)] font-semibold tabular-nums text-foreground mt-1">
+              {stats.totalTokens.toLocaleString()}
+            </p>
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 mt-0.5">
+              ≈ {formatBig(stats.totalTokens)}
+            </p>
+          </div>
+        </div>
+        <div className="rounded-xl border border-border/40 bg-card/60 p-5">
+          <div className="min-w-0">
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
+              缓存命中率
+            </p>
+            <p className="text-[calc(var(--helix-transcript-size)*2.1429)] font-semibold tabular-nums text-foreground mt-1">
+              {cacheHit.reported && cacheHit.percent !== null
+                ? `${cacheHit.percent.toFixed(1)}%`
+                : "未上报"}
+            </p>
+            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 mt-0.5">
+              {cacheHit.reported
+                ? `读缓存 ${formatBig(stats.cachedReadTokens)} / prompt ${formatBig(
+                    promptTotal,
+                  )}`
+                : "供应商未上报缓存字段，不是「没有命中」"}
+            </p>
+          </div>
         </div>
       </div>
 

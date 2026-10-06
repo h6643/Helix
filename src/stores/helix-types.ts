@@ -160,6 +160,13 @@ export interface ChatMessage {
   reasoning?: string;
   steps?: ExecutionStep[];
   fileChanges?: PendingChange[];
+  /**
+   * 本轮开始前那次快照的 runId（见 fs.rs 的 snapshot_save / restore）。
+   * 「撤销本轮」在逐文件反推 diff 之后拿它兜底：`undoUnsafe` 的改动反推不了，
+   * 快照里是原文。远程对话、未初始化 git 的项目没有快照 → 该字段为空，
+   * 撤销只剩逐文件这条路（不给虚假的安全感）。
+   */
+  runSnapshotId?: string;
   blocks?: Array<
     | { type: "text"; content: string }
     | { type: "thinking"; content: string }

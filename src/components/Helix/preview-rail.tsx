@@ -1,7 +1,8 @@
 "use client";
 
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
-  X,
   ChevronLeft,
   ChevronRight,
   RotateCw,
@@ -10,58 +11,27 @@ import {
   Globe,
 } from "lucide-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { isRealElectron } from "@/lib/electron-bridge";
+import { electronShell } from "@/lib/electron-bridge";
+import { isTauri } from "@/lib/tauri-bridge";
 import { cleanUrl } from "@/lib/url-utils";
 import { useHelixStore } from "@/stores/helix-store";
 
-// ---------------------------------------------------------------------------
-// Suppress benign <webview> navigation-abort noise.
-//
-// When the Electron <webview> guest redirects, or a newer navigation supersedes
-// an in-flight load, Chromium aborts the previous loadURL with ERR_ABORTED
-// (-3). Electron surfaces this as a rejected `GUEST_VIEW_MANAGER_CALL` IPC which
-// Next.js's dev overlay prints to the console as an "Unexpected error while
-// loading URL" unhandled rejection. The page always finishes loading, so this
-// is purely cosmetic — we swallow it globally here (registered once per module
-// load, guarded so HMR re-imports don't stack listeners).
-// ---------------------------------------------------------------------------
-if (
-  typeof window !== "undefined" &&
-  !(window as any).__helixWebviewErrSuppressed
-) {
-  (window as any).__helixWebviewErrSuppressed = true;
-  const isBenignNavError = (e: any): boolean => {
-    const msg =
-      e?.reason?.message || e?.message || String(e?.reason ?? e ?? "");
-    return (
-      msg.includes("GUEST_VIEW_MANAGER_CALL") ||
-      msg.includes("ERR_ABORTED") ||
-      msg.includes("(-3)")
-    );
-  };
-  window.addEventListener("unhandledrejection", (e: any) => {
-    if (isBenignNavError(e)) {
-      e.preventDefault();
-      e.stopImmediatePropagation?.();
-    }
-  });
-  window.addEventListener("error", (e: any) => {
-    if (isBenignNavError(e)) {
-      e.preventDefault();
-      e.stopImmediatePropagation?.();
-    }
-  });
-}
+/** 面板矩形 → 子窗口边界的采样间隔。几何真相在 DOM，这里只做脏检查后推送。 */
+const SYNC_INTERVAL_MS = 120;
+
+/** 遮挡采样的内缩距离：贴边的点会打到相邻元素的边界上。 */
+const OCCLUDE_INSET = 4;
 
 /**
- * A single browser page rendered by RightSidebar. It shows one <webview>/<iframe>
- * for the given `url`, a navigation toolbar (back / forward / refresh), an
- * inline-editable address, and the imported bookmark bar.
+ * 内置浏览器：右侧栏每个页面一条**原生子窗口**（后端见 src-tauri/src/browser_webview.rs）。
  *
- * In Electron we use a real <webview> so sites that forbid iframing
- * (X-Frame-Options / CSP frame-ancestors) still render. Outside Electron we
- * fall back to a plain <iframe>.
+ * 为什么不用 iframe：主 webview 里的 `<iframe>` 对绝大多数外网站会被
+ * X-Frame-Options / CSP frame-ancestors 直接拒掉，只能退回 page_fetch 抓来的静态
+ * 快照 —— 那就是「能看、点不动」。子窗口是真浏览器内核，链接、表单、脚本、cookie
+ * 全都正常。非 Tauri 运行时（serve 模式在真浏览器里打开）开不出子窗口，退回 iframe。
+ *
+ * 子窗口永远浮在 DOM 之上，z-index 管不住它，所以「面板被 Helix 自己的浮层盖住」时
+ * 必须让它让路 —— 遮挡判定见 isOccluded，DOM 几何是可见性的唯一真相。
  */
 
 function cleanInput(raw: string): string {
@@ -87,18 +57,6 @@ function normalizeUrl(raw: string): string {
   return `https://${t}`;
 }
 
-/** 本地地址：dev server / 本地 serve 网关走真 iframe（需要完整 JS、HMR、cookie），
- *  不做 frame-ancestors 探测，也不降级成快照。 */
-function isLocalhostUrl(url: string): boolean {
-  try {
-    return ["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(
-      new URL(url).hostname,
-    );
-  } catch {
-    return false;
-  }
-}
-
 function summarizeUrl(url: string): string {
   if (!url) return "";
   try {
@@ -113,180 +71,125 @@ function summarizeUrl(url: string): string {
   }
 }
 
+/** 面板是否被 Helix 自己的浮层（模态、下拉、命令面板、tooltip）盖住。取五点：
+ *  命中元素只要有一个不属于本面板，就说明上面还压着别的东西，子窗口必须让路。 */
+function isOccluded(el: HTMLElement, r: DOMRect): boolean {
+  const points: Array<[number, number]> = [
+    [r.left + r.width / 2, r.top + r.height / 2],
+    [r.left + OCCLUDE_INSET, r.top + OCCLUDE_INSET],
+    [r.right - OCCLUDE_INSET, r.top + OCCLUDE_INSET],
+    [r.left + OCCLUDE_INSET, r.bottom - OCCLUDE_INSET],
+    [r.right - OCCLUDE_INSET, r.bottom - OCCLUDE_INSET],
+  ];
+  return points.some(([x, y]) => {
+    const top = document.elementFromPoint(x, y);
+    return !top || !el.contains(top);
+  });
+}
+
+const PICK_SCRIPT = `
+  (function() {
+    // 注意：用独立的标志名 —— 父页面 injectPickScript 已设
+    // __helixPickerInstalled（防重复 append），脚本内部若检查同一个标志
+    // 会因已 true 而直接 return，事件监听器一个都不注册（hover 无高亮、
+    // 点击无响应）。这里用 __helixPickerListening 区分。
+    if (window.__helixPickerListening) return;
+    window.__helixPickerListening = true;
+    try { parent.postMessage({ type: 'HELIX_PICKER_READY' }, '*'); } catch (e) {}
+    var current = null;
+    document.addEventListener('mouseover', function(e) {
+      var el = e.target;
+      if (!el || el === current) return;
+      if (current && current.style) current.style.outline = '';
+      current = el;
+      if (el.style) { el.style.outline = '2px solid #f59e0b'; el.style.outlineOffset = '-2px'; }
+    }, true);
+    document.addEventListener('click', function(e) {
+      e.preventDefault(); e.stopPropagation();
+      var el = e.target;
+      if (!el) return;
+      if (current && current.style) current.style.outline = '';
+      var text = (el.innerText || el.textContent || '').trim().slice(0, 8000);
+      var html = (el.outerHTML || '').slice(0, 20000);
+      var href = '';
+      var src = '';
+      try {
+        href = el.href || el.getAttribute('href') || '';
+        src = el.src || el.getAttribute('src') || '';
+      } catch (err) {}
+      parent.postMessage({ type: 'HELIX_PICKED', info: {
+        tag: (el.tagName || '').toLowerCase(),
+        text: text,
+        html: html,
+        href: href,
+        src: src,
+        title: document.title || ''
+      } }, '*');
+    }, true);
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        if (current && current.style) current.style.outline = '';
+        parent.postMessage({ type: 'HELIX_PICKED_CANCEL' }, '*');
+      }
+    }, true);
+    document.body.style.cursor = 'crosshair';
+  })();
+`;
+
+/** 在 srcdoc iframe 的 document 里注入元素选择脚本：hover 高亮、点击选取、
+ *  结果通过 parent.postMessage 回传给宿主页面。 */
+function injectPickScript(doc: Document) {
+  try {
+    if ((doc.defaultView as any)?.__helixPickerInstalled) return;
+    (doc.defaultView as any).__helixPickerInstalled = true;
+    const script = doc.createElement("script");
+    script.textContent = PICK_SCRIPT;
+    (doc.head || doc.documentElement).appendChild(script);
+  } catch {
+    /* cross-origin guard — picker just won't attach */
+  }
+}
+
 export function BrowserView({
+  pageId,
   url,
   onUrlChange,
-  onPageTitle,
 }: {
+  pageId: string;
   url: string;
   onUrlChange: (url: string) => void;
-  onPageTitle?: (title: string) => void;
 }) {
+  const native = isTauri();
+  const call = useCallback(
+    (cmd: string, args?: Record<string, unknown>) =>
+      invoke(cmd, { page: pageId, ...args }),
+    [pageId],
+  );
+
   const [loaded, setLoaded] = useState(cleanUrl(url));
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
+  // 子窗口当前真正停在哪个 URL。地址栏回读时靠它区分「这页自己跳的」和「外部把新
+  // 链接塞给了这一页」：前者绝不能再 navigate 一次，否则每次导航都变成重新加载。
+  const appliedRef = useRef("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const webviewRef = useRef<any>(null);
-  const inElectron = isRealElectron();
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
-  // ── 快照模式 ─────────────────────────────────────────────────────────
-  // 站点自己禁止被嵌入（X-Frame-Options: deny / CSP frame-ancestors: 'none'）时，
-  // 真 iframe / webview 会被浏览器直接拒绝。退化为 Rust 端 page_fetch 抓 HTML +
-  // <iframe srcdoc> 渲染：srcdoc 继承父 origin，frame-ancestors 不适用。
-  // 代价：无登录态（cookie 属于站点 origin，带不进应用的 origin）、无客户端交互。
-  const [snapshotHtml, setSnapshotHtml] = useState<string | null>(null);
-  // 探测/抓取进行中的标记。为 true 时 frame 被 suspend（不真加载），
-  // 避免 React 在 loaded 变化与判定返回之间的那一帧里先撞一次 frame-ancestors。
-  const [framePending, setFramePending] = useState(() => {
-    const u = cleanUrl(url);
-    return (
-      !!u &&
-      (u.startsWith("http://") || u.startsWith("https://")) &&
-      !isLocalhostUrl(u)
-    );
-  });
-  // 探测/抓取是异步的，用户可能已换链接 —— 用代次号丢弃过期结果。
-  const probeGen = useRef(0);
-
-  /** 决定加载方式：真 iframe/webview，还是 page_fetch + srcdoc 快照。 */
-  const prepareLoad = useCallback(async (u: string) => {
-    const gen = ++probeGen.current;
-    const setDone = () => {
-      setSnapshotHtml(null);
-      setFramePending(false);
-      setLoading(false);
-    };
-    if (
-      !u.startsWith("http://") &&
-      !u.startsWith("https://") &&
-      !isLocalhostUrl(u)
-    ) {
-      // file: 等非 http(s) 地址不做探测，直接真加载。
-      setDone();
-      return;
-    }
-    const invoke = (window as any).__TAURI_INTERNALS__?.invoke;
-    if (typeof invoke !== "function") {
-      // 非 Tauri（serve / 纯浏览器）跑不了后端抓取，直接真加载。
-      setDone();
-      return;
-    }
-    if (isLocalhostUrl(u)) {
-      // 本地 dev server 需要完整 JS / HMR / cookie，不降级成快照。
-      setDone();
-      return;
-    }
-    setFramePending(true);
-    setLoading(true);
-    setSnapshotHtml(null);
-    try {
-      // 探测失败（网络不通等）→ 退回真加载，让浏览器自己判断，别在此处阻断。
-      let frameable = false;
-      try {
-        const policy = (await invoke("page_frame_policy", { url: u })) as
-          | { frameable?: boolean }
-          | undefined;
-        if (gen !== probeGen.current) return;
-        frameable = policy?.frameable === true;
-      } catch {
-        if (gen !== probeGen.current) return;
-        // 探测失败 → 退回真加载，让浏览器自己判断，别在此处阻断。
-        setDone();
-        return;
-      }
-      if (frameable) {
-        setFramePending(false);
-        setLoading(false);
-        return;
-      }
-      const res = (await invoke("page_fetch", { url: u })) as
-        | { html?: string }
-        | undefined;
-      if (gen !== probeGen.current) return;
-      if (!res?.html) throw new Error("抓取失败");
-      setSnapshotHtml(res.html);
-      setFramePending(false);
-      setLoading(false);
-    } catch (e: any) {
-      if (gen !== probeGen.current) return;
-      setSnapshotHtml(null);
-      setFramePending(false);
-      setLoading(false);
-      setError(
-        `${summarizeUrl(u)} 禁止被嵌入（frame-ancestors），且快照抓取失败（${e?.message || e}）` +
-          "。点工具栏「在外部浏览器中打开」可直接查看。",
-      );
-    }
-  }, []);
-
-  // Sync when the controlled `url` prop changes (external link / page switch).
-  useEffect(() => {
-    const u = cleanUrl(url);
-    if (u !== loadedRef.current) setLoaded(u);
-  }, [url]);
-
-  // 每个 loaded 都过一次加载方式判定（本地直连跳过探测）。
-  useEffect(() => {
-    void prepareLoad(loaded);
-  }, [loaded, prepareLoad]);
-
-  const goBack = () => {
-    try {
-      webviewRef.current?.goBack?.();
-    } catch { /* empty */}
-  };
-  const goForward = () => {
-    try {
-      webviewRef.current?.goForward?.();
-    } catch { /* empty */}
-  };
-  const reload = () => {
-    // 快照模式下 iframe 没有 reload()，重新走一次抓取。
-    if (snapshotHtml) {
-      void prepareLoad(loadedRef.current || url);
-      return;
-    }
-    try {
-      webviewRef.current?.reload?.();
-    } catch { /* empty */}
-  };
-
-  const commitUrl = (raw?: string) => {
-    const input = (raw ?? "").trim();
-    const u = cleanUrl(normalizeUrl(input));
-    if (!u) return;
-    // 地址栏导航 → 必须退出选取模式（否则 iframe 仍停留在 srcdoc 渲染的
-    // 选取页面，新链接不会加载，表现为"地址栏输入链接没反应"）
-    exitPick();
-    setLoaded(u);
-    setError("");
-    onUrlChange(u);
-  };
-
-  const [editingUrl, setEditingUrl] = useState(false);
-  const [urlDraft, setUrlDraft] = useState("");
-  const startUrlEdit = () => {
-    exitPick();
-    setUrlDraft(loaded);
-    setEditingUrl(true);
-  };
-  const submitUrlEdit = () => {
-    commitUrl(urlDraft);
-    setEditingUrl(false);
-  };
-  const cancelUrlEdit = () => setEditingUrl(false);
+  const onUrlChangeRef = useRef(onUrlChange);
+  onUrlChangeRef.current = onUrlChange;
 
   // ── "选取元素加入聊天" ─────────────────────────────────────────────────
-  // 跨域 iframe 无法从父页面访问 DOM，所以进入选择模式时先用 Rust
-  // page_fetch 拉取页面 HTML，用 <iframe srcdoc> 渲染（继承父 origin），
-  // 注入选择脚本：hover 高亮、点击选取、parent.postMessage 回传元素信息。
+  // 真页面在另一条原生窗口里，宿主拿不到它的 DOM，所以选取仍然走 page_fetch 快照 +
+  // 同源 <iframe srcdoc>：继承父 origin，注入选择脚本，parent.postMessage 回传。
+  // 代价是选取看到的仍是静态快照；好处是快照页没有脚本状态，选到的就是服务端 HTML 里
+  // 的东西。进入选取时子窗口会hide（几何同步里判 pickMode）。
   const [pickMode, setPickMode] = useState(false);
   const [pickSrcDoc, setPickSrcDoc] = useState<string | null>(null);
   const [pickError, setPickError] = useState("");
   const pickErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [pickedCount, setPickedCount] = useState(0);
   const pickedCountRef = useRef(0);
+  const [pickedCount, setPickedCount] = useState(0);
 
   const exitPick = () => {
     setPickMode(false);
@@ -300,15 +203,10 @@ export function BrowserView({
     setPickError("");
     setPickMode(true);
     try {
-      // 快照模式下已经有同源 HTML，直接复用，避免重复请求。
-      if (snapshotHtml) {
-        setPickSrcDoc(snapshotHtml);
-        return;
-      }
-      const res = await (window as any).__TAURI_INTERNALS__?.invoke?.(
-        "page_fetch",
-        { url: loaded },
-      );
+      const res = (await invoke("page_fetch", { url: loaded })) as
+        | { html?: unknown }
+        | null
+        | undefined;
       if (!res || typeof res.html !== "string") throw new Error("fetch failed");
       setPickSrcDoc(res.html);
     } catch (e: any) {
@@ -319,7 +217,107 @@ export function BrowserView({
     }
   };
 
-  // 接收选取结果 → 注入聊天输入框 → 退出选择模式
+  /** 让页面去这个 URL：子窗口已存在则复用（后端内部就是 navigate）。 */
+  const applyUrl = useCallback(
+    (u: string) => {
+      loadedRef.current = u;
+      appliedRef.current = u;
+      setLoaded(u);
+      if (!u) return;
+      if (native) {
+        setLoading(true);
+        void call("browser_webview_open", { url: u }).catch((e: any) => {
+          setLoading(false);
+          setError(String(e?.message ?? e ?? "无法打开浏览器视图"));
+        });
+      }
+    },
+    [native, call],
+  );
+
+  // 受控 `url` 变化（点消息里的链接、切换页面）→ 加载。
+  useEffect(() => {
+    const u = cleanUrl(url);
+    if (u && u !== appliedRef.current) applyUrl(u);
+  }, [url, applyUrl]);
+
+  // 几何同步 + 显隐。面板矩形是唯一真相：尺寸变了、面板被收起、被浮层盖住、进入
+  // 元素选取，都只在这里判定并推给后端。
+  useEffect(() => {
+    if (!native) return;
+    let lastKey = "";
+    const push = () => {
+      const el = contentRef.current;
+      if (!el) return;
+      // 还没打开任何页面时后端没有子窗口，推几何只会拿到「页面不存在」，白跑一趟 IPC。
+      if (!loadedRef.current) return;
+      const r = el.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const visible =
+        r.width >= 1 && r.height >= 1 && !pickMode && !isOccluded(el, r);
+      const key = `${Math.round(r.left)}|${Math.round(r.top)}|${Math.round(
+        r.width,
+      )}|${Math.round(r.height)}|${visible ? 1 : 0}|${dpr}`;
+      if (key === lastKey) return;
+      lastKey = key;
+      void call("browser_webview_set_rect", {
+        x: r.left,
+        y: r.top,
+        w: r.width,
+        h: r.height,
+        dpr,
+        visible,
+      }).catch(() => {
+        // 窗口此刻还不存在（open 的 IPC 还在路上）或已被关掉：不要把这次意图当成
+        // 已经落地，否则脏检查键会永远停在「已同步」，子窗口留在屏幕外不显示。
+        lastKey = "";
+      });
+    };
+    push();
+    const timer = setInterval(push, SYNC_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [native, call, pickMode]);
+
+  // 页面关闭（组件卸载）→ 销毁子窗口。
+  useEffect(() => {
+    return () => {
+      if (native) void call("browser_webview_close").catch(() => {});
+    };
+  }, [native, call]);
+
+  // 子窗口的导航事件 → 地址栏跟随。外部页面拿不到 Tauri IPC（capabilities 只信任
+  // 应用 origin），不能自己上报，所以后端的 on_page_load 是唯一 URL 来源。
+  useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<{ page: string; url: string; started: boolean }>(
+      "helix:browser-nav",
+      (e) => {
+        const d = e.payload;
+        if (!d || d.page !== pageId) return;
+        if (d.started) {
+          setLoading(true);
+          return;
+        }
+        setLoading(false);
+        setError("");
+        appliedRef.current = d.url;
+        loadedRef.current = d.url;
+        setLoaded(d.url);
+        onUrlChangeRef.current(d.url);
+      },
+    ).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [native, pageId]);
+
+  // 接收选取结果 → 注入聊天输入框 → 保持选取模式，可以连续点选。
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
       const data = e?.data;
@@ -350,8 +348,7 @@ export function BrowserView({
     };
     window.addEventListener("message", onMsg);
     return () => window.removeEventListener("message", onMsg);
-     
-  }, [loaded]);
+  }, []);
 
   // Esc 退出选择模式
   useEffect(() => {
@@ -363,33 +360,61 @@ export function BrowserView({
     return () => window.removeEventListener("keydown", onKey);
   }, [pickMode]);
 
+  const goHistory = (dir: "back" | "forward" | "reload") => {
+    if (!native) return;
+    void call("browser_webview_history", { dir }).catch((e: any) =>
+      setError(String(e?.message ?? e ?? "操作失败")),
+    );
+  };
+
+  const commitUrl = (raw?: string) => {
+    const u = cleanUrl(normalizeUrl((raw ?? "").trim()));
+    if (!u) return;
+    // 地址栏导航 → 必须退出选取模式（否则看到的还是 srcdoc 快照那页，新链接不会加载）。
+    exitPick();
+    setError("");
+    applyUrl(u);
+  };
+
+  const [editingUrl, setEditingUrl] = useState(false);
+  const [urlDraft, setUrlDraft] = useState("");
+  const startUrlEdit = () => {
+    exitPick();
+    setUrlDraft(loaded);
+    setEditingUrl(true);
+  };
+  const submitUrlEdit = () => {
+    commitUrl(urlDraft);
+    setEditingUrl(false);
+  };
+
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-background/50">
       {/* Navigation toolbar */}
       <div className="flex items-center gap-1 px-2.5 py-1.5 border-b border-border/20 shrink-0 bg-background/50">
         <button
-          onClick={goBack}
-          disabled={!inElectron}
+          onClick={() => goHistory("back")}
+          disabled={!native}
           className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-          data-tip="后退"
+          data-tip={native ? "后退" : "内嵌浏览器视图不可用"}
         >
           <ChevronLeft className="size-4" />
         </button>
         <button
-          onClick={goForward}
-          disabled={!inElectron}
+          onClick={() => goHistory("forward")}
+          disabled={!native}
           className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-          data-tip="前进"
+          data-tip={native ? "前进" : "内嵌浏览器视图不可用"}
         >
           <ChevronRight className="size-4" />
         </button>
         <button
-          onClick={reload}
-          disabled={!inElectron}
+          onClick={() => goHistory("reload")}
+          disabled={!native}
           className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
           data-tip="刷新"
         >
-          <RotateCw className="size-3.5" />
+          <RotateCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
         </button>
         <div className="flex-1 min-w-0 px-2">
           {editingUrl ? (
@@ -399,7 +424,7 @@ export function BrowserView({
               onChange={(e) => setUrlDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") submitUrlEdit();
-                if (e.key === "Escape") cancelUrlEdit();
+                if (e.key === "Escape") setEditingUrl(false);
               }}
               onBlur={submitUrlEdit}
               spellCheck={false}
@@ -436,11 +461,7 @@ export function BrowserView({
         </button>
         <button
           onClick={() => {
-            if (loaded) {
-              import("@/lib/electron-bridge").then(({ electronShell }) => {
-                electronShell.open(loaded);
-              });
-            }
+            if (loaded) void electronShell.open(loaded);
           }}
           className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 transition-colors"
           data-tip="在外部浏览器中打开"
@@ -449,49 +470,35 @@ export function BrowserView({
         </button>
       </div>
 
-      {/* Content */}
-      <div className="flex-1 min-h-0 bg-background/50 relative">
+      {/* Content：原生子窗口精确盖在这块矩形上，所以这里的 DOM 只在窗口让路时才看得见 */}
+      <div ref={contentRef} className="flex-1 min-h-0 bg-background/50 relative">
         {pickMode ? (
-          <WebviewFrame
-            url={url}
-            active
-            srcdoc={pickSrcDoc ?? undefined}
-            pickMode
-            onLoading={setLoading}
-            onError={(e) => {
-              setError(e);
-              setLoading(false);
+          <iframe
+            srcDoc={pickSrcDoc ?? undefined}
+            onLoad={(e) => {
+              const doc = (e.currentTarget as HTMLIFrameElement).contentDocument;
+              if (doc) injectPickScript(doc);
             }}
-            onNavigate={(u) => {
-              setLoaded(u);
-            }}
-            onWebviewRef={(el) => {
-              webviewRef.current = el;
-            }}
-            onPageTitle={onPageTitle}
+            className="w-full h-full border-0"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
           />
-        ) : url ? (
-          <WebviewFrame
-            url={url}
-            active
-            srcdoc={snapshotHtml ?? undefined}
-            suspend={framePending}
-            onLoading={setLoading}
-            onError={(e) => {
-              setError(e);
-              setLoading(false);
-            }}
-            onNavigate={(u) => {
-              setLoaded(u);
-            }}
-            onWebviewRef={(el) => {
-              webviewRef.current = el;
-            }}
-            onPageTitle={onPageTitle}
-          />
+        ) : native ? (
+          !loaded && (
+            <div className="absolute inset-0 flex items-center justify-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 pointer-events-none">
+              点击消息中的链接以预览
+            </div>
+          )
         ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/40 pointer-events-none">
-            点击消息中的链接以预览
+          <iframe
+            src={loaded || undefined}
+            onLoad={() => setLoading(false)}
+            className="w-full h-full border-0"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+          />
+        )}
+        {pickMode && (
+          <div className="absolute top-2 right-2 z-10 px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground bg-card/80 rounded pointer-events-none">
+            选取中 · 已添加 {pickedCount} 个 · Esc 退出
           </div>
         )}
         {pickError && (
@@ -499,289 +506,12 @@ export function BrowserView({
             {pickError}
           </div>
         )}
-        {loading && (
-          <div className="absolute top-2 right-2 z-10 px-2 py-0.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70 bg-card/80 rounded pointer-events-none">
-            加载中…
-          </div>
-        )}
         {error && (
           <div className="absolute inset-x-0 top-0 z-10 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.7857)] text-red-500 bg-red-50/90 border-b border-red-100">
             {error}
           </div>
         )}
-        {snapshotHtml && !pickMode && (
-          <div className="absolute inset-x-0 bottom-0 z-[5] px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.7143)] text-amber-700 bg-amber-50/95 border-t border-amber-200/70">
-            快照模式 · 站点禁止被嵌入（frame-ancestors），已降级为静态快照 ——
-            无登录态、客户端交互不可用
-          </div>
-        )}
       </div>
     </div>
   );
-}
-
-/** A single webview/iframe frame + its lifecycle listeners and resize sizing. */
-function WebviewFrame({
-  url,
-  active,
-  srcdoc,
-  suspend,
-  pickMode,
-  onLoading,
-  onError,
-  onNavigate,
-  onWebviewRef,
-  onPageTitle,
-}: {
-  url: string;
-  active: boolean;
-  srcdoc?: string;
-  /** 挂起真加载（判定嵌入能力期间）：iframe 不拿到 src，guest 只停在 about:blank。 */
-  suspend?: boolean;
-  pickMode?: boolean;
-  onLoading: (loading: boolean) => void;
-  onError: (error: string) => void;
-  onNavigate: (url: string) => void;
-  onWebviewRef?: (el: any) => void;
-  onPageTitle?: (title: string) => void;
-}) {
-  const webviewRef = useRef<any>(null);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  const inElectron = isRealElectron();
-  // Freeze the INITIAL src to `about:blank` so the <webview> guest process is
-  // created exactly once. We must NOT bind `src` to the live `url` — every
-  // `src` change makes Electron call loadURL internally, whose ERR_ABORTED
-  // rejection is an UN-catchable console error (the GUEST_VIEW_MANAGER_CALL
-  // noise). All real navigations go through our own loadURL below, which
-  // swallows ERR_ABORTED ourselves.
-  const initialSrcRef = useRef<string>("about:blank");
-  const urlRef = useRef(url);
-  urlRef.current = url;
-  // The last url we actually asked the guest to load. Prevents duplicate loads
-  // (a duplicate loadURL is exactly what produces the benign ERR_ABORTED -3).
-  const lastLoadedRef = useRef<string | null>(null);
-  const [guestReady, setGuestReady] = useState(false);
-  // Keep callbacks fresh without re-running the mount-once listener effect.
-  const onLoadingRef = useRef(onLoading);
-  const onErrorRef = useRef(onError);
-  const onNavigateRef = useRef(onNavigate);
-  const onPageTitleRef = useRef(onPageTitle);
-  onLoadingRef.current = onLoading;
-  onErrorRef.current = onError;
-  onNavigateRef.current = onNavigate;
-  onPageTitleRef.current = onPageTitle;
-  const setWebviewRef = (el: any) => {
-    webviewRef.current = el;
-    onWebviewRef?.(el);
-  };
-
-  // Electron's <webview> doesn't reflow on container resize (known flex-parent
-  // bug). Size it imperatively to the wrapper; ResizeObserver keeps it correct
-  // (including when the frame becomes visible again after being hidden).
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    if (!wrap || typeof ResizeObserver === "undefined") return;
-    const apply = () => {
-      const rect = wrap.getBoundingClientRect();
-      const wv = webviewRef.current;
-      if (wv && rect.width > 0) {
-        wv.style.width = `${rect.width}px`;
-        wv.style.height = `${rect.height}px`;
-      }
-    };
-    apply();
-    const ro = new ResizeObserver(apply);
-    ro.observe(wrap);
-    return () => ro.disconnect();
-  }, []);
-
-  // Our own loadURL wrapper — the promise is ours, so we can swallow ERR_ABORTED.
-  const doLoad = (target: string) => {
-    if (!target || lastLoadedRef.current === target) return;
-    const el = webviewRef.current;
-    if (!el) return;
-    lastLoadedRef.current = target;
-    onLoadingRef.current(true);
-    try {
-      el.loadURL(target).catch((err: any) => {
-        // ERR_ABORTED (-3): a newer navigation superseded this one (the site
-        // redirected, a link was clicked, or a refresh interrupted an in-flight
-        // load). Benign — the page always finishes loading. The error arrives
-        // serialized across the GUEST_VIEW_MANAGER_CALL IPC, so the `code`
-        // property is not always preserved; match on code OR message.
-        const msg = err?.message || "";
-        const benign =
-          err?.code === "ERR_ABORTED" ||
-          err?.errno === -3 ||
-          msg.includes("ERR_ABORTED") ||
-          msg.includes("(-3)");
-        if (!benign) onErrorRef.current(err?.message || "页面加载失败");
-        onLoadingRef.current(false);
-      });
-    } catch {
-      onLoadingRef.current(false);
-    }
-  };
-
-  // Lifecycle listeners (Electron <webview> only). Attached once on mount.
-  useEffect(() => {
-    if (!inElectron) return;
-    const el = webviewRef.current;
-    if (!el || typeof el.addEventListener !== "function") return;
-    const onStart = () => onLoadingRef.current(true);
-    const onStop = () => onLoadingRef.current(false);
-    const onDomReady = () => {
-      setGuestReady(true);
-      doLoad(urlRef.current);
-    };
-    const onNav = (e: any) => {
-      if (e?.url) onNavigateRef.current(e.url);
-    };
-    const onTitle = (e: any) => {
-      if (e?.title) onPageTitleRef.current?.(e.title);
-    };
-    const onFail = (e: any) => {
-      // ERR_ABORTED (-3) is a benign navigation supersede — never surface it.
-      if (e?.errorCode && e.errorCode !== -3) {
-        onErrorRef.current(e?.errorDescription || "页面加载失败");
-        onLoadingRef.current(false);
-      }
-    };
-    el.addEventListener("did-start-loading", onStart);
-    el.addEventListener("did-stop-loading", onStop);
-    el.addEventListener("dom-ready", onDomReady);
-    el.addEventListener("did-navigate", onNav);
-    el.addEventListener("page-title-updated", onTitle);
-    el.addEventListener("did-fail-load", onFail);
-    // If the guest is already live (dom-ready fired before React attached the
-    // listener, e.g. after an HMR remount), load now — otherwise dom-ready will.
-    try {
-      if (
-        typeof el.getWebContentsId === "function" &&
-        el.getWebContentsId() != null
-      )
-        onDomReady();
-    } catch {
-      /* guest not ready yet; dom-ready will fire */
-    }
-    return () => {
-      el.removeEventListener("did-start-loading", onStart);
-      el.removeEventListener("did-stop-loading", onStop);
-      el.removeEventListener("dom-ready", onDomReady);
-      el.removeEventListener("did-navigate", onNav);
-      el.removeEventListener("page-title-updated", onTitle);
-      el.removeEventListener("did-fail-load", onFail);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Load whenever the controlled `url` prop changes (user input / external link).
-  // Gated on guestReady so we never call loadURL before the guest exists.
-  // srcdoc 时渲染的是 <iframe>（没有 loadURL），suspend 时判定还没出结果，都跳过。
-  useEffect(() => {
-    if (!inElectron || srcdoc || suspend || !guestReady) return;
-    const el = webviewRef.current;
-    if (!el || !url) return;
-    doLoad(url);
-  }, [url, guestReady, inElectron, srcdoc, suspend]);
-
-  if (!url && !srcdoc) return null;
-
-  return (
-    <div ref={wrapRef} className={`absolute inset-0 ${active ? "" : "hidden"}`}>
-      {/* srcdoc 必须走 <iframe> —— Electron 的 <webview> 没有 srcdoc，传了也
-       * 被忽略（guest 只会加载 about:blank）。srcdoc 在两种运行时都是 iframe，
-       * 所以快照模式在 Electron 下同样可用。 */}
-      {inElectron && !srcdoc ? (
-        React.createElement(
-          "webview",
-          {
-            ref: setWebviewRef,
-            src: initialSrcRef.current,
-            allowpopups: "true",
-            className: "w-full h-full border-0",
-          } as any,
-          null,
-        )
-      ) : (
-        <iframe
-          ref={setWebviewRef as any}
-          src={srcdoc || suspend ? undefined : url}
-          srcDoc={srcdoc || undefined}
-          onLoad={() => {
-            onLoadingRef.current(false);
-            // 选择模式：srcdoc iframe 继承父 origin，加载后注入选择脚本
-            if (pickMode && srcdoc) {
-              const doc = (webviewRef.current as any)?.contentDocument;
-              if (doc) injectPickScript(doc);
-            }
-          }}
-          className="w-full h-full border-0"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-        />
-      )}
-    </div>
-  );
-}
-
-/** 在 srcdoc iframe 的 document 里注入元素选择脚本：hover 高亮、点击选取、
- *  结果通过 parent.postMessage 回传给宿主页面。 */
-function injectPickScript(doc: Document) {
-  try {
-    // 防重复 append（父页面视角）。脚本内部的防重入用 __helixPickerListening。
-    if ((doc.defaultView as any)?.__helixPickerInstalled) return;
-    (doc.defaultView as any).__helixPickerInstalled = true;
-    const script = doc.createElement("script");
-    script.textContent = `
-      (function() {
-        // 注意：用独立的标志名 —— 父页面 injectPickScript 已设
-        // __helixPickerInstalled（防重复 append），脚本内部若检查同一个标志
-        // 会因已 true 而直接 return，事件监听器一个都不注册（hover 无高亮、
-        // 点击无响应）。这里用 __helixPickerListening 区分。
-        if (window.__helixPickerListening) return;
-        window.__helixPickerListening = true;
-        try { parent.postMessage({ type: 'HELIX_PICKER_READY' }, '*'); } catch (e) {}
-        var current = null;
-        document.addEventListener('mouseover', function(e) {
-          var el = e.target;
-          if (!el || el === current) return;
-          if (current && current.style) current.style.outline = '';
-          current = el;
-          if (el.style) { el.style.outline = '2px solid #f59e0b'; el.style.outlineOffset = '-2px'; }
-        }, true);
-        document.addEventListener('click', function(e) {
-          e.preventDefault(); e.stopPropagation();
-          var el = e.target;
-          if (!el) return;
-          if (current && current.style) current.style.outline = '';
-          var text = (el.innerText || el.textContent || '').trim().slice(0, 8000);
-          var html = (el.outerHTML || '').slice(0, 20000);
-          var href = '';
-          var src = '';
-          try {
-            href = el.href || el.getAttribute('href') || '';
-            src = el.src || el.getAttribute('src') || '';
-          } catch (err) {}
-          parent.postMessage({ type: 'HELIX_PICKED', info: {
-            tag: (el.tagName || '').toLowerCase(),
-            text: text,
-            html: html,
-            href: href,
-            src: src,
-            title: document.title || ''
-          } }, '*');
-        }, true);
-        document.addEventListener('keydown', function(e) {
-          if (e.key === 'Escape') {
-            if (current && current.style) current.style.outline = '';
-            parent.postMessage({ type: 'HELIX_PICKED_CANCEL' }, '*');
-          }
-        }, true);
-        document.body.style.cursor = 'crosshair';
-      })();
-    `;
-    (doc.head || doc.documentElement).appendChild(script);
-  } catch {
-    /* cross-origin guard — picker just won't attach */
-  }
 }

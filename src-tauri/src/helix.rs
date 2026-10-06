@@ -100,35 +100,11 @@ pub fn poll_browser_requests() -> Value {
             };
             // url is optional: navigate ops always carry one, but read/click/
             // type/press target the currently-open browser page (url omitted).
-            // The frontend resolves the active URL from its own store; when
-            // there is no open page it writes a descriptive error result.
+            // 每个 op（含 navigate）都由前端执行并回写结果。navigate 尤其要等真
+            // 页面落地才答：旧做法在这里写一个即时 ack，于是 open_browser 立刻
+            // "成功"、紧随其后的 read 读到的却是上一个页面。
             let url = v.get("url").and_then(Value::as_str).unwrap_or("");
-            let req_id = v
-                .get("reqId")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let op = v.get("op").and_then(Value::as_str).unwrap_or("navigate");
             let _ = app_handle().emit("helix:browser-request", &v);
-            // navigate has no execution payload of its own: it just points the
-            // real webview at `url`. Write an immediate result file so the pi
-            // extension's poll loop doesn't burn its full timeout waiting on a
-            // no-op; the frontend's navigate listener (helix:open-browser) is
-            // the source of truth for the actual webview navigation.
-            if op == "navigate" && !req_id.is_empty() {
-                let _ = browser_write_result(
-                    req_id.clone(),
-                    json!({ "ok": true, "navigated": url }),
-                );
-                // Back-compat: emit the legacy event so the sidebar-open path
-                // keeps working. `quiet: true` marks it as agent-triggered so
-                // the frontend navigates in place instead of yanking the
-                // sidebar open over whatever tab the user is reading.
-                let _ = app_handle().emit(
-                    "helix:open-browser",
-                    json!({ "url": url, "quiet": true }),
-                );
-            }
             let consumed = dir.join(format!("{}.consumed", name));
             let _ = std::fs::rename(&path, &consumed);
             opened.push(url.to_string());

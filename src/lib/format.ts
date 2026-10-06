@@ -59,6 +59,32 @@ export function formatDurationSeconds(seconds: number): string {
 }
 
 /**
+ * 缓存命中率的**唯一**计算口径，上下文环弹窗与设置里的用量面板共用（两处数字
+ * 必须同语义，否则同一个"命中率"在两个地方对不上）。
+ *
+ * 分母是 prompt 侧 `input + cacheRead + cacheWrite`：pi（以及 Anthropic 系）把
+ * `input` 报成**净**（未缓存）数，缓存命中/写入是另外两个字段。拿
+ * `cacheRead / (input + output)` 之类的写法会算出几百 percent —— 上下文环本身
+ * 就在 `pi_gateway.rs` 的 emit_usage 里踩过这个坑。
+ *
+ * `reported=false`：缓存两个字段全 0。这既可能是"供应商压根不上报缓存"（实测本机
+ * 22 个会话里 7 个恒 0），也可能是"真的没命中"，两者数字一样、无法区分，所以
+ * 调用方必须显示「未上报」而不是「0%」——后者是对一个没上报的供应商指控它缓存失效。
+ */
+export function promptCacheHit(counters: {
+  input?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+} | null | undefined): { reported: boolean; percent: number | null } {
+  const net = Math.max(0, counters?.input || 0);
+  const read = Math.max(0, counters?.cacheRead || 0);
+  const write = Math.max(0, counters?.cacheWrite || 0);
+  const promptTotal = net + read + write;
+  if (promptTotal <= 0) return { reported: false, percent: null };
+  return { reported: read + write > 0, percent: (read / promptTotal) * 100 };
+}
+
+/**
  * Truncate a potentially huge string (e.g. tool output / file content) to a
  * bounded length, keeping a head + tail window so the truncated result is still
  * useful for display. Used by addChatMessage / addExecutionStep to prevent

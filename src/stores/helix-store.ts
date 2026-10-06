@@ -50,8 +50,8 @@ import { normalizeAcpContent } from "@/lib/text-utils";
  * `strict` / `yolo` 是 pi-permission 扩展自己的档位名，
  * `default` / `accept_edits` / `dont_ask` 是磁盘上可能残留的 Helix 旧值
  * （Python serve-gateway 时代自造，pi 路径下从不生效）。
- * 扩展另有 `approve` 档，Helix 不提供也不认它（Rust 读路径已经把它归成
- * `auto` 才发过来）；这里再见到 `approve` 就按「认不出来」处理。
+ * 上游扩展另有 `approve` 档（本机补丁版已删，重装会回来），Helix 不提供也不认它
+ * （Rust 读路径已经把它归成 `auto` 才发过来）；这里再见到 `approve` 就按「认不出来」处理。
  *
  * 认不出来返回 `undefined` —— 表示「这次读到的东西不可信，保留上一次缓存」，
  * 绝不因为解析失败就把 UI 上的档位改掉（那会让显示与实际再度分裂）。
@@ -241,6 +241,11 @@ interface HelixState
     forceOpen?: boolean,
     quiet?: boolean,
   ) => void;
+  // 面板里那条「网页」页的 id —— pages 的唯一拥有者是 RightSidebar，它把这一个
+  // 事实投影出来给 agent 浏览器自动化用：read/click/type 必须打在用户正看着的
+  // 同一页上。没有浏览器页时为 null（自动化据此决定「建一页」还是报错）。
+  browserPageId: string | null;
+  setBrowserPageId: (id: string | null) => void;
   togglePreviewRail: () => void;
 
   // Monotonic counter bumped on every "新建浏览器页" request (the "更多操作 /
@@ -550,6 +555,18 @@ interface HelixState
         tool_count: number;
         schema_tokens: number;
       }>;
+      /**
+       * 本会话累计的计费侧 token 计数（后端 `context_breakdown` 的 `usage_stats`）。
+       * 与上面的 size/used **不是同一个轴**：那两个是「下一条 prompt 要重放多少」，
+       * 这五个是「这个会话历史上实际流过多少」，只用来算缓存命中率。
+       * `input` 是净（未缓存）数，缓存命中/写入另列 —— 口径见 `promptCacheHit`。
+       */
+      usageStats?: {
+        input: number;
+        output: number;
+        cacheRead: number;
+        cacheWrite: number;
+      };
     }
   >;
   setContextUsage: (
@@ -573,6 +590,12 @@ interface HelixState
      *  cache miss / in-turn compaction 时不单调，覆盖会把环来回跳。压缩是一个
      *  已知的确定性下降事件，不能被 max 拦住，否则环永远停在压缩前的高位。 */
     authoritative?: boolean,
+    usageStats?: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+    },
   ) => void;
   // Estimated tokens for in-flight requests (shows ~Xk while waiting for API response)
   estimatedTokens: Record<string, number>;
@@ -1552,6 +1575,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   previewRailUrl: null as string | null,
   previewRailNavSeq: 0,
   lastPreviewRailQuiet: false,
+  browserPageId: null as string | null,
+  setBrowserPageId: (id) => set({ browserPageId: id }),
   browserAddSeq: 0,
   gitChangeRevision: 0,
   browserHomeUrl: "",
@@ -2556,6 +2581,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     categories,
     toolsets,
     authoritative = false,
+    usageStats,
   ) => {
     set((s) => {
       const prev = s.contextUsage[sessionId];
@@ -2578,6 +2604,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           tool_count: number;
           schema_tokens: number;
         }>;
+        usageStats?: {
+          input: number;
+          output: number;
+          cacheRead: number;
+          cacheWrite: number;
+        };
       } = { size: nextSize, used: nextUsed };
       // Only a non-empty categories/toolsets array overrides the snapshot — an
       // empty array is a "backend couldn't produce a breakdown" marker, and
@@ -2587,6 +2619,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       else if (prev?.categories) next.categories = prev.categories;
       if (toolsets && toolsets.length > 0) next.toolsets = toolsets;
       else if (prev?.toolsets) next.toolsets = prev.toolsets;
+      // 缓存计数：给了就覆盖（它是累计值，单调性由后端保证），没给保留旧值 ——
+      // 流式 usage 事件不带这组数，不能让它把已捕获的命中率抹成空。
+      if (usageStats) next.usageStats = usageStats;
+      else if (prev?.usageStats) next.usageStats = prev.usageStats;
       return { contextUsage: { ...s.contextUsage, [sessionId]: next } };
     });
     // Persist immediately so a cold restart restores the latest usage snapshot

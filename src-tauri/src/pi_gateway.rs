@@ -2246,10 +2246,10 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // No project picked: the conversation must NOT inherit the last
             // used project (persisted workdir.json — the global work_dir).
             // That's how a brand-new chat landed in e.g. the LangGraph dir
-            // just because a previous conversation ran there. The scratch dir
-            // (`~/.pi/agent/scratch`, outside sessions/) is the neutral home;
-            // a warm spare (spawned in the global dir) is never claimed for
-            // such a conversation either.
+            // just because a previous conversation ran there. The no-project
+            // default dir (`~/.pi/agent/workspace/default`, outside
+            // sessions/) is the neutral home; a warm spare (spawned in the
+            // global dir) is never claimed for such a conversation either.
             let spawn_cwd = remote_cwd.clone().or_else(|| cwd.clone()).or_else(|| {
                 Some(
                     crate::state::pi_sessions_default_dir()
@@ -2728,7 +2728,7 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             // 所以这个 RPC 只在 cwd 能唯一圈定对话时才成立。
             //
             // 缺 cwd **必须拒绝**，绝不能回退到中立兜底目录
-            // (~/.pi/agent/scratch)：
+            // (~/.pi/agent/workspace/default)：
             // 有项目的对话 cwd 唯一、语义成立；而所有**无项目**的对话共用同一
             // 个兜底目录，那个共享桶里"行数最多"= "历史上最长的一条无关对话"。
             // 一旦回退过去，新建对话会认领别人的老会话、把自己的消息续写进去；

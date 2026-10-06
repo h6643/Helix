@@ -18,7 +18,6 @@ interface PanelPage {
   id: string;
   kind: PageKind;
   url: string;
-  title?: string;
 }
 
 // 挂在 globalThis 上：HMR 重新求值本模块时模块作用域的计数器会归零，
@@ -154,9 +153,25 @@ export function RightSidebar() {
     // 同批触发 tab effect + browserAddSeq effect，会各建一个 → 弹出两个浏览器。
     // 只激活已有页；diff 页仍由本 effect 新建（无其他创建入口）。
     if (kind === "browser") return;
+    if (kind === "byline") {
+      // 同批的 bylineFocusSignal effect 可能也在建 byline 页：互斥防两页签。
+      if (bylineCreationInFlightRef.current) return;
+      bylineCreationInFlightRef.current = true;
+      queueMicrotask(() => {
+        bylineCreationInFlightRef.current = false;
+      });
+    }
     const np: PanelPage = { id: newPageId(), kind, url: "" };
     activePageIdRef.current = np.id;
-    setPages((prev) => [...prev, np]);
+    setPages((prev) => {
+      const next = [...prev, np];
+      // 同提交内立即同步 ref：bylineFocusSignal effect 与 tab effect 可能同批
+      // 触发，若 ref 还是旧值它就会再建一个 byline 页 → 弹两个旁路面板。
+      // （浏览器页的同类竞态当初用「tab effect 不建页」修掉，byline 需要
+      // tab effect 建页来支持标题栏切换，故用同步 ref 消除竞态。）
+      pagesRef.current = next;
+      return next;
+    });
     setActivePageId(np.id);
   }, [tab]);
 
@@ -165,6 +180,13 @@ export function RightSidebar() {
   // 过时 tab 仍停在 "byline"，tab 不变就不会再建页，点入口看起来就没反应。
   const bylineFocusSignal = useHelixStore((s) => s.bylineFocusSignal);
   const lastBylineFocusRef = useRef(bylineFocusSignal);
+  // 同批次 tab effect 与 bylineFocusSignal effect 都可能想建 byline 页
+  // （「更多操作 → 旁路问答」= setTab + 递增 signal，同一批次触发两个 effect）。
+  // 旧实现靠 setPages 的 updater 里同步 pagesRef——但 updater 要到下一次 render
+  // 才执行，同批内第二个 effect 仍看到空列表 → 建两个 byline 页（两页签）。
+  // 这里用「批次内已建」互斥 ref：任一 effect 决定建页时同步置位，另一个跳过；
+  // 批次结束（微任务）复位，不影响下次打开。
+  const bylineCreationInFlightRef = useRef(false);
   useEffect(() => {
     const isIncrease = bylineFocusSignal > lastBylineFocusRef.current;
     lastBylineFocusRef.current = bylineFocusSignal;
@@ -174,9 +196,21 @@ export function RightSidebar() {
       activePageIdRef.current = existing.id;
       setActivePageId(existing.id);
     } else {
+      // 同批的 tab effect 已建 byline 页（flag 已置位）：不重复建，避免两页签。
+      if (bylineCreationInFlightRef.current) return;
+      bylineCreationInFlightRef.current = true;
+      queueMicrotask(() => {
+        bylineCreationInFlightRef.current = false;
+      });
       const np: PanelPage = { id: newPageId(), kind: "byline", url: "" };
       activePageIdRef.current = np.id;
-      setPages((prev) => [...prev, np]);
+      setPages((prev) => {
+        const next = [...prev, np];
+        // 与 tab effect 同批触发时，tab effect 建的 byline 页已同步进 ref，
+        // 这里 find 就能命中、不再重复建页（两个旁路面板的竞态）。
+        pagesRef.current = next;
+        return next;
+      });
       setActivePageId(np.id);
     }
     setTab("byline");
@@ -253,13 +287,6 @@ export function RightSidebar() {
   const updatePageUrl = (id: string, url: string) =>
     setPages((prev) => prev.map((p) => (p.id === id ? { ...p, url } : p)));
 
-  const updatePageTitle = (id: string, title: string) =>
-    setPages((prev) =>
-      prev.map((p) =>
-        p.id === id ? (p.title === title ? p : { ...p, title }) : p,
-      ),
-    );
-
   const closePage = (id: string) => {
     const idx = pages.findIndex((p) => p.id === id);
     if (idx === -1) return;
@@ -275,6 +302,25 @@ export function RightSidebar() {
       }
     }
   };
+
+  // 把「面板里那条网页页」投影到 store：agent 的浏览器工具用它找到要驱动的真窗口。
+  // 优先当前激活的 browser 页，否则退回标签条里第一条 browser 页 —— 用户切到「更改」
+  // 时那条窗口只是隐藏（DOM 还活着），操作照样有效。pages 的真相仍在这里。
+  const setBrowserPageId = useHelixStore((s) => s.setBrowserPageId);
+  useEffect(() => {
+    const active = pages.find((p) => p.id === activePageId);
+    const target =
+      active?.kind === "browser"
+        ? active
+        : pages.find((p) => p.kind === "browser");
+    setBrowserPageId(target?.id ?? null);
+  }, [pages, activePageId, setBrowserPageId]);
+
+  // 侧边栏卸载（或 HMR 重载）时清空：不能让自动化拿到一条已经销毁的窗口 id。
+  useEffect(
+    () => () => useHelixStore.getState().setBrowserPageId(null),
+    [],
+  );
 
   // Close one open file tab (from the header strip). Dirty tabs open the
   // unsaved-changes confirmation (handled inside CodeEditorPanel) instead of
@@ -397,7 +443,7 @@ export function RightSidebar() {
           {stripPages.map((p) => {
             const label =
               p.kind === "browser"
-                ? p.title || summarizeUrl(p.url) || "网页"
+                ? summarizeUrl(p.url) || "网页"
                 : p.kind === "agent"
                   ? activeAgentView?.name || "子 Agent"
                   : p.kind === "byline"
@@ -509,9 +555,9 @@ export function RightSidebar() {
               >
                 {p.kind === "browser" && (
                   <BrowserView
+                    pageId={p.id}
                     url={p.url}
                     onUrlChange={(u) => updatePageUrl(p.id, u)}
-                    onPageTitle={(t) => updatePageTitle(p.id, t)}
                   />
                 )}
                 {p.kind === "diff" && <DiffSidebarPanel />}

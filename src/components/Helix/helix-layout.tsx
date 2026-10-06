@@ -55,10 +55,7 @@ import { getCurrentVersion } from "@/hooks/use-check-update";
 import { useCheckUpdate } from "@/hooks/use-check-update";
 import { useGitChangeStat } from "@/hooks/use-git-change-stat";
 import { useRemoteTunnelReconcile } from "@/hooks/use-remote-tunnel-reconcile";
-import {
-  BrowserExecFrame,
-  useBrowserAutomation,
-} from "@/lib/browser-automation";
+import { useBrowserAutomation } from "@/lib/browser-automation";
 import {
   pushModelConfig,
   pushAgentConfigLive,
@@ -345,14 +342,12 @@ export function HelixLayout() {
   //
   // The same effect also wires the pi-extension browser automation protocol:
   // poll_browser_requests emits `helix:browser-request` with the full payload
-  // (op/url/reqId/params). navigate goes through the legacy open path (real
-  // webview); read/click/type/press run against a same-origin page snapshot
-  // (see lib/browser-automation.tsx) and the result is written back via the
-  // browser_write_result command so the pi tool can resolve.
-  const { enqueue: enqueueBrowserOp, frameHtml: browserExecHtml } =
-    useBrowserAutomation();
-  const enqueueBrowserOpRef = useRef(enqueueBrowserOp);
-  enqueueBrowserOpRef.current = enqueueBrowserOp;
+  // (op/url/reqId/params), and every op — navigate 包括在内 — is executed by
+  // lib/browser-automation.ts against the panel's real webview, which writes
+  // the result back via browser_write_result so the pi tool can resolve.
+  const { handleRequest: runBrowserRequest } = useBrowserAutomation();
+  const runBrowserRequestRef = useRef(runBrowserRequest);
+  runBrowserRequestRef.current = runBrowserRequest;
   useEffect(() => {
     const open = (url: string, quiet: boolean) => {
       if (!url) return;
@@ -407,54 +402,19 @@ export function HelixLayout() {
             );
           });
           // Automation requests from the pi extension (op + reqId + params).
-          // navigate is ALSO emitted as helix:open-browser by Rust (back-compat)
-          // and must not be double-processed here.
-          unlistenReq = await listen(
-            "helix:browser-request",
-            async (e: any) => {
-              const p: any = e.payload ?? {};
-              if (p.op === "navigate") return; // legacy event already opened it
-              const reqId = String(p.reqId ?? "");
-              if (!reqId) return;
-              // back/forward/refresh act on the real webview — dispatch through
-              // the open path so the panel's URL flow stays authoritative; the
-              // pi tool gets an immediate ack (no snapshot needed).
-              if (p.op === "back" || p.op === "forward" || p.op === "refresh") {
-                // The embedded <webview> exposes goBack/goForward/reload via the
-                // browser panel's own ref; from here the store-level equivalents
-                // are enough of an approximation for navigate-style ops.
-                const { electronApp } = await import("@/lib/electron-bridge");
-                electronApp.browserWriteResult?.(reqId, {
-                  ok: true,
-                  note: `${p.op} 已在当前浏览器页执行`,
-                });
-                return;
-              }
-              // read/click/type/press — snapshot executor. The op targets the
-              // CURRENT browser page when the request carries no url.
-              const snapshotUrl =
-                (typeof p.url === "string" && p.url) || undefined;
-              const activeUrl =
-                snapshotUrl ??
-                useHelixStore.getState().previewRailUrl ??
-                undefined;
-              if (!activeUrl) {
-                const { electronApp } = await import("@/lib/electron-bridge");
-                electronApp.browserWriteResult?.(reqId, {
-                  ok: false,
-                  error:
-                    "当前没有打开的浏览器页面——先用 open_browser / browser_navigate 打开一个 URL",
-                });
-                return;
-              }
-              enqueueBrowserOpRef.current({
-                op: p.op,
-                url: activeUrl,
-                reqId,
-                params: p.params ?? {},
-              });
-            },
-          );
+          // 所有 op 一视同仁丢给执行器：目标页面（面板里那条网页页）、导航等待、
+          // 结果回写都在它里面，这里不再按 op 分叉。
+          unlistenReq = await listen("helix:browser-request", (e: any) => {
+            const p: any = e.payload ?? {};
+            const reqId = String(p.reqId ?? "");
+            if (!reqId) return;
+            runBrowserRequestRef.current({
+              op: p.op,
+              url: typeof p.url === "string" ? p.url : undefined,
+              reqId,
+              params: p.params ?? {},
+            });
+          });
           // Poll the pi extension's browser request queue. The Rust command
           // emits helix:browser-request (full payload) and the legacy
           // helix:open-browser for navigate ops, which the listener above picks up.
@@ -2871,10 +2831,6 @@ export function HelixLayout() {
           <BootOverlay />
         </Suspense>
         <GlobalTooltip />
-        {/* Hidden same-origin snapshot iframe used by the pi browser tools
-            (browser_read/click/type/press) — mounted at the layout root so it
-            stays alive regardless of which side panel is open. */}
-        <BrowserExecFrame html={browserExecHtml} />
       </Suspense>
     </div>
   );

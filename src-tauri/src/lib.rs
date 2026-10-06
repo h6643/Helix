@@ -3,6 +3,7 @@
 mod app;
 mod approval_policy;
 mod background_tasks;
+mod browser_webview;
 mod config;
 mod delegations;
 mod fs;
@@ -269,7 +270,6 @@ pub fn run() {
             fs::snapshot_save,
             fs::snapshot_restore,
             fs::snapshot_discard,
-            fs::snapshot_list,
             // file-based skills (slash-command picker / skill panel)
             skills::helix_get_skills_dir,
             skills::helix_read_dir,
@@ -333,6 +333,12 @@ pub fn run() {
             // page fetch (browser pick-element) + iframe 嵌入能力探测
             page_fetch::page_fetch,
             page_fetch::page_frame_policy,
+            browser_webview::browser_webview_open,
+            browser_webview::browser_webview_set_rect,
+            browser_webview::browser_webview_navigate,
+            browser_webview::browser_webview_history,
+            browser_webview::browser_webview_eval,
+            browser_webview::browser_webview_close,
             // git
             git::status,
             git::diff,
@@ -360,7 +366,7 @@ pub fn run() {
             // app
             app::get_info,
             app::get_sessions_dir,
-            app::get_scratch_dir,
+            app::get_workspace_default_dir,
             app::get_status,
             app::helix_update,
             app::sync_work_dir,

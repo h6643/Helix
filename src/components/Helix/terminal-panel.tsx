@@ -25,7 +25,8 @@ function stripVerbatimPrefix(
 }
 
 // ── No-project terminal default ────────────────────────────────────────────
-// Fetched once from the backend (get_scratch_dir → ~/.pi/agent/scratch).
+// Fetched once from the backend (get_workspace_default_dir →
+// ~/.pi/agent/workspace/default).
 //
 // MUST match the gateway's own no-project spawn cwd (pi_gateway.rs's
 // `spawn_cwd` fallback → state::pi_sessions_default_dir). This used to derive
@@ -38,17 +39,25 @@ async function getNoProjectDefaultDir(): Promise<string> {
   if (_noProjectDefaultDir) return _noProjectDefaultDir;
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    const r = await invoke<{ scratchDir?: string }>("get_scratch_dir");
-    const dir = r?.scratchDir ? r.scratchDir.replace(/[/\\]$/, "") : "";
+    // 旧命令名 `get_scratch_dir` 保留一次兼容尝试（Rust 侧未重建时不至于出不了壳）。
+    const r = (await invoke<{ workspaceDefaultDir?: string }>(
+      "get_workspace_default_dir",
+    ).catch(() => invoke<{ scratchDir?: string }>("get_scratch_dir"))) as {
+      workspaceDefaultDir?: string;
+      scratchDir?: string;
+    };
+    const raw = r?.workspaceDefaultDir ?? r?.scratchDir ?? "";
+    const dir = raw ? raw.replace(/[/\\]$/, "") : "";
     if (dir) _noProjectDefaultDir = dir;
     return dir;
   } catch {
-    // No `get_scratch_dir` (Rust 侧还没重建 / 浏览器模式)。**不能返回 ""**：
-    // 调用方 `terminalCwd = activeSessionWorkDir ?? noProjectDefaultDir` 为空
-    // 就永远不会 start PTY（`if (!terminalCwd) return`），无项目对话的终端会
-    // 直接不出壳。退回旧的推导（sessions/default）—— 路径虽然不存在，但
-    // create_process 会忽略它、让 shell 落在进程 cwd，至少能用（与改动前
-    // 行为一致）。等 Rust 重建后自动走上面的正确路径。
+    // 无 `get_workspace_default_dir` / `get_scratch_dir`（Rust 侧还没重建 /
+    // 浏览器模式）。**不能返回 ""**：调用方 `terminalCwd =
+    // activeSessionWorkDir ?? noProjectDefaultDir` 为空就永远不会 start PTY
+    // （`if (!terminalCwd) return`），无项目对话的终端会直接不出壳。退回旧的
+    // 推导（sessions/default）—— 路径虽然不存在，但 create_process 会忽略
+    // 它、让 shell 落在进程 cwd，至少能用（与改动前行为一致）。等 Rust 重建
+    // 后自动走上面的正确路径。
     try {
       const { electronApp } = await import("@/lib/electron-bridge");
       const { sessionsDir } = await electronApp.getSessionsDir();
@@ -139,7 +148,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
   const { activeSessionWorkDir, isTerminalOpen } =
     useHelixStore();
   const conversationIsRemote = useConversationIsRemote();
-  // No-project conversations pin to ~/.pi/agent/scratch — the SAME dir the
+  // No-project conversations pin to ~/.pi/agent/workspace/default — the SAME dir the
   // gateway spawns their pi instance in. Resolved asynchronously from the
   // backend; falls back to null until loaded.
   const [noProjectDefaultDir, setNoProjectDefaultDir] = useState<string | null>(null);
