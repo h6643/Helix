@@ -16,6 +16,8 @@ import {
   Activity,
   Workflow,
   RefreshCw,
+  Brain,
+  Code2,
 } from "lucide-react";
 import React, {
   useState,
@@ -29,6 +31,8 @@ import { AppearanceSettingsPanel } from "./appearance-settings-panel";
 import { GeneralSettingsPanel } from "./general-settings-panel";
 import { HookSettings } from "./hook-settings";
 import { ImageModelSettings } from "./image-model-settings";
+import { MemorySettingsPanel } from "./memory-settings";
+import { CodemodeSettingsPanel } from "./codemode-settings";
 import { McpEditorForm, type McpFormData } from "./mcp-editor-form";
 import { PageHeader, PopupSelect, SettingGroup } from "./settings-ui";
 import { ShortcutsPage } from "./shortcuts-page";
@@ -98,7 +102,9 @@ type SettingsPage =
   | "hook"
   | "usage"
   | "help"
-  | "agents";
+  | "agents"
+  | "memory"
+  | "codemode";
 
 interface NavItem {
   id: SettingsPage;
@@ -127,6 +133,8 @@ const NAV_GROUPS: NavGroup[] = [
       { id: "mcp", label: "MCP", icon: Plug },
       { id: "usage", label: "用量", icon: Activity },
       { id: "agents", label: "子智能体", icon: Bot },
+      { id: "memory", label: "记忆", icon: Brain },
+      { id: "codemode", label: "Codemode", icon: Code2 },
     ],
   },
   {
@@ -2840,6 +2848,12 @@ export function ApiSettings({
 
       case "agents":
         return <AgentsSettings />;
+
+      case "memory":
+        return <MemorySettingsPanel />;
+
+      case "codemode":
+        return <CodemodeSettingsPanel />;
     }
   };
 

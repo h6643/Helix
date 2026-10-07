@@ -372,6 +372,75 @@ async function evalInPage<T>(
   }
 }
 
+// ── 真像素截图：browser_webview_screenshot → helix:browser-shot ─────────────────
+//
+// 和上面 eval 通道同一个形状（发出即返回、结果走事件、前端配对 reqId）。区别在值的
+// 载体：页面里的 canvas 拍不到外部样式表和图片（见 PAGE_SCRIPT 里 doScreenshot 的注释），
+// 而 WebView2 的 CapturePreview 拍的是合成后的位图 —— 工具栏那颗截图按钮要的是用户
+// 眼睛看到的那张图。
+
+/** 与 Rust `browser_webview::SHOT_EVENT` 一致。 */
+const SHOT_EVENT = "helix:browser-shot";
+
+const shotWaiters = new Map<
+  string,
+  (payload: { image?: string; error?: string }) => void
+>();
+let shotSeq = 0;
+let shotListener: Promise<void> | null = null;
+
+function ensureShotListener(): Promise<void> {
+  if (!shotListener) {
+    shotListener = listen<{ reqId?: string; image?: string; error?: string }>(
+      SHOT_EVENT,
+      (e) => {
+        const reqId = e.payload?.reqId;
+        if (!reqId) return;
+        const settle = shotWaiters.get(reqId);
+        if (!settle) return;
+        shotWaiters.delete(reqId);
+        settle(e.payload ?? {});
+      },
+    )
+      .then(() => undefined)
+      .catch((err) => {
+        shotListener = null;
+        throw err;
+      });
+  }
+  return shotListener;
+}
+
+/** 拍当前页的真像素，成功返回 PNG data URL，失败抛错（Rust 侧每一步失败都会回 error）。 */
+export async function capturePagePng(
+  page: string,
+  timeoutMs = OP_TIMEOUT_MS,
+): Promise<string> {
+  await ensureShotListener();
+  const reqId = `shot-${Date.now().toString(36)}-${++shotSeq}`;
+  const delivered = new Promise<{ image?: string; error?: string }>(
+    (resolve, reject) => {
+      shotWaiters.set(reqId, resolve);
+      invoke("browser_webview_screenshot", { page, reqId }).catch((e) => {
+        shotWaiters.delete(reqId);
+        reject(toErr(e));
+      });
+    },
+  );
+  try {
+    const r = await withTimeout(
+      delivered,
+      timeoutMs,
+      `网页截图超时（${Math.round(timeoutMs / 1000)}s）`,
+    );
+    if (r.error) throw new Error(r.error);
+    if (!r.image) throw new Error("截图没有返回图片");
+    return r.image;
+  } finally {
+    shotWaiters.delete(reqId);
+  }
+}
+
 interface Probe {
   url: string;
   title: string;

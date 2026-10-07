@@ -8,7 +8,6 @@ import {
   Zap,
   Copy,
   Check,
-  ChevronRight,
   ChevronDown,
   Search,
   Server,
@@ -81,6 +80,7 @@ import {
 import {
   processClipboardImage,
   canAddMoreImages,
+  dataUrlToBlob,
   blobToDataUrl,
   compressImage,
 } from "@/lib/image-utils";
@@ -597,12 +597,12 @@ export function ReasoningEffortControl({
 
 // ==== Main Component ============================================================================
 
-// ── 内存守卫：摘要化 + 截断 ──────────────────────────────────────────────
+// ── 内存守卫：单条截断 + 流式上限 ────────────────────────────────────────
 // 长期会话把完整历史（含工具输出/思考/steps）堆在渲染进程，normalized +
-// markdown + DOM 多份副本最终会顶爆 V8 堆。旧消息折叠为摘要、超长单条截断、流式缓冲设上限，把内存压成
-// 「近期限定」而不是「随时长无界增长」。持久化数据不受影响，搜索仍基于完整内容。
-const DISPLAY_LIMIT = 80; // 最近 N 条消息完整渲染
-const SUMMARY_CHUNK = 10; // 更早的消息每 N 条折叠为一个摘要块
+// markdown + DOM 多份副本最终会顶爆 V8 堆。超长单条截断、流式缓冲设上限，把内存
+// 压成「体量限定」。曾经还有一层「最近 80 条完整渲染、更早的折成摘要块」的折叠，
+// 已按他的要求删除：那会让上方历史变成「更早的 N 条消息」，他要看到原文。
+// 持久化数据从来是全量，搜索也基于完整内容。
 const MAX_MESSAGE_CHARS = 200_000; // 单条正文上限（超出截断显示）
 const MAX_REASONING_CHARS = 40_000;
 const MAX_STEP_CHARS = 60_000; // 单步工具输出上限
@@ -617,14 +617,6 @@ const TRUNC_MARK = "…[内容过长已截断]";
 const SEED_MARKER = "（系统注入：以下是本次会话恢复的先前对话记录";
 
 type DisplayItem =
-  | {
-      kind: "summary";
-      id: string;
-      count: number;
-      preview: string;
-      startTs?: number;
-      endTs?: number;
-    }
   | { kind: "message"; msg: ChatMessage }
   | { kind: "status"; id: string; text: string }
   | { kind: "compressing"; id: string; text: string }
@@ -715,59 +707,6 @@ function truncateMessage(m: ChatMessage): ChatMessage {
     return m;
   return { ...m, content: content ?? "", reasoning, steps, blocks };
 }
-
-function previewText(m: ChatMessage | undefined): string {
-  if (!m) return "";
-  const raw = stripEmoji(normalizeAcpContent(m.content || ""))
-    .replace(/\s+/g, " ")
-    .trim();
-  return raw
-    ? raw.slice(0, 240)
-    : m.role === "user"
-      ? "(空消息)"
-      : "(无正文输出)";
-}
-
-function summarizeChunk(messages: ChatMessage[]): string {
-  const first = previewText(messages[0]);
-  const last =
-    messages.length > 1 ? previewText(messages[messages.length - 1]) : null;
-  return (first + (last ? "\n\n…\n\n" + last : "")).slice(0, 800);
-}
-
-function SummarizedHistoryBlock({
-  count,
-  preview,
-  startTs,
-  endTs,
-}: {
-  count: number;
-  preview: string;
-  startTs?: number;
-  endTs?: number;
-}) {
-  const range =
-    startTs && endTs && startTs !== endTs
-      ? `（${new Date(startTs).toLocaleDateString()} ~ ${new Date(endTs).toLocaleDateString()}）`
-      : "";
-  return (
-    <details className="group/details">
-      <summary className="flex items-center gap-1.5 px-1 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/40 cursor-pointer hover:text-foreground/60 select-none list-none transition-colors">
-        <ChevronRight className="size-3 transition-transform group-open/details:rotate-90 shrink-0" />
-        <span>
-          {/* 措辞刻意避开「已压缩」：这只是**渲染窗口**之外的旧消息（DISPLAY_LIMIT
-              折叠），跟真正的上下文压缩（transcript 里那条「上下文已压缩」分隔线）
-              完全无关。旧措辞把两者混为一谈，用户会以为压缩把消息吃掉了。 */}
-          更早的 {count} 条消息{range}，点击展开预览
-        </span>
-      </summary>
-      <div className="pl-4 pr-2 ui-text-sm2 text-muted-foreground/45  leading-relaxed mb-2">
-        {preview}
-      </div>
-    </details>
-  );
-}
-
 
 // Memoized single-message row. While a reply streams in, the live content lives
 // in responseBlocks (local state) — committed messages keep stable references,
@@ -1275,13 +1214,13 @@ export function AgentFlowPanel() {
     }
   }, [streamingDrafts, chatMessages, bylineReplies, bylineFinalizeTick]);
 
-  // 渲染层摘要化：只完整渲染最近 DISPLAY_LIMIT 条，更早的折叠为摘要块；
-  // 超长单条截断显示。数组在 sessionMessages 变化时才重建，截断后的副本引用
-  // 保持稳定，TranscriptMessage 的 React.memo 不受影响。
+  // 渲染层：每条消息都完整渲染，只对超长单条做截断显示。数组在 sessionMessages
+  // 变化时才重建，截断后的副本引用保持稳定，TranscriptMessage 的 React.memo 不受
+  // 影响（已提交的消息引用不变，流式中的那条才需要重解析）。
   const displayMessages = useMemo<DisplayItem[]>(() => {
     const n = sessionMessages.length;
     const items: DisplayItem[] = [];
-    // 一条消息附带的改动卡（diff）——折叠区与渲染窗口共用，避免两处逻辑漂移。
+    // 一条消息附带的改动卡（diff）。
     const pushChanges = (i: number) => {
       const changes = sessionMessages[i].fileChanges?.length
         ? [...sessionMessages[i].fileChanges!]
@@ -1295,60 +1234,7 @@ export function AgentFlowPanel() {
         });
       }
     };
-    // 折叠区：**用户消息不折叠，始终完整渲染**。
-    //
-    // DISPLAY_LIMIT 是"按条数"的滑动窗口（recentStart = n - DISPLAY_LIMIT）：
-    // 每来一条新消息，窗口整体前移一条，最早那条可见消息立刻被摘要块吞掉。
-    // 一次 run 会产生 ~6 条 message（正文 + 各步工具/思考），窗口实际只覆盖
-    // 最近十来轮 —— 用户每发一条新消息，就约有**一条之前发过的输入**被推出
-    // 可见区，用户视角就是"我发一条，之前发的内容就自动少一条"
-    // （"用户发消息后，之前用户的输入就会自动消失"）。
-    //
-    // 内存守卫（见文件顶部说明）针对的是体量大的助手内容（工具输出 / 思考 /
-    // steps 的 normalized + markdown + DOM 多份副本）。用户消息是纯文本、体量
-    // 极小，不承担这个职责——把它们一起折叠没有任何内存收益，只有可见性损失。
-    // 所以按角色切分：用户消息无条件渲染（含 diff 卡），非用户消息按
-    // SUMMARY_CHUNK 成块折叠。
-    if (n > DISPLAY_LIMIT) {
-      const collapsed = n - DISPLAY_LIMIT;
-      // 连续的非用户消息攒成一个 pending 段，段内再按 SUMMARY_CHUNK 切块。
-      // 块 id 用块内首条消息的 id：折叠区只从尾部增长，同一段历史的成块结果
-      // 稳定，多次渲染能拿到稳定的 React key。
-      let pendingStart = -1;
-      const flushPending = (endExclusive: number) => {
-        if (pendingStart < 0) return;
-        for (let s = pendingStart; s < endExclusive; s += SUMMARY_CHUNK) {
-          const chunk = sessionMessages.slice(
-            s,
-            Math.min(s + SUMMARY_CHUNK, endExclusive),
-          );
-          items.push({
-            kind: "summary",
-            id: "summary-" + chunk[0].id,
-            count: chunk.length,
-            preview: summarizeChunk(chunk),
-            startTs: chunk[0]?.timestamp,
-            endTs: chunk[chunk.length - 1]?.timestamp,
-          });
-        }
-        pendingStart = -1;
-      };
-      for (let i = 0; i < collapsed; i++) {
-        if (sessionMessages[i].role === "user") {
-          flushPending(i);
-          items.push({
-            kind: "message",
-            msg: truncateMessage(sessionMessages[i]),
-          });
-          pushChanges(i);
-        } else if (pendingStart < 0) {
-          pendingStart = i;
-        }
-      }
-      flushPending(collapsed);
-    }
-    const recentStart = Math.max(0, n - DISPLAY_LIMIT);
-    for (let i = recentStart; i < n; i++) {
+    for (let i = 0; i < n; i++) {
       items.push({ kind: "message", msg: truncateMessage(sessionMessages[i]) });
       pushChanges(i);
     }
@@ -7978,6 +7864,46 @@ export function AgentFlowPanel() {
     [pendingImages, pendingFiles, persistPendingAttachments],
   );
 
+  // 右侧栏浏览器工具栏的「截图」在这里收件。拍图的一方只往 store 放一条一次性请求，
+  // 因为 `pendingImages` 的所有权在本组件 —— 粘贴、拖拽、截图三条路最后写的都是同一份
+  // state、同一条 persistPendingAttachments，只是加工入口不同。取走立刻清空，切回对话
+  // 不会重复插一张。
+  const composerImageRequest = useHelixStore((s) => s.composerImageRequest);
+  useEffect(() => {
+    if (!composerImageRequest) return;
+    const { dataUrl, name } = composerImageRequest;
+    storeActions.clearComposerImageRequest();
+    void (async () => {
+      if (!canAddMoreImages(pendingImages.length, 1)) {
+        storeActions.showToast({ type: "warning", title: `最多 5 张图片` });
+        return;
+      }
+      let att: ImageAttachment | null = null;
+      try {
+        att = await processClipboardImage(dataUrlToBlob(dataUrl));
+      } catch {
+        att = null;
+      }
+      if (!att) {
+        storeActions.showToast({
+          type: "error",
+          title: "截图无法加入输入框",
+          description: "回来的数据不是一张图",
+        });
+        return;
+      }
+      const next = [...pendingImages, { ...att, name }];
+      setPendingImages(next);
+      persistPendingAttachments(next, pendingFiles);
+    })();
+  }, [
+    composerImageRequest,
+    pendingImages,
+    pendingFiles,
+    persistPendingAttachments,
+    storeActions,
+  ]);
+
   // Turn a FileList (dropped or picked) into pending file attachments.
   const addFiles = useCallback(async (fileList: FileList | File[]) => {
     const files = Array.from(fileList);
@@ -9151,15 +9077,7 @@ export function AgentFlowPanel() {
                   Each row is memoized (TranscriptMessage) so streamed chunks
                   don't re-render the whole transcript. */}
               {displayMessages.map((item, index) =>
-                item.kind === "summary" ? (
-                  <SummarizedHistoryBlock
-                    key={item.id}
-                    count={item.count}
-                    preview={item.preview}
-                    startTs={item.startTs}
-                    endTs={item.endTs}
-                  />
-                ) : item.kind === "status" ? (
+                item.kind === "status" ? (
                   <div
                     key={item.id}
                     className="flex w-full items-center justify-center gap-1.5 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60"

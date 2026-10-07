@@ -28,7 +28,7 @@ export function cleanUrl(raw: string): string {
   return url;
 }
 
-/** 网页标题/标签页展示用摘要：file 协议取文件名，其余取 hostname。 */
+/** 网页页签展示用摘要：file 协议取文件名，其余取 hostname。 */
 export function summarizeUrl(url: string): string {
   if (!url) return "";
   try {
@@ -41,4 +41,29 @@ export function summarizeUrl(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** 地址栏输入先剥掉粘贴带来的 markdown 痕迹和尾部标点。 */
+function cleanInput(raw: string): string {
+  let t = raw.trim();
+  const linkMatch = t.match(/^\[[^\]]*\]\(([^)]+)\)$/);
+  if (linkMatch) t = linkMatch[1].trim();
+  t = t.replace(/^<([^>]+)>$/, "$1");
+  t = t.replace(/[*_`]/g, "");
+  t = t.replace(/[.,;:!?。，；！？)…'"\]}»>]+$/, "");
+  return t.trim();
+}
+
+/** 把用户敲进地址栏的东西变成可导航的绝对地址（缺协议时按域名/localhost 补）。 */
+export function normalizeUrl(raw: string): string {
+  const t = cleanInput(raw);
+  if (!t) return "";
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(t)) return t;
+  if (
+    t.startsWith("localhost") ||
+    /^\d{1,3}(\.\d{1,3}){3}/.test(t) ||
+    t.startsWith("[")
+  )
+    return `http://${t}`;
+  return `https://${t}`;
 }

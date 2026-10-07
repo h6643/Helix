@@ -503,6 +503,282 @@ pub fn helix_list_memories() -> Value {
     })
 }
 
+/// pi-hermes-memory 记忆概览（设置「记忆」页）：全局 + 各项目记忆文件数、
+/// 最近更新时间、启用开关。数据源 = pi-hermes-memory 存储（~/.pi/agent/
+/// pi-hermes-memory 与 projects-memory/），开关存 hermes-memory-config.json。
+#[tauri::command]
+pub fn helix_memory_overview(state: State<'_, Arc<AppState>>) -> Value {
+    let agent = crate::paths::pi_agent_dir();
+    let global_dir = agent.join("pi-hermes-memory");
+    let projects_dir = agent.join("projects-memory");
+
+    // 开关（键缺失默认开启）
+    let cfg: Value = std::fs::read_to_string(agent.join("hermes-memory-config.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(Value::Null);
+    let is_enabled = |k: &str| -> bool {
+        cfg.get(k).and_then(Value::as_bool).unwrap_or(true)
+    };
+
+    // 统计目录：顶层 .md 文件数 + 最近修改时间（unix 秒）。
+    // 隐藏文件（.recovery* / .retired*）与子目录（skills/）不计入「记忆文件」。
+    let stat = |dir: &std::path::Path| -> Value {
+        let mut files = 0u64;
+        let mut last = 0u64;
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !name.ends_with(".md") || name.starts_with('.') {
+                    continue;
+                }
+                if let Ok(md) = e.metadata() {
+                    if !md.is_file() {
+                        continue;
+                    }
+                    files += 1;
+                    if let Ok(t) = md.modified() {
+                        last = last.max(
+                            t.duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        );
+                    }
+                }
+            }
+        }
+        json!({ "file_count": files, "last_updated": last })
+    };
+
+    let mut projects = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&projects_dir) {
+        for e in rd.flatten() {
+            if let Ok(md) = e.metadata() {
+                if !md.is_dir() {
+                    continue;
+                }
+                let name = e.file_name().to_string_lossy().into_owned();
+                let mut p = stat(&e.path());
+                if let Some(obj) = p.as_object_mut() {
+                    obj.insert("name".into(), Value::String(name));
+                    obj.insert("enabled".into(), Value::Bool(is_enabled("projectMemoryEnabled")));
+                }
+                projects.push(p);
+            }
+        }
+    }
+    projects.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["name"].as_str().unwrap_or(""))
+    });
+
+    let current = state
+        .work_dir
+        .read()
+        .unwrap()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    json!({
+        "ok": true,
+        "global": {
+            "enabled": is_enabled("globalMemoryEnabled"),
+            "file_count": stat(&global_dir)["file_count"],
+            "last_updated": stat(&global_dir)["last_updated"],
+        },
+        "current_project": current,
+        "projects": projects,
+        "config_path": agent.join("hermes-memory-config.json").to_string_lossy(),
+    })
+}
+
+/// 记忆开关：`globalMemoryEnabled` / `projectMemoryEnabled` 写进
+/// hermes-memory-config.json（pi-hermes-memory 扩展同读这两个键）。
+#[tauri::command]
+pub fn helix_set_memory_enabled(scope: String, enabled: bool) -> Value {
+    let path = crate::paths::pi_agent_dir().join("hermes-memory-config.json");
+    let mut cfg: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| json!({}));
+    if !cfg.is_object() {
+        cfg = json!({});
+    }
+    let key = match scope.as_str() {
+        "project" => "projectMemoryEnabled",
+        _ => "globalMemoryEnabled",
+    };
+    if let Some(obj) = cfg.as_object_mut() {
+        obj.insert(key.into(), Value::Bool(enabled));
+    }
+    let body = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
+    match crate::config::atomic_write(&path, &format!("{body}\n")) {
+        Ok(()) => json!({ "ok": true, "scope": scope, "enabled": enabled }),
+        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+/// pi-hermes-memory 扩展的默认配置（与扩展 src/config.ts DEFAULT_CONFIG 对齐，
+/// 用于设置页展示未覆盖项的默认值；文件中的值优先）。
+fn default_memory_config() -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    // 枚举/字符串
+    m.insert("memoryPolicyStyle".into(), json!("full"));
+    m.insert("memoryOverflowStrategy".into(), json!("auto-consolidate"));
+    m.insert("sessionSearch".into(), json!({ "variant": "legacy" }));
+    // 数字
+    m.insert("memoryCharLimit".into(), json!(5000));
+    m.insert("userCharLimit".into(), json!(5000));
+    m.insert("projectCharLimit".into(), json!(5000));
+    m.insert("nudgeInterval".into(), json!(10));
+    m.insert("nudgeToolCalls".into(), json!(15));
+    m.insert("reviewRecentMessages".into(), json!(0));
+    m.insert("flushMinTurns".into(), json!(6));
+    m.insert("flushRecentMessages".into(), json!(0));
+    m.insert("failureInjectionMaxAgeDays".into(), json!(7));
+    m.insert("failureInjectionMaxEntries".into(), json!(5));
+    m.insert("sessionRetentionDays".into(), json!(0));
+    // 布尔
+    m.insert("reviewEnabled".into(), json!(true));
+    m.insert("flushOnCompact".into(), json!(true));
+    m.insert("flushOnShutdown".into(), json!(true));
+    m.insert("autoConsolidate".into(), json!(true));
+    m.insert("correctionDetection".into(), json!(true));
+    m.insert("failureInjectionEnabled".into(), json!(true));
+    m.insert("standingInstructionsEnabled".into(), json!(true));
+    m.insert("quickCheckOnOpen".into(), json!(true));
+    m
+}
+
+/// 读记忆扩展全量配置（默认值 + 文件覆盖），设置「记忆」页展示用。
+#[tauri::command]
+pub fn helix_memory_config() -> Value {
+    let path = crate::paths::pi_agent_dir().join("hermes-memory-config.json");
+    let file: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(Value::Null);
+    let mut cfg = default_memory_config();
+    if let Some(obj) = file.as_object() {
+        for (k, v) in obj {
+            cfg.insert(k.clone(), v.clone());
+        }
+    }
+    json!({ "ok": true, "config": Value::Object(cfg) })
+}
+
+/// 通用更新记忆扩展配置：逐键合并写回 hermes-memory-config.json（保留其它键）。
+#[tauri::command]
+pub fn helix_set_memory_config(updates: Value) -> Value {
+    let path = crate::paths::pi_agent_dir().join("hermes-memory-config.json");
+    let mut cfg: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| json!({}));
+    if !cfg.is_object() {
+        cfg = json!({});
+    }
+    if let Some(upd) = updates.as_object() {
+        if let Some(obj) = cfg.as_object_mut() {
+            for (k, v) in upd {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    let body = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
+    match crate::config::atomic_write(&path, &format!("{body}\n")) {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+/// Codemode 配置（读 pi settings.json）：`defaultTools` 是否含 codemode、
+/// `codemode.mode`（on/only）、`codemode.inlineBudget`。
+#[tauri::command]
+pub fn helix_codemode_config() -> Value {
+    let s = crate::config::read_pi_settings();
+    let default_tools: Vec<Value> = s
+        .get("defaultTools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let enabled = default_tools.iter().any(|t| {
+        t.as_str()
+            .map(|x| x == "codemode" || x == "+codemode")
+            .unwrap_or(false)
+    });
+    let cm = s.get("codemode").and_then(Value::as_object);
+    let mode = cm
+        .and_then(|o| o.get("mode"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "on".into());
+    let budget = cm
+        .and_then(|o| o.get("inlineBudget"))
+        .and_then(Value::as_i64)
+        .unwrap_or(3000);
+    json!({ "ok": true, "enabled": enabled, "mode": mode, "inlineBudget": budget })
+}
+
+/// 写 Codemode 配置：`enabled` 控制 defaultTools 里的 codemode 条目；
+/// `mode` / `inlineBudget` 写 codemode 对象。保留 settings.json 其它键。
+#[tauri::command]
+pub fn helix_set_codemode_config(updates: Value) -> Value {
+    let mut s = crate::config::read_pi_settings();
+    if !s.is_object() {
+        s = json!({});
+    }
+    let Some(upd) = updates.as_object() else {
+        return json!({ "ok": false, "error": "invalid updates" });
+    };
+    if let Some(enabled) = upd.get("enabled").and_then(Value::as_bool) {
+        let mut tools: Vec<Value> = s
+            .get("defaultTools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| {
+                t.as_str()
+                    .map(|x| x != "codemode" && x != "+codemode")
+                    .unwrap_or(true)
+            })
+            .collect();
+        if enabled {
+            tools.push(json!("+codemode"));
+        }
+        if let Some(obj) = s.as_object_mut() {
+            obj.insert("defaultTools".into(), json!(tools));
+        }
+    }
+    let mut cm: Value = s.get("codemode").cloned().unwrap_or_else(|| json!({}));
+    if !cm.is_object() {
+        cm = json!({});
+    }
+    if let Some(mode) = upd.get("mode").and_then(Value::as_str) {
+        if mode == "on" || mode == "only" {
+            if let Some(obj) = cm.as_object_mut() {
+                obj.insert("mode".into(), json!(mode));
+            }
+        }
+    }
+    if let Some(b) = upd.get("inlineBudget").and_then(Value::as_i64) {
+        if b >= 0 && b <= 40000 {
+            if let Some(obj) = cm.as_object_mut() {
+                obj.insert("inlineBudget".into(), json!(b));
+            }
+        }
+    }
+    if let Some(obj) = s.as_object_mut() {
+        obj.insert("codemode".into(), cm);
+    }
+    crate::config::write_pi_settings(&s);
+    json!({ "ok": true })
+}
+
 #[tauri::command]
 pub fn helix_add_memory_entry(target: String, text: String) -> Value {
     let dir = crate::memory::helix_memories_dir();

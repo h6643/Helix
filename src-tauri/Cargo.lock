@@ -1599,6 +1599,7 @@ dependencies = [
  "tokio",
  "urlencoding",
  "webkit2gtk",
+ "webview2-com",
  "which",
  "windows",
 ]

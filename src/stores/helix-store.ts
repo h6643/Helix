@@ -246,6 +246,14 @@ interface HelixState
   // 同一页上。没有浏览器页时为 null（自动化据此决定「建一页」还是报错）。
   browserPageId: string | null;
   setBrowserPageId: (id: string | null) => void;
+  // 「哪一条浏览器页正在选取元素」。工具栏并进页签条之后，画按钮的地方（右侧栏）
+  // 和干活的的地方（BrowserView 抓快照 + 注入选择脚本）不是同一个组件，所以这个
+  // 事实只存一份：按钮写 id，BrowserView 按 `id === 自己的 pageId` 派生选取态。
+  browserPickPageId: string | null;
+  setBrowserPickPageId: (id: string | null) => void;
+  // 同理：「哪一页正在加载」也是投影出来的事实，页签条上那个刷新图标读它。
+  browserLoadingPageId: string | null;
+  setBrowserLoadingPageId: (id: string | null) => void;
   togglePreviewRail: () => void;
 
   // Monotonic counter bumped on every "新建浏览器页" request (the "更多操作 /
@@ -253,6 +261,13 @@ interface HelixState
   // every click opens a NEW browser tab instead of reusing the existing one.
   browserAddSeq: number;
   requestAddBrowserPage: () => void;
+
+  // 浏览器工具栏「截图」拍好的 PNG，等聊天面板收件。拍照的一方在右侧栏，收图的一方
+  // 在聊天面板（`pendingImages` 的所有权在它那儿 —— 粘贴、拖拽写的都是那份 state），
+  // 所以这里只存一次性请求，面板取走后备空。不入持久化：重启后不该有张待收的图。
+  composerImageRequest: { dataUrl: string; name: string } | null;
+  requestComposerImage: (req: { dataUrl: string; name: string }) => void;
+  clearComposerImageRequest: () => void;
 
   // 「工作区的文件可能变了」的单调信号：agent 的 edit/write 登记成功、汇总卡片
   // 撤销、提交完成后递增。`useGitChangeStat` 订阅它，改动立刻进「更改」列表与
@@ -1577,7 +1592,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   lastPreviewRailQuiet: false,
   browserPageId: null as string | null,
   setBrowserPageId: (id) => set({ browserPageId: id }),
+  browserPickPageId: null,
+  setBrowserPickPageId: (id) => set({ browserPickPageId: id }),
+  browserLoadingPageId: null,
+  setBrowserLoadingPageId: (id) => set({ browserLoadingPageId: id }),
   browserAddSeq: 0,
+  composerImageRequest: null as { dataUrl: string; name: string } | null,
+  requestComposerImage: (req) => set({ composerImageRequest: req }),
+  clearComposerImageRequest: () => set({ composerImageRequest: null }),
   gitChangeRevision: 0,
   browserHomeUrl: "",
   rightSidebarTab: null,

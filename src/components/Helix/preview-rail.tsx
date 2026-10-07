@@ -3,21 +3,24 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  Camera,
   ChevronLeft,
   ChevronRight,
-  RotateCw,
   ExternalLink,
-  MousePointer2,
   Globe,
+  MousePointer2,
+  RotateCw,
 } from "lucide-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { capturePagePng } from "@/lib/browser-automation";
 import { electronShell } from "@/lib/electron-bridge";
 import { isTauri } from "@/lib/tauri-bridge";
-import { cleanUrl } from "@/lib/url-utils";
+import { cleanUrl, normalizeUrl, summarizeUrl } from "@/lib/url-utils";
 import { useHelixStore } from "@/stores/helix-store";
 
-/** 面板矩形 → 子窗口边界的采样间隔。几何真相在 DOM，这里只做脏检查后推送。 */
-const SYNC_INTERVAL_MS = 120;
+/** 面板矩形 → 子窗口边界的采样间隔。几何真相在 DOM，这里只做脏检查后推送。
+ *  60ms：拖侧栏宽度/改窗口大小时子窗口最多落后一个周期，太大会看出「橡皮筋」。 */
+const SYNC_INTERVAL_MS = 60;
 
 /** 遮挡采样的内缩距离：贴边的点会打到相邻元素的边界上。 */
 const OCCLUDE_INSET = 4;
@@ -34,45 +37,14 @@ const OCCLUDE_INSET = 4;
  * 必须让它让路 —— 遮挡判定见 isOccluded，DOM 几何是可见性的唯一真相。
  */
 
-function cleanInput(raw: string): string {
-  let t = raw.trim();
-  const linkMatch = t.match(/^\[[^\]]*\]\(([^)]+)\)$/);
-  if (linkMatch) t = linkMatch[1].trim();
-  t = t.replace(/^<([^>]+)>$/, "$1");
-  t = t.replace(/[*_`]/g, "");
-  t = t.replace(/[.,;:!?。，；！？)…'"\]}»>]+$/, "");
-  return t.trim();
-}
-
-function normalizeUrl(raw: string): string {
-  const t = cleanInput(raw);
-  if (!t) return "";
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(t)) return t;
-  if (
-    t.startsWith("localhost") ||
-    /^\d{1,3}(\.\d{1,3}){3}/.test(t) ||
-    t.startsWith("[")
-  )
-    return `http://${t}`;
-  return `https://${t}`;
-}
-
-function summarizeUrl(url: string): string {
-  if (!url) return "";
-  try {
-    const u = new URL(url);
-    if (u.protocol === "file:") {
-      const name = decodeURIComponent(u.pathname).split("/").pop();
-      return name || url;
-    }
-    return u.hostname || url;
-  } catch {
-    return url;
-  }
-}
-
-/** 面板是否被 Helix 自己的浮层（模态、下拉、命令面板、tooltip）盖住。取五点：
- *  命中元素只要有一个不属于本面板，就说明上面还压着别的东西，子窗口必须让路。 */
+/** 面板是否被 Helix 自己的浮层（模态、下拉、命令面板、tooltip）盖住。两层判定：
+ *
+ *  1. 五点采样（中心 + 四角）：抓大浮层 —— 全屏遮罩、大面积弹窗必压中其中一点。
+ *  2. body 直属 fixed 浮层扫描：抓「小浮层压大面板」—— 加号菜单、toast 只有
+ *     一两百像素宽，挂在角落，五个采样点全落在它外面 → 漏判 → 原生子窗口压住
+ *     菜单。这些浮层（菜单/toast/命令面板）一律 portal 到 body 且 position:fixed，
+ *     只要矩形与面板相交就让路。z 阈值 50：菜单 z-[200]、toast z-[60]、命令面板
+ *     z-[310] 都在之上；更低的都是面板内局部元素，不经过 body。 */
 function isOccluded(el: HTMLElement, r: DOMRect): boolean {
   const points: Array<[number, number]> = [
     [r.left + r.width / 2, r.top + r.height / 2],
@@ -81,10 +53,29 @@ function isOccluded(el: HTMLElement, r: DOMRect): boolean {
     [r.left + OCCLUDE_INSET, r.bottom - OCCLUDE_INSET],
     [r.right - OCCLUDE_INSET, r.bottom - OCCLUDE_INSET],
   ];
-  return points.some(([x, y]) => {
+  const pointHit = points.some(([x, y]) => {
     const top = document.elementFromPoint(x, y);
     return !top || !el.contains(top);
   });
+  if (pointHit) return true;
+  for (const node of document.body.children) {
+    if (!(node instanceof HTMLElement) || el.contains(node)) continue;
+    const s = getComputedStyle(node);
+    if (s.position !== "fixed" || s.pointerEvents === "none") continue;
+    const z = Number(s.zIndex);
+    if (!Number.isFinite(z) || z < 50) continue;
+    const cr = node.getBoundingClientRect();
+    if (cr.width < 1 || cr.height < 1) continue;
+    if (
+      cr.left < r.right &&
+      cr.right > r.left &&
+      cr.top < r.bottom &&
+      cr.bottom > r.top
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const PICK_SCRIPT = `
@@ -150,6 +141,191 @@ function injectPickScript(doc: Document) {
   }
 }
 
+/** 工具栏上的后退/前进/刷新打的就是这一页的原生子窗口。 */
+function browserHistory(pageId: string, dir: "back" | "forward" | "reload") {
+  return invoke("browser_webview_history", { page: pageId, dir });
+}
+
+const CTRL_BTN =
+  "shrink-0 p-1.5 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 transition-colors";
+
+/**
+ * 浏览器工具栏（右侧栏的第二行）。
+ *
+ * 只有一条：右侧栏为**当前激活的网页页**渲染它，而不是每页各挂一条 —— 页签是
+ * keep-alive 的，每页一条会把这一行叠成一堆。因此它和真正干活的 BrowserView 不是
+ * 父子关系，「这一页在加载 / 在选取」都从 store 按 pageId 派生。
+ *
+ * 地址栏是常驻输入框（不再点一下才展开成胶囊）：没聚焦时显示页面当前 URL，聚焦后
+ * 草稿接管，失焦即丢弃 —— 否则页面自己跳转（nav 事件回写 url）会把用户正在敲的
+ * 半个地址吃掉。
+ */
+export function BrowserToolbar({
+  pageId,
+  url,
+  onUrlChange,
+}: {
+  pageId: string;
+  url: string;
+  onUrlChange: (url: string) => void;
+}) {
+  const native = isTauri();
+  const loading = useHelixStore((s) => s.browserLoadingPageId === pageId);
+  const picking = useHelixStore((s) => s.browserPickPageId === pageId);
+  // null = 没有草稿，显示页面真实 URL。
+  const [draft, setDraft] = useState<string | null>(null);
+  const [shooting, setShooting] = useState(false);
+
+  const go = (dir: "back" | "forward" | "reload") => {
+    if (!native) return;
+    void browserHistory(pageId, dir).catch((e: any) =>
+      useHelixStore.getState().showToast({
+        type: "error",
+        title: dir === "reload" ? "刷新失败" : "翻页失败",
+        description: String(e?.message ?? e ?? ""),
+      }),
+    );
+  };
+
+  const commit = (raw: string) => {
+    const st = useHelixStore.getState();
+    st.setBrowserPickPageId(null);
+    const u = cleanUrl(normalizeUrl(raw));
+    if (!u) return;
+    // 地址没变 → 受控 url 不变，BrowserView 的 effect 不会重新导航，用户按回车要的
+    // 就是「再来一次」，所以走刷新。
+    if (u === url) go("reload");
+    else onUrlChange(u);
+  };
+
+  const togglePick = () => {
+    const st = useHelixStore.getState();
+    if (!url) {
+      st.showToast({
+        type: "info",
+        title: "没有可选取的页面",
+        description: "先在地址栏输入网址，加载后再选取元素",
+      });
+      return;
+    }
+    st.setBrowserPickPageId(st.browserPickPageId === pageId ? null : pageId);
+  };
+
+  // 截图 = WebView2 拍真像素（不是页面里画 canvas，那样拍不到外部样式和图片），
+  // 拍完只把 PNG 交给 store 的一次性请求，收件方是聊天面板的输入框：pendingImages
+  // 的所有权在那儿，这里不越界去改别人的 state。
+  const shoot = async () => {
+    const st = useHelixStore.getState();
+    if (!url) {
+      st.showToast({
+        type: "info",
+        title: "没有可截图的页面",
+        description: "先在地址栏输入网址，加载后再截图",
+      });
+      return;
+    }
+    setShooting(true);
+    try {
+      const dataUrl = await capturePagePng(pageId);
+      const host = summarizeUrl(url) || "page";
+      st.requestComposerImage({
+        dataUrl,
+        name: `screenshot-${host}.png`,
+      });
+      st.showToast({
+        type: "success",
+        title: "已截取网页",
+        description: "图片已放进聊天输入框，可以直接问 Agent",
+      });
+    } catch (e: any) {
+      st.showToast({
+        type: "error",
+        title: "截图失败",
+        description: String(e?.message ?? e ?? "未知错误"),
+      });
+    } finally {
+      setShooting(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1 px-2 py-1.5 shrink-0 border-b border-border/20">
+      <button
+        onClick={() => go("back")}
+        disabled={!native}
+        className={`${CTRL_BTN} disabled:opacity-30 disabled:hover:bg-transparent`}
+        data-tip="后退"
+      >
+        <ChevronLeft className="size-4" />
+      </button>
+      <button
+        onClick={() => go("forward")}
+        disabled={!native}
+        className={`${CTRL_BTN} disabled:opacity-30 disabled:hover:bg-transparent`}
+        data-tip="前进"
+      >
+        <ChevronRight className="size-4" />
+      </button>
+      <button
+        onClick={() => go("reload")}
+        disabled={!native}
+        className={`${CTRL_BTN} disabled:opacity-30 disabled:hover:bg-transparent`}
+        data-tip="刷新"
+      >
+        <RotateCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+      </button>
+      <div className="flex-1 min-w-0 flex items-center gap-1.5 px-2 py-1 rounded-full border border-border/40 bg-muted/30 focus-within:border-primary/60 focus-within:bg-muted/50 transition-colors">
+        <Globe className="size-3 shrink-0 text-muted-foreground/70" />
+        <input
+          value={draft ?? url}
+          onFocus={(e) => setDraft(e.currentTarget.value)}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => setDraft(null)}
+          onKeyDown={(e) => {
+            // 不让按键继续冒泡：全局快捷键会把这里当成命令面板/搜索的触发点。
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              commit(e.currentTarget.value);
+              setDraft(null);
+              e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+              setDraft(null);
+              e.currentTarget.blur();
+            }
+          }}
+          spellCheck={false}
+          placeholder="输入网址，例如 localhost:3000"
+          className="flex-1 min-w-0 bg-transparent text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground placeholder:text-muted-foreground/50 outline-none"
+        />
+      </div>
+      <button
+        onClick={() => void shoot()}
+        disabled={!native || shooting}
+        className={`${CTRL_BTN} disabled:opacity-40`}
+        data-tip={shooting ? "正在截图…" : "截图，加入聊天输入框"}
+      >
+        <Camera className={`size-3.5 ${shooting ? "animate-pulse" : ""}`} />
+      </button>
+      <button
+        onClick={togglePick}
+        className={`${CTRL_BTN} ${picking ? "text-primary bg-primary/10" : ""}`}
+        data-tip={url ? "选取网页元素加入聊天" : "请先打开网页再选取元素"}
+      >
+        <MousePointer2 className="size-3.5" />
+      </button>
+      <button
+        onClick={() => {
+          if (url) void electronShell.open(url);
+        }}
+        className={CTRL_BTN}
+        data-tip="在外部浏览器中打开"
+      >
+        <ExternalLink className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
 export function BrowserView({
   pageId,
   url,
@@ -172,50 +348,68 @@ export function BrowserView({
   // 子窗口当前真正停在哪个 URL。地址栏回读时靠它区分「这页自己跳的」和「外部把新
   // 链接塞给了这一页」：前者绝不能再 navigate 一次，否则每次导航都变成重新加载。
   const appliedRef = useRef("");
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const contentRef = useRef<HTMLDivElement | null>(null);
 
   const onUrlChangeRef = useRef(onUrlChange);
   onUrlChangeRef.current = onUrlChange;
 
+  // 「这一页正在加载」同样投影进 store：刷新图标在工具栏那一行，和这个组件不是同一
+  // 个渲染树，各存一份布尔值会不同步。
+  const setBusy = useCallback(
+    (busy: boolean) =>
+      useHelixStore.getState().setBrowserLoadingPageId(busy ? pageId : null),
+    [pageId],
+  );
+
   // ── "选取元素加入聊天" ─────────────────────────────────────────────────
   // 真页面在另一条原生窗口里，宿主拿不到它的 DOM，所以选取仍然走 page_fetch 快照 +
   // 同源 <iframe srcdoc>：继承父 origin，注入选择脚本，parent.postMessage 回传。
   // 代价是选取看到的仍是静态快照；好处是快照页没有脚本状态，选到的就是服务端 HTML 里
   // 的东西。进入选取时子窗口会hide（几何同步里判 pickMode）。
-  const [pickMode, setPickMode] = useState(false);
+  //
+  // 「哪一页在选取 / 在加载」存在 store 里而不是本地 state：工具栏是右侧栏为**当前
+  // 激活的那条网页页**单独渲染的一行，和干活的 BrowserView 不是父子组件，两边各存
+  // 一份布尔值就会出现「按钮亮着、页面没进选取」。这里只按 `id === 自己` 派生。
+  const pickMode = useHelixStore((s) => s.browserPickPageId === pageId);
   const [pickSrcDoc, setPickSrcDoc] = useState<string | null>(null);
   const [pickError, setPickError] = useState("");
   const pickErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pickedCountRef = useRef(0);
   const [pickedCount, setPickedCount] = useState(0);
 
-  const exitPick = () => {
-    setPickMode(false);
-    setPickSrcDoc(null);
-    setPickedCount(0);
-    pickedCountRef.current = 0;
-  };
-
-  const enterPick = async () => {
-    if (!loaded) return;
-    setPickError("");
-    setPickMode(true);
-    try {
-      const res = (await invoke("page_fetch", { url: loaded })) as
-        | { html?: unknown }
-        | null
-        | undefined;
-      if (!res || typeof res.html !== "string") throw new Error("fetch failed");
-      setPickSrcDoc(res.html);
-    } catch (e: any) {
-      exitPick();
-      setPickError(`无法载入页面进行选取：${e?.message || e || "未知错误"}`);
-      if (pickErrorTimer.current) clearTimeout(pickErrorTimer.current);
-      pickErrorTimer.current = setTimeout(() => setPickError(""), 5000);
+  // 这一个 effect 拥有「进入/退出选取时这一页该是什么样」：退出就清掉快照与计数，
+  // 进入就抓快照（抓不到则直接退出选取，而不是留一个空白页给用户点）。
+  useEffect(() => {
+    if (!pickMode) {
+      setPickSrcDoc(null);
+      setPickedCount(0);
+      pickedCountRef.current = 0;
+      return;
     }
-  };
+    let cancelled = false;
+    setPickError("");
+    void (async () => {
+      try {
+        const res = (await invoke("page_fetch", { url: loadedRef.current })) as
+          { html?: unknown } | null | undefined;
+        if (!res || typeof res.html !== "string")
+          throw new Error("fetch failed");
+        if (!cancelled) setPickSrcDoc(res.html);
+      } catch (e: any) {
+        if (cancelled) return;
+        useHelixStore.getState().setBrowserPickPageId(null);
+        setPickError(`无法载入页面进行选取：${e?.message || e || "未知错误"}`);
+        if (pickErrorTimer.current) clearTimeout(pickErrorTimer.current);
+        pickErrorTimer.current = setTimeout(() => setPickError(""), 5000);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pickMode]);
+
+  const exitPick = () => useHelixStore.getState().setBrowserPickPageId(null);
 
   /** 让页面去这个 URL：子窗口已存在则复用（后端内部就是 navigate）。 */
   const applyUrl = useCallback(
@@ -225,14 +419,14 @@ export function BrowserView({
       setLoaded(u);
       if (!u) return;
       if (native) {
-        setLoading(true);
+        setBusy(true);
         void call("browser_webview_open", { url: u }).catch((e: any) => {
-          setLoading(false);
+          setBusy(false);
           setError(String(e?.message ?? e ?? "无法打开浏览器视图"));
         });
       }
     },
-    [native, call],
+    [native, call, setBusy],
   );
 
   // 受控 `url` 变化（点消息里的链接、切换页面）→ 加载。
@@ -267,10 +461,13 @@ export function BrowserView({
         h: r.height,
         dpr,
         visible,
-      }).catch(() => {
+      }).catch((e: unknown) => {
         // 窗口此刻还不存在（open 的 IPC 还在路上）或已被关掉：不要把这次意图当成
         // 已经落地，否则脏检查键会永远停在「已同步」，子窗口留在屏幕外不显示。
         lastKey = "";
+        setError(
+          `浏览器视图对齐失败：${String((e as { message?: string })?.message ?? e)}`,
+        );
       });
     };
     push();
@@ -297,10 +494,10 @@ export function BrowserView({
         const d = e.payload;
         if (!d || d.page !== pageId) return;
         if (d.started) {
-          setLoading(true);
+          setBusy(true);
           return;
         }
-        setLoading(false);
+        setBusy(false);
         setError("");
         appliedRef.current = d.url;
         loadedRef.current = d.url;
@@ -315,7 +512,7 @@ export function BrowserView({
       disposed = true;
       unlisten?.();
     };
-  }, [native, pageId]);
+  }, [native, pageId, setBusy]);
 
   // 接收选取结果 → 注入聊天输入框 → 保持选取模式，可以连续点选。
   useEffect(() => {
@@ -360,123 +557,19 @@ export function BrowserView({
     return () => window.removeEventListener("keydown", onKey);
   }, [pickMode]);
 
-  const goHistory = (dir: "back" | "forward" | "reload") => {
-    if (!native) return;
-    void call("browser_webview_history", { dir }).catch((e: any) =>
-      setError(String(e?.message ?? e ?? "操作失败")),
-    );
-  };
-
-  const commitUrl = (raw?: string) => {
-    const u = cleanUrl(normalizeUrl((raw ?? "").trim()));
-    if (!u) return;
-    // 地址栏导航 → 必须退出选取模式（否则看到的还是 srcdoc 快照那页，新链接不会加载）。
-    exitPick();
-    setError("");
-    applyUrl(u);
-  };
-
-  const [editingUrl, setEditingUrl] = useState(false);
-  const [urlDraft, setUrlDraft] = useState("");
-  const startUrlEdit = () => {
-    exitPick();
-    setUrlDraft(loaded);
-    setEditingUrl(true);
-  };
-  const submitUrlEdit = () => {
-    commitUrl(urlDraft);
-    setEditingUrl(false);
-  };
-
   return (
-    <div className="flex-1 min-h-0 flex flex-col bg-background/50">
-      {/* Navigation toolbar */}
-      <div className="flex items-center gap-1 px-2.5 py-1.5 border-b border-border/20 shrink-0 bg-background/50">
-        <button
-          onClick={() => goHistory("back")}
-          disabled={!native}
-          className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-          data-tip={native ? "后退" : "内嵌浏览器视图不可用"}
-        >
-          <ChevronLeft className="size-4" />
-        </button>
-        <button
-          onClick={() => goHistory("forward")}
-          disabled={!native}
-          className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-          data-tip={native ? "前进" : "内嵌浏览器视图不可用"}
-        >
-          <ChevronRight className="size-4" />
-        </button>
-        <button
-          onClick={() => goHistory("reload")}
-          disabled={!native}
-          className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 disabled:opacity-30 disabled:hover:bg-transparent transition-colors"
-          data-tip="刷新"
-        >
-          <RotateCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
-        </button>
-        <div className="flex-1 min-w-0 px-2">
-          {editingUrl ? (
-            <input
-              autoFocus
-              value={urlDraft}
-              onChange={(e) => setUrlDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitUrlEdit();
-                if (e.key === "Escape") setEditingUrl(false);
-              }}
-              onBlur={submitUrlEdit}
-              spellCheck={false}
-              className="w-full px-2 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] bg-muted/40 border border-border/50 rounded-md text-foreground outline-none text-center"
-            />
-          ) : (
-            <button
-              onClick={startUrlEdit}
-              className="w-full flex items-center justify-center gap-1.5 px-2 py-1 text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground/80 bg-muted/30 border border-border/40 rounded-md hover:bg-muted/50 hover:border-border/60 hover:text-foreground transition-colors"
-              data-tip={loaded}
-            >
-              <Globe className="size-3 text-muted-foreground/70 shrink-0" />
-              <span className="truncate">{summarizeUrl(loaded)}</span>
-            </button>
-          )}
-        </div>
-        {/* 选取元素加入聊天（放在地址栏右侧，远离刷新/后退，避免误触） */}
-        <button
-          onClick={() => {
-            if (!loaded) {
-              useHelixStore.getState().showToast({
-                type: "info",
-                title: "没有可选取的页面",
-                description: "请先在地址栏输入网址，加载后再选取元素",
-              });
-              return;
-            }
-            pickMode ? exitPick() : enterPick();
-          }}
-          className={`p-1 rounded transition-colors ${pickMode ? "text-primary bg-primary/10" : "text-foreground/60 hover:text-foreground hover:bg-accent/60"}`}
-          data-tip={loaded ? "选取网页元素加入聊天" : "请先打开网页再选取元素"}
-        >
-          <MousePointer2 className="size-3.5" />
-        </button>
-        <button
-          onClick={() => {
-            if (loaded) void electronShell.open(loaded);
-          }}
-          className="p-1 rounded text-foreground/60 hover:text-foreground hover:bg-accent/60 transition-colors"
-          data-tip="在外部浏览器中打开"
-        >
-          <ExternalLink className="size-3.5" />
-        </button>
-      </div>
-
+    <div className="flex-1 min-h-0 flex flex-col">
       {/* Content：原生子窗口精确盖在这块矩形上，所以这里的 DOM 只在窗口让路时才看得见 */}
-      <div ref={contentRef} className="flex-1 min-h-0 bg-background/50 relative">
+      {/* 这里**不涂背景**：侧栏的可见底色只由面板根 `.helix-sidebar-right` 提供
+          （全局背景图激活时它是 88% 蒙罩）。以前涂 bg-card 会在那块玻璃上贴出一
+          块实色，子窗口一让位就看见「网页区比上面几条工具条更白」。 */}
+      <div ref={contentRef} className="flex-1 min-h-0 relative">
         {pickMode ? (
           <iframe
             srcDoc={pickSrcDoc ?? undefined}
             onLoad={(e) => {
-              const doc = (e.currentTarget as HTMLIFrameElement).contentDocument;
+              const doc = (e.currentTarget as HTMLIFrameElement)
+                .contentDocument;
               if (doc) injectPickScript(doc);
             }}
             className="w-full h-full border-0"
@@ -491,7 +584,6 @@ export function BrowserView({
         ) : (
           <iframe
             src={loaded || undefined}
-            onLoad={() => setLoading(false)}
             className="w-full h-full border-0"
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
           />

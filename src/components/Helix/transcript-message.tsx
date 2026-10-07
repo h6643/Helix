@@ -17,6 +17,7 @@ import {
   Copy,
   GitFork,
   FileText,
+  Undo2,
 } from "lucide-react";
 import {
   normalizeAcpContent,
@@ -1201,6 +1202,15 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
           </div>
           {/* Action buttons below user message */}
           <div className="flex justify-end items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pt-0.5">
+            {onUndo && (
+              <button
+                onClick={() => onUndo()}
+                className="p-1 rounded-lg text-muted-foreground/40 hover:text-amber-500 hover:bg-amber-500/10 transition-colors"
+                data-tip="撤回本轮对话"
+              >
+                <Undo2 className="size-3" />
+              </button>
+            )}
             <CopyButton text={content} />
           </div>
         </div>

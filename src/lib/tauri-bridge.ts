@@ -335,6 +335,16 @@ function buildTauriAPI(): ElectronAPI {
       invoke("helix_add_memory_entry", { target, text }),
     removeMemoryEntry: (target: "memory" | "user", text: string) =>
       invoke("helix_remove_memory_entry", { target, text }),
+    // pi-hermes-memory 概览 + 开关（设置「记忆」页）
+    memoryOverview: () => invoke("helix_memory_overview"),
+    setMemoryEnabled: (scope: "global" | "project", enabled: boolean) =>
+      invoke("helix_set_memory_enabled", { scope, enabled }),
+    memoryConfig: () => invoke("helix_memory_config"),
+    setMemoryConfig: (updates: Record<string, unknown>) =>
+      invoke("helix_set_memory_config", { updates }),
+    codemodeConfig: () => invoke("helix_codemode_config"),
+    setCodemodeConfig: (updates: Record<string, unknown>) =>
+      invoke("helix_set_codemode_config", { updates }),
     setConfigKeyValue: (params: unknown) =>
       invoke("helix_set_config_key_value", { params }),
     approvalRespond: (params: unknown) =>

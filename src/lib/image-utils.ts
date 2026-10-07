@@ -103,6 +103,20 @@ export function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+/**
+ * `blobToDataUrl` 的逆操作：把 Rust 回传的 data URL 变回 Blob，好让浏览器截图走
+ * 粘贴那一条同样的加工管线（类型校验 / 压缩 / 尺寸）。用 atob 而不是
+ * `fetch(dataUrl)` —— 后者要过页面的 CSP connect-src。
+ */
+export function dataUrlToBlob(dataUrl: string): Blob {
+  const comma = dataUrl.indexOf(",");
+  const meta = dataUrl.slice(5, comma); // 去掉 "data:"，取 ";base64" 前的 MIME
+  const bin = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: meta.split(";")[0] || "image/png" });
+}
+
 export function canAddMoreImages(
   currentCount: number,
   newCount: number,

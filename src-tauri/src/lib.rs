@@ -211,11 +211,18 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            use tauri::{Emitter, WindowEvent};
+            use tauri::{Emitter, Manager, WindowEvent};
             match event {
                 WindowEvent::Resized(_) => {
                     let maximized = window.is_maximized().unwrap_or(false);
                     let _ = window.emit("window:maximized-changed", maximized);
+                }
+                // owned 子窗口（内置浏览器）在 Windows 上不跟 owner 移动，
+                // 拖主窗时用缓存的 CSS 矩形 + 新原点把它们拖回来。
+                WindowEvent::Moved(_) => {
+                    if window.label() == "main" {
+                        crate::browser_webview::reflow_on_main_moved(window.app_handle());
+                    }
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     // Minimize to tray instead of closing.
@@ -252,6 +259,12 @@ pub fn run() {
             helix::helix_list_memories,
             helix::helix_add_memory_entry,
             helix::helix_remove_memory_entry,
+            helix::helix_memory_overview,
+            helix::helix_set_memory_enabled,
+            helix::helix_memory_config,
+            helix::helix_set_memory_config,
+            helix::helix_codemode_config,
+            helix::helix_set_codemode_config,
             // Memory status
             // Personality management
             // Plugin installation
@@ -338,6 +351,7 @@ pub fn run() {
             browser_webview::browser_webview_navigate,
             browser_webview::browser_webview_history,
             browser_webview::browser_webview_eval,
+            browser_webview::browser_webview_screenshot,
             browser_webview::browser_webview_close,
             // git
             git::status,

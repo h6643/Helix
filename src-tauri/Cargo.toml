@@ -71,10 +71,21 @@ windows = { version = "0.61", features = [
     "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_System_Com",
+    # CreateStreamOnHGlobal（截图的内存流承接处）在 Com 的子模块 StructuredStorage 里，
+    # 是一个单独的 feature，只开 Win32_System_Com 不会带进来。
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_IO",
     "Win32_Storage_FileSystem",
     "Win32_Security",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+# WebView2 的 COM 绑定，浏览器截图要用 `ICoreWebView2::CapturePreview`。
+# 版本必须跟 tauri 2.11 声明的 "0.38" 一致：cargo 会统一成同一份，`PlatformWebview::
+# controller()` 返回的 ICoreWebView2Controller 才 cast 得进我们手上的类型；装上两个
+# 版本就是两套同名 COM 包装 struct，接口指针互不认。
+webview2-com = "0.38"
 
 # Linux-only: renderer HTTP proxy via the WebKitGTK default WebContext
 # (WebsiteDataManager.set_network_proxy_settings). Gated so the crate never

@@ -348,6 +348,39 @@ export interface ElectronAPI {
       target: "memory" | "user",
       text: string,
     ) => Promise<{ ok: boolean; entries?: string[] }>;
+    // pi-hermes-memory 概览 + 开关（设置「记忆」页）
+    memoryOverview: () => Promise<{
+      ok: boolean;
+      global: { enabled: boolean; file_count: number; last_updated: number };
+      current_project: string;
+      projects: {
+        name: string;
+        enabled: boolean;
+        file_count: number;
+        last_updated: number;
+      }[];
+      config_path?: string;
+    }>;
+    setMemoryEnabled: (
+      scope: "global" | "project",
+      enabled: boolean,
+    ) => Promise<{ ok: boolean; scope: string; enabled: boolean; error?: string }>;
+    memoryConfig: () => Promise<{ ok: boolean; config: Record<string, unknown> }>;
+    setMemoryConfig: (
+      updates: Record<string, unknown>,
+    ) => Promise<{ ok: boolean; error?: string }>;
+    // Codemode（pi settings.json 的 defaultTools + codemode 块）
+    codemodeConfig: () => Promise<{
+      ok: boolean;
+      enabled: boolean;
+      mode: "on" | "only";
+      inlineBudget: number;
+    }>;
+    setCodemodeConfig: (updates: {
+      enabled?: boolean;
+      mode?: "on" | "only";
+      inlineBudget?: number;
+    }) => Promise<{ ok: boolean; error?: string }>;
     // Subagent global settings (config.yaml `subagents:` block, read/write;
     // mirrored into the pi-subagents extension's settings.json on save).
     listSubagentSettings: () => Promise<{

@@ -1,16 +1,15 @@
 "use client";
 
-import { Globe, Plus, X, Maximize2, Minimize2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Globe, Maximize2, Minimize2, Plus, X } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { AgentWorkPanel } from "./agent-work-panel";
 import { BylinePanel } from "./byline-panel";
 import { CodeEditorPanel } from "./code-editor-panel";
 import { DiffSidebarPanel } from "./diff-sidebar-panel";
 import { MoreActionsMenu } from "./more-actions-menu";
-import { BrowserView } from "./preview-rail";
-import { cleanUrl } from "@/lib/url-utils";
-import { summarizeUrl } from "@/lib/url-utils";
+import { BrowserToolbar, BrowserView } from "./preview-rail";
+import { cleanUrl, summarizeUrl } from "@/lib/url-utils";
 import { useHelixStore } from "@/stores/helix-store";
 
 type PageKind = "browser" | "code" | "diff" | "agent" | "byline";
@@ -31,15 +30,59 @@ const newPageId = () => {
   return `pg-${++g.__helixPageSeq}`;
 };
 
+/** 一条页签的视觉。两级页签（面板行 / 条目行）共用它，包括「✕ 只在 hover 或激活时
+ *  露出来」这条热区规则。 */
+function TabChip({
+  label,
+  tip,
+  icon,
+  active,
+  onClick,
+  onClose,
+}: {
+  label: string;
+  tip?: string;
+  icon?: ReactNode;
+  active: boolean;
+  onClick: () => void;
+  onClose?: () => void;
+}) {
+  return (
+    <div
+      onClick={onClick}
+      data-tip={tip ?? label}
+      className={`group relative flex items-center gap-1.5 pl-3 pr-4 py-1.5 flex-1 min-w-0 max-w-[200px] rounded-t-md overflow-hidden cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] border-b-2 transition-colors ${active ? "bg-primary/10 border-primary text-foreground" : "bg-muted/40 border-transparent text-foreground/60 hover:bg-accent/50"}`}
+    >
+      {icon}
+      <span className="flex-1 min-w-0 truncate">{label}</span>
+      {onClose && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onClose();
+          }}
+          data-tip="关闭"
+          className={`absolute right-0.5 top-1/2 -translate-y-1/2 rounded p-0.5 transition-opacity ${active ? "opacity-60 hover:opacity-100 hover:text-destructive hover:bg-destructive/10" : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10"}`}
+        >
+          <X className="size-3" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** 面板行的固定顺序（也是「有哪几面」这一行的读法）。 */
+const PANEL_ORDER: PageKind[] = ["browser", "diff", "agent", "byline", "code"];
+
 /**
- * Right-hand sidebar as a tabbed workspace. The single header tab strip holds:
- *  - browser pages  → one BrowserView (one URL) each
- *  - the diff page  → the git diff view
- *  - every open code file → its own tab (the in-editor per-file tab bar was
- *    removed to avoid a duplicate "file name" row; the editor just shows the
- *    active file now).
- * All tabs can be switched / closed independently; the "+" menu creates a new
- * page (browser / diff / terminal).
+ * Right-hand sidebar as a two-level tabbed workspace. Three bands, top down:
+ *  1. panel tabs — one per kind that is open (浏览器 / 更改 / 子 Agent / 旁路问答 /
+ *     代码), plus the panel-level actions at the row's right end.
+ *  2. the browser toolbar — only when the 浏览器 panel is the active one.
+ *  3. item tabs — the contents *of* the active panel: one per browser page, or
+ *     one per open code file. Panels that hold a single item skip this band.
+ * Tabs in band 1 close a single-item panel outright; closing a browser page or
+ * a file goes through band 3. The "+" menu creates a new page (browser / diff).
  */
 export function RightSidebar() {
   const tab = useHelixStore((s) => s.rightSidebarTab);
@@ -281,7 +324,6 @@ export function RightSidebar() {
     pendingActivateRef.current = null;
     activePageIdRef.current = id;
     setActivePageId(id);
-     
   }, [pages]);
 
   const updatePageUrl = (id: string, url: string) =>
@@ -344,7 +386,6 @@ export function RightSidebar() {
     setPages((prev) => [...prev, np]);
     activePageIdRef.current = np.id;
     setActivePageId(np.id);
-     
   }, [browserAddSeq]);
 
   // Close the whole code view (empty-state "关闭编辑器" button).
@@ -426,99 +467,135 @@ export function RightSidebar() {
     return <div ref={sidebarRef} className="h-full w-full" />;
   }
 
-  // The header strip holds browser/diff pages PLUS every open code file.
-  const stripPages = pages.filter((p) => p.kind !== "code");
+  // 两级页签：第 1 行说「有哪几面」（每种面板一个页签），第 3 行说「这一面里有几条
+  // 内容」（浏览器面 = 每条网页页，代码面 = 每个打开的文件）。只有一个条目的面板
+  // （更改 / 子 Agent / 旁路问答）不产生第 3 行。
   const codeViewActive = !pages.some((p) => p.id === activePageId);
+  const activePage = pages.find((p) => p.id === activePageId);
+  const activeKind: PageKind = codeViewActive
+    ? "code"
+    : (activePage?.kind ?? "code");
+  // 工具栏只有一条，打在「正看着的那条网页页」上；不在网页面时整行隐藏。
+  const browserTab = activePage?.kind === "browser" ? activePage : undefined;
+  const browserPages = pages.filter((p) => p.kind === "browser");
+  const panelKinds = PANEL_ORDER.filter((k) =>
+    k === "code" ? editorTabs.length > 0 : pages.some((p) => p.kind === k),
+  );
+  const showPageStrip = activeKind === "browser" && browserPages.length > 0;
+  const showFileStrip = activeKind === "code" && editorTabs.length > 0;
+  const kindLabel = (k: PageKind) =>
+    k === "browser"
+      ? "浏览器"
+      : k === "diff"
+        ? "更改"
+        : k === "agent"
+          ? activeAgentView?.name || "子 Agent"
+          : k === "byline"
+            ? "旁路问答"
+            : "代码";
+  const openKind = (k: PageKind) => {
+    if (k === "code") {
+      setActivePageId("");
+      return;
+    }
+    const target = pages.find((p) => p.kind === k);
+    if (target) setActivePageId(target.id);
+  };
 
   return (
     <div
       ref={sidebarRef}
       className="h-full w-full flex flex-col overflow-hidden"
     >
-      {/* Unified tab strip: browser / diff pages AND every open file share ONE
-          row (the editor's own per-file tab bar was removed so the file name is
-          never shown twice). Tabs compress / truncate as more are added. */}
-      {(stripPages.length > 0 || editorTabs.length > 0) && (
-        <div className="flex items-end gap-0.5 px-1 mt-10 h-9 shrink-0 border-b border-border/20 bg-card">
-          {stripPages.map((p) => {
-            const label =
-              p.kind === "browser"
-                ? summarizeUrl(p.url) || "网页"
-                : p.kind === "agent"
-                  ? activeAgentView?.name || "子 Agent"
-                  : p.kind === "byline"
-                    ? "旁路问答"
-                    : "更改";
-            const active = p.id === activePageId;
-            return (
-              <div
-                key={p.id}
-                onClick={() => setActivePageId(p.id)}
-                data-tip={label}
-                className={`group relative flex items-center gap-1.5 pl-3 pr-4 py-1.5 flex-1 min-w-0 max-w-[200px] rounded-t-md overflow-hidden cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] border-b-2 transition-colors ${active ? "bg-primary/10 border-primary text-foreground" : "bg-muted/40 border-transparent text-foreground/60 hover:bg-accent/50"}`}
-              >
-                {p.kind === "browser" && (
-                  <Globe className="size-3.5 shrink-0 opacity-60" />
-                )}
-                <span className="flex-1 min-w-0 truncate">{label}</span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closePage(p.id);
-                  }}
-                  data-tip="关闭"
-                  className={`absolute right-0.5 top-1/2 -translate-y-1/2 rounded p-0.5 transition-opacity ${active ? "opacity-60 hover:opacity-100 hover:text-destructive hover:bg-destructive/10" : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10"}`}
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
-            );
-          })}
-          {editorTabs.map((t) => {
-            const active = t.id === activeEditorTabId && codeViewActive;
-            return (
-              <div
-                key={t.id}
-                onClick={() => {
-                  useHelixStore.getState().setActiveEditorTab(t.id);
-                  setActivePageId("");
-                }}
-                data-tip={t.path}
-                className={`group relative flex items-center gap-1.5 pl-3 pr-4 py-1.5 flex-1 min-w-0 max-w-[200px] rounded-t-md overflow-hidden cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] border-b-2 transition-colors ${active ? "bg-primary/10 border-primary text-foreground" : "bg-muted/40 border-transparent text-foreground/60 hover:bg-accent/50"}`}
-              >
-                <span className="flex-1 min-w-0 truncate">{t.name}</span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeCodeTab(t.id);
-                  }}
-                  data-tip="关闭"
-                  className={`absolute right-0.5 top-1/2 -translate-y-1/2 rounded p-0.5 transition-opacity ${active ? "opacity-60 hover:opacity-100 hover:text-destructive hover:bg-destructive/10" : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10"}`}
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
-            );
-          })}
+      {/* 三条带（他给的图）：
+          1. 面板页签行 —— 「有哪几面」，行尾钉面板级操作（＋ 更多、⛶ 展开全屏）。
+             顶部 mt-10 是给窗口拖拽区留的空隙，只有最上面这行需要它。
+          2. 浏览器工具栏 —— 只在浏览器面激活时出现（后退/前进/刷新 + 常驻地址输入框
+             + 选取元素 + 外部打开），由 preview-rail 的 BrowserToolbar 渲染。
+          3. 条目页签行 —— 当前这一面里的内容：每条网页页 / 每个打开的文件。 */}
+      <div className="flex items-end gap-0.5 px-1 mt-10 h-9 shrink-0 border-b border-border/20">
+        {panelKinds.map((k) => (
+          <TabChip
+            key={k}
+            label={kindLabel(k)}
+            icon={
+              k === "browser" ? (
+                <Globe className="size-3.5 shrink-0 opacity-60" />
+              ) : undefined
+            }
+            active={k === activeKind}
+            onClick={() => openKind(k)}
+            onClose={
+              // 单条目面板：关这个页签就是关这一面。浏览器 / 代码的关闭走第 3 行，
+              // 在这里放 ✕ 会让人以为点一下会关掉所有网页页。
+              k === "diff" || k === "agent" || k === "byline"
+                ? () => {
+                    const target = pages.find((p) => p.kind === k);
+                    if (target) closePage(target.id);
+                  }
+                : undefined
+            }
+          />
+        ))}
+        {/* `self-center` 是必需的：整行按页签的视觉基线走 items-end（下划线要贴住
+            行底），按钮跟着沉底会歪。 */}
+        <div className="ml-auto self-center flex items-center gap-0.5 shrink-0 pr-1">
           <button
             ref={titlePlusRef}
             onClick={() => setPlusMenuOpen((v) => !v)}
-            className="ml-0.5 mb-0.5 p-1.5 rounded text-foreground/50 hover:text-foreground hover:bg-accent/50 transition-colors shrink-0 self-end"
+            className="p-1.5 rounded text-foreground/50 hover:text-foreground hover:bg-accent/50 transition-colors shrink-0"
             data-tip="更多操作"
           >
-            <Plus className="size-3.5" />
+            <Plus className="size-4" />
           </button>
           <button
             onClick={() => toggleCodeFullscreen()}
-            className={`mb-0.5 p-1.5 rounded transition-colors shrink-0 self-end ${codeFullscreen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/50"}`}
+            className={`p-1.5 rounded transition-colors shrink-0 ${codeFullscreen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/50"}`}
             data-tip={codeFullscreen ? "退出全屏" : "展开全屏"}
           >
             {codeFullscreen ? (
-              <Minimize2 className="size-3.5" />
+              <Minimize2 className="size-4" />
             ) : (
-              <Maximize2 className="size-3.5" />
+              <Maximize2 className="size-4" />
             )}
           </button>
+        </div>
+      </div>
+
+      {browserTab && (
+        <BrowserToolbar
+          pageId={browserTab.id}
+          url={browserTab.url}
+          onUrlChange={(u) => updatePageUrl(browserTab.id, u)}
+        />
+      )}
+
+      {(showPageStrip || showFileStrip) && (
+        <div className="flex items-end gap-0.5 px-1 h-9 shrink-0 border-b border-border/20">
+          {showPageStrip &&
+            browserPages.map((p) => (
+              <TabChip
+                key={p.id}
+                label={summarizeUrl(p.url) || "新标签页"}
+                tip={p.url || "新标签页"}
+                active={p.id === activePageId}
+                onClick={() => setActivePageId(p.id)}
+                onClose={() => closePage(p.id)}
+              />
+            ))}
+          {showFileStrip &&
+            editorTabs.map((t) => (
+              <TabChip
+                key={t.id}
+                label={t.name}
+                tip={t.path}
+                active={t.id === activeEditorTabId}
+                onClick={() =>
+                  useHelixStore.getState().setActiveEditorTab(t.id)
+                }
+                onClose={() => closeCodeTab(t.id)}
+              />
+            ))}
         </div>
       )}
 
@@ -546,25 +623,25 @@ export function RightSidebar() {
             return pages.map((p, i) => {
               const isActive = i === activeIdx;
               return (
-              <div
-                key={p.id}
-                className={
-                  isActive ? "flex-1 min-h-0 min-w-0 flex flex-col" : "hidden"
-                }
-                style={isActive ? undefined : { display: "none" }}
-              >
-                {p.kind === "browser" && (
-                  <BrowserView
-                    pageId={p.id}
-                    url={p.url}
-                    onUrlChange={(u) => updatePageUrl(p.id, u)}
-                  />
-                )}
-                {p.kind === "diff" && <DiffSidebarPanel />}
-                {p.kind === "agent" && <AgentWorkPanel />}
-                {p.kind === "byline" && <BylinePanel />}
-              </div>
-            );
+                <div
+                  key={p.id}
+                  className={
+                    isActive ? "flex-1 min-h-0 min-w-0 flex flex-col" : "hidden"
+                  }
+                  style={isActive ? undefined : { display: "none" }}
+                >
+                  {p.kind === "browser" && (
+                    <BrowserView
+                      pageId={p.id}
+                      url={p.url}
+                      onUrlChange={(u) => updatePageUrl(p.id, u)}
+                    />
+                  )}
+                  {p.kind === "diff" && <DiffSidebarPanel />}
+                  {p.kind === "agent" && <AgentWorkPanel />}
+                  {p.kind === "byline" && <BylinePanel />}
+                </div>
+              );
             });
           })()}
           {editorTabs.length > 0 && codeViewActive && (

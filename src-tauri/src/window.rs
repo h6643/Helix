@@ -40,8 +40,11 @@ pub fn toggle_devtools(window: Window) {
     }
 }
 
+/// **必须 `async`**：建窗要把任务丢给主线程事件循环再等 channel 回话，而同步命令
+/// 就跑在这条线程上 —— 自己等自己，整个应用冻死。见 browser_webview.rs 里同一条
+/// 约束的说明。
 #[tauri::command]
-pub fn new_window() {
+pub async fn new_window() {
     let handle = app_handle();
     let _ = tauri::WebviewWindowBuilder::new(
         handle,
