@@ -5,7 +5,9 @@ version = "0.1.17"
 description = "Helix — AI coding assistant (Tauri rewrite of the Electron shell)"
 authors = ["hyt"]
 edition = "2021"
-rust-version = "1.77"
+# tauri 2.11.5 自身声明 rustc ≥1.77.2，这里对齐（1.77 会让 MSRV 感知解析器
+# 拒绝任何稳定的 plugin-updater 版本）。
+rust-version = "1.77.2"
 
 [lib]
 name = "helix_lib"
@@ -18,7 +20,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["devtools", "tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+# `~2.3` 是硬上限不是保守写法：2.4+ 要求 tauri ≥2.12，而 2.12 把 webview2-com
+# 从 0.38 升到 0.39，与下面钉死的 0.38 组成双版本依赖图，
+# browser_webview.rs 的 ICoreWebView2 系 COM 类型随即失配（E0308）。
+# 升级这支前先读 Cargo.toml 里 webview2-com 段落的注释。
+tauri-plugin-notification = "~2.3"
 tauri-plugin-single-instance = "2"
+# `~2.12` 同理是硬上限：2.13+ 要求 rustc ≥1.90；2.12（rustc 1.77.2、tauri ^2.10）
+# 是与现锁定 tauri 2.11.5 匹配的最后一条兼容线。
+tauri-plugin-updater = "~2.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 dirs = "6"

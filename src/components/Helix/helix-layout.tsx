@@ -44,6 +44,7 @@ import { createPortal } from "react-dom";
 import { AgentFlowPanel } from "./agent-flow-panel";
 import { BackgroundTasksPanel, type BgTask } from "./background-tasks-panel";
 import { BranchPicker } from "./branch-picker";
+import { preheatChannelsCenter } from "./channels-center-state";
 import { CommandPalette } from "./command-palette";
 import { ContextMenuProvider } from "./context-menu";
 import { GlobalTooltip } from "./global-tooltip";
@@ -53,6 +54,7 @@ import { Sidebar } from "./sidebar";
 import { ToastContainer } from "./toast-container";
 import { getCurrentVersion } from "@/hooks/use-check-update";
 import { useCheckUpdate } from "@/hooks/use-check-update";
+import { checkHelixAppUpdate, installHelixAppUpdate } from "@/lib/app-update";
 import { useGitChangeStat } from "@/hooks/use-git-change-stat";
 import { useRemoteTunnelReconcile } from "@/hooks/use-remote-tunnel-reconcile";
 import { useBrowserAutomation } from "@/lib/browser-automation";
@@ -114,6 +116,11 @@ const ScheduledTasksPanel = lazy(() =>
 );
 const CustomizePanel = lazy(() =>
   import("./customize-panel").then((m) => ({ default: m.CustomizePanel })),
+);
+const ChannelsCenterPanel = lazy(() =>
+  import("./channels-center-panel").then((m) => ({
+    default: m.ChannelsCenterPanel,
+  })),
 );
 const RuntimePanel = lazy(() =>
   import("./runtime-panel").then((m) => ({ default: m.RuntimePanel })),
@@ -280,6 +287,13 @@ interface WindowMenuItem {
 
 export function HelixLayout() {
   useCheckUpdate();
+  // 渠道中心预热：启动后先在后台跑一次 /connect status（一次性 pi 进程，
+  // 十余秒），打开面板时直接有数据，不再现场等待。延迟与更新检查同款，
+  // 让首屏与网关启动先走完；模块内有一次性的 preheated 守卫。
+  useEffect(() => {
+    const timer = window.setTimeout(preheatChannelsCenter, 5000);
+    return () => window.clearTimeout(timer);
+  }, []);
   const [showSidebar, setShowSidebar] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
@@ -557,6 +571,7 @@ export function HelixLayout() {
     (s) => s.showScheduledTasksPanel,
   );
   const showCustomizePanel = useHelixStore((s) => s.showCustomizePanel);
+  const showChannelsCenter = useHelixStore((s) => s.showChannelsCenter);
   const showRuntimePanel = useHelixStore((s) => s.showRuntimePanel);
   const showWorktreePanel = useHelixStore((s) => s.showWorktreePanel);
   const showSubAgentPanel = useHelixStore((s) => s.showSubAgentPanel);
@@ -1261,9 +1276,16 @@ export function HelixLayout() {
       }
       if (stopped) return;
       if (connected) {
+        const wasReady = useHelixStore.getState().gatewayStatus === "ready";
         useGatewayStore.getState().setHelixConnected(true);
         useGatewayStore.getState().setHelixError(null);
         useHelixStore.getState().setGatewayStatus("ready");
+        // 网关（重新）就绪时刷新 pi 渠道模型清单（pi-connect 的 WorkBuddy /
+        // Trae / Qoder 由扩展在 pi 实例里注册，冷启动第一次成功连接的这一刻
+        // 才拿得到）。只在状态跃迁时拉——这里带心跳重探，不设门槛会打爆 RPC。
+        if (!wasReady) {
+          void useHelixStore.getState().refreshPiChannelProviders();
+        }
         if (startupTimer) {
           clearTimeout(startupTimer);
           startupTimer = null;
@@ -1282,6 +1304,9 @@ export function HelixLayout() {
         useGatewayStore.getState().setHelixConnected(true);
         useGatewayStore.getState().setHelixError(null);
         useHelixStore.getState().setGatewayStatus("ready");
+        // 新网关进程：pi 实例会重新加载扩展，渠道 provider 注册结果可能变化
+        // （扩展被更新/启停），重新拉一次 pi 渠道模型清单。
+        void useHelixStore.getState().refreshPiChannelProviders();
         // 新网关进程（非同进程重连）：旧缓存的后端 sid 全部失效，bump epoch
         // 让 handleRun 的 session/resume 分支真正触发，而不是静默走缓存路径。
         if (params?.sameGateway !== true) {
@@ -1305,6 +1330,8 @@ export function HelixLayout() {
         if (phase === "recovered") {
           useGatewayStore.getState().setHelixConnected(true);
           useHelixStore.getState().setGatewayStatus("ready");
+          // 网关自愈成功：同样补一次渠道模型刷新（网关重启后扩展重新注册）。
+          void useHelixStore.getState().refreshPiChannelProviders();
           scheduleProbe(HEALTHY_HEARTBEAT_MS, 0);
         } else {
           useGatewayStore.getState().setHelixConnected(false);
@@ -1810,9 +1837,31 @@ export function HelixLayout() {
                       className="w-full px-3 py-2 text-[length:var(--helix-transcript-size)] text-left hover:bg-accent/60 transition-colors flex items-center gap-2"
                       onClick={async () => {
                         setHelpMenuOpen(false);
+                        // 1) Helix 应用自身：GitHub Release 的 latest.json
+                        //    （tauri-plugin-updater；点击 toast 一键下载安装）。
+                        let appUpdateFound = false;
                         try {
-                          // 检查 pi agent + npm 插件的更新（npm registry），
-                          // 不再查 Helix 应用自身——后端 agent 是外部 pi 包。
+                          const appRes = await checkHelixAppUpdate();
+                          if (appRes?.available && appRes.version) {
+                            appUpdateFound = true;
+                            const version = appRes.version;
+                            const st = useHelixStore.getState();
+                            const toastId = st.showToast({
+                              type: "info",
+                              title: `Helix v${version} 可用`,
+                              description: "点击下载并安装，完成后应用将自动重启",
+                              duration: 12000,
+                              onClick: () => {
+                                useHelixStore.getState().dismissToast(toastId);
+                                void installHelixAppUpdate(version);
+                              },
+                            });
+                          }
+                        } catch {
+                          // 离线 / release 尚无 latest.json：静默，继续查 pi
+                        }
+                        // 2) pi agent + npm 插件（npm registry）
+                        try {
                           const res = await (
                             window as any
                           ).electron?.helix?.piCheckUpdates?.();
@@ -1857,7 +1906,8 @@ export function HelixLayout() {
                                   : ""),
                               duration: 10000,
                             });
-                          } else if (pi.installed) {
+                          } else if (pi.installed && !appUpdateFound) {
+                            // 已有 Helix 应用更新 toast 时不叠第二个「已最新」。
                             useHelixStore.getState().showToast({
                               type: "success",
                               title: "已是最新版本",
@@ -2815,6 +2865,11 @@ export function HelixLayout() {
         )}
         {showCustomizePanel && (
           <CustomizePanel onClose={() => storeActions.toggleCustomizePanel()} />
+        )}
+        {showChannelsCenter && (
+          <ChannelsCenterPanel
+            onClose={() => storeActions.toggleChannelsCenter()}
+          />
         )}
         {/* New surfaces */}
         {showActivityFeed && (

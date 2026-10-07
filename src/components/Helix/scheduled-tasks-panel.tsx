@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { getSnapshot, query } from "./channels-center-state";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { helixApi } from "@/lib/electron-bridge";
 import { parseChineseSchedule } from "@/lib/schedule-utils";
@@ -461,6 +462,25 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
     try {
       const { addChatMessage, updateScheduledTask, showToast } =
         useHelixStore.getState();
+      // 渠道签到类任务由 pi_connect 桥执行：`/connect checkin` 当 agent prompt
+      // 发进会话会命中扩展 confirm，被网关转成审批弹窗挂住。
+      if (task.action === "channel_checkin") {
+        if (getSnapshot().busy) {
+          showToast({ type: "warning", title: "渠道正在执行其他操作，请稍候再试" });
+          return;
+        }
+        showToast({ type: "info", title: "正在领取渠道签到…" });
+        await query("checkin");
+        const st = getSnapshot();
+        if (st.error) {
+          showToast({ type: "warning", title: `渠道签到失败：${st.error}` });
+        } else {
+          const text = (st.checkinResults ?? []).map((m) => m.message).join("；");
+          showToast({ type: "info", title: text || "渠道签到完成" });
+        }
+        updateScheduledTask(task.id, { lastRunAt: Date.now() });
+        return;
+      }
       const { helixSessionId } = useGatewayStore.getState();
       addChatMessage({
         role: "system",

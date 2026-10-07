@@ -62,6 +62,10 @@ import { HistoryStrip } from "./history-strip";
 import { InlineToolGroup, summarizeGroupDiff } from "./inline-tool-group";
 import { ScheduledTaskConfirm } from "./scheduled-task-confirm";
 import { Button } from "@/components/ui/button";
+import {
+  formatChannelModelLabel,
+  parseChannelModelLabel,
+} from "@/lib/channel-model";
 import { pushModelConfig } from "@/lib/config-sync";
 import { captureContextBreakdown } from "@/lib/context-capture";
 import {
@@ -810,6 +814,8 @@ export function AgentFlowPanel() {
       question: string;
       choices: string[] | null;
       sessionId?: string;
+      /** 审批卡到期时刻（ms epoch）；普通 clarify 卡为 null/缺省 = 不超时 */
+      expiresAt?: number | null;
     }>
   >([]);
   // 计划审批（plan 模式）：模型产出方案后先弹浮条让用户决定“批准执行”或“继续调整”，
@@ -1003,6 +1009,42 @@ export function AgentFlowPanel() {
       pendingUserRequestsRef.current + delta,
     );
   }, []);
+  // clarifyQueue 的镜像：run 循环的闭包拿不到最新 useState（同 pendingUserRequestsRef
+  // 的成因），网关作废事件（clarify_settled）要按 id 判断卡是否还在队列里再递减计数，
+  // 避免与用户同刻点击时 respond 的 finally 双重递减。
+  const clarifyQueueRef = useRef(clarifyQueue);
+  useEffect(() => {
+    clarifyQueueRef.current = clarifyQueue;
+  }, [clarifyQueue]);
+  // 被网关作废（clarify_settled）的请求 id：作废侧已递减计数，若用户点击与作废
+  // 撞车（respond 的 finally 也会递减同一张卡），respond 侧凭这个集合跳过，
+  // 保证一张卡只减一次。pi 的请求 id 是 randomUUID，不会复用。
+  const gatewaySettledRef = useRef<Set<string>>(new Set());
+  // 审批卡到点出队（显示镜像）：到点把过期卡从队列摘掉、递减待确认计数，
+  // 覆盖后台会话的卡。真身是扩展侧 withFailClosedTimeout —— 同一锚点（弹窗
+  // 打开）起算、同一时长（approvalTimeoutSec），到期 fail-closed 拒绝并
+  // abort；网关随后发来的 clarify_settled 与该路径撞车时被 gatewaySettledRef
+  // 去重（一张卡只减一次）。普通 clarify 卡（无 expiresAt）永不超时。
+  useEffect(() => {
+    if (!clarifyQueue.some((r) => typeof r.expiresAt === "number")) return;
+    const tick = () => {
+      const now = Date.now();
+      const expired = clarifyQueueRef.current.filter(
+        (r) =>
+          typeof r.expiresAt === "number" &&
+          r.expiresAt <= now &&
+          !gatewaySettledRef.current.has(r.id),
+      );
+      if (expired.length === 0) return;
+      for (const r of expired) gatewaySettledRef.current.add(r.id);
+      const ids = new Set(expired.map((r) => r.id));
+      setClarifyQueue((prev) => prev.filter((r) => !ids.has(r.id)));
+      bumpPendingUserRequests(-expired.length);
+    };
+    tick(); // 队列变化后立即核对一次（如切回会话时卡已过期）
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [clarifyQueue, bumpPendingUserRequests]);
   // Which session's data the shared live UI state (responseBlocks / steps /
   // streamThinking) currently belongs to. Lets the display layer keep
   // showing a promoted-but-not-yet-flushed run's own draft instead of another
@@ -1954,6 +1996,10 @@ export function AgentFlowPanel() {
   // 同源，只有模型字符串不够。
   const sessionModelOverride =
     modelBySession[currentSessionId ?? DRAFT_SESSION_KEY];
+  // pi-connect 渠道 provider（WorkBuddy / Trae / Qoder）：由 helix-layout 在
+  // 网关就绪时从 pi 快照刷新；下拉里作为独立分组列出（id 前缀 "pi:"），
+  // 选中后按会话经 set_model 透传给 pi（见 handleModelSelect 的渠道分支）。
+  const piChannelProviders = useHelixStore((s) => s.piChannelProviders);
 
   // Resolve the provider that owns the current backend endpoint.
   // Primary key: activeProviderId when it still matches the current baseUrl.
@@ -2044,6 +2090,9 @@ export function AgentFlowPanel() {
       name: string;
       baseUrl: string;
       models: string[];
+      /** 显示名覆盖（模型 id → 装饰名，如「Sonus · x0.50」）。只有渠道组有：
+       *  倍率是 pi 扩展拼在 name 里的，id 只做路由。 */
+      labels?: Record<string, string>;
     }[] = [];
     for (const p of providers) {
       const models = new Set<string>();
@@ -2069,8 +2118,22 @@ export function AgentFlowPanel() {
         });
       }
     }
+    // 渠道分组（pi-connect 的 WorkBuddy / Trae / Qoder）：provider 由 pi 扩展
+    // 在运行期注册，不在 Helix 的 providers 里。group id 加 "pi:" 前缀——
+    // handleModelSelect 命中前缀后只做按会话透传，不走 models.json 注册。
+    for (const cp of piChannelProviders) {
+      if (cp.models.length > 0) {
+        groups.push({
+          id: `pi:${cp.id}`,
+          name: cp.name,
+          baseUrl: "",
+          models: cp.models.map((x) => x.id),
+          labels: Object.fromEntries(cp.models.map((x) => [x.id, x.label])),
+        });
+      }
+    }
     return groups;
-  }, [providers, apiConfig, activeProvider]);
+  }, [providers, apiConfig, activeProvider, piChannelProviders]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -2180,6 +2243,20 @@ export function AgentFlowPanel() {
   const handleModelSelect = useCallback(
     async (model: string, ownerProviderId?: string) => {
       const st0 = useHelixStore.getState();
+      // 渠道分组（group id "pi:<providerId>"）：模型由 pi-connect 扩展在 pi 实例
+      // 里注册，凭据 / baseUrl / 协议全在扩展内。这里只把选择写进本会话的覆盖值，
+      // provider 用 pi 注册的原始 id —— handleRun 每轮 set_model 按
+      // {provider, modelId} 在 pi 快照里精确匹配。不碰全局 apiConfig，也不能走
+      // 下面的 registerProviderModels（渠道 provider 没有真实 baseUrl）。
+      if (ownerProviderId?.startsWith("pi:")) {
+        st0.setModelForSession(st0.currentSessionId ?? DRAFT_SESSION_KEY, {
+          provider: ownerProviderId.slice("pi:".length),
+          model,
+        });
+        st0.showToast({ type: "success", title: `本会话已覆盖为 ${model}` });
+        setShowModelDropdown(false);
+        return;
+      }
       // 每个对话各选各的：用纯解析拿到所选模型所属供应商（**不**动全局状态），
       // 只把选择写进本对话的覆盖值。handleRun 每轮把 modelBySession[本对话] 经
       // set_model 透传到该会话自己的 pi 实例（网关按 session_id 路由），全局默认
@@ -2270,9 +2347,20 @@ export function AgentFlowPanel() {
   // model name while the backend was already on the new one.
   const renderModelSelector = () => {
     // 显示源：本对话的专属模型优先（每个对话可各选各的），没有才回落全局默认。
-    // 图标上不显示文字，名字只出现在 tooltip 与下拉里。
+    // 勾选比较用 currentModelId（id 是 set_model 的路由键），显示用 displayName——
+    // 渠道模型的 label 是扩展装饰过的 name（含倍率后缀），裸 id 不丢：tooltip 与
+    // 下拉里的勾选仍以 id 对齐。
+    const currentModelId = sessionModel || apiConfig.model || activeModel || "";
+    const sessionModelLabel = sessionModelOverride?.provider
+      ? piChannelProviders
+          .find((c) => c.id === sessionModelOverride.provider)
+          ?.models.find((x) => x.id === sessionModel)?.label
+      : undefined;
+    // 渠道 label 里的「免费」统一成 x0.00，与下拉列表的倍率列同措辞。
     const displayName =
-      sessionModel || apiConfig.model || activeModel || "选择模型";
+      (sessionModelLabel ? formatChannelModelLabel(sessionModelLabel) : "") ||
+      currentModelId ||
+      "选择模型";
     return (
       <>
         <div className="relative min-w-0 max-w-[240px]" ref={modelDropdownRef}>
@@ -2286,8 +2374,14 @@ export function AgentFlowPanel() {
                 // 该覆盖值的 provider（选择时就已解析），只有回落全局默认时才用
                 // activeProvider——否则对话覆盖指向硅基流动、全局还停在
                 // shangtang 时，悬停会显示成 shangtang · 硅基流动的模型。
-                const tipProvider =
+                const rawTip =
                   sessionModelOverride?.provider || activeProvider?.name;
+                // 渠道 provider 的覆盖值存的是 pi 注册 id（workbuddy1 等）：
+                // 悬停显示界面名（WorkBuddy），查不到就原样显示。
+                const tipProvider = rawTip
+                  ? (piChannelProviders.find((c) => c.id === rawTip)?.name ??
+                    rawTip)
+                  : undefined;
                 const base = tipProvider
                   ? `${tipProvider} · ${displayName}`
                   : displayName;
@@ -2336,15 +2430,30 @@ export function AgentFlowPanel() {
                         <path d="m9 18 6-6-6-6" />
                       </svg>
                       <div
-                        className="invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute right-full top-0 pr-1"
+                        className="invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute right-full bottom-0 pr-1"
                       >
-                        <div className="w-52 max-w-[208px] rounded-xl border border-border/40 bg-card shadow-xl z-50 py-1">
+                        {/* 二级菜单**向上长**（bottom-0 锚在行底）且自带滚动。
+                            原来用 top-0 向下长：面板贴着卡片底部，下面没有空间，
+                            菜单下沿会被宿主的 `overflow-hidden` 卡片裁掉
+                            （ helix-surface 是 overflow-hidden + 圆角），表现为
+                            「最后几个模型看不见」。向上长正好落在输入区上方的空处，
+                            max-h 兜底 + overflow-y-auto 保证再长的列表也只是滚动，
+                            不会溢出裁切。 */}
+                        <div
+                          className={`${g.labels ? "w-64 max-w-[256px]" : "w-52 max-w-[208px]"} max-h-[min(360px,55vh)] overflow-y-auto overscroll-contain rounded-xl border border-border/40 bg-card shadow-xl z-50 py-1`}
+                        >
                         {g.models.length === 0 ? (
                           <div className="px-3 py-3 text-center text-[length:var(--helix-transcript-size)*0.8571] text-foreground/40">
                             该供应商暂无模型
                           </div>
                         ) : (
                           g.models.map((m) => {
+                            // 渠道模型的 label 是扩展装饰过的 name（含倍率/促销
+                            // 后缀），比裸 id 更适合展示；id 仍做选中比较与路由键。
+                            const label = g.labels?.[m];
+                            const parts = label
+                              ? parseChannelModelLabel(label)
+                              : undefined;
                             return (
                               <button
                                 key={m}
@@ -2355,17 +2464,46 @@ export function AgentFlowPanel() {
                                 }}
                                 className={`w-full flex items-center gap-1.5 px-2 py-1.5 text-left transition-colors rounded-lg hover:bg-muted/70`}
                               >
-                                <span className="min-w-0 flex-1 truncate font-mono ui-text text-foreground" data-tip={m}>
-                                  {truncateModelLabel(m)}
-                                </span>
-                                {m === displayName && (
+                                {parts ? (
+                                  <>
+                                    <span
+                                      className="flex min-w-0 flex-1 items-baseline gap-1.5"
+                                      data-tip={m}
+                                    >
+                                      <span className="min-w-0 shrink truncate font-mono ui-text text-foreground">
+                                        {parts.name}
+                                      </span>
+                                      {parts.notes.length > 0 && (
+                                        <span className="min-w-0 shrink truncate text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
+                                          {parts.notes.join(" ")}
+                                        </span>
+                                      )}
+                                    </span>
+                                    {/* 固定宽度 + 右对齐：倍率成一列，名长名短都对得上 */}
+                                    <span className="w-11 shrink-0 text-right font-mono tabular-nums text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
+                                      {parts.factor}
+                                    </span>
+                                  </>
+                                ) : (
                                   <span
-                                    className="shrink-0 text-foreground/50"
-                                    data-tip="当前模型"
+                                    className="min-w-0 flex-1 truncate font-mono ui-text text-foreground"
+                                    data-tip={m}
                                   >
-                                    <Check className="size-3.5" />
+                                    {truncateModelLabel(m)}
                                   </span>
                                 )}
+                                {/* 勾选位常驻（不选也占宽）：否则选中行的倍率列
+                                    会被图标挤偏，右对齐就不成立了。 */}
+                                <span className="flex w-3.5 shrink-0 items-center justify-center">
+                                  {m === currentModelId && (
+                                    <span
+                                      className="text-foreground/50"
+                                      data-tip="当前模型"
+                                    >
+                                      <Check className="size-3.5" />
+                                    </span>
+                                  )}
+                                </span>
                               </button>
                             );
                           })
@@ -4388,6 +4526,9 @@ export function AgentFlowPanel() {
           return {
             type: "usage_prompt_complete",
             usage: params?.usage || null,
+            // 归属键与事件时刻只由网��的 message_end（final:true）给出，必须透传。
+            model: params?.model || null,
+            at_ms: params?.at_ms || null,
           };
         }
         if (method === "session/update") {
@@ -4527,12 +4668,26 @@ export function AgentFlowPanel() {
             case "clarify_request":
               // 模型反问多选（clarify 工具）：弹底部浮条让用户挑选/输入，
               // 回应 clarify/respond 后后端继续。之前没有此分支 → 模型一反问就挂起。
+              // approvalTimeoutSec：审批卡才有（网关 permission==true 时附带）→
+              // 算出到期时刻供倒计时与到点出队；普通 clarify 卡恒为 null（不超时）。
               return {
                 type: "clarify_request",
                 requestId:
                   u.requestId || u.request_id || `clarify-${Date.now()}`,
                 question: u.question || "",
                 choices: Array.isArray(u.choices) ? u.choices : null,
+                expiresAt:
+                  typeof u.approvalTimeoutSec === "number" &&
+                  u.approvalTimeoutSec > 0
+                    ? Date.now() + u.approvalTimeoutSec * 1000
+                    : null,
+              };
+            case "clarify_settled":
+              // 网关作废竞速输掉的审批弹窗（pi_gateway::evict_settled_permission_asks）：
+              // 只带 requestId 的出队指令，不弹任何东西。
+              return {
+                type: "clarify_settled",
+                requestId: u.requestId || u.request_id || "",
               };
             case "run_complete":
               // 后端 run.completed / message.complete 携带完整正文(payload.text / output)。
@@ -5257,6 +5412,16 @@ export function AgentFlowPanel() {
             const text =
               typeof params?.message === "string" ? params.message : "";
             if (raw?.method === "notify" && text) {
+              // pi-hermes-memory 的 session backfill 每次会话启动都会播报
+              // 「🧠 Session backfill complete: ...」例行状态，对用户无意义，
+              // 在前端直接静默（其余扩展播报照常展示）。
+              const notice = text.trim();
+              if (
+                notice.startsWith("🧠 Session backfill") ||
+                notice.includes("Session backfill complete")
+              ) {
+                return;
+              }
               setExtensionNotices((prev) =>
                 [...prev, { id: generateId(), ts: Date.now(), text }].slice(-20),
               );
@@ -7107,27 +7272,40 @@ export function AgentFlowPanel() {
             } else if (parsed.type === "usage_prompt_complete") {
               const u = parsed.usage;
               if (u && typeof u === "object") {
+                // 计费只认 `final: true`（网关的 message_end，每条 assistant
+                // 消息恰好一次）。流式的 message_update 带的是同一条消息的**累计**
+                // usage，在 text_end/thinking_end/toolcall_end 各上报一次——把它
+                // 也累加会让每条消息被计2~3 次（实测 ×2.7~3.4）。
+                const isFinal = u.final === true;
+                // 归属用消息自带的 model；流式事件没有 model 字段，兜底顺序为
+                // 本会话覆盖 → 全局默认。旧代码恒用全局 apiConfig.model，于是所有
+                // 会话（哪怕跑的是会话级覆盖模型）的量都记到默认模型名下。
+                const store0 = useHelixStore.getState();
                 const model =
-                  useHelixStore.getState().apiConfig.model || "unknown";
-                // pi 口径：一次 run（带工具循环）产生多条 assistant 消息，每条
-                // usage 事件是该次 LLM 调用的计费量（provider 对每次调用独立
-                // 计费）。因此每条都要累加进会话用量统计——只记第一条会漏掉工具
-                // 循环中后续调用的全部 token。usageReceivedRef 仅用于 done 事件
-                // 的"等 usage 落地"判断与消息级 token 展示，不再拦截累加。
-                useHelixStore.getState().addSessionUsageStats(model, {
-                  totalTokens: Number(u.totalTokens) || undefined,
-                  inputTokens: Number(u.inputTokens) || undefined,
-                  outputTokens: Number(u.outputTokens) || undefined,
-                  thoughtTokens: Number(u.thoughtTokens) || undefined,
-                  cachedReadTokens: Number(u.cachedReadTokens) || undefined,
-                  cachedWriteTokens: Number(u.cachedWriteTokens) || undefined,
-                });
+                  (isFinal ? parsed.model : undefined) ||
+                  store0.modelBySession?.[activeSessionId ?? DRAFT_SESSION_KEY]
+                    ?.model ||
+                  store0.apiConfig.model ||
+                  "unknown";
+                if (isFinal) {
+                  useHelixStore.getState().addSessionUsageStats(model, {
+                    totalTokens: Number(u.totalTokens) || undefined,
+                    inputTokens: Number(u.inputTokens) || undefined,
+                    outputTokens: Number(u.outputTokens) || undefined,
+                    thoughtTokens: Number(u.thoughtTokens) || undefined,
+                    cachedReadTokens: Number(u.cachedReadTokens) || undefined,
+                    cachedWriteTokens: Number(u.cachedWriteTokens) || undefined,
+                    atMs: Number(parsed.at_ms) || undefined,
+                  });
+                }
                 if (!usageReceivedRef.current) {
                   usageReceivedRef.current = true;
                 }
-                thoughtTokensRef.current = Number(u.thoughtTokens) || 0;
-                outputTokensRef.current = Number(u.outputTokens) || 0;
-                totalTokensRef.current = Number(u.totalTokens) || 0;
+                if (isFinal) {
+                  thoughtTokensRef.current = Number(u.thoughtTokens) || 0;
+                  outputTokensRef.current = Number(u.outputTokens) || 0;
+                  totalTokensRef.current = Number(u.totalTokens) || 0;
+                }
                 // 只用后端 message.complete 携带的真实 context_used/context_max，
                 // 不再用客户端估算。无后端数据时上下文环显示空态。
                 // pi 口径：一次 run（带工具循环）产生多条 assistant 消息，每条
@@ -7251,8 +7429,26 @@ export function AgentFlowPanel() {
                   sessionId: myCid,
                   question: parsed.question || "",
                   choices: parsed.choices || null,
+                  expiresAt: parsed.expiresAt ?? null,
                 },
               ]);
+            } else if (parsed.type === "clarify_settled") {
+              // 竞速输掉的审批弹窗由网关作废：只出队、不给 pi 回任何东西——
+              // pi 侧那个请求 id 早已被静默删除。计数仅在卡确实还在队列里时
+              // 递减，并把 id 记进 gatewaySettledRef：用户点击与作废撞车时，
+              // respond 的 finally 凭集合跳过递减（一张卡只减一次）。
+              const settledId =
+                typeof parsed.requestId === "string" ? parsed.requestId : "";
+              if (
+                settledId &&
+                clarifyQueueRef.current.some((r) => r.id === settledId)
+              ) {
+                gatewaySettledRef.current.add(settledId);
+                setClarifyQueue((prev) =>
+                  prev.filter((r) => r.id !== settledId),
+                );
+                bumpPendingUserRequests(-1);
+              }
             }
           } catch {
             // skip non-JSON lines
@@ -7997,7 +8193,11 @@ export function AgentFlowPanel() {
         console.error("Clarify respond error:", err);
       } finally {
         setClarifyQueue((prev) => prev.filter((r) => r.id !== requestId));
-        bumpPendingUserRequests(-1);
+        // 网关已作废这张卡（点击与竞速作废撞车）→ 计数在作废侧已减过，这里
+        // 跳过，避免双重递减把「还有卡在等」的护栏计数提前打到 0。
+        if (!gatewaySettledRef.current.delete(requestId)) {
+          bumpPendingUserRequests(-1);
+        }
       }
     },
     [currentSessionId, bumpPendingUserRequests],

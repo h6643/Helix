@@ -314,6 +314,16 @@ interface HelixState
   /** 写权限档到扩展配置，成功后用回读结果更新缓存。 */
   setPermissionMode: (v: PermissionTier) => Promise<PermissionTier>;
   /**
+   * 审批卡超时秒数（settings.json permission.approvalTimeoutSec 的只读缓存，
+   * 30–3600 已归一）。只服务设置页下拉的显示；卡片倒计时走网关事件附带的
+   * approvalTimeoutSec，不读这里。写只走 setApprovalTimeoutSec。
+   */
+  approvalTimeoutSec: number;
+  /** 从扩展配置回读审批超时；读不到（桥不可用/文件坏）时沿用缓存。 */
+  syncApprovalTimeoutSec: () => Promise<number>;
+  /** 写审批超时到扩展配置，成功后用生效值更新缓存；失败回读真相。 */
+  setApprovalTimeoutSec: (v: number) => Promise<number>;
+  /**
    * plan 轴：按会话（cid → 是否处于只读规划态）。这是 pi 实例级状态的前端
    * 影子（网关 `PiInstance.plan_mode`），实例销毁即失效，所以不落 IndexedDB。
    */
@@ -635,8 +645,22 @@ interface HelixState
       thoughtTokens?: number;
       cachedReadTokens?: number;
       cachedWriteTokens?: number;
+      /** Event time (epoch ms) from the backend; decides which DAY bucket the
+       *  spend lands in. Defaults to now() — pass it whenever known so a reply
+       *  that completes after midnight isn't billed to the new day. */
+      atMs?: number;
     },
   ) => void;
+  /**
+   * Wipe accumulated usage stats (session totals + the per-day per-model map).
+   *
+   * Needed after a billing-source fix: the historical `dailyUsage` buckets were
+   * written under the old rules (streamed cumulative usage counted once per
+   * content block, everything attributed to the global default model), so they
+   * are permanently inflated / mis-attributed and cannot be corrected in place —
+   * only dropped, letting the corrected numbers accumulate from now on.
+   */
+  resetUsageStats: () => void;
   notifySessionSaved: () => void;
   flushSessionPersist: () => void;
   /** Persist a specific session's messages (works for background sessions). */
@@ -1610,6 +1634,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // 意味着新装用户第一次跑工具就没有任何确认，那是更危险的默认值。
   // 起步值只是首次回读完成前的占位；真相由 syncPermissionMode 从扩展配置读。
   permissionMode: "auto" as const,
+  // 审批卡超时默认 300s（扩展 DEFAULT_APPROVAL_TIMEOUT_SEC）。同样是只读缓存：
+  // 真相在 settings.json permission.approvalTimeoutSec，写只走
+  // setApprovalTimeoutSec。卡片倒计时不读这里（走网关事件的附带字段）。
+  approvalTimeoutSec: 300,
   planModeBySession: {},
   modelBySession: {},
   bylineReplies: {},
@@ -1990,6 +2018,35 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     // 写失败（权限/磁盘问题）时绝不能停在用户刚点的那档 —— 那正是「设置显示
     // 完全访问、实际照样弹窗」的反向版本。回读一次让 UI 说真话。
     return get().syncPermissionMode();
+  },
+  syncApprovalTimeoutSec: async () => {
+    try {
+      const res = await helixApi()?.getPermissionMode?.();
+      if (res?.ok && typeof res.approvalTimeoutSec === "number") {
+        if (get().approvalTimeoutSec !== res.approvalTimeoutSec)
+          set({ approvalTimeoutSec: res.approvalTimeoutSec });
+        return res.approvalTimeoutSec;
+      }
+    } catch {
+      /* 桥不可用（如纯浏览器 dev）：沿用缓存 */
+    }
+    return get().approvalTimeoutSec;
+  },
+  setApprovalTimeoutSec: async (v) => {
+    const api = helixApi();
+    if (!api?.setApprovalTimeoutSec) return get().approvalTimeoutSec;
+    try {
+      const res = await api.setApprovalTimeoutSec(v);
+      if (res?.ok && typeof res.approvalTimeoutSec === "number") {
+        // 后端可能把越界输入收敛到边界（如 10 → 30），缓存的必须是生效值。
+        set({ approvalTimeoutSec: res.approvalTimeoutSec });
+        return res.approvalTimeoutSec;
+      }
+    } catch {
+      /* 落盘失败：下面回读真相 */
+    }
+    // 写失败绝不能停在用户刚选的值（同权限档的教训）：回读一次让 UI 说真话。
+    return get().syncApprovalTimeoutSec();
   },
   setPlanModeForSession: (sessionId, on) =>
     set((s) => {
@@ -2682,8 +2739,15 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       // are billed as output by every thinking-capable provider, so they enter
       // the output bucket; cache reads/writes use their discounted tiers.
     
-      // Accumulate into the current local day (used by the daily-usage treemap).
-      const dayKey = dayKeyOf(new Date());
+      // Accumulate into the day the tokens were actually GENERATED (used by the
+      // daily-usage treemap). `atMs` is the backend's event time; falling back
+      // to `new Date()` keeps the old behaviour for callers that don't pass it,
+      // but a reply landing after midnight would then be billed to the new day.
+      const dayKey = dayKeyOf(
+        usage.atMs && Number.isFinite(usage.atMs)
+          ? new Date(usage.atMs)
+          : new Date(),
+      );
       const prevDay = state.dailyUsage[dayKey] || {
         totalTokens: 0,
         requestCount: 0,
@@ -2739,6 +2803,28 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           persistence.saveSetting("dailyUsage", s.dailyUsage),
         ]).catch(() => {});
       }));
+  },
+  // 清空累计用量。必须同时清 store 与 IndexedDB —— 只清内存会在下次
+  // persistToStorage 时把旧值写回去。
+  resetUsageStats: () => {
+    set({
+      sessionUsageStats: {
+        requestCount: 0,
+        totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        thoughtTokens: 0,
+        cachedReadTokens: 0,
+        cachedWriteTokens: 0,
+      },
+      dailyUsage: {},
+    });
+    import("@/lib/persist").then(({ persistence }) => {
+      Promise.all([
+        persistence.saveSetting("sessionUsageStats", get().sessionUsageStats),
+        persistence.saveSetting("dailyUsage", {}),
+      ]).catch(() => {});
+    });
   },
   setNoActiveConversation: (v) => set({ noActiveConversation: v }),
   // 标 broken 必须连**原因**一起存：UI（agent-flow-panel 的 broken 横幅）与

@@ -35,6 +35,8 @@ export interface PanelSlice {
   navigationHistory: NavEntry[];
   navigationIndex: number;
   showCustomizePanel: boolean;
+  /** 渠道中心叠加面板（侧边栏「设置」按钮上方的入口打开）。 */
+  showChannelsCenter: boolean;
   showWorktreePanel: boolean;
   showPluginManager: boolean;
   availableCommands: AvailableCommand[];
@@ -77,6 +79,7 @@ export interface PanelSlice {
     validSessionIds: Set<string>,
   ) => void;
   toggleCustomizePanel: () => void;
+  toggleChannelsCenter: () => void;
   toggleWorktreePanel: () => void;
   togglePluginManager: () => void;
   setAvailableCommands: (cmds: AvailableCommand[]) => void;
@@ -99,6 +102,7 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
   navigationHistory: [],
   navigationIndex: -1,
   showCustomizePanel: false,
+  showChannelsCenter: false,
   showWorktreePanel: false,
   showPluginManager: false,
   availableCommands: [],
@@ -201,6 +205,8 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
 
   toggleCustomizePanel: () =>
     set((s) => ({ showCustomizePanel: !s.showCustomizePanel })),
+  toggleChannelsCenter: () =>
+    set((s) => ({ showChannelsCenter: !s.showChannelsCenter })),
   toggleWorktreePanel: () =>
     set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
   togglePluginManager: () =>

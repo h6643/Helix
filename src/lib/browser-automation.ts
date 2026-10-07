@@ -1,10 +1,11 @@
 /**
- * pi 扩展的浏览器请求 → 驱动右侧面板里那条**真**网页视图。
+ * Helix 内置浏览器扩展（browser_* 工具）的请求 → 驱动右侧面板里那条**真**网页视图。
  *
- * 协议：pi 的 browser_* 工具往 `~/.pi/agent/browser-requests/*.json` 丢一个
- * `{op,url,reqId,params}`，Rust 的 `poll_browser_requests` 把它转成
- * `helix:browser-request` 事件（helix.rs），这里执行完再用 `browser_write_result`
- * 写 `<reqId>.result.json`，工具那边才解除等待。
+ * 协议：pi 会话里的 browser_* 工具（内置扩展注册——文件由 Helix 写出、经
+ * spawn 参数 `--extension` 注入，不进 pi 的扩展目录）往
+ * `~/.pi/agent/browser-requests/*.json` 丢一个 `{op,url,reqId,params}`，Rust 的
+ * `poll_browser_requests` 把它转成 `helix:browser-request` 事件（helix.rs），
+ * 这里执行完再用 `browser_write_result` 写 `<reqId>.result.json`，工具那边才解除等待。
  *
  * 为什么不再是「抓 HTML → 塞进隐藏 iframe 跑脚本」：内置浏览器已经是真窗口
  * （src-tauri/src/browser_webview.rs），而静态快照看不见 SPA 渲染出来的内容、

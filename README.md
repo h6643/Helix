@@ -34,6 +34,9 @@
 - **记忆 / 技能 / 子代理**：读写 `MEMORY.md` / `USER.md`、`SKILL.md` 文件式技能、Pi subagents 配置，并提供子代理转录回放与 delegation 查看。
 - **视觉 / 图像模型**：`vision.rs` 读取 `config.yaml` 的 `vision:` 块；粘贴图片时，`pi_gateway.rs` 会先调用视觉模型把图片转成文字描述拼进 prompt，同时仍把图片透传给支持多模态的 Pi 模型。
 - **嵌入式侧边栏浏览器**：`page_fetch.rs` 抓取静态 HTML（srcdoc 同源 iframe），配合 `helix::open_browser_url` 等命令做页面读取、点击、填表；外链则开独立 `WebviewWindow`。
+- **系统通知**：`desktop_notify.rs` 在没有 Helix 窗口处于前台时弹 Windows toast（审批 / 澄清弹窗到达、回合完成 / 出错、定时任务派发），单点拥有「何时弹」这条事实，Rust 侧触发、不依赖 webview。
+- **工具审批（pi-permission 桥）**：`approval_policy.rs` 把审批档位（询问 / 自动 / 完全访问）写进 `@zhushanwen/pi-permission` 扩展的 `settings.json` `permission` 键 —— 真正阻断工具执行的只有该扩展的 `tool_call` 钩子。审批卡带倒计时：超时 `approvalTimeoutSec` 可在设置「常规」页调（30–3600 秒，默认 300），弹窗打开即起算、到期无操作自动拒绝（fail-closed，不放行）。注意本机装的是就地补丁版扩展（另含 `approve` 档移除、AI 不抢答），`pi update --extensions` 会还原补丁，更新后需重新打。
+- **应用自动更新**：`tauri-plugin-updater` 读 GitHub Release 的 `latest.json`（minisign 签名校验）；启动静默检查 + 帮助菜单「检查更新」，发现新版本弹可点击的 toast，单击即下载安装（Windows 上装完自动重启）。CI 在 tag 构建时签名并生成 `latest.json`。
 - **代理**：`proxy.rs` 为应用出口流量、渲染层、模型 / MCP 请求统一设置 HTTP 代理（跨 WebKitGTK / WebView2 / WKWebView）。
 
 ---
@@ -41,7 +44,7 @@
 ## 技术栈
 
 - **前端**：React 19、TypeScript、Vite（端口 1430）、Tailwind CSS 4、Zustand（slices 分域）、CodeMirror、xterm、shiki、KaTeX、React Markdown、lucide-react、Radix UI。
-- **后端**：Rust、Tauri 2、tokio、reqwest（rustls）、serde + serde_yaml、`tauri-plugin-opener / dialog / single-instance`；Windows 下 `windows` 0.61（ConPTY），Linux 下 `webkit2gtk`（渲染层代理）。
+- **后端**：Rust、Tauri 2、tokio、reqwest（rustls）、serde + serde_yaml、`tauri-plugin-opener / dialog / notification / single-instance / updater`；Windows 下 `windows` 0.61（ConPTY），Linux 下 `webkit2gtk`（渲染层代理）。
 - **智能体引擎**：外部 Pi 编码智能体（`@earendil-works/pi-coding-agent`），以 `pi --mode rpc` 的 JSONL stdio 协议运行。
 - **UI 基础**：shadcn/ui 风格组件（`components.json`：`new-york`、lucide、Tailwind CSS 变量）。
 
@@ -115,7 +118,7 @@
 ### 前置条件
 
 - Node.js 20
-- Rust 工具链（`stable`，MSRV 1.77）
+- Rust 工具链（`stable`，MSRV 1.77.2 —— 由 tauri 2.11 自身声明决定）
 - Tauri 系统依赖（Linux 需要 WebKitGTK 等）
 - 本地可用的 Pi 智能体环境与配置（模型、API key、MCP 等放在 Pi 数据目录；Pi CLI 路径可通过 `config.yaml` 的 `pi.cli_path` 或 `HELIX_PI_CLI` 环境变量指定）
 

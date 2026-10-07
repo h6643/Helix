@@ -210,7 +210,7 @@ function normalizeForPrefix(p: string): string {
  *
  * 卡片是「本轮改了哪些文件」的清单，越界的文件混进来不只是难看：它让「撤销」
  * 去打项目外的路径、让一次项目内 git 重算被项目外的写入触发（真实症状：改完
- * `~/.pi/agent/config/permission-ext-config.json` 也出现在卡片里）。
+ * `~/.pi/agent/settings.json` 里的审批配置也出现在卡片里）。
  *
  * - 相对路径 ⇒ 算在内：pi 的工具参数按会话 cwd 解析，那个 cwd 就是项目根。
  * - 绝对路径 + 知道项目根 ⇒ 必须在根之下（含根本身）。

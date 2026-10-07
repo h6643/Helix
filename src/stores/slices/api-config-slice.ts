@@ -9,6 +9,21 @@ import { warn } from "@/lib/logger";
 /** Provider ids currently auto-fetching their model lists (in-flight guard). */
 const fetchingProviderModels = new Set<string>();
 
+/** pi-connect 渠道 provider 的占位 baseUrl（扩展 registerProvider 时写死的值，
+ *  真实请求走扩展自己的本地 shim）。pi 的模型快照里按它识别「渠道 provider」：
+ *  这些 provider 不在 Helix 的 profiles/models.json 里，凭据由扩展管理，前端
+ *  只做展示与按会话的 set_model 透传。 */
+const PI_CHANNEL_BASE_URL = "http://127.0.0.1:0/v1";
+
+/** 渠道 provider 的显示名（pi 注册 id → 界面名）。未知 id 回落原 id。 */
+const PI_CHANNEL_NAMES: Record<string, string> = {
+  workbuddy1: "WorkBuddy",
+  trae: "Trae",
+  "trae-global": "Trae Global",
+  qoder: "Qoder",
+  "qoder-cn": "Qoder CN",
+};
+
 export interface ApiConfigSlice {
   apiConfig: ApiConfig;
   apiHistory: ApiConfig[];
@@ -24,6 +39,16 @@ export interface ApiConfigSlice {
   providerModels: Record<string, string[]>;
   /** Multi-provider config backing the flattened model selector. */
   providers: ProviderConfig[];
+  /** pi 渠道路由的 provider（pi-connect 扩展在运行期注册：WorkBuddy / Trae /
+   *  Qoder 等）及其模型清单。每个模型带 id（路由键——set_model 用它）与
+   *  label（pi 的显示名：扩展把计费倍率/促销徽章装饰进了 name，如
+   *  "Sonus · x0.50"、"Hy4 preview · x0.29 credits · 夜间免费"；缺 name 回落
+   *  id）。刷新入口 refreshPiChannelProviders()。 */
+  piChannelProviders: {
+    id: string;
+    name: string;
+    models: { id: string; label: string }[];
+  }[];
   /** Currently selected model name (flat list item), */
   activeModel: string | null;
   /** The provider currently active in the model selector. The model dropdown
@@ -60,12 +85,14 @@ export interface ApiConfigSlice {
     config: ApiConfig,
     models?: string[],
     modelContextWindows?: Record<string, number>,
+    modelReasonings?: Record<string, boolean>,
   ) => string;
   updateApiProfileConfig: (
     id: string,
     config: ApiConfig,
     models?: string[],
     modelContextWindows?: Record<string, number>,
+    modelReasonings?: Record<string, boolean>,
   ) => void;
   renameApiProfile: (id: string, name: string) => void;
   removeApiProfile: (id: string) => void;
@@ -83,6 +110,10 @@ export interface ApiConfigSlice {
    *  model selector re-fetches live instead of relying on a possibly-stale
    *  persisted list. Called on save to keep stored config free of a stale list. */
   clearProviderModels: (providerId: string) => void;
+  /** 拉取 pi 的权威模型快照（get_available_models RPC），按渠道占位 baseUrl
+   *  （PI_CHANNEL_BASE_URL）过滤出渠道 provider 并按 provider 分组存入
+   *  piChannelProviders。网关未就绪 / pi 未启动时静默返回，保留上一次的列表。 */
+  refreshPiChannelProviders: () => Promise<void>;
   /** Switch the active provider. If the current model doesn't belong to the new
    *  provider, reselect its defaultModel (or models[0]). Mirrors the new
    *  provider's credentials + model into apiConfig. */
@@ -122,6 +153,7 @@ export const createApiConfigSlice: StateCreator<
   availableModelsBaseUrl: null,
   providerModels: {},
   providers: [],
+  piChannelProviders: [],
   activeModel: null,
   activeProviderId: null,
 
@@ -246,17 +278,29 @@ export const createApiConfigSlice: StateCreator<
       return { apiConfig: { ...config } };
     }),
 
-  addApiProfile: (name, config, models?, modelContextWindows?) => {
+  addApiProfile: (
+    name,
+    config,
+    models?,
+    modelContextWindows?,
+    modelReasonings?,
+  ) => {
     const id = generateId();
     set((state) => ({
       apiProfiles: [
         ...state.apiProfiles,
-        { id, name, config, models, modelContextWindows },
+        { id, name, config, models, modelContextWindows, modelReasonings },
       ],
     }));
     return id;
   },
-  updateApiProfileConfig: (id, config, models?, modelContextWindows?) =>
+  updateApiProfileConfig: (
+    id,
+    config,
+    models?,
+    modelContextWindows?,
+    modelReasonings?,
+  ) =>
     set((state) => ({
       apiProfiles: state.apiProfiles.map((p) =>
         p.id === id
@@ -265,6 +309,7 @@ export const createApiConfigSlice: StateCreator<
               config,
               ...(models ? { models } : {}),
               ...(modelContextWindows ? { modelContextWindows } : {}),
+              ...(modelReasonings ? { modelReasonings } : {}),
             }
           : p,
       ),
@@ -562,6 +607,42 @@ export const createApiConfigSlice: StateCreator<
       delete next[providerId];
       return { providerModels: next };
     });
+  },
+
+  refreshPiChannelProviders: async () => {
+    try {
+      if (
+        typeof window === "undefined" ||
+        !(window as any).electron?.helix?.piGetAvailableModels
+      )
+        return;
+      const r = await (window as any).electron.helix.piGetAvailableModels();
+      const models: any[] = Array.isArray(r?.models) ? r.models : [];
+      const grouped = new Map<string, { id: string; label: string }[]>();
+      for (const m of models) {
+        if (!m?.id || !m?.provider || m.baseUrl !== PI_CHANNEL_BASE_URL) continue;
+        // label = pi 的 name。扩展刻意把倍率/促销后缀拼进 name（listModels
+        // 只透传 id/name），id 保持裸值只做路由——UI 展示用 label，勾选/发送
+        // 仍用 id。name 缺失时回落 id。
+        const label =
+          typeof m.name === "string" && m.name.trim() ? m.name : m.id;
+        const list = grouped.get(m.provider);
+        if (list) {
+          if (!list.some((x) => x.id === m.id)) list.push({ id: m.id, label });
+        } else {
+          grouped.set(m.provider, [{ id: m.id, label }]);
+        }
+      }
+      set({
+        piChannelProviders: [...grouped.entries()].map(([id, entries]) => ({
+          id,
+          name: PI_CHANNEL_NAMES[id] || id,
+          models: entries,
+        })),
+      });
+    } catch {
+      // 网关未就绪 / pi 未启动：保留上一次的列表（空则 UI 不渲染渠道行）。
+    }
   },
 
   setActiveProvider: (id) => {

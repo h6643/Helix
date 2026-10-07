@@ -116,7 +116,13 @@ export interface PersistedSession {
    *  can sort by this for a fixed order that doesn't reshuffle on click. */
   createdAt?: number;
   isArchived?: boolean;
+  /** 全局置顶：侧边栏顶部独立「置顶」分组。 */
   isPinned?: boolean;
+  /**
+   * 工作区内置顶：只在该会话所属工作区（workDir）的项目分组内排到最前，
+   * 不进顶部「置顶」分组。作用域就是 workDir 本身，不需要额外字段。
+   */
+  pinnedInProject?: boolean;
   workDir: string | null;
   goal: string | null;
   memories: PersistedMemory[];
@@ -710,6 +716,25 @@ export const persistence = {
       await tx(db, "sessions", "readwrite", (store) => store.put(session));
       this.sessionCachePut(session);
       return session.isPinned;
+    }
+    return false;
+  },
+
+  /** 工作区内置顶：只在本工作区的项目分组里排最前，不进顶部「置顶」分组。 */
+  async toggleSessionPinnedInProject(id: string): Promise<boolean> {
+    const db = await openDB();
+    const session = await tx<PersistedSession | undefined>(
+      db,
+      "sessions",
+      "readonly",
+      (store) => store.get(id),
+    );
+    if (session) {
+      session.pinnedInProject = !session.pinnedInProject;
+      // 与 toggleSessionPinned 同款：置顶不是"使用"，不动 savedAt。
+      await tx(db, "sessions", "readwrite", (store) => store.put(session));
+      this.sessionCachePut(session);
+      return session.pinnedInProject;
     }
     return false;
   },

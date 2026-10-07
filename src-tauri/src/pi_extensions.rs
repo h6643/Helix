@@ -1,16 +1,22 @@
-//! Helix 自带的 pi 扩展安装器：把随仓库编译的扩展写出到 `~/.pi/agent/extensions/`
-//! 并在 pi 的 `settings.json` 里单点登记。
+//! Helix 自带的 pi 扩展安装器。两类扩展走两个通道：
 //!
-//! 为什么需要：`describe_image`（视觉读图工具）来自第三方 `pi-aux-vision`，但 Helix
-//! 改过它的配置来源（读 `config.yaml` 的 `vision:` 块，见 vendor/pi-aux-vision/index.ts
-//! 头部说明）。装在 npm 里的副本会被 `pi update` / 重装静默还原成上游行为，
-//! 所以仓库里的 `src-tauri/vendor/pi-aux-vision/` 才是唯一权威副本，每次启动覆盖写出。
+//! 1. 视觉读图 `describe_image`（第三方 `pi-aux-vision` 的 Helix 修改版）：
+//!    写出到 `~/.pi/agent/extensions/pi-aux-vision/` 并在 pi 的 `settings.json`
+//!    里单点登记 —— 它同时出现在终端 pi 里，属于"正常安装"的插件。但 Helix 改过它
+//!    的配置来源（读 `config.yaml` 的 `vision:` 块，见 vendor/pi-aux-vision/index.ts
+//!    头部说明），装在 npm 里的副本会被 `pi update` / 重装静默还原成上游行为，
+//!    所以仓库里的 `src-tauri/vendor/pi-aux-vision/` 才是唯一权威副本，每次启动覆盖写出。
+//!    登记必须唯一：npm 版和目录版都注册同名工具 `describe_image`，两份同时被 pi 加载
+//!    会重名冲突，因此写文件之外还要把 `packages` 里指向 pi-aux-vision 的**其他**条目清掉。
 //!
-//! 登记必须唯一：npm 版和目录版都注册同名工具 `describe_image`，两份同时被 pi 加载
-//! 会重名冲突，因此写文件之外还要把 `packages` 里指向 pi-aux-vision 的**其他**条目清掉。
+//! 2. 内置浏览器扩展 `browser_*`（`vendor/helix-browser.js`）：写出到
+//!    `~/.pi/agent/helix-internal/`，**不登记** settings.json —— 只有 Helix 网关
+//!    spawn 时附加的 `--extension <path>` 会加载它，终端里的 `pi` 看不到这些工具。
+//!    旧版曾把同功能的 `pi-helix-browser` 装在 `extensions/` 下（终端 pi 可见），
+//!    启动时移除其 settings.json 登记与目录。
 
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::{atomic_write, read_pi_settings, write_pi_settings};
 use crate::paths::pi_agent_dir;
@@ -161,6 +167,114 @@ fn register_in_settings() -> bool {
     true
 }
 
+// ── 内置浏览器扩展（browser_* 工具，经 `--extension` 注入 Helix 会话） ──────
+
+/// 内置扩展的安装目录 / 文件名。目录刻意在 pi 的 `extensions/` 自动发现
+/// 路径之外，也避开可迁移的 helix_data_dir：spawn 参数与文件位置必须始终
+/// 一致，不能随数据目录搬家而漂移。
+const INTERNAL_DIR_NAME: &str = "helix-internal";
+const BROWSER_EXT_FILE_NAME: &str = "browser-extension.js";
+
+/// 内置浏览器扩展的磁盘路径（`~/.pi/agent/helix-internal/browser-extension.js`）。
+/// 只有 `pi_command()` 在 spawn 时把它作为 `--extension <path>` 传给 pi：
+/// 终端里的 `pi` 看不到这些工具，Helix 会话全都有。
+pub fn browser_extension_path() -> PathBuf {
+    pi_agent_dir()
+        .join(INTERNAL_DIR_NAME)
+        .join(BROWSER_EXT_FILE_NAME)
+}
+
+/// 启动时调用（在 pi 网关 spawn 之前）：写出内置浏览器扩展。
+/// 内容不同才写（原子写），稳态启动不碰磁盘。
+pub fn install_browser_extension() {
+    let path = browser_extension_path();
+    let dir = pi_agent_dir().join(INTERNAL_DIR_NAME);
+    let changed = write_files(
+        &dir,
+        &[(
+            BROWSER_EXT_FILE_NAME,
+            include_str!("../vendor/helix-browser.js"),
+        )],
+    );
+    if changed {
+        eprintln!("[Helix] 已写出内置浏览器扩展到 {}", path.display());
+    }
+}
+
+/// 旧版外置浏览器扩展的目录名（曾作为普通 pi 扩展装在 extensions/ 下）。
+const LEGACY_BROWSER_DIR_NAME: &str = "pi-helix-browser";
+
+/// 该条目是否指向旧版外置 pi-helix-browser 扩展（相对/绝对/npm 各种写法）。
+/// 按最后一段路径/包名精确比对，避免误删名字相近的无关扩展。
+fn is_legacy_browser_entry(entry: &str) -> bool {
+    let normalized = entry.replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    let name = trimmed.strip_prefix("npm:").unwrap_or(trimmed);
+    name.rsplit('/').next() == Some(LEGACY_BROWSER_DIR_NAME)
+}
+
+/// 启动时调用：移除旧版外置浏览器扩展（settings.json 登记 + 目录）。
+/// 8 个浏览器工具已改由内置扩展经 `--extension` 注入；旧目录若还留着，
+/// 终端 pi 会看到这些工具、Helix 会话还会因两份同名声明的加载顺序而冲突。
+/// 每次启动都收敛（幂等），稳态无操作、不打日志。
+pub fn remove_legacy_browser_extension() {
+    let dir = pi_agent_dir()
+        .join("extensions")
+        .join(LEGACY_BROWSER_DIR_NAME);
+    let dir_removed = if dir.is_dir() {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("[Helix] 旧版浏览器扩展目录删除失败 {}: {e}", dir.display());
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let settings_changed = unregister_legacy_browser_from_settings();
+    if dir_removed || settings_changed {
+        eprintln!("[Helix] 已移除旧版外置浏览器扩展（工具已内置，仅 Helix 会话加载）");
+    }
+}
+
+/// 从 settings.json 的 `packages` 里剔除指向旧版浏览器扩展的条目。
+fn unregister_legacy_browser_from_settings() -> bool {
+    let mut settings = read_pi_settings();
+    let obj = match settings.as_object_mut() {
+        Some(o) => o,
+        None => return false,
+    };
+    let existing: Vec<String> = obj
+        .get("packages")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let next: Vec<String> = existing
+        .iter()
+        .filter(|e| !is_legacy_browser_entry(e))
+        .cloned()
+        .collect();
+    if next == existing {
+        return false;
+    }
+    if next.is_empty() {
+        // 清空后移除键，恢复 pi 的"未安装任何包"默认形态。
+        obj.remove("packages");
+    } else {
+        obj.insert(
+            "packages".to_string(),
+            Value::Array(next.into_iter().map(Value::String).collect()),
+        );
+    }
+    write_pi_settings(&settings);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +311,36 @@ mod tests {
         assert!(!is_rival_entry("npm:pi-hermes-memory"));
         assert!(!is_rival_entry("extensions\\pi-helix-browser"));
         assert!(!is_rival_entry("npm:pi-aux-vision-plus"));
+    }
+
+    #[test]
+    fn legacy_browser_entries_recognized_in_all_forms() {
+        assert!(is_legacy_browser_entry("extensions\\pi-helix-browser"));
+        assert!(is_legacy_browser_entry("extensions/pi-helix-browser"));
+        assert!(is_legacy_browser_entry("extensions/pi-helix-browser/"));
+        assert!(is_legacy_browser_entry("npm:pi-helix-browser"));
+        assert!(is_legacy_browser_entry(
+            "C:\\Users\\x\\.pi\\agent\\extensions\\pi-helix-browser"
+        ));
+        // 名字相近的无关扩展不能被误删。
+        assert!(!is_legacy_browser_entry("extensions\\pi-helix-browser-plus"));
+        assert!(!is_legacy_browser_entry("extensions\\pi-aux-vision"));
+        assert!(!is_legacy_browser_entry("npm:pi-hermes-memory"));
+    }
+
+    #[test]
+    fn browser_extension_lives_outside_pi_discovery() {
+        let path = browser_extension_path();
+        // 不能落在 pi 的 extensions/ 扫描目录下——否则 pi 会自动加载，
+        // 终端里的 `pi` 也就能看到这些工具（用户要求只有 Helix 会话有）。
+        assert!(
+            !path.components().any(|c| c.as_os_str() == "extensions"),
+            "内置扩展不能落在 pi 的发现路径下: {}",
+            path.display()
+        );
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some(BROWSER_EXT_FILE_NAME)
+        );
     }
 }

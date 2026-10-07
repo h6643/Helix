@@ -430,17 +430,6 @@ export const electronHelix = {
     }
   },
 
-  async update(): Promise<{ ok: boolean; message: string }> {
-    const api = getElectronAPI();
-    const h = api?.helix as {
-      update?: () => Promise<{ ok: boolean; message: string }>;
-    };
-    if (h?.update) {
-      return h.update();
-    }
-    return { ok: false, message: "更新通道不可用" };
-  },
-
   /** Live config push: set a single key/value pair without gateway restart */
   async setConfigKeyValue(
     key: string,

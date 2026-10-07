@@ -210,6 +210,8 @@ interface ClarifyRequest {
   id: string;
   question: string;
   choices: string[] | null;
+  /** 审批卡到期时刻（ms epoch）；缺省/null = 普通 clarify，不显示倒计时 */
+  expiresAt?: number | null;
 }
 
 interface ClarifyBarProps {
@@ -224,6 +226,19 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(
     choices.length > 0 ? 0 : null,
   );
+  // 审批卡倒计时（1s 一格）：expiresAt 由面板按网关附带的 approvalTimeoutSec
+  // 算出。归零只是显示层面的镜到点；实际 fail-closed 拒绝在扩展侧同一时刻
+  // 执行，卡片的出队由面板级过期清扫负责。
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (typeof request.expiresAt !== "number") return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [request.expiresAt]);
+  const countdown =
+    typeof request.expiresAt === "number"
+      ? Math.max(0, Math.ceil((request.expiresAt - now) / 1000))
+      : null;
 
   const submit = useCallback(
     (answer: string) => {
@@ -272,9 +287,24 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
           <h3 className="text-[calc(var(--helix-transcript-size)*0.9286)] font-semibold leading-snug">
             需要你的确认
           </h3>
-          <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
-            等待确认
-          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            {countdown !== null && (
+              <span
+                className={
+                  "shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium px-2 py-0.5 rounded-full border tabular-nums " +
+                  (countdown <= 30
+                    ? "bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/25"
+                    : "bg-muted text-muted-foreground border-border/40")
+                }
+              >
+                剩 {Math.floor(countdown / 60)}:
+                {String(countdown % 60).padStart(2, "0")} 自动拒绝
+              </span>
+            )}
+            <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7143)] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25">
+              等待确认
+            </span>
+          </div>
         </div>
 
         <div className="bg-muted rounded-lg px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 leading-relaxed whitespace-pre-wrap break-words mb-2 max-h-32 overflow-auto">

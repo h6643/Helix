@@ -192,6 +192,7 @@ export function UsageDetail() {
 export function TokenUsagePanel() {
   const stats = useHelixStore((s) => s.sessionUsageStats);
   const dailyUsage = useHelixStore((s) => s.dailyUsage);
+  const resetUsageStats = useHelixStore((s) => s.resetUsageStats);
   const [rangeDays, setRangeDays] = useState<7 | 30>(30);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
 
@@ -284,13 +285,6 @@ export function TokenUsagePanel() {
                 ? `${cacheHit.percent.toFixed(1)}%`
                 : "未上报"}
             </p>
-            <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 mt-0.5">
-              {cacheHit.reported
-                ? `读缓存 ${formatBig(stats.cachedReadTokens)} / prompt ${formatBig(
-                    promptTotal,
-                  )}`
-                : "供应商未上报缓存字段，不是「没有命中」"}
-            </p>
           </div>
         </div>
       </div>
@@ -357,9 +351,29 @@ export function TokenUsagePanel() {
           <h3 className="text-[length:var(--helix-transcript-size)] font-medium text-foreground">
             模型用量明细
           </h3>
-          <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
-            {activeDay}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/60">
+              {activeDay}
+            </span>
+            {/* 口径改过（计费只认 message_end + 归属用真实模型）之后，历史
+                dailyUsage 是永久性错误数据，无法原地修正，只能清空重算。 */}
+            <button
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "清空全部用量统计？历史每日/每模型明细会一并删除，且无法恢复。",
+                  )
+                ) {
+                  resetUsageStats();
+                  setSelectedDay(null);
+                }
+              }}
+              className="rounded-md px-1.5 py-0.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/50 transition-colors hover:text-foreground"
+              data-tip="清空用量统计"
+            >
+              清空
+            </button>
+          </div>
         </div>
         {modelRows.length > 0 ? (
           <div className="overflow-x-auto">

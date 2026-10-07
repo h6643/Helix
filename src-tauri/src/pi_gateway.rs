@@ -195,6 +195,106 @@ struct TurnWaiter {
 
 struct PendingUI {
     method: String,
+    /// pi-permission 的 rpc 审批弹窗（select）。只有它会被自动作废 —— 见
+    /// [`evict_settled_permission_asks`]。
+    permission: bool,
+}
+
+/// pi-permission rpc 审批弹窗标题首行（approval.ts `formatTitle`，选项固定为
+/// Appr/Deny 两个）。扩展被 `pi update --extensions` 还原或以后改文案时这里会
+/// 失配 —— 失配只会让自动作废静默失效（退回人工点卡），不会误关别的扩展的 select。
+const PERMISSION_TITLE_PREFIX: &str = "[pi-permission]";
+
+/// 该 UI 请求是否 pi-permission 的竞速审批弹窗。
+fn is_permission_ui_request(method: &str, title: Option<&str>) -> bool {
+    method == "select" && title.is_some_and(|t| t.starts_with(PERMISSION_TITLE_PREFIX))
+}
+
+/// 审批 / 澄清弹窗文本的 toast 摘要：丢掉 pi-permission 的固定抬头行
+/// （approval.ts `formatTitle` 首行，与 PERMISSION_TITLE_PREFIX 同一个失配面）
+/// 与空行，留下 Tool / Command / Reason 等实质内容。
+fn dialog_toast_body(raw: &str) -> String {
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != "[pi-permission] Approval required")
+        .collect();
+    if lines.is_empty() {
+        raw.trim().to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+/// 摘除全部已标记的审批请求，返回它们的 id（纯函数，便于单测）。
+fn take_permission_asks(map: &mut HashMap<String, PendingUI>) -> Vec<String> {
+    let ids: Vec<String> = map
+        .iter()
+        .filter(|(_, p)| p.permission)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &ids {
+        map.remove(id);
+    }
+    ids
+}
+
+/// 作废本实例所有仍挂着的 pi-permission 审批弹窗 —— 仅在网关能**推导出**
+/// 它们已被 pi 判定完毕时调用：
+///
+///  - 非嵌套 `tool_execution_start`：pi 对每条工具调用**先发 start 再 await 钩子**
+///    （prepareToolCall 里跑 pi-permission 的竞速弹窗），且 start/prepare 严格
+///    串行、按序 —— 第 k+1 次 start 只在第 k 次钩子返回后才发出（pi-agent-core/
+///    dist/agent-loop.js 两条执行路径都是这个次序：parallel 路径只把「执行」推迟
+///    并发，prepare 仍串行）。所以此刻仍挂着的弹窗，其钩子必然已返回：要么
+///    AI 赢了竞速（僵尸 —— pi 侧 abort 只本地 resolve/删 id，宿主收不到任何消息，
+///    见 rpc-mode.js `createDialogPromise` 的 onAbort），要么用户已答（前端已关，
+///    幂等）。还活着的弹窗（AI 判定中/等用户点）对应一个未返回的钩子，此时后续
+///    start 事件根本不存在 —— 不会误关。
+///  - 非嵌套 `tool_execution_update` / `tool_execution_end`：执行期事件只在对应
+///    调用的 prepare 返回后发出，同上推理 —— 让「本轮最后一个工具/单工具消息」
+///    的僵尸在工具跑完（或首次输出）时就关掉，不必等 `agent_settled`。
+///  - `agent_settled`：turn 结束 ⇒ 不存在未返回的工具钩子（阻塞的钩子会让 turn
+///    无法 settle；用户停止时 pi 同样静默 abort 弹窗）。覆盖「本轮最后一个工具」
+///    与停止残局。
+///
+/// 嵌套调用（codemode `ctx.executeTool`，事件带 parentToolCallId）可能并发跑钩子，
+/// 不套用这条推理，调用点会跳过。作废只清本地状态并通知前端出队，**不给 pi 发任何
+/// 响应** —— pi 侧那些 id 早已删除，回了也会被静默丢弃（rpc-mode.js 未知 id 直接
+/// return）。
+fn evict_settled_permission_asks(instance: &PiInstance, reason: &str) {
+    let ids = {
+        let mut reqs = instance.ui_requests.lock().unwrap();
+        take_permission_asks(&mut reqs)
+    };
+    if ids.is_empty() {
+        return;
+    }
+    {
+        let mut owners = UI_REQUEST_OWNERS.lock().unwrap();
+        for id in &ids {
+            owners.remove(id);
+        }
+    }
+    let sid = instance
+        .current_session
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| instance.key());
+    for id in ids {
+        emit_helix_event(
+            "session/update",
+            &json!({
+                "session_id": sid,
+                "update": {
+                    "sessionUpdate": "clarify_settled",
+                    "requestId": id,
+                    "reason": reason,
+                },
+            }),
+        );
+    }
 }
 
 /// One `pi --mode rpc` child process plus its per-process state. All state
@@ -3203,7 +3303,7 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             // carries no session).
             let instance =
                 routed_instance_or_ui_owner(&params, &approval_id, &state).await?;
-            let PendingUI { method: ui_method } = instance
+            let PendingUI { method: ui_method, .. } = instance
                 .ui_requests
                 .lock()
                 .unwrap()
@@ -4822,6 +4922,33 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
+                    // Authoritative per-message bill. `message_end` fires
+                    // exactly once per assistant message and is the only event
+                    // that carries the real `model` / `provider`, so it is the
+                    // correct—and only correct—source for per-model usage
+                    // attribution. Billing from `message_update` instead meant
+                    // (a) every assistant message counted once per content block
+                    // (2.7–3.4x inflation) and (b) everything was filed under
+                    // the GLOBAL default model, because the streaming event has
+                    // no model field, so sessions running an overridden model
+                    // showed their tokens on the wrong row.
+                    let msg_model = msg
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let msg_provider = msg
+                        .get("provider")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    if let Some(usage) = msg.get("usage") {
+                        emit_usage(
+                            instance,
+                            usage,
+                            msg_model.as_deref(),
+                            msg_provider.as_deref(),
+                            true,
+                        );
+                    }
                     if stop_reason == "error" && !error_message.is_empty() {
                         *instance.last_assistant_error.lock().unwrap() = error_message;
                     } else {
@@ -5238,15 +5365,38 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 }
                 _ => {}
             }
-            // Per-message usage snapshot → context ring (same as the legacy
-            // adapter's tokenUsage/updated event on assistant message completion).
-            if message.get("usage").is_some()
-                && matches!(delta_type, "text_end" | "thinking_end" | "toolcall_end")
-            {
-                emit_usage(instance, message);
+            // Per-message usage snapshot → context ring. NOT a billing event:
+            // pi's top-level `usage` is cumulative for the whole assistant
+            // response and re-arrives on every content-block end, so billing it
+            // here counted the same tokens 2–3x per message. `final: false`
+            // tells the frontend to refresh the ring only. The authoritative
+            // per-message bill comes from `message_end` below.
+            if let Some(usage) = message.get("usage") {
+                if matches!(delta_type, "text_end" | "thinking_end" | "toolcall_end")
+                {
+                    let model = instance.current_model.lock().unwrap().clone();
+                    let provider = instance.current_provider.lock().unwrap().clone();
+                    emit_usage(
+                        instance,
+                        usage,
+                        model.as_deref(),
+                        provider.as_deref(),
+                        false,
+                    );
+                }
             }
         }
         "tool_execution_start" => {
+            // 非嵌套调用是本会话的串行工具链（推理见 evict_settled_permission_asks）：
+            // 走到这里，此前收到的审批弹窗都已决。嵌套调用（带 parentToolCallId）
+            // 可能并发跑钩子，跳过。
+            let nested = message
+                .get("parentToolCallId")
+                .and_then(Value::as_str)
+                .is_some_and(|p| !p.is_empty());
+            if !nested {
+                evict_settled_permission_asks(instance, "tool_started");
+            }
             let tool_call_id = message
                 .get("toolCallId")
                 .and_then(Value::as_str)
@@ -5412,6 +5562,17 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             }
         }
         "tool_execution_update" => {
+            // 执行期事件只在各调用的 prepare（竞速弹窗所在阶段）返回后发出
+            // ——走到这里，此前收到的审批弹窗都已决（推理见
+            // evict_settled_permission_asks）。嵌套调用（带 parentToolCallId）
+            // 保守跳过。
+            let nested = message
+                .get("parentToolCallId")
+                .and_then(Value::as_str)
+                .is_some_and(|p| !p.is_empty());
+            if !nested {
+                evict_settled_permission_asks(instance, "tool_running");
+            }
             let tool_call_id = message
                 .get("toolCallId")
                 .and_then(Value::as_str)
@@ -5527,6 +5688,15 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             }
         }
         "tool_execution_end" => {
+            // 同 tool_execution_update：执行期事件 = prepare 已返回，此前收到的
+            // 审批弹窗都已决。嵌套调用保守跳过。
+            let nested = message
+                .get("parentToolCallId")
+                .and_then(Value::as_str)
+                .is_some_and(|p| !p.is_empty());
+            if !nested {
+                evict_settled_permission_asks(instance, "tool_finished");
+            }
             let tool_call_id = message
                 .get("toolCallId")
                 .and_then(Value::as_str)
@@ -5892,6 +6062,9 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             }
         }
         "agent_settled" => {
+            // Turn 结束 ⇒ 不存在未返回的工具钩子：仍挂着的审批弹窗都是竞速
+            // 输掉的僵尸（也覆盖「停止」残局），作废它们。
+            evict_settled_permission_asks(instance, "turn_settled");
             // Turn (including queued steering/follow-ups) fully settled →
             // release the in-flight session/prompt waiter.
             let cancelled = instance.turn_cancelled.swap(false, Ordering::SeqCst);
@@ -5946,6 +6119,14 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         "reasoning": final_thinking,
                     }),
                 );
+                // 人不在前台时的收尾信号：出错优先报错，否则报完成（摘要取正文开头）。
+                if !fatal_error.is_empty() {
+                    crate::desktop_notify::notify_unfocused("任务出错", &fatal_error);
+                } else if !final_text.is_empty() {
+                    crate::desktop_notify::notify_unfocused("任务完成", &final_text);
+                } else {
+                    crate::desktop_notify::notify_unfocused("任务完成", "回合已结束");
+                }
             }
             // Settle the waiter. The guard must be DROPPED before calling
             // w.tx.send() — send() can block on tokio runtime contention,
@@ -6036,6 +6217,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         request_id.clone(),
                         PendingUI {
                             method: ui_method.to_string(),
+                            permission: false,
                         },
                     );
                     UI_REQUEST_OWNERS.lock().unwrap().insert(
@@ -6064,6 +6246,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             },
                         }),
                     );
+                    crate::desktop_notify::notify_unfocused("需要确认", &dialog_toast_body(title));
                 }
                 // select/input/editor = free-form user interaction → the
                 // clarify bar (bottom floating input with optional choices),
@@ -6071,10 +6254,18 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 // permission_request loses the answer value (approve could
                 // not pick an option), which hung the extension forever.
                 "select" | "input" | "editor" => {
+                    // pi-permission 的竞速审批弹窗在这里打标记：只有它会被
+                    // 自动作废（见 evict_settled_permission_asks）。其它 select
+                    // 是真正的用户交互，永不自动关。
+                    let permission = is_permission_ui_request(
+                        ui_method,
+                        message.get("title").and_then(Value::as_str),
+                    );
                     instance.ui_requests.lock().unwrap().insert(
                         request_id.clone(),
                         PendingUI {
                             method: ui_method.to_string(),
+                            permission,
                         },
                     );
                     UI_REQUEST_OWNERS.lock().unwrap().insert(
@@ -6099,6 +6290,13 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         .unwrap_or_default();
                     // editor prefills the answer box with the text to edit.
                     let prefill = message.get("prefill").and_then(Value::as_str).unwrap_or("");
+                    // 审批卡附带超时秒数（与扩展侧 withFailClosedTimeout 读同一份
+                    // settings.json），前端卡片用它渲染倒计时；非审批卡为 null（不适用）。
+                    let approval_timeout = if permission {
+                        json!(crate::approval_policy::read_approval_timeout_sec())
+                    } else {
+                        Value::Null
+                    };
                     emit_helix_event(
                         "session/update",
                         &json!({
@@ -6109,10 +6307,13 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                                 "question": question,
                                 "choices": if choices.is_empty() { Value::Null } else { json!(choices) },
                                 "prefill": prefill,
+                                "approvalTimeoutSec": approval_timeout,
                                 "params": message,
                             },
                         }),
                     );
+                    let toast_title = if permission { "需要审批" } else { "需要你的回答" };
+                    crate::desktop_notify::notify_unfocused(toast_title, &dialog_toast_body(&question));
                 }
                 // 已知的 fire-and-forget 方法（不阻塞模型）：surface as warning。
                 "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text" | "status" => {
@@ -6137,6 +6338,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         request_id.clone(),
                         PendingUI {
                             method: ui_method.to_string(),
+                            permission: false,
                         },
                     );
                     UI_REQUEST_OWNERS.lock().unwrap().insert(
@@ -6172,6 +6374,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             },
                         }),
                     );
+                    crate::desktop_notify::notify_unfocused("需要你的回答", &dialog_toast_body(&question));
                 }
             }
         }
@@ -6196,10 +6399,26 @@ fn content_to_text(content: &Value) -> Value {
     }
 }
 
-/// `message_update` carries the cumulative `usage` field → emit the context
-/// ring event in the shape the frontend's addSessionUsageStats expects.
-fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
-    let usage = message.get("usage").cloned().unwrap_or(Value::Null);
+/// One `usage:prompt-complete` notification.
+///
+/// Two sources, deliberately distinguished by `final_report`:
+///
+/// - `message_update` (`final_report = false`): pi's top-level `usage` is the
+///   **cumulative** usage of the assistant response *so far* (docs/json.md), and
+///   it re-arrives on every `text_end` / `thinking_end` / `toolcall_end`. These
+///   events exist to keep the context ring live; the frontend must NOT bill them
+///   — billing the same figure once per content block inflated the daily
+///   per-model totals by 2.7–3.4x.
+/// - `message_end` (`final_report = true`): the authoritative final message.
+///   Fires exactly once per assistant message and carries `model` / `provider`,
+///   so it is the only correct source for per-model billing attribution.
+fn emit_usage(
+    instance: &Arc<PiInstance>,
+    usage: &Value,
+    model: Option<&str>,
+    provider: Option<&str>,
+    final_report: bool,
+) {
     if usage.is_null() {
         return;
     }
@@ -6254,6 +6473,10 @@ fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
             "aggregate": true,
         });
     }
+    // `at_ms` lets the frontend bucket the spend under the EVENT's day instead
+    // of the write-time day — a reply that lands after midnight used to be
+    // filed under the new day even though most of its tokens were generated
+    // before it.
     emit_helix_event(
         "usage:prompt-complete",
         &json!({
@@ -6267,7 +6490,11 @@ fn emit_usage(instance: &Arc<PiInstance>, message: &Value) {
                 "context_used": context_used,
                 "context_percent": context_percent,
                 "categories": categories,
+                "final": final_report,
             },
+            "model": model,
+            "provider": provider,
+            "at_ms": now_ms(),
             "session_id": instance.current_session_id(),
             "raw": usage,
         }),
@@ -6665,16 +6892,58 @@ pub fn pi_cli_strings() -> (String, Vec<String>) {
     (command.get_program().to_string_lossy().into_owned(), base)
 }
 
-#[cfg(windows)]
+/// pi CLI program + `--mode rpc`, plus Helix's built-in browser extension.
+///
+/// The extension file lives in `~/.pi/agent/helix-internal/` — outside pi's
+/// `extensions/` discovery dir — so terminal `pi` runs never see its
+/// `browser_*` tools; only processes spawned here load them. Skipped when the
+/// installer hasn't written the file yet: pi hard-fails startup on a missing
+/// `--extension` path.
 fn pi_command() -> Command {
     let (mut command, _base) = pi_cli_args();
     command.arg("--mode").arg("rpc");
+    let ext = crate::pi_extensions::browser_extension_path();
+    if ext.is_file() {
+        command.arg("--extension").arg(ext);
+    }
     command
 }
 
-#[cfg(not(windows))]
-fn pi_command() -> Command {
-    let (mut command, _base) = pi_cli_args();
-    command.arg("--mode").arg("rpc");
-    command
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ui(method: &str, permission: bool) -> PendingUI {
+        PendingUI {
+            method: method.into(),
+            permission,
+        }
+    }
+
+    #[test]
+    fn permission_marker_recognizes_only_extension_select() {
+        assert!(is_permission_ui_request(
+            "select",
+            Some("[pi-permission] Approval required\nTool: bash")
+        ));
+        assert!(!is_permission_ui_request("select", Some("模型反问：选一个")));
+        assert!(!is_permission_ui_request(
+            "select",
+            Some("前缀里有 [pi-permission] 但不在开头")
+        ));
+        assert!(!is_permission_ui_request("input", Some("[pi-permission] x")));
+        assert!(!is_permission_ui_request("select", None));
+    }
+
+    #[test]
+    fn take_permission_asks_removes_only_marked() {
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), ui("select", true));
+        m.insert("b".to_string(), ui("select", false));
+        m.insert("c".to_string(), ui("confirm", false));
+        let taken = take_permission_asks(&mut m);
+        assert_eq!(taken, vec!["a".to_string()]);
+        assert!(!m.contains_key("a"));
+        assert!(m.contains_key("b") && m.contains_key("c"));
+    }
 }

@@ -31,7 +31,7 @@ pub fn open_browser_url(url: String) -> Value {
     json!({ "ok": true, "url": url })
 }
 
-/// Poll the pi extension's browser request queue
+/// Poll the built-in browser extension's request queue
 /// (`~/.pi/agent/browser-requests/*.json`), forward each NEW request's
 /// full payload (op/url/reqId/params) as a `helix:browser-request` event, and
 /// mark consumed files by renaming to `*.consumed` so the frontend's periodic
@@ -113,8 +113,8 @@ pub fn poll_browser_requests() -> Value {
     json!({ "ok": true, "opened": opened })
 }
 
-/// Write a browser automation result (`<reqId>.result.json`) that the pi
-/// extension's request-response tools poll for. `result` is stored verbatim.
+/// Write a browser automation result (`<reqId>.result.json`) that the built-in
+/// browser extension's request-response tools poll for. `result` is stored verbatim.
 #[tauri::command]
 pub fn browser_write_result(req_id: String, result: Value) -> Value {
     let dir = dirs::home_dir()

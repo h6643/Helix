@@ -356,7 +356,13 @@ function buildTauriAPI(): ElectronAPI {
     getPermissionMode: () => invoke("helix_get_permission_mode"),
     setPermissionMode: (mode: string) =>
       invoke("helix_set_permission_mode", { mode }),
+    // 审批卡超时（秒）⇄ settings.json permission.approvalTimeoutSec。弹窗打开
+    // 即起算，到期无用户操作 → 扩展侧 fail-closed 拒绝；范围 30–3600，越界
+    // 会被后端收敛到边界（不提供 0=关闭档）。
+    setApprovalTimeoutSec: (seconds: number) =>
+      invoke("helix_set_approval_timeout_sec", { seconds }),
     update: () => invoke("helix_update"),
+    updateInstall: () => invoke("helix_update_install"),
     // Subagent presets bundled with the pi-subagents extension (surfaced in the
     // Subagent settings page alongside user identities). deleteSubagent moves
     // the preset's agents/<name>.md out of the scanned dir (recoverable backup).
@@ -371,6 +377,10 @@ function buildTauriAPI(): ElectronAPI {
     piGetAvailableModels: () => invoke("pi_get_available_models"),
     piSetThinkingLevelAll: (level: string) =>
       invoke("pi_set_thinking_level_all", { level }),
+    // 渠道中心：一次性 pi RPC 进程执行 pi-connect 的 /connect（见 pi_connect.rs）。
+    // checkin 会跟在一次 status 刷新后面（复用同一进程），results[0]/[1] 各自成段。
+    piConnectQuery: (action: "status" | "checkin") =>
+      invoke("pi_connect_query", { action }),
     // pi.dev 官方目录（不是 npm 全量搜索 —— 那个搜 `pi` 会满屏数学库）。
     // 参数全部可选：空 query = 最热门，type/sort/page 下推服务端。
     piSearchPackages: (

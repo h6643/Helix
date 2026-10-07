@@ -26,6 +26,40 @@ fn pi_models_path() -> PathBuf {
     pi_agent_dir().join("models.json")
 }
 
+/// Fallback window for a custom-endpoint model the user never gave a
+/// `contextWindow` for.
+///
+/// Why this must be shared by EVERY models.json write path: pi's own default
+/// is `contextWindow ?? 128e3` (bundle chunks/chunk-BFNE7BHG.js). An entry that
+/// stays without the field therefore reports **128k**, not 256k — the usage
+/// ring's denominator then silently disagrees with what the user expects.
+/// Historically only `apply_pi_model_config` (the single-model `setConfig`
+/// path) had this fallback, and it only ever covered the FIRST model of a
+/// list — so models #2..N stayed bare and landed on pi's 128k.
+/// Keep the invariant here: every write of a model entry backfills 256k when
+/// no explicit window was given and none is already recorded.
+const FALLBACK_CONTEXT_WINDOW: u64 = 256_000;
+
+/// Backfill `contextWindow` on a model entry when it has none.
+///
+/// An explicit `cw` always wins (including the user *shrinking* an existing
+/// window). Otherwise an already-recorded window is preserved, and only a
+/// genuinely missing one is filled with [`FALLBACK_CONTEXT_WINDOW`].
+fn apply_context_window_to_entry(
+    entry: &mut serde_json::Value,
+    context_window: Option<u64>,
+) {
+    if let Some(cw) = context_window.filter(|cw| *cw > 0) {
+        entry["contextWindow"] = serde_json::json!(cw);
+    } else if entry
+        .get("contextWindow")
+        .and_then(serde_json::Value::as_u64)
+        .is_none()
+    {
+        entry["contextWindow"] = serde_json::json!(FALLBACK_CONTEXT_WINDOW);
+    }
+}
+
 /// Read Pi's settings.json as JSON (empty object on any error).
 pub fn read_pi_settings() -> serde_json::Value {
     std::fs::read_to_string(pi_settings_path())
@@ -468,15 +502,7 @@ fn apply_pi_model_config(
         // An explicit window wins; otherwise keep the limit already registered
         // for this model (the settings flow stores one per model) and only fall
         // back to 256k for a brand-new entry, which otherwise gets pi's 128k.
-        if let Some(cw) = context_window {
-            model_entry["contextWindow"] = serde_json::json!(cw);
-        } else if model_entry
-            .get("contextWindow")
-            .and_then(|v| v.as_u64())
-            .is_none()
-        {
-            model_entry["contextWindow"] = serde_json::json!(256_000);
-        }
+        apply_context_window_to_entry(&mut model_entry, context_window);
         if model_entry
             .get("maxTokens")
             .and_then(|v| v.as_u64())
@@ -627,9 +653,7 @@ pub fn apply_pi_provider_models(
             .unwrap_or_else(|| serde_json::json!({ "id": id }));
         entry["id"] = serde_json::Value::String(id.clone());
         entry["name"] = serde_json::Value::String(id);
-        if let Some(cw) = context_window {
-            entry["contextWindow"] = serde_json::json!(cw);
-        }
+        apply_context_window_to_entry(&mut entry, *context_window);
         if *reasoning == Some(true) {
             entry["reasoning"] = serde_json::json!(true);
         }
@@ -783,9 +807,7 @@ pub fn register_pi_provider_models(
             .unwrap_or_else(|| serde_json::json!({ "id": id }));
         entry["id"] = serde_json::Value::String(id.clone());
         entry["name"] = serde_json::Value::String(id);
-        if let Some(cw) = context_window {
-            entry["contextWindow"] = serde_json::json!(cw);
-        }
+        apply_context_window_to_entry(&mut entry, *context_window);
         if *reasoning == Some(true) {
             entry["reasoning"] = serde_json::json!(true);
         }
@@ -1048,5 +1070,34 @@ mod pi_roundtrip_tests {
         assert_eq!(w("   ", Some("alpha")), 0);
         // 没有 providers 段（models.json 被清空/损坏）→ 0，不 panic。
         assert_eq!(context_window_in(&serde_json::json!({}), "big-model", None), 0);
+    }
+
+    /// 每条 models.json 写入路径在「用户没填窗口」时都必须把条目补成256k。
+    ///
+    /// 回归背景：兜底原先只写在 `apply_pi_model_config`（setConfig，且只作用于
+    /// 模型列表第1 项），`apply_pi_provider_models` / `register_pi_provider_models`
+    /// 的循环里是裸的 `if let Some(cw)`。于是第 2..N 个模型条目在 models.json 里
+    /// 裸奔，pi 用自己的 `?? 128e3` 兜底 ⇒ 上下文环分母变成 128k。
+    #[test]
+    fn context_window_fallback_backfills_missing_entries() {
+        // 不填 → 补 256k（pi 的 128k 兜底不许露出来）。
+        let mut bare = serde_json::json!({ "id": "m" });
+        apply_context_window_to_entry(&mut bare, None);
+        assert_eq!(bare["contextWindow"], serde_json::json!(256_000));
+
+        // 不填 + 已有窗口 → 保留原值，不被兜底覆盖。
+        let mut recorded = serde_json::json!({ "id": "m", "contextWindow": 1_000_000 });
+        apply_context_window_to_entry(&mut recorded, None);
+        assert_eq!(recorded["contextWindow"], serde_json::json!(1_000_000));
+
+        // 显式填 → 覆盖（包括把窗口调小；这是用户主动改的意图）。
+        let mut shrink = serde_json::json!({ "id": "m", "contextWindow": 1_000_000 });
+        apply_context_window_to_entry(&mut shrink, Some(8_192));
+        assert_eq!(shrink["contextWindow"], serde_json::json!(8_192));
+
+        // 0 / 无效值视同「没填」→ 走兜底而不是写下 0（写下 0 会让分母塌成 0）。
+        let mut zero = serde_json::json!({ "id": "m" });
+        apply_context_window_to_entry(&mut zero, Some(0));
+        assert_eq!(zero["contextWindow"], serde_json::json!(256_000));
     }
 }

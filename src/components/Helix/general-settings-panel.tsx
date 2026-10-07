@@ -14,6 +14,14 @@ import {
 } from "@/lib/electron-bridge";
 import { useHelixStore } from "@/stores/helix-store";
 
+/** 审批卡超时预设（秒）：1/2/5/10/30 分钟。范围 [30,3600] 由扩展与后端收敛。 */
+const APPROVAL_TIMEOUT_PRESETS = [60, 120, 300, 600, 1800];
+
+/** 秒 → 展示文案（60 的倍数按分钟显示，其余按秒）。 */
+function formatApprovalTimeout(sec: number): string {
+  return sec >= 60 && sec % 60 === 0 ? `${sec / 60} 分钟` : `${sec} 秒`;
+}
+
 export function GeneralSettingsPanel() {
   const showToast = useHelixStore((s) => s.showToast);
 
@@ -51,6 +59,11 @@ export function GeneralSettingsPanel() {
     gitRemoteUrl,
     gitCommitTemplate,
     gitBranchPrefix,
+    // 审批卡超时：真相在 pi-permission 的 settings.json，store 里是供本页
+    // 下拉显示的只读缓存（回读/写回见 sync/setApprovalTimeoutSec）。
+    approvalTimeoutSec,
+    syncApprovalTimeoutSec,
+    setApprovalTimeoutSec,
     persistToStorage,
   } = useHelixStore();
 
@@ -70,9 +83,9 @@ export function GeneralSettingsPanel() {
     "themeStyle",
     "editorTheme",
     "mcpServers",
-    // 审批档位不导出：它的真相是 pi-permission 的配置文件
-    // （<pi 数据根>/config/permission-ext-config.json），不在 store 里，
-    // 导出一份副本等于制造第二条真相。要迁移档位请复制那个文件。
+    // 审批档位/审批超时不导出：它们的真相是 pi-permission 的配置文件
+    // （<pi 数据根>/settings.json 的 permission 键），store 里的值只是缓存，
+    // 导出一份副本等于制造第二条真相。要迁移请复制那个文件。
     "startupGreeting",
     "terminalShell",
     "agentMaxIterations",
@@ -142,6 +155,9 @@ export function GeneralSettingsPanel() {
   const [proxyUrl, setProxyUrl] = useState("");
   const [proxyBusy, setProxyBusy] = useState(false);
 
+  // 审批卡超时（settings.json permission.approvalTimeoutSec；下拉显示回读值）。
+  const [approvalTimeoutBusy, setApprovalTimeoutBusy] = useState(false);
+
 
   // 常规面板的开关/选项改动即生效（无保存按钮），防抖写入 IndexedDB，
   // 避免设置项重启后丢失。
@@ -190,6 +206,11 @@ export function GeneralSettingsPanel() {
       cancelled = true;
     };
   }, []);
+
+  // 回读审批卡超时的真相（settings.json permission.approvalTimeoutSec）。
+  useEffect(() => {
+    void syncApprovalTimeoutSec();
+  }, [syncApprovalTimeoutSec]);
 
   const applyProxy = async () => {
     setProxyBusy(true);
@@ -279,6 +300,41 @@ export function GeneralSettingsPanel() {
     }
   };
 
+  // 审批卡超时下拉选项：预设 + （手工改过文件时）当前值本身，选项不撒谎。
+  const approvalTimeoutPresets = APPROVAL_TIMEOUT_PRESETS.includes(
+    approvalTimeoutSec,
+  )
+    ? APPROVAL_TIMEOUT_PRESETS
+    : [...APPROVAL_TIMEOUT_PRESETS, approvalTimeoutSec].sort((a, b) => a - b);
+  const approvalTimeoutOptions = approvalTimeoutPresets.map((s) => ({
+    label: formatApprovalTimeout(s),
+    value: s,
+  }));
+
+  // 审批卡超时改动即写（无保存按钮）：写 settings.json 后回读生效值刷新下拉。
+  const handleApprovalTimeoutChange = async (v: string) => {
+    const sec = Number(v);
+    if (!Number.isFinite(sec) || sec === approvalTimeoutSec) return;
+    setApprovalTimeoutBusy(true);
+    try {
+      const applied = await setApprovalTimeoutSec(sec);
+      if (applied === sec) {
+        showToast({
+          type: "success",
+          title: `审批卡超时已设为 ${formatApprovalTimeout(applied)}`,
+        });
+      } else {
+        // 写失败会回读旧值；越界收敛也走这里（预设均在范围内，实际只有失败）。
+        showToast({
+          type: "error",
+          title: `审批卡超时未能写入，当前为 ${formatApprovalTimeout(applied)}`,
+        });
+      }
+    } finally {
+      setApprovalTimeoutBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader>常规</PageHeader>
@@ -308,6 +364,20 @@ export function GeneralSettingsPanel() {
         </SettingRow>
       </SettingGroup>
 
+      <SettingGroup>
+        <SettingRow
+          label="审批卡超时"
+          hint="弹窗出现即倒计时；到期未操作自动拒绝（拒绝执行，不放行）"
+        >
+          <PopupSelect
+            value={String(approvalTimeoutSec)}
+            onChange={(v) => void handleApprovalTimeoutChange(v)}
+            options={approvalTimeoutOptions}
+            className="w-36"
+            disabled={approvalTimeoutBusy}
+          />
+        </SettingRow>
+      </SettingGroup>
 
       <SettingGroup>
         <SettingRow label="数据存储路径" hint={`应用数据的根目录`}>

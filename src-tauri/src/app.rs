@@ -395,14 +395,68 @@ pub fn get_status() -> Value {
 // (helix_get/set_raw_config removed — config edits go through
 // helix_set_config / helix_set_yaml_key / helix_set_config_key_value.)
 
-// ── Update Check ─────────────────────────
+// ── Update Check & Install ─────────────────────────
 
+/// 检查 GitHub Release 上的 Helix 更新（tauri-plugin-updater；签名公钥在
+/// tauri.conf.json 的 plugins.updater.pubkey）。端点缺失 / 离线 / 还没有带
+/// latest.json 的 release 时返回 Err，由前端静默降级。
 #[tauri::command]
-pub async fn helix_update() -> Result<Value, String> {
-    // Placeholder: Tauri's built-in updater should be used in production
-    Ok(json!({
-        "available": false,
-        "version": env!("CARGO_PKG_VERSION"),
-        "message": "暂无更新"
-    }))
+pub async fn helix_update(app: tauri::AppHandle) -> Result<Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| format!("更新器初始化失败: {e}"))?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(json!({
+            "available": true,
+            "current": update.current_version,
+            "version": update.version,
+            "notes": update.body,
+            "date": update.date.map(|d| d.to_string()),
+        })),
+        Ok(None) => Ok(json!({
+            "available": false,
+            "current": app.package_info().version.to_string(),
+        })),
+        Err(e) => Err(format!("检查更新失败: {e}")),
+    }
+}
+
+/// 下载并安装更新。
+///
+/// Windows 语义（tauri-plugin-updater）：安装器（NSIS，passive 进度窗）被拉起后
+/// 本进程立即 exit(0)，装完由安装器按默认参数自动重启应用 —— 成功路径等不到本
+/// 命令的返回值，前端保持「正在安装」态即可。进度经 `helix:event` 两连发：
+/// `app_update_progress`（下载中，节流 ~256KB）与 `app_update_installing`（下载完）。
+#[tauri::command]
+pub async fn helix_update_install(app: tauri::AppHandle) -> Result<Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| format!("更新器初始化失败: {e}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("检查更新失败: {e}"))?
+        .ok_or_else(|| "当前已是最新版本".to_string())?;
+
+    let mut downloaded: u64 = 0;
+    let mut last_emit: u64 = 0;
+    update
+        .download_and_install(
+            |chunk_len, content_len| {
+                downloaded += chunk_len as u64;
+                if downloaded - last_emit >= 256 * 1024 {
+                    last_emit = downloaded;
+                    crate::gateway::emit_helix_event(
+                        "app_update_progress",
+                        &json!({ "downloaded": downloaded, "total": content_len }),
+                    );
+                }
+            },
+            || {
+                crate::gateway::emit_helix_event("app_update_installing", &json!({}));
+            },
+        )
+        .await
+        .map_err(|e| format!("下载/安装更新失败: {e}"))?;
+
+    // Windows 上走不到这里（进程已随安装器退出）；其它平台重启使新版本生效。
+    app.restart();
 }

@@ -5,6 +5,7 @@ import {
   Sun,
   Plug,
   Archive,
+  ArchiveRestore,
   ChevronLeft,
   Search,
   X,
@@ -16,6 +17,8 @@ import {
   Activity,
   Workflow,
   RefreshCw,
+  Trash2,
+  Folder,
   Brain,
   Code2,
 } from "lucide-react";
@@ -28,6 +31,7 @@ import React, {
 } from "react";
 import { AgentsSettings } from "./agents-settings";
 import { AppearanceSettingsPanel } from "./appearance-settings-panel";
+import { ChannelModelSettings } from "./channel-model-settings";
 import { GeneralSettingsPanel } from "./general-settings-panel";
 import { HookSettings } from "./hook-settings";
 import { ImageModelSettings } from "./image-model-settings";
@@ -141,10 +145,23 @@ const NAV_GROUPS: NavGroup[] = [
     title: "集成",
     items: [
       { id: "hook", label: "Hook", icon: Workflow },
-      { id: "archive", label: "历史归档", icon: Archive },
+      { id: "archive", label: "任务", icon: Archive },
     ],
   },
 ];
+
+// 归档列表按 workDir 分组显示项目名：取路径最后一段，末位分隔符先剥掉。
+const archiveProjectName = (workDir: string | null): string => {
+  if (!workDir) return "未关联项目";
+  const parts = workDir.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || workDir;
+};
+
+const formatArchiveDate = (ts: number): string => {
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
 
 // ModelUsageStats, UsageSummary, UsageDetail, TokenUsagePanel — extracted to ./usage-stats.tsx
 
@@ -336,12 +353,16 @@ export function ApiSettings({
   // Profile 只存模型 id 字符串，contextWindow / reasoning 不在 profile 里。
   // 重新灌入 addedModels 时必须保留内存里已有的 per-model 元数据，否则
   // 保存触发 apiProfiles 变化 → 下方 effect 一跑就把它们洗成 { id }。
-  // 冷启动（prev 为空）时回退到 profile 落盘的 modelContextWindows：
-  // 若不单独存一份映射，重开编辑时 per-model 窗口全丢，再保存就送
-  // undefined，后端 256_000 回退把用户填过的值重置掉
-  // （"我之前填的上下文窗口被改掉了"根因）。
+  // 冷启动（prev 为空）时回退到 profile 落盘的 modelContextWindows /
+  // modelReasonings：若不单独存一份映射，重开编辑时 per-model 元数据全丢，
+  // 再保存就送 undefined，后端 256_000 回退把用户填过的值重置掉
+  // （"我之前填的上下文窗口被改掉了" / "思考模式重启后没了"根因）。
   const seedAddedModels = useCallback(
-    (ids: string[], persistedWindows?: Record<string, number>) => {
+    (
+      ids: string[],
+      persistedWindows?: Record<string, number>,
+      persistedReasonings?: Record<string, boolean>,
+    ) => {
       setAddedModels((prev) =>
         ids.map((id) => {
           const old = prev.find((x) => x.id === id);
@@ -353,7 +374,12 @@ export function ApiSettings({
             };
           }
           const cw = persistedWindows?.[id];
-          return cw !== undefined ? { id, contextWindow: cw } : { id };
+          const rs = persistedReasonings?.[id];
+          return {
+            id,
+            ...(cw !== undefined ? { contextWindow: cw } : {}),
+            ...(rs !== undefined ? { reasoning: rs } : {}),
+          };
         }),
       );
     },
@@ -371,7 +397,11 @@ export function ApiSettings({
     setSelectedProviderId(p.id);
     setEditingProfileId(p.id);
     setLocalConfig({ ...p.config });
-    seedAddedModels(p.models || [], p.modelContextWindows);
+    seedAddedModels(
+      p.models || [],
+      p.modelContextWindows,
+      p.modelReasonings,
+    );
   }, [activeProfileId, apiProfiles, seedAddedModels]);
 
   // Mirror the backend's actual config when running in Electron so the form
@@ -446,7 +476,7 @@ export function ApiSettings({
   const [pickedContext, setPickedContext] = useState("");
   const [manualModel, setManualModel] = useState("");
   const [pickedReasoning, setPickedReasoning] = useState(false);
-  type ModelTab = "main" | "vision" | "image";
+  type ModelTab = "main" | "vision" | "image" | `channel:${string}`;
   const [modelTab, setModelTab] = useState<ModelTab>("main");
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
 
@@ -504,10 +534,14 @@ export function ApiSettings({
     baseUrl?: string;
     api?: string;
     reasoning?: boolean;
+    input?: string[];
     contextWindow?: number;
   };
   const [piModels, setPiModels] = useState<PiModel[]>([]);
   const [isLoadingPiModels, setIsLoadingPiModels] = useState(false);
+  // pi-connect 渠道 provider（WorkBuddy / Trae / Qoder）——由 helix-layout 在
+  // 网关就绪时刷新，这里只读用于左栏渠道行。
+  const piChannelProviders = useHelixStore((s) => s.piChannelProviders);
 
   const loadPiModels = useCallback(async () => {
     if (!isElectron()) return;
@@ -533,9 +567,11 @@ export function ApiSettings({
 
   // 挂载即拉一次 pi 的模型列表：per-model 的 contextWindow / reasoning 只
   // 持久化在 ~/.pi/agent/models.json，profile 重启后只剩 id，冷启动后编辑
-  // 弹窗要靠这份数据回填。
+  // 弹窗要靠这份数据回填。渠道 provider 列表一并刷新（扩展注册结果可能
+  // 在本会话里变过——比如刚在渠道中心重新登录）。
   useEffect(() => {
     void loadPiModels();
+    void useHelixStore.getState().refreshPiChannelProviders();
   }, [loadPiModels]);
 
   // 把 pi models.json 里该模型的 contextWindow / reasoning 回填进
@@ -815,8 +851,12 @@ export function ApiSettings({
 
   // Archive state
   const [archives, setArchives] = useState<
-    Array<{ id: string; label: string; savedAt: number; messageCount: number }>
+    Array<{ id: string; label: string; savedAt: number; workDir: string | null }>
   >([]);
+  const [archiveQuery, setArchiveQuery] = useState("");
+  const [archiveProjectFilter, setArchiveProjectFilter] = useState("all");
+  const [archiveConfirmDeleteAll, setArchiveConfirmDeleteAll] = useState(false);
+  const [archiveDeletingAll, setArchiveDeletingAll] = useState(false);
 
   const loadArchives = useCallback(async () => {
     try {
@@ -829,7 +869,7 @@ export function ApiSettings({
             id: s.id,
             label: s.label,
             savedAt: s.savedAt,
-            messageCount: s.chatMessages.length,
+            workDir: s.workDir ?? null,
           })),
       );
     } catch { /* empty */}
@@ -1095,7 +1135,11 @@ export function ApiSettings({
       setShowModelDropdown(false);
       // 编辑既有供应商时把已保存的模型带进卡片，否则列表会显示为空、
       // 保存一次就把 models 数组清空。
-      seedAddedModels(p.models || [], p.modelContextWindows);
+      seedAddedModels(
+        p.models || [],
+        p.modelContextWindows,
+        p.modelReasonings,
+      );
       setApiView("edit");
     },
     [apiProfiles, seedAddedModels],
@@ -1197,10 +1241,17 @@ export function ApiSettings({
     // per-model 窗口剥掉，再保存就送 undefined → 后端 256_000 回退把用户
     // 填过的值重置（"我之前填的上下文窗口被改掉了"根因）。
     const modelContextWindows: Record<string, number> = {};
+    // 同理：reasoning（开启思考模式）也必须随 profile 落盘，否则冷启动
+    // seedAddedModels 剥成 undefined，重开编辑弹窗开关显示为关
+    // （"我开了思考模式，重启后没了"根因）。
+    const modelReasonings: Record<string, boolean> = {};
     for (const m of models) {
       const id = m.id.trim();
       if (id && m.contextWindow !== undefined && Number.isFinite(m.contextWindow)) {
         modelContextWindows[id] = m.contextWindow;
+      }
+      if (id && m.reasoning !== undefined) {
+        modelReasonings[id] = m.reasoning;
       }
     }
     const finalConfig: ApiConfig = {
@@ -1222,6 +1273,7 @@ export function ApiSettings({
         finalConfig,
         profileModels,
         modelContextWindows,
+        modelReasonings,
       );
       renameApiProfile(editingProfileId, profileName);
       setActiveProfile(editingProfileId);
@@ -1239,6 +1291,7 @@ export function ApiSettings({
           finalConfig,
           profileModels,
           modelContextWindows,
+          modelReasonings,
         );
         renameApiProfile(dup.id, profileName);
         setActiveProfile(dup.id);
@@ -1248,6 +1301,7 @@ export function ApiSettings({
           finalConfig,
           profileModels,
           modelContextWindows,
+          modelReasonings,
         );
         setActiveProfile(id);
       }
@@ -1678,6 +1732,24 @@ export function ApiSettings({
     [showToast, loadArchives],
   );
 
+  const handleDeleteAllArchives = useCallback(async () => {
+    setArchiveDeletingAll(true);
+    try {
+      for (const a of archives) {
+        await persistence.deleteSession(a.id);
+      }
+      showToast({
+        type: "success",
+        title: "已删除全部归档",
+        description: `${archives.length} 个任务`,
+      });
+      await loadArchives();
+    } finally {
+      setArchiveDeletingAll(false);
+      setArchiveConfirmDeleteAll(false);
+    }
+  }, [archives, showToast, loadArchives]);
+
   const handleLoadArchive = useCallback(
     async (sessionId: string) => {
       const sessions = await persistence.loadSessions();
@@ -1706,10 +1778,8 @@ export function ApiSettings({
         useHelixStore.getState().setSelectedWorkDir(session.workDir);
       }
       useHelixStore.getState().setCurrentSessionId(session.id);
-      // 恢复 = 取消归档：把 isArchived 置回 false，让会话回到侧边栏主列表。
-      // 之前只加载内容不改归档标记 → toast 显示"已恢复"但会话仍留在归档里，
-      // 主列表看不到 → "实际没效果"。恢复不是新对话——savedAt 保持最后一条
-      // 消息的时间。
+      // 取消归档：isArchived 置回 false，让会话回到侧边栏主列表。
+      // savedAt 保持最后一条消息的时间——恢复不是新对话。
       if (session.isArchived) {
         await persistence.saveSession({
           ...session,
@@ -1720,7 +1790,7 @@ export function ApiSettings({
       await loadArchives();
       showToast({
         type: "success",
-        title: "已恢复",
+        title: "已取消归档",
         description: session.label,
       });
     },
@@ -2053,7 +2123,11 @@ export function ApiSettings({
                           setSelectedProviderId(p.id);
                           setEditingProfileId(p.id);
                           setLocalConfig({ ...p.config });
-                          seedAddedModels(p.models || [], p.modelContextWindows);
+                          seedAddedModels(
+                            p.models || [],
+                            p.modelContextWindows,
+                            p.modelReasonings,
+                          );
                           setAvailableModels([]);
                           setShowModelDropdown(false);
                         }}
@@ -2072,6 +2146,32 @@ export function ApiSettings({
                         {p.config.apiKey && (
                           <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
                         )}
+                      </button>
+                    );
+                  })}
+                  {/* 渠道行（pi-connect 的 WorkBuddy / Trae / Qoder）：由 pi 的
+                      扩展在运行期注册，不在 profiles 里；点击后右侧是只读的
+                      模型清单，实际使用走输入框模型下拉的按会话选择。 */}
+                  {piChannelProviders.map((cp) => {
+                    const tab: ModelTab = `channel:${cp.id}`;
+                    const isActive = modelTab === tab;
+                    return (
+                      <button
+                        key={cp.id}
+                        onClick={() => setModelTab(tab)}
+                        className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors ${
+                          isActive
+                            ? "bg-primary/10 text-primary"
+                            : "text-foreground hover:bg-muted/50"
+                        }`}
+                      >
+                        <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] px-1.5 py-0.5 rounded-full font-medium bg-muted/80 text-muted-foreground">
+                          渠道
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-[length:var(--helix-transcript-size)] font-medium">
+                          {cp.name}
+                        </span>
+                        <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
                       </button>
                     );
                   })}
@@ -2586,8 +2686,13 @@ export function ApiSettings({
                   </>
                 ) : modelTab === "vision" ? (
                   <VisionModelSettings />
-                ) : (
+                ) : modelTab === "image" ? (
                   <ImageModelSettings />
+                ) : (
+                  <ChannelModelSettings
+                    channelId={modelTab.slice("channel:".length)}
+                    models={piModels}
+                  />
                 )}
               </div>
             </div>
@@ -2607,15 +2712,15 @@ export function ApiSettings({
             <PageHeader
               action={<>
                 {!isAddingMcp && !editingMcpName && !gatewayEditing ? (
-                  <button
+                  <Button
+                    variant="outline"
                     onClick={() => {
                       setIsAddingMcp(true);
                       resetMcpForm();
                     }}
-                    className="flex items-center gap-1.5 text-[length:var(--helix-transcript-size)] font-medium text-primary hover:text-primary/80 transition-colors"
                   >
                     添加服务器
-                  </button>
+                  </Button>
                 ) : (
                   <button
                     onClick={() => {
@@ -2782,51 +2887,205 @@ export function ApiSettings({
           </div>
         );
 
-      case "archive":
+      case "archive": {
+        const projectOptions = [
+          { label: "所有项目", value: "all" },
+          ...[...new Set(archives.map((a) => a.workDir ?? ""))].map((v) => ({
+            label: v === "" ? "未关联项目" : archiveProjectName(v),
+            value: v,
+          })),
+        ];
+        // 删空一个项目后它的筛选项不复存在 → 回退到「所有项目」，避免出现空列表。
+        const projectFilter = projectOptions.some(
+          (o) => o.value === archiveProjectFilter,
+        )
+          ? archiveProjectFilter
+          : "all";
+        const q = archiveQuery.trim().toLowerCase();
+        const filtered = archives.filter(
+          (a) =>
+            (projectFilter === "all" || (a.workDir ?? "") === projectFilter) &&
+            (q === "" || a.label.toLowerCase().includes(q)),
+        );
+        // archives 已按 savedAt 降序 → 分组按「最近有任务的项目」排序，组内同序。
+        const groups: Array<{
+          key: string;
+          workDir: string | null;
+          items: typeof archives;
+        }> = [];
+        for (const a of filtered) {
+          const key = a.workDir ?? "";
+          let g = groups.find((x) => x.key === key);
+          if (!g) {
+            g = { key, workDir: a.workDir, items: [] };
+            groups.push(g);
+          }
+          g.items.push(a);
+        }
+
         return (
           <div className="max-w-3xl space-y-6">
-            <PageHeader>历史归档</PageHeader>
+            <PageHeader
+              action={
+                <button
+                  onClick={() => setArchiveConfirmDeleteAll(true)}
+                  disabled={archives.length === 0}
+                  className="h-9 flex items-center gap-1.5 px-4 rounded-[10px] bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)] font-medium disabled:opacity-40 disabled:pointer-events-none"
+                >
+                  <Trash2 className="size-4" />
+                  全部删除
+                </button>
+              }
+            >
+              任务
+            </PageHeader>
 
-            {/* Archived sessions */}
-            <section className="space-y-3">
-              {archives.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground/60">
-                    暂无归档记录
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-1.5">
-                  {archives.map((a) => (
-                    <div
-                      key={a.id}
-                      onClick={() => handleLoadArchive(a.id)}
-                      className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-card shadow-sm cursor-pointer transition-colors group hover:bg-muted/40"
-                    >
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[length:var(--helix-transcript-size)] font-medium text-foreground truncate">
-                          {a.label}
-                        </p>
-                        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70 mt-0.5">
-                          {a.messageCount} 条消息
-                        </p>
-                      </div>
+            {archives.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-12 text-center">
+                <p className="ui-text font-medium text-foreground/60">
+                  暂无归档记录
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* 搜索（只匹配任务名）+ 按项目筛选 */}
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 flex items-center gap-2.5 h-9 px-3.5 rounded-lg border border-border/50 bg-muted/50 focus-within:border-foreground/25 transition-colors">
+                    <Search className="size-3.5 text-muted-foreground/40 shrink-0" />
+                    <input
+                      value={archiveQuery}
+                      onChange={(e) => setArchiveQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") {
+                          setArchiveQuery("");
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      placeholder="搜索已归档任务"
+                      className="flex-1 bg-transparent ui-text text-foreground placeholder:text-muted-foreground/40 min-w-0 outline-none"
+                    />
+                    {archiveQuery && (
                       <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteArchive(a.id);
-                        }}
-                        className="p-1 rounded-md text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/20 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                        onClick={() => setArchiveQuery("")}
+                        className="text-muted-foreground/30 hover:text-muted-foreground/60 shrink-0"
                       >
-                        删除
+                        <X className="size-3.5" />
                       </button>
-                    </div>
-                  ))}
+                    )}
+                  </div>
+                  <PopupSelect
+                    value={projectFilter}
+                    onChange={setArchiveProjectFilter}
+                    options={projectOptions}
+                    className="w-44 h-9 shrink-0"
+                  />
                 </div>
-              )}
-            </section>
+
+                {groups.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center">
+                    <p className="ui-text font-medium text-foreground/60">
+                      没有匹配的归档任务
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-8">
+                    {groups.map((g) => (
+                      <section key={g.key}>
+                        <div className="flex items-center justify-between gap-3 mb-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <Folder className="size-4 text-muted-foreground/60 shrink-0" />
+                            <span
+                              className="ui-text font-semibold text-foreground truncate"
+                              data-tip={g.workDir ?? undefined}
+                            >
+                              {archiveProjectName(g.workDir)}
+                            </span>
+                          </div>
+                          <span className="ui-text-sm2 text-muted-foreground/60 shrink-0">
+                            {g.items.length} 个任务
+                          </span>
+                        </div>
+                        <div className="space-y-2.5">
+                          {g.items.map((a) => (
+                            <div
+                              key={a.id}
+                              className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-border/40 bg-card/60"
+                            >
+                              <div className="flex-1 min-w-0">
+                                <p className="ui-text font-semibold text-foreground truncate">
+                                  {a.label}
+                                </p>
+                                <p className="ui-text-sm2 text-muted-foreground/60 mt-0.5">
+                                  {formatArchiveDate(a.savedAt)}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <button
+                                  onClick={() => handleDeleteArchive(a.id)}
+                                  aria-label="删除"
+                                  data-tip="删除"
+                                  className="size-9 flex items-center justify-center rounded-[10px] bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors"
+                                >
+                                  <Trash2 className="size-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleLoadArchive(a.id)}
+                                  className="h-9 flex items-center gap-1.5 px-3.5 rounded-[10px] bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)] font-medium"
+                                >
+                                  <ArchiveRestore className="size-4" />
+                                  取消归档
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* 全部删除确认 */}
+            {archiveConfirmDeleteAll && (
+              <div
+                className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/40 p-4 backdrop-blur-[2px]"
+                onClick={() => {
+                  if (!archiveDeletingAll) setArchiveConfirmDeleteAll(false);
+                }}
+              >
+                <div
+                  className="w-full max-w-sm rounded-xl border border-border/50 bg-card p-5 shadow-xl"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <h3 className="ui-title font-semibold text-foreground">
+                    删除全部归档任务
+                  </h3>
+                  <p className="mt-2 ui-text text-muted-foreground/70">
+                    将删除 {archives.length} 个已归档任务，此操作无法撤销。
+                  </p>
+                  <div className="mt-5 flex items-center justify-end gap-2.5">
+                    <button
+                      onClick={() => setArchiveConfirmDeleteAll(false)}
+                      disabled={archiveDeletingAll}
+                      className="px-4 py-2 rounded-lg ui-text-sm2 font-medium text-foreground/70 bg-muted/50 hover:bg-muted/80 transition-colors disabled:opacity-40"
+                    >
+                      取消
+                    </button>
+                    <button
+                      onClick={handleDeleteAllArchives}
+                      disabled={archiveDeletingAll}
+                      className="px-4 py-2 rounded-lg ui-text-sm2 font-medium text-white bg-red-500 hover:bg-red-500/90 transition-colors disabled:opacity-50"
+                    >
+                      {archiveDeletingAll ? "删除中…" : "全部删除"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         );
+      }
 
       case "usage":
         return (
@@ -2854,6 +3113,11 @@ export function ApiSettings({
 
       case "codemode":
         return <CodemodeSettingsPanel />;
+
+      default:
+        // 导航历史持久化里可能残留已删除页面的 id（如曾短暂存在的
+        // 「channels」），回退到常规页而不是渲染空白。
+        return <GeneralSettingsPanel />;
     }
   };
 

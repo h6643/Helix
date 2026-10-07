@@ -6,6 +6,7 @@ import {
   Clock,
   Puzzle,
   Settings,
+  Cable,
   Loader2,
   Trash2,
   Folder,
@@ -20,6 +21,9 @@ import {
   MoreVertical,
   Pencil,
   Copy,
+  Download,
+  ChevronRight,
+  PanelRight,
   GitBranch,
   AlertTriangle,
 } from "lucide-react";
@@ -76,62 +80,96 @@ function inFlightPrepare(backendSid: string): Promise<unknown> {
   return p;
 }
 
+// 右键菜单字号比界面字号小一档（与「项目」行的更多菜单同款），否则界面字号
+// 调大时菜单整块膨胀、盖住半侧边栏。
+const MENU_ITEM =
+  "w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/85 hover:text-foreground hover:bg-accent/60 transition-colors";
+const MENU_ICON = "size-3.5 shrink-0";
+
 interface SidebarProps {
   onNewTask?: () => void;
   collapsed?: boolean;
 }
 
 interface SessionActionsMenuProps {
+  /** 全局置顶：进侧边栏顶部独立「置顶」分组。 */
   isPinned?: boolean;
+  /** 工作区内置顶：只在本工作区的项目分组内排最前。 */
+  pinnedInProject?: boolean;
+  /** 该会话是否属于某个工作区（有 workDir）；没有就隐藏「在工作区内置顶」。 */
+  hasWorkspace?: boolean;
   isArchived?: boolean;
   onArchive?: () => void;
   onPin?: () => void;
-  onDelete?: () => void;
+  onPinInProject?: () => void;
   onRestore?: () => void;
   onRename?: () => void;
   onCopyId?: () => void;
+  /** 打开旁路问答（/btw）：右侧「旁路问答」面板，不切走当前对话。 */
+  onByline?: () => void;
+  /** 导出：走 persistence 的 JSON / Markdown 导出（与「会话管理」同一套实现）。 */
+  onExport?: (format: "json" | "markdown") => void;
   // 展开态受控：菜单有两个入口（hover 的「更多操作」按钮 + 对话行右键），
   // 状态必须住在父组件，否则右键无法驱动打开。
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * 右键锚点。给了就从鼠标位置弹出（VSCode 风格），不给则回退到
+   * hover 按钮的 getBoundingClientRect 定位。
+   */
+  contextPoint?: { x: number; y: number } | null;
 }
 
 function SessionActionsMenu({
   isPinned,
+  pinnedInProject,
+  hasWorkspace,
   isArchived,
   onArchive,
   onPin,
-  onDelete,
+  onPinInProject,
   onRestore,
   onRename,
   onCopyId,
+  onByline,
+  onExport,
   open,
   onOpenChange,
+  contextPoint,
 }: SessionActionsMenuProps) {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [exportOpen, setExportOpen] = useState(false);
   const [coords, setCoords] = useState<{
-    top?: number;
-    bottom?: number;
-    right: number;
+    top: number;
+    left: number;
   } | null>(null);
 
   const updatePosition = useCallback(() => {
-    if (!buttonRef.current) return;
-    const rect = buttonRef.current.getBoundingClientRect();
-    const MENU_HEIGHT_ESTIMATE = 180; // ~4–5 items × ~36px each + padding
-    const spaceBelow = window.innerHeight - rect.bottom - 4;
-    const spaceAbove = rect.top - 4;
-    // Prefer opening downward; flip upward only when there isn't enough room.
-    // When upward, anchor menu BOTTOM just above the button (no gap).
-    const openUpward =
-      spaceBelow < MENU_HEIGHT_ESTIMATE && spaceAbove > spaceBelow;
+    const MENU_W = 176; // w-44
+    const MENU_H = 230; // ~7 项 × 30px + 分隔线 + padding
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let left: number;
+    let top: number;
+    if (contextPoint) {
+      // 鼠标锚点：右下溢出时向左/向上翻转
+      left = contextPoint.x + MENU_W + 8 > vw ? contextPoint.x - MENU_W : contextPoint.x;
+      top = contextPoint.y + MENU_H + 8 > vh ? Math.max(4, vh - MENU_H - 4) : contextPoint.y;
+    } else {
+      if (!buttonRef.current) return;
+      const rect = buttonRef.current.getBoundingClientRect();
+      left = rect.left - MENU_W + rect.width; // 右对齐按钮
+      top =
+        vh - rect.bottom - 4 < MENU_H && rect.top > vh - rect.bottom - 4
+          ? Math.max(4, rect.top - MENU_H)
+          : rect.bottom + 4;
+    }
     setCoords({
-      top: openUpward ? undefined : rect.bottom + 4,
-      bottom: openUpward ? window.innerHeight - rect.top + 4 : undefined,
-      right: window.innerWidth - rect.right,
+      left: Math.max(4, Math.min(left, vw - MENU_W - 4)),
+      top: Math.max(4, Math.min(top, vh - 40)),
     });
-  }, []);
+  }, [contextPoint]);
 
   useEffect(() => {
     if (!open) return;
@@ -174,17 +212,28 @@ function SessionActionsMenu({
         coords &&
         createPortal(
           <div
-            className="fixed z-[100]"
-            style={{
-              top: coords.top,
-              bottom: coords.bottom,
-              right: coords.right,
-            }}
+            className="fixed z-[200]"
+            style={{ top: coords.top, left: coords.left }}
           >
             <div
               ref={menuRef}
-              className="w-40 bg-card border border-border/80 rounded-lg shadow-xl py-1"
+              className="w-44 bg-card border border-border/80 rounded-lg shadow-xl py-1 select-none"
+              onContextMenu={(e) => e.preventDefault()}
             >
+              {/* 项样式统一走 MENU_ITEM，hover 底色/图标/字号与 VSCode 菜单一致 */}
+              {onCopyId && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenChange(false);
+                    onCopyId();
+                  }}
+                  className={MENU_ITEM}
+                >
+                  <Copy className={MENU_ICON} />
+                  复制对话 ID
+                </button>
+              )}
               {onRename && (
                 <button
                   onClick={(e) => {
@@ -192,24 +241,58 @@ function SessionActionsMenu({
                     onOpenChange(false);
                     onRename();
                   }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground hover:bg-accent/60"
+                  className={MENU_ITEM}
                 >
-                  <Pencil className="size-3.5" />
+                  <Pencil className={MENU_ICON} />
                   重命名
                 </button>
               )}
-              {!isArchived && onArchive && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onOpenChange(false);
-                    onArchive();
-                  }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+              {onExport && (
+                <div
+                  className="relative"
+                  onMouseEnter={() => setExportOpen(true)}
+                  onMouseLeave={() => setExportOpen(false)}
                 >
-                  <Archive className="size-3.5" />
-                  归档
-                </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setExportOpen((v) => !v);
+                    }}
+                    className={MENU_ITEM}
+                  >
+                    <Download className={MENU_ICON} />
+                    <span className="flex-1 text-left">导出记录</span>
+                    <ChevronRight
+                      className={`size-3.5 shrink-0 text-muted-foreground/60 transition-transform ${exportOpen ? "rotate-90" : ""}`}
+                    />
+                  </button>
+                  {exportOpen && (
+                    <div className="absolute left-full top-0 ml-1 w-40 bg-card border border-border/80 rounded-lg shadow-xl py-1">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenChange(false);
+                          onExport("markdown");
+                        }}
+                        className={MENU_ITEM}
+                      >
+                        <Download className={MENU_ICON} />
+                        Markdown
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenChange(false);
+                          onExport("json");
+                        }}
+                        className={MENU_ITEM}
+                      >
+                        <Download className={MENU_ICON} />
+                        JSON
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
               {!isArchived && onPin && (
                 <button
@@ -218,12 +301,40 @@ function SessionActionsMenu({
                     onOpenChange(false);
                     onPin();
                   }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                  className={MENU_ITEM}
                 >
                   <Pin
-                    className={`size-3.5 ${isPinned ? "text-primary" : ""}`}
+                    className={`${MENU_ICON} ${isPinned ? "text-primary" : ""}`}
                   />
-                  {isPinned ? "取消固定" : "固定"}
+                  {isPinned ? "取消全局置顶" : "全局置顶"}
+                </button>
+              )}
+              {!isArchived && hasWorkspace && onPinInProject && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenChange(false);
+                    onPinInProject();
+                  }}
+                  className={MENU_ITEM}
+                >
+                  <Pin
+                    className={`${MENU_ICON} ${pinnedInProject ? "text-primary" : ""}`}
+                  />
+                  {pinnedInProject ? "取消工作区置顶" : "在工作区内置顶"}
+                </button>
+              )}
+              {onByline && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenChange(false);
+                    onByline();
+                  }}
+                  className={MENU_ITEM}
+                >
+                  <PanelRight className={MENU_ICON} />
+                  旁路提问
                 </button>
               )}
               {isArchived && onRestore && (
@@ -233,38 +344,31 @@ function SessionActionsMenu({
                     onOpenChange(false);
                     onRestore();
                   }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
+                  className={MENU_ITEM}
                 >
-                  <RotateCcw className="size-3.5" />
+                  <RotateCcw className={MENU_ICON} />
                   恢复
                 </button>
               )}
-              {onCopyId && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onOpenChange(false);
-                    onCopyId();
-                  }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-foreground/80 hover:text-foreground hover:bg-accent/50 transition-colors"
-                >
-                  <Copy className="size-3.5" />
-                  复制对话 ID
-                </button>
+              {/* 破坏性/不可逆操作放分隔线之后 */}
+              {!isArchived && onArchive && (
+                <>
+                  <div className="my-1 h-px bg-border/60" />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenChange(false);
+                      onArchive();
+                    }}
+                    className={`${MENU_ITEM} text-destructive hover:bg-destructive/10`}
+                  >
+                    <Archive className={MENU_ICON} />
+                    归档
+                  </button>
+                </>
               )}
-              {onDelete && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onOpenChange(false);
-                    onDelete();
-                  }}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-destructive hover:bg-destructive/10"
-                >
-                  <Trash2 className="size-3.5" />
-                  删除
-                </button>
-              )}
+              {/* 侧边栏不提供「删除对话」：误触成本高且不可撤销。
+                  需要清理时走「设置 → 会话管理」或先归档。 */}
             </div>
           </div>,
           document.body,
@@ -449,6 +553,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
   const {
     clearChat,
     toggleSettings,
+    toggleChannelsCenter,
     toggleSessionManager,
     showToast,
     setSelectedWorkDir,
@@ -457,12 +562,14 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     useShallow((s) => ({
       clearChat: s.clearChat,
       toggleSettings: s.toggleSettings,
+      toggleChannelsCenter: s.toggleChannelsCenter,
       toggleSessionManager: s.toggleSessionManager,
       showToast: s.showToast,
       setSelectedWorkDir: s.setSelectedWorkDir,
       setWorkDir: s.setWorkDir,
     })),
   );
+  const showChannelsCenter = useHelixStore((s) => s.showChannelsCenter);
   const showScheduledTasksPanel = useHelixStore(
     (s) => s.showScheduledTasksPanel,
   );
@@ -509,14 +616,27 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     new Set(),
   );
   const [loading, setLoading] = useState(true);
-  const [deleteTarget, setDeleteTarget] = useState<PersistedSession | null>(
-    null,
-  );
   const [deleteProjectDir, setDeleteProjectDir] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   // 对话操作菜单的展开目标（受控）：同一时刻最多展开一个。右键对话行或
   // hover 的「更多操作」按钮都能打开，所以 open 不能只存在菜单组件内部。
   const [sessionMenuId, setSessionMenuId] = useState<string | null>(null);
+  // 右键锚点：非 null 时菜单从鼠标位置弹出（VSCode 风格），
+  // 点「更多操作」按钮时置回 null → 菜单回退到按钮锚点。
+  const [sessionMenuPoint, setSessionMenuPoint] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const openSessionMenuAt = useCallback(
+    (id: string, e?: React.MouseEvent) => {
+      e?.stopPropagation();
+      setSessionMenuId(id);
+      setSessionMenuPoint(
+        e ? { x: e.clientX, y: e.clientY } : null,
+      );
+    },
+    [],
+  );
   // 复制对话 id：取后端 sid（pi 会话 UUID，会话目录 / 日志都用它定位），
   // 这个对话还没绑定过后端会话时才退回前端会话 id。toast 带上 id 本体，
   // 复制结果一眼可核对。
@@ -546,6 +666,34 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
         .catch(() => showToast({ type: "error", title: "复制失败" }));
     },
     [showToast],
+  );
+
+  /** 导出对话记录：走 persistence 的 JSON / Markdown 序列化，与「会话管理」同一套。 */
+  const exportSession = useCallback(
+    async (id: string, format: "json" | "markdown") => {
+      const session = sessions.find((s) => s.id === id);
+      if (!session) return;
+      try {
+        const data =
+          format === "json"
+            ? await persistence.exportSessionAsJson(session)
+            : await persistence.exportSessionAsMarkdown(session);
+        const blob = new Blob([data], {
+          type: format === "json" ? "application/json" : "text/markdown",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `helix-session-${session.label || session.id}.${format === "json" ? "json" : "md"}`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast({ type: "success", title: "导出成功" });
+      } catch (e) {
+        console.error("Failed to export session:", e);
+        showToast({ type: "error", title: "导出失败" });
+      }
+    },
+    [sessions, showToast],
   );
 
   // 历史对话条分页：每页最多显示 20 条（项目内会话与独立对话各自分页）。
@@ -627,6 +775,8 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     const groups = new Map<string, PersistedSession[]>();
     for (const s of sessions) {
       if (s.isArchived) continue;
+      // 全局置顶的会话只在顶部「置顶」分组出现，这里跳过避免重复
+      if (s.isPinned) continue;
       if (!s.workDir || s.workDir === "/" || s.workDir === "\\") continue;
       if (isRemoteWorkDir(s.workDir)) continue;
       const list = groups.get(s.workDir) || [];
@@ -649,6 +799,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     return Array.from(groups.entries())
       .map(([dir, list]) => {
         const sorted = [...list].sort((a, b) => {
+          // 工作区内置顶排最前；全局置顶的已上移到顶部「置顶」分组
+          if (a.pinnedInProject !== b.pinnedInProject)
+            return a.pinnedInProject ? -1 : 1;
           if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
           return (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt);
         });
@@ -668,6 +821,16 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       });
   }, [sessions, persistedFolders, pinnedProjectDirs]);
 
+  // ── 顶部「置顶」分组：全局置顶的会话（不分项目 / 独立）─────────────────
+  // 已从 projects / conversations / remoteBuckets 里排除，不会重复出现。
+  const pinnedSessions = useMemo(
+    () =>
+      sessions
+        .filter((s) => !s.isArchived && s.isPinned)
+        .sort((a, b) => (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt)),
+    [sessions],
+  );
+
   // ── 「项目」统一列表：本地目录 + 远程服务器 ─────────────────────────────
   // 远程对话的 workDir 是 `remote://<user@host:port>/<远端路径>` 虚拟键（目录在另
   // 一台机器上），按机器身份归拢到该服务器名下 —— 于是远程行和本地行一样能展开看
@@ -679,6 +842,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     const orphan: PersistedSession[] = [];
     for (const s of sessions) {
       if (s.isArchived) continue;
+      if (s.isPinned) continue; // 已上移到顶部「置顶」分组
       if (!isRemoteWorkDir(s.workDir)) continue;
       const svc = findServiceByRemoteWorkDir(externalServices, s.workDir);
       if (!svc) {
@@ -726,8 +890,13 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
 
   // Standalone conversations: 没有项目的对话 + 认不出服务器的远程对话。
   const conversations = useMemo(() => {
-    const local = sessions.filter((s) => !s.isArchived && !s.workDir);
+    // isPinned 的已上移到顶部「置顶」分组
+    const local = sessions.filter(
+      (s) => !s.isArchived && !s.workDir && !s.isPinned,
+    );
     return [...local, ...remoteBuckets.orphan].sort((a, b) => {
+      if (a.pinnedInProject !== b.pinnedInProject)
+        return a.pinnedInProject ? -1 : 1;
       if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
       return (b.createdAt ?? b.savedAt) - (a.createdAt ?? a.savedAt);
     });
@@ -1003,45 +1172,8 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
     [],
   );
 
-  const handleDeleteSession = useCallback(
-    async (id: string) => {
-      const session = sessions.find((s) => s.id === id);
-      if (session) setDeleteTarget(session);
-    },
-    [sessions],
-  );
-
-  const handleConfirmDelete = useCallback(async () => {
-    if (!deleteTarget) return;
-    try {
-      await persistence.deleteSession(deleteTarget.id);
-      // 同步清理磁盘反向索引，避免 conversation-index.json 只增不减
-      await removeConversationIndex(deleteTarget.id);
-      const remaining = await persistence.loadSessions();
-      setSessions(sortSessions(remaining));
-      const state = useHelixStore.getState();
-      if (
-        state.currentSessionId === deleteTarget.id ||
-        remaining.length === 0
-      ) {
-        // Only clear chat state; preserve the current project so the project
-        // item remains visible even after its last session is deleted.
-        useHelixStore.setState({
-          chatMessages: [],
-          currentSessionId: null,
-          activeSessionWorkDir: null,
-        });
-        if (remaining.length === 0) {
-          useHelixStore.setState({ selectedWorkDir: null });
-        }
-        useHelixStore.getState().clearExecutionFlow();
-        useGatewayStore.getState().setHelixSessionId(null);
-      }
-      setDeleteTarget(null);
-    } catch (e) {
-      console.error("Failed to delete session:", e);
-    }
-  }, [deleteTarget, sortSessions]);
+  /* 侧边栏不再提供「删除对话」入口（误触成本高、不可撤销）。
+     删除能力仍在「设置 → 会话管理」里，见 session-manager.tsx。 */
 
   const handleToggleArchive = useCallback(
     async (id: string, e?: React.MouseEvent) => {
@@ -1069,6 +1201,40 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
       }
     },
     [sortSessions],
+  );
+
+  /** 工作区内置顶：只在本工作区的项目分组里排最前，不进顶部「置顶」分组。 */
+  const handleTogglePinInProject = useCallback(
+    async (id: string) => {
+      try {
+        await persistence.toggleSessionPinnedInProject(id);
+        const remaining = await persistence.loadSessions();
+        setSessions(sortSessions(remaining));
+      } catch (e) {
+        console.error("Failed to toggle in-project pin:", e);
+      }
+    },
+    [sortSessions],
+  );
+
+  /**
+   * 旁路提问（/btw）：打开右侧「旁路问答」面板并聚焦输入框。
+   * 等价于 helix-layout 里会话头的 onOpenByline —— 官方"只开面板不发问"的路径，
+   * **不切currentSessionId**（先 loadSession 到目标会话，让旁路以它为背景）。
+   */
+  const handleOpenByline = useCallback(
+    async (id: string) => {
+      const target = sessions.find((s) => s.id === id);
+      if (!target) return;
+      // 旁路以「当前打开的对话」为背景，先切到目标会话再开面板
+      if (useHelixStore.getState().currentSessionId !== id) {
+        await handleLoadSession(target);
+      }
+      const st = useHelixStore.getState();
+      st.setRightSidebarTab("byline");
+      st.focusBylineInput();
+    },
+    [handleLoadSession, sessions],
   );
 
   const handleRevealInExplorer = useCallback(async (dir?: string | null) => {
@@ -1450,6 +1616,17 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           })}
           <div className="flex-1" />
           <button
+            onClick={() => toggleChannelsCenter()}
+            data-tip="渠道中心"
+            className={`p-2.5 rounded-lg transition-colors ${
+              showChannelsCenter
+                ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
+                : "text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40"
+            }`}
+          >
+            <Cable className="size-[18px]" />
+          </button>
+          <button
             onClick={() => toggleSettings()}
             data-tip="设置"
             className="p-2.5 rounded-lg text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent/40 transition-colors"
@@ -1509,6 +1686,95 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
 
           {/* Unified scroll: single scrollbar covers projects + standalone conversations */}
           <div className="flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+            {/* 「置顶」= 全局置顶的会话，独立于项目/工作区，恒在最上面。
+                这批会话已从 projects / conversations 里排除，不会重复出现。 */}
+            {pinnedSessions.length > 0 && (
+              <>
+                <div className="flex items-center px-4 pt-1.5 pb-0.5">
+                  <span className="flex-1 text-[calc(var(--helix-transcript-size)*0.9286)] font-medium tracking-normal text-sidebar-foreground/50">
+                    置顶
+                  </span>
+                </div>
+                {pinnedSessions.map((session) => (
+                  <div
+                    key={session.id}
+                    onClick={() => handleLoadSession(session)}
+                    className={`relative w-full group flex items-center gap-2 px-4 py-2 cursor-pointer transition-colors ${
+                      currentSessionId === session.id
+                        ? "bg-primary/10 text-primary"
+                        : "text-sidebar-foreground/50 hover:bg-sidebar-accent/30 hover:text-sidebar-foreground/80"
+                    }`}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      openSessionMenuAt(session.id, e);
+                    }}
+                  >
+                    <Pin className="size-3.5 shrink-0 text-primary/70" />
+                    <div className="flex-1 min-w-0">
+                      {renamingId === session.id ? (
+                        <input
+                          autoFocus
+                          defaultValue={session.label}
+                          onClick={(e) => e.stopPropagation()}
+                          onBlur={(e) =>
+                            handleCommitRename(
+                              session.id,
+                              e.target.value,
+                            )
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              handleCommitRename(
+                                session.id,
+                                (e.target as HTMLInputElement).value,
+                              );
+                            } else if (e.key === "Escape") {
+                              setRenamingId(null);
+                            }
+                          }}
+                          className="text-[calc(var(--helix-transcript-size)*0.8571)] w-full bg-background outline-none border border-primary rounded px-1 py-0.5"
+                        />
+                      ) : (
+                        <p className="text-[calc(var(--helix-transcript-size)*0.8571)] truncate flex-1">
+                          {session.label.length > 14
+                            ? session.label.slice(0, 14) + "…"
+                            : session.label}
+                        </p>
+                      )}
+                    </div>
+                    <span
+                      className="ml-auto shrink-0 text-right text-[calc(var(--helix-transcript-size)*0.7143)] text-sidebar-foreground/40 transition-opacity group-hover:opacity-0"
+                      data-tip={`上次使用：${new Date(session.savedAt).toLocaleString("zh-CN")}`}
+                    >
+                      {timeAgo(session.savedAt)}
+                    </span>
+                    <SessionActionsMenu
+                      isPinned={session.isPinned}
+                      pinnedInProject={session.pinnedInProject}
+                      hasWorkspace={!!session.workDir}
+                      contextPoint={sessionMenuPoint}
+                      open={sessionMenuId === session.id}
+                      onOpenChange={(v) => {
+                        setSessionMenuId(v ? session.id : null);
+                        if (!v) setSessionMenuPoint(null);
+                      }}
+                      onPinInProject={() =>
+                        void handleTogglePinInProject(session.id)
+                      }
+                      onByline={() => void handleOpenByline(session.id)}
+                      onCopyId={() => copySessionId(session.id)}
+                      onExport={(fmt) =>
+                        void exportSession(session.id, fmt)
+                      }
+                      onArchive={() => handleToggleArchive(session.id)}
+                      onPin={() => handleTogglePin(session.id)}
+                      onRename={() => setRenamingId(session.id)}
+                    />
+                  </div>
+                ))}
+              </>
+            )}
             {/* 「项目」= 本地目录 + 远程服务器，一张列表一套行渲染。标题右侧的 ＋
                 是唯一的添加入口（本地挑目录 / 远程走三步向导），行内不再挂「添加
                 远程项目」占位行 —— 列表里每一行都是一个真实项目。 */}
@@ -1832,8 +2098,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                                           }`}
                                           onContextMenu={(e) => {
                                             e.preventDefault();
-                                            e.stopPropagation();
-                                            setSessionMenuId(session.id);
+                                            openSessionMenuAt(session.id, e);
                                           }}
                                         >
                                           {streamingDrafts[session.id]
@@ -1917,23 +2182,37 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                                           </span>
                                           <SessionActionsMenu
                                             isPinned={session.isPinned}
+                                            pinnedInProject={
+                                              session.pinnedInProject
+                                            }
+                                            hasWorkspace={!!session.workDir}
+                                            contextPoint={sessionMenuPoint}
                                             open={sessionMenuId === session.id}
-                                            onOpenChange={(v) =>
+                                            onOpenChange={(v) => {
                                               setSessionMenuId(
                                                 v ? session.id : null,
+                                              );
+                                              if (!v) setSessionMenuPoint(null);
+                                            }}
+                                            onPinInProject={() =>
+                                              void handleTogglePinInProject(
+                                                session.id,
                                               )
+                                            }
+                                            onByline={() =>
+                                              void handleOpenByline(session.id)
                                             }
                                             onCopyId={() =>
                                               copySessionId(session.id)
+                                            }
+                                            onExport={(fmt) =>
+                                              void exportSession(session.id, fmt)
                                             }
                                             onArchive={() =>
                                               handleToggleArchive(session.id)
                                             }
                                             onPin={() =>
                                               handleTogglePin(session.id)
-                                            }
-                                            onDelete={() =>
-                                              handleDeleteSession(session.id)
                                             }
                                             onRename={() =>
                                               setRenamingId(session.id)
@@ -2017,8 +2296,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                           }`}
                           onContextMenu={(e) => {
                             e.preventDefault();
-                            e.stopPropagation();
-                            setSessionMenuId(session.id);
+                            openSessionMenuAt(session.id, e);
                           }}
                         >
                           {streamingDrafts[session.id]?.isAgentRunning ? (
@@ -2079,14 +2357,22 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
                           </span>
                           <SessionActionsMenu
                             isPinned={session.isPinned}
+                            contextPoint={sessionMenuPoint}
                             open={sessionMenuId === session.id}
-                            onOpenChange={(v) =>
-                              setSessionMenuId(v ? session.id : null)
-                            }
+                            onOpenChange={(v) => {
+                              setSessionMenuId(v ? session.id : null);
+                              if (!v) setSessionMenuPoint(null);
+                            }}
                             onCopyId={() => copySessionId(session.id)}
+                            onExport={(fmt) =>
+                              void exportSession(session.id, fmt)
+                            }
                             onArchive={() => handleToggleArchive(session.id)}
                             onPin={() => handleTogglePin(session.id)}
-                            onDelete={() => handleDeleteSession(session.id)}
+                            onPinInProject={() =>
+                              void handleTogglePinInProject(session.id)
+                            }
+                            onByline={() => void handleOpenByline(session.id)}
                             onRename={() => setRenamingId(session.id)}
                           />
                         </div>
@@ -2126,6 +2412,17 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           </div>
           <div className="px-2 py-1.5 shrink-0 space-y-0.5">
             <button
+              onClick={() => toggleChannelsCenter()}
+              className={`w-full flex items-center gap-2.5 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8929)] rounded-lg transition-colors ${
+                showChannelsCenter
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/60 hover:text-sidebar-foreground/90 hover:bg-sidebar-accent/40"
+              }`}
+            >
+              <Cable className="size-4 shrink-0" />
+              <span>渠道中心</span>
+            </button>
+            <button
               onClick={() => toggleSettings()}
               className="w-full flex items-center gap-2.5 px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8929)] text-sidebar-foreground/60 hover:text-sidebar-foreground/90 hover:bg-sidebar-accent/40 rounded-lg transition-colors"
             >
@@ -2145,46 +2442,7 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           </div>
         </>
       )}
-      {/* Delete confirmation dialog */}
-      {deleteTarget &&
-        createPortal(
-          <div className="fixed inset-0 z-[10000] flex items-center justify-center animate-fade-in">
-            <div
-              className="absolute inset-0 bg-black/50"
-              onClick={() => setDeleteTarget(null)}
-            />
-            <div className="relative bg-popover border border-border/40 rounded-2xl shadow-2xl w-96 mx-4 p-6 space-y-4 animate-scale-in">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center shrink-0">
-                  <AlertTriangle className="size-5 text-destructive" />
-                </div>
-                <div>
-                  <h3 className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
-                    删除对话
-                  </h3>
-                  <p className="text-[length:var(--helix-transcript-size)] text-muted-foreground mt-1">
-                    确定要删除「{deleteTarget.label}」吗？此操作不可撤销。
-                  </p>
-                </div>
-              </div>
-              <div className="flex justify-between gap-2">
-                <button
-                  onClick={handleConfirmDelete}
-                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-destructive-foreground bg-destructive hover:bg-destructive/90 rounded-lg transition-colors"
-                >
-                  删除
-                </button>
-                <button
-                  onClick={() => setDeleteTarget(null)}
-                  className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground/70 hover:text-foreground hover:bg-accent rounded-lg transition-colors"
-                >
-                  取消
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
+      {/* Delete confirmation dialog —仅「删除项目」 */}
       {deleteProjectDir &&
         createPortal(
           <div className="fixed inset-0 z-[10000] flex items-center justify-center animate-fade-in">

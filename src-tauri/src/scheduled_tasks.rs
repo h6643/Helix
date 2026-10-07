@@ -190,6 +190,7 @@ fn task_from_job(job: &Value, updated_at: Option<&Value>) -> Value {
         "prompt": job.get("prompt").and_then(|v| v.as_str()).unwrap_or(""),
         "scheduleText": schedule_text,
         "cronExpression": cron_expr,
+        "action": job.get("helix_action").and_then(Value::as_str),
         "enabled": job.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
         "lastRunAt": parse_ts(job.get("last_run_at")),
         "nextRunAt": parse_ts(job.get("next_run_at")),
@@ -403,6 +404,75 @@ fn format_iso(ms: i64) -> String {
 // `scheduledTasks` bridge surface only. helix_cron_run's manual one-shot
 // dispatch has no UI either — the poller below is the single dispatcher.)
 
+/// Helix 内置任务的动作标记（jobs.json 的 `helix_action` 字段）：带标记的
+/// 任务分发时不发 agent prompt，由 dispatch_scheduled_task 按动作路由到
+/// 专用通道（渠道签到 = pi_connect 一次性桥）。
+const CHANNEL_CHECKIN_ACTION: &str = "channel_checkin";
+
+/// 一次性播种「每日 11:00 自动领取渠道签到」任务（2026-10-08 用户要求）。
+///
+/// 幂等 + 防复活：helix_data_dir() 下的标记文件一旦落盘就永不再播种 —— 用户
+/// 手动删除该任务后，下次启动不能原地复活它。jobs.json 里已存在同动作的
+/// 任务（如换机同步）时只补标记，不重复创建；jobs.json 存在但解析失败时
+/// 跳过（绝不在损坏文件上覆写）。
+pub fn seed_channel_checkin_job() {
+    let marker = crate::paths::helix_data_dir().join("channel-checkin-seeded");
+    if marker.exists() {
+        return;
+    }
+    let path = cron_jobs_path();
+    let mut data = match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("[scheduled-events] seed skipped: jobs.json unparsable");
+                return;
+            }
+        },
+        Err(_) => json!({ "jobs": [] }),
+    };
+    let jobs = match data.get_mut("jobs") {
+        Some(j) if j.is_array() => j.as_array_mut().unwrap(),
+        _ => {
+            eprintln!("[scheduled-events] seed skipped: jobs.json has no jobs array");
+            return;
+        }
+    };
+    let existing = jobs.iter().any(|j| {
+        j.get("helix_action").and_then(Value::as_str) == Some(CHANNEL_CHECKIN_ACTION)
+    });
+    if !existing {
+        let expr = "0 11 * * *";
+        let next = next_cron_occurrence(expr, now_ms());
+        let id = gen_job_id();
+        jobs.push(json!({
+            "id": id,
+            "name": "渠道中心签到",
+            "prompt": "/connect checkin",
+            "schedule": { "kind": "cron", "expr": expr, "display": "every day at 11:00" },
+            "schedule_display": "every day at 11:00",
+            "enabled": true,
+            "state": "scheduled",
+            "created_at": now_iso(),
+            "next_run_at": next.map(format_iso),
+            "last_run_at": null,
+            "helix_action": CHANNEL_CHECKIN_ACTION,
+        }));
+        data["updated_at"] = json!(now_iso());
+        if let Err(e) = atomic_write_jobs(&data) {
+            eprintln!("[scheduled-events] failed to seed channel checkin job: {e}");
+            return; // 不落标记 → 下次启动重试
+        }
+        eprintln!("[scheduled-events] seeded 渠道中心签到 job {id} (daily 11:00)");
+    }
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&marker, now_iso()) {
+        eprintln!("[scheduled-events] failed to write seed marker: {e}");
+    }
+}
+
 /// Start a background thread that polls for due jobs in jobs.json and consumes
 /// the extension's event files every 5 s. This thread is the SINGLE dispatcher
 /// for scheduled tasks — the frontend runner only refreshes UI state and the
@@ -566,6 +636,13 @@ fn dispatch_scheduled_task(job_id: &str, label: &str, prompt: &str, trigger: &st
     eprintln!(
         "[scheduled-events] dispatching task_fired job={job_id} label={label} trigger={trigger}"
     );
+    // 渠道签到类任务走一次性 pi_connect 桥：`/connect checkin` 的扩展 confirm
+    // 会被网关转成审批弹窗，无人值守下永远等不到回应（见 pi_gateway 的
+    // extension_ui_request 分支）；桥自动放行 confirm 且进程用完即杀。
+    if job_helix_action(job_id).as_deref() == Some(CHANNEL_CHECKIN_ACTION) {
+        dispatch_channel_checkin(job_id, label);
+        return;
+    }
     let prompt = prompt.to_string();
     let label = label.to_string();
     let job_id = job_id.to_string();
@@ -604,6 +681,10 @@ fn dispatch_scheduled_task(job_id: &str, label: &str, prompt: &str, trigger: &st
                 return;
             }
         };
+        // 任务已开始跑 —— 用户切走时这是唯一信号（跑完不另行通知；
+        // 卡在审批上时网关的审批 toast 会接力）。
+        let toast_body: &str = if label.is_empty() { "未命名任务" } else { &label };
+        crate::desktop_notify::notify_unfocused("定时任务已触发", toast_body);
         let prompt_res = crate::pi_gateway::send(
             "session/prompt",
             json!({
@@ -629,6 +710,73 @@ fn dispatch_scheduled_task(job_id: &str, label: &str, prompt: &str, trigger: &st
         // in-memory instance directly instead.
         crate::pi_gateway::drop_session_instance(&session_id);
     });
+}
+
+/// 读 jobs.json 里该 job 的 `helix_action`（事件文件路径也经此取动作）。
+fn job_helix_action(job_id: &str) -> Option<String> {
+    if job_id.is_empty() {
+        return None;
+    }
+    let data = load_jobs();
+    data.get("jobs")?
+        .as_array()?
+        .iter()
+        .find(|j| j.get("id").and_then(Value::as_str) == Some(job_id))
+        .and_then(|j| j.get("helix_action").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// 渠道签到任务的分发：在独立线程里跑 pi_connect 桥（阻塞 ~15-150s），不占
+/// poller 的 5s tick；桥自带全局串行锁（与面板手动签到互斥）。结算走系统
+/// 通知（聚焦时静默），成功才 mark_job_fired —— next_run_at 在认领时已前移，
+/// 失败不会重试风暴，次日 11:00 再试。
+fn dispatch_channel_checkin(job_id: &str, label: &str) {
+    let job_id = job_id.to_string();
+    let label = if label.is_empty() {
+        "渠道中心签到".to_string()
+    } else {
+        label.to_string()
+    };
+    std::thread::Builder::new()
+        .name("channel-checkin-dispatch".into())
+        .spawn(move || {
+            eprintln!("[scheduled-events] channel checkin job {job_id} ({label}) started");
+            match crate::pi_connect::run_checkin_blocking() {
+                Ok(v) => {
+                    let body = checkin_summary(&v);
+                    crate::desktop_notify::notify_unfocused("渠道中心签到", &body);
+                    mark_job_fired_in_jobs(&job_id);
+                    eprintln!("[scheduled-events] channel checkin job {job_id} done: {body}");
+                }
+                Err(e) => {
+                    crate::desktop_notify::notify_unfocused("渠道签到失败", &e);
+                    eprintln!("[scheduled-events] channel checkin job {job_id} failed: {e}");
+                }
+            }
+        })
+        .ok();
+}
+
+/// 从桥返回的 results 取第一段（checkin）的 notify 文案，拼成通知正文。
+fn checkin_summary(v: &Value) -> String {
+    let msgs: Vec<String> = v
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|r| r.first())
+        .and_then(|r| r.get("messages"))
+        .and_then(Value::as_array)
+        .map(|ms| {
+            ms.iter()
+                .filter_map(|m| m.get("message").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if msgs.is_empty() {
+        "签到完成".to_string()
+    } else {
+        msgs.join("\n")
+    }
 }
 
 /// Update jobs.json for the fired job: set last_run_at=now, disable once-tasks,

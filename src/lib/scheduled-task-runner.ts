@@ -47,6 +47,7 @@ async function refreshFromBackend() {
         prompt: bt.prompt,
         scheduleText: bt.scheduleText,
         cronExpression: bt.cronExpression,
+        action: bt.action ?? null,
         enabled: bt.enabled,
         lastRunAt: bt.lastRunAt ?? null,
         nextRunAt: bt.nextRunAt ?? null,

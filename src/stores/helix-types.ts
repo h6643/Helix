@@ -194,6 +194,8 @@ export interface ToastMessage {
   title: string;
   description?: string;
   duration?: number;
+  /** 0–100；有值时 ToastContainer 在描述下方渲染细进度条（如下载进度）。 */
+  progress?: number;
   onClick?: () => void;
 }
 
@@ -237,7 +239,7 @@ export type ReasoningEffortLevel =
  *
  * - 权限档 `PermissionTier`（`ask` / `auto` / `full`）—— 决定「工具调用要不要
  *   先问」，而且**全局只有一档**：它是 `@zhushanwen/pi-permission` 的配置
- *   （`config/permission-ext-config.json`），那个扩展只读一个文件，不区分会话。
+ *   （`settings.json` 顶层 `permission` 键），那个扩展只读一处，不区分会话。
  *   所以前端必须把它当「外部真相的缓存」：唯一写路径是
  *   `helix_set_permission_mode`，唯一读路径是 `helix_get_permission_mode`，
  *   并且**不再落 IndexedDB** —— 落一份自己的副本就制造第二条真相，历史教训
@@ -329,6 +331,11 @@ export interface ApiProfile {
    *  再保存就送 undefined，后端 256_000 回退把用户填的值重置掉。
    *  键 = 模型 id。 */
   modelContextWindows?: Record<string, number>;
+  /** 每个模型各自的「开启思考模式」（reasoning）开关。和
+   *  modelContextWindows 同理：models 数组只存 id，不落盘的话冷启动
+   *  seedAddedModels 会把它剥成 undefined，重开编辑弹窗时开关显示为关
+   *  （"我明明开了思考模式，重启后又没了"根因）。键 = 模型 id。 */
+  modelReasonings?: Record<string, boolean>;
 }
 
 /**
@@ -413,6 +420,10 @@ export interface ScheduledTask {
   prompt: string;
   scheduleText: string; // e.g. "every day at 9am" or "cron: 0 9 * * *"
   cronExpression?: string; // parsed cron expression
+  /** Helix 内置动作（如 "channel_checkin"）：分发不走 agent prompt，由 Rust
+   *  按动作路由到专用通道（渠道签到 = pi_connect 一次性桥）。缺省/null =
+   *  普通 agent 任务。 */
+  action?: string | null;
   enabled: boolean;
   lastRunAt: number | null;
   nextRunAt: number | null;

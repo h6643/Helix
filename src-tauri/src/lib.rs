@@ -6,6 +6,7 @@ mod background_tasks;
 mod browser_webview;
 mod config;
 mod delegations;
+mod desktop_notify;
 mod fs;
 mod gateway;
 mod git;
@@ -16,6 +17,7 @@ mod memory;
 mod page_fetch;
 mod paths;
 mod pi_catalog;
+mod pi_connect;
 mod pi_extensions;
 mod pi_gateway;
 /// Test-only re-exports of pi_gateway's session-trim helpers (integration
@@ -54,6 +56,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // A second Helix process was launched. Instead of opening another
             // window, focus the already-running one (mirror tray "show").
@@ -121,6 +125,14 @@ pub fn run() {
             // the first pi session already loads this copy instead of an
             // upstream one `pi update` may have restored.
             pi_extensions::install_aux_vision();
+            // Built-in browser extension (browser_* tools): write it to the
+            // internal path before the gateway spawns — pi_command() passes it
+            // to local sessions via `--extension` — and remove the superseded
+            // user-level pi-helix-browser install in the same pass (a leftover
+            // copy would leak the tools into terminal `pi` and double-register
+            // names in Helix sessions).
+            pi_extensions::install_browser_extension();
+            pi_extensions::remove_legacy_browser_extension();
 
             // Apply the HTTP proxy to the renderer (WebKitGTK default context)
             // BEFORE the gateway spawns so the webview fetches already honor it.
@@ -132,6 +144,8 @@ pub fn run() {
             });
             // Spawned after the
             // gateway so the pi child is ready before the first dispatch.
+            // 先播种内置任务（每日 11:00 渠道签到），再启动轮询。
+            scheduled_tasks::seed_channel_checkin_job();
             scheduled_tasks::start_scheduled_events_poller();
 
             // ── System tray ──────────────────────
@@ -250,6 +264,7 @@ pub fn run() {
             // 审批档位 ⇄ pi-permission 扩展配置（真正阻断工具执行的那一层）
             approval_policy::helix_get_permission_mode,
             approval_policy::helix_set_permission_mode,
+            approval_policy::helix_set_approval_timeout_sec,
             // embedded sidebar browser
             helix::open_browser_url,
             helix::poll_browser_requests,
@@ -383,6 +398,7 @@ pub fn run() {
             app::get_workspace_default_dir,
             app::get_status,
             app::helix_update,
+            app::helix_update_install,
             app::sync_work_dir,
             app::set_work_dir,
             app::get_data_root,
@@ -403,6 +419,8 @@ pub fn run() {
             helix::pi_set_package_enabled,
             helix::pi_get_available_models,
             helix::pi_set_thinking_level_all,
+            // 渠道中心：一次性 pi RPC 进程执行 pi-connect 的 /connect 命令
+            pi_connect::pi_connect_query,
             helix::pi_search_packages,
             helix::pi_install_package,
             helix::pi_uninstall_package,

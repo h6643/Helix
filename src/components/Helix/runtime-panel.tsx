@@ -54,8 +54,9 @@ export function RuntimePanel({ onClose }: { onClose: () => void }) {
     if (!isElectron()) return;
     setUpdating(true);
     try {
-      // 检查 pi agent + npm 插件的更新（npm registry）——与帮助菜单的
-      // “检查更新”同一后端命令；Helix 应用自身没有自动更新通道。
+      // 检查 pi agent + npm 插件的更新（npm registry）——与帮助菜单
+      // “检查更新”的 pi 分支同一后端命令；Helix 应用自身的更新在帮助
+      // 菜单里走 GitHub Release（tauri-plugin-updater），这里不涉及。
       const res = await (window as any).electron?.helix?.piCheckUpdates?.();
       if (!res) {
         return;

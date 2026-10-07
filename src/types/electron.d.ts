@@ -299,6 +299,8 @@ export interface ElectronAPI {
       extension_mode?: string;
       /** false 等价 yolo（扩展约定），必须读出来否则会显示错 */
       enabled?: boolean;
+      /** 审批卡超时秒数（30–3600 已归一）；ok=false 时为 null（读不到真相） */
+      approvalTimeoutSec?: number | null;
       config_path?: string;
       reason?: string;
     }>;
@@ -309,6 +311,16 @@ export interface ElectronAPI {
       mode?: string;
       extension_mode?: string;
       enabled?: boolean;
+      changed?: boolean;
+      config_path?: string;
+      error?: string;
+    }>;
+    setApprovalTimeoutSec: (
+      seconds: number,
+    ) => Promise<{
+      ok: boolean;
+      /** 生效值：越界输入被收敛后的结果（如 10 → 30） */
+      approvalTimeoutSec?: number;
       changed?: boolean;
       config_path?: string;
       error?: string;
@@ -466,6 +478,21 @@ export interface ElectronAPI {
     }>;
     piSetThinkingLevelAll: (level: string) => Promise<{ success: boolean }>;
     /**
+     * 渠道中心：一次性 pi RPC 进程执行 pi-connect 的 `/connect` 命令，
+     * 返回扩展的 notify 文本（见 src-tauri/src/pi_connect.rs）。
+     * checkin 的结果后跟着一段 status 刷新（复用同一进程）。
+     */
+    piConnectQuery: (action: "status" | "checkin") => Promise<{
+      results: Array<{
+        prompt: string;
+        success: boolean;
+        messages: Array<{
+          message: string;
+          type: "info" | "warning" | "error" | string;
+        }>;
+      }>;
+    }>;
+    /**
      * pi.dev 官方包目录搜索。
      * query 为空 = 不限（返回最热门）；pkgType / sort / page 直接下推给服务端。
      */
@@ -516,6 +543,19 @@ export interface ElectronAPI {
         hasUpdate?: boolean;
       }>;
     }>;
+    /** 检查 Helix 应用自身更新（tauri-plugin-updater，读 GitHub Release 的
+     *  latest.json）。离线 / release 尚无清单时 reject，调用方按静默降级处理。 */
+    update: () => Promise<{
+      available: boolean;
+      current?: string;
+      version?: string;
+      notes?: string | null;
+      date?: string | null;
+    }>;
+    /** 下载并安装 Helix 应用更新。进度经 app_update_progress /
+     *  app_update_installing 事件回推；Windows 上安装器拉起后进程退出，
+     *  成功路径没有返回值，失败才 reject。 */
+    updateInstall: () => Promise<void>;
   };
 
   profile: {

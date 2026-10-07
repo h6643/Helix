@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, X, AlertTriangle, Info, XCircle } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { useHelixStore } from "@/stores/helix-store";
 
 function ToastIcon({ type }: { type: string }) {
@@ -75,6 +75,16 @@ export function ToastContainer() {
               <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground mt-0.5 leading-relaxed">
                 {toast.description}
               </p>
+            )}
+            {typeof toast.progress === "number" && (
+              <div className="mt-1.5 h-1 rounded-full bg-border/60 overflow-hidden">
+                <div
+                  className="h-full bg-blue-400/80 transition-all duration-200"
+                  style={{
+                    width: `${Math.max(0, Math.min(100, toast.progress))}%`,
+                  }}
+                />
+              </div>
             )}
           </div>
           <button

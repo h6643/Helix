@@ -74,12 +74,15 @@ export default defineConfig([
     },
   },
   {
-    // Node runtime script (remote pi bridge) — not part of the frontend build,
-    // so browser globals don't apply. Disables the core-js `no-undef` the same
-    // way the helix/ts block does for TS files (see note at top of this file);
-    // `node --check src-tauri/vendor/remote-bridge.js` is its syntax gate.
+    // Node runtime scripts (remote pi bridge; built-in browser extension) —
+    // not part of the frontend build, so browser globals don't apply. Disables
+    // the core-js `no-undef` the same way the helix/ts block does for TS files
+    // (see note at top of this file); `node --check <file>` is their syntax gate.
     name: "helix/node-script",
-    files: ["src-tauri/vendor/remote-bridge.js"],
+    files: [
+      "src-tauri/vendor/remote-bridge.js",
+      "src-tauri/vendor/helix-browser.js",
+    ],
     rules: {
       "no-undef": "off",
     },
