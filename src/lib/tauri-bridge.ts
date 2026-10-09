@@ -361,6 +361,12 @@ function buildTauriAPI(): ElectronAPI {
     // 会被后端收敛到边界（不提供 0=关闭档）。
     setApprovalTimeoutSec: (seconds: number) =>
       invoke("helix_set_approval_timeout_sec", { seconds }),
+    // 用户规则 ⇄ settings.json permission.userRules（真正参与判定的那一层）。
+    // 读口顺带告知「当前档位下规则生不生效」+ 内置危险规则快照；写口整组替换，
+    // 校验不过一条都不写。
+    getPermissionRules: () => invoke("helix_get_permission_rules"),
+    setPermissionRules: (rules: unknown[]) =>
+      invoke("helix_set_permission_rules", { rules }),
     update: () => invoke("helix_update"),
     updateInstall: () => invoke("helix_update_install"),
     // Subagent presets bundled with the pi-subagents extension (surfaced in the
@@ -479,6 +485,15 @@ function buildTauriAPI(): ElectronAPI {
   api.image = {
     getConfig: () => invoke("image_config_list"),
     setConfig: (config: unknown) => invoke("image_config_save", { config }),
+  };
+
+  // ── 联网搜索（web-access 扩展读的 config.yaml `web_search:` 块）─────────
+  // 后端只回「有没有 key / key 由什么提供」，从不回显密钥，所以这里没有脱敏工作。
+  api.webSearch = {
+    getConfig: () => invoke("web_search_config_list"),
+    setConfig: (config: unknown) => invoke("web_search_config_save", { config }),
+    test: (provider?: string) =>
+      invoke("web_search_test", { provider: provider ?? null }),
   };
 
   // ── gateway MCP servers (config.yaml mcp_servers, read/write) ────────

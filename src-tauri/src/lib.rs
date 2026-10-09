@@ -43,6 +43,7 @@ pub mod ssh;
 mod state;
 mod terminal;
 mod vision;
+mod web_search;
 mod window;
 
 use crate::state::{AppState, APP_HANDLE};
@@ -265,6 +266,9 @@ pub fn run() {
             approval_policy::helix_get_permission_mode,
             approval_policy::helix_set_permission_mode,
             approval_policy::helix_set_approval_timeout_sec,
+            // 用户规则（settings.json → permission.userRules）可视化编辑
+            approval_policy::helix_get_permission_rules,
+            approval_policy::helix_set_permission_rules,
             // embedded sidebar browser
             helix::open_browser_url,
             helix::poll_browser_requests,
@@ -314,6 +318,10 @@ pub fn run() {
             vision::vision_describe,
             image_model::image_config_list,
             image_model::image_config_save,
+            // 联网搜索（web-access 扩展的 web_search: 配置块 + 连通性测试）
+            web_search::web_search_config_list,
+            web_search::web_search_config_save,
+            web_search::web_search_test,
             // SSH connections
             ssh::ssh_connect,
             // 一键远程连接（agent 远程跑）

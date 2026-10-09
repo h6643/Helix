@@ -21,6 +21,7 @@ import {
   Folder,
   Brain,
   Code2,
+  Shield,
 } from "lucide-react";
 import React, {
   useState,
@@ -37,6 +38,8 @@ import { HookSettings } from "./hook-settings";
 import { ImageModelSettings } from "./image-model-settings";
 import { MemorySettingsPanel } from "./memory-settings";
 import { CodemodeSettingsPanel } from "./codemode-settings";
+import { PermissionRulesSettings } from "./permission-rules-settings";
+import { WebSearchSettings } from "./web-search-settings";
 import { McpEditorForm, type McpFormData } from "./mcp-editor-form";
 import { PageHeader, PopupSelect, SettingGroup } from "./settings-ui";
 import { ShortcutsPage } from "./shortcuts-page";
@@ -108,7 +111,8 @@ type SettingsPage =
   | "help"
   | "agents"
   | "memory"
-  | "codemode";
+  | "codemode"
+  | "rules";
 
 interface NavItem {
   id: SettingsPage;
@@ -139,6 +143,7 @@ const NAV_GROUPS: NavGroup[] = [
       { id: "agents", label: "子智能体", icon: Bot },
       { id: "memory", label: "记忆", icon: Brain },
       { id: "codemode", label: "Codemode", icon: Code2 },
+      { id: "rules", label: "权限规则", icon: Shield },
     ],
   },
   {
@@ -476,13 +481,16 @@ export function ApiSettings({
   const [pickedContext, setPickedContext] = useState("");
   const [manualModel, setManualModel] = useState("");
   const [pickedReasoning, setPickedReasoning] = useState(false);
-  type ModelTab = "main" | "vision" | "image" | `channel:${string}`;
+  type ModelTab = "main" | "vision" | "image" | "search" | `channel:${string}`;
   const [modelTab, setModelTab] = useState<ModelTab>("main");
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null);
 
   // Vision / Image model config (loaded from config.yaml via Tauri or localStorage)
   const [visionModelName, setVisionModelName] = useState("");
   const [visionHasApiKey, setVisionHasApiKey] = useState(false);
+  // 联网搜索没有「模型名」可显示，左栏那行就说当前生效的引擎 + 有没有 key。
+  const [searchProviderName, setSearchProviderName] = useState("");
+  const [searchHasKey, setSearchHasKey] = useState(false);
   const [imageModelName, setImageModelName] = useState("");
   const [imageHasApiKey, setImageHasApiKey] = useState(false);
 
@@ -506,6 +514,24 @@ export function ApiSettings({
             if (r?.ok && r.config) {
               setImageModelName(r.config.model || "");
               setImageHasApiKey(!!r.config.apiKey);
+            }
+          }
+        } catch { /* empty */ }
+        try {
+          const searchApi = window.electron?.webSearch;
+          if (searchApi?.getConfig) {
+            const r = await searchApi.getConfig();
+            if (r?.ok && r.config) {
+              const names: Record<string, string> = {
+                auto: "自动",
+                tavily: "Tavily",
+                perplexity: "Perplexity",
+              };
+              setSearchProviderName(names[r.config.searchProvider] ?? r.config.searchProvider);
+              const s = r.secrets;
+              setSearchHasKey(
+                Boolean(s?.tavilyApiKey?.configured || s?.perplexityApiKey?.configured),
+              );
             }
           }
         } catch { /* empty */ }
@@ -2113,6 +2139,24 @@ export function ApiSettings({
                       <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
                     )}
                   </button>
+                  <button
+                    onClick={() => setModelTab("search")}
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors ${
+                      modelTab === "search"
+                        ? "bg-primary/10 text-primary"
+                        : "text-foreground hover:bg-muted/50"
+                    }`}
+                  >
+                    <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] px-1.5 py-0.5 rounded-full font-medium bg-muted/80 text-muted-foreground">
+                      搜索
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[length:var(--helix-transcript-size)] font-medium">
+                      {searchProviderName || "未配置"}
+                    </span>
+                    {searchHasKey && (
+                      <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                    )}
+                  </button>
                   {apiProfiles.map((p) => {
                     const isActive = modelTab === "main" && selectedProviderId === p.id;
                     return (
@@ -2688,6 +2732,8 @@ export function ApiSettings({
                   <VisionModelSettings />
                 ) : modelTab === "image" ? (
                   <ImageModelSettings />
+                ) : modelTab === "search" ? (
+                  <WebSearchSettings />
                 ) : (
                   <ChannelModelSettings
                     channelId={modelTab.slice("channel:".length)}
@@ -3113,6 +3159,9 @@ export function ApiSettings({
 
       case "codemode":
         return <CodemodeSettingsPanel />;
+
+      case "rules":
+        return <PermissionRulesSettings />;
 
       default:
         // 导航历史持久化里可能残留已删除页面的 id（如曾短暂存在的

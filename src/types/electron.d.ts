@@ -13,6 +13,23 @@ export type GitNumstatFailureCode =
   | "not_a_repository"
   | "git_failed";
 
+/**
+ * pi-permission 的一条规则（`settings.json` 的 `permission.userRules` 元素）。
+ * `tool` / `pattern` 是通配符（不是正则，内置危险规则除外），空串会编成「永不
+ * 命中」的死规则，所以后端把它们当校验错误而不是合法值。
+ */
+export type PermissionRule = {
+  id?: string;
+  tool: string;
+  pattern: string;
+  action: "allow" | "ask" | "deny";
+  /** "user" = 可编辑；"builtin-danger" = 只读快照 */
+  source?: string;
+  description?: string;
+  /** 内置快照的 pattern 按正则解释 */
+  regex?: boolean;
+};
+
 export interface ElectronAPI {
   fs: {
     read: (filePath: string) => Promise<string>;
@@ -324,6 +341,42 @@ export interface ElectronAPI {
       changed?: boolean;
       config_path?: string;
       error?: string;
+    }>;
+    /** 用户规则 ⇄ settings.json permission.userRules。
+     *  规则层只在 auto 档 + enabled=true 参与判定（yolo 全放行、strict 全部人工
+     *  审批，两档都不跑规则），所以读口一并告知 rulesActive。 */
+    getPermissionRules: () => Promise<{
+      ok: boolean;
+      rules?: PermissionRule[] | null;
+      /** 文件里存着的条数（与 rules.length 不同 ⇒ 有条目被判定为非法） */
+      storedCount?: number;
+      /** 会被扩展静默丢弃的条目（动作非法、空 pattern 等） */
+      unparsable?: { index: number; reason: string; raw: unknown }[];
+      mode?: string | null;
+      extension_mode?: string;
+      enabled?: boolean;
+      classifierEnabled?: boolean;
+      rulesActive?: boolean;
+      /** 内置危险规则快照（只读，Helix 不写它） */
+      builtinRules?: PermissionRule[];
+      builtinSnapshotVersion?: string;
+      installedVersion?: string | null;
+      /** 快照版本 ≠ 安装版本 ⇒ 这份只读列表可能已过期 */
+      builtinVersionDrift?: boolean;
+      configPath?: string;
+      reason?: string;
+      error?: string;
+    }>;
+    /** 整组替换。任意一条校验不过 ⇒ 一条都不写，并带回每条错误。 */
+    setPermissionRules: (
+      rules: PermissionRule[],
+    ) => Promise<{
+      ok: boolean;
+      rules?: PermissionRule[];
+      count?: number;
+      configPath?: string;
+      error?: string;
+      errors?: { index: number; message: string }[];
     }>;
     setDelegationIdentities: (
       identities: Array<{ name: string; system_prompt: string }>,
@@ -713,6 +766,58 @@ export interface ElectronAPI {
       baseUrl: string;
       apiKey: string;
     }) => Promise<{ ok: boolean; error?: string }>;
+  };
+
+  // ── 联网搜索（config.yaml `web_search:` 块，供 web-access 扩展消费）─────
+  // 后端只回「有没有 key / key 由什么提供」，值一个字节都不出来，所以这里也
+  // 不存在展示密钥的可能。
+  webSearch: {
+    getConfig: () => Promise<{
+      ok: boolean;
+      config?: {
+        /** 归一后的生效档位：auto / tavily / perplexity（认不出的值后端已折成 auto） */
+        searchProvider: string;
+        /** 文件里原样存着的值（可能与 searchProvider 不同） */
+        storedSearchProvider: string;
+        /** 遗留写法 `provider`（扩展按 searchProvider ?? provider 读） */
+        legacyProvider: string;
+      };
+      secrets?: Record<
+        "tavilyApiKey" | "perplexityApiKey",
+        {
+          configured: boolean;
+          /** none | literal | env | command —— env/command 不是密钥本身 */
+          source: "none" | "literal" | "env" | "command";
+          envVar: string | null;
+          /** 环境变量优先级高于这份文件，所以要单独告知当前进程里有没有 */
+          processEnvSet: boolean;
+        }
+      >;
+      configPath?: string;
+      extensionLoaded?: boolean;
+      extensionPackage?: string | null;
+      restartNeeded?: boolean;
+      error?: string;
+    }>;
+    /** 字段缺省 = 不改这一项；空串 = 清除。密钥不回显，所以必须这么约定。 */
+    setConfig: (config: {
+      searchProvider?: string;
+      tavilyApiKey?: string;
+      perplexityApiKey?: string;
+    }) => Promise<{
+      ok: boolean;
+      changedKeys?: string[];
+      configPath?: string;
+      error?: string;
+    }>;
+    test: (provider?: string) => Promise<{
+      ok: boolean;
+      provider?: string;
+      keyFrom?: string;
+      httpStatus?: number;
+      latencyMs?: number;
+      error?: string;
+    }>;
   };
 }
 

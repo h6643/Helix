@@ -11,6 +11,7 @@ use chrono::{Datelike, Local, SecondsFormat, TimeZone, Timelike, Utc};
 use rand::Rng;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 // ── Minimal cron engine ──────────────────────────────────────────────────────
 // Supports the 5-field syntax the extension / frontend generate:
@@ -409,6 +410,39 @@ fn format_iso(ms: i64) -> String {
 /// 专用通道（渠道签到 = pi_connect 一次性桥）。
 const CHANNEL_CHECKIN_ACTION: &str = "channel_checkin";
 
+/// 迟到判定宽限：poller 是 5s tick，正常抖动不该被标成「补跑」。
+const LATE_GRACE_MS: i64 = 15 * 60 * 1000;
+
+/// 轮询间隔。
+const POLL_TICK: Duration = Duration::from_secs(5);
+
+/// 首轮扫描前的启动宽限。setup 之后 5s 就开扫会同时撞两件还没就绪的事
+/// （2026-10-08 21:59 实测）：常驻网关仍在冷启动 → 普通任务的 `session/new`
+/// 必失败；helix-layout 的 5s 渠道预热正占着 pi_connect 的串行锁 → 补跑签到
+/// 被 try_lock 直接拒掉。两种都已经在认领时把 next_run_at 前移，于是当天彻底
+/// 丢失。过期任务会一直是 due，晚 60s 认领不丢任何东西。
+const STARTUP_GRACE: Duration = Duration::from_secs(60);
+
+/// 「原定 11:00，实际 19:32 补跑」——只在真的错过窗口时产出。
+///
+/// `due_ms` 是认领前 jobs.json 里的 `next_run_at`；由扩展事件
+/// （`task_fired`）进来的任务拿不到名义时间，传 None 就不标注。
+fn late_note(due_ms: Option<i64>) -> Option<String> {
+    let due = due_ms?;
+    let now = now_ms();
+    if now - due <= LATE_GRACE_MS {
+        return None;
+    }
+    let hhmm = |ms: i64| {
+        Local
+            .timestamp_millis_opt(ms)
+            .single()
+            .map(|d| d.format("%H:%M").to_string())
+            .unwrap_or_else(|| "?".to_string())
+    };
+    Some(format!("原定 {}，实际 {} 补跑", hhmm(due), hhmm(now)))
+}
+
 /// 一次性播种「每日 11:00 自动领取渠道签到」任务（2026-10-08 用户要求）。
 ///
 /// 幂等 + 防复活：helix_data_dir() 下的标记文件一旦落盘就永不再播种 —— 用户
@@ -477,14 +511,17 @@ pub fn seed_channel_checkin_job() {
 /// the extension's event files every 5 s. This thread is the SINGLE dispatcher
 /// for scheduled tasks — the frontend runner only refreshes UI state and the
 /// extension's old auto-fire tick was removed — so nothing double-fires.
-/// Call once at setup, after `pi_gateway::spawn` has finished.
+/// The first scan waits out `STARTUP_GRACE`. Call once at setup.
 pub fn start_scheduled_events_poller() {
     std::thread::Builder::new()
         .name("scheduled-events-poller".into())
-        .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            poll_due_jobs();
-            poll_scheduled_events();
+        .spawn(move || {
+            std::thread::sleep(STARTUP_GRACE);
+            loop {
+                poll_due_jobs();
+                poll_scheduled_events();
+                std::thread::sleep(POLL_TICK);
+            }
         })
         .ok();
 }
@@ -502,7 +539,7 @@ fn poll_due_jobs() {
         Some(j) if j.is_array() => j.as_array_mut().unwrap(),
         _ => return,
     };
-    let mut due: Vec<(String, String, String)> = Vec::new();
+    let mut due: Vec<(String, String, String, Option<i64>)> = Vec::new();
     let mut changed = false;
     for job in jobs.iter_mut() {
         if !job.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
@@ -553,7 +590,7 @@ fn poll_due_jobs() {
                     .unwrap_or("")
                     .to_string();
                 if !id.is_empty() && !prompt.is_empty() {
-                    due.push((id, label, prompt));
+                    due.push((id, label, prompt, Some(t)));
                 }
             }
             None if kind == "cron" => {
@@ -573,8 +610,8 @@ fn poll_due_jobs() {
             eprintln!("[scheduled-events] failed to advance due jobs: {e}");
         }
     }
-    for (id, label, prompt) in due {
-        dispatch_scheduled_task(&id, &label, &prompt, "auto");
+    for (id, label, prompt, due_ms) in due {
+        dispatch_scheduled_task(&id, &label, &prompt, "auto", due_ms);
     }
 }
 ///
@@ -615,7 +652,8 @@ pub fn poll_scheduled_events() {
             "task_fired" => {
                 let prompt = event.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
                 let trigger = event.get("trigger").and_then(Value::as_str).unwrap_or("auto");
-                dispatch_scheduled_task(&job_id, label, &prompt, trigger);
+                // 扩展事件里没有名义时间，迟到标注只能留给 poller 认领的那批。
+                dispatch_scheduled_task(&job_id, label, &prompt, trigger, None);
             }
             "task_created" | "task_deleted" | "task_toggled" => {
                 // Informational only — the frontend picks up the change on its
@@ -632,7 +670,13 @@ pub fn poll_scheduled_events() {
 
 /// Fire-and-forget: spawn a dedicated pi session, send the task prompt, then
 /// close the session so the process doesn't linger.
-fn dispatch_scheduled_task(job_id: &str, label: &str, prompt: &str, trigger: &str) {
+fn dispatch_scheduled_task(
+    job_id: &str,
+    label: &str,
+    prompt: &str,
+    trigger: &str,
+    due_ms: Option<i64>,
+) {
     eprintln!(
         "[scheduled-events] dispatching task_fired job={job_id} label={label} trigger={trigger}"
     );
@@ -640,7 +684,7 @@ fn dispatch_scheduled_task(job_id: &str, label: &str, prompt: &str, trigger: &st
     // 会被网关转成审批弹窗，无人值守下永远等不到回应（见 pi_gateway 的
     // extension_ui_request 分支）；桥自动放行 confirm 且进程用完即杀。
     if job_helix_action(job_id).as_deref() == Some(CHANNEL_CHECKIN_ACTION) {
-        dispatch_channel_checkin(job_id, label);
+        dispatch_channel_checkin(job_id, label, due_ms);
         return;
     }
     let prompt = prompt.to_string();
@@ -730,26 +774,40 @@ fn job_helix_action(job_id: &str) -> Option<String> {
 /// poller 的 5s tick；桥自带全局串行锁（与面板手动签到互斥）。结算走系统
 /// 通知（聚焦时静默），成功才 mark_job_fired —— next_run_at 在认领时已前移，
 /// 失败不会重试风暴，次日 11:00 再试。
-fn dispatch_channel_checkin(job_id: &str, label: &str) {
+///
+/// 错过窗口的补跑（应用没开 → poller 首轮扫描即认领）会在通知正文首行标注
+/// 「原定 HH:MM，实际 HH:MM 补跑」，免得迟到的一次看起来像空转。
+fn dispatch_channel_checkin(job_id: &str, label: &str, due_ms: Option<i64>) {
     let job_id = job_id.to_string();
     let label = if label.is_empty() {
         "渠道中心签到".to_string()
     } else {
         label.to_string()
     };
+    let note = late_note(due_ms);
+    let prefix = note
+        .as_deref()
+        .map(|n| format!("{n}\n"))
+        .unwrap_or_default();
+    let log_note = note
+        .as_deref()
+        .map(|n| format!(" — {n}"))
+        .unwrap_or_default();
     std::thread::Builder::new()
         .name("channel-checkin-dispatch".into())
         .spawn(move || {
-            eprintln!("[scheduled-events] channel checkin job {job_id} ({label}) started");
+            eprintln!(
+                "[scheduled-events] channel checkin job {job_id} ({label}) started{log_note}"
+            );
             match crate::pi_connect::run_checkin_blocking() {
                 Ok(v) => {
-                    let body = checkin_summary(&v);
+                    let body = format!("{prefix}{}", checkin_summary(&v));
                     crate::desktop_notify::notify_unfocused("渠道中心签到", &body);
                     mark_job_fired_in_jobs(&job_id);
                     eprintln!("[scheduled-events] channel checkin job {job_id} done: {body}");
                 }
                 Err(e) => {
-                    crate::desktop_notify::notify_unfocused("渠道签到失败", &e);
+                    crate::desktop_notify::notify_unfocused("渠道签到失败", &format!("{prefix}{e}"));
                     eprintln!("[scheduled-events] channel checkin job {job_id} failed: {e}");
                 }
             }
@@ -818,5 +876,21 @@ fn mark_job_fired_in_jobs(job_id: &str) {
     data["updated_at"] = json!(now_iso());
     if let Err(e) = atomic_write_jobs(&data) {
         eprintln!("[scheduled-events] failed to update jobs.json: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn late_note_marks_only_missed_windows() {
+        // 名义时间两小时前 = 错过窗口，必须标注；时间戳走本机时区，只断言形态。
+        let note = late_note(Some(now_ms() - 2 * 3_600_000)).expect("two hours late");
+        assert!(note.starts_with("原定 "));
+        assert!(note.ends_with(" 补跑"));
+        // poller 的 5s tick 抖动与「没有名义时间」（扩展事件进来的任务）都不标注。
+        assert!(late_note(Some(now_ms() - 60_000)).is_none());
+        assert!(late_note(None).is_none());
     }
 }
