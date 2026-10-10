@@ -256,6 +256,12 @@ function buildTauriAPI(): ElectronAPI {
     // HTTP 代理（修改后需重启应用生效）
     proxyGet: () => invoke("proxy_get"),
     proxySet: (url: string) => invoke("proxy_set", { url }),
+    // 系统通知开关（设置 → 常规 → 通知）。真相是 config.yaml 的
+    // `notifications:` 块，网关每次弹之前现读 → 改完即生效，不用重启。
+    notificationConfig: () => invoke("helix_notification_config"),
+    setNotificationConfig: (updates: Record<string, unknown>) =>
+      invoke("helix_set_notification_config", { updates }),
+    openNotificationSettings: () => invoke("helix_open_notification_settings"),
     // Poll pending pi-extension browser requests (emits helix:browser-request
     // events carrying the full request payload; navigate also emits the legacy
     // helix:open-browser for the sidebar-open path).
@@ -340,6 +346,8 @@ function buildTauriAPI(): ElectronAPI {
     setMemoryEnabled: (scope: "global" | "project", enabled: boolean) =>
       invoke("helix_set_memory_enabled", { scope, enabled }),
     memoryConfig: () => invoke("helix_memory_config"),
+    deleteMemory: (scope: "global" | "project", project?: string) =>
+      invoke("helix_delete_memory", { scope, project: project ?? null }),
     setMemoryConfig: (updates: Record<string, unknown>) =>
       invoke("helix_set_memory_config", { updates }),
     codemodeConfig: () => invoke("helix_codemode_config"),
@@ -353,20 +361,45 @@ function buildTauriAPI(): ElectronAPI {
     // permission 键，不再是 config/permission-ext-config.json）。
     // 真正阻断工具执行的是那个扩展的 tool_call 钩子，所以前端下拉必须写它的
     // 配置，而不是维护一份自己的状态（那会导致「设置显示放行、实际仍弹窗」）。
-    getPermissionMode: () => invoke("helix_get_permission_mode"),
-    setPermissionMode: (mode: string) =>
-      invoke("helix_set_permission_mode", { mode }),
+    // 档位可按全局 / 项目 / 会话覆盖，两张覆盖表也在这同一份文件里，由扩展自己
+    // 按「会话 → 项目 → 全局」解析 —— 所以读的时候要把身份带上，否则只能拿到
+    // 「全局那格」而闸门用的是生效档，又是一次显示与门禁分叉。
+    getPermissionMode: (
+      scope?: { sessionId?: string | null; cwd?: string | null },
+    ) =>
+      invoke("helix_get_permission_mode", {
+        sessionId: scope?.sessionId ?? null,
+        cwd: scope?.cwd ?? null,
+      }),
+    setPermissionMode: (
+      mode: string,
+      scope?: {
+        scope?: "global" | "project" | "session";
+        sessionId?: string | null;
+        cwd?: string | null;
+      },
+    ) =>
+      invoke("helix_set_permission_mode", {
+        mode,
+        scope: scope?.scope ?? "global",
+        sessionId: scope?.sessionId ?? null,
+        cwd: scope?.cwd ?? null,
+      }),
+    // 撤掉某一层覆盖，回落到下一层说了算（global 没有「清除」，后端会拒）。
+    clearPermissionOverride: (
+      scope: "project" | "session",
+      target?: { sessionId?: string | null; cwd?: string | null },
+    ) =>
+      invoke("helix_clear_permission_override", {
+        scope,
+        sessionId: target?.sessionId ?? null,
+        cwd: target?.cwd ?? null,
+      }),
     // 审批卡超时（秒）⇄ settings.json permission.approvalTimeoutSec。弹窗打开
     // 即起算，到期无用户操作 → 扩展侧 fail-closed 拒绝；范围 30–3600，越界
     // 会被后端收敛到边界（不提供 0=关闭档）。
     setApprovalTimeoutSec: (seconds: number) =>
       invoke("helix_set_approval_timeout_sec", { seconds }),
-    // 用户规则 ⇄ settings.json permission.userRules（真正参与判定的那一层）。
-    // 读口顺带告知「当前档位下规则生不生效」+ 内置危险规则快照；写口整组替换，
-    // 校验不过一条都不写。
-    getPermissionRules: () => invoke("helix_get_permission_rules"),
-    setPermissionRules: (rules: unknown[]) =>
-      invoke("helix_set_permission_rules", { rules }),
     update: () => invoke("helix_update"),
     updateInstall: () => invoke("helix_update_install"),
     // Subagent presets bundled with the pi-subagents extension (surfaced in the
@@ -381,6 +414,7 @@ function buildTauriAPI(): ElectronAPI {
     // Pi agent commands (extensions / skills / prompts / models)
     piListInstalled: () => invoke("pi_list_installed"),
     piGetAvailableModels: () => invoke("pi_get_available_models"),
+    piReadCustomProviders: () => invoke("pi_read_custom_providers"),
     piSetThinkingLevelAll: (level: string) =>
       invoke("pi_set_thinking_level_all", { level }),
     // 渠道中心：一次性 pi RPC 进程执行 pi-connect 的 /connect（见 pi_connect.rs）。
@@ -455,6 +489,15 @@ function buildTauriAPI(): ElectronAPI {
     fetch: (opts?: unknown) => invoke("fetch", { opts: opts ?? null }),
   };
 
+  // ── github（PR 闭环：gh 优先，缺 gh 则推送分支 + compare 链接）──────────
+  api.github = {
+    ghStatus: (cwd?: string | null) =>
+      invoke("gh_status", { targetCwd: cwd ?? null }),
+    repo: (cwd?: string | null) => invoke("gh_repo", { targetCwd: cwd ?? null }),
+    prCreate: (opts?: unknown) => invoke("pr_create", { opts: opts ?? null }),
+    prList: (opts?: unknown) => invoke("pr_list", { opts: opts ?? null }),
+  };
+
   // ── external (TCP probe + SSH implemented) ──────────────────────────────
   api.external = {
     sshConnect: (params: {
@@ -492,8 +535,6 @@ function buildTauriAPI(): ElectronAPI {
   api.webSearch = {
     getConfig: () => invoke("web_search_config_list"),
     setConfig: (config: unknown) => invoke("web_search_config_save", { config }),
-    test: (provider?: string) =>
-      invoke("web_search_test", { provider: provider ?? null }),
   };
 
   // ── gateway MCP servers (config.yaml mcp_servers, read/write) ────────
@@ -550,8 +591,14 @@ function buildTauriAPI(): ElectronAPI {
   };
 
   // ── diagnostics ─────────────────────────────────────────────────────────
+  // getStatus = 运行时自检（runtime-panel 用）；detect/run = 「跑项目自带的
+  // 类型检查/lint」那套（src-tauri/src/diagnostics.rs）。同一个命名空间，
+  // 只允许一处赋值 —— 两处 `api.diagnostics = {...}` 会把前者静默覆盖。
   api.diagnostics = {
     getStatus: () => invoke("get_status"),
+    detect: (cwd?: string | null) =>
+      invoke("diagnostics_detect", { targetCwd: cwd ?? null }),
+    run: (opts?: unknown) => invoke("diagnostics_run", { opts: opts ?? null }),
   };
 
   // ── window controls (used by title bar) ─────────────────────────────────

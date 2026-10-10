@@ -254,12 +254,15 @@ export interface DetectedTask {
   nextRunAt: number | null;
   cronExpression?: string | null;
   sessionId?: string;
+  /** "fresh"（缺省）= 每次运行开新对话；"reuse" = 回到同一条对话。 */
+  sessionMode?: "fresh" | "reuse";
 }
 
 /**
  * Fire-and-forget sync of a created scheduled task to Helix backend jobs.json.
  * Pass cronExpression for recurring tasks so the backend stores them as cron
- * jobs (kind=cron) instead of one-shots.
+ * jobs (kind=cron) instead of one-shots. sessionMode 对齐 Codex 的
+ * Scheduled Task / Scheduled Message，缺省 fresh。
  */
 export function syncTaskToBackend(
   label: string,
@@ -267,6 +270,7 @@ export function syncTaskToBackend(
   scheduleText: string,
   nextRunAt: number | null,
   cronExpression?: string | null,
+  sessionMode?: "fresh" | "reuse",
 ) {
   try {
     const electron = (window as any).electron;
@@ -278,6 +282,7 @@ export function syncTaskToBackend(
           scheduleText,
           cronExpression: cronExpression ?? undefined,
           nextRunAt: nextRunAt ?? undefined,
+          sessionMode: sessionMode ?? "fresh",
         })
         .catch((e: any) =>
           console.error("sync scheduled task to backend failed:", e),
@@ -318,6 +323,14 @@ export function detectScheduledTasks(text: string): {
       const schedule = String(
         data.schedule || data.when || data.time || "",
       ).trim();
+      // sessionMode：fresh（缺省，每次新对话）| reuse（回到同一条对话）。
+      // 同 scheduledTasks.create，不认的值一律当 fresh。
+      const rawMode = String(
+        data.sessionMode || data.session_mode || "",
+      )
+        .trim()
+        .toLowerCase();
+      const sessionMode = rawMode === "reuse" ? "reuse" : "fresh";
       if (label && prompt && schedule) {
         const parsed = parseScheduleForTask(schedule);
         tasks.push({
@@ -326,6 +339,7 @@ export function detectScheduledTasks(text: string): {
           scheduleText: schedule,
           nextRunAt: parsed.nextRun,
           cronExpression: parsed.cronExpression,
+          sessionMode,
         });
         cleaned = cleaned.replace(block, "");
       }

@@ -1,5 +1,79 @@
 import type { HooksConfig } from "@/lib/hooks-config";
 import type { ScheduledTask } from "@/stores/helix-store";
+import type { PermissionScopeId } from "@/stores/helix-types";
+
+/** `helix_get_permission_mode` / set / clear 的作用域身份（不传 = 只看全局格）。 */
+export type PermissionScopeQuery = {
+  sessionId?: string | null;
+  cwd?: string | null;
+};
+
+/** 写入层。`disabled` 是读方向才有的来源（扩展总开关关着），不可写。 */
+export type PermissionScopeWriteId = PermissionScopeId;
+
+/** 一层档位格子（global / session / project 共用同一形状）。 */
+export interface PermissionModeCell {
+  /** Helix 档位：ask / auto / full。 */
+  mode: string;
+  /** 扩展原生档位：strict / auto / yolo。归一会抹平差异，两个都要读。 */
+  extension_mode: string;
+}
+
+/** set 命令额外带回：这次实际写了哪一格。 */
+export interface PermissionModeScopeWrite {
+  scope: PermissionScopeWriteId;
+  key: string | null;
+  mode: string;
+  extension_mode: string;
+  previous: PermissionModeCell | null;
+  changed: boolean;
+}
+
+/** clear 命令额外带回：删掉了哪些同键旧拼法（项目键可能有多份历史写法）。 */
+export interface PermissionModeCleared {
+  scope: PermissionScopeWriteId;
+  key: string;
+  removed: string[];
+}
+
+/**
+ * 三份 permission 命令共用的视图（后端 `permission_mode_view` 一处构造）。
+ *
+ * `mode` 顶层键**一直是生效档**，旧前端只读它仍然正确。
+ * `ok=false` 时除了 `mode: null` 还会给 `exists` / `reason`：读不到真相就
+ * 别编一个档位回去（扩展在文件缺失/坏 JSON 时一律回落 yolo = 全放行）。
+ */
+export interface PermissionModeView {
+  ok: boolean;
+  mode: string | null;
+  extension_mode?: string;
+  /** 生效档 + 它来自哪一层（session / project / global / disabled）。 */
+  effective?: {
+    mode: string;
+    extension_mode: string;
+    source: PermissionScopeId | "disabled";
+    key: string | null;
+  } | null;
+  global?: (PermissionModeCell & { unparsable?: boolean }) | null;
+  session?: (PermissionModeCell & { key: string }) | null;
+  project?: (PermissionModeCell & { key: string }) | null;
+  /** 生效档来自覆盖表（不是全局）。 */
+  override_active?: boolean;
+  scope?: {
+    session_id: string | null;
+    cwd: string | null;
+    remote: boolean;
+  };
+  /** 审批卡超时秒数（30–3600 已归一）；ok=false 时为 null。 */
+  approvalTimeoutSec?: number | null;
+  /** 扩展总开关：false ⇒ 覆盖表整个不跑，实际全放行。 */
+  enabled?: boolean;
+  /** ok=false 时给出：文件是否存在。 */
+  exists?: boolean;
+  reason?: string;
+  error?: string;
+  config_path?: string;
+}
 
 /**
  * `git.diffNumstatFull` 失败时后端给的原因分类（`src-tauri/src/git.rs`）。
@@ -13,22 +87,42 @@ export type GitNumstatFailureCode =
   | "not_a_repository"
   | "git_failed";
 
-/**
- * pi-permission 的一条规则（`settings.json` 的 `permission.userRules` 元素）。
- * `tool` / `pattern` 是通配符（不是正则，内置危险规则除外），空串会编成「永不
- * 命中」的死规则，所以后端把它们当校验错误而不是合法值。
- */
-export type PermissionRule = {
-  id?: string;
-  tool: string;
-  pattern: string;
-  action: "allow" | "ask" | "deny";
-  /** "user" = 可编辑；"builtin-danger" = 只读快照 */
-  source?: string;
-  description?: string;
-  /** 内置快照的 pattern 按正则解释 */
-  regex?: boolean;
-};
+/** `src-tauri/src/diagnostics.rs`：项目自带的类型检查/lint 命令（不是 LSP）。 */
+export interface DiagnosticCheck {
+  id: string;
+  label: string;
+  program: string;
+  args: string[];
+  timeoutSecs: number;
+  source: string;
+}
+
+export interface DiagnosticProblem {
+  /** 相对项目根、'/' 分隔——与 fs 桥和编辑器 tab 的路径形状一致。 */
+  file: string;
+  absPath: string;
+  line: number;
+  column: number;
+  severity: "error" | "warning" | "info";
+  message: string;
+  code?: string;
+}
+
+export interface DiagnosticRunResult {
+  ok: boolean;
+  checkId?: string;
+  label?: string;
+  exitCode?: number | null;
+  timedOut?: boolean;
+  durationMs?: number;
+  cwd?: string;
+  problems?: DiagnosticProblem[];
+  counts?: { errors: number; warnings: number; total: number };
+  truncated?: boolean;
+  rawTail?: string;
+  code?: "no_check_available" | "tool_unavailable" | string;
+  error?: string;
+}
 
 export interface ElectronAPI {
   fs: {
@@ -217,6 +311,31 @@ export interface ElectronAPI {
     }>;
     proxyGet: () => Promise<{ url: string }>;
     proxySet: (url: string) => Promise<{ success: boolean; url: string }>;
+    /** 系统通知开关。真相是 config.yaml 的 `notifications:` 块，网关每次弹之前
+     *  现读，所以改完即生效（不用重启）。turnEndMode: never|unfocused|always。 */
+    notificationConfig: () => Promise<{
+      ok: boolean;
+      turnEndMode?: string;
+      approvalEnabled?: boolean;
+      clarifyEnabled?: boolean;
+      configPath?: string;
+      error?: string;
+    }>;
+    /** 只提交要改的键；返回体里的三个字段是回读到的**生效值**（写失败时 UI 不撒谎）。 */
+    setNotificationConfig: (updates: {
+      turnEndMode?: string;
+      approvalEnabled?: boolean;
+      clarifyEnabled?: boolean;
+    }) => Promise<{
+      ok: boolean;
+      turnEndMode?: string;
+      approvalEnabled?: boolean;
+      clarifyEnabled?: boolean;
+      changed?: string[];
+      error?: string;
+    }>;
+    /** 跳到系统的通知设置页（Windows: ms-settings:notifications）。 */
+    openNotificationSettings: () => Promise<{ ok: boolean; error?: string }>;
     /** Poll pending pi-extension browser requests (emits helix:browser-request
      *  events with the full payload; navigate also emits the legacy
      *  helix:open-browser for the sidebar-open path). */
@@ -301,37 +420,20 @@ export interface ElectronAPI {
       username?: string;
       remote_path?: string | null;
     }>;
-    /** 审批档位 ⇄ pi-permission 扩展配置。前端下拉直写扩展的 config，
-     *  因为真正 block 工具执行的是扩展的 tool_call 钩子。 */
-    getPermissionMode: () => Promise<{
-      ok: boolean;
-      /** Helix 档位：ask（询问审批）/ auto（自动审批）/ full（完全访问）。
-       *  ok=false 时为 null —— 读不到真相，调用方自己决定怎么显示。 */
-      mode: string | null;
-      /** ok=false 时给出：配置文件是否存在。false ⇒ 扩展会自建 yolo 默认；
-       *  true（坏 JSON/不可读）⇒ 扩展回落 yolo。两种都是「实际全放行」。 */
-      exists?: boolean;
-      /** 扩展原生档位：strict / auto / yolo（扩展另有 Helix 不用的 approve 档）。
-       *  `mode` 是它归一后的 Helix 档位，两个都要读：归一会抹平差异。 */
-      extension_mode?: string;
-      /** false 等价 yolo（扩展约定），必须读出来否则会显示错 */
-      enabled?: boolean;
-      /** 审批卡超时秒数（30–3600 已归一）；ok=false 时为 null（读不到真相） */
-      approvalTimeoutSec?: number | null;
-      config_path?: string;
-      reason?: string;
-    }>;
+    /** 审批档位 ⇄ pi-permission 扩展配置。前端下拉直写扩展的 settings.json，
+     *  因为真正 block 工具执行的是扩展的 tool_call 钩子。
+     *  档位可分三层（全局 / 本项目 / 本会话），覆盖表也在同一个文件里，
+     *  由扩展自己按「会话 → 项目 → 全局」解析 —— 见 `PermissionModeView`。 */
+    getPermissionMode: (scope?: PermissionScopeQuery) => Promise<PermissionModeView>;
     setPermissionMode: (
       mode: string,
-    ) => Promise<{
-      ok: boolean;
-      mode?: string;
-      extension_mode?: string;
-      enabled?: boolean;
-      changed?: boolean;
-      config_path?: string;
-      error?: string;
-    }>;
+      scope?: PermissionScopeQuery & { scope?: PermissionScopeWriteId },
+    ) => Promise<PermissionModeView & { scope_written?: PermissionModeScopeWrite }>;
+    /** 删掉某一层覆盖，回到「下一层说了算」。global 没有清除（它就是兜底层）。 */
+    clearPermissionOverride: (
+      scope: Extract<PermissionScopeWriteId, "project" | "session">,
+      target?: PermissionScopeQuery,
+    ) => Promise<PermissionModeView & { cleared?: PermissionModeCleared }>;
     setApprovalTimeoutSec: (
       seconds: number,
     ) => Promise<{
@@ -341,42 +443,6 @@ export interface ElectronAPI {
       changed?: boolean;
       config_path?: string;
       error?: string;
-    }>;
-    /** 用户规则 ⇄ settings.json permission.userRules。
-     *  规则层只在 auto 档 + enabled=true 参与判定（yolo 全放行、strict 全部人工
-     *  审批，两档都不跑规则），所以读口一并告知 rulesActive。 */
-    getPermissionRules: () => Promise<{
-      ok: boolean;
-      rules?: PermissionRule[] | null;
-      /** 文件里存着的条数（与 rules.length 不同 ⇒ 有条目被判定为非法） */
-      storedCount?: number;
-      /** 会被扩展静默丢弃的条目（动作非法、空 pattern 等） */
-      unparsable?: { index: number; reason: string; raw: unknown }[];
-      mode?: string | null;
-      extension_mode?: string;
-      enabled?: boolean;
-      classifierEnabled?: boolean;
-      rulesActive?: boolean;
-      /** 内置危险规则快照（只读，Helix 不写它） */
-      builtinRules?: PermissionRule[];
-      builtinSnapshotVersion?: string;
-      installedVersion?: string | null;
-      /** 快照版本 ≠ 安装版本 ⇒ 这份只读列表可能已过期 */
-      builtinVersionDrift?: boolean;
-      configPath?: string;
-      reason?: string;
-      error?: string;
-    }>;
-    /** 整组替换。任意一条校验不过 ⇒ 一条都不写，并带回每条错误。 */
-    setPermissionRules: (
-      rules: PermissionRule[],
-    ) => Promise<{
-      ok: boolean;
-      rules?: PermissionRule[];
-      count?: number;
-      configPath?: string;
-      error?: string;
-      errors?: { index: number; message: string }[];
     }>;
     setDelegationIdentities: (
       identities: Array<{ name: string; system_prompt: string }>,
@@ -416,13 +482,19 @@ export interface ElectronAPI {
     // pi-hermes-memory 概览 + 开关（设置「记忆」页）
     memoryOverview: () => Promise<{
       ok: boolean;
-      global: { enabled: boolean; file_count: number; last_updated: number };
+      global: {
+        enabled: boolean;
+        file_count: number;
+        last_updated: number;
+        dir?: string;
+      };
       current_project: string;
       projects: {
         name: string;
         enabled: boolean;
         file_count: number;
         last_updated: number;
+        dir?: string;
       }[];
       config_path?: string;
     }>;
@@ -434,6 +506,16 @@ export interface ElectronAPI {
     setMemoryConfig: (
       updates: Record<string, unknown>,
     ) => Promise<{ ok: boolean; error?: string }>;
+    deleteMemory: (
+      scope: "global" | "project",
+      project?: string,
+    ) => Promise<{
+      ok: boolean;
+      removed: number;
+      dir?: string;
+      errors?: string[];
+      error?: string;
+    }>;
     // Codemode（pi settings.json 的 defaultTools + codemode 块）
     codemodeConfig: () => Promise<{
       ok: boolean;
@@ -528,6 +610,30 @@ export interface ElectronAPI {
           cacheWrite: number;
         };
       }>;
+    }>;
+    /**
+     * 读 pi `models.json` 里的自定义 provider（Helix 每次保存模型时写下的那份），
+     * 供冷启动「profile 列表读空了」时重建模型配置。只读。带 apiKey —— 这是
+     * `piGetAvailableModels` 的 RPC 快照里没有的字段，也是重建 profile 必需的。
+     */
+    piReadCustomProviders: () => Promise<{
+      providers: Array<{
+        /** pi 注册名（models.json 的 key），同时用作 profile 的 provider。 */
+        id: string;
+        baseUrl: string;
+        apiKey: string;
+        /** 线协议，如 "openai-completions"；缺失时由调用方回落默认格式。 */
+        api?: string;
+        models: Array<{
+          id: string;
+          name?: string;
+          contextWindow?: number;
+          reasoning?: boolean;
+          input?: string[];
+        }>;
+      }>;
+      defaultProvider: string;
+      defaultModel: string;
     }>;
     piSetThinkingLevelAll: (level: string) => Promise<{ success: boolean }>;
     /**
@@ -716,6 +822,95 @@ export interface ElectronAPI {
     }) => Promise<{ ok: boolean; output?: string; error?: string }>;
   };
 
+  /**
+   * PR 闭环（`src-tauri/src/github.rs`）。装了 gh 就走命令行直建；没装或没登录
+   * 也照样把分支推上去并返回 GitHub 的 compare 链接（标题/正文预填），最后一步
+   * 在浏览器里点一下。两条路都不需要 Helix 存 token。
+   */
+  github: {
+    ghStatus: (cwd?: string | null) => Promise<{
+      ok: boolean;
+      available: boolean;
+      authenticated: boolean;
+      path?: string;
+      version?: string;
+      hint?: string;
+      authError?: string;
+      error?: string;
+    }>;
+    repo: (cwd?: string | null) => Promise<{
+      ok: boolean;
+      code?: "no_remote" | "bad_remote" | string;
+      error?: string;
+      host?: string;
+      owner?: string;
+      repo?: string;
+      remoteUrl?: string;
+      head?: string | null;
+      base?: string;
+      uncommitted?: number;
+    }>;
+    prCreate: (opts?: {
+      title?: string;
+      body?: string;
+      base?: string;
+      head?: string;
+      draft?: boolean;
+      cwd?: string;
+    }) => Promise<{
+      ok: boolean;
+      code?:
+        | "uncommitted_changes"
+        | "on_base_branch"
+        | "detached_head"
+        | "push_failed"
+        | "gh_unavailable"
+        | "no_remote"
+        | "bad_remote"
+        | string;
+      error?: string;
+      method?: "gh" | "compare";
+      url?: string;
+      head?: string;
+      base?: string;
+      pushed?: boolean;
+      ghError?: string;
+      files?: string[];
+      note?: string;
+    }>;
+    prList?: (opts?: {
+      state?: "open" | "closed" | "merged" | "all";
+      limit?: number;
+      cwd?: string;
+    }) => Promise<{
+      ok: boolean;
+      code?: string;
+      error?: string;
+      prs?: Array<{
+        number: number;
+        title: string;
+        url: string;
+        headRefName: string;
+        baseRefName: string;
+        isDraft: boolean;
+      }>;
+    }>;
+  };
+
+  /** 项目自带的类型检查/lint（`src-tauri/src/diagnostics.rs`）。 */
+  diagnostics: {
+    detect: (cwd?: string | null) => Promise<{
+      ok: boolean;
+      cwd?: string;
+      note?: string;
+      checks?: DiagnosticCheck[];
+    }>;
+    run: (opts?: {
+      checkId?: string;
+      cwd?: string;
+    }) => Promise<DiagnosticRunResult>;
+  };
+
   platform: string;
 
   // ── External services (server / VM TCP reachability probe) ──
@@ -774,16 +969,13 @@ export interface ElectronAPI {
   webSearch: {
     getConfig: () => Promise<{
       ok: boolean;
-      config?: {
-        /** 归一后的生效档位：auto / tavily / perplexity（认不出的值后端已折成 auto） */
-        searchProvider: string;
-        /** 文件里原样存着的值（可能与 searchProvider 不同） */
-        storedSearchProvider: string;
-        /** 遗留写法 `provider`（扩展按 searchProvider ?? provider 读） */
-        legacyProvider: string;
-      };
+      /**
+       * 文件里存着「扩展认、但 Helix 不再配置」的档位（遗留 perplexity）时非空。
+       * Helix 只走 Tavily，所以没有档位可选，这一项只用于如实播报生效值。
+       */
+      unmanagedSearchProvider?: string;
       secrets?: Record<
-        "tavilyApiKey" | "perplexityApiKey",
+        "tavilyApiKey",
         {
           configured: boolean;
           /** none | literal | env | command —— env/command 不是密钥本身 */
@@ -800,22 +992,10 @@ export interface ElectronAPI {
       error?: string;
     }>;
     /** 字段缺省 = 不改这一项；空串 = 清除。密钥不回显，所以必须这么约定。 */
-    setConfig: (config: {
-      searchProvider?: string;
-      tavilyApiKey?: string;
-      perplexityApiKey?: string;
-    }) => Promise<{
+    setConfig: (config: { tavilyApiKey?: string }) => Promise<{
       ok: boolean;
       changedKeys?: string[];
       configPath?: string;
-      error?: string;
-    }>;
-    test: (provider?: string) => Promise<{
-      ok: boolean;
-      provider?: string;
-      keyFrom?: string;
-      httpStatus?: number;
-      latencyMs?: number;
       error?: string;
     }>;
   };

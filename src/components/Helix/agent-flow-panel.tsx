@@ -91,6 +91,11 @@ import {
 import { debug } from "@/lib/logger";
 import { buildAcpMcpServers } from "@/lib/mcp";
 import {
+  deriveAllowPrefix,
+  parsePermissionAsk,
+  PERM_APPROVE_ANSWER,
+} from "@/lib/permission-allow";
+import {
   detectScheduledTasks,
   syncTaskToBackend,
   type DetectedTask,
@@ -128,6 +133,7 @@ import { formatMergedSummary, isSubAgentTool } from "@/lib/tool-merge";
 import {
   BUILTIN_SLASH_COMMANDS,
   DRAFT_SESSION_KEY,
+  rewriteReviewCommand,
   runCompactCommand,
 } from "./slash-commands";
 import {
@@ -137,6 +143,7 @@ import {
   mergeToolRuns,
   buildProcessSegments,
   normalizeTextBlocks,
+  thinkingSegmentDurationS,
   mergeThinkingContents,
   ThinkingFold,
   ToolStreamFold,
@@ -161,13 +168,15 @@ import {
   type StreamingResponseBlock,
 } from "@/stores/helix-store";
 import type { ApprovalLevel } from "@/stores/helix-types";
-import type { PlanStep } from "@/stores/helix-types";
-import { APPROVAL_MODE_ITEMS, approvalModeOf } from "@/stores/helix-types";
-import type {
-  ChatMessage,
-  HelixTodo,
-  PendingChange,
+import {
+  APPROVAL_MODE_ITEMS,
+  approvalModeOf,
+  PERMISSION_SCOPE_ITEMS,
+  permissionScopeLabelOf,
+  permissionTierOfLayer,
+  type PermissionScopeTarget,
 } from "@/stores/helix-types";
+import type { ChatMessage, PendingChange } from "@/stores/helix-types";
 import type { PersistedChatMessage, PersistedSession } from "@/lib/persist";
 
 // ── Persisted per-conversation backend session map ──────────────────────────
@@ -382,6 +391,28 @@ function localProjectRoot(dir: string | null): string | null {
 // ==== Interleaved response blocks (text -> tool groups) ====
 
 type ResponseBlock = StreamingResponseBlock;
+
+/**
+ * 工具收尾：写结束时刻并算出耗时（折叠标签右端那一行用这些 startedAt/finishedAt
+ * 算出该段的墙上跨度，单个工具卡上不再显示时间）。
+ * 只在 tool_call 步骤上生效；没有 startedAt 的步骤（旧数据）不算耗时，
+ * 免得用 timestamp 猜出一个假的数字。
+ */
+function closeToolStep(
+  s: ExecutionStep,
+  failed: boolean,
+  finishedAt: number,
+): ExecutionStep {
+  return {
+    ...s,
+    status: failed ? ("failed" as const) : ("completed" as const),
+    finishedAt,
+    duration_s:
+      s.startedAt != null
+        ? Math.max(0, (finishedAt - s.startedAt) / 1000)
+        : s.duration_s,
+  };
+}
 
 // InlineToolGroup — extracted to ./inline-tool-group.tsx
 
@@ -814,8 +845,12 @@ export function AgentFlowPanel() {
       question: string;
       choices: string[] | null;
       sessionId?: string;
+      /** 发起这条请求的 pi 后端 sid（事件自带），回应按它路由 */
+      sid?: string;
       /** 审批卡到期时刻（ms epoch）；普通 clarify 卡为 null/缺省 = 不超时 */
       expiresAt?: number | null;
+      /** pi-permission 审批卡（仅 auto 档）：ClarifyBar 渲染 once/always/reject */
+      isPermission?: boolean;
     }>
   >([]);
   // 计划审批（plan 模式）：模型产出方案后先弹浮条让用户决定“批准执行”或“继续调整”，
@@ -847,19 +882,41 @@ export function AgentFlowPanel() {
   const openRemoteWizard = useHelixStore((s) => s.openRemoteWizard);
 
   // 审批相关的两条轴（详见 helix-types 的 ApprovalMode 文档）：
-  // - 权限档 `permissionMode`：**全局一档**，值是从 pi-permission 扩展配置文件
-  //   回读来的缓存。它不是本地状态，所以没有「按会话记住」一说——扩展只读
-  //   一个文件，按会话存一份就是第二条真相（历史 bug：显示完全访问、照样弹窗）。
+  // - 权限档 `permissionMode`：**这条对话的生效档**，从 pi-permission 的
+  //   settings.json 回读。覆盖表（本项目 / 本会话）也在同一份文件里、由扩展自己
+  //   按「会话 → 项目 → 全局」解析，所以前端只有缓存，不自持「哪条会话用哪档」。
   // - `plan`：按会话的独立轴（pi 实例级），只有下拉/批准会写它。
   // 芯片显示的是两者合成的那一个值。
   const permissionMode = useHelixStore((s) => s.permissionMode);
   const planModeBySession = useHelixStore((s) => s.planModeBySession);
   const setPermissionMode = useHelixStore((s) => s.setPermissionMode);
   const setPlanModeForSession = useHelixStore((s) => s.setPlanModeForSession);
+  // 作用域视图（生效档来自哪一层 + 三层格子）与写入层偏好。
+  const permissionScopeInfo = useHelixStore((s) => s.permissionScopeInfo);
+  const permissionWriteScope = useHelixStore((s) => s.permissionWriteScope);
+  const setPermissionWriteScope = useHelixStore(
+    (s) => s.setPermissionWriteScope,
+  );
+  const clearPermissionOverride = useHelixStore(
+    (s) => s.clearPermissionOverride,
+  );
   // 芯片/下拉的查找键：与 modelBySession 同一约定（新对话未分配 id 时用草稿键）。
   const modeKey = currentSessionId ?? DRAFT_SESSION_KEY;
   const planOn = !!planModeBySession[modeKey];
   const approvalMode = approvalModeOf(permissionMode, planOn);
+  // 读写档位必须带上**这条对话**的身份（pi sid + 项目目录），否则读回来的只是
+  // 全局那格，而闸门用的是生效档 —— 显示与门禁分叉的老毛病。目录直接传存储里的
+  // 原值：远程键（remote://…）由后端按「不可入库」处理，前端不重复判一遍。
+  const permissionTarget = useCallback((): PermissionScopeTarget => {
+    const st = useHelixStore.getState();
+    const sid = currentSessionId
+      ? sessionMapRef.current.get(currentSessionId)?.sid
+      : undefined;
+    return {
+      sessionId: sid ?? null,
+      cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? null,
+    };
+  }, [currentSessionId]);
   // 压缩完成提示 divider（手动 /compact 与自动压缩都会写入，持久化显示，切会话时清空）
   const compressionNotice = useHelixStore(
     (s) => s.compressionNotices[currentSessionId ?? DRAFT_SESSION_KEY],
@@ -895,6 +952,7 @@ export function AgentFlowPanel() {
         prompt: t.prompt,
         scheduleText: t.scheduleText,
         cronExpression: t.cronExpression ?? undefined,
+        sessionMode: t.sessionMode ?? "fresh",
         enabled: true,
         lastRunAt: null,
         nextRunAt: t.nextRunAt,
@@ -905,6 +963,7 @@ export function AgentFlowPanel() {
         t.scheduleText,
         t.nextRunAt,
         t.cronExpression,
+        t.sessionMode,
       );
     }
     // 只移除本次确认的这几条：队列里可能还留着别的对话待确认的任务。
@@ -1045,6 +1104,212 @@ export function AgentFlowPanel() {
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [clarifyQueue, bumpPendingUserRequests]);
+
+  // ── 审批 / clarify 的常驻消费者 ──────────────────────────────────────
+  // 这两类事件原先**只有 handleRun 内部那一个订阅者**，而它同时做两件事：
+  //   ① run 一退订（done、报错、点停止、合成 done）订阅就没了；
+  //   ② 事件 `session_id` 不等于本轮 sid 就整条丢掉（5163 的并行隔离）。
+  // 于是审批/反问只要不在「本轮 run 活着且 sid 命中」的窗口里到达，就永远
+  // 无人认领：扩展的 ui.confirm（旁路会话、别的对话、run 收尾后才到的钩子）
+  // 或 pi-permission 的竞速弹窗——它带 approvalTimeoutSec（默认 300s），到点
+  // fail-closed 自动拒绝。用户看到的症状是「弹窗根本没出现，工具却跑了
+  // 4 分 48 秒然后自己拒了」（2026-10-09 CNKI 导航审批）。
+  //
+  // 审批恰恰需要跨 run 认领，所以这里不做 sid 相等过滤，改为按事件自带的后端
+  // sid **反查归属对话**。归属只决定「显示在哪个视图、侧边栏哪个会话打点」；
+  // 回应永远按卡片自己携带的 sid 路由（网关 `routed_instance_or_ui_owner`
+  // 严格按 sid 找等待中的实例），归属判错不会把回应送给错误的实例。
+  useEffect(() => {
+    // 反查 sid → cid。sessionMapRef 冷启动可能还是空的，先 await 真值再查
+    // （同 awaitSessionMap 的约定：未加载就暂停等待，不是 fallback 成空）。
+    const ownerOf = async (
+      sid: string,
+    ): Promise<{ cid: string; via: string }> => {
+      if (sid) {
+        const map = await awaitSessionMap(sessionMapRef);
+        for (const [cid, entry] of map) {
+          if (sidCandidates(entry).includes(sid)) {
+            return { cid, via: "session_map" };
+          }
+        }
+      }
+      // 反查不到（旁路 btw 会话不落映射、网关重启换了 sid、映射还没写盘）：
+      // 挂到前台视图。显示可能挂错对话，但回应仍按 sid 正确路由。
+      const st = useHelixStore.getState();
+      return {
+        cid: st.currentSessionId ?? DRAFT_SESSION_KEY,
+        via: "front_view",
+      };
+    };
+
+    const onUserRequest = async (method: string, params: any) => {
+      if (method !== "session/update") return;
+      const u = params?.update;
+      const kind = u?.sessionUpdate;
+      if (
+        kind !== "permission_request" &&
+        kind !== "clarify_request" &&
+        kind !== "clarify_settled"
+      ) {
+        return;
+      }
+      const sid =
+        typeof params?.session_id === "string" ? params.session_id : "";
+      const id = String(
+        (kind === "permission_request" ? u?.toolCallId : u?.requestId) ?? "",
+      );
+      // 静默丢卡的三种形态都在这条日志里现形：没 id（无法回应）、作废早到
+      // （见下方 settledBeforeArrival）、归属靠兜底。
+      debug("[HelixTrace] user-request event arrived", {
+        kind,
+        id,
+        eventSid: sid,
+        frontCid:
+          useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY,
+      });
+      if (!id) {
+        debug("[HelixTrace] user-request event dropped: no request id", {
+          kind,
+          eventSid: sid,
+        });
+        return;
+      }
+
+      if (kind === "clarify_settled") {
+        // 网关作废竞速输掉的审批卡（evict_settled_permission_asks）：只出队、
+        // 不给 pi 回任何东西——pi 侧那个 id 早已被静默删除。
+        // 无论卡是否在队列里都把 id 记进 gatewaySettledRef：① 用户点击与作废
+        // 撞车时 respond 的 finally 凭集合跳过递减（一张卡只减一次）；② 入队是
+        // async 的（等 session map），作废若抢在卡落地之前到达，卡落地时凭同一
+        // 集合直接丢弃，不会留下永远无人应答的僵尸卡。
+        const hadCard = clarifyQueueRef.current.some((r) => r.id === id);
+        gatewaySettledRef.current.add(id);
+        debug("[HelixTrace] user-request settled", {
+          id,
+          reason: typeof u?.reason === "string" ? u.reason : "",
+          hadCard,
+        });
+        if (!hadCard) return;
+        setClarifyQueue((prev) => prev.filter((r) => r.id !== id));
+        bumpPendingUserRequests(-1);
+        return;
+      }
+
+      const owner = await ownerOf(sid);
+      if (kind === "clarify_request" && gatewaySettledRef.current.has(id)) {
+        debug("[HelixTrace] clarify card dropped: settled before arrival", {
+          id,
+          eventSid: sid,
+        });
+        return;
+      }
+      // pi-permission 审批卡（auto 档）命中「本会话始终允许」→ 代答放行，不弹卡。
+      // 只在 auto 档拦截：strict 档的契约是每次都问，不因前端登记而静默放行。
+      // 代答失败（实例已销毁/请求已被作废）落入正常入队，用户仍可手动处理。
+      const isPermissionAsk =
+        kind === "clarify_request" &&
+        typeof u.approvalTimeoutSec === "number" &&
+        u.approvalTimeoutSec > 0;
+      if (isPermissionAsk) {
+        const ask = parsePermissionAsk(u.question || "");
+        if (
+          ask &&
+          useHelixStore.getState().permissionMode === "auto" &&
+          useHelixStore.getState().matchesSessionApprovalAllow(ask.tool, ask.command)
+        ) {
+          try {
+            await helixApi()!.send("clarify/respond", {
+              session_id: sid,
+              request_id: id,
+              answer: PERM_APPROVE_ANSWER,
+            });
+            debug("[HelixTrace] permission auto-approved by session allow", {
+              id,
+              eventSid: sid,
+              tool: ask.tool,
+              command: ask.command ?? "",
+            });
+            return;
+          } catch (err) {
+            debug("[HelixTrace] permission auto-approve failed, showing card", {
+              id,
+              eventSid: sid,
+              error: String(err),
+            });
+          }
+        }
+      }
+      debug("[HelixTrace] user-request card enqueue", {
+        kind,
+        id,
+        eventSid: sid,
+        ownerCid: owner.cid,
+        via: owner.via,
+        permission: isPermissionAsk,
+      });
+      bumpPendingUserRequests(1);
+      if (kind === "permission_request") {
+        // ui.confirm（yes/no 门禁）→ ApprovalDialog。权限档不参与：门禁在
+        // pi-permission 那一侧，前端再判一次就是第二条真相。
+        setApprovalQueue((prev) => [
+          ...prev,
+          {
+            id,
+            sid,
+            sessionId: owner.cid,
+            toolName: u.toolName || u.title || "unknown",
+            params: u.toolParams || u.params || {},
+            timestamp: Date.now(),
+          },
+        ]);
+        return;
+      }
+      // clarify 卡：模型反问（choices/input/editor）与 pi-permission 的审批弹窗
+      // 都走这里。审批卡带 approvalTimeoutSec（网关只在 permission==true 时附）
+      // → 算出到期时刻供倒计时与到点出队；普通反问卡恒为 null（不超时）。
+      // isPermission 只在 auto 档置位：strict 档仍渲染扩展的英文 choices 原文。
+      setClarifyQueue((prev) => [
+        ...prev,
+        {
+          id,
+          sid,
+          sessionId: owner.cid,
+          question: u.question || "",
+          choices: Array.isArray(u.choices) ? u.choices : null,
+          expiresAt:
+            typeof u.approvalTimeoutSec === "number" && u.approvalTimeoutSec > 0
+              ? Date.now() + u.approvalTimeoutSec * 1000
+              : null,
+          isPermission:
+            isPermissionAsk &&
+            useHelixStore.getState().permissionMode === "auto",
+        },
+      ]);
+    };
+
+    // serve 模式的门面（helixApi()）可能晚于本组件挂载才就绪，桥没通时返回
+    // null —— 挂不上就轮询到挂上为止（卸载时清掉）。
+    let detach: (() => void) | null = null;
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const attach = () => {
+      const api = helixApi();
+      if (typeof api?.onEvent !== "function") return false;
+      detach = api.onEvent(onUserRequest);
+      return true;
+    };
+    if (!attach()) {
+      poll = setInterval(() => {
+        if (attach() && poll) {
+          clearInterval(poll);
+          poll = null;
+        }
+      }, 500);
+    }
+    return () => {
+      if (poll) clearInterval(poll);
+      detach?.();
+    };
+  }, [bumpPendingUserRequests]);
   // Which session's data the shared live UI state (responseBlocks / steps /
   // streamThinking) currently belongs to. Lets the display layer keep
   // showing a promoted-but-not-yet-flushed run's own draft instead of another
@@ -1524,29 +1789,37 @@ export function AgentFlowPanel() {
   }, [currentSessionId, streamingDrafts]);
   // 进/换会话时把两条轴各自对齐一次：
   // 1) 权限档的真相是 pi-permission 的配置文件（用户可能手改、另一个 pi 客户端
-  //    也可能改过）。不回读就是拿缓存骗界面。
+  //    也可能改过）。不回读就是拿缓存骗界面。读的时候带上**这条对话**的身份，
+  //    否则覆盖表不参与解析，看到的永远是全局那格，而闸门拦工具用的是生效档。
   // 2) plan 的真相是该会话 pi 实例的状态，前端只有一份影子。切回一个「规划中」
   //    的旧对话时，只改前端不通知后端，后端仍停在上次的模式，模型直接执行而不
   //    等批准（这正是当初的根因）。set_mode 带合成值：进 plan → 网关发 /plan
   //    start，离开 plan → 发 /plan exit；无变化时网关两边都不发（no-op）。
   //    尚无 sid 的新草稿跳过（session/new 自带 mode_id，网关已消费）。
   useEffect(() => {
-    void useHelixStore.getState().syncPermissionMode();
+    const target = permissionTarget();
     const cid = currentSessionId;
-    if (!cid) return;
-    const sid = sessionMapRef.current.get(cid)?.sid;
-    if (!sid) return;
-    const st = useHelixStore.getState();
-    const mode_id = approvalModeOf(
-      st.permissionMode,
-      !!st.planModeBySession[cid],
-    );
-    helixApi()
-      ?.send("session/set_mode", { session_id: sid, mode_id })
+    const sid = cid ? sessionMapRef.current.get(cid)?.sid : undefined;
+    void useHelixStore
+      .getState()
+      .syncPermissionMode(target)
+      .then(() => {
+        if (!cid || !sid) return;
+        const st = useHelixStore.getState();
+        const mode_id = approvalModeOf(
+          st.permissionMode,
+          !!st.planModeBySession[cid],
+        );
+        return helixApi()
+          ?.send("session/set_mode", { session_id: sid, mode_id })
+          .catch((e: unknown) => {
+            console.warn("[Helix] set_mode(sync on switch) failed:", e);
+          });
+      })
       .catch((e: unknown) => {
-        console.warn("[Helix] set_mode(sync on switch) failed:", e);
+        console.warn("[Helix] syncPermissionMode(switch) failed:", e);
       });
-  }, [currentSessionId]);
+  }, [currentSessionId, permissionTarget]);
   // Per-session running: any conversation whose draft is running (whether it's
   // the front run or a background run you switched to) shows busy state.
   const isRunning = useMemo(() => {
@@ -3510,6 +3783,12 @@ export function AgentFlowPanel() {
     keepInput?: boolean;
   }) => {
     const isBackground = !!opts?.sessionId;
+    // 本轮所属项目根（本机语义），开局就定下来：回合末尾再读 activeSessionWorkDir
+    // 可能已经被别的对话切走，检查会跑错仓库。
+    const runWorkDir = localProjectRoot(
+      useHelixStore.getState().activeSessionWorkDir ??
+        useHelixStore.getState().selectedWorkDir,
+    );
     const currentInput = opts?.prompt ?? inputValueRef.current;
     // 终端式输入历史：记录用户从输入框发送的文本（程序化 prompt / 斜杠命令除外）。
     if (!opts?.prompt) pushInputHistory(currentInput);
@@ -3529,7 +3808,11 @@ export function AgentFlowPanel() {
           .map((l) => `链接: ${l.title ? `${l.title} (${l.url})` : l.url}`)
           .join("\n")
       : "";
-    const trimmed = baseTrimmed + linkSuffix;
+    // /review 是「提示词宏」而不是客户端动作：改写成审查正文后照常走发送路径。
+    // 另起一次 run 会和这一次抢 isChatLoading / 前端运行标记（并行对话保护那套），
+    // 所以在这里换正文、由同一个 run 发出去。
+    const reviewPrompt = rewriteReviewCommand(baseTrimmed);
+    const trimmed = (reviewPrompt ?? baseTrimmed) + linkSuffix;
     if (
       !baseTrimmed &&
       pendingImages.length === 0 &&
@@ -3584,7 +3867,8 @@ export function AgentFlowPanel() {
       const builtin = BUILTIN_COMMANDS.find(
         (c) => c.name === builtinMatch[1].toLowerCase(),
       );
-      if (builtin) {
+      // review 不进这条早退分支：它的正文已经替换进 trimmed，继续往下当普通消息发。
+      if (builtin && builtin.action !== "review") {
         setInputSynced("");
         resetInputHeight();
         switch (builtin.action) {
@@ -3752,6 +4036,11 @@ export function AgentFlowPanel() {
     // 缓冲只在 run/done/error 时被清成 ""（永不变短），所以 slice 时用
     // Math.min 兜住"基准 > 缓冲长度"的清空瞬间，无需在每个重置点同步重置基准。
     const thinkingPhaseBaseRef = { current: 0 };
+    // 本阶段思考的**起点**（首个 thinking 事件的 ms epoch）。每个 thinking 分片
+    // 用它刷新所在块的 duration_s，所以卡片上的数字随流式增长、阶段结束即定格
+    // —— 那是「这段思考花了多久」，与 run 级 thinkingStartTimeRef（整轮第一条
+    // 思考）不是一回事。
+    const thinkingPhaseStartRef = { current: 0 };
     const phaseThinkingText = () =>
       thoughtBufferRef.current.slice(
         Math.min(thinkingPhaseBaseRef.current, thoughtBufferRef.current.length),
@@ -3759,6 +4048,7 @@ export function AgentFlowPanel() {
     // 非思考块落块 = 思考阶段边界。
     const markThinkingPhaseBoundary = () => {
       thinkingPhaseBaseRef.current = thoughtBufferRef.current.length;
+      thinkingPhaseStartRef.current = 0;
     };
     const lastStreamedTextRef = { current: "" };
     const stepsRef = { current: [] as ExecutionStep[] };
@@ -3778,7 +4068,13 @@ export function AgentFlowPanel() {
     const pendingThinkingRef = { current: null as string | null };
     const pendingBlocksRef = {
       current: [] as Array<
-        | { type: "thinking" | "text"; content: string }
+        | {
+            type: "thinking";
+            content: string;
+            startedAt?: number;
+            duration_s?: number;
+          }
+        | { type: "text"; content: string }
         | { type: "tool_group"; steps: ExecutionStep[] }
       >,
     };
@@ -3962,10 +4258,16 @@ export function AgentFlowPanel() {
               const curC = String(b.content || "");
               const prevN = normalizeForCompare(prevC);
               const curN = normalizeForCompare(curC);
+              // 计时随「本阶段」走：分片替换/追加都沿用 incoming 的起止，它才
+              // 是最新的一次思考事件时刻（旧块可能是上一帧的同阶段副本）。
+              const timing = {
+                startedAt: b.startedAt,
+                duration_s: b.duration_s,
+              };
               if (curC.includes(prevC)) {
                 next = [
                   ...next.slice(0, lastI),
-                  { type: "thinking", content: curC },
+                  { type: "thinking", content: curC, ...timing },
                 ];
               } else if (prevC.includes(curC)) {
                 // 旧块更长（极少见，可能是旧数据残留），保留旧的
@@ -3977,14 +4279,30 @@ export function AgentFlowPanel() {
                 // 归一化后高度相似：视为累积重发或改写，取更长的一份
                 next = [
                   ...next.slice(0, lastI),
-                  { type: "thinking", content: curC.length >= prevC.length ? curC : prevC },
+                  {
+                    type: "thinking",
+                    content:
+                      curC.length >= prevC.length ? curC : prevC,
+                    ...timing,
+                  },
                 ];
               } else {
                 // 无包含关系且相似度低：真正的独立思考段，保留原逻辑追加
-                next = [...next, { type: "thinking", content: b.content }];
+                next = [
+                  ...next,
+                  { type: "thinking", content: b.content, ...timing },
+                ];
               }
             } else {
-              next = [...next, { type: "thinking", content: b.content }];
+              next = [
+                ...next,
+                {
+                  type: "thinking",
+                  content: b.content,
+                  startedAt: b.startedAt,
+                  duration_s: b.duration_s,
+                },
+              ];
             }
           } else {
             next =
@@ -4419,9 +4737,20 @@ export function AgentFlowPanel() {
       // 每轮都同步一次模式（不只是建会话时）：复用中的对话，它的 pi 实例留着
       // 上次的 plan 状态，而上面的切会话 effect 只在焦点变化时跑；这里补一次，
       // 芯片和后端实例在网关重启/漂移之后仍然一致。
-      // 两条轴各自解析：权限档**全局一档**，且发消息前回读扩展配置（真相在那
-      // 个文件里，别的进程可能改过；一次小 JSON 读取，代价可忽略）；plan 按会话。
-      const runTier = await useHelixStore.getState().syncPermissionMode();
+      // 两条轴各自解析：权限档回读扩展配置（真相在那个文件里，别的进程可能改过；
+      // 一次小 JSON 读取，代价可忽略），带**这条会话**的 sid + 目录，覆盖表才
+      // 参与解析；plan 按会话。
+      const runState = useHelixStore.getState();
+      const runTier = await runState.syncPermissionMode({
+        sessionId,
+        // 与快照同一目录链（落盘的 workDir 优先）：后台跑的不是焦点对话时，
+        // activeSessionWorkDir 可能是另一条对话的，不能用它盖掉这条会话的目录。
+        cwd:
+          record?.workDir ??
+          runState.activeSessionWorkDir ??
+          selectedWorkDir ??
+          null,
+      });
       const runPlanOn = !!useHelixStore.getState().planModeBySession[
         activeSessionId
       ];
@@ -4580,14 +4909,14 @@ export function AgentFlowPanel() {
                 const content = normalizeAcpContent(u.content);
                 uiSteps((prev) => {
                   const next = [...prev];
+                  const endedAt = Date.now();
                   for (let i = next.length - 1; i >= 0; i--) {
                     if (
                       next[i].type === "tool_call" &&
                       next[i].toolName?.startsWith("SubAgent")
                     ) {
                       next[i] = {
-                        ...next[i],
-                        status,
+                        ...closeToolStep(next[i], status === "failed", endedAt),
                         content: content || next[i].content,
                       };
                       break;
@@ -4656,38 +4985,19 @@ export function AgentFlowPanel() {
               return null;
             }
             case "permission_request":
-              // Forward as approval_request so the ApprovalDialog shows up
-              return {
-                type: "approval_request",
-                approvalId:
-                  (typeof u.toolCallId === "string" ? u.toolCallId : "") ||
-                  `approval-${Date.now()}`,
-                toolName: u.toolName || u.title || "unknown",
-                toolParams: u.toolParams || u.params || {},
-              };
             case "clarify_request":
-              // 模型反问多选（clarify 工具）：弹底部浮条让用户挑选/输入，
-              // 回应 clarify/respond 后后端继续。之前没有此分支 → 模型一反问就挂起。
-              // approvalTimeoutSec：审批卡才有（网关 permission==true 时附带）→
-              // 算出到期时刻供倒计时与到点出队；普通 clarify 卡恒为 null（不超时）。
-              return {
-                type: "clarify_request",
-                requestId:
-                  u.requestId || u.request_id || `clarify-${Date.now()}`,
-                question: u.question || "",
-                choices: Array.isArray(u.choices) ? u.choices : null,
-                expiresAt:
-                  typeof u.approvalTimeoutSec === "number" &&
-                  u.approvalTimeoutSec > 0
-                    ? Date.now() + u.approvalTimeoutSec * 1000
-                    : null,
-              };
             case "clarify_settled":
-              // 网关作废竞速输掉的审批弹窗（pi_gateway::evict_settled_permission_asks）：
-              // 只带 requestId 的出队指令，不弹任何东西。
+              // 审批 / 反问 / 作废由组件级的常驻订阅认领（见 onUserRequest）。
+              // 留在 run 循环里 = run 一退订就没人接，且入队前还要过「sid ==
+              // 本轮」过滤，别的会话（含旁路）的审批永远进不来。
+              return null;
+            case "tool_prepare_unblocked":
+              // 网关注射的 Helix 侧事件（不是 pi 发的）：审批答完 ⇒ 那条工具调用的
+              // prepare 返回了。只走 run 循环，因为它要改的是这个 run 私有的累加器。
               return {
-                type: "clarify_settled",
-                requestId: u.requestId || u.request_id || "",
+                type: "tool_prepare_unblocked",
+                toolCallId: String(u?.toolCallId || ""),
+                at: Number(u?.at) || 0,
               };
             case "run_complete":
               // 后端 run.completed / message.complete 携带完整正文(payload.text / output)。
@@ -4946,142 +5256,6 @@ export function AgentFlowPanel() {
         }
         // subagent.progress / subagent.text / 其它 → 忽略
       };
-
-      // ── Backend todo-list extraction ──────────────────────────────────────
-      // The backend carries an in-session todo list and streams it via session/update
-      // events whose sessionUpdate name includes "todo"/"task"/"plan" (per the
-      // user: "独立 session/update 事件"). It may also surface the full list
-      // inside a `todo_write` tool result. We try both, tolerate unknown field
-      // shapes, and normalize every item to { id, content, status, activeForm }.
-      // The captured list is pushed to the store so the header button can show
-      // it; an empty/garbage payload is ignored (button stays hidden).
-      const STATUS_MAP: Record<
-        string,
-        "pending" | "in_progress" | "completed" | "cancelled"
-      > = {
-        pending: "pending",
-        todo: "pending",
-        not_started: "pending",
-        queued: "pending",
-        in_progress: "in_progress",
-        inprogress: "in_progress",
-        doing: "in_progress",
-        running: "in_progress",
-        active: "in_progress",
-        completed: "completed",
-        done: "completed",
-        finished: "completed",
-        cancelled: "cancelled",
-        canceled: "cancelled",
-        abandoned: "cancelled",
-      };
-      const parseTodoItem = (raw: any): HelixTodo | null => {
-        if (!raw || typeof raw !== "object") return null;
-        const content =
-          raw.content ??
-          raw.subject ??
-          raw.title ??
-          raw.text ??
-          raw.label ??
-          raw.name ??
-          raw.task ??
-          "";
-        const statusRaw = String(
-          raw.status ?? raw.state ?? "pending",
-        ).toLowerCase();
-        // rpiv-todo tombstones (deleted tasks) never render — skip them
-        // instead of mapping to an unknown status.
-        if (statusRaw === "deleted") return null;
-        const status = STATUS_MAP[statusRaw] || "pending";
-        if (typeof content !== "string" || !content.trim()) return null;
-        return {
-          id:
-            typeof raw.id === "string" && raw.id
-              ? raw.id
-              : "todo-" + Math.abs(hashString(content + status)).toString(36),
-          content: content.trim(),
-          status,
-          activeForm:
-            typeof raw.activeForm === "string" ? raw.activeForm : undefined,
-        };
-      };
-      const extractTodoList = (payload: any): HelixTodo[] | null => {
-        if (!payload || typeof payload !== "object") return null;
-        // session/update wraps the list in `.update` (or `.params.update`)
-        const u = payload.update ?? payload.params?.update ?? payload;
-        // Direct array on the event? ACP's native plan update uses `entries`
-        // (PlanEntry[] with content/priority/status) — see acp.schema.AgentPlanUpdate.
-        // Also accept the legacy todos/items/taskList/list field names.
-        const arr =
-          u?.entries ??
-          u?.todos ??
-          u?.items ??
-          u?.taskList ??
-          u?.list ??
-          u?.update?.entries ??
-          u?.update?.todos ??
-          u?.update?.items ??
-          payload?.entries ??
-          payload?.todos ??
-          payload?.items;
-        if (Array.isArray(arr)) {
-          const items = arr.map(parseTodoItem).filter(Boolean) as HelixTodo[];
-          return items.length ? items : null;
-        }
-        // tool_call with name todo_write/TodoWrite may carry `todos` in rawInput
-        const toolName = String(
-          u?.title ?? u?.toolName ?? payload?.title ?? "",
-        ).toLowerCase();
-        if (
-          /todo_write|todowrite|todo_update|task_create|task_update/.test(
-            toolName,
-          )
-        ) {
-          const ri = u?.rawInput;
-          let parsedInput = ri;
-          if (typeof ri === "string") {
-            try {
-              parsedInput = JSON.parse(ri);
-            } catch {
-              parsedInput = null;
-            }
-          }
-          const inner = Array.isArray(parsedInput?.todos)
-            ? parsedInput.todos
-            : Array.isArray(parsedInput?.items)
-              ? parsedInput.items
-              : Array.isArray(parsedInput?.taskList)
-                ? parsedInput.taskList
-                : Array.isArray(parsedInput?.list)
-                  ? parsedInput.list
-                  : null;
-          if (Array.isArray(inner)) {
-            const items = inner
-              .map(parseTodoItem)
-              .filter(Boolean) as HelixTodo[];
-            return items.length ? items : null;
-          }
-        }
-        return null;
-      };
-      const pushTodos = (list: HelixTodo[] | null) => {
-        if (list && list.length) {
-          // 带上前端对话 id（myCid）：右上角按 currentSessionId 过滤，之前误用
-          // 后端 sid 导致 todo 永远写不进当前会话的缓存（2026-08-18 修复）。
-          useHelixStore.getState().setHelixTodos(list, myCid ?? undefined);
-        }
-      };
-
-      // Simple stable string hash (for deriving todo ids when the backend
-      // doesn't supply one). Defined before the todo parser uses it.
-      function hashString(s: string): number {
-        let h = 0;
-        for (let i = 0; i < s.length; i++) {
-          h = (h << 5) - h + s.charCodeAt(i);
-          h |= 0;
-        }
-        return h;
-      }
 
       // Event-driven async queue — no polling. Producers push items and
       // wake the consumer immediately via a resolver.
@@ -5489,6 +5663,7 @@ export function AgentFlowPanel() {
               thoughtBufferRef.current = "";
               // 缓冲被清空，阶段基准必须同步归零（否则重连后新思考会被 slice 掉）。
               thinkingPhaseBaseRef.current = 0;
+              thinkingPhaseStartRef.current = 0;
               lastStreamedTextRef.current = "";
               streamCappedRef.current = false;
               thinkingCappedRef.current = false;
@@ -5526,6 +5701,7 @@ export function AgentFlowPanel() {
               thoughtBufferRef.current = "";
               // 缓冲被清空，阶段基准必须同步归零（否则重试后新思考会被 slice 掉）。
               thinkingPhaseBaseRef.current = 0;
+              thinkingPhaseStartRef.current = 0;
               lastStreamedTextRef.current = "";
               streamCappedRef.current = false;
               thinkingCappedRef.current = false;
@@ -5628,25 +5804,9 @@ export function AgentFlowPanel() {
               return [...prev, { id: generateId(), ts: Date.now(), text }];
             });
           }
-          // Capture the backend's in-session todo list from dedicated todo/plan
-          // session/update events (or todo_write tool results) so the header
-          // button can surface it. Silently ignored when no list is present.
           if (method === "session/update") {
             const su =
               params?.update?.sessionUpdate || params?.update?.type || "";
-            // pi 的 rpiv-todo 扩展：每次 todo 工具调用都会在
-            // result.details.tasks 里带回全量任务列表，网关转发为
-            // todo_list。空数组 = clear，需要收起面板。
-            if (su === "todo_list") {
-              const list = extractTodoList(params);
-              if (list && list.length) {
-                pushTodos(list);
-              } else if (Array.isArray(params?.update?.todos)) {
-                useHelixStore.getState().setHelixTodos([], myCid ?? undefined);
-              }
-            } else if (/todo|task|plan/i.test(String(su))) {
-              pushTodos(extractTodoList(params));
-            }
             // pi 计划模式扩展（@narumitw/pi-plan-mode）：模型调用
             // plan_mode_complete 工具交出决策就绪的完整方案时，网关转发
             // plan_complete。立刻弹“计划审批”浮条并展示真实 plan 工件，
@@ -5662,61 +5822,6 @@ export function AgentFlowPanel() {
                   sessionId: cid ?? DRAFT_SESSION_KEY,
                   content: planText,
                 });
-              }
-            }
-            // 执行计划同步（工作面板「执行计划」区块）：activePlan 已加载且
-            // 本次 todo 列表非空时，把已完成/进行中的 todo 按文本（精确或
-            // 前缀）匹配到计划步骤上更新其状态；匹配不上就只保留 helixTodos，
-            // 不强行改 plan。
-            const planSyncList = su === "todo_list"
-              ? extractTodoList(params)
-              : /todo|task|plan/i.test(String(su))
-                ? extractTodoList(params)
-                : null;
-            if (planSyncList && planSyncList.length) {
-              const st = useHelixStore.getState();
-              const active = st.activePlan;
-              if (active.length > 0) {
-                const completedTexts = new Set<string>(
-                  planSyncList
-                    .filter((t) => t.status === "completed")
-                    .map((t) => t.content.trim()),
-                );
-                const activeTexts = new Set<string>(
-                  planSyncList
-                    .filter((t) => t.status === "in_progress")
-                    .map((t) => t.content.trim()),
-                );
-                const matches = (t: string): boolean =>
-                  completedTexts.has(t) ||
-                  [...completedTexts].some(
-                    (c) =>
-                      t.startsWith(c) ||
-                      c.startsWith(t) ||
-                      c.startsWith(t.slice(0, 40)) ||
-                      t.startsWith(c.slice(0, 40)),
-                  );
-                const activeMatch = (t: string): boolean =>
-                  activeTexts.has(t) ||
-                  [...activeTexts].some(
-                    (c) =>
-                      t.startsWith(c) ||
-                      c.startsWith(t) ||
-                      c.startsWith(t.slice(0, 40)) ||
-                      t.startsWith(c.slice(0, 40)),
-                  );
-                let changed = false;
-                const next: PlanStep[] = active.map((s) => {
-                  if (s.status === "completed") return s;
-                  const n: PlanStep["status"] = matches(s.text)
-                    ? "completed"
-                    : activeMatch(s.text)
-                      ? "in_progress"
-                      : s.status;
-                  if (n !== s.status) changed = true;
-                  return n === s.status ? s : { ...s, status: n };
-                });
-                if (changed) st.setActivePlan(next);
               }
             }
             // Diff capture —— 「已修改」汇总卡片的**唯一登记点**。
@@ -6092,6 +6197,7 @@ export function AgentFlowPanel() {
 
               // Sub-agent tool calls: append as sub-step to the last delegate_task step
               if (isSubAgentTool) {
+                const saStartedAt = Date.now();
                 const subStep: ExecutionStep = {
                   id: generateId(),
                   type: "tool_call",
@@ -6104,7 +6210,8 @@ export function AgentFlowPanel() {
                   toolName: parsed.toolName,
                   toolKind: parsed.toolKind,
                   toolParams: parsed.toolParams,
-                  timestamp: Date.now(),
+                  timestamp: saStartedAt,
+                  startedAt: saStartedAt,
                 };
                 uiSteps((prev) => {
                   const next = [...prev];
@@ -6179,6 +6286,7 @@ export function AgentFlowPanel() {
                 }
               }
               const id = generateId();
+              const toolStartedAt = Date.now();
               const isDelegateTask = parsed.toolName?.startsWith("Delegating");
               // All tool_calls start as 'running' so the top status bar can surface
               // "正在执行工具：read xxx / bash xxx". They'll be marked
@@ -6195,7 +6303,10 @@ export function AgentFlowPanel() {
                 toolKind: parsed.toolKind,
                 toolCallId: toolCallId || undefined,
                 toolParams: params,
-                timestamp: Date.now(),
+                // 计时起点 = 卡片出现（tool_call 事件）那一刻，与用户看到的转圈
+                // 区间一致；tool_result 到达时 closeToolStep 收尾。
+                timestamp: toolStartedAt,
+                startedAt: toolStartedAt,
                 status: "running",
                 subSteps: isDelegateTask ? [] : undefined,
               };
@@ -6263,8 +6374,16 @@ export function AgentFlowPanel() {
               pendingBlocksRef.current.push({ type: "tool_group", steps: [step] });
               scheduleStreamRender();
             } else if (parsed.type === "thinking") {
+              const thinkingNow = Date.now();
               if (!thinkingStartTimeRef.current)
-                thinkingStartTimeRef.current = Date.now();
+                thinkingStartTimeRef.current = thinkingNow;
+              if (!thinkingPhaseStartRef.current)
+                thinkingPhaseStartRef.current = thinkingNow;
+              const phaseStartedAt = thinkingPhaseStartRef.current;
+              const phaseDurationS = Math.max(
+                0,
+                (thinkingNow - phaseStartedAt) / 1000,
+              );
               // 规整模型侧思考流自带的空行：连发的多个 \n 压成单个，
               // 与正文侧的空白规整保持一致，避免思考块里渲染出大段空白。
               const inc = normalizeAcpContent(parsed.content).replace(
@@ -6281,6 +6400,8 @@ export function AgentFlowPanel() {
                 pendingBlocksRef.current.push({
                   type: "thinking",
                   content: phaseThinkingText(),
+                  startedAt: phaseStartedAt,
+                  duration_s: phaseDurationS,
                 });
                 scheduleStreamRender();
                 return;
@@ -6323,6 +6444,8 @@ export function AgentFlowPanel() {
                 // 缓冲仍完整保留在 thoughtBufferRef 里供 done 兜底，但块内容不能
                 // 带上前几段思考，否则会跨工具重复渲染。
                 content: phaseThinkingText(),
+                startedAt: phaseStartedAt,
+                duration_s: phaseDurationS,
               });
               scheduleStreamRender();
             } else if (parsed.type === "reasoning") {
@@ -6351,13 +6474,14 @@ export function AgentFlowPanel() {
             } else if (parsed.type === "tool_result") {
               const id = generateId();
               const resultCallId: string = parsed.toolCallId || "";
+              const toolFinishedAt = Date.now();
               const step: ExecutionStep = {
                 id,
                 type: "tool_result",
                 toolCallId: resultCallId || undefined,
                 content: parsed.content,
                 toolName: parsed.toolName,
-                timestamp: Date.now(),
+                timestamp: toolFinishedAt,
               };
               uiSteps((prev) => [...prev, step]);
               storeActions.addExecutionStep({
@@ -6368,6 +6492,8 @@ export function AgentFlowPanel() {
               // bar stops showing it in "正在执行工具". Prefer the exact
               // toolCallId; fall back to the last unfinished tool_call (serial
               // execution) when the event carries no id.
+              // closeToolStep 顺带写下 finishedAt/duration_s —— 折叠标签右端那一行
+              // 的墙上跨度就是拿这些端点算的（同批工具并行执行，耗时不能相加）。
               uiSteps((prev) => {
                 const next = [...prev];
                 let marked = false;
@@ -6378,7 +6504,7 @@ export function AgentFlowPanel() {
                       next[i].toolCallId === resultCallId &&
                       next[i].status === "running"
                     ) {
-                      next[i] = { ...next[i], status: "completed" as const };
+                      next[i] = closeToolStep(next[i], false, toolFinishedAt);
                       marked = true;
                       break;
                     }
@@ -6390,7 +6516,7 @@ export function AgentFlowPanel() {
                       next[i].type === "tool_call" &&
                       next[i].status === "running"
                     ) {
-                      next[i] = { ...next[i], status: "completed" as const };
+                      next[i] = closeToolStep(next[i], false, toolFinishedAt);
                       break;
                     }
                   }
@@ -6456,12 +6582,11 @@ export function AgentFlowPanel() {
                         // 属于别的工具，不能顺手标记（并行时会把别的工具
                         // 的卡提前标完成）。
                         (!matchedCall || s.id === matchedCall.id)
-                          ? {
-                              ...s,
-                              status: parsed.failed
-                                ? ("failed" as const)
-                                : ("completed" as const),
-                            }
+                          ? closeToolStep(
+                              s,
+                              !!parsed.failed,
+                              toolFinishedAt,
+                            )
                           : s,
                       ),
                       step,
@@ -6471,6 +6596,47 @@ export function AgentFlowPanel() {
                 }
                 return [...prev, { type: "tool_group", steps: [step] }];
               });
+            } else if (parsed.type === "tool_prepare_unblocked") {
+              // 卡片建在 tool_execution_start 那一刻，而审批弹窗跑在那之后的
+              // prepareToolCall 里 ⇒ 不挪起点的话，「等用户点批准」的那几分钟会算成
+              // 工具自己的耗时（网关那侧记的就是这条卡片真正的起跑时刻）。
+              // 只往后挪**未收尾**的步骤：数字已经定格的不能被追溯改写。
+              const unblockedId: string = parsed.toolCallId || "";
+              const unblockedAt: number = parsed.at || 0;
+              if (unblockedId && unblockedAt) {
+                const isTarget = (s: ExecutionStep) =>
+                  s.type === "tool_call" &&
+                  s.toolCallId === unblockedId &&
+                  s.duration_s == null &&
+                  s.startedAt != null &&
+                  s.startedAt < unblockedAt;
+                uiSteps((prev: ExecutionStep[]) =>
+                  prev.some(isTarget)
+                    ? prev.map((s) =>
+                        isTarget(s) ? { ...s, startedAt: unblockedAt } : s,
+                      )
+                    : prev,
+                );
+                // 与 tool_result 分支同理：可能还在 pendingBlocksRef 里等 rAF，
+                // 不落盘就改不到它对应的那个 tool_group。
+                flushPending();
+                uiRB((prev: ResponseBlock[]) =>
+                  prev.some((b) => b.type === "tool_group" && b.steps.some(isTarget))
+                    ? prev.map((b) =>
+                        b.type === "tool_group"
+                          ? {
+                              ...b,
+                              steps: b.steps.map((s) =>
+                                isTarget(s)
+                                  ? { ...s, startedAt: unblockedAt }
+                                  : s,
+                              ),
+                            }
+                          : b,
+                      )
+                    : prev,
+                );
+              }
             } else if (parsed.type === "tool_output_delta") {
               // Streaming output chunk from a running tool — append to the
               // latest tool_call step's content so the user sees output in real time.
@@ -7404,51 +7570,6 @@ export function AgentFlowPanel() {
               }
             } else if (parsed.type === "available_commands") {
               useHelixStore.getState().setAvailableCommands(parsed.commands);
-            } else if (parsed.type === "approval_request") {
-              // `approval_request` 只来自扩展的 ui.confirm（subagents 删 agent /
-              // 覆盖文件那一类）：它主动请求确认就是要人拍板，没有自动放行分支。
-              // 权限档不参与——门禁在 pi-permission 那一侧，它自己的配置决定问不
-              // 问；前端在这里再判一次就是第二条真相。
-              bumpPendingUserRequests(1);
-              setApprovalQueue((prev) => [
-                ...prev,
-                {
-                  id: parsed.approvalId,
-                  sessionId: myCid,
-                  toolName: parsed.toolName,
-                  params: parsed.toolParams || {},
-                  timestamp: Date.now(),
-                },
-              ]);
-            } else if (parsed.type === "clarify_request") {
-              bumpPendingUserRequests(1);
-              setClarifyQueue((prev) => [
-                ...prev,
-                {
-                  id: parsed.requestId,
-                  sessionId: myCid,
-                  question: parsed.question || "",
-                  choices: parsed.choices || null,
-                  expiresAt: parsed.expiresAt ?? null,
-                },
-              ]);
-            } else if (parsed.type === "clarify_settled") {
-              // 竞速输掉的审批弹窗由网关作废：只出队、不给 pi 回任何东西——
-              // pi 侧那个请求 id 早已被静默删除。计数仅在卡确实还在队列里时
-              // 递减，并把 id 记进 gatewaySettledRef：用户点击与作废撞车时，
-              // respond 的 finally 凭集合跳过递减（一张卡只减一次）。
-              const settledId =
-                typeof parsed.requestId === "string" ? parsed.requestId : "";
-              if (
-                settledId &&
-                clarifyQueueRef.current.some((r) => r.id === settledId)
-              ) {
-                gatewaySettledRef.current.add(settledId);
-                setClarifyQueue((prev) =>
-                  prev.filter((r) => r.id !== settledId),
-                );
-                bumpPendingUserRequests(-1);
-              }
             }
           } catch {
             // skip non-JSON lines
@@ -7708,6 +7829,34 @@ export function AgentFlowPanel() {
           } catch (e) {
             console.error("[GitAutoCommit] Failed:", e);
           }
+        }
+      }
+
+      // 回合结束自动诊断（「诊断」面板里的「每轮结束自动检查」）：跑项目自带的
+      // 类型检查/lint，结果缓存进 store，面板打开即见。
+      // fire-and-forget —— cargo check 可能几十秒，不能挡住后面的持久化。
+      // 后台旁路 run（/btw）不触发：它不动工作区，检查只会白跑一遍。
+      if (isElectron() && sid && !isBackground && !controller.signal.aborted) {
+        const { diagnosticsAfterRun } = useHelixStore.getState();
+        if (diagnosticsAfterRun && runWorkDir) {
+          void window.electron.diagnostics
+            ?.run({ cwd: runWorkDir })
+            .then((r) => {
+              const store = useHelixStore.getState();
+              if (r.ok && r.cwd) store.setLastDiagnostics(r.cwd, r);
+              const errors = r.counts?.errors ?? 0;
+              if (r.ok && errors > 0) {
+                store.showToast({
+                  type: "warning",
+                  title: `${r.label ?? "检查"}：${errors} 个错误`,
+                  description: "打开「诊断」查看，可一键交给 AI 修复",
+                  duration: 6000,
+                });
+              }
+            })
+            .catch(() => {
+              // 检查跑不起来（工具缺失 / 超时）不值得打断对话
+            });
         }
       }
 
@@ -8134,6 +8283,7 @@ export function AgentFlowPanel() {
       approvalId: string,
       choice: ApprovalLevel,
       ownerCid?: string,
+      cardSid?: string,
     ) => {
       // 先出队（fail-closed）：无论 RPC 是否成功，approval 弹条立即从 UI 移除，
       // 避免后端已 resolve 但响应延迟/超时时，用户看到一条永远转圈"提交中"的弹条
@@ -8142,14 +8292,15 @@ export function AgentFlowPanel() {
       setApprovalQueue((prev) => prev.filter((r) => r.id !== approvalId));
       bumpPendingUserRequests(-1);
       try {
-        // sid 按**请求归属的对话**查：后端 approval.respond 用 session_id 严格
-        // 路由（pi_gateway.rs `routed_instance_or_ui_owner`），送到别的实例上
-        // 就是「Unknown pi UI request」报错 + 真正等回应的那条 run 永久卡死。
-        // 没带归属（草稿态等旧调用方）才退回当前会话。
+        // sid 优先用**卡片自己携带的那条**（事件到达时的 `session_id`）：后端
+        // approval.respond 用它严格路由（pi_gateway.rs `routed_instance_or_ui_owner`），
+        // 送到别的实例上就是「Unknown pi UI request」报错 + 真正等回应的那条 run
+        // 永久卡死。按归属对话查 sessionMap 是兜底（旧数据/重挂载后卡片没 sid）。
         const cid = ownerCid ?? useHelixStore.getState().currentSessionId;
         const sid =
-          (cid && sessionMapRef.current.get(cid)?.sid) ||
-          helixSessionIdRef.current;
+          cardSid ||
+          ((cid && sessionMapRef.current.get(cid)?.sid) ||
+            helixSessionIdRef.current);
         if (sid) {
           // 旧 RPC 是 WS 里非对称的一对一 approve/deny（session/approve 需要 toolCallId）。
           // 新 RPC 用 approval.respond + choice: once/session/always/deny，把决定写回
@@ -8174,14 +8325,20 @@ export function AgentFlowPanel() {
 
   // 回应模型的 clarify 反问：把选中项/输入文本发回 clarify/respond 解锁后端，然后出队。
   const handleClarifyRespond = useCallback(
-    async (requestId: string, answer: string, ownerCid?: string) => {
+    async (
+      requestId: string,
+      answer: string,
+      ownerCid?: string,
+      cardSid?: string,
+    ) => {
       try {
-        // sid 按反问归属的对话查（同 handleApproval）：后台并行 run 和旁路的反
-        // 问都带着自己的 cid，送到前台会话的实例上就解不开那个等待。
+        // sid 优先取卡片携带的那条（同 handleApproval）：后台并行 run 和旁路的反
+        // 问都带着自己的 sid，送到前台会话的实例上就解不开那个等待。
         const cid = ownerCid ?? currentSessionId;
         const sid =
-          (cid && sessionMapRef.current.get(cid)?.sid) ||
-          helixSessionIdRef.current;
+          cardSid ||
+          ((cid && sessionMapRef.current.get(cid)?.sid) ||
+            helixSessionIdRef.current);
         if (sid) {
           await helixApi()!.send("clarify/respond", {
             session_id: sid,
@@ -8201,6 +8358,36 @@ export function AgentFlowPanel() {
       }
     },
     [currentSessionId, bumpPendingUserRequests],
+  );
+
+  // 审批卡「本会话始终允许」：从卡上解析 Tool/Command 派生前缀，登记会话级
+  // 放行（内存态，重启即清），然后对当前这张卡代答 Approve (once)。后续命中
+  // 同 tool+前缀的审批请求由 onUserRequest 入队前拦截，不再弹卡。
+  const handleClarifyApproveAlways = useCallback(
+    (requestId: string) => {
+      const card = clarifyQueueRef.current.find((r) => r.id === requestId);
+      const ask = card ? parsePermissionAsk(card.question) : null;
+      if (ask) {
+        const prefix = deriveAllowPrefix(ask.command);
+        useHelixStore.getState().addSessionApprovalAllow({
+          tool: ask.tool,
+          prefix,
+        });
+        useHelixStore.getState().showToast({
+          type: "success",
+          title: prefix
+            ? `本会话内已自动允许 ${prefix}*`
+            : `本会话内已自动允许 ${ask.tool} 的全部调用`,
+        });
+      }
+      void handleClarifyRespond(
+        requestId,
+        PERM_APPROVE_ANSWER,
+        card?.sessionId,
+        card?.sid,
+      );
+    },
+    [handleClarifyRespond],
   );
 
   // 批准计划：关掉审批浮条，**只**清本会话的 plan 标记 —— 权限档是全局那一档，
@@ -8276,12 +8463,14 @@ export function AgentFlowPanel() {
     try {
       const fallbackCid = useHelixStore.getState().currentSessionId;
       for (const req of mine) {
-        // 每条按自己的归属对话取 sid：队列里可以混着后台对话/旁路的请求，共用
-        // 一个 sid 等于把它们全送到同一个实例（同 handleApproval 的路由约束）。
+        // 每条按**自己携带的 sid** 回应（缺失时退回按归属对话查映射）：队列里
+        // 可以混着后台对话/旁路的请求，共用一个 sid 等于把它们全送到同一个实例
+        // （同 handleApproval 的路由约束）。
         const cid = req.sessionId ?? fallbackCid;
         const sid =
-          (cid && sessionMapRef.current.get(cid)?.sid) ||
-          helixSessionIdRef.current;
+          req.sid ||
+          ((cid && sessionMapRef.current.get(cid)?.sid) ||
+            helixSessionIdRef.current);
         if (!sid) continue;
         // 新 RPC（2026-08-17 起后端弃用 session/approve）：approval.respond +
         // choice: once/session/always/deny，由 agent 侧状态机 resolve。
@@ -8314,6 +8503,7 @@ export function AgentFlowPanel() {
         first.id,
         detail.approved ? "once" : "deny",
         first.sessionId,
+        first.sid,
       );
     };
     window.addEventListener("helix:approve-request", handler);
@@ -8490,7 +8680,9 @@ export function AgentFlowPanel() {
           data-tip={
             planOn
               ? "制定计划：只对本对话生效，选一个权限档即退出"
-              : "审批模式：全局一档，所有对话共用（值来自 pi-permission 的配置）"
+              : `审批模式：${
+                  permissionScopeLabelOf(permissionScopeInfo) ?? "全局"
+                }生效，值来自 pi-permission 的配置（可按项目/会话覆盖）`
           }
         >
           {(() => {
@@ -8498,12 +8690,20 @@ export function AgentFlowPanel() {
               (m) => m.id === approvalMode,
             );
             const Icon = cur ? APPROVAL_MODE_ICONS[cur.icon] : null;
+            // 覆盖生效时把来源标在芯片上：用户看到的档位必须是**这条对话**真正
+            // 会用到的那一档，否则「本项目设了严格」在界面上完全看不出来。
+            const scopeTag = planOn ? null : permissionScopeLabelOf(permissionScopeInfo);
             return (
               <>
                 {Icon && <Icon className="size-3.5 shrink-0" />}
                 <span className="truncate min-w-0">
                   {cur?.title ?? "自动审批"}
                 </span>
+                {scopeTag && (
+                  <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.75)] text-muted-foreground/70">
+                    ·{scopeTag}
+                  </span>
+                )}
               </>
             );
           })()}
@@ -8511,9 +8711,46 @@ export function AgentFlowPanel() {
         </button>
         {showApprovalModeDropdown && (
           <div className="absolute bottom-full left-0 mb-2 w-[300px] bg-card rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
+            {/* 写到哪一层：全局 / 本项目 / 本会话（生效优先级反过来）。选的是
+                **写入目标**，不是当前生效值 —— 后者芯片上已经标出来了。 */}
+            <div className="px-3 pb-1.5 pt-0.5">
+              <div className="flex items-center gap-1">
+                {PERMISSION_SCOPE_ITEMS.map((item) => {
+                  const active = permissionWriteScope === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setPermissionWriteScope(item.id)}
+                      data-tip={item.desc}
+                      className={`flex-1 h-6 rounded-md ui-text-sm2 border transition-colors ${
+                        active
+                          ? "border-primary/40 bg-primary/10 text-primary"
+                          : "border-border/40 bg-muted/20 text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {item.title}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.78)] text-muted-foreground leading-snug">
+                {PERMISSION_SCOPE_ITEMS.find(
+                  (i) => i.id === permissionWriteScope,
+                )?.desc ?? ""}
+              </div>
+            </div>
             {APPROVAL_MODE_ITEMS.map((mode) => {
               const Icon = APPROVAL_MODE_ICONS[mode.icon];
-              const active = approvalMode === mode.id;
+              // plan 是按会话那一轴，勾选只看本会话；权限档勾的是**当前写入层**
+              // 自己的格子（全局格恒有值；项目/会话没覆盖时回落到显示生效档）。
+              const active =
+                mode.id === "plan"
+                  ? approvalMode === "plan"
+                  : (permissionTierOfLayer(
+                      permissionScopeInfo,
+                      permissionWriteScope,
+                    ) ?? permissionMode) === mode.id;
               return (
                 <button
                   key={mode.id}
@@ -8542,9 +8779,9 @@ export function AgentFlowPanel() {
                     }
                     // 权限档：唯一写路径是 pi-permission 的配置文件（阻断工具
                     // 执行的是那个扩展的 tool_call 钩子，它只读这一个文件）。
-                    // setPermissionMode 写完会回读，芯片显示的是文件里的值，
-                    // 不是「用户刚才点了什么」。
-                    void setPermissionMode(mode.id);
+                    // 落在哪一层由上面的作用域选择器决定；写完 store 会回读，
+                    // 芯片显示的是文件里的生效档，不是「用户刚才点了什么」。
+                    void setPermissionMode(mode.id, permissionTarget());
                     // 选权限档 = 离开 plan：清本会话标记，并让网关补发 /plan exit
                     // 解锁写工具（本来不在 plan 时它是 no-op，所以不必多发）。
                     if (planOn) {
@@ -8585,6 +8822,67 @@ export function AgentFlowPanel() {
                 </button>
               );
             })}
+            {/* 生效说明 + 覆盖回收。真相只有 settings.json 那一份，这里只是把
+                「哪一格在起作用」讲出来，并提供一键回到下一层。 */}
+            <div className="mt-1 px-3 py-1.5 border-t border-border/30 space-y-1">
+              <div className="text-[calc(var(--helix-transcript-size)*0.78)] text-muted-foreground leading-snug">
+                {permissionScopeInfo ? (
+                  <>
+                    本对话实际生效：
+                    <span className="text-foreground">
+                      {APPROVAL_MODE_ITEMS.find(
+                        (m) => m.id === permissionScopeInfo.effective,
+                      )?.title ?? permissionScopeInfo.effective}
+                    </span>
+                    {permissionScopeLabelOf(permissionScopeInfo)
+                      ? `（来自${permissionScopeLabelOf(permissionScopeInfo)}）`
+                      : "（全局）"}
+                    {permissionScopeInfo.globalUnparsable &&
+                      "；配置里的全局档认不出，扩展按全放行跑"}
+                  </>
+                ) : (
+                  "还没读到配置（打开下拉时会回读一次）"
+                )}
+              </div>
+              {conversationIsRemote && (
+                <div className="text-[calc(var(--helix-transcript-size)*0.78)] text-amber-600 leading-snug">
+                  这条对话在远端机器执行：它的 pi 读**远端**的配置，本机档位对它无效
+                </div>
+              )}
+              {(permissionScopeInfo?.project ||
+                permissionScopeInfo?.session) && (
+                <div className="flex items-center gap-1.5">
+                  {permissionScopeInfo?.project && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void clearPermissionOverride(
+                          "project",
+                          permissionTarget(),
+                        )
+                      }
+                      className="h-6 px-2 rounded-md ui-text-sm2 border border-border/40 bg-muted/20 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                    >
+                      清除本项目
+                    </button>
+                  )}
+                  {permissionScopeInfo?.session && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void clearPermissionOverride(
+                          "session",
+                          permissionTarget(),
+                        )
+                      }
+                      className="h-6 px-2 rounded-md ui-text-sm2 border border-border/40 bg-muted/20 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                    >
+                      清除本会话
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -9537,6 +9835,9 @@ export function AgentFlowPanel() {
                                           isNewestSegment
                                         }
                                         streaming={streamingActive && isNewestSegment}
+                                        durationS={thinkingSegmentDurationS(
+                                          seg.blocks,
+                                        )}
                                         searchOpen={conversationSearchOpen}
                                         searchQuery={conversationSearchQuery}
                                         isSearchActive={false}
@@ -9730,6 +10031,7 @@ export function AgentFlowPanel() {
                                             key={i}
                                             content={content}
                                             fontSize={transcriptFontSize}
+                                            durationS={b.duration_s}
                                             searchOpen={conversationSearchOpen}
                                             searchQuery={
                                               conversationSearchQuery
@@ -9796,6 +10098,9 @@ export function AgentFlowPanel() {
                                             isLastTrail
                                           }
                                           streaming={streamingActive && isLastTrail}
+                                          durationS={thinkingSegmentDurationS(
+                                            seg.blocks,
+                                          )}
                                           searchOpen={conversationSearchOpen}
                                           searchQuery={conversationSearchQuery}
                                           isSearchActive={false}
@@ -10073,9 +10378,21 @@ export function AgentFlowPanel() {
           request={approvalRequest}
           pendingCount={pendingApprovalCount}
           onApprove={(id, level) =>
-            handleApproval(id, level, approvalRequest.sessionId)
+            handleApproval(
+              id,
+              level,
+              approvalRequest.sessionId,
+              approvalRequest.sid,
+            )
           }
-          onReject={(id) => handleApproval(id, "deny", approvalRequest.sessionId)}
+          onReject={(id) =>
+            handleApproval(
+              id,
+              "deny",
+              approvalRequest.sessionId,
+              approvalRequest.sid,
+            )
+          }
           onApproveAll={handleApproveAll}
         />
       )}
@@ -10100,8 +10417,14 @@ export function AgentFlowPanel() {
           key={clarifyRequest.id}
           request={clarifyRequest}
           onRespond={(id, answer) =>
-            handleClarifyRespond(id, answer, clarifyRequest.sessionId)
+            handleClarifyRespond(
+              id,
+              answer,
+              clarifyRequest.sessionId,
+              clarifyRequest.sid,
+            )
           }
+          onApproveAlways={handleClarifyApproveAlways}
         />
       )}
 

@@ -7,9 +7,9 @@
 //! takes effect).
 
 use crate::config::{
-    apply_pi_provider_models, atomic_write, read_helix_config,
-    register_pi_provider_models, set_model as config_set_model, set_yaml_key,
-    write_helix_config, HelixConfig,
+    apply_pi_provider_models, atomic_write, read_helix_config, read_pi_models, read_pi_settings,
+    register_pi_provider_models, set_model as config_set_model, set_yaml_key, write_helix_config,
+    HelixConfig,
 };
 use crate::gateway::restart_gateway_soon;
 use crate::pi_gateway;
@@ -19,17 +19,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Emitter;
 use tauri::State;
-
-/// Open a URL in the right-sidebar embedded browser. Emits a
-/// `helix:open-browser` event that the renderer's global hook
-/// (`window.__helixOpenBrowser`, registered in `helix-layout.tsx`) listens for
-/// and forwards to `setPreviewRailUrl` + the browser tab.
-#[tauri::command]
-pub fn open_browser_url(url: String) -> Value {
-    use crate::state::app_handle;
-    let _ = app_handle().emit("helix:open-browser", json!({ "url": url }));
-    json!({ "ok": true, "url": url })
-}
 
 /// Poll the built-in browser extension's request queue
 /// (`~/.pi/agent/browser-requests/*.json`), forward each NEW request's
@@ -198,8 +187,9 @@ pub fn helix_set_config(state: State<'_, Arc<AppState>>, config: Value) -> Value
     // Startup race: the renderer re-asserts its restored model config on every
     // launch (helix-layout startupSync → pushModelConfig → setConfig). An
     // UNCONDITIONAL restart here kills the main pi instance + warm spare while
-    // their get_state handshake is still in flight ("process exited (no
-    // response channel)" + "warm spare spawn failed" on every boot). Respawn
+    // their get_state handshake is still in flight (现在报 "killed by Helix"，
+    // 冷启动重试分支不会再为此重生子进程；先前报 "process exited" 时每次启动都
+    // 白等一个 ~12s 的备件重启 + 一条 "warm spare spawn failed")。Respawn
     // only when the written config actually differs from pi's current one.
     let (changed, _key_changed) =
         write_helix_config(model, provider, base_url, api_key, context_window);
@@ -561,6 +551,10 @@ pub fn helix_memory_overview(state: State<'_, Arc<AppState>>) -> Value {
                 let mut p = stat(&e.path());
                 if let Some(obj) = p.as_object_mut() {
                     obj.insert("name".into(), Value::String(name));
+                    obj.insert(
+                        "dir".into(),
+                        Value::String(e.path().to_string_lossy().into_owned()),
+                    );
                     obj.insert("enabled".into(), Value::Bool(is_enabled("projectMemoryEnabled")));
                 }
                 projects.push(p);
@@ -588,10 +582,67 @@ pub fn helix_memory_overview(state: State<'_, Arc<AppState>>) -> Value {
             "enabled": is_enabled("globalMemoryEnabled"),
             "file_count": stat(&global_dir)["file_count"],
             "last_updated": stat(&global_dir)["last_updated"],
+            "dir": global_dir.to_string_lossy(),
         },
         "current_project": current,
         "projects": projects,
         "config_path": agent.join("hermes-memory-config.json").to_string_lossy(),
+    })
+}
+
+/// 删除记忆文件（设置「记忆」页的垃圾桶图标，前端已二次确认）。
+/// `scope = "global"` 删 pi-hermes-memory/ 下的 .md；`scope = "project"`
+/// 删 projects-memory/<project>/ 下的 .md（含隐藏的 .retired-*.md 归档，
+/// 但不碰 skills/ 子目录）。项目名做路径逃逸校验。
+#[tauri::command]
+pub fn helix_delete_memory(scope: String, project: Option<String>) -> Value {
+    let agent = crate::paths::pi_agent_dir();
+    let dir = match scope.as_str() {
+        "global" => agent.join("pi-hermes-memory"),
+        "project" => {
+            let name = match project.as_deref() {
+                Some(n) if !n.is_empty() => n,
+                _ => return json!({ "ok": false, "error": "缺少项目名" }),
+            };
+            // 项目名只允许单层、无分隔符，防止 projects-memory/../../ 逃逸。
+            if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+                return json!({ "ok": false, "error": "项目名不合法" });
+            }
+            agent.join("projects-memory").join(name)
+        }
+        _ => return json!({ "ok": false, "error": "未知的记忆范围" }),
+    };
+
+    if !dir.starts_with(&agent) || !dir.is_dir() {
+        return json!({ "ok": false, "error": "记忆目录不存在" });
+    }
+
+    let mut removed = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let path = e.path();
+            // 只删顶层 .md（含 .retired-*.md / .recovery-*.md），跳过子目录。
+            let is_md = path
+                .extension()
+                .map(|x| x.eq_ignore_ascii_case("md"))
+                .unwrap_or(false);
+            if !is_md || !path.is_file() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed.push(name),
+                Err(err) => failed.push(format!("{name}: {err}")),
+            }
+        }
+    }
+
+    json!({
+        "ok": failed.is_empty(),
+        "removed": removed.len(),
+        "dir": dir.to_string_lossy(),
+        "errors": failed,
     })
 }
 
@@ -1801,6 +1852,70 @@ fn push_skill_dirs(dir: &std::path::Path, pkg_name: &str, version: &str, items: 
 #[tauri::command]
 pub async fn pi_get_available_models() -> Result<Value, String> {
     pi_gateway::send("get_available_models", Value::Null).await
+}
+
+/// Read the custom providers pi has registered in `models.json` (the file Helix
+/// itself writes on every model save), plus pi's default provider/model.
+///
+/// Read-only. This is the source for Helix's cold-start model recovery: a
+/// profile needs `baseUrl` + `apiKey` + per-model context window / reasoning,
+/// and the `get_available_models` RPC snapshot carries none of the credentials,
+/// so `models.json` is the only place the full shape still exists.
+#[tauri::command]
+pub fn pi_read_custom_providers() -> Value {
+    let doc = read_pi_models();
+    let settings = read_pi_settings();
+    let mut providers: Vec<Value> = Vec::new();
+    if let Some(map) = doc.get("providers").and_then(|v| v.as_object()) {
+        for (id, entry) in map {
+            let base_url = entry.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("");
+            if base_url.is_empty() {
+                continue;
+            }
+            let models: Vec<Value> = entry
+                .get("models")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            let model_id = m.get("id").and_then(|v| v.as_str())?;
+                            Some(json!({
+                                "id": model_id,
+                                "name": m.get("name").and_then(|v| v.as_str()),
+                                "contextWindow": m
+                                    .get("contextWindow")
+                                    .and_then(|v| v.as_u64()),
+                                "reasoning": m.get("reasoning").and_then(|v| v.as_bool()),
+                                "input": m
+                                    .get("input")
+                                    .and_then(|v| v.as_array())
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            providers.push(json!({
+                "id": id,
+                "baseUrl": base_url,
+                "apiKey": entry.get("apiKey").and_then(|v| v.as_str()).unwrap_or(""),
+                "api": entry.get("api").and_then(|v| v.as_str()),
+                "models": models,
+            }));
+        }
+    }
+    json!({
+        "providers": providers,
+        "defaultProvider": settings
+            .get("defaultProvider")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        "defaultModel": settings
+            .get("defaultModel")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+    })
 }
 
 /// Broadcast a thinking level to every live Pi instance (live, no restart).

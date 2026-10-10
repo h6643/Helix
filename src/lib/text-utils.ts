@@ -112,9 +112,23 @@ const KAOMOJI_STATUS_RE =
 // Matches inline kaomoji status markers such as:
 //   "( •_•)> reflecting...The user is saying..."
 //   "(°ロ°) contemplating...The project directory..."
-// It captures the kaomoji prefix + status word + ellipsis only.
+// Group 1 = the parenthesised face, group 2 = the status word. The face must
+// pass looksLikeKaomojiFace() and the word must be in STATUS_ZH before the
+// match counts — the bare shape also matches ordinary prose like
+// "(代码 Code Font): Description...", which then renders as stripped junk.
 const KAOMOJI_INLINE_STATUS_RE =
-  /(\((?=[^)]*[^\w\s])[^)]{1,40}\)[^\s\w]*)\s+([a-zA-Z]{3,})\.{2,}/g;
+  /\(([^)]{1,40})\)[^\s\w]*\s+([a-zA-Z]{3,})\.{2,}/g;
+
+// 汉字（含扩展 A 区与兼容表意文字）。假名不算：颜文字真会用到「°ロ°」。
+const HAN_RE = /[㐀-䶿一-鿿豈-﫿]/;
+
+/** 括号里到底是不是张脸：得有一个符号字符（¬ ˘ • ° ロ …），且不含汉字。 */
+function looksLikeKaomojiFace(inner: string): boolean {
+  if (!inner || HAN_RE.test(inner)) return false;
+  // \w 只覆盖 ASCII，所以「非单词非空白」正好挑出颜文字那些符号笔画；
+  // 纯「汉字 + 英文 + 空格」的括号注解过不了这一关（汉字那条也已经先拦掉）。
+  return /[^\w\s]/.test(inner);
+}
 
 /**
  * Extract the last kaomoji status line from thinking content.
@@ -187,16 +201,16 @@ export function extractKaomojiStatus(thinking: string): {
   }
 
   // 2) Inline markers (no newline separation); return the latest one and keep the body intact.
-  let inlineMatch: RegExpMatchArray | null = null;
-  let m: RegExpMatchArray | null;
-  while ((m = KAOMOJI_INLINE_STATUS_RE.exec(thinking)) !== null) {
-    inlineMatch = m;
+  // 只认「括号里是脸 + 状态词在 STATUS_ZH 里」，两边都过不了就当没有状态 ——
+  // 宁可不显示，也不要把正文里的括号注解剥成乱码标题。
+  let inlineStatus: string | null = null;
+  for (const m of thinking.matchAll(KAOMOJI_INLINE_STATUS_RE)) {
+    const zh = STATUS_ZH[m[2].toLowerCase()];
+    if (!zh || !looksLikeKaomojiFace(m[1])) continue;
+    inlineStatus = zh + "...";
   }
-  if (inlineMatch) {
-    return {
-      status: normalizeKaomojiStatus(inlineMatch[0].trim()),
-      body: thinking,
-    };
+  if (inlineStatus) {
+    return { status: inlineStatus, body: thinking };
   }
 
   return { status: null, body: thinking };

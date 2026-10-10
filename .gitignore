@@ -139,6 +139,7 @@ KaTeX_*
 eslint-report.json
 parse-eslint.mjs
 watch-log.ps1
+.scratch/
 
 
 *.log

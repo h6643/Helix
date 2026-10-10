@@ -713,6 +713,91 @@ const ATX_HEADING_GLUED_TABLE_RE =
   /^( {0,3})((?:>[ \t]*)*)(#{2,6})(\u3000)([^|\n]*)(\|[^|\n]*\|[^\n]*)$/gm;
 
 /**
+ * Count a table row's cells: non-empty `|`-delimited segments, so both
+ * `| a | b |` and `a|b` count 2.
+ */
+function cellCount(line: string): number {
+  return line
+    .trim()
+    .split("|")
+    .filter((segment) => segment.trim().length > 0).length;
+}
+
+/**
+ * Mark each line that belongs to a GFM table block (header row, delimiter row,
+ * body rows). Recognition mirrors `padTableDelimiterRows` /
+ * `dropDuplicateTableDelimiterRows`: a ≥2-cell header, its adjacent dash row
+ * (one blank line tolerated, the shape those repairs already accept), then body
+ * rows until a blank line or a line with <2 cells.
+ *
+ * BLOCK membership matters: "the line has pipes" is not enough, because
+ * technical prose is full of `a|b` shapes (`{signal}|{apiKey}`, `A|B` unions)
+ * that legitimately need the repairs. GFM tables are LINE-level syntax, so any
+ * newline inserted mid-row truncates it — the remaining cells fall out as a
+ * paragraph/list and an emphasis marker opened in the truncated cell renders as
+ * literal `**` (user-visible: a 2-cell row plus raw asterisks). Table cells are
+ * stuffed with exactly the shapes the glued-heading/list repairs hunt for
+ * (`名称-子名称`, `说明：- 第二项`, `耗时4. 时间`), and GFM can't render a heading
+ * or list INSIDE a cell anyway, so skipping the row costs nothing.
+ */
+function tableBlockFlags(text: string): boolean[] {
+  const lines = text.split("\n");
+  const flags = lines.map(() => false);
+  let index = 0;
+
+  while (index < lines.length) {
+    let delim = index + 1;
+    if (delim < lines.length && !lines[delim].trim()) delim += 1;
+
+    if (
+      cellCount(lines[index]) < 2 ||
+      delim >= lines.length ||
+      !TABLE_DASH_LINE_RE.test(lines[delim]) ||
+      cellCount(lines[delim]) < 2
+    ) {
+      index += 1;
+
+      continue;
+    }
+
+    flags[index] = true;
+    flags[delim] = true;
+
+    let cursor = delim + 1;
+    while (
+      cursor < lines.length &&
+      lines[cursor].trim() &&
+      cellCount(lines[cursor]) >= 2
+    ) {
+      flags[cursor] = true;
+      cursor += 1;
+    }
+
+    index = cursor;
+  }
+
+  return flags;
+}
+
+/**
+ * Run a LINE-LOCAL repair on every line outside a GFM table block. The `fix`
+ * must not depend on text across a line boundary — the guard regexes here use
+ * lookbehinds that exclude `\n`, so per-line and whole-text runs agree on the
+ * lines that do get repaired.
+ */
+function repairOutsideTableLines(
+  text: string,
+  fix: (line: string) => string,
+): string {
+  const flags = tableBlockFlags(text);
+
+  return text
+    .split("\n")
+    .map((line, i) => (flags[i] ? line : fix(line)))
+    .join("\n");
+}
+
+/**
  * Repair ATX headings: replace a full-width space after a `##`+ marker with
  * an ASCII space (`##　标题` → `## 标题`), and insert a space where the text
  * is glued straight onto the marker (`##标题` → `## 标题`) so both parse as
@@ -748,13 +833,15 @@ function normalizeAtxHeadings(text: string): string {
     ) => `${prefix}${hashes} ${rest}`,
   );
 
-  return fixedBroken
-    .replace(
-      ATX_HEADING_GLUED_RE,
-      (_match, _indent: string, prefix: string, hashes: string, rest: string) =>
-        `${prefix}${hashes} ${rest}`,
-    )
-    .replace(ATX_HEADING_MIDLINE_RE, "\n## ");
+  const fixedGlued = fixedBroken.replace(
+    ATX_HEADING_GLUED_RE,
+    (_match, _indent: string, prefix: string, hashes: string, rest: string) =>
+      `${prefix}${hashes} ${rest}`,
+  );
+
+  return repairOutsideTableLines(fixedGlued, (line) =>
+    line.replace(ATX_HEADING_MIDLINE_RE, "\n## "),
+  );
 }
 
 // LLMs pad emphasis with spaces/full-width spaces around the `**` markers —
@@ -833,6 +920,83 @@ function isSingleBacktickAt(seg: string, i: number): boolean {
   return seg[i] === "`" && seg[i - 1] !== "`" && seg[i + 1] !== "`";
 }
 
+/**
+ * Walk one segment: close a dropped-backtick span right after its leading
+ * code-like token, and — when `closeAtEnd` — close any span still open at the
+ * segment's end.
+ */
+function closeDanglingSpansIn(seg: string, closeAtEnd: boolean): string {
+  let out = "";
+  let cursor = 0;
+  let inCode = false;
+
+  while (cursor < seg.length) {
+    const ch = seg[cursor];
+
+    if (ch === "`" && isSingleBacktickAt(seg, cursor)) {
+      if (!inCode) {
+        // Opening — inspect the token that follows.
+        let j = cursor + 1;
+        while (
+          j < seg.length &&
+          seg[j] !== "`" &&
+          seg[j] !== "\n" &&
+          !/\s/.test(seg[j])
+        ) {
+          j += 1;
+        }
+
+        const token = seg.slice(cursor + 1, j);
+        // Remainder after the token (skip one run of whitespace).
+        let k = j;
+        while (k < seg.length && /\s/.test(seg[k])) {
+          k += 1;
+        }
+        let m = k;
+        while (m < seg.length && seg[m] !== "`") {
+          m += 1;
+        }
+        const remainder = seg.slice(k, m);
+
+        const codeLike = /^[A-Za-z0-9_./\-*]+$/.test(token);
+
+        if (codeLike && /[一-鿿]/.test(remainder)) {
+          // Dropped closing backtick — close right after the token.
+          out += "`" + token + "`";
+          cursor = j; // consume opening backtick + token; continue in prose
+          inCode = false;
+
+          continue;
+        }
+
+        out += "`";
+        inCode = true;
+        cursor += 1;
+
+        continue;
+      }
+
+      // Closing backtick (balanced span).
+      out += "`";
+      inCode = false;
+      cursor += 1;
+
+      continue;
+    }
+
+    out += ch;
+    cursor += 1;
+  }
+
+  // Any span still open at paragraph end gets closed here. Table rows opt
+  // out — see closeDanglingInlineCode.
+  if (closeAtEnd && inCode) {
+    out += "`";
+  }
+
+  return out;
+}
+
 function closeDanglingInlineCode(text: string): string {
   // Operate per-paragraph (blank-line separated) so a dangling span in one
   // paragraph can never bleed into the next.
@@ -844,74 +1008,13 @@ function closeDanglingInlineCode(text: string): string {
         return seg;
       }
 
-      let out = "";
-      let cursor = 0;
-      let inCode = false;
+      // An unclosed span must not get the fallback close when the paragraph
+      // ENDS on a table row: the backtick lands after the last `|` and GFM reads
+      // it as an extra cell (user-visible: a phantom column on the table's last
+      // row). A literal backtick in a cell is what the source already says.
+      const flags = tableBlockFlags(seg);
 
-      while (cursor < seg.length) {
-        const ch = seg[cursor];
-
-        if (ch === "`" && isSingleBacktickAt(seg, cursor)) {
-          if (!inCode) {
-            // Opening — inspect the token that follows.
-            let j = cursor + 1;
-            while (
-              j < seg.length &&
-              seg[j] !== "`" &&
-              seg[j] !== "\n" &&
-              !/\s/.test(seg[j])
-            ) {
-              j += 1;
-            }
-
-            const token = seg.slice(cursor + 1, j);
-            // Remainder after the token (skip one run of whitespace).
-            let k = j;
-            while (k < seg.length && /\s/.test(seg[k])) {
-              k += 1;
-            }
-            let m = k;
-            while (m < seg.length && seg[m] !== "`") {
-              m += 1;
-            }
-            const remainder = seg.slice(k, m);
-
-            const codeLike = /^[A-Za-z0-9_./\-*]+$/.test(token);
-
-            if (codeLike && /[一-鿿]/.test(remainder)) {
-              // Dropped closing backtick — close right after the token.
-              out += "`" + token + "`";
-              cursor = j; // consume opening backtick + token; continue in prose
-              inCode = false;
-
-              continue;
-            }
-
-            out += "`";
-            inCode = true;
-            cursor += 1;
-
-            continue;
-          }
-
-          // Closing backtick (balanced span).
-          out += "`";
-          inCode = false;
-          cursor += 1;
-
-          continue;
-        }
-
-        out += ch;
-        cursor += 1;
-      }
-
-      // Any span still open at paragraph end gets closed here.
-      if (inCode) {
-        out += "`";
-      }
-
-      return out;
+      return closeDanglingSpansIn(seg, flags[flags.length - 1] !== true);
     })
     .join("");
 }
@@ -920,20 +1023,12 @@ function closeDanglingInlineCode(text: string): string {
 // row: `证据|检查项 |结果 |含义 |` over `|---|---|---|` renders nothing — GFM
 // needs the separator to have exactly as many cells as the header. When the
 // header has more cells than the dash row, rebuild the dash row with the
-// header's cell count. Cell count = non-empty `|`-delimited segments (so both
-// `| a | b |` and `a|b` count 2).
+// header's cell count (see `cellCount`).
 //
 // Models also sometimes put a BLANK LINE between the header and the dash row
 // — GFM requires them adjacent, so the blank line is removed too.
 const TABLE_DASH_LINE_RE =
   /^\s*\|?[\t ]*:?-+:?[\t ]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?\s*$/;
-
-function cellCount(line: string): number {
-  return line
-    .trim()
-    .split("|")
-    .filter((segment) => segment.trim().length > 0).length;
-}
 
 function padTableDelimiterRows(text: string): string {
   const lines = text.split("\n");
@@ -1093,23 +1188,34 @@ const GLUED_BULLET_NOSPACE_MIDLINE_RE =
 // literally and the code text as a list item (user-visible: `` ` `` 换行
 // `` helix-cli` `` 而非行内代码)。Same protection pattern as
 // normalizeVisibleProse — only prose segments get the list repair.
+//
+// Lines are the OUTER loop so the table-block test sees whole rows: a row's
+// inline-code span cuts it into fragments, and a fragment like `）：- 第二项 |`
+// alone doesn't look table-like, which would let the newline insert anyway.
+// Code spans never cross a line (`INLINE_CODE_SPLIT_RE` excludes `\n`), so
+// splitting per line yields the same segments as splitting the whole block.
 function normalizeGluedListItems(text: string): string {
+  const inTable = tableBlockFlags(text);
+
   return text
-    .split(INLINE_CODE_SPLIT_RE)
-    .map((part) => {
-      if (part.startsWith("`")) return part;
-      const numbered = part.replace(GLUED_LIST_ITEM_RE, "\n$1");
-      const withSpacedBullets = numbered.replace(GLUED_BULLET_ITEM_RE, "\n$1");
-      const withNospaceLineStart = withSpacedBullets.replace(
-        GLUED_BULLET_NOSPACE_LINE_START_RE,
-        "$1- ",
-      );
-      return withNospaceLineStart.replace(
-        GLUED_BULLET_NOSPACE_MIDLINE_RE,
-        "\n- ",
-      );
-    })
-    .join("");
+    .split("\n")
+    .map((line, i) =>
+      inTable[i]
+        ? line
+        : line
+            .split(INLINE_CODE_SPLIT_RE)
+            .map((part) =>
+              part.startsWith("`")
+                ? part
+                : part
+                    .replace(GLUED_LIST_ITEM_RE, "\n$1")
+                    .replace(GLUED_BULLET_ITEM_RE, "\n$1")
+                    .replace(GLUED_BULLET_NOSPACE_LINE_START_RE, "$1- ")
+                    .replace(GLUED_BULLET_NOSPACE_MIDLINE_RE, "\n- "),
+            )
+            .join(""),
+    )
+    .join("\n");
 }
 
 const processCache = new Map<string, string>();

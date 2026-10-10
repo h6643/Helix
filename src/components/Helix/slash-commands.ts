@@ -32,7 +32,7 @@ import { useHelixStore } from "@/stores/helix-store";
 export interface BuiltinCommand {
   name: string;
   description: string;
-  action: "compact" | "btw" | "init";
+  action: "compact" | "btw" | "init" | "review";
 }
 
 export const BUILTIN_SLASH_COMMANDS: BuiltinCommand[] = [
@@ -53,7 +53,44 @@ export const BUILTIN_SLASH_COMMANDS: BuiltinCommand[] = [
     description: "初始化生成 pi.md",
     action: "init",
   },
+  {
+    name: "review",
+    description: "审查未提交的改动（只读，不改代码）",
+    action: "review",
+  },
 ];
+
+/**
+ * `/review` 的正文。刻意不把 diff 拼进 prompt：让 agent 自己跑 `git status`/
+ * `git diff` 并按需 Read——上下文小一个量级，而且能审到 `git diff` 根本不包含
+ * 的未跟踪新文件（本项目 write 出来的文件大多是这类）。
+ */
+export const REVIEW_PROMPT = `请审查当前项目里**未提交**的改动。这是审查任务，不是实现任务：不要修改或创建任何文件，也不要提交。
+
+步骤：
+1. \`git status --porcelain\` 看清改动范围，再 \`git diff HEAD\` 读已跟踪文件的 diff。
+2. 未跟踪的新文件不在 diff 里，必须逐个 Read 才能审到。
+3. 逐条给结论，每条都带 \`文件:行号\`，按严重程度分组：
+   - **必须修**：正确性错误、编译/类型不过、安全（注入/越权/泄密）、数据丢失
+   - **建议修**：边界与错误处理、并发与资源泄漏、明显会让后续改动出错的抽象
+   - **可选**：命名、重复、风格
+
+要求：
+- 没问题就直说，不要为凑数造问题；不复述diff 内容，引用 \`文件:行号\` 即可。
+- 只读命令之外的工具一律不用。
+- 结尾给一份「最小修复清单」，只列必须修与建议修。`;
+
+/**
+ * 把 `/review [重点]` 改写成真正发给模型的正文；不是 /review 返回 null。
+ * 走「改写后照常发送」而不是「客户端动作」，是为了不碰 handleRun 的并发/
+ * 忙标记簿记——另起一次 run 会把上一次的 isChatLoading 抢掉。
+ */
+export function rewriteReviewCommand(text: string): string | null {
+  const m = text.trim().match(/^\/review(?:\s+([\s\S]*))?$/i);
+  if (!m) return null;
+  const focus = (m[1] ?? "").trim();
+  return focus ? `${REVIEW_PROMPT}\n\n本次审查重点：${focus}` : REVIEW_PROMPT;
+}
 
 export const DRAFT_SESSION_KEY = "__draft__";
 

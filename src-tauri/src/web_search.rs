@@ -6,7 +6,7 @@
 //! （`~/.pi/agent/extensions/web-access`），Helix 不拥有它的判定逻辑，只拥有
 //! 它读的那份配置。它自己的文档写明取值优先级：
 //!
-//! 1. 环境变量 `TAVILY_API_KEY` / `PERPLEXITY_API_KEY`
+//! 1. 环境变量 `TAVILY_API_KEY`
 //! 2. `config.yaml` 的 `web_search:` 块（本模块写这里）
 //! 3. 遗留的 `~/.pi/web-search.json`
 //!
@@ -16,33 +16,35 @@
 //! # 绝不回显密钥
 //!
 //! 读命令只返回**来源类别**（literal / env / command / none）和「有没有」，从不
-//! 返回值本身 —— 前端连掩码都不需要，因为一个都不显示。密钥只在这份文件里，
-//! 测试调用时临时读进内存，用完即弃。
+//! 返回值本身 —— 前端连掩码都不需要，因为一个都不显示。密钥只在这份文件里。
 //!
 //! # 键值可以是「凭据来源」而不是一串 key
 //!
 //! 扩展认这几种写法（`credential-source.ts`）：`!命令`（跑命令取 stdout）、
 //! `$ENV_NAME` / `${ENV_NAME}`（读环境变量）、`$$` / `$!` 开头的转义字面量。
-//! 这些都不是密钥本身，所以按字面量去打 API 一定失败 —— 测试命令遇到它们会明说
-//! 「这条路由扩展在 pi 进程里解析，Helix 不代跑」，而不是伪造一次成功。
+//! 这些都不是密钥本身，所以分类结果只用来告诉前端「这一项由什么提供」，
+//! Helix 从不代跑命令、也从不把类别当成 key 去用。
 //!
 //! # 改完要不要重启 pi
 //!
 //! 要。扩展的 `loadWebSearchConfig()` 和 `getSearchConfig()` 都是 module-level
 //! 缓存，一个 pi 进程只在第一次调用时读文件。这与审批档位（每次 tool_call 重读）
-//! 不同 —— 面板据此提示「下一次新会话/新 spawn 的 pi 才生效」。
+//! 不同 —— 所以读口回 `restartNeeded`，但卡片上没有再播报这条（页脚已删）。
 
 use serde_json::{json, Value};
 
-/// Helix 拥有的 `web_search:` 子键。**不含** `githubClone`：那是扩展自己的
-/// 嵌套块，本模块一个字节都不碰（`set_yaml_key` 只写点分两级的标量键）。
-const PROVIDER_KEY: &str = "searchProvider";
-const SECRET_KEYS: [&str; 2] = ["tavilyApiKey", "perplexityApiKey"];
-/// 扩展读 provider 时的兼容写法：`raw.searchProvider ?? raw.provider`。
-/// 只读不写 —— 新值一律落 `searchProvider`，它优先级更高。
-const LEGACY_PROVIDER_KEY: &str = "provider";
+/// Helix 拥有的 `web_search:` 子键只有 key 本身。**不含** `githubClone`：那是扩展
+/// 自己的嵌套块，本模块一个字节都不碰（`set_yaml_key` 只写点分两级的标量键）。
+const SECRET_KEYS: [&str; 1] = ["tavilyApiKey"];
 
-const SEARCH_PROVIDERS: [&str; 3] = ["auto", "tavily", "perplexity"];
+/// 下面两个**只读不写**：Helix 只支持 Tavily，没有档位可选，所以不再写
+/// `searchProvider`。但文件里可能还存着「扩展认、Helix 不认」的值（遗留的
+/// perplexity），必须如实报出去 —— 否则卡片说走 Tavily、扩展实际走别家，又是一次
+/// 生效值分裂。扩展自己的读取顺序是 `raw.searchProvider ?? raw.provider`（`search.ts`）。
+const PROVIDER_KEY: &str = "searchProvider";
+const LEGACY_PROVIDER_KEY: &str = "provider";
+/// 扩展 `normalizeSearchProvider` 仍认、但 Helix 不再配置的那一家。
+const UNMANAGED_PROVIDER: &str = "perplexity";
 
 /// 密钥这一项当前由什么提供（**永远不包含值本身**）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,18 +134,22 @@ pub fn web_search_config_list() -> Value {
             .to_string()
     };
 
-    let provider = {
-        let v = get(PROVIDER_KEY);
-        if SEARCH_PROVIDERS.contains(&v.as_str()) {
-            v
-        } else {
-            // 认不出的值在扩展侧一律回落 auto（`normalizeSearchProvider`），
-            // 所以这里也必须显示 auto，否则「显示 X 实际 auto」又是一次分裂。
-            "auto".to_string()
-        }
+    // 扩展的生效值是 `searchProvider ?? provider` 再归一（`normalizeSearchProvider`），
+    // 所以判断「管不到的那一家有没有在生效」得按这个顺序看，不能只看一个键。
+    let effective_provider = if block.get(PROVIDER_KEY).is_some() {
+        get(PROVIDER_KEY)
+    } else {
+        get(LEGACY_PROVIDER_KEY)
+    }
+    .trim()
+    .to_lowercase();
+    let unmanaged_search_provider = if effective_provider == UNMANAGED_PROVIDER {
+        effective_provider
+    } else {
+        // 其余取值（包括空的和认不出的垃圾）在扩展侧一律回落 auto ⇒ 实际只有
+        // Tavily ⇒ 与卡片说的一致，不必声张。
+        String::new()
     };
-    let stored_provider = get(PROVIDER_KEY);
-    let legacy_provider = get(LEGACY_PROVIDER_KEY);
 
     let mut secrets = serde_json::Map::new();
     for k in SECRET_KEYS {
@@ -164,10 +170,7 @@ pub fn web_search_config_list() -> Value {
                 // 进程环境（spawn 时没有 clean_env），这里探到就等于 pi 也用得上。
                 "processEnvSet": process_env_present(match env_var.as_deref() {
                     Some(name) => name,
-                    None => match k {
-                        "tavilyApiKey" => "TAVILY_API_KEY",
-                        _ => "PERPLEXITY_API_KEY",
-                    },
+                    None => "TAVILY_API_KEY",
                 }),
             }),
         );
@@ -176,11 +179,7 @@ pub fn web_search_config_list() -> Value {
     let entry = extension_package_entry();
     json!({
         "ok": true,
-        "config": {
-            "searchProvider": provider,
-            "storedSearchProvider": stored_provider,
-            "legacyProvider": legacy_provider,
-        },
+        "unmanagedSearchProvider": unmanaged_search_provider,
         "secrets": Value::Object(secrets),
         "configPath": crate::config::config_yaml_path().to_string_lossy(),
         "extensionLoaded": entry.is_some(),
@@ -189,9 +188,9 @@ pub fn web_search_config_list() -> Value {
     })
 }
 
-/// 写 `web_search:` 块。**字段缺省 = 不改这一项**，空串 = 清除，非空 = 写入。
-/// 之所以要「缺省不改」：密钥从不回显，前端没法把旧值填回表单，若无这条约定，
-/// 用户只改 provider 就会把 tavilyApiKey 清成空。
+/// 写 `web_search:` 块里的 Tavily key。**字段缺省 = 不改这一项**，空串 = 清除，
+/// 非空 = 写入。之所以要「缺省不改」：密钥从不回显，前端没法把旧值填回表单，
+/// 若无这条约定，用户随便改一项都会把 tavilyApiKey 清成空。
 #[tauri::command]
 pub fn web_search_config_save(config: Value) -> Value {
     let Some(obj) = config.as_object() else {
@@ -200,16 +199,6 @@ pub fn web_search_config_save(config: Value) -> Value {
 
     // 先全部校验，再动文件：一半写进去、一半被拒是最坏结果。
     let mut pending: Vec<(String, String)> = Vec::new();
-    if let Some(v) = obj.get(PROVIDER_KEY) {
-        let provider = v.as_str().unwrap_or("").trim().to_lowercase();
-        if !SEARCH_PROVIDERS.contains(&provider.as_str()) {
-            return json!({
-                "ok": false,
-                "error": format!("searchProvider 只能是 auto / tavily / perplexity，收到: {provider}"),
-            });
-        }
-        pending.push((PROVIDER_KEY.to_string(), provider));
-    }
     for k in SECRET_KEYS {
         if let Some(v) = obj.get(k) {
             let raw = v.as_str().unwrap_or("").to_string();
@@ -241,176 +230,6 @@ pub fn web_search_config_save(config: Value) -> Value {
 
 fn process_env_present(name: &str) -> bool {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty()).is_some()
-}
-
-/// 解析测试用 key：字面量直接用；`$ENV` 形态回落 Helix 进程环境（与 pi 同一份）。
-fn resolve_test_key(raw: &str) -> Result<(String, &'static str), String> {
-    match classify_credential(raw) {
-        CredentialSource::None => Err("未配置 key".to_string()),
-        CredentialSource::Literal => Ok((raw.trim().to_string(), "config.yaml")),
-        CredentialSource::Env => match env_name_for(raw) {
-            Some(name) => match std::env::var(&name) {
-                Ok(v) if !v.trim().is_empty() => Ok((v.trim().to_string(), "环境变量")),
-                _ => Err(format!("key 由环境变量 {name} 提供，但当前进程环境里没有它")),
-            },
-            None => Err("环境变量名写法无法解析".to_string()),
-        },
-        CredentialSource::Command => Err(
-            "key 写成 `!命令` 形态，只有扩展在 pi 进程里能执行它；Helix 不代跑命令，\
-             请在对话里让模型用一次 web_search 来验证"
-                .to_string(),
-        ),
-    }
-}
-
-/// 把 key 从错误文本里抹掉（对齐扩展的 `redactCredential`）：401 响应体偶尔会
-/// 回显请求头，那玩意儿一旦进日志就等于密钥外泄。
-fn redact(text: &str, key: &str) -> String {
-    if key.is_empty() {
-        return text.to_string();
-    }
-    text.replace(key, "[redacted]")
-}
-
-/// 打一次**真实**的搜索请求，只回「通不通 + 哪一家 + 状态码」，不回内容。
-///
-/// 只测连通性，不做缓存/额度统计 —— Tavily 按 credit 计费，配额超了会直接以
-/// HTTP 错误回来，这里把它原样转达。
-#[tauri::command]
-pub async fn web_search_test(provider: Option<String>) -> Value {
-    let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).unwrap_or_default();
-    let block = crate::config::read_yaml_block(&yaml, "web_search");
-    let get = |k: &str| -> String {
-        block
-            .get(k)
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-
-    let configured = {
-        let v = get(PROVIDER_KEY);
-        if SEARCH_PROVIDERS.contains(&v.as_str()) {
-            v
-        } else {
-            "auto".to_string()
-        }
-    };
-    let requested = provider
-        .unwrap_or_default()
-        .trim()
-        .to_lowercase()
-        .to_string();
-    let choice = if requested.is_empty() { configured } else { requested };
-    if !SEARCH_PROVIDERS.contains(&choice.as_str()) {
-        return json!({ "ok": false, "error": format!("未知 provider: {choice}") });
-    }
-
-    // auto = Tavily 优先、其次 Perplexity，都缺就报缺（与扩展 search.ts 同序）。
-    let order: Vec<&str> = match choice.as_str() {
-        "tavily" => vec!["tavily"],
-        "perplexity" => vec!["perplexity"],
-        _ => vec!["tavily", "perplexity"],
-    };
-
-    let mut attempts: Vec<String> = Vec::new();
-    for name in order {
-        let (key, key_from) = match resolve_test_key(
-            &get(if name == "tavily" { "tavilyApiKey" } else { "perplexityApiKey" }),
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                attempts.push(format!("{name}: {e}"));
-                continue;
-            }
-        };
-        let started = std::time::Instant::now();
-        let result = if name == "tavily" {
-            call_tavily(&key).await
-        } else {
-            call_perplexity(&key).await
-        };
-        let latency_ms = started.elapsed().as_millis() as u64;
-        match result {
-            Ok(status) => {
-                return json!({
-                    "ok": true,
-                    "provider": name,
-                    "keyFrom": key_from,
-                    "httpStatus": status,
-                    "latencyMs": latency_ms,
-                })
-            }
-            Err(e) => {
-                let msg = redact(&e, &key);
-                // 显式指定这一家时不回落到另一家（与扩展一致：静默换供应商会让
-                // 「Tavily key 废了」看起来像「搜索能用」）。
-                if choice != "auto" {
-                    return json!({
-                        "ok": false,
-                        "provider": name,
-                        "keyFrom": key_from,
-                        "latencyMs": latency_ms,
-                        "error": msg,
-                    });
-                }
-                attempts.push(format!("{name}: {msg}"));
-            }
-        }
-    }
-    json!({
-        "ok": false,
-        "provider": choice,
-        "error": format!("没有一家可用：{}", attempts.join(" | ")),
-    })
-}
-
-/// Tavily `POST https://api.tavily.com/search`（扩展 tavily.ts 同一 endpoint）。
-async fn call_tavily(key: &str) -> Result<u16, String> {
-    let client = crate::proxy::proxy_aware_client().map_err(|e| e.to_string())?;
-    let resp = client
-        .post("https://api.tavily.com/search")
-        .bearer_auth(key)
-        // 最小请求体：连通性测试不该消耗配额去抓正文。
-        .json(&json!({
-            "query": "Helix 联网搜索连通性测试",
-            "search_depth": "ultra-fast",
-            "max_results": 1,
-            "include_answer": false,
-            "include_raw_content": false,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    if status.is_success() {
-        return Ok(status.as_u16());
-    }
-    Err(format!("Tavily API {status}: {}", &text.chars().take(300).collect::<String>()))
-}
-
-/// Perplexity `POST https://api.perplexity.ai/chat/completions`，model 固定
-/// `sonar`（扩展 perplexity.ts 里也是硬编码，没有可配项）。
-async fn call_perplexity(key: &str) -> Result<u16, String> {
-    let client = crate::proxy::proxy_aware_client().map_err(|e| e.to_string())?;
-    let resp = client
-        .post("https://api.perplexity.ai/chat/completions")
-        .bearer_auth(key)
-        .json(&json!({
-            "model": "sonar",
-            "messages": [{ "role": "user", "content": "Reply with exactly: ok" }],
-            "max_tokens": 8,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    if status.is_success() {
-        return Ok(status.as_u16());
-    }
-    Err(format!("Perplexity API {status}: {}", &text.chars().take(300).collect::<String>()))
 }
 
 #[cfg(test)]
@@ -465,23 +284,5 @@ mod tests {
         let back = crate::config::read_yaml_block(&out, "web_search");
         let raw = back.get("tavilyApiKey").and_then(Value::as_str).unwrap_or("");
         assert_eq!(classify_credential(raw), CredentialSource::None);
-    }
-
-    #[test]
-    fn redact_removes_key_from_error_text() {
-        assert_eq!(
-            redact("401 unauthorized: Bearer SECRET123", "SECRET123"),
-            "401 unauthorized: Bearer [redacted]"
-        );
-        assert_eq!(redact("no key here", ""), "no key here");
-    }
-
-    #[test]
-    fn command_sourced_keys_are_not_executed_by_helix() {
-        let err = resolve_test_key("!security find-generic-password").unwrap_err();
-        assert!(err.contains("不代跑命令"), "{err}");
-        assert!(resolve_test_key("").is_err());
-        // 字面量直接可用
-        assert_eq!(resolve_test_key("  tvly-x  ").unwrap().0, "tvly-x");
     }
 }

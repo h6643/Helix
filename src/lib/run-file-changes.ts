@@ -38,7 +38,7 @@ import type { PendingChange } from "@/stores/helix-types";
  * `+++` 必须优先：新建文件的 `---` 行是 `/dev/null`，若按"第一条 ---/+++ 行"
  * 取值就会命中 `/dev/null` 并返回空串 ⇒ **新建的文件永远进不了「已修改」卡片**。
  */
-export function inferDiffPath(diff: string): string {
+function inferDiffPath(diff: string): string {
   if (!diff) return "";
   const lines = diff.split("\n");
   const clean = (raw: string) =>
@@ -122,7 +122,7 @@ function normalizeAuthoritativePath(raw: unknown): string {
  * `authoritativePath`（工具的 `path` 参数）存在时**无条件**用它——它是"模型
  * 想改哪个文件"的唯一事实来源；diff 文本推断只在它缺失时兜底。
  */
-export function pickUsableDiff(
+function pickUsableDiff(
   candidates: Array<string | undefined>,
   authoritativePath?: unknown,
 ): { diff: string; filePath: string } | null {
@@ -218,7 +218,7 @@ function normalizeForPrefix(p: string): string {
  *   **保守放行**：拿本机前缀去比远端路径必然全不匹配，那会把用户真实的改动整条
  *   藏掉。宁可卡片多一行，不少一行。
  */
-export function changeBelongsToProject(
+function changeBelongsToProject(
   filePath: string,
   projectRoot: string | null | undefined,
 ): boolean {

@@ -202,10 +202,10 @@ export function remoteAvailable(): boolean {
 // 的代理键，删掉重加就换一个。对话记得却是旧 id，于是删除一次服务器就会把它名下
 // 所有对话变成孤儿（哪个远程行都不认它）。`user@host:port` 是这台机器的事实，
 // 换行、改名、重加都不受影响。
-export const REMOTE_WORKDIR_PREFIX = "remote://";
+const REMOTE_WORKDIR_PREFIX = "remote://";
 
 /** 远程项目的稳定身份键（与服务器列表行的 id 无关）。 */
-export function remoteTargetKey(
+function remoteTargetKey(
   svc: Pick<ExternalService, "host" | "port" | "username">,
 ): string {
   const port = svc.port || 22;
@@ -220,7 +220,7 @@ export function remoteWorkDirForService(
   return makeRemoteWorkDir(remoteTargetKey(svc), remotePath);
 }
 
-export function makeRemoteWorkDir(
+function makeRemoteWorkDir(
   targetKey: string,
   remotePath?: string,
 ): string {

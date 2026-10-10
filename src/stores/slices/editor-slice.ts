@@ -24,7 +24,7 @@ interface EditorTab {
   dirty: boolean;
 }
 
-export interface EditorRevealRequest {
+interface EditorRevealRequest {
   /** Tab id (= absolute file path) this request targets. */
   path: string;
   /** 1-based inclusive line range to scroll to / highlight. */

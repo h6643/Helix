@@ -74,6 +74,54 @@ const SAME_TAB_SCRIPT: &str = r#"
 })();
 "#;
 
+/// 注入到每条浏览器子窗口的脚本：把 JS 对话框（alert/confirm/prompt）变成「记录 +
+/// 立即返回」，不再弹原生窗口。
+///
+/// 为什么必须拦：WebView2 的默认行为是弹**模态原生**脚本对话框，它占住页面的脚本
+/// 线程 —— 页面卡住不说，之后每一条注入脚本（`browser_read`/`click`…）都要等到
+/// 前端超时，模型只看得见「页面对脚本无响应」，完全不知道该有个框要点。
+/// 改成记录之后，agent 用 `browser_dialog` 读到「页面调过 confirm('删除?')」，
+/// 可以自己决定策略（accept=true 再点一次那个按钮），也可以交给用户。
+///
+/// 默认答案保守：alert 无返回、confirm 返回 false、prompt 返回 null —— 等价于
+/// 「用户按了取消」，不会因为拦截而误提交。代价是人也看不到原生弹框了（只留记录），
+/// 这是 agent 驱动的浏览器面上明确的取舍。
+///
+/// 约束和 `SAME_TAB_SCRIPT` 一样：每个新文档重跑一次、必须可重入、任何一步不许抛异常。
+const DIALOG_SHIM_SCRIPT: &str = r#"
+(() => {
+  if (window.__helixDialogs) return;
+  window.__helixDialogs = [];
+  window.__helixDialogPolicy = { accept: false, text: null };
+  const push = (type, message) => {
+    try {
+      window.__helixDialogs.push({
+        type,
+        message: String(message == null ? "" : message).slice(0, 300),
+        at: Date.now(),
+      });
+      if (window.__helixDialogs.length > 20) window.__helixDialogs.shift();
+    } catch (err) {}
+  };
+  const policy = () => window.__helixDialogPolicy || { accept: false, text: null };
+  try { window.alert = function (m) { push("alert", m); }; } catch (err) {}
+  try {
+    window.confirm = function (m) {
+      push("confirm", m);
+      return policy().accept === true;
+    };
+  } catch (err) {}
+  try {
+    window.prompt = function (m, d) {
+      push("prompt", m);
+      const p = policy();
+      if (!p.accept) return null;
+      return p.text == null ? (d == null ? "" : String(d)) : String(p.text);
+    };
+  } catch (err) {}
+})();
+"#;
+
 /// 已创建的浏览器页 → 窗口 label 的登记表。
 ///
 /// 为什么不直接用 page id 当 label：label 只允许 `a-zA-Z0-9-/:_`，而 page id 的
@@ -93,14 +141,18 @@ fn registry() -> std::sync::MutexGuard<'static, Option<BrowserWindows>> {
     BROWSER_WINDOWS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 每条子窗口最近一次上报的 CSS 像素矩形（相对主 webview 视口）。
+/// 每条子窗口最近一次上报的 CSS 像素矩形（key 是窗口 label，值是相对主 webview 视口的矩形）。
 ///
 /// 为什么必须缓存：Windows 上子窗口是 **owner** 关系（tauri-runtime-wry 用
 /// `with_owner_window`），而 Win32 的 owned 窗口**不会**跟着 owner 移动。
 /// 前端的几何同步只在「DOM 矩形变化」时推送 —— 拖动主窗口时面板在视口里的
 /// 矩形一点没变，一次 IPC 都不会发，子窗口就留在屏幕原地，视觉上整个浏览器
 /// 「浮」在窗外。主窗口 `Moved` 时用这里的缓存矩形 + 新视口原点重算物理位置
-/// （见 `reflow_on_main_moved`）。隐藏时移除缓存：看不见的窗口不参与重排。
+/// （见 `reflow_on_main_moved`）。
+///
+/// 语义是「前端此刻要求这一页可见」：`set_rect(visible=false)` 会移除记录（那一页
+/// 被面板收起/遮挡了，不参与重排），但主窗口自己藏进托盘时记录**保留** ——
+/// 唤回要靠它把页面放回原位（见 `set_pages_visible`）。
 static LAST_RECTS: Mutex<Option<HashMap<String, CachedRect>>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
@@ -219,6 +271,18 @@ fn to_physical(
     ))
 }
 
+/// 主窗口当前是否摆在屏幕上。
+///
+/// 只有「关闭=隐藏到托盘」会让它为 false：最小化时 Windows 的 `IsWindowVisible`
+/// 仍是 true，而 owned 子窗口由系统自己跟着收起/放回，不需要这里介入。量不到主
+/// 窗口时返回 true —— 宁可不拦，也别让浏览器页面莫名其妙不显示。
+fn main_is_visible(app: &AppHandle) -> bool {
+    match app.get_webview_window("main") {
+        Some(main) => main.is_visible().unwrap_or(true),
+        None => true,
+    }
+}
+
 /// 打开（或复用）某个浏览器页的真 webview。创建时是隐藏的，等前端报矩形。
 ///
 /// **必须 `async`**：建窗/导航/取位置都是「把任务丢给主线程事件循环、再等 channel
@@ -266,6 +330,9 @@ pub async fn browser_webview_open(
         // 先注入「同页导航」脚本，新窗口请求基本不会再发生；下面的 handler 只兜住
         // 漏网的（点击时才动态设 target、或页面自己缓存了旧的 window.open）。
         .initialization_script(SAME_TAB_SCRIPT)
+        // JS 对话框改成记录 + 立即返回（原生模态框会冻结页面脚本线程，把后面所有
+        // 浏览器工具一起拖死）。
+        .initialization_script(DIALOG_SHIM_SCRIPT)
         // `target="_blank"` / `window.open` 的新窗口请求。
         //
         // 不注册处理器的默认行为是**静默丢弃**：wry 在没有 handler 时只执行
@@ -320,6 +387,27 @@ pub async fn browser_webview_open(
 
     if let Some(main) = app.get_webview_window("main") {
         builder = builder.parent(&main).map_err(|e| e.to_string())?;
+    }
+
+    // **浏览器窗口用独立的 WebView2 用户数据目录（UDF）**。
+    //
+    // 不指定的话 Tauri 会给每一条 webview 都填 `app_local_data_dir()`（tauri
+    // `manager/webview.rs` 的「in windows, we need to force a data_directory」分支），
+    // wry 再按 data_directory 缓存 environment —— 于是浏览器子窗口和 Helix 主窗口
+    // **共用同一个 profile**。实测后果：`EBWebView/Default/IndexedDB` 里同时躺着
+    // `http_localhost_1430`（应用自己）和 `https_github.com`（外部网页）。
+    // 那样「清理浏览器缓存」会连 Helix 自己的 localStorage / IndexedDB / cookie
+    // 一起删掉（主题、模型 id、输入历史全没），这个功能就不可能安全地做。
+    // 分开之后两边互不影响，浏览器数据也成了一个能整体删干净的目录。
+    //
+    // 代价：升级后浏览器里的旧登录态不迁移（旧数据混在主 profile 里，拆不出来），
+    // 需要重新登录一次。
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(dir) = browser_udf_dir(&app) {
+            let _ = std::fs::create_dir_all(&dir);
+            builder = builder.data_directory(dir);
+        }
     }
 
     builder
@@ -515,7 +603,7 @@ pub async fn browser_webview_set_rect(
     let win = window_of(&app, &page)?;
 
     if !visible || w < 1.0 || h < 1.0 {
-        // 隐藏即清缓存：Moved 重排只服务「当前看得见」的窗口。
+        // 前端这一页不要了：连同缓存一起丢（重排/唤回只服务还记录着的窗口）。
         let label = win.label().to_string();
         if let Some(m) = LAST_RECTS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             m.remove(&label);
@@ -563,7 +651,14 @@ pub async fn browser_webview_set_rect(
             },
         );
     }
-    win.show().map_err(|e| e.to_string())?;
+    // 可见性是两个条件的与：前端说 visible **且**主窗在屏幕上。主窗收进托盘时
+    // 只把矩形记进缓存、不放窗口（放出来就是一片浮在桌面上的网页），等
+    // `set_pages_visible(true)` 唤回。
+    if main_is_visible(&app) {
+        win.show().map_err(|e| e.to_string())?;
+    } else {
+        let _ = win.hide();
+    }
 
     // 摆好之后再打一次：核对「客户区实际落点」是否等于目标 phys（对账用）。
     #[cfg(target_os = "windows")]
@@ -584,14 +679,7 @@ pub async fn browser_webview_set_rect(
 /// 浏览器就永远留在屏幕原地。只重算位置不改尺寸：CSS 矩形没变，尺寸也不会变。
 /// Moved 在拖动中每像素触发一次，SetWindowPos 很便宜，不需要节流。
 pub fn reflow_on_main_moved(app: &AppHandle) {
-    let rects: Vec<(String, CachedRect)> = {
-        let guard = LAST_RECTS.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
-            Some(m) if !m.is_empty() => m.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-            _ => return,
-        }
-    };
-    for (label, r) in rects {
+    for (label, r) in cached_rects() {
         let Some(win) = app.get_webview_window(&label) else {
             continue;
         };
@@ -602,6 +690,59 @@ pub fn reflow_on_main_moved(app: &AppHandle) {
             let _ = win.set_position(PhysicalPosition::new(px - r.inset_x, py - r.inset_y));
         }
     }
+}
+
+/// `LAST_RECTS` 的快照（锁在外、动作在内：下面这些路径都要调窗口方法，不能抱着锁）。
+fn cached_rects() -> Vec<(String, CachedRect)> {
+    let guard = LAST_RECTS.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(m) => m.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// 主窗口隐藏/唤回时同步所有浏览器子窗口的可见性。
+///
+/// 为什么必须显式做：子窗口是独立 HWND，`main.hide()`（托盘「关闭」）不会带走
+/// owned 窗口 —— 实测主窗消失后网页还浮在桌面上。只有最小化是系统代管的，
+/// 隐藏/显示得由 lib.rs 那几条路径各调一次这里。
+///
+/// 缓存里有记录 == 前端此刻要求这一页可见，所以 `false` 时**不清**缓存（收起不是
+/// 用户关了这页），`true` 时按缓存重算尺寸和位置再显示（隐藏期间面板矩形可能已经
+/// 变过：那时前端发来的 set_rect 只更新了缓存、没放窗口，见 `main_is_visible`）。
+pub fn set_pages_visible(app: &AppHandle, visible: bool) {
+    for (label, r) in cached_rects() {
+        let Some(win) = app.get_webview_window(&label) else {
+            continue;
+        };
+        if !visible {
+            let _ = win.hide();
+            continue;
+        }
+        let Ok((px, py, pw, ph)) = to_physical(app, r.x, r.y, r.w, r.h, r.dpr) else {
+            continue;
+        };
+        let _ = win.set_size(PhysicalSize::new(pw, ph));
+        let _ = win.set_position(PhysicalPosition::new(px - r.inset_x, py - r.inset_y));
+        let _ = win.show();
+    }
+}
+
+/// 子窗口销毁后清掉登记（page→label 映射、label 唯一集、矩形缓存）。
+///
+/// 为什么需要：正常关页走 `browser_webview_close`，但无边框窗口照样可能被 Alt+F4
+/// 或页面自己的 `window.close()` 销毁。映射留着不放的话，同一个 page id 下次
+/// `browser_webview_open` 会复用这个已不存在的 label，那一页就再也打不开了。
+pub fn forget_window(label: &str) {
+    if let Some(m) = LAST_RECTS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        m.remove(label);
+    }
+    let mut reg = registry();
+    let Some(r) = reg.as_mut() else {
+        return;
+    };
+    r.by_page.retain(|_, v| v != label);
+    r.used_labels.remove(label);
 }
 
 #[tauri::command]
@@ -800,6 +941,13 @@ fn emit_shot(app: &AppHandle, page: &str, req_id: &str, payload: Result<String, 
 }
 
 /// 关闭页面时销毁子窗口（并清掉映射，允许 page id 复用）。
+///
+/// 映射在**这里**立刻删，不等 `Destroyed`：`win.close()` 只是将销毁请求丢给主线程，
+/// 而前端可以在同一个 tick 里重新打开同一 page id。映射还留着的话，
+/// `browser_webview_open` 会复用这个正在消失的 label、把导航发到一条将死的窗口上，
+/// 随后 Destroyed 又把映射删掉 —— 那一页从此再没有窗口。窗口真正消失（Alt+F4、页面
+/// 自己 `window.close()`）时由 lib.rs 的 `on_window_event` 调 `forget_window` 补一次
+/// 同样的清理。
 #[tauri::command]
 pub async fn browser_webview_close(app: AppHandle, page: String) -> Result<(), String> {
     let label = {
@@ -818,6 +966,402 @@ pub async fn browser_webview_close(app: AppHandle, page: String) -> Result<(), S
         let _ = win.close();
     }
     Ok(())
+}
+
+/// 把焦点交给浏览器子窗口（「交给人工验证」时用）。
+///
+/// 子窗口是独立 HWND，但 OS 层面只有获得焦点的窗口才收键盘输入，所以人工登录必须
+/// 显式抢焦点 —— 靠前端 `window.focus()` 没用，那只会动主窗口。
+#[tauri::command]
+pub async fn browser_webview_focus(app: AppHandle, page: String) -> Result<(), String> {
+    let win = window_of(&app, &page)?;
+    let _ = win.unminimize();
+    win.set_focus().map_err(|e| e.to_string())
+}
+
+/// `browser_upload` 的单文件体积上限：注入脚本时整个 base64 串要随 JS 一起过
+/// ExecuteScript，再大而空的字符串只会把这次 op 拖到超时。
+const UPLOAD_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 读出要上传的本地文件字节（base64）+ 文件名 + MIME，供前端注入页面赋给
+/// `<input type=file>`。
+///
+/// 为什么限制在项目目录内：模型本来就能读本地文件、也能把任意文本敲进任何输入框，
+/// 「读文件 + 传到任意网站」这条外传通道不是这里新开的；但内置浏览器是用户正看着的
+/// 那扇窗，所以把可选范围收在「当前项目」之内 —— 一次误调用不会把家目录里的密钥
+/// 送出去。越界直接拒绝，没有绕过路径。
+#[tauri::command]
+pub async fn browser_read_upload_file(
+    path: String,
+    work_dir: String,
+) -> Result<serde_json::Value, String> {
+    use base64::Engine;
+    use std::path::Path;
+
+    if work_dir.trim().is_empty() {
+        return Err("没有选定的项目工作目录：browser_upload 只在项目目录之内取文件".to_string());
+    }
+    let cand = Path::new(&path);
+    let joined = if cand.is_absolute() {
+        cand.to_path_buf()
+    } else {
+        Path::new(&work_dir).join(cand)
+    };
+    // canonicalize 而不是词法拼接：项目里一条指向别处的符号链接就能绕过前缀判断。
+    let real = joined.canonicalize().map_err(|e| format!("读不到文件：{e}"))?;
+    let root = Path::new(&work_dir)
+        .canonicalize()
+        .map_err(|e| format!("项目目录不可用：{e}"))?;
+    if real.strip_prefix(&root).is_err() {
+        return Err(format!(
+            "只能上传项目目录内的文件：{} 不在 {} 下",
+            real.display(),
+            root.display()
+        ));
+    }
+    let meta = std::fs::metadata(&real).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("不是一个文件".to_string());
+    }
+    if meta.len() > UPLOAD_MAX_BYTES {
+        return Err(format!(
+            "文件 {:.1} MB，超过 8 MB 上限",
+            meta.len() as f64 / 1_048_576.0
+        ));
+    }
+    let bytes = std::fs::read(&real).map_err(|e| e.to_string())?;
+    let name = real
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    Ok(serde_json::json!({
+        "name": name,
+        "type": mime_for_ext(
+            real.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+        ),
+        "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
+}
+
+/// 扩展名 → MIME。只覆盖会走表单上传的常见类型，认不出的一律 octet-stream
+/// （页面上的上传组件按 `file.type` 判格式，猜错比给个空串更容易被拒）。
+fn mime_for_ext(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "avif" => "image/avif",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "txt" | "md" | "log" => "text/plain",
+        "html" | "htm" => "text/html",
+        "xml" => "application/xml",
+        "js" | "ts" | "tsx" | "jsx" | "css" => "text/plain",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 传给 WebView2 的 UDF 根目录（我们自己的那一份，与主窗口分开）。
+///
+/// WebView2 会在它下面再建一层 `EBWebView/Default/`。
+#[cfg(target_os = "windows")]
+fn browser_udf_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map(|p| p.join("browser-webview"))
+        .map_err(|e| format!("取不到应用数据目录: {e}"))
+}
+
+/// 旧版本遗留的**共享** UDF（`app_local_data_dir()/EBWebView`）。
+///
+/// 浏览器窗口独立 profile 之前，浏览器与 Helix 主窗口共用这一份。切独立 profile
+/// 之后浏览器不再写它，但**主窗口至今仍在这份 profile 上跑**（Tauri 默认 UDF），
+/// 所以它的缓存会随每次运行再生，不算纯残留。
+///
+/// 只有其中的**缓存类**子目录可以安全回收（缓存对两边都可再生），三个清理档位
+/// 都会在 `browser_clear_data` 里顺带回收它；`Local Storage` / `IndexedDB` /
+/// cookie 一律不碰 —— 删了就是把 Helix 自己的主题、输入历史、模型 id 一起删了。
+#[cfg(target_os = "windows")]
+fn browser_legacy_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map(|p| p.join("EBWebView"))
+        .map_err(|e| format!("取不到应用数据目录: {e}"))
+}
+
+/// 内置浏览器实际存放数据的地方（`<UDF>/EBWebView`）。
+///
+/// 浏览器子窗口建窗时显式传 `data_directory = browser_udf_dir()`（见
+/// `browser_webview_open`），WebView2 在它下面再开一层 `EBWebView/Default/`，
+/// 于是浏览器与 Helix 主窗口各用一份 profile。缓存、cookie、IndexedDB、
+/// 历史全在那儿，且**跨重启持久** —— 这也是「手动登一次之后能续着」
+/// 的原因（见 `browser-automation.ts` 的 `check_login`）。
+///
+/// 注意：密码自动保存**没有**开（WebView2 需要显式
+/// `ICoreWebView2Profile::SetIsPasswordAutosaveEnabled`），`Default\Login Data`
+/// 只是 Chromium 建的空表。
+fn browser_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    {
+        Ok(browser_udf_dir(app)?.join("EBWebView"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("清理浏览器数据目前只在 Windows 上实现".to_string())
+    }
+}
+
+/// 内置浏览器的 profile 目录（`<UDF>/EBWebView/Default`）——密码导入与书签
+/// 合并都写这里（browser_import.rs）。目录可能还不存在（从没开过浏览器），
+/// 调用方按需 create_dir_all。
+pub(crate) fn browser_default_profile_dir(
+    app: &AppHandle,
+) -> Result<std::path::PathBuf, String> {
+    Ok(browser_data_dir(app)?.join("Default"))
+}
+
+/// 关掉所有浏览器子窗口并等待它们真正消失（ WebView2 后台进程还要再占一会儿
+/// 文件句柄，所以窗口消失后再补一拍）。返回被关掉的窗口 label 列表。
+///
+/// 改写 profile 里的 SQLite / JSON（Login Data、Bookmarks）之前必须走这里：
+/// WebView2 持有这些文件的句柄，Windows 上被占用的文件写不进去。
+pub(crate) async fn close_all_browser_windows(app: &AppHandle) -> Vec<String> {
+    let labels: Vec<String> = {
+        let reg = registry();
+        reg.as_ref()
+            .map(|r| r.by_page.values().cloned().collect())
+            .unwrap_or_default()
+    };
+    for label in &labels {
+        if let Some(win) = app.get_webview_window(label) {
+            let _ = win.close();
+        }
+    }
+    let mut alive = labels.clone();
+    // 命令是 async 的，跑在 tokio worker 上 —— 用 tokio 的 sleep，不要阻塞线程。
+    for _ in 0..50 {
+        if alive.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        alive.retain(|l| app.get_webview_window(l).is_some());
+    }
+    // 窗口消失不等于 WebView2 后台进程放开了句柄，再等一拍。
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    labels
+}
+
+/// 缓存类子目录（相对 UDF/Default，以及相对 UDF 的两处）。清「只清缓存」时删这些。
+#[cfg(target_os = "windows")]
+const CACHE_DIRS: &[&str] = &[
+    "Default/Cache",
+    "Default/Code Cache",
+    "Default/GPUCache",
+    "Default/DawnGraphiteCache",
+    "Default/DawnWebGPUCache",
+    "Default/ShaderCache",
+    "Default/blob_storage",
+    "Default/Service Worker",
+    "Default/Shared Dictionary",
+    "Default/OfflinePages",
+];
+
+/// 登录/站点数据类目录。清「缓存 + 登录数据」时额外删这些（会掉登录态）。
+#[cfg(target_os = "windows")]
+const SITE_DATA_DIRS: &[&str] = &[
+    "Default/IndexedDB",
+    "Default/Local Storage",
+    "Default/Session Storage",
+    "Default/WebStorage",
+    "Default/PlatformStorage",
+    "Default/File System",
+    "Default/CacheStorage",
+];
+
+/// 递归算目录字节数（跳过符号链接，防环）。
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let Ok(md) = std::fs::symlink_metadata(&p) else { continue };
+            if md.is_symlink() {
+                continue;
+            }
+            if md.is_dir() {
+                stack.push(p);
+            } else {
+                total += md.len();
+            }
+        }
+    }
+    total
+}
+
+/// 递归删除目录（同样跳过符号链接：只删链接本身，不顺着删目标）。
+fn remove_tree(path: &std::path::Path) -> (u64, Vec<String>) {
+    let mut freed = 0u64;
+    let mut errors: Vec<String> = Vec::new();
+    let mut stack = vec![path.to_path_buf()];
+    // 先删文件、再删空目录：自底向上靠「目录非空就下一轮再试」实现，
+    // 简单起见这里用两趟——第一趟统计+删文件，第二趟从深到浅删目录。
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let Ok(md) = std::fs::symlink_metadata(&p) else { continue };
+            if md.is_symlink() {
+                let _ = std::fs::remove_file(&p);
+                continue;
+            }
+            if md.is_dir() {
+                stack.push(p);
+            } else {
+                freed += md.len();
+                if let Err(e) = std::fs::remove_file(&p) {
+                    errors.push(format!("{}: {e}", p.display()));
+                }
+            }
+        }
+        dirs.push(dir);
+    }
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    for d in dirs {
+        if d == path {
+            continue;
+        }
+        let _ = std::fs::remove_dir(&d); // 非空/被占用就留着，不算错误
+    }
+    (freed, errors)
+}
+
+/// 内置浏览器的存储占用（设置页展示用）。
+#[tauri::command]
+pub async fn browser_storage_usage(app: AppHandle) -> Result<serde_json::Value, String> {
+    let root = browser_data_dir(&app)?;
+    let mut cache_bytes = 0u64;
+    #[cfg(target_os = "windows")]
+    for rel in CACHE_DIRS {
+        cache_bytes += dir_size(&root.join(rel));
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "dir": root.to_string_lossy(),
+        "cache_bytes": cache_bytes,
+        "total_bytes": dir_size(&root),
+    }))
+}
+
+/// 清理内置浏览器的存储（设置页的「清理浏览器数据」）。
+///
+/// `mode`：
+/// - `"cache"` 只删缓存（HTTP 缓存 + V8 code cache + GPU/着色器缓存等），**保留登录态**；
+/// - `"cache_site"` 额外删 IndexedDB / localStorage / cookie，会掉登录；
+/// - `"all"` 删整个 UDF（含历史、下载记录、自动填充表）。
+///
+/// 三个档位都**顺带回收旧共享目录**（`browser_legacy_dir`）里的同款缓存——那份
+/// profile 至今是主窗口在用的，缓存随每次运行再生，所以不再做独立入口，
+/// 挂在清理动作里能清多少清多少。
+///
+/// 为什么先关窗口再删：WebView2 进程持有 UDF 里的文件句柄（leveldb / sqlite 的
+/// -wal 与 .lock），Windows 上删除被占用的文件会直接失败。UDF 本身在窗口关闭后
+/// 仍由 WebView2 后台进程占一会儿，所以关掉之后要等一拍再删。
+#[tauri::command]
+pub async fn browser_clear_data(app: AppHandle, mode: String) -> Result<serde_json::Value, String> {
+    let root = browser_data_dir(&app)?;
+
+    if !matches!(mode.as_str(), "cache" | "cache_site" | "all") {
+        return Err(format!("未知的清理范围: {mode}"));
+    }
+
+    if !root.exists() {
+        return Ok(serde_json::json!({ "ok": true, "freed_bytes": 0, "errors": [] }));
+    }
+
+    // 1) 关掉所有浏览器子窗口（缓存目录被它们锁着），并等 WebView2 放句柄。
+    let labels = close_all_browser_windows(&app).await;
+
+    // 2) 按 mode 决定删哪些目录。
+    let mut targets: Vec<std::path::PathBuf> = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        match mode.as_str() {
+            "cache" | "cache_site" => {
+                targets.extend(CACHE_DIRS.iter().map(|rel| root.join(rel)));
+            }
+            _ => {}
+        }
+        if mode == "cache_site" {
+            targets.extend(SITE_DATA_DIRS.iter().map(|rel| root.join(rel)));
+            targets.push(root.join("Default/Network")); // cookie 在这里
+        }
+        if mode == "all" {
+            targets = vec![root.clone()];
+        }
+    }
+    if targets.is_empty() {
+        return Err(format!("未知的清理范围: {mode}"));
+    }
+
+    // 3) 删。
+    let mut freed = 0u64;
+    let mut errors: Vec<String> = Vec::new();
+    for t in &targets {
+        if !t.exists() {
+            continue;
+        }
+        let (n, errs) = remove_tree(t);
+        freed += n;
+        errors.extend(errs);
+        // 顶层目录本身（"all" 模式）删不掉时只报告，不算失败。
+        if t == &root && t.exists() {
+            if let Ok(rd) = std::fs::read_dir(t) {
+                if rd.flatten().next().is_some() {
+                    errors.push(format!("{} 仍有残留（WebView2 可能还占着句柄）", t.display()));
+                }
+            }
+        }
+    }
+
+    // 4) 顺带回收旧共享目录的缓存。那份数据同时被**主窗口**在用（也绝不该关
+    //    主窗口），缓存本来就可再生、被占用时删失败也只是少回收点，所以不关
+    //    窗口、不等句柄，且这些预期中的占用错误不并入 errors。
+    #[cfg(target_os = "windows")]
+    if let Ok(legacy) = browser_legacy_dir(&app) {
+        if legacy.is_dir() {
+            for rel in CACHE_DIRS {
+                let t = legacy.join(rel);
+                if !t.exists() {
+                    continue;
+                }
+                let (n, _errs) = remove_tree(&t);
+                freed += n;
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "ok": errors.is_empty(),
+        "freed_bytes": freed,
+        "errors": errors,
+        "closed_windows": labels.len(),
+    }))
 }
 
 fn window_of(app: &AppHandle, page: &str) -> Result<tauri::WebviewWindow, String> {

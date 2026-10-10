@@ -23,7 +23,7 @@
  *
  * @param tailChars 取尾部多少字符参与统计
  */
-export function reasoningRepetitionRatio(
+function reasoningRepetitionRatio(
   text: string,
   tailChars = 2000,
 ): number {
@@ -46,10 +46,10 @@ export function reasoningRepetitionRatio(
 }
 
 /** 重复率阈值：正常轮次实测最高 0.674，退化轮次最低 0.732，取中间。 */
-export const DEGENERATE_REASONING_RATIO = 0.7;
+const DEGENERATE_REASONING_RATIO = 0.7;
 
 /** 长度门槛：正常轮次 p90=5266 字符、max=12307。 */
-export const DEGENERATE_REASONING_MIN_LEN = 6000;
+const DEGENERATE_REASONING_MIN_LEN = 6000;
 
 /**
  * 这段思考是否退化到「只是在原地重复、什么也没推进」。

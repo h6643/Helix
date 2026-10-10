@@ -15,7 +15,7 @@ const CHECKBOX_RE = /^\s*[-*]\s*\[([ xX~])\]\s*(.+)$/;
 const OL_ITEM_RE = /^\s*\d+\.\s+(.+)$/;
 const UL_ITEM_RE = /^\s*[-*]\s+(?!\[)(.+)$/;
 
-export function parsePlanSteps(markdown: string): PlanStep[] {
+function parsePlanSteps(markdown: string): PlanStep[] {
   const lines = markdown.split("\n");
   const steps: PlanStep[] = [];
   let inCodeBlock = false;

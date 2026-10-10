@@ -25,6 +25,7 @@ import type {
   EditorTab,
   CursorPosition,
   PendingChange,
+  BrowserHandoff,
   ApiConfig,
   ApiProfile,
   MemoryCategory,
@@ -37,30 +38,38 @@ import type {
   McpServerConfig,
   PermissionTier,
   BylineReply,
-  HelixTodo,
-  PlanStep,
+  PermissionScopeInfo,
+  PermissionScopeId,
+  PermissionScopeTarget,
 } from "./helix-types";
-import { DEFAULT_SHORTCUTS } from "./helix-types";
+import {
+  DEFAULT_SHORTCUTS,
+  permissionScopeInfoFrom,
+} from "./helix-types";
 import { helixApi } from "@/lib/electron-bridge";
 import { normalizeAcpContent } from "@/lib/text-utils";
 
 /**
- * 归一 `helix_get_permission_mode` 返回的权限档。
+ * 两份作用域视图是否等价（逐格比，不比对象身份）。
  *
- * `strict` / `yolo` 是 pi-permission 扩展自己的档位名，
- * `default` / `accept_edits` / `dont_ask` 是磁盘上可能残留的 Helix 旧值
- * （Python serve-gateway 时代自造，pi 路径下从不生效）。
- * 上游扩展另有 `approve` 档（本机补丁版已删，重装会回来），Helix 不提供也不认它
- * （Rust 读路径已经把它归成 `auto` 才发过来）；这里再见到 `approve` 就按「认不出来」处理。
- *
- * 认不出来返回 `undefined` —— 表示「这次读到的东西不可信，保留上一次缓存」，
- * 绝不因为解析失败就把 UI 上的档位改掉（那会让显示与实际再度分裂）。
+ * `syncPermissionMode` 会在**每次发一轮**和每次切会话时读一次，用 `!==` 判等
+ * 就等于每次 run 都塞一个新对象进去、把订阅档位芯片的组件全重渲染一遍。
  */
-function normalizePermissionTier(v: unknown): PermissionTier | undefined {
-  if (v === "ask" || v === "strict") return "ask";
-  if (v === "full" || v === "yolo" || v === "dont_ask") return "full";
-  if (v === "auto" || v === "default" || v === "accept_edits") return "auto";
-  return undefined;
+function isSamePermissionView(
+  a: PermissionScopeInfo | null,
+  b: PermissionScopeInfo,
+): boolean {
+  if (!a) return false;
+  return (
+    a.effective === b.effective &&
+    a.source === b.source &&
+    a.global === b.global &&
+    a.project === b.project &&
+    a.session === b.session &&
+    a.remote === b.remote &&
+    a.enabled === b.enabled &&
+    a.globalUnparsable === b.globalUnparsable
+  );
 }
 
 /** A server / virtual machine the user can connect to from the breadcrumb. */
@@ -108,7 +117,12 @@ import {
   type AgentSettingsSlice,
 } from "./slices/agent-settings-slice";
 import {
+  createApprovalAllowSlice,
+  type ApprovalAllowSlice,
+} from "./slices/approval-allow-slice";
+import {
   createApiConfigSlice,
+  PI_CHANNEL_BASE_URL,
   type ApiConfigSlice,
 } from "./slices/api-config-slice";
 import {
@@ -120,6 +134,7 @@ import {
   type CompressionRecordsSlice,
 } from "./slices/compression-records-slice";
 import { createEditorSlice, type EditorSlice } from "./slices/editor-slice";
+import { createDiagnosticsSlice, type DiagnosticsSlice } from "./slices/diagnostics-slice";
 import { createGitSlice, type GitSlice } from "./slices/git-slice";
 import { createPanelSlice, type PanelSlice } from "./slices/panel-slice";
 import { createSkillSlice, type SkillSlice } from "./slices/skill-slice";
@@ -155,20 +170,21 @@ export type {
   TaskNode,
   ScheduledTask,
   ProviderConfig,
-  HelixTodo,
-  PlanStep,
+  
 };
 export { DEFAULT_SHORTCUTS };
 
 interface HelixState
   extends
     GitSlice,
+    DiagnosticsSlice,
     ToastSlice,
     CompactNoticeSlice,
     CompressionRecordsSlice,
     TerminalSlice,
     EditorSlice,
     AgentSettingsSlice,
+    ApprovalAllowSlice,
     PanelSlice,
     ApiConfigSlice,
     SkillSlice {
@@ -254,6 +270,11 @@ interface HelixState
   // 同理：「哪一页正在加载」也是投影出来的事实，页签条上那个刷新图标读它。
   browserLoadingPageId: string | null;
   setBrowserLoadingPageId: (id: string | null) => void;
+  // 「哪一页正被人类手动操作」（agent 撞到登录墙时调 browser_handoff 写进来）。
+  // 一份事实两个读者：browser-automation 据此锁住写操作，侧栏据此出横幅 +
+  // 「我已完成」。null = 无人接管。
+  browserHandoff: BrowserHandoff | null;
+  setBrowserHandoff: (h: BrowserHandoff | null) => void;
   togglePreviewRail: () => void;
 
   // Monotonic counter bumped on every "新建浏览器页" request (the "更多操作 /
@@ -299,20 +320,40 @@ interface HelixState
   codeFullscreen: boolean;
   toggleCodeFullscreen: () => void;
   /**
-   * 全局权限档 = pi-permission 扩展配置的**只读缓存**。
+   * 当前身份的**生效**权限档 = pi-permission 扩展配置的只读缓存。
+   * 「生效」是扩展按「会话覆盖 → 项目覆盖 → 全局」解析出来的（覆盖表也在
+   * settings.json 里），不是前端自己记的映射。
    * 写只走 `helix_set_permission_mode` 那一条 IPC（前端封装 = `setPermissionMode`；
    * 首次建文件时 syncPermissionMode 也走同一条），读只走 `syncPermissionMode`。
    * 不写 IndexedDB：那份副本没人读，只会变成第二条真相。
    */
   permissionMode: PermissionTier;
+  /** 最近一次成功读回的作用域视图（生效档 + 三层格子）；null = 还没读到过。 */
+  permissionScopeInfo: PermissionScopeInfo | null;
+  /**
+   * 下拉这次要点到**哪一层**（默认 global）。这是 UI 偏好不是真相：真相只有
+   * settings.json，切会话时不改它，所以「在本项目都设严格」这件事能跨对话保持。
+   */
+  permissionWriteScope: PermissionScopeId;
+  setPermissionWriteScope: (scope: PermissionScopeId) => void;
   /**
    * 从扩展配置回读权限档。读不到时的显示必须说实话：扩展在文件缺失/坏 JSON 时
    * 一律跑它自己的 yolo 默认，所以按「完全访问」显示；文件还没人写过就先落下
    * Helix 的默认档（auto），让两边从第一次读起就是同一个值。
    */
-  syncPermissionMode: () => Promise<PermissionTier>;
-  /** 写权限档到扩展配置，成功后用回读结果更新缓存。 */
-  setPermissionMode: (v: PermissionTier) => Promise<PermissionTier>;
+  syncPermissionMode: (
+    target?: PermissionScopeTarget,
+  ) => Promise<PermissionTier>;
+  /** 写权限档到扩展配置的某一层，成功后用回读结果更新缓存。 */
+  setPermissionMode: (
+    v: PermissionTier,
+    opts?: PermissionScopeTarget & { scope?: PermissionScopeId },
+  ) => Promise<PermissionTier>;
+  /** 删掉某一层覆盖，回到「下一层说了算」。 */
+  clearPermissionOverride: (
+    scope: "project" | "session",
+    target?: PermissionScopeTarget,
+  ) => Promise<PermissionTier>;
   /**
    * 审批卡超时秒数（settings.json permission.approvalTimeoutSec 的只读缓存，
    * 30–3600 已归一）。只服务设置页下拉的显示；卡片倒计时走网关事件附带的
@@ -1333,14 +1374,120 @@ async function persistSessionById(sessionId: string): Promise<void> {
   }
 }
 
+/**
+ * 本次冷启动有没有拿到可信的模型列表来源。restoreFromStorage 写、persistToStorage
+ * 读：IndexedDB 读失败会被 safeLoad 压成 null，此时内存里的空 `apiProfiles` 表示
+ * 「没读到」而不是「用户删光了」，照常写回去就等于把一次瞬时读失败固化成永久丢失
+ * （「我添加的模型全没了」的根因）。回退快照救回来时同样算可信。
+ */
+let modelListsSourceTrusted = true;
+
+/** pi `models.json` 里一个自定义 provider 的快照（`pi_read_custom_providers`）。 */
+type PiProviderSnapshot = {
+  id: string;
+  baseUrl: string;
+  apiKey: string;
+  api?: string;
+  models: Array<{
+    id: string;
+    name?: string;
+    contextWindow?: number;
+    reasoning?: boolean;
+  }>;
+};
+
+/**
+ * 从 pi 的 provider 快照重建 Helix 的 profile / provider 两份列表（纯函数：不碰
+ * store、不落盘）。这是「模型列表整个读空了」时的唯一恢复来源 —— `models.json`
+ * 由 Helix 每次保存模型时写下，baseUrl / apiKey / 每模型的上下文窗口和思考开关
+ * 都齐了，而 `get_available_models` 的 RPC 快照不带凭据，建不出可用 profile。
+ *
+ * 渠道 provider（pi-connect 扩展的占位 baseUrl）跳过：它们的凭据在扩展手里，
+ * 从来不是 Helix 的 profile。
+ */
+function profilesFromPiSnapshot(
+  snapshot: PiProviderSnapshot[],
+  defaultProvider: string,
+  defaultModel: string,
+): {
+  profiles: ApiProfile[];
+  providers: ProviderConfig[];
+  activeProfileId: string | null;
+  activeProviderId: string | null;
+  activeModel: string | null;
+} {
+  const profiles: ApiProfile[] = [];
+  for (const p of snapshot) {
+    if (!p.baseUrl || p.baseUrl === PI_CHANNEL_BASE_URL) continue;
+    const ids = Array.from(
+      new Set(p.models.map((m) => m.id).filter((id) => !!id)),
+    );
+    if (ids.length === 0) continue;
+    const modelContextWindows: Record<string, number> = {};
+    const modelReasonings: Record<string, boolean> = {};
+    for (const m of p.models) {
+      if (!m.id) continue;
+      if (m.contextWindow && m.contextWindow > 0)
+        modelContextWindows[m.id] = m.contextWindow;
+      if (m.reasoning) modelReasonings[m.id] = true;
+    }
+    profiles.push({
+      id: generateId(),
+      name: p.id,
+      config: {
+        provider: p.id,
+        apiKey: p.apiKey || "",
+        baseUrl: p.baseUrl,
+        model: ids[0],
+        contextWindow: modelContextWindows[ids[0]],
+        // models.json 的 `api` 就是 Helix 的 apiFormat（同一套 pi 协议名）。
+        apiFormat: p.api || "openai-completions",
+      },
+      models: ids,
+      modelContextWindows,
+      modelReasonings,
+    });
+  }
+  const providers: ProviderConfig[] = profiles.map((p) => ({
+    id: p.id,
+    name: p.config.provider || p.name,
+    baseUrl: p.config.baseUrl,
+    apiKey: p.config.apiKey,
+    models: p.models || [],
+    isDefault: !!defaultProvider && p.name === defaultProvider,
+  }));
+  // 活跃模型以 pi 的 defaultModel 为准（它是同一份配置文件里写的选择），落不到
+  // 任何 profile 上时退到 defaultProvider 的第一个模型，再退到第一个有模型的。
+  const ownerOfModel = providers.find((pv) => pv.models.includes(defaultModel));
+  const active =
+    ownerOfModel ||
+    providers.find((pv) => pv.isDefault && pv.models.length > 0) ||
+    providers.find((pv) => pv.models.length > 0) ||
+    null;
+  const activeModel = active
+    ? ownerOfModel?.id === active.id
+      ? defaultModel
+      : active.models[0]
+    : null;
+  return {
+    profiles,
+    providers,
+    activeProfileId: active ? active.id : null,
+    activeProviderId: active ? active.id : null,
+    activeModel,
+  };
+}
+
 export const useHelixStore = create<HelixState>()((set, get, store) => ({
   ...createGitSlice(set, get, store),
+  ...createDiagnosticsSlice(set, get, store),
   ...createToastSlice(set, get, store),
   ...createCompactNoticeSlice(set, get, store),
   ...createCompressionRecordsSlice(set, get, store),
   ...createTerminalSlice(set, get, store),
   ...createEditorSlice(set, get, store),
   ...createAgentSettingsSlice(set, get, store),
+  ...createApprovalAllowSlice(set, get, store),
   ...createPanelSlice(set, get, store),
   ...createApiConfigSlice(set, get, store),
   ...createSkillSlice(set, get, store),
@@ -1620,6 +1767,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   setBrowserPickPageId: (id) => set({ browserPickPageId: id }),
   browserLoadingPageId: null,
   setBrowserLoadingPageId: (id) => set({ browserLoadingPageId: id }),
+  browserHandoff: null as BrowserHandoff | null,
+  setBrowserHandoff: (h) => set({ browserHandoff: h }),
   browserAddSeq: 0,
   composerImageRequest: null as { dataUrl: string; name: string } | null,
   requestComposerImage: (req) => set({ composerImageRequest: req }),
@@ -1634,6 +1783,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // 意味着新装用户第一次跑工具就没有任何确认，那是更危险的默认值。
   // 起步值只是首次回读完成前的占位；真相由 syncPermissionMode 从扩展配置读。
   permissionMode: "auto" as const,
+  permissionScopeInfo: null,
+  permissionWriteScope: "global" as const,
   // 审批卡超时默认 300s（扩展 DEFAULT_APPROVAL_TIMEOUT_SEC）。同样是只读缓存：
   // 真相在 settings.json permission.approvalTimeoutSec，写只走
   // setApprovalTimeoutSec。卡片倒计时不读这里（走网关事件的附带字段）。
@@ -1962,9 +2113,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     })),
   toggleCodeFullscreen: () =>
     set((s) => ({ codeFullscreen: !s.codeFullscreen })),
-  syncPermissionMode: async () => {
+  syncPermissionMode: async (target) => {
     try {
-      const res = await helixApi()?.getPermissionMode?.();
+      const res = await helixApi()?.getPermissionMode?.(target);
       if (!res) return get().permissionMode;
       if (!res.ok) {
         // 读不到真相。此刻扩展跑的是它自己的 DEFAULT_CONFIG = **yolo**（文件
@@ -1975,49 +2126,101 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           // 比扩展自带的 yolo 保守），扩展热加载同一份文件 → 界面与实际同源。
           // 直接写 IPC，不走 setPermissionMode —— 它失败时会回调进本函数，绕成死循环。
           try {
-            const seeded = await helixApi()?.setPermissionMode?.("auto");
-            if (seeded?.ok) {
-              const t = normalizePermissionTier(seeded.mode) ?? "auto";
-              set({ permissionMode: t });
-              return t;
+            const seeded = await helixApi()?.setPermissionMode?.("auto", {
+              scope: "global",
+            });
+            const info = permissionScopeInfoFrom(seeded);
+            if (info) {
+              set({ permissionMode: info.effective, permissionScopeInfo: info });
+              return info.effective;
             }
           } catch {
             /* 写不下去：按下面扩展的实际行为（yolo）显示 */
           }
         }
-        set({ permissionMode: "full" });
+        // 明细一格都别留：拿着上一次读到的格子显示「本会话严格」比说不知道更危险。
+        set({ permissionMode: "full", permissionScopeInfo: null });
         return "full" as const;
       }
-      // enabled=false 在扩展里等价 yolo（它的约定），而配置里的 mode 可能还
-      // 写着 auto —— 只看 mode 就会显示「自动审批」而实际全放行。
-      const tier =
-        res.enabled === false ? "full" : normalizePermissionTier(res.mode);
+      // enabled=false / 覆盖表解析全在扩展与后端做，这里只照抄它给的生效档：
+      // 前端再折叠一次就是第二条真相，折叠规则改一处就会漏改另一处。
+      const info = permissionScopeInfoFrom(res);
       // ok=true 但 mode 认不出来（扩展加了新档位名之类）：不动缓存，也不谎报。
-      if (tier) {
-        if (get().permissionMode !== tier) set({ permissionMode: tier });
-        return tier;
+      if (info) {
+        if (!isSamePermissionView(get().permissionScopeInfo, info)) {
+          set({ permissionMode: info.effective, permissionScopeInfo: info });
+        }
+        return info.effective;
       }
     } catch {
       /* 桥不可用（如纯浏览器 dev）：沿用缓存 */
     }
     return get().permissionMode;
   },
-  setPermissionMode: async (v: PermissionTier) => {
+  setPermissionWriteScope: (scope) =>
+    set((s) =>
+      s.permissionWriteScope === scope ? {} : { permissionWriteScope: scope },
+    ),
+  setPermissionMode: async (v, opts) => {
     const api = helixApi();
     if (!api?.setPermissionMode) return get().permissionMode;
+    const scope = opts?.scope ?? get().permissionWriteScope;
     try {
-      const res = await api.setPermissionMode(v);
+      const res = await api.setPermissionMode(v, {
+        scope,
+        sessionId: opts?.sessionId ?? null,
+        cwd: opts?.cwd ?? null,
+      });
       if (res?.ok) {
-        const tier = normalizePermissionTier(res.mode) ?? v;
-        set({ permissionMode: tier });
-        return tier;
+        const info = permissionScopeInfoFrom(res);
+        if (info) {
+          set({ permissionMode: info.effective, permissionScopeInfo: info });
+          return info.effective;
+        }
+      } else if (typeof res?.error === "string") {
+        // 后端**挡下了**这一写（远程会话、草稿还没有身份、配置坏 JSON）。
+        // 不是落盘故障，回读也读不出用户要的东西 —— 只把实话讲出来，档位显示
+        // 保持原值，绝不能停在用户刚点的那档。
+        get().showToast({
+          type: "error",
+          title: "审批档没改",
+          description: res.error,
+        });
+        return get().permissionMode;
       }
     } catch {
       /* 落盘失败：下面回读真相 */
     }
     // 写失败（权限/磁盘问题）时绝不能停在用户刚点的那档 —— 那正是「设置显示
     // 完全访问、实际照样弹窗」的反向版本。回读一次让 UI 说真话。
-    return get().syncPermissionMode();
+    return get().syncPermissionMode({
+      sessionId: opts?.sessionId ?? null,
+      cwd: opts?.cwd ?? null,
+    });
+  },
+  clearPermissionOverride: async (scope, target) => {
+    const api = helixApi();
+    if (!api?.clearPermissionOverride) return get().permissionMode;
+    try {
+      const res = await api.clearPermissionOverride(scope, target);
+      if (res?.ok) {
+        const info = permissionScopeInfoFrom(res);
+        if (info) {
+          set({ permissionMode: info.effective, permissionScopeInfo: info });
+          return info.effective;
+        }
+      } else if (typeof res?.error === "string") {
+        get().showToast({
+          type: "error",
+          title: "覆盖没清掉",
+          description: res.error,
+        });
+        return get().permissionMode;
+      }
+    } catch {
+      /* 落盘失败：下面回读真相 */
+    }
+    return get().syncPermissionMode(target);
   },
   syncApprovalTimeoutSec: async () => {
     try {
@@ -2859,14 +3062,11 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         return {
           currentSessionId: id,
           activeSessionWorkDir: null,
-          helixTodos: [],
           planModeBySession,
         };
       }
       // Skip if clicking the same session that's already loaded
       if (id === state.currentSessionId) return {};
-      // 任务清单跟随会话：恢复目标会话缓存的 todo 列表（无则清空）
-      const helixTodos = state.helixTodosBySession?.[id] ?? [];
       // plan 轴的草稿迁移：新对话分配出真 cid 时，把草稿期选的 plan 搬过去
       //（与 modelBySession 同一约定）。权限档是全局的，没有按会话恢复一说。
       const planModeBySession = { ...state.planModeBySession };
@@ -2880,7 +3080,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         get().pushNavigation({ type: "chat", sessionId: id });
         return {
           currentSessionId: id,
-          helixTodos,
           planModeBySession,
         };
       }
@@ -2893,7 +3092,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         currentSessionId: id,
         sessionHistory: newHistory,
         sessionHistoryIndex: newHistory.length - 1,
-        helixTodos,
         planModeBySession,
       };
     }),
@@ -3892,14 +4090,22 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting("goal", state.goal),
         persistence.saveSetting("apiConfig", state.apiConfig),
         persistence.saveSetting("apiHistory", state.apiHistory),
-        persistence.saveSetting("apiProfiles", state.apiProfiles),
         persistence.saveSetting("activeProfileId", state.activeProfileId),
-        persistence.saveSetting("providers", state.providers),
         persistence.saveSetting("activeModel", state.activeModel),
         persistence.saveSetting("activeProviderId", state.activeProviderId),
-        // Persist the per-provider fetched model lists alongside other config so
-        // they never get lost between a fetch and the next full persistToStorage.
-        persistence.saveSetting("providerModels", state.providerModels),
+        // 模型列表三键一起走同一个可信度门槛：读失败又没快照可回退的那一次启动，
+        // 内存里的空列表代表「没读到」而不是「用户删光了」，写回去就把瞬时故障
+        // 固化成永久丢失（配合 restoreFromStorage 里的 seedProfiles 回退）。
+        ...(modelListsSourceTrusted
+          ? [
+              persistence.saveSetting("apiProfiles", state.apiProfiles),
+              persistence.saveSetting("providers", state.providers),
+              // Persist the per-provider fetched model lists alongside other
+              // config so they never get lost between a fetch and the next
+              // full persistToStorage.
+              persistence.saveSetting("providerModels", state.providerModels),
+            ]
+          : []),
         persistence.saveSetting("fontFamily", state.fontFamily),
         persistence.saveSetting("fontSize", state.fontSize),
         persistence.saveSetting("interfaceFont", state.interfaceFont),
@@ -3919,6 +4125,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting("agentMaxIterations", state.agentMaxIterations),
         persistence.saveSetting("autoCompactContext", state.autoCompactContext),
         persistence.saveSetting("autoSaveSession", state.autoSaveSession),
+        persistence.saveSetting(
+          "autoArchiveOldTasks",
+          state.autoArchiveOldTasks,
+        ),
+        persistence.saveSetting(
+          "autoArchiveRetentionDays",
+          state.autoArchiveRetentionDays,
+        ),
         persistence.saveSetting("reasoningEffort", state.reasoningEffort),
         persistence.saveSetting("personality", state.personality),
         persistence.saveSetting("fastMode", state.fastMode),
@@ -3939,6 +4153,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         persistence.saveSetting("gitRemoteUrl", state.gitRemoteUrl),
         persistence.saveSetting("gitCommitTemplate", state.gitCommitTemplate),
         persistence.saveSetting("gitBranchPrefix", state.gitBranchPrefix),
+        persistence.saveSetting(
+          "diagnosticsAfterRun",
+          state.diagnosticsAfterRun,
+        ),
         persistence.saveSetting("sessionHistory", state.sessionHistory),
         persistence.saveSetting(
           "sessionHistoryIndex",
@@ -3961,11 +4179,18 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
 
   restoreFromStorage: async () => {
     try {
-      const { persistence } = await import("@/lib/persist");
+      const { persistence, setPersistCurrentSessionGetter } =
+        await import("@/lib/persist");
+      // 注入「当前打开的会话」取数钩子：saveSession 据此给 lastViewedAt 盖章，
+      // 自动归档拿它判「结果有没有人看过」。不注入时退化成不盖章（少归档），不写坏数据。
+      setPersistCurrentSessionGetter(() => get().currentSessionId);
       const sessionId = "current-session";
 
       // MCP config is now managed by Helix
       const fileMcpConfig: Record<string, any> = {};
+
+      // 本次恢复里读失败的设置键名：只用来区分「读失败」和「真的没数据」。
+      const failedLoads = new Set<string>();
 
       // Helper: load a setting without throwing — a single corrupted key
       // must not fail the entire restore (common on Windows after crashes).
@@ -3974,6 +4199,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         key: string,
       ): Promise<T | null> =>
         promise.catch((e) => {
+          // 记下键名：读失败会被压成 null，和「用户没有配过」在下游长得一模一样。
+          // 模型列表那段用它决定能不能把重建结果写回 IndexedDB（见 failedLoads 用法）。
+          failedLoads.add(key);
           logError(`[restore] failed to load ${key}:`, e);
           return null;
         });
@@ -4029,6 +4257,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         agentMaxIterations,
         autoCompactContext,
         autoSaveSession,
+        autoArchiveOldTasks,
+        autoArchiveRetentionDays,
         availableModels,
         providerModels,
         reasoningEffort,
@@ -4043,6 +4273,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitRemoteUrl,
         gitCommitTemplate,
         gitBranchPrefix,
+        diagnosticsAfterRun,
         modelBySession,
         startupGreeting,
         bootBackgroundImage,
@@ -4140,6 +4371,14 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           "autoSaveSession",
         ),
         safeLoad(
+          persistence.loadSetting<boolean>("autoArchiveOldTasks"),
+          "autoArchiveOldTasks",
+        ),
+        safeLoad(
+          persistence.loadSetting<number>("autoArchiveRetentionDays"),
+          "autoArchiveRetentionDays",
+        ),
+        safeLoad(
           persistence.loadSetting<string[]>("availableModels"),
           "availableModels",
         ),
@@ -4187,6 +4426,10 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         safeLoad(
           persistence.loadSetting<string>("gitBranchPrefix"),
           "gitBranchPrefix",
+        ),
+        safeLoad(
+          persistence.loadSetting<boolean>("diagnosticsAfterRun"),
+          "diagnosticsAfterRun",
         ),
         safeLoad(
           persistence.loadSetting<
@@ -4282,6 +4525,42 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           "activeProfileId",
         )) ?? null;
 
+      // ── 读失败时回退到上一份快照 ──
+      // `apiProfiles` 没读到（瞬时故障：上次进程被强杀 / 崩溃后重启时库还被占着）
+      // 不等于用户没有 profile。此时拿上一次成功读到的快照当生效列表，UI 就不会显示
+      // 成空列表，用户点「保存」也不会把空状态写实。没有快照可回退时这一次启动算
+      // 「不可信」，persistToStorage 与下方 self-heal 都跳过模型三键的写入。
+      let seedProfiles: ApiProfile[] = apiProfiles ?? [];
+      modelListsSourceTrusted = !failedLoads.has("apiProfiles");
+      if (failedLoads.has("apiProfiles")) {
+        try {
+          const backup =
+            await persistence.loadSetting<ApiProfile[]>("apiProfilesBackup");
+          if (Array.isArray(backup) && backup.length > 0) {
+            seedProfiles = backup;
+            modelListsSourceTrusted = true;
+            logError(
+              `[restore] apiProfiles 读取失败，已回退到 ${backup.length} 条快照`,
+            );
+          }
+        } catch {
+          // 连快照都读不到：只能按不可信处理，本次不回写模型列表。
+        }
+        if (!modelListsSourceTrusted) {
+          // 静默失败是「模型全没了却没有任何提示」的另一半原因，所以这一条必须让人
+          // 看见：本次会话的模型改动不落盘（写回去就是拿空列表覆盖），重启通常就好。
+          logError(
+            "[restore] apiProfiles 读取失败且没有可用快照，本次不写回模型列表",
+          );
+          get().showToast({
+            type: "warning",
+            title: "没能从本地存储读出模型列表",
+            description:
+              "为避免用空列表覆盖你的配置，本次会话的模型改动不会保存。重启应用通常即可恢复。",
+          });
+        }
+      }
+
       // ── Build multi-provider config for the flattened model selector ──
       // Always rebuild `builtProviders` from the authoritative declared sources
       // (apiProfiles / apiConfig). We do NOT trust the persisted `providers`
@@ -4337,7 +4616,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             expandedProfiles.push({ ...p, models: cleanProfileModels(p) });
           }
         };
-        seedFrom(apiProfiles ?? undefined);
+        seedFrom(seedProfiles);
         // Synthesize a real profile for each history endpoint not already covered
         // by a saved profile.
         const hist = (apiHistory || []) as Array<{
@@ -4648,7 +4927,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
             });
           }
           if (loadedActiveProfileId) {
-            const prof = (apiProfiles || []).find(
+            const prof = seedProfiles.find(
               (p) => p.id === loadedActiveProfileId,
             );
             if (prof && prof.config) {
@@ -4829,6 +5108,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         agentMaxIterations: agentMaxIterations ?? get().agentMaxIterations,
         autoCompactContext: autoCompactContext ?? get().autoCompactContext,
         autoSaveSession: autoSaveSession ?? get().autoSaveSession,
+        autoArchiveOldTasks: autoArchiveOldTasks ?? get().autoArchiveOldTasks,
+        autoArchiveRetentionDays:
+          autoArchiveRetentionDays ?? get().autoArchiveRetentionDays,
         reasoningEffort: (reasoningEffort as any) || get().reasoningEffort,
         personality: personality || get().personality,
         fastMode: fastMode ?? get().fastMode,
@@ -4850,6 +5132,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         gitRemoteUrl: gitRemoteUrl || get().gitRemoteUrl,
         gitCommitTemplate: gitCommitTemplate || get().gitCommitTemplate,
         gitBranchPrefix: gitBranchPrefix || get().gitBranchPrefix,
+        diagnosticsAfterRun:
+          diagnosticsAfterRun ?? get().diagnosticsAfterRun,
         // 权限档 / plan 轴不从这里恢复：前者由 syncPermissionMode 在设置加载
         // 完成后回读扩展配置（真相只有那一份文件），后者是 pi 实例级状态，
         // 进程重启即失效。旧版本持久化过的 "approvalMode" /
@@ -4878,14 +5162,35 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         const healedActiveProviderId = healed.activeProviderId;
         const providerIdChanged = healedActiveProviderId !== activeProviderId;
         const changed =
-          JSON.stringify(healed.apiProfiles) !==
-            JSON.stringify(apiProfiles || []) ||
+          JSON.stringify(healed.apiProfiles) !== JSON.stringify(seedProfiles) ||
           JSON.stringify(healed.providers) !==
             JSON.stringify(providers || []) ||
           JSON.stringify(cleanedProviderModels) !==
             JSON.stringify(prevModels) ||
           providerIdChanged;
-        if (changed) {
+        // 门槛：`apiProfiles` / `apiHistory` 任一没读到就整体不回写。这两份是
+        // 重建用户声明列表的唯一输入，读失败时 `changed` 必然为真（旧值被压成了
+        // null/空），照写就等于把一次瞬时读失败固化成永久丢失。providerModels 不
+        // 在门槛里：它只是各端点的 /models 目录缓存，重新「获取模型列表」就能补回。
+        const modelSourceFailed =
+          failedLoads.has("apiProfiles") || failedLoads.has("apiHistory");
+        // 快照：库里始终留一份「最后一次成功读到且非空」的 profile 列表，读失败时
+        // 上面的 seedProfiles 才有东西可回退。故意不挂在 `changed` 上，否则连一份
+        // 快照都要等到下次自愈重写才存在。只在内容变化时写，免得每次冷启动多写一遍
+        // blob；空列表不写，那会把上一份好快照顶掉、快照就成了丢失的镜像。（副作用：
+        // 用户主动删光后再也没加回来时，快照仍是删除前那份，只有读失败才会用它。）
+        if (!modelSourceFailed && seedProfiles.length > 0) {
+          const storedBackup = await persistence
+            .loadSetting<ApiProfile[]>("apiProfilesBackup")
+            .catch(() => null);
+          if (
+            JSON.stringify(storedBackup ?? null) !==
+            JSON.stringify(seedProfiles)
+          ) {
+            await persistence.saveSetting("apiProfilesBackup", seedProfiles);
+          }
+        }
+        if (changed && !modelSourceFailed) {
           await persistence.saveSetting("apiProfiles", healed.apiProfiles);
           await persistence.saveSetting("providers", healed.providers);
           await persistence.saveSetting(
@@ -4901,6 +5206,76 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         }
       } catch (persistErr) {
         logError("Failed to persist healed model lists:", persistErr);
+      }
+
+      // ── 空列表自愈：profile 整个读空时，从 pi 的 models.json 重建 ──
+      // 「我添加的模型全没了」的数据侧补救。只有两种现场会走到这里：① 库里有
+      // `apiProfiles` 这个键但它是 []（旧版本把一次瞬时读失败当作用户意图写了
+      // 回去）；② 这一次压根没读到。全新安装（键不存在、也没有读失败）不触发 ——
+      // 那不是丢失，是还没配过。`profilesClearedByUser` 是用户删掉最后一个
+      // profile 时记下的意图，有它就尊重空列表、绝不复活。
+      const profilesWiped =
+        Array.isArray(apiProfiles) || failedLoads.has("apiProfiles");
+      if (expandedProfiles.length === 0 && profilesWiped) {
+        try {
+          const clearedByUser = await persistence
+            .loadSetting<boolean>("profilesClearedByUser")
+            .catch(() => false);
+          if (!clearedByUser) {
+            const snap = await helixApi()?.piReadCustomProviders?.();
+            const rebuilt = profilesFromPiSnapshot(
+              snap?.providers || [],
+              snap?.defaultProvider || "",
+              snap?.defaultModel || "",
+            );
+            if (rebuilt.profiles.length > 0) {
+              const activeProvider =
+                rebuilt.providers.find(
+                  (p) => p.id === rebuilt.activeProviderId,
+                ) || rebuilt.providers[0];
+              set({
+                apiProfiles: rebuilt.profiles,
+                providers: rebuilt.providers,
+                activeProfileId: rebuilt.activeProfileId,
+                activeProviderId: rebuilt.activeProviderId,
+                activeModel: rebuilt.activeModel,
+                apiConfig: {
+                  ...get().apiConfig,
+                  provider: activeProvider.name,
+                  baseUrl: activeProvider.baseUrl,
+                  apiKey: activeProvider.apiKey,
+                  model: rebuilt.activeModel || "",
+                },
+              });
+              // 重建结果就是可信来源：解除模型三键的写入门槛，并当场落盘 + 留
+              // 一份快照，免得同一次启动里再来一次读失败把它写成空。
+              modelListsSourceTrusted = true;
+              await persistence.saveSetting("apiProfiles", rebuilt.profiles);
+              await persistence.saveSetting("providers", rebuilt.providers);
+              await persistence.saveSetting(
+                "apiProfilesBackup",
+                rebuilt.profiles,
+              );
+              await persistence.saveSetting(
+                "activeProfileId",
+                rebuilt.activeProfileId,
+              );
+              await persistence.saveSetting(
+                "activeProviderId",
+                rebuilt.activeProviderId,
+              );
+              await persistence.saveSetting("activeModel", rebuilt.activeModel);
+              get().showToast({
+                type: "info",
+                title: `已从本地配置重建 ${rebuilt.profiles.length} 个供应商`,
+                description:
+                  "模型列表在本地存储里是空的，已按 pi 的 models.json 重新生成。请核对一下，多余的供应商直接在设置里删除即可。",
+              });
+            }
+          }
+        } catch (rebuildErr) {
+          logError("[restore] 模型列表自愈失败:", rebuildErr);
+        }
       }
 
       // Auto-detect AGENTS.md / CLAUDE.md from project root as fallback

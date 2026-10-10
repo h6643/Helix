@@ -11,7 +11,13 @@ rust-version = "1.77.2"
 
 [lib]
 name = "helix_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+#只留 rlib。`staticlib` / `cdylib` 是Tauri 移动端（iOS/Android）打包才需要的
+# 产物类型，桌面端 `tauri dev` / `tauri build` 一个都不消费。但它们列在
+# crate-type 里就意味着**每次编译 lib 都要额外跑一遍归档+链接**：本机
+# staticlib产物`deps/helix_lib.lib`单个192MB，cdylib 还要再链一次 .dll。
+# 这两步对「改一行 Rust 等 1 分钟」贡献了最大的一块。
+# 万一将来要打移动端，再把这两项加回来。
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -37,6 +43,13 @@ sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
 aes-gcm = "0.10"
+# 浏览器导入（browser_import.rs）：读本机 Chrome/Edge 的 SQLite（Login Data /
+# History）用 rusqlite bundled（不依赖系统 SQLite）；Chrome v10 密码是
+# AES-128-CBC + HMAC-SHA256，CBC 链直接在 aes 的裸块 API 上手写（cbc crate 已
+# 迁到 cipher 0.5，与本仓库钉死的 aes 0.8 / cipher 0.4 不兼容）。
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes = "0.8"
+hmac = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["time", "sync", "io-util", "macros", "process"] }
@@ -46,6 +59,19 @@ serde_yaml = "0.9"
 mail-parser = "0.7"
 which = "5"
 urlencoding = "2.1.3"
+
+# dev 默认（debug=true + incremental）会让 target/debug 涨到 29G：全量 CodeView
+# 让每个依赖 crate 的 .o/.pdb 都带上调试信息。line-tables-only 保留栈回溯和断点，
+# 去掉变量级调试；依赖库另外开优化（只 app 代码留调试语义）。
+[profile.dev]
+debug = "line-tables-only"
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+# 磁盘大头在这：几百个依赖 crate 原先每个都编一份带 CodeView 的 .o/.pdb。
+# 关掉之后 panic 栈里依赖内部的帧没有 file:line，自己的代码仍精确到行。
+debug = false
 
 [profile.release]
 codegen-units = 1

@@ -57,6 +57,7 @@ import { useCheckUpdate } from "@/hooks/use-check-update";
 import { checkHelixAppUpdate, installHelixAppUpdate } from "@/lib/app-update";
 import { useGitChangeStat } from "@/hooks/use-git-change-stat";
 import { useRemoteTunnelReconcile } from "@/hooks/use-remote-tunnel-reconcile";
+import { startAutoArchiveRunner } from "@/lib/auto-archive";
 import { useBrowserAutomation } from "@/lib/browser-automation";
 import {
   pushModelConfig,
@@ -139,6 +140,14 @@ const TerminalPanel = lazy(() =>
 );
 const WorktreePanel = lazy(() =>
   import("./worktree-panel").then((m) => ({ default: m.WorktreePanel })),
+);
+const PrPanel = lazy(() =>
+  import("./pr-panel").then((m) => ({ default: m.PrPanel })),
+);
+const DiagnosticsPanel = lazy(() =>
+  import("./diagnostics-panel").then((m) => ({
+    default: m.DiagnosticsPanel,
+  })),
 );
 const DelegationsPanel = lazy(() =>
   import("./delegations-panel").then((m) => ({ default: m.DelegationsPanel })),
@@ -407,9 +416,9 @@ export function HelixLayout() {
         const { isTauri } = await import("@/lib/tauri-bridge");
         if (isTauri()) {
           unlisten = await listen("helix:open-browser", (e: any) => {
-            // quiet:true = agent 触发（poll_browser_requests 的 navigate、
-            // 网关的 app/open_browser 都带）→ 不抢标签；只有显式入口
-            // open_browser_url 不带 quiet → 视为用户意图，抢焦点。
+            // quiet:true = agent 触发（网关的 helix/app/open_browser 带）→ 不抢
+            // 标签。Rust 侧现在所有生产者都带 quiet；不带 quiet 的只剩
+            // __helixOpenBrowser（用户主动入口 / devtools）这一条。
             open(
               String(e.payload?.url ?? ""),
               e.payload?.quiet === true,
@@ -429,9 +438,9 @@ export function HelixLayout() {
               params: p.params ?? {},
             });
           });
-          // Poll the pi extension's browser request queue. The Rust command
-          // emits helix:browser-request (full payload) and the legacy
-          // helix:open-browser for navigate ops, which the listener above picks up.
+          // Poll the pi extension's browser request queue: the Rust command
+          // emits helix:browser-request with the full payload, which the
+          // listener above hands to the executor.
           try {
             const { electronApp } = await import("@/lib/electron-bridge");
             pollTimer = setInterval(async () => {
@@ -574,6 +583,8 @@ export function HelixLayout() {
   const showChannelsCenter = useHelixStore((s) => s.showChannelsCenter);
   const showRuntimePanel = useHelixStore((s) => s.showRuntimePanel);
   const showWorktreePanel = useHelixStore((s) => s.showWorktreePanel);
+  const showPrPanel = useHelixStore((s) => s.showPrPanel);
+  const showDiagnosticsPanel = useHelixStore((s) => s.showDiagnosticsPanel);
   const showSubAgentPanel = useHelixStore((s) => s.showSubAgentPanel);
   const showActivityFeed = useHelixStore((s) => s.showActivityFeed);
   const showArtifactsBrowser = useHelixStore((s) => s.showArtifactsBrowser);
@@ -587,6 +598,8 @@ export function HelixLayout() {
   const sidePanelOpen =
     showRuntimePanel ||
     showWorktreePanel ||
+    showPrPanel ||
+    showDiagnosticsPanel ||
     showSubAgentPanel ||
     showSkillPanel ||
     showScheduledTasksPanel;
@@ -660,6 +673,8 @@ export function HelixLayout() {
     showSkillPanel ||
     showRuntimePanel ||
     showWorktreePanel ||
+    showPrPanel ||
+    showDiagnosticsPanel ||
     showSubAgentPanel;
   const activeSessionWorkDir = useHelixStore((s) => s.activeSessionWorkDir);
   // Which workDir the branch picker operates on. An active session uses its
@@ -684,7 +699,6 @@ export function HelixLayout() {
   const navigationHistory = useHelixStore((s) => s.navigationHistory);
   const navigationIndex = useHelixStore((s) => s.navigationIndex);
   const customShortcuts = useHelixStore((s) => s.customShortcuts);
-  const helixTodos = useHelixStore((s) => s.helixTodos);
   const activePlan = useHelixStore((s) => s.activePlan);
   const pendingPlanReviewAll = useHelixStore((s) => s.pendingPlanReview);
   // 实时子代理（store.subAgents，由 subagent.* 事件写入）。pi-subagents 的
@@ -710,11 +724,6 @@ export function HelixLayout() {
   const activeSubAgents = useMemo(
     () => subAgents.filter((a) => a.status !== "completed"),
     [subAgents],
-  );
-  // 任务清单同理：全部完成的清单让位给「更改」，未完成的仍占位。
-  const activeTodos = useMemo(
-    () => helixTodos.filter((t) => t.status !== "completed"),
-    [helixTodos],
   );
   const pendingPlanReview =
     pendingPlanReviewAll &&
@@ -763,7 +772,7 @@ export function HelixLayout() {
   // 提交弹窗（点「提交并推送」时弹出，内含提交信息输入框 + 提交 / 提交并推送 两个动作）。
   const [commitDialogOpen, setCommitDialogOpen] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
-  // 右上角统一工作面板（更改 / 任务清单 / 子 Agent 共用的下拉）。
+  // 右上角统一工作面板（更改 / 计划 / 子 Agent 共用的下拉）。
   const [workPanelOpen, setWorkPanelOpen] = useState(false);
   // 工作面板里「子 Agent」区块的折叠态：默认展开，点标题行收起/展开列表。
   const [subAgentsCollapsed, setSubAgentsCollapsed] = useState(false);
@@ -1603,11 +1612,8 @@ export function HelixLayout() {
   // Start global scheduled task runner
   useEffect(() => {
     startScheduledTaskRunner();
+    startAutoArchiveRunner();
   }, []);
-
-  // ── Task list ───────────────────────────────────────────────────────────
-  // 后端没有任务清单 RPC（helix:getTasks 是空桩），任务清单 = 前端已接收的
-  // live todos（来自 session/update 的 todo/plan 负载）。
 
   const windowMenuItems: (WindowMenuItem | { divider: true })[] = useMemo(
     () => [
@@ -2003,7 +2009,7 @@ export function HelixLayout() {
           region) so the capsule stays visible in settings mode too, where the
           whole left region above is hidden. Pinned to the window's top-right
           corner via the relative `helix-app-backdrop` root. */}
-      {/* Unified top-right icon row: conversation actions (任务清单 / 子 Agent /
+      {/* Unified top-right icon row: conversation actions (计划 / 子 Agent /
           后台任务) + window controls (终端 / 更多操作 / min / max / close) all in
           ONE evenly-spaced flex. Conversation actions share the same gating as
           终端/更多操作 — hidden in settings & full-screen panel modes. */}
@@ -2013,13 +2019,12 @@ export function HelixLayout() {
       >
         {!showSettings && !hideConversationActions && (
           <>
-            {/* 统一工作面板：更改（含提交/推送）、任务清单、子 Agent 收进同一个下拉。仅在有内容时显示。 */}
+            {/* 统一工作面板：更改（含提交/推送）、计划、子 Agent 收进同一个下拉。仅在有内容时显示。 */}
             {(pendingPlanReview ||
               activePlan.length > 0 ||
               hasDelegations ||
               delegations.length > 0 ||
               subAgents.length > 0 ||
-              helixTodos.length > 0 ||
               gitChangeStat) && (
               <div className="relative" ref={workPanelRef}>                <button
                   type="button"
@@ -2095,16 +2100,6 @@ export function HelixLayout() {
                       {delegations.length}
                     </span>
                     )}
-                  </>
-                ) : activeTodos.length > 0 ? (
-                  <>
-                    <ListTodo className="size-3.5 text-foreground/60 shrink-0" />
-                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] font-medium text-foreground/80">
-                      任务
-                    </span>
-                    <span className="text-[calc(var(--helix-transcript-size)*0.8571)] tabular-nums font-medium text-foreground/60">
-                      {activeTodos.length}
-                    </span>
                   </>
                 ) : (
                   <ListTodo className="size-[18px] text-foreground/60" />
@@ -2250,68 +2245,6 @@ export function HelixLayout() {
                         );
                       })()}
                     </section>
-                  )}
-                  {activeTodos.length > 0 && (
-                  <section className="p-1.5">
-                    {(() => {
-                      const doneCount = helixTodos.filter(
-                        (t) => t.status === "completed",
-                      ).length;
-                      const pct = Math.round(
-                        (doneCount / helixTodos.length) * 100,
-                      );
-                      return (
-                        <>
-                          <div className="flex items-center gap-2.5 min-w-0 px-2.5 py-2">
-                            <ListTodo className="size-4 shrink-0 text-foreground/50" />
-                            <span className="flex-1 min-w-0 truncate text-[calc(var(--helix-transcript-size)*0.8571)] font-medium">
-                              任务清单
-                            </span>
-                            <span className="shrink-0 text-[calc(var(--helix-transcript-size)*0.7857)] tabular-nums text-foreground/50">
-                              {doneCount}/{helixTodos.length}
-                            </span>
-                          </div>
-                          <div className="px-2.5 pb-2.5">
-                            <div className="h-1 rounded-full bg-muted overflow-hidden">
-                              <div
-                                className="h-full rounded-full bg-primary transition-[width] duration-300"
-                                style={{ width: `${pct}%` }}
-                              />
-                            </div>
-                          </div>
-                          <ul className="px-1 pb-1">
-                            {helixTodos.map((todo) => (
-                              <li
-                                key={todo.id}
-                                className="flex items-start gap-2 px-1.5 py-1.5 rounded-xl hover:bg-accent/60 transition-colors text-[calc(var(--helix-transcript-size)*0.8571)]"
-                              >
-                                {todo.status === "completed" ? (
-                                  <CheckCircle2 className="size-4 text-emerald-500 shrink-0 mt-0.5" />
-                                ) : todo.status === "in_progress" ? (
-                                  <Loader2 className="size-4 text-primary shrink-0 mt-0.5 animate-spin" />
-                                ) : todo.status === "cancelled" ? (
-                                  <XCircle className="size-4 text-muted-foreground shrink-0 mt-0.5" />
-                                ) : (
-                                  <Circle className="size-4 text-foreground/40 shrink-0 mt-0.5" />
-                                )}
-                                <span
-                                  className={`min-w-0 break-words ${
-                                    todo.status === "completed"
-                                      ? "line-through text-foreground/50"
-                                      : todo.status === "cancelled"
-                                        ? "line-through text-foreground/40"
-                                        : "text-foreground/90"
-                                  }`}
-                                >
-                                  {todo.content}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        </>
-                      );
-                    })()}
-                  </section>
                   )}
                   {(subAgents.length > 0 || isElectron()) &&
                     (subAgents.length > 0 || delegations.length > 0) && (
@@ -2766,6 +2699,14 @@ export function HelixLayout() {
                                           storeActions.focusBylineInput();
                                           setBrowserMenuOpen(false);
                                         }}
+                                        onOpenPr={() => {
+                                          storeActions.togglePrPanel();
+                                          setBrowserMenuOpen(false);
+                                        }}
+                                        onOpenDiagnostics={() => {
+                                          storeActions.toggleDiagnosticsPanel();
+                                          setBrowserMenuOpen(false);
+                                        }}
                                       />
                                     </div>
                                   </div>,
@@ -2836,6 +2777,22 @@ export function HelixLayout() {
                     <PanelSuspense>
                       <WorktreePanel
                         onClose={() => storeActions.toggleWorktreePanel()}
+                      />
+                    </PanelSuspense>
+                  </div>
+                )}
+                {showPrPanel && (
+                  <div className="absolute inset-0 z-20">
+                    <PanelSuspense>
+                      <PrPanel onClose={() => storeActions.togglePrPanel()} />
+                    </PanelSuspense>
+                  </div>
+                )}
+                {showDiagnosticsPanel && (
+                  <div className="absolute inset-0 z-20">
+                    <PanelSuspense>
+                      <DiagnosticsPanel
+                        onClose={() => storeActions.toggleDiagnosticsPanel()}
                       />
                     </PanelSuspense>
                   </div>

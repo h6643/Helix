@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import { Folder, Globe, Trash2 } from "lucide-react";
 import {
   PageHeader,
   SettingGroup,
@@ -10,19 +11,29 @@ import {
   PopupSelect,
 } from "./settings-ui";
 import { getElectronAPI } from "@/lib/electron-bridge";
+import { Button } from "@/components/ui/button";
 
 interface MemoryStats {
   file_count: number;
   last_updated: number;
-  enabled: boolean;
+  enabled?: boolean;
+  dir?: string;
 }
 
 interface MemoryOverview {
   ok: boolean;
   global: MemoryStats;
   current_project: string;
-  projects: (MemoryStats & { name: string })[];
+  projects: (MemoryStats & { name: string; enabled: boolean })[];
   config_path?: string;
+}
+
+/** 待确认删除的记忆范围（全局或某个项目）。 */
+interface DeleteTarget {
+  scope: "global" | "project";
+  project?: string;
+  label: string;
+  count: number;
 }
 
 type MemoryConfig = Record<string, any>;
@@ -96,6 +107,38 @@ export function MemorySettingsPanel() {
     overview?.projects.find((p) => p.name === overview.current_project) ??
     overview?.projects[0];
 
+  /** 打开记忆存储目录（文件夹图标）。 */
+  const openMemoryDir = useCallback(async (dir?: string) => {
+    if (!dir) return;
+    try {
+      await getElectronAPI()?.shell.openPath(dir);
+    } catch (e) {
+      console.error("打开记忆目录失败", dir, e);
+    }
+  }, []);
+
+  /** 点垃圾桶：先弹确认框，确认后才真删。 */
+  const [deleting, setDeleting] = useState<DeleteTarget | null>(null);
+
+  const confirmDelete = useCallback(async () => {
+    if (!deleting) return;
+    const target = deleting;
+    setDeleting(null);
+    setBusy(true);
+    try {
+      const res = await getElectronAPI()?.helix.deleteMemory(
+        target.scope,
+        target.project,
+      );
+      refreshOverview();
+      if (res && res.ok === false) {
+        console.error("删除记忆失败", res.error ?? res.errors);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [deleting, refreshOverview]);
+
   const num = (key: string, fallback: number) =>
     typeof cfg?.[key] === "number" ? cfg[key] : fallback;
 
@@ -137,36 +180,66 @@ export function MemorySettingsPanel() {
         </SettingRow>
       </SettingGroup>
 
-      {/* 记忆文件统计 */}
+      {/* 记忆文件统计：全局一张卡 + 各项目一行（无记忆文件的项目不显示） */}
       <SettingGroup>
-        <div className="flex items-center justify-between px-4 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)]">
-          <div>
-            <div className="font-medium text-foreground">全局记忆</div>
-            <div className="text-muted-foreground/70">
-              {overview
-                ? `${overview.global.file_count} 个记忆文件 · 更新于 ${fmt(
-                    overview.global.last_updated,
-                  )}`
-                : "加载中…"}
-            </div>
+        {overview && (
+          <MemoryStatRow
+            icon={<Globe className="size-[1.15em]" />}
+            title="全局记忆"
+            subtitle={`${overview.global.file_count} 个记忆文件 · 更新于 ${fmt(
+              overview.global.last_updated,
+            )}`}
+            dir={overview.global.dir}
+            onOpen={openMemoryDir}
+            onDelete={() =>
+              setDeleting({
+                scope: "global",
+                label: "全局记忆",
+                count: overview.global.file_count,
+              })
+            }
+          />
+        )}
+        {overview?.projects
+          .filter((p) => p.file_count > 0)
+          .map((p) => {
+            const isCurrent = p.name === overview.current_project;
+            return (
+              <MemoryStatRow
+                key={p.name}
+                icon={<Folder className="size-[1.15em]" />}
+                title="项目记忆"
+                subtitle={
+                  <span className="inline-flex items-center gap-1.5 min-w-0">
+                    <span className="truncate">{p.name}</span>
+                    {isCurrent && (
+                      <span className="shrink-0 rounded-full border border-border px-1.5 py-px text-[0.7143em]">
+                        当前
+                      </span>
+                    )}
+                    <span className="shrink-0 text-muted-foreground/70">
+                      · {p.file_count} 个记忆文件 · 更新于 {fmt(p.last_updated)}
+                    </span>
+                  </span>
+                }
+                dir={p.dir}
+                onOpen={openMemoryDir}
+                onDelete={() =>
+                  setDeleting({
+                    scope: "project",
+                    project: p.name,
+                    label: `项目记忆（${p.name}）`,
+                    count: p.file_count,
+                  })
+                }
+              />
+            );
+          })}
+        {!overview && (
+          <div className="px-4 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
+            加载中…
           </div>
-        </div>
-        <div className="flex items-center justify-between px-4 py-2.5 text-[calc(var(--helix-transcript-size)*0.8571)]">
-          <div>
-            <div className="font-medium text-foreground">
-              项目记忆{currentProject ? `（${currentProject.name}）` : ""}
-            </div>
-            <div className="text-muted-foreground/70">
-              {currentProject
-                ? `${currentProject.file_count} 个记忆文件 · 更新于 ${fmt(
-                    currentProject.last_updated,
-                  )}`
-                : overview
-                  ? "暂无项目记忆"
-                  : "加载中…"}
-            </div>
-          </div>
-        </div>
+        )}
       </SettingGroup>
 
       {/* 容量上限 */}
@@ -285,6 +358,15 @@ export function MemorySettingsPanel() {
 
       {/* 回顾与自动识别 */}
       <SettingGroup>
+        <SettingRow
+          label="自动沉淀"
+          hint="回合结束后由后台回看对话并写入记忆（扩展在会话启动时读配置，改动对进行中的会话无效）。关掉后下面的阈值与「会话回顾」都不生效。"
+        >
+          <Toggle
+            enabled={bool("reviewEnabled")}
+            onToggle={() => apply({ reviewEnabled: !bool("reviewEnabled") })}
+          />
+        </SettingRow>
         <SettingRow
           label="会话回顾"
           hint="会话结束后用最近 N 条消息回顾并沉淀记忆（0 = 关闭）"
@@ -429,6 +511,128 @@ export function MemorySettingsPanel() {
           正在保存…
         </div>
       )}
+
+      {deleting && (
+        <MemoryDeleteDialog
+          target={deleting}
+          onCancel={() => setDeleting(null)}
+          onConfirm={confirmDelete}
+        />
+      )}
+    </div>
+  );
+}
+
+/** 统计行：左侧图标 + 标题/副标题，右侧「打开目录」与「删除」图标按钮。 */
+function MemoryStatRow({
+  icon,
+  title,
+  subtitle,
+  dir,
+  onOpen,
+  onDelete,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  subtitle: React.ReactNode;
+  dir?: string;
+  onOpen: (dir?: string) => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-3 py-3 px-4 hover:bg-muted/40 transition-colors">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1 text-[length:var(--helix-transcript-size)]">
+        <span className="block truncate font-medium text-foreground">
+          {title}
+        </span>
+        <span className="block truncate text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
+          {subtitle}
+        </span>
+      </span>
+      <div className="flex shrink-0 items-center gap-1">
+        <button
+          type="button"
+          title="打开记忆目录"
+          aria-label="打开记忆目录"
+          disabled={!dir}
+          onClick={() => onOpen(dir)}
+          className="rounded-md p-1.5 text-foreground transition-colors hover:bg-muted disabled:opacity-40 disabled:hover:bg-transparent"
+        >
+          <Folder className="size-4" />
+        </button>
+        <button
+          type="button"
+          title="删除记忆文件"
+          aria-label="删除记忆文件"
+          onClick={onDelete}
+          className="rounded-md p-1.5 text-destructive transition-colors hover:bg-destructive/10"
+        >
+          <Trash2 className="size-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** 删除确认弹窗：不可撤销，明确列出范围与文件数。 */
+function MemoryDeleteDialog({
+  target,
+  onCancel,
+  onConfirm,
+}: {
+  target: DeleteTarget;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/40 p-4 backdrop-blur-[2px]"
+      onClick={onCancel}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-sm rounded-xl border border-border bg-popover p-5 text-popover-foreground shadow-2xl"
+      >
+        <div className="flex items-start gap-3">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-destructive/10 text-destructive">
+            <Trash2 className="size-4" />
+          </span>
+          <div className="min-w-0">
+            <div className="text-[length:var(--helix-transcript-size)] font-semibold text-foreground">
+              删除{target.label}？
+            </div>
+            <p className="mt-1 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
+              将删除该目录下全部 {target.count} 个记忆文件（含 .retired-*.md
+              归档），此操作不可撤销。
+            </p>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={onCancel}>
+            取消
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={onConfirm}
+          >
+            删除
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

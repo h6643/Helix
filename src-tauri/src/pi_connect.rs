@@ -92,7 +92,13 @@ fn run_bridge(prompts: &[String]) -> Result<Value, String> {
         .arg("rpc")
         // 一次性会话：不落 sessions 目录（否则会在 Helix 侧栏留下垃圾会话）。
         .arg("--no-session")
-        .env("PI_OFFLINE", "1")
+        // 渠道目录的在线刷新只有这一条路：pi 仅在 `!offline && mode==rpc` 时于
+        // 启动后台跑 modelRuntime.refresh()（allowNetwork 默认取 PI_OFFLINE），
+        // 渠道 provider 的 refreshModels 就把线上目录 persist 进 models.json。
+        // 常驻网关仍带 PI_OFFLINE=1（那里要的是启动快），读的就是这份缓存。
+        // 所以这里必须显式清掉继承来的 PI_OFFLINE，否则渠道永远是扩展写死的
+        // 兜底表（Trae 只有 4+7 条、且没有 `· x倍率`）。
+        .env_remove("PI_OFFLINE")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

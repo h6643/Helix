@@ -11,14 +11,13 @@
  * 工作原理（请求-响应协议）：
  *   1. 工具写请求文件 `<reqId>.json` = { op, url, reqId, ts, params }
  *   2. Helix 前端 Tauri 轮询该目录 → Rust emit `helix:browser-request`
- *   3. 前端对活动浏览器页执行（navigate 走 webview；read/click/type 等
- *      通过 page_fetch 拉同源 HTML → srcdoc iframe → 注入脚本执行）
+ *   3. 前端在右侧栏那条**真**浏览器窗口上执行（src-tauri/src/browser_webview.rs：
+ *      navigate/历史走 webview，read/click/type/press 注入脚本读写实时 DOM）
  *   4. 前端调 Rust `browser_write_result` 写 `<reqId>.result.json`
  *   5. 本扩展轮询等结果文件 → 删除 → 把结果返回给模型
  *
- * 注意：read/click/type 执行在 page_fetch 拉取的同源快照上——它是静态
- * HTML（无页面 JS 状态），适合读结构/文本和触发原生跳转类交互；SPA
- * 动态渲染的内容可能取不到。navigate 是在真实 webview 上执行的。
+ * 注意：所有 op 都打在用户正看着的同一条页面上，SPA 渲染出来的内容读得到。
+ * 唯一的例外是「选取元素加入聊天」（侧栏自己的功能），它仍走静态快照。
  */
 
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync, existsSync } from "node:fs";
@@ -114,12 +113,13 @@ async function request(op, opts = {}) {
 
 /** 工具描述前缀：说明执行环境与限制，模型据此决定用法。 */
 const SNAPNOTE =
-  "在 Helix 侧边栏嵌入浏览器上执行操作（通过请求-响应文件协议）。\n" +
-  "前提：当前必须有一个已打开的浏览器页面（先 open_browser / browser_navigate）；" +
+  "在 Helix 右侧栏那条真实浏览器窗口（WebView2，用户正看着它）上执行操作，走请求-响应文件协议。\n" +
+  "前提：当前必须有一条已打开的浏览器页面（先 open_browser / browser_navigate）；" +
   "没有打开页面时 read/click/type 会直接报错。\n" +
-  "注意：read/click/type/press 作用于由 page_fetch 拉取的静态 HTML 快照（srcdoc 同源 iframe）——" +
-  "适合读取结构/文本、点击链接/按钮、填写表单并回车跳转；SPA 动态渲染的内容可能取不到。" +
-  "navigate/back/forward/refresh 直接作用于真实 webview。";
+  "read/click/type/press 注入脚本读写那条页的**实时 DOM**（SPA 渲染出来的内容读得到），" +
+  "navigate/back/forward/refresh 直接作用于同一条窗口。每次导航会重新打一遍元素引用表。\n" +
+  "撞登录墙/验证码时：用 browser_handoff 把页面交给人工（那条页的写操作会锁，只读工具照常），" +
+  "然后继续做不依赖该页的工作，不要原地等。";
 
 function registerTool(pi, tool) {
   pi.registerTool({
@@ -156,8 +156,13 @@ export default function register(pi) {
     description:
       SNAPNOTE +
       "\n读取当前页面的标题、URL、可见文本摘要与可交互元素（链接/按钮/输入框）的清单。" +
-      "返回的元素带 ref 序号（如 e12），可紧接其后用于 browser_click / browser_type 定位；" +
-      "但 ref 仅限当次 read——中间若穿插 navigate 或另一次 read，ref 即失效，跨请求请改用稳定 selector。",
+      "遍历会穿透 shadow DOM 和**同源** iframe（组件库藏在影子里的控件也列得出来，元素的 " +
+      "`frame` 字段标出它在哪一帧；跨域 iframe 只会以「读不到」标注）。" +
+      "返回的元素带 ref 序号（如 e12），可直接用于 browser_click / browser_type / browser_hover / browser_drag 定位；" +
+      "ref 认的是页面全局的引用表，跨请求有效，但 navigate、页面重渲染、或另一次 read" +
+      "（会按新的 DOM 顺序重编号）都可能让它指错东西 —— 拿不准就再 read 一次，或改用稳定 selector。" +
+      "元素超过约 400 个时 `truncated:true`，用 selector 参数缩小范围。" +
+      "页面调用过 alert/confirm/prompt 的话会在 `dialogs` 里带最近几条（Helix 不弹原生框）。",
     params: {
       selector: {
         type: "string",
@@ -175,17 +180,15 @@ export default function register(pi) {
     label: "Browser Click",
     description:
       SNAPNOTE +
-      "\n点击页面上的元素。定位优先级：selector（稳定，推荐）> ref（仅当次 read 有效）。" +
-      "⚠ ref（如 e12）只在「产生它的 browser_read」里有效——click 是独立请求，" +
-      "会重新抓一份静态快照，上一轮的 data-helix-ref 没有落到这份 DOM 上，所以" +
-      "「先 read、再 click 用 ref」经常定位不到。跨请求定位请改用稳定 CSS selector；" +
-      "确需 ref 时要在刚 read 之后立刻 click（中间不要 navigate/其它 read）。" +
+      "\n点击页面上的元素。定位优先级：selector（跨请求稳定，推荐）> ref（由上一次 browser_read 打在那条实时 DOM 上）。" +
+      "ref 不需要紧跟着 read 就用 —— 但 navigate、页面重渲染或另一次 read 之后编号可能已经指到别的东西上，" +
+      "所以点完要 read/截图确认，定位不到就重新 read。" +
       "点击链接/提交按钮会触发导航——导航后的新页面需再 browser_read 确认。",
     params: {
       ref: {
         type: "string",
         description:
-          "刚由 browser_read 返回的元素 ref（如 e12）。仅紧接其后、未经其它操作时有效；跨请求不保证",
+          "上一次 browser_read 返回的元素 ref（如 e12）；中间没有 navigate/另一次 read 时仍然有效",
       },
       selector: {
         type: "string",
@@ -206,13 +209,15 @@ export default function register(pi) {
     label: "Browser Type",
     description:
       SNAPNOTE +
-      "\n向输入框填入文本。定位同 browser_click：优先稳定 selector；ref 仅当次 read 有效。" +
+      "\n向输入框填入文本（input / textarea / contenteditable 富文本框 / `<select>` 都能填：" +
+      "富文本走 insertText 所以编辑器自己的监听器看得见；下拉可以直接给选项文本，给错会列出可选值）。" +
+      "定位同 browser_click：优先稳定 selector，ref 在没被导航/另一次 read 打乱前也有效。" +
       "submit=true 时填完回车提交（触发导航，新页面需再 read 确认）。",
     params: {
       ref: {
         type: "string",
         description:
-          "刚由 browser_read 返回的输入框 ref。仅紧接其后、未经其它操作时有效；跨请求不保证",
+          "上一次 browser_read 返回的输入框 ref；中间没有 navigate/另一次 read 时仍然有效",
       },
       selector: {
         type: "string",
@@ -236,7 +241,7 @@ export default function register(pi) {
   registerTool(pi, {
     name: "browser_press",
     label: "Browser Press",
-    description: SNAPNOTE + "\n对当前焦点元素按一个键（如 Enter、Escape、Tab）。",
+    description: SNAPNOTE + "\n对当前焦点元素按一个键或组合键（Enter / Escape / Tab，或 Ctrl+A、Shift+Tab、Ctrl+Shift+P 这类写法）。会成对派发 keydown+keyup。",
     params: { key: { type: "string", description: "键名，如 Enter / Escape / Tab" } },
     required: ["key"],
     run: (p) => request("press", { params: { key: String(p?.key ?? "Enter") } }),
@@ -257,7 +262,7 @@ export default function register(pi) {
     label: "Browser Screenshot",
     description:
       SNAPNOTE +
-      "截取当前页面的渲染快照（PNG，base64）。适合需要\"看\"页面布局、视觉元素、" +
+      "\n截取当前页面的渲染快照（PNG，base64）。适合需要\"看\"页面布局、视觉元素、" +
       "或确认渲染结果时使用；返回的 image 会尽量经视觉模型转述为文字 description" +
       "（配置了视觉模型时），主模型据此理解页面外观。",
     params: {},
@@ -277,5 +282,237 @@ export default function register(pi) {
       }
       return request(a);
     },
+  });
+
+  registerTool(pi, {
+    name: "browser_handoff",
+    label: "交给人工验证",
+    description:
+      "把当前页面交给人来完成登录/验证码/扫码/人工授权。\n" +
+      "效果：右侧栏那条网页页会挂出「人工验证中 · 原因」横幅并把键盘焦点交给它，同时**锁住该页的写操作**" +
+      "（navigate/click/type/press/hover/scroll/drag/eval/upload/back/forward/refresh 一律被拒绝，返回里会说明原因）；" +
+      "browser_read / browser_screenshot / browser_wait 这类只读的仍然可用，你能看见进展。\n" +
+      "⚠ 这个工具**不等用户**：它立刻返回。拿到返回后必须继续做不依赖这个页面的工作" +
+      "（读代码、改文件、查别的站点、推进别的步骤），过一会儿再用 browser_check_login 回来看 —— " +
+      "在这里停下来干等，就等于把整个任务卡死了。\n" +
+      "可选登记判据（selector 或 urlIncludes），之后 browser_check_login 会自动用它。" +
+      "用户点横幅上的「我已完成」会直接解锁；10 分钟无人响应则自动解锁（防止侧栏被永久锁死）。",
+    params: {
+      reason: {
+        type: "string",
+        description: "为什么要人工介入，原样显示在侧栏横幅上（如「需要 GitHub 登录并输验证码」）",
+      },
+      selector: {
+        type: "string",
+        description: "可选：登录成功后页面上必然存在的 CSS 选择器（判据）",
+      },
+      urlIncludes: {
+        type: "string",
+        description: "可选：登录成功后 URL 必然包含的片段（判据），如站点首页路径",
+      },
+    },
+    required: ["reason"],
+    run: (p) =>
+      request("handoff", {
+        params: {
+          reason: String(p?.reason ?? ""),
+          selector: p?.selector ? String(p.selector) : undefined,
+          urlIncludes: p?.urlIncludes ? String(p.urlIncludes) : undefined,
+        },
+      }),
+  });
+
+  registerTool(pi, {
+    name: "browser_check_login",
+    label: "检查人工验证",
+    description:
+      "问一句「人工那边的验证完成了没」（只读探针，不动页面内容）。返回 status：\n" +
+      "cleared=判据命中、接管已解除、写操作恢复，可以继续；" +
+      "still_waiting=还没好，页面仍锁着 —— 去做别的工作，别在这里轮询等。\n" +
+      "判据缺省时沿用 browser_handoff 登记的那份；两个都不传时只能靠用户点「我已完成」解锁。" +
+      "当前没有接管时，这个工具照样可以用判据问一句页面状态。",
+    params: {
+      selector: { type: "string", description: "登录成功后页面上存在的 CSS 选择器" },
+      urlIncludes: { type: "string", description: "登录成功后 URL 必然包含的片段" },
+    },
+    run: (p) =>
+      request("check_login", {
+        params: {
+          selector: p?.selector ? String(p.selector) : undefined,
+          urlIncludes: p?.urlIncludes ? String(p.urlIncludes) : undefined,
+        },
+      }),
+  });
+
+  registerTool(pi, {
+    name: "browser_hover",
+    label: "悬停元素",
+    description:
+      SNAPNOTE +
+      "\n对元素悬停（派发 pointerover/mouseenter/mousemove 一整套合成事件）。" +
+      "只有 hover 才出现的下拉菜单、工具提示、悬浮面板要先 hover 再 read 才能看到里面的东西。" +
+      "事件是合成的（isTrusted=false），个别只认真实指针的控件不会响应 —— 没效果就 read/截图确认，" +
+      "或改用 click / browser_eval 直接改样式。",
+    params: {
+      ref: { type: "string", description: "上一次 browser_read 返回的元素 ref" },
+      selector: { type: "string", description: "首选：稳定 CSS 选择器" },
+    },
+    run: (p) =>
+      request("hover", {
+        params: {
+          ref: p?.ref ? String(p.ref) : undefined,
+          selector: p?.selector ? String(p.selector) : undefined,
+        },
+      }),
+  });
+
+  registerTool(pi, {
+    name: "browser_scroll",
+    label: "滚动页面",
+    description:
+      SNAPNOTE +
+      "\n滚动页面：direction=down/up/left/right/top/bottom，amount=像素（缺省约 0.8 视口高）。" +
+      "传 ref/selector 时改为把那个元素滚到视野中间。返回当前滚动位置与页面总高 —— " +
+      "懒加载列表要「滚一段 read 一段」，一次滚到底再 read 可能只拿到最后一屏的内容。",
+    params: {
+      direction: { type: "string", description: "down | up | left | right | top | bottom（缺省 down）" },
+      amount: { type: "number", description: "滚动像素，缺省约 0.8 屏高" },
+      ref: { type: "string", description: "可选：滚到某个元素（上一次 read 的 ref）" },
+      selector: { type: "string", description: "可选：滚到某个元素（CSS 选择器）" },
+    },
+    run: (p) =>
+      request("scroll", {
+        params: {
+          direction: p?.direction ? String(p.direction) : undefined,
+          amount: p?.amount != null ? Number(p.amount) : undefined,
+          ref: p?.ref ? String(p.ref) : undefined,
+          selector: p?.selector ? String(p.selector) : undefined,
+        },
+      }),
+  });
+
+  registerTool(pi, {
+    name: "browser_drag",
+    label: "拖拽元素",
+    description:
+      SNAPNOTE +
+      "\n把一个元素拖到另一个元素上（起点/终点都用上一次 browser_read 的 ref 或稳定 selector）。" +
+      "同时派发 HTML5 拖放事件（dragstart/dragover/drop/dragend + DataTransfer）和一套指针序列，" +
+      "所以 sortable 列表、文件拖入区、看板卡片这类通常能走通。" +
+      "⚠ 合成事件 isTrusted=false，依赖真实指针捕获的库可能无效 → 拖完一定要 read 或截图确认结果。",
+    params: {
+      ref: { type: "string", description: "起点元素 ref" },
+      selector: { type: "string", description: "起点元素 CSS 选择器" },
+      toRef: { type: "string", description: "终点元素 ref" },
+      toSelector: { type: "string", description: "终点元素 CSS 选择器" },
+    },
+    run: (p) =>
+      request("drag", {
+        params: {
+          ref: p?.ref ? String(p.ref) : undefined,
+          selector: p?.selector ? String(p.selector) : undefined,
+          toRef: p?.toRef ? String(p.toRef) : undefined,
+          toSelector: p?.toSelector ? String(p.toSelector) : undefined,
+        },
+      }),
+  });
+
+  registerTool(pi, {
+    name: "browser_wait",
+    label: "等待页面内容",
+    description:
+      SNAPNOTE +
+      "\n等页面上出现某段文本（text）或某个元素（selector），最多等 seconds 秒（缺省 8，上限 25）。" +
+      "命中即返回；超时返回 ok:false 并附上当前地址与标题。\n" +
+      "用它的理由：SPA 渲染、异步列表、跳转后的落地页都需要等一下，而反复 browser_read 轮询每轮都要付一次" +
+      "请求往返 —— 要等就用这个，别靠连续 read 硬凑。接管人工验证期间也可以调（只读）。",
+    params: {
+      text: { type: "string", description: "等这段文本出现在页面可见文字里" },
+      selector: { type: "string", description: "等这个 CSS 选择器命中元素（优先于 text）" },
+      seconds: { type: "number", description: "最长等待秒数，缺省 8、上限 25" },
+    },
+    run: (p) =>
+      request("wait", {
+        params: {
+          text: p?.text ? String(p.text) : undefined,
+          selector: p?.selector ? String(p.selector) : undefined,
+          seconds: p?.seconds != null ? Number(p.seconds) : undefined,
+        },
+      }),
+  });
+
+  registerTool(pi, {
+    name: "browser_eval",
+    label: "页面执行脚本",
+    description:
+      SNAPNOTE +
+      "\n在页面里执行一段 JS 并把返回值给模型。其它工具做不到的事再用它（读框架状态、" +
+      "改样式、批量取 DOM、翻 localStorage）。\n" +
+      "硬约束：脚本**同步返回**，不能 await —— 页面注入（ExecuteScript）不等 Promise，也不回报异常，" +
+      "返回 Promise 会被拒。要异步结果就分两步：先调一次把值写进全局（window.__x = …），" +
+      "过一会儿再 browser_eval 读那个全局变量。" +
+      "返回值必须是可 JSON 序列化的；站点 CSP 禁止 new Function 时会报错。" +
+      "运行在页面自己的 origin 里（碰不到 Helix 的任何能力），但它**能改这个页面**，" +
+      "所以视同写操作：人工接管期间会被拒绝。",
+    params: {
+      js: {
+        type: "string",
+        description: "函数体源码（不用包 function），必须 return 一个可序列化值，如：JSON.stringify([...document.querySelectorAll('h2')].map(h=>h.innerText))",
+      },
+    },
+    required: ["js"],
+    run: (p) => request("eval", { params: { js: String(p?.js ?? "") } }),
+  });
+
+  registerTool(pi, {
+    name: "browser_upload",
+    label: "上传本地文件",
+    description:
+      SNAPNOTE +
+      "\n把一个**本地文件**塞进 `<input type=\"file\">`（页内用 DataTransfer + File 赋值，再派发 change）。" +
+      "path 必须在当前项目目录之内，单文件上限 8MB —— 越界或过大直接拒绝，这是刻意的边界。\n" +
+      "定位用 ref 或 selector，指向的必须真是 file input（不是它的兄弟 label/按钮）。" +
+      "传完要 read 或截图确认站点收到了文件；个别校验 isTrusted 的上传组件不会认这次赋值，" +
+      "那就 browser_handoff 交给人点。",
+    params: {
+      path: { type: "string", description: "文件路径（项目目录内的相对或绝对路径）" },
+      ref: { type: "string", description: "<input type=file> 的 ref" },
+      selector: { type: "string", description: "<input type=file> 的 CSS 选择器（推荐）" },
+    },
+    required: ["path"],
+    run: (p) =>
+      request("upload", {
+        params: {
+          path: String(p?.path ?? ""),
+          ref: p?.ref ? String(p.ref) : undefined,
+          selector: p?.selector ? String(p.selector) : undefined,
+        },
+      }),
+  });
+
+  registerTool(pi, {
+    name: "browser_dialog",
+    label: "页面弹窗",
+    description:
+      SNAPNOTE +
+      "\nHelix 不弹原生 alert/confirm/prompt（那会占住页面的脚本线程，把之后所有浏览器工具一起拖死）：" +
+      "页面调用它们时只**记一条记录**并立刻按「取消」返回（confirm→false、prompt→null、alert→无）。\n" +
+      "所以点了一个会弹确认框的按钮之后，用这个工具看 dialogs 里记了什么；" +
+      "要让下一次 confirm 回答「确定」就先调 `accept:true`（prompt 还可以带 text），然后再点按钮 —— " +
+      "已经发生的那次不会追溯生效。clear:true 清空记录。\n" +
+      "browser_read 的返回里也会带最近 3 条记录，通常不需要专门调这个。",
+    params: {
+      accept: { type: "boolean", description: "下一次 confirm 返回 true / prompt 采纳 text" },
+      text: { type: "string", description: "下一次 prompt 的应答文本" },
+      clear: { type: "boolean", description: "清空已记录的弹窗" },
+    },
+    run: (p) =>
+      request("dialog", {
+        params: {
+          accept: p?.accept === true || p?.accept === "true" ? true : p?.accept === false ? false : undefined,
+          text: p?.text != null ? String(p.text) : undefined,
+          clear: p?.clear === true || p?.clear === "true",
+        },
+      }),
   });
 }

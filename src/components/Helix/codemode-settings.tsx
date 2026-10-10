@@ -80,7 +80,6 @@ export function CodemodeSettingsPanel() {
               value={cfg?.inlineBudget ?? 3000}
               min={0}
               max={40000}
-              suffix="tokens"
               small
               onCommit={(v) => apply({ inlineBudget: v })}
             />

@@ -19,6 +19,11 @@ export interface AgentSettingsSlice {
   agentMaxIterations: number;
   autoCompactContext: boolean;
   autoSaveSession: boolean;
+  // 自动归档旧任务：前端定时扫描会话，把「已完成 + 无未读 + 未置顶 + 超过保留期」
+  // 的会话移入归档。见 src/lib/auto-archive.ts。
+  autoArchiveOldTasks: boolean;
+  /** 保留期（天）：savedAt 早于 now - 该天数才进候选。 */
+  autoArchiveRetentionDays: number;
   reasoningEffort: ReasoningEffortLevel;
   personality: string;
   fastMode: boolean;
@@ -33,6 +38,8 @@ export interface AgentSettingsSlice {
   setAgentMaxIterations: (n: number) => void;
   setAutoCompactContext: (v: boolean) => void;
   setAutoSaveSession: (v: boolean) => void;
+  setAutoArchiveOldTasks: (v: boolean) => void;
+  setAutoArchiveRetentionDays: (v: number) => void;
   setReasoningEffort: (v: ReasoningEffortLevel) => void;
   setPersonality: (v: string) => void;
   setFastMode: (v: boolean) => void;
@@ -56,6 +63,8 @@ export const createAgentSettingsSlice: StateCreator<
   agentMaxIterations: 90,
   autoCompactContext: true,
   autoSaveSession: false,
+  autoArchiveOldTasks: false,
+  autoArchiveRetentionDays: 7,
   reasoningEffort: "medium",
   personality: "helpful",
   fastMode: false,
@@ -67,6 +76,8 @@ export const createAgentSettingsSlice: StateCreator<
   setAgentMaxIterations: (n) => set({ agentMaxIterations: n }),
   setAutoCompactContext: (v) => set({ autoCompactContext: v }),
   setAutoSaveSession: (v) => set({ autoSaveSession: v }),
+  setAutoArchiveOldTasks: (v) => set({ autoArchiveOldTasks: v }),
+  setAutoArchiveRetentionDays: (v) => set({ autoArchiveRetentionDays: v }),
   setReasoningEffort: (v) => set({ reasoningEffort: v }),
   setPersonality: (v) => set({ personality: v }),
   setFastMode: (v) => set({ fastMode: v }),

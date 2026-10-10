@@ -172,6 +172,10 @@ export function BrowserToolbar({
   const native = isTauri();
   const loading = useHelixStore((s) => s.browserLoadingPageId === pageId);
   const picking = useHelixStore((s) => s.browserPickPageId === pageId);
+  // agent 把这一页交回给人时（browser_handoff）挂出一条窄横幅。读的是 store 里那份
+  // 唯一事实，和「写操作是否被锁」同源，所以不会出现横幅还在但工具没锁的分裂。
+  const handoff = useHelixStore((s) => s.browserHandoff);
+  const handedOff = handoff && handoff.pageId === pageId ? handoff : null;
   // null = 没有草稿，显示页面真实 URL。
   const [draft, setDraft] = useState<string | null>(null);
   const [shooting, setShooting] = useState(false);
@@ -249,79 +253,95 @@ export function BrowserToolbar({
   };
 
   return (
-    <div className="flex items-center gap-1 px-2 py-1.5 shrink-0 border-b border-border/20">
-      <button
-        onClick={() => go("back")}
-        disabled={!native}
-        className={`${CTRL_BTN} disabled:opacity-30 disabled:hover:bg-transparent`}
-        data-tip="后退"
-      >
-        <ChevronLeft className="size-4" />
-      </button>
-      <button
-        onClick={() => go("forward")}
-        disabled={!native}
-        className={`${CTRL_BTN} disabled:opacity-30 disabled:hover:bg-transparent`}
-        data-tip="前进"
-      >
-        <ChevronRight className="size-4" />
-      </button>
-      <button
-        onClick={() => go("reload")}
-        disabled={!native}
-        className={`${CTRL_BTN} disabled:opacity-30 disabled:hover:bg-transparent`}
-        data-tip="刷新"
-      >
-        <RotateCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
-      </button>
-      <div className="flex-1 min-w-0 flex items-center gap-1.5 px-2 py-1 rounded-full border border-border/40 bg-muted/30 focus-within:border-primary/60 focus-within:bg-muted/50 transition-colors">
-        <Globe className="size-3 shrink-0 text-muted-foreground/70" />
-        <input
-          value={draft ?? url}
-          onFocus={(e) => setDraft(e.currentTarget.value)}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => setDraft(null)}
-          onKeyDown={(e) => {
-            // 不让按键继续冒泡：全局快捷键会把这里当成命令面板/搜索的触发点。
-            e.stopPropagation();
-            if (e.key === "Enter") {
-              commit(e.currentTarget.value);
-              setDraft(null);
-              e.currentTarget.blur();
-            } else if (e.key === "Escape") {
-              setDraft(null);
-              e.currentTarget.blur();
-            }
+    <div className="flex flex-col shrink-0">
+      <div className="flex items-center gap-1 px-2 py-1.5 shrink-0 border-b border-border/20">
+        <button
+          onClick={() => go("back")}
+          disabled={!native}
+          className={`${CTRL_BTN} disabled:opacity-30 disabled:hover:bg-transparent`}
+          data-tip="后退"
+        >
+          <ChevronLeft className="size-4" />
+        </button>
+        <button
+          onClick={() => go("forward")}
+          disabled={!native}
+          className={`${CTRL_BTN} disabled:opacity-30 disabled:hover:bg-transparent`}
+          data-tip="前进"
+        >
+          <ChevronRight className="size-4" />
+        </button>
+        <button
+          onClick={() => go("reload")}
+          disabled={!native}
+          className={`${CTRL_BTN} disabled:opacity-30 disabled:hover:bg-transparent`}
+          data-tip="刷新"
+        >
+          <RotateCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+        </button>
+        <div className="flex-1 min-w-0 flex items-center gap-1.5 px-2 py-1 rounded-full border border-border/40 bg-muted/30 focus-within:border-primary/60 focus-within:bg-muted/50 transition-colors">
+          <Globe className="size-3 shrink-0 text-muted-foreground/70" />
+          <input
+            value={draft ?? url}
+            onFocus={(e) => setDraft(e.currentTarget.value)}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={() => setDraft(null)}
+            onKeyDown={(e) => {
+              // 不让按键继续冒泡：全局快捷键会把这里当成命令面板/搜索的触发点。
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                commit(e.currentTarget.value);
+                setDraft(null);
+                e.currentTarget.blur();
+              } else if (e.key === "Escape") {
+                setDraft(null);
+                e.currentTarget.blur();
+              }
+            }}
+            spellCheck={false}
+            placeholder="输入网址，例如 localhost:3000"
+            className="flex-1 min-w-0 bg-transparent text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground placeholder:text-muted-foreground/50 outline-none"
+          />
+        </div>
+        <button
+          onClick={() => void shoot()}
+          disabled={!native || shooting}
+          className={`${CTRL_BTN} disabled:opacity-40`}
+          data-tip={shooting ? "正在截图…" : "截图，加入聊天输入框"}
+        >
+          <Camera className={`size-3.5 ${shooting ? "animate-pulse" : ""}`} />
+        </button>
+        <button
+          onClick={togglePick}
+          className={`${CTRL_BTN} ${picking ? "text-primary bg-primary/10" : ""}`}
+          data-tip={url ? "选取网页元素加入聊天" : "请先打开网页再选取元素"}
+        >
+          <MousePointer2 className="size-3.5" />
+        </button>
+        <button
+          onClick={() => {
+            if (url) void electronShell.open(url);
           }}
-          spellCheck={false}
-          placeholder="输入网址，例如 localhost:3000"
-          className="flex-1 min-w-0 bg-transparent text-[calc(var(--helix-transcript-size)*0.7857)] text-foreground placeholder:text-muted-foreground/50 outline-none"
-        />
+          className={CTRL_BTN}
+          data-tip="在外部浏览器中打开"
+        >
+          <ExternalLink className="size-3.5" />
+        </button>
       </div>
-      <button
-        onClick={() => void shoot()}
-        disabled={!native || shooting}
-        className={`${CTRL_BTN} disabled:opacity-40`}
-        data-tip={shooting ? "正在截图…" : "截图，加入聊天输入框"}
-      >
-        <Camera className={`size-3.5 ${shooting ? "animate-pulse" : ""}`} />
-      </button>
-      <button
-        onClick={togglePick}
-        className={`${CTRL_BTN} ${picking ? "text-primary bg-primary/10" : ""}`}
-        data-tip={url ? "选取网页元素加入聊天" : "请先打开网页再选取元素"}
-      >
-        <MousePointer2 className="size-3.5" />
-      </button>
-      <button
-        onClick={() => {
-          if (url) void electronShell.open(url);
-        }}
-        className={CTRL_BTN}
-        data-tip="在外部浏览器中打开"
-      >
-        <ExternalLink className="size-3.5" />
-      </button>
+      {handedOff && (
+        <div className="flex items-center gap-2 px-2 py-1 border-b border-amber-500/20 bg-amber-500/10 text-[calc(var(--helix-transcript-size)*0.75)] text-amber-700 dark:text-amber-400">
+          <span className="flex-1 min-w-0 truncate">
+            人工验证中 · 原因：{handedOff.reason}
+          </span>
+          <button
+            onClick={() => useHelixStore.getState().setBrowserHandoff(null)}
+            className="shrink-0 px-2 py-0.5 rounded-md border border-amber-500/30 bg-amber-500/15 hover:bg-amber-500/25 transition-colors"
+            data-tip="解锁该页，让 Agent 继续操作它"
+          >
+            我已完成
+          </button>
+        </div>
+      )}
     </div>
   );
 }

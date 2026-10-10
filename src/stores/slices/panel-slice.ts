@@ -3,7 +3,7 @@
  * Zero business-logic cross-references; purely UI state.
  */
 import type { StateCreator } from "zustand";
-import type { AvailableCommand, HelixTodo, PlanStep } from "../helix-types";
+import type { AvailableCommand, PlanStep } from "../helix-types";
 import type { PlanReviewRequest } from "@/components/Helix/approval-dialog";
 
 type NavEntry =
@@ -38,17 +38,12 @@ export interface PanelSlice {
   /** 渠道中心叠加面板（侧边栏「设置」按钮上方的入口打开）。 */
   showChannelsCenter: boolean;
   showWorktreePanel: boolean;
+  /** PR 面板（`gh` 直建或推送分支 + compare 链接）。 */
+  showPrPanel: boolean;
+  /** 诊断面板：跑项目自带的类型检查/lint 并列出可跳转的问题。 */
+  showDiagnosticsPanel: boolean;
   showPluginManager: boolean;
   availableCommands: AvailableCommand[];
-  /**
-   * Helix's in-session todo list, captured from `session/update` events that
-   * carry a todo/plan payload. Empty by default so the header button stays
-   * hidden until the backend actually streams a list.
-   */
-  helixTodos: HelixTodo[];
-  /** 按会话缓存的 todo 列表（仅内存，不持久化）：切会话时按 currentSessionId
-   *  恢复对应清单，避免 A 会话的任务清单串到 B 会话。 */
-  helixTodosBySession: Record<string, HelixTodo[]>;
   /** 计划模式（plan mode）模型产出的待批准方案。由后端 plan_complete /
    *  run 结束等事件写入，全局共享，供右上角工作面板与底部 PlanReviewBar 共用。 */
   pendingPlanReview: PlanReviewRequest | null;
@@ -81,12 +76,10 @@ export interface PanelSlice {
   toggleCustomizePanel: () => void;
   toggleChannelsCenter: () => void;
   toggleWorktreePanel: () => void;
+  togglePrPanel: () => void;
+  toggleDiagnosticsPanel: () => void;
   togglePluginManager: () => void;
   setAvailableCommands: (cmds: AvailableCommand[]) => void;
-  /** Replace the Helix todo list (called whenever a fresh todo payload arrives).
-   *  sessionId 标识该清单归属的 UI 会话：写入按会话缓存，且仅当它就是当前
-   *  查看的会话时才更新展示列表（并行 run 不互相覆盖）。 */
-  setHelixTodos: (todos: HelixTodo[], sessionId?: string) => void;
 }
 
 export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
@@ -104,10 +97,10 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
   showCustomizePanel: false,
   showChannelsCenter: false,
   showWorktreePanel: false,
+  showPrPanel: false,
+  showDiagnosticsPanel: false,
   showPluginManager: false,
   availableCommands: [],
-  helixTodos: [],
-  helixTodosBySession: {},
   pendingPlanReview: null,
   activePlan: [],
 
@@ -209,22 +202,12 @@ export const createPanelSlice: StateCreator<PanelSlice, [], [], PanelSlice> = (
     set((s) => ({ showChannelsCenter: !s.showChannelsCenter })),
   toggleWorktreePanel: () =>
     set((s) => ({ showWorktreePanel: !s.showWorktreePanel })),
+  togglePrPanel: () => set((s) => ({ showPrPanel: !s.showPrPanel })),
+  toggleDiagnosticsPanel: () =>
+    set((s) => ({ showDiagnosticsPanel: !s.showDiagnosticsPanel })),
   togglePluginManager: () =>
     set((s) => ({ showPluginManager: !s.showPluginManager })),
   setAvailableCommands: (cmds) => set({ availableCommands: cmds }),
-  setHelixTodos: (todos, sessionId) =>
-    set((s) => {
-      const bySession = sessionId
-        ? { ...s.helixTodosBySession, [sessionId]: todos }
-        : s.helixTodosBySession;
-      const cur = (s as unknown as { currentSessionId: string | null })
-        .currentSessionId;
-      const isVisible = sessionId === undefined || sessionId === cur;
-      return {
-        helixTodosBySession: bySession,
-        ...(isVisible ? { helixTodos: todos } : {}),
-      };
-    }),
   setPendingPlanReview: (v) => set({ pendingPlanReview: v }),
   setActivePlan: (steps) => set({ activePlan: steps ?? [] }),
 });

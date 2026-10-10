@@ -4,7 +4,6 @@ import { Copy, CheckCheck } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import { computeDiff, looksLikeUnifiedDiff } from "@/components/Helix/diff-preview";
 import { CodeCard } from "@/components/Helix/helix-markdown";
-import { formatDurationSeconds } from "@/lib/format";
 import { normalizeAcpContent, stripEmoji } from "@/lib/text-utils";
 import {
   getToolDisplayLabel,
@@ -31,6 +30,12 @@ const TOOL_CATEGORY: Record<string, string> = {
   browser_click: "浏览器点击",
   browser_type: "浏览器输入",
   browser_scroll: "浏览器滚动",
+  browser_hover: "浏览器",
+  browser_drag: "浏览器",
+  browser_wait: "浏览器",
+  browser_eval: "浏览器",
+  browser_upload: "浏览器",
+  browser_dialog: "浏览器",
   read: "读取",
   read_file: "读取",
   write: "写入",
@@ -561,11 +566,6 @@ function ToolCard({
         >
           {verbText} {titleLabel}
         </span>
-        {step.duration_s != null && step.duration_s > 0 && (
-          <span className="text-[0.72em] text-muted-foreground shrink-0">
-            {formatDurationSeconds(step.duration_s)}
-          </span>
-        )}
         {(() => {
           const count = step.content
             ? extractResultCount(

@@ -361,6 +361,47 @@ export const electronApp = {
     throw new Error("App not available in browser mode");
   },
 
+  /** 系统通知开关（config.yaml 的 notifications: 块）。浏览器模式下拿不到
+   *  后端，返回 null 让设置页显示默认值而不是假装成功。 */
+  async notificationConfig(): Promise<{
+    ok: boolean;
+    turnEndMode?: string;
+    approvalEnabled?: boolean;
+    clarifyEnabled?: boolean;
+  } | null> {
+    const api = getElectronAPI();
+    if (api && typeof api.app.notificationConfig === "function") {
+      return api.app.notificationConfig();
+    }
+    return null;
+  },
+
+  async setNotificationConfig(updates: {
+    turnEndMode?: string;
+    approvalEnabled?: boolean;
+    clarifyEnabled?: boolean;
+  }): Promise<{
+    ok: boolean;
+    turnEndMode?: string;
+    approvalEnabled?: boolean;
+    clarifyEnabled?: boolean;
+    error?: string;
+  } | null> {
+    const api = getElectronAPI();
+    if (api && typeof api.app.setNotificationConfig === "function") {
+      return api.app.setNotificationConfig(updates);
+    }
+    return null;
+  },
+
+  async openNotificationSettings(): Promise<{ ok: boolean; error?: string }> {
+    const api = getElectronAPI();
+    if (api && typeof api.app.openNotificationSettings === "function") {
+      return api.app.openNotificationSettings();
+    }
+    return { ok: false, error: "App not available in browser mode" };
+  },
+
   /** Poll pending pi-extension browser requests (emits helix:browser-request
    *  events with the full payload; navigate also emits the legacy
    *  helix:open-browser for the sidebar-open path). */

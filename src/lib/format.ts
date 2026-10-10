@@ -30,26 +30,19 @@ export function formatTokens(n: number): string {
 }
 
 /**
- * Format duration in seconds to a human-readable string.
- * Matches Helix Desktop behavior:
- *   < 1s   → "500ms"
- *   < 60s  → "2.5s" or "10s"
+ * Format a duration in (possibly fractional) seconds as whole seconds.
+ * 转录里的计时只回答「这步花了多久」，毫秒和小数点是噪音 —— 亚秒向上取 1s，
+ * 绝不出现 "500ms" / "2.5s" 这种写法。
+ *   < 60s  → "3s"
  *   < 60m  → "3m 15s" or "5m"
  *   ≥ 1h   → "1h 30m" or "2h"
  */
 export function formatDurationSeconds(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "";
-  if (seconds < 1) {
-    const ms = Math.max(1, Math.round(seconds * 1000));
-    return `${ms}ms`;
-  }
-  if (seconds < 60) {
-    const raw = seconds.toFixed(seconds >= 10 ? 0 : 1);
-    return `${raw.endsWith(".0") ? raw.slice(0, -2) : raw}s`;
-  }
-  const wholeSeconds = Math.round(seconds);
-  const minutes = Math.floor(wholeSeconds / 60);
-  const remSeconds = wholeSeconds % 60;
+  const whole = Math.max(1, Math.round(seconds));
+  if (whole < 60) return `${whole}s`;
+  const minutes = Math.floor(whole / 60);
+  const remSeconds = whole % 60;
   if (minutes < 60) {
     return remSeconds ? `${minutes}m ${remSeconds}s` : `${minutes}m`;
   }

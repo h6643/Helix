@@ -107,16 +107,74 @@ function parseSchedule(text: string): ParsedSchedule {
   };
 }
 
+/**
+ * 会话模式选择器（对齐 Codex 的 Scheduled Task / Scheduled Message）。
+ *
+ * fresh = 每次运行开一条新对话，跑完即焚。明天的汇总不需要记得今天的汇总。
+ * reuse = 回到同一条对话接着聊。这次检查依赖上次检查的结论。
+ *
+ * 判据就一句：如果明天跑这次任务，它需要之前的对话吗？需要 → reuse。
+ */
+function SessionModePicker({
+  value,
+  onChange,
+}: {
+  value: "fresh" | "reuse";
+  onChange: (v: "fresh" | "reuse") => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => onChange("fresh")}
+        className={cn(
+          "px-2 py-1 rounded-lg text-[calc(var(--helix-transcript-size)*0.7857)] transition-colors",
+          value === "fresh"
+            ? "bg-primary text-primary-foreground"
+            : "bg-muted/50 text-muted-foreground hover:text-foreground",
+        )}
+        title="每次运行开一条新对话，跑完即焚。适合每天早上汇总邮件这类不需要记住上次结果的任务。"
+      >
+        新对话
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("reuse")}
+        className={cn(
+          "px-2 py-1 rounded-lg text-[calc(var(--helix-transcript-size)*0.7857)] transition-colors",
+          value === "reuse"
+            ? "bg-primary text-primary-foreground"
+            : "bg-muted/50 text-muted-foreground hover:text-foreground",
+        )}
+        title="每次运行回到同一条对话。适合每 30 分钟检查这个 PR、处理新评论这类依赖上次结论的轮询任务。"
+      >
+        沿用上次对话
+      </button>
+      <span className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/70">
+        {value === "reuse"
+          ? "每次运行接着上次的对话继续"
+          : "每次运行都开一条干净的新对话"}
+      </span>
+    </div>
+  );
+}
+
 function AddTaskForm({
   onCancel,
   onAdd,
 }: {
   onCancel: () => void;
-  onAdd: (label: string, prompt: string, schedule: string) => void;
+  onAdd: (
+    label: string,
+    prompt: string,
+    schedule: string,
+    sessionMode: "fresh" | "reuse",
+  ) => void;
 }) {
   const [label, setLabel] = useState("");
   const [prompt, setPrompt] = useState("");
   const [schedule, setSchedule] = useState("");
+  const [sessionMode, setSessionMode] = useState<"fresh" | "reuse">("fresh");
   const canSubmit = label.trim() && prompt.trim() && schedule.trim();
 
   return (
@@ -143,6 +201,7 @@ function AddTaskForm({
         className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono"
         placeholder="e.g. every day at 9:00, every 30 minutes, in 5 minutes"
       />
+      <SessionModePicker value={sessionMode} onChange={setSessionMode} />
       <div className="flex justify-end gap-2">
         <button
           onClick={onCancel}
@@ -152,7 +211,8 @@ function AddTaskForm({
         </button>
         <button
           onClick={() =>
-            canSubmit && onAdd(label.trim(), prompt.trim(), schedule.trim())
+            canSubmit &&
+            onAdd(label.trim(), prompt.trim(), schedule.trim(), sessionMode)
           }
           disabled={!canSubmit}
           className="px-3 py-1.5 text-[calc(var(--helix-transcript-size)*0.8571)] bg-primary text-primary-foreground rounded-lg disabled:opacity-50 transition-colors"
@@ -176,6 +236,9 @@ function EditTaskForm({
   const [editLabel, setEditLabel] = useState(task.label);
   const [editPrompt, setEditPrompt] = useState(task.prompt);
   const [editSchedule, setEditSchedule] = useState(task.scheduleText);
+  const [editSessionMode, setEditSessionMode] = useState<"fresh" | "reuse">(
+    task.sessionMode ?? "fresh",
+  );
 
   const handleSave = () => {
     if (!editLabel.trim() || !editPrompt.trim() || !editSchedule.trim()) return;
@@ -185,6 +248,7 @@ function EditTaskForm({
       prompt: editPrompt.trim(),
       scheduleText: editSchedule.trim(),
       nextRunAt: parsed.nextRun,
+      sessionMode: editSessionMode,
     });
     onCancel();
   };
@@ -212,6 +276,7 @@ function EditTaskForm({
         className="w-full px-2 py-1.5 bg-muted/50 border border-border/50 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] font-mono"
         placeholder="e.g. every day at 9:00, every 30 minutes"
       />
+      <SessionModePicker value={editSessionMode} onChange={setEditSessionMode} />
       <div className="flex justify-end gap-2">
         <button
           onClick={onCancel}
@@ -310,6 +375,25 @@ function TaskItem({
             <Clock className="size-3" />
             {task.scheduleText}
           </span>
+          {(task.sessionMode ?? "fresh") === "reuse" ? (
+            <span
+              className="flex items-center gap-1 text-primary/80"
+              title="每次运行回到同一条对话（Codex Scheduled Message）。适合轮询类任务：这次检查依赖上次检查的结论。"
+            >
+              <RefreshCw className="size-3" />
+              沿用对话
+            </span>
+          ) : (
+            <span
+              className="text-muted-foreground/50"
+              title="每次运行开一条新对话，跑完即焚（Codex Scheduled Task）。适合每天早上汇总邮件这类不需要记住上次结果的任务。"
+            >
+              新对话
+            </span>
+          )}
+          {(task.runCount ?? 0) > 0 && (
+            <span title="累计运行次数">已跑 {task.runCount} 次</span>
+          )}
           <span>下次: {formatTime(task.nextRunAt)}</span>
           {task.lastRunAt && <span>上次: {formatTime(task.lastRunAt)}</span>}
           <span
@@ -418,7 +502,12 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
   }, []);
 
   const handleAdd = useCallback(
-    async (label: string, prompt: string, schedule: string) => {
+    async (
+      label: string,
+      prompt: string,
+      schedule: string,
+      sessionMode: "fresh" | "reuse",
+    ) => {
       const parsed = parseSchedule(schedule);
       const cronExpression = parsed.kind === "cron" ? parsed.expr : undefined;
       const nextRunAt = parsed.kind === "once" ? parsed.runAt : undefined;
@@ -433,6 +522,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
             scheduleText: schedule,
             cronExpression,
             nextRunAt,
+            sessionMode,
           });
           if (res.ok && res.id) {
             backendId = res.id;
@@ -448,6 +538,7 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
         prompt,
         scheduleText: schedule,
         cronExpression,
+        sessionMode,
         enabled: true,
         lastRunAt: null,
         nextRunAt: backendNextRun,
@@ -679,9 +770,18 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
                       selectedWorkDir={selectedWorkDir}
                       onToggle={() => handleToggle(task)}
                       onDelete={() => handleDelete(task)}
-                      onUpdate={(updates) =>
-                        updateScheduledTask(task.id, updates)
-                      }
+                      onUpdate={(updates) => {
+                        // sessionMode 存在 jobs.json 里，不同步到后端就会被
+                        // 30s 后的 refreshFromBackend 洗回旧值。
+                        if (updates.sessionMode !== undefined) {
+                          const electron = (window as any).electron;
+                          void electron?.scheduledTasks?.update?.({
+                            id: task.id,
+                            sessionMode: updates.sessionMode,
+                          });
+                        }
+                        updateScheduledTask(task.id, updates);
+                      }}
                       onRunNow={() => handleRunNow(task)}
                       isSelected={selectedIds.has(task.id)}
                       onToggleSelect={() => handleToggleSelect(task.id)}

@@ -24,9 +24,36 @@
 //! 上游另有第四档 `approve`（规则匹配、无 AI 那一层）；本机装的是就地补丁版，
 //! 扩展源码里已经删掉它，但 `pi update` 会带回来，所以这里的归一必须继续认得。
 //! Helix 不提供这一档，也从不写它：它与 `auto` 的差别只是「要不要过 AI」，而 AI
-//! 判定要额外一次模型调用，不该由一个下拉静默决定。万一磁盘上被人写成 `approve`，
-//! 读路径落到 `_` → `auto` 显示；别指望这种文件只靠改名就对得上 —— 扩展把认不出的
-//! mode 一律回落成它的 `DEFAULT_CONFIG.mode` = yolo，也就是实际全放行。
+//! 判定要额外一次模型调用，不该由一个下拉静默决定。
+//!
+//! 磁盘上被人写成 `approve`（或任何认不出的值）时：扩展把它认不出 ⇒ 回落它的
+//! `DEFAULT_CONFIG.mode` = **yolo，实际全放行**，所以读路径必须照样报「完全访问」
+//! 并把 `globalModeUnparsable` 摆给前端。这里曾经报 `auto`（显示会问、实际不问），
+//! 是本模块最坏那一类错法；覆盖表里的坏值同理 —— 逐条当作不存在，绝不自己发明档位。
+//!
+//! # 按项目 / 按会话覆盖（2026-10-10 本地定制）
+//!
+//! 同一个 settings.json 的 `permission` 块里另有两张覆盖表：
+//!
+//! ```json
+//! "modeByProject": { "d:/project/helix": "strict" },
+//! "modeBySession": { "01a123df-02ea-70f4-bfdd-f4598bbd6241": "yolo" }
+//! ```
+//!
+//! 生效档 = **会话覆盖 → 项目覆盖 → 全局 `mode`**，由**扩展自己**解析
+//! （`config.ts::resolvePermissionMode`，闸门与 footer 都走它），所以「面板显示
+//! 的档」与「真正拦工具的档」是同一个函数的同一个返回值。这正是这个模块一直要的
+//! 单一真相：覆盖状态绝不只放在前端（旧 `approvalModeBySession` 就是这么坏的）。
+//!
+//! 由此对写入侧的三条硬约束：
+//!  - **项目键归一必须逐字复刻扩展**（反斜杠→正斜杠、去尾斜杠、Windows 转小写）。
+//!  - **认不出的值当作不存在**（扩展 `isValidPermissionMode` 只收 yolo/auto/strict，
+//!    坏条目逐个丢弃而不是回落默认），否则 Helix 写出一份扩展不消费的表。
+//!  - **`enabled` 是总开关，一关连覆盖表都不跑**，所以任何写档动作都把它置 true；
+//!    yolo 本身已经是放行档，不需要再借 `enabled=false` 表达「关闭」。
+//!
+//! 远程工作区不在这套机制的作用范围里：远端的 pi 读**远端**自己的 settings.json，
+//! 本机的覆盖表对它一点影响都没有，所以远程会话的 scoped 写入一律拒绝并说明原因。
 //!
 //! # 生效时机
 //!
@@ -105,12 +132,14 @@ pub(crate) fn read_approval_timeout_sec() -> u64 {
     clamp_approval_timeout(block.get("approvalTimeoutSec").and_then(Value::as_f64))
 }
 
-/// permission 键缺失时的起底配置（与扩展 DEFAULT_CONFIG 对齐）。
+/// permission 键缺失时的起底配置（与扩展 DEFAULT_CONFIG 对齐，另加两张空的覆盖表）。
 fn default_permission_block() -> Value {
     json!({
         "mode": "auto",
         "enabled": true,
         "approvalTimeoutSec": DEFAULT_APPROVAL_TIMEOUT_SEC,
+        "modeByProject": {},
+        "modeBySession": {},
         "classifier": {
             "enabled": true,
             "model": "auto",
@@ -144,97 +173,461 @@ fn from_extension_mode(mode: &str) -> &'static str {
     }
 }
 
-/// 读当前档位。
+// ──────────────────────── 作用域档位（全局 / 项目 / 会话） ────────────────────────
+
+/// 扩展 `normalizeConfig` 认不出 `mode` 时回落的值 —— 也就是「实际全放行」。
+/// 读路径必须报同一个值，否则显示会问、实际不问。
+const EXTENSION_FALLBACK_MODE: &str = "yolo";
+
+/// 项目键归一：**必须与扩展 `config.ts::normalizeProjectKey` 逐字一致**
+/// （反斜杠 → 正斜杠、去尾斜杠、Windows 大小写不敏感）。两侧任何一处不同，就会
+/// 造出「UI 说本项目已收紧、实际按全局放行」。
+fn normalize_project_key(cwd: &str) -> String {
+    let forward = cwd.replace('\\', "/");
+    let trimmed = forward.trim_end_matches('/');
+    if cfg!(windows) {
+        trimmed.to_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// 扩展 `isValidPermissionMode` 的同集合。不在里面的值在扩展侧一律**当作不存在**，
+/// 这里也必须一样跳过，不能自己发明档位。
+fn is_extension_mode(value: &str) -> bool {
+    matches!(value, "yolo" | "auto" | "strict")
+}
+
+/// 写命令的作用域。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Scope {
+    Global,
+    Project,
+    Session,
+}
+
+fn parse_scope(raw: Option<&str>) -> Result<Scope, String> {
+    match raw.unwrap_or("global").trim().to_lowercase().as_str() {
+        "global" => Ok(Scope::Global),
+        "project" => Ok(Scope::Project),
+        "session" => Ok(Scope::Session),
+        other => Err(format!("未知作用域: {other}（只支持 global / project / session）")),
+    }
+}
+
+/// 一次调用的作用域身份（对应扩展侧 `readScopeIdentity`：拿不到就回落全局）。
+#[derive(Clone, Default)]
+struct ScopeTarget {
+    session_id: Option<String>,
+    cwd: Option<String>,
+    remote: bool,
+}
+
+impl ScopeTarget {
+    /// 前端给 sid 与/或 cwd（草稿可能两个都没有），缺的从网关实例和 jsonl 头补。
+    ///
+    /// `remote://…` 这类虚拟键**不能**当项目目录写进覆盖表：扩展收到的是 pi 报的
+    /// 真实 cwd，写一个本机路径都命不中的键等于藏一条永不生效的规则。
+    fn resolve(session_id: Option<&str>, cwd: Option<&str>) -> Self {
+        let clean = |v: &str| -> Option<String> {
+            let t = v.trim();
+            (!t.is_empty() && !t.contains("://")).then(|| t.to_string())
+        };
+        let sid = session_id.and_then(clean);
+        let remote = sid
+            .as_deref()
+            .map(crate::pi_gateway::session_is_remote)
+            .unwrap_or(false);
+        // 远程会话的项目在**远端机器**上：本机覆盖表里按远端路径建的键永远不会被
+        // 远端的扩展读到，所以这里干脆不带 cwd —— 解析只会落到全局，而
+        // `scope.remote = true` 让前端把「这条跑在远端，档位由远端 settings.json
+        // 决定」说明白。（`remote://…` 虚拟键同样被 clean 挡掉，绝不入库。）
+        let cwd = if remote {
+            None
+        } else {
+            // 显式参数优先：面板那条流的目录是用户看得见的项目，比实例残值更权威。
+            cwd.and_then(clean).or_else(|| {
+                sid.as_deref().and_then(|s| {
+                    crate::pi_gateway::peek_session_cwd(s)
+                        .or_else(|| crate::pi_gateway::session_jsonl_cwd(s))
+                })
+            })
+        };
+        Self {
+            session_id: sid,
+            cwd,
+            remote,
+        }
+    }
+
+    fn project_key(&self) -> Option<String> {
+        let cwd = self.cwd.as_deref()?;
+        let key = normalize_project_key(cwd);
+        (!key.is_empty()).then_some(key)
+    }
+}
+
+/// 读一张覆盖表，只留「键非空 + 值合法」的条目（与扩展 `normalizeModeOverrides`
+/// 同）。`project = true` 时键再归一一次 —— 扩展也只对 `modeByProject` 归一，
+/// 手改文件写成的反斜杠路径因此仍能命中 pi 报来的正斜杠 cwd。
+fn read_override_table(block: &Value, field: &str, project: bool) -> Vec<(String, String)> {
+    let Some(map) = block.get(field).and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(map.len());
+    for (key, value) in map {
+        let trimmed = key.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(mode) = value.as_str().filter(|m| is_extension_mode(m)) else {
+            continue;
+        };
+        out.push((
+            if project {
+                normalize_project_key(trimmed)
+            } else {
+                trimmed.to_string()
+            },
+            mode.to_string(),
+        ));
+    }
+    out
+}
+
+/// 生效档解析：会话覆盖 → 项目覆盖 → 全局 `mode`。优先级、坏值处理、默认回落
+/// 都逐字对齐扩展 `config.ts::resolvePermissionMode`。
 ///
-/// 读不到时**不要**编一个档位回去：`ok:false` + `mode:null` + `exists`，让调用
-/// 方自己决定怎么说实话。原因就写在下面那个历史 bug 里 —— 曾经这里坏 JSON 也
-/// 返回 `mode:"auto"`，前端拿去显示「自动审批」，而扩展在文件缺失/坏 JSON 时
-/// 一律回落它自己的 `DEFAULT_CONFIG`（`mode:"yolo"`，全放行）。显示会问、实际
-/// 不问，是这一层最坏的错法。
-#[tauri::command]
-pub fn helix_get_permission_mode() -> Value {
-    let path = config_path();
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(r) => r,
-        Err(e) => {
-            return json!({
-                "ok": false,
-                "mode": Value::Null,
-                "approvalTimeoutSec": Value::Null,
-                "exists": path.exists(),
-                "reason": format!("settings.json 不可读: {e}"),
-                "config_path": path.to_string_lossy(),
-            })
+/// 返回 `(扩展 mode, 来源, 命中键)`；`source` 是给前端看的实话，不是判定输入。
+fn resolve_effective_mode(
+    block: &Value,
+    session_id: Option<&str>,
+    cwd: Option<&str>,
+) -> (String, &'static str, Option<String>) {
+    if let Some(sid) = session_id {
+        if let Some((key, mode)) = read_override_table(block, "modeBySession", false)
+            .into_iter()
+            .find(|(k, _)| k.as_str() == sid)
+        {
+            return (mode, "session", Some(key));
         }
-    };
-    let root = match serde_json::from_str::<Value>(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            return json!({
-                "ok": false,
-                "mode": Value::Null,
-                "approvalTimeoutSec": Value::Null,
-                "exists": true,
-                "reason": format!("settings.json JSON 解析失败: {e}"),
-                "config_path": path.to_string_lossy(),
-            })
+    }
+    let usable_cwd = cwd.map(str::trim).filter(|c| !c.is_empty() && !c.contains("://"));
+    if let Some(cwd) = usable_cwd {
+        let key = normalize_project_key(cwd);
+        if let Some((stored, mode)) = read_override_table(block, "modeByProject", true)
+            .into_iter()
+            .find(|(stored, _)| *stored == key)
+        {
+            return (mode, "project", Some(stored));
         }
+    }
+    match block.get("mode").and_then(Value::as_str).filter(|m| is_extension_mode(m)) {
+        Some(mode) => (mode.to_string(), "global", None),
+        None => (EXTENSION_FALLBACK_MODE.to_string(), "global", None),
+    }
+}
+
+/// 把 permission 块 + 作用域身份装配成前端要的那一份视图。
+///
+/// get / set / clear 三条命令共用同一个构造，免得「写入返回的形状」和「读回来的
+/// 形状」又是两套。`mode` 顶层键**一直是生效档**（旧前端只读它，语义保持兼容）。
+fn permission_mode_view(block: &Value, target: &ScopeTarget, path: &std::path::Path) -> Value {
+    // enabled=false 是扩展的总开关：它一关，连覆盖表都不跑（实际全放行）。
+    let enabled = block.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let (mode, source, key) = resolve_effective_mode(block, target.session_id.as_deref(), target.cwd.as_deref());
+    let global_mode = block
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|m| is_extension_mode(m))
+        .unwrap_or(EXTENSION_FALLBACK_MODE);
+    let (mode, source) = if enabled {
+        (mode, source)
+    } else {
+        (EXTENSION_FALLBACK_MODE.to_string(), "disabled")
     };
-    let Some(v) = read_permission_block(&root) else {
-        // settings.json 里还没有 permission 键：如实说没有，不编档位。
-        return json!({
-            "ok": false,
-            "mode": Value::Null,
-            "approvalTimeoutSec": Value::Null,
-            "exists": false,
-            "reason": "settings.json 中尚无 permission 键",
-            "config_path": path.to_string_lossy(),
-        });
+    let session_hit = read_override_table(block, "modeBySession", false)
+        .into_iter()
+        .find(|(k, _)| Some(k.as_str()) == target.session_id.as_deref());
+    let project_hit = target.project_key().and_then(|want| {
+        read_override_table(block, "modeByProject", true)
+            .into_iter()
+            .find(|(k, _)| *k == want)
+    });
+    let scoped = |entry: Option<(String, String)>| -> Option<Value> {
+        entry.map(|(k, m)| json!({ "key": k, "mode": from_extension_mode(&m), "extension_mode": m }))
     };
-    let m = v.get("mode").and_then(Value::as_str).unwrap_or("auto");
     json!({
         "ok": true,
-        "mode": from_extension_mode(m),
-        "extension_mode": m,
-        "approvalTimeoutSec": clamp_approval_timeout(v.get("approvalTimeoutSec").and_then(Value::as_f64)),
-        // enabled=false 等价 yolo（扩展自己的约定），必须一并读出来，
-        // 否则前端显示「自动审批」而实际全放行。
-        "enabled": v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        "mode": from_extension_mode(&mode),
+        "extension_mode": mode,
+        "effective": {
+            "mode": from_extension_mode(&mode),
+            "extension_mode": mode,
+            "source": source,
+            "key": key,
+        },
+        "global": {
+            "mode": from_extension_mode(global_mode),
+            "extension_mode": global_mode,
+            // 全局 mode 缺失/打错 ⇒ 扩展按 yolo 放行，而 Helix 从没写过这种值。
+            // 前端要能指出「这不是你选的档，是文件里的值认不出来」。
+            "unparsable": !block.get("mode").and_then(Value::as_str).is_some_and(is_extension_mode),
+        },
+        "session": scoped(session_hit),
+        "project": scoped(project_hit),
+        "override_active": matches!(source, "session" | "project"),
+        "scope": {
+            "session_id": target.session_id,
+            "cwd": target.cwd,
+            "remote": target.remote,
+        },
+        "approvalTimeoutSec": clamp_approval_timeout(block.get("approvalTimeoutSec").and_then(Value::as_f64)),
+        "enabled": enabled,
         "config_path": path.to_string_lossy(),
     })
 }
 
-/// 写档位。只改 `mode` 与 `enabled`，其余字段（`approvalTimeoutSec` /
-/// `classifier` / `userRules`）原样保留 —— 用户在扩展里调过的 AI 模型和规则
-/// 不能被前端一个下拉抹掉。
+/// 失败视图：读不到 settings.json 时**不要编一个档位回去**。
+///
+/// 原因就写在下面那个历史 bug 里 —— 曾经这里坏 JSON 也返回 `mode:"auto"`，前端
+/// 拿去显示「自动审批」，而扩展在文件缺失/坏 JSON 时一律回落它自己的
+/// `DEFAULT_CONFIG`（`mode:"yolo"`，全放行）。显示会问、实际不问，是这一层最坏的错法。
+fn permission_mode_read_error(path: &std::path::Path, exists: bool, reason: String) -> Value {
+    json!({
+        "ok": false,
+        "mode": Value::Null,
+        "effective": Value::Null,
+        "global": Value::Null,
+        "session": Value::Null,
+        "project": Value::Null,
+        "approvalTimeoutSec": Value::Null,
+        "exists": exists,
+        "reason": reason,
+        "config_path": path.to_string_lossy(),
+    })
+}
+
+/// 读档位（可选带上作用域身份，前端传 sid 就能拿到这条会话真正生效的那一档）。
 #[tauri::command]
-pub fn helix_set_permission_mode(mode: String) -> Value {
+pub fn helix_get_permission_mode(session_id: Option<String>, cwd: Option<String>) -> Value {
+    let path = config_path();
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            return permission_mode_read_error(&path, path.exists(), format!("settings.json 不可读: {e}"))
+        }
+    };
+    let root = match serde_json::from_str::<Value>(&raw) {
+        Ok(v) => v,
+        Err(e) => return permission_mode_read_error(&path, true, format!("settings.json JSON 解析失败: {e}")),
+    };
+    let Some(v) = read_permission_block(&root) else {
+        // settings.json 里还没有 permission 键：如实说没有，不编档位。
+        return permission_mode_read_error(&path, false, "settings.json 中尚无 permission 键".into());
+    };
+    let target = ScopeTarget::resolve(session_id.as_deref(), cwd.as_deref());
+    permission_mode_view(&v, &target, &path)
+}
+
+/// 读整份 settings.json 供写入。**文件存在但解析失败时必须中止**：
+///
+/// 这条路径写的是整份 pi 配置（`defaultModel` / `packages` / 各扩展的键都在里面）。
+/// 旧实现坏 JSON 也当「空配置」继续写，等于前端点一下审批下拉就把用户整份
+/// settings.json 抹了 —— 那是数据丢失，不是显示分歧。
+fn load_root_for_write(path: &std::path::Path) -> Result<Value, String> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str::<Value>(&raw)
+            .map_err(|e| format!("settings.json 解析失败，已中止写入以免覆盖整份配置: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+        Err(e) => Err(format!("settings.json 不可读，已中止写入: {e}")),
+    }
+}
+
+/// 目标那一格**现在**的值（已按扩展的口径校验：认不出的值 = 没有覆盖）。
+/// 用于写入返回的 `changed`，也用于「清除」前的对照。
+fn prev_scope_value(cfg: &Value, scope: Scope, key: &str) -> Option<String> {
+    match scope {
+        Scope::Global => cfg
+            .get("mode")
+            .and_then(Value::as_str)
+            .filter(|m| is_extension_mode(m))
+            .map(str::to_string),
+        Scope::Project => read_override_table(cfg, "modeByProject", true)
+            .into_iter()
+            .find(|(k, _)| k.as_str() == key)
+            .map(|(_, m)| m),
+        Scope::Session => read_override_table(cfg, "modeBySession", false)
+            .into_iter()
+            .find(|(k, _)| k.as_str() == key)
+            .map(|(_, m)| m),
+    }
+}
+
+/// 把档位写进目标那一格，返回改之前那格的值。
+///
+/// 只碰目标：另一张覆盖表、`approvalTimeoutSec`、`classifier`、`userRules` 一律
+/// 原样留着（用户在扩展里调过的东西不能被前端一个下拉抹掉）。
+/// 末尾把 `enabled` 置回 true —— 它在扩展侧是「整个扩展关闭」的总开关，一关连
+/// 覆盖表都不跑；而这里写的是**某一格的档位**，写成不生效的状态就是撒谎。
+/// yolo 本身已经是放行档，不需要再借 `enabled=false` 表达。
+fn apply_scope_mode(cfg: &mut Value, scope: Scope, key: &str, ext_mode: &str) -> Option<String> {
+    let prev = prev_scope_value(cfg, scope, key);
+    match scope {
+        Scope::Global => cfg["mode"] = Value::String(ext_mode.to_string()),
+        Scope::Project | Scope::Session => {
+            let field = if scope == Scope::Project {
+                "modeByProject"
+            } else {
+                "modeBySession"
+            };
+            let project = scope == Scope::Project;
+            let obj = cfg.as_object_mut().expect("已是 object");
+            // 表不存在时建一张空表；存在则原地改，别的条目不动。
+            let table = obj
+                .entry(field)
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !table.is_object() {
+                // 被人写成数组/字符串：整张丢掉重建 —— 扩展认不出这张表就等于
+                // 没有覆盖，而 UI 会显示「本项目已收紧」，那正是显示与闸门分叉。
+                *table = Value::Object(serde_json::Map::new());
+            }
+            let map = table.as_object_mut().expect("刚确保是 object");
+            if project {
+                // 归一后同键的旧写法（手改成的反斜杠 / 大小写）一并换掉：同一个
+                // 项目留两条不同档位的条目，两侧迭代顺序可能不同，判定就成了掷硬币。
+                let dupes: Vec<String> = map
+                    .keys()
+                    .filter(|k| {
+                        normalize_project_key(k.trim()) == key && k.as_str() != key
+                    })
+                    .cloned()
+                    .collect();
+                for k in dupes {
+                    map.remove(&k);
+                }
+            } else {
+                // 会话表同理清掉「同一 sid 的带空格写法」，否则两条同会话条目
+                // 会让 UI 的「已覆盖」与扩展实际命中的那条不一致。
+                let dupes: Vec<String> = map
+                    .keys()
+                    .filter(|k| k.trim() == key && k.as_str() != key)
+                    .cloned()
+                    .collect();
+                for k in dupes {
+                    map.remove(&k);
+                }
+            }
+            map.insert(key.to_string(), Value::String(ext_mode.to_string()));
+        }
+    }
+    cfg["enabled"] = Value::Bool(true);
+    prev
+}
+
+/// 删掉目标那一格，返回被删掉的键（项目表可能有多于一种拼法）。
+///
+/// `global` 走不到这里（它是兜底那一层，没有「清除」，见 `helix_clear_permission_override`）。
+fn remove_scope_override(cfg: &mut Value, scope: Scope, key: &str) -> Vec<String> {
+    let project = scope == Scope::Project;
+    let field = if project { "modeByProject" } else { "modeBySession" };
+    let Some(map) = cfg
+        .as_object_mut()
+        .and_then(|c| c.get_mut(field))
+        .and_then(Value::as_object_mut)
+    else {
+        return Vec::new();
+    };
+    let hits: Vec<String> = map
+        .keys()
+        .filter(|k| {
+            if project {
+                normalize_project_key(k.trim()) == key
+            } else {
+                k.trim() == key
+            }
+        })
+        .cloned()
+        .collect();
+    for k in &hits {
+        map.remove(k);
+    }
+    hits
+}
+
+/// 写档位。`scope` 决定写到哪一层：
+///  - `global` → `mode`（旧前端不传 scope，走这一档，行为不变）
+///  - `project` → `modeByProject[归一后的项目键]`
+///  - `session` → `modeBySession[pi 会话 id]`
+///
+/// 写入本身收在 `apply_scope_mode` 里（纯函数，可测）；这条命令只负责把身份
+/// 解析成键、拒绝写不进的作用域，再把结果按 `permission_mode_view` 的形状回传。
+#[tauri::command]
+pub fn helix_set_permission_mode(
+    mode: String,
+    scope: Option<String>,
+    session_id: Option<String>,
+    cwd: Option<String>,
+) -> Value {
+    let scope = match parse_scope(scope.as_deref()) {
+        Ok(s) => s,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
     let ext_mode = to_extension_mode(&mode);
+    let target = if scope == Scope::Global {
+        ScopeTarget::default()
+    } else {
+        ScopeTarget::resolve(session_id.as_deref(), cwd.as_deref())
+    };
     let path = config_path();
 
-    // 读 settings.json（保留全部键，defaultModel/packages 等不能被覆盖）；
-    // permission 键缺失时用扩展默认值起一份。
-    let mut root: Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or_else(|| json!({}));
+    // 目标格子的键（顺带把「这个作用域现在根本写不了」挡在写之前）。
+    let key: Result<String, String> = match scope {
+        Scope::Global => Ok(String::new()),
+        Scope::Project => {
+            if target.remote {
+                Err("远程会话的项目在**远端机器**上，它的 pi 读远端自己的 settings.json：本机覆盖表对它无效。".into())
+            } else {
+                target.project_key().ok_or_else(|| {
+                    "写「本项目」档需要项目目录：这条会话还没有本地目录（草稿？）。请先选项目，或改用「本会话」/「全局」。".into()
+                })
+            }
+        }
+        Scope::Session => {
+            if target.remote {
+                Err("远程会话的审批档由远端配置决定：本机的 modeBySession 不会被远端的扩展读到。".into())
+            } else {
+                target
+                    .session_id
+                    .clone()
+                    .ok_or_else(|| "写「本会话」档需要会话 id：这条对话还没建起来（草稿）。请先发一轮，或改用「本项目」/「全局」。".into())
+            }
+        }
+    };
+    let key = match key {
+        Ok(k) => k,
+        Err(e) => return json!({ "ok": false, "error": e, "config_path": path.to_string_lossy() }),
+    };
+
+    let mut root = match load_root_for_write(&path) {
+        Ok(v) => v,
+        Err(e) => return json!({ "ok": false, "error": e, "config_path": path.to_string_lossy() }),
+    };
     if !root.is_object() {
         root = json!({});
     }
     let mut cfg = read_permission_block(&root).unwrap_or_else(default_permission_block);
+    let prev_scope_mode = apply_scope_mode(&mut cfg, scope, &key, ext_mode);
 
-    let prev = cfg.get("mode").and_then(Value::as_str).unwrap_or("").to_string();
-    // 只有 yolo 档才把 enabled 置 false（等价语义）；其余档必须 enabled=true，
-    // 否则扩展按「enabled=false 等同 yolo」直接全放行 —— 那是「设置显示会问、
-    // 实际全放行」的最隐蔽一种分裂。
-    let enabled = ext_mode != "yolo";
-    {
-        let obj = cfg.as_object_mut().expect("已是 object");
-        obj.insert("mode".into(), Value::String(ext_mode.into()));
-        obj.insert("enabled".into(), Value::Bool(enabled));
-    }
-    if let Some(obj) = root.as_object_mut() {
-        obj.insert("permission".into(), cfg);
+    // 会话档是临时意图：对话早被删掉的条目留着只会无界增长，按本机存活情况清一次。
+    let pruned = if scope == Scope::Session {
+        prune_session_overrides(&mut cfg, crate::pi_gateway::session_override_alive)
+    } else {
+        Vec::new()
+    };
+
+    if let Some(map) = root.as_object_mut() {
+        map.insert("permission".into(), cfg.clone());
     }
 
     let body = serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".into());
@@ -245,15 +638,121 @@ pub fn helix_set_permission_mode(mode: String) -> Value {
             "config_path": path.to_string_lossy(),
         });
     }
-    json!({
-        "ok": true,
-        "mode": from_extension_mode(ext_mode),
-        "extension_mode": ext_mode,
-        "enabled": enabled,
-        "changed": prev != ext_mode,
-        "config_path": path.to_string_lossy(),
-    })
+    let mut view = permission_mode_view(&cfg, &target, &path);
+    if let Some(obj) = view.as_object_mut() {
+        obj.insert("scope_written".into(), json!({
+            "scope": scope_name(scope),
+            "key": if scope == Scope::Global { Value::Null } else { Value::String(key) },
+            "mode": from_extension_mode(ext_mode),
+            "extension_mode": ext_mode,
+            "previous": prev_scope_mode.as_ref().map(|m| json!({ "mode": from_extension_mode(m), "extension_mode": m })),
+            "changed": prev_scope_mode.as_deref() != Some(ext_mode),
+        }));
+        if !pruned.is_empty() {
+            obj.insert("prunedSessions".into(), json!(pruned));
+        }
+    }
+    view
 }
+
+fn scope_name(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Global => "global",
+        Scope::Project => "project",
+        Scope::Session => "session",
+    }
+}
+
+/// 删掉「本机已经不存在的会话」的覆盖条目，返回被删的 sid。
+///
+/// 判活口径由调用方给（生产用 `pi_gateway::session_override_alive`：本机有 jsonl /
+/// 实例还在跑 / 被记为远程会话 —— 任一即活），这样纯函数可测。
+/// 表清空后保留空对象键：扩展读空表与读不到等价，而稳定的形状便于用户手改。
+fn prune_session_overrides(cfg: &mut Value, alive: impl Fn(&str) -> bool) -> Vec<String> {
+    let Some(map) = cfg
+        .as_object_mut()
+        .and_then(|c| c.get_mut("modeBySession"))
+        .and_then(Value::as_object_mut)
+    else {
+        return Vec::new();
+    };
+    let dead: Vec<String> = map.keys().filter(|k| !alive(k)).cloned().collect();
+    for k in &dead {
+        map.remove(k);
+    }
+    dead
+}
+
+/// 清除某一层的覆盖，回到「下一层说了算」。
+///
+/// `global` 没有「清除」这一说（它就是兜底那一层），要改请直接选档。
+#[tauri::command]
+pub fn helix_clear_permission_override(
+    scope: String,
+    session_id: Option<String>,
+    cwd: Option<String>,
+) -> Value {
+    let scope = match parse_scope(Some(scope.as_str())) {
+        Ok(s) => s,
+        Err(e) => return json!({ "ok": false, "error": e }),
+    };
+    let path = config_path();
+    if scope == Scope::Global {
+        return json!({
+            "ok": false,
+            "error": "全局档没有「清除」（它本来就是兜底那一层）；要改请直接选一个档位。",
+            "config_path": path.to_string_lossy(),
+        });
+    }
+    let target = ScopeTarget::resolve(session_id.as_deref(), cwd.as_deref());
+    let key = if scope == Scope::Project {
+        target.project_key()
+    } else {
+        target.session_id.clone()
+    };
+    let Some(key) = key else {
+        return json!({
+            "ok": false,
+            "error": if scope == Scope::Project {
+                "清除「本项目」覆盖需要项目目录（这条会话还没有本地目录）。"
+            } else {
+                "清除「本会话」覆盖需要会话 id（这条对话还没建起来）。"
+            },
+            "config_path": path.to_string_lossy(),
+        })
+    };
+
+    let mut root = match load_root_for_write(&path) {
+        Ok(v) => v,
+        Err(e) => return json!({ "ok": false, "error": e, "config_path": path.to_string_lossy() }),
+    };
+    if !root.is_object() {
+        root = json!({});
+    }
+    let mut cfg = read_permission_block(&root).unwrap_or_else(default_permission_block);
+    let removed = remove_scope_override(&mut cfg, scope, &key);
+
+    if let Some(map) = root.as_object_mut() {
+        map.insert("permission".into(), cfg.clone());
+    }
+    let body = serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".into());
+    if let Err(e) = crate::config::atomic_write(&path, &format!("{body}\n")) {
+        return json!({
+            "ok": false,
+            "error": format!("写配置失败: {e}"),
+            "config_path": path.to_string_lossy(),
+        });
+    }
+    let mut view = permission_mode_view(&cfg, &target, &path);
+    if let Some(obj) = view.as_object_mut() {
+        obj.insert(
+            "cleared".into(),
+            json!({ "scope": scope_name(scope), "key": key, "removed": removed }),
+        );
+    }
+    view
+}
+
 
 /// 写审批卡超时秒数。只改 `approvalTimeoutSec`，其余字段原样保留；输入收敛到
 /// [30, 3600]（不提供 0=关闭档），返回的是**生效值**（被收敛时与输入不同）。
@@ -268,10 +767,10 @@ pub fn helix_set_approval_timeout_sec(seconds: i64) -> Value {
     let sec = seconds.clamp(MIN_APPROVAL_TIMEOUT_SEC as i64, MAX_APPROVAL_TIMEOUT_SEC as i64) as u64;
     let path = config_path();
 
-    let mut root: Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or_else(|| json!({}));
+    let mut root = match load_root_for_write(&path) {
+        Ok(v) => v,
+        Err(e) => return json!({ "ok": false, "error": e, "config_path": path.to_string_lossy() }),
+    };
     if !root.is_object() {
         root = json!({});
     }
@@ -321,71 +820,12 @@ pub fn helix_set_approval_timeout_sec(seconds: i64) -> Value {
 //  - `yolo`：直接放行，规则层根本不跑。
 //  - `strict`：全部人工审批，规则层也不跑 —— 连 deny 规则都不生效，最严也只是
 //    弹窗问一次。
-//  - `auto`：层 1 AST → 层 2 规则（`[...12 条 builtin-danger, ...userRules]`，
+//  - `auto`：层 1 AST → 层 2 规则（`[...getDefaultRules(), ...userRules]`，
+//    内置侧现是四组（只读放行 / builtin-danger / 密钥路径 / 额外 bash deny），
 //    last-match-wins）→ 未命中才进层 3（AI + 人工竞速）。
 //  - bash 且 AST 判定「结构危险」（管道 / `&&` / 子 shell 等）时**跳过层 2**，
 //    直接进层 3 —— 这类命令上用户规则不生效。
 // 所以前端必须把「当前档位下规则到底生不生效」如实摆出来。
-
-/// builtin-danger 快照的来源版本（`src/rules/builtins.ts` 抄录时对齐的那一版）。
-const BUILTIN_SNAPSHOT_VERSION: &str = "1.5.0";
-
-/// 内置危险规则快照（12 条，逐字抄自 pi-permission 的 `src/rules/builtins.ts`）。
-///
-/// **只读展示用**，Helix 从不写它 —— 真规则由扩展的 `getDefaultRules()` 在每次
-/// 判定时现造。这一份存在的唯一理由是「让用户知道哪些是内置的、哪些是自己写的」；
-/// 代价是它会随 `pi update --extensions` 过期，所以读取命令会拿安装目录里的
-/// package.json 版本比对，不一致就显式告警。宁可提示过期，不要给过期安全感。
-fn builtin_danger_snapshot() -> Vec<Value> {
-    let rules: [(&str, &str, &str); 12] = [
-        ("bd-001", "\\brm\\b.*(\\s-(?:[a-zA-Z]*r)|--recursive)", "recursive delete"),
-        ("bd-002", "\\bsudo\\b", "sudo"),
-        ("bd-003", "\\bchmod\\b.*(777|a\\+rwx|ugo\\+rwx|ugo=rwx)", "world-writable permissions"),
-        (
-            "bd-004",
-            "(>\\s*/dev/(sd|hd|nvme|mmcblk|vd|xvd)[a-z0-9]+|of=/dev/(sd|hd|nvme|mmcblk|vd|xvd)[a-z0-9]+)",
-            "raw device write",
-        ),
-        ("bd-005", "\\bgit\\s+push\\s+.*(-f\\b|--force\\b)", "force push"),
-        ("bd-006", "\\bgit\\s+reset\\s+--hard\\b", "hard reset"),
-        ("bd-007", "\\bgit\\s+clean\\b.*(\\s-(?:[a-zA-Z]*f)|--force)", "git clean --force"),
-        ("bd-008", "\\bgit\\s+checkout\\s+(--\\s+)?\\.\\s*($|[;&|])", "git checkout . (discard all)"),
-        ("bd-009", "\\bgit\\s+restore\\b", "git restore"),
-        ("bd-010", "\\b(curl|wget)\\b.*\\|\\s*(ba)?sh\\b", "pipe to shell"),
-        ("bd-011", "\\bgh\\s+repo\\s+(create|delete|rename|archive)\\b", "modify GitHub repo"),
-        ("bd-012", "\\bgh\\s+release\\s+(create|delete|edit)\\b", "modify GitHub release"),
-    ];
-    rules
-        .iter()
-        .map(|(id, pattern, description)| {
-            json!({
-                "id": id,
-                "tool": "bash",
-                "pattern": pattern,
-                "action": "deny",
-                "source": "builtin-danger",
-                "description": description,
-                "regex": true,
-            })
-        })
-        .collect()
-}
-
-/// 本机实际装着的扩展版本（读不到返回 None ⇒ 前端显示「未知」，不假装一致）。
-fn installed_extension_version() -> Option<String> {
-    let pkg = crate::paths::pi_agent_dir()
-        .join("npm")
-        .join("node_modules")
-        .join("@zhushanwen")
-        .join("pi-permission")
-        .join("package.json");
-    let raw = std::fs::read_to_string(pkg).ok()?;
-    serde_json::from_str::<Value>(&raw)
-        .ok()?
-        .get("version")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string())
-}
 
 /// 校验并归一一条规则；返回可扩展消费的 JSON 形状。错误信息面向 UI（会原样显示）。
 fn normalize_rule(raw: &Value, fallback_id: &str) -> Result<Value, String> {
@@ -509,7 +949,7 @@ fn apply_user_rules_to_root(root: &Value, rules: Vec<Value>) -> Value {
     root
 }
 
-/// 读用户规则 + 规则层当前是否参与判定 + 内置规则快照（只读）。
+/// 读用户规则 + 当前档位 / enabled / classifier 开关 + 规则层是否参与判定。
 #[tauri::command]
 pub fn helix_get_permission_rules() -> Value {
     let path = config_path();
@@ -571,9 +1011,6 @@ pub fn helix_get_permission_rules() -> Value {
         }
     }
 
-    let installed = installed_extension_version();
-    let version_matches = installed.as_deref() == Some(BUILTIN_SNAPSHOT_VERSION);
-
     json!({
         "ok": true,
         "rules": good,
@@ -585,10 +1022,6 @@ pub fn helix_get_permission_rules() -> Value {
         "classifierEnabled": classifier_enabled,
         // 只有 auto + enabled 才跑规则层（见文件头）。
         "rulesActive": ext_mode == "auto" && enabled,
-        "builtinRules": builtin_danger_snapshot(),
-        "builtinSnapshotVersion": BUILTIN_SNAPSHOT_VERSION,
-        "installedVersion": installed,
-        "builtinVersionDrift": !version_matches,
         "configPath": path.to_string_lossy(),
     })
 }
@@ -611,10 +1044,10 @@ pub fn helix_set_permission_rules(rules: Vec<Value>) -> Value {
     };
 
     let path = config_path();
-    let root: Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or_else(|| json!({}));
+    let root = match load_root_for_write(&path) {
+        Ok(v) => v,
+        Err(e) => return json!({ "ok": false, "error": e, "configPath": path.to_string_lossy() }),
+    };
     let merged = apply_user_rules_to_root(&root, normalized);
 
     let body = serde_json::to_string_pretty(&merged).unwrap_or_else(|_| "{}".into());
@@ -846,24 +1279,169 @@ mod tests {
         assert_eq!(out["permission"]["userRules"], json!([]));
     }
 
-    #[test]
-    fn builtin_snapshot_has_twelve_deny_rules() {
-        let rules = builtin_danger_snapshot();
-        assert_eq!(rules.len(), 12);
-        for r in &rules {
-            assert_eq!(r["action"], "deny");
-            assert_eq!(r["tool"], "bash");
-            assert_eq!(r["source"], "builtin-danger");
-            assert!(r["regex"].as_bool().unwrap());
-            // 内置那份是 RegExp 源串：必须能被当成正则用（这里只查明显畸形）。
-            let p = r["pattern"].as_str().unwrap();
-            assert!(!p.is_empty() && p.matches('\\').count() < p.len(), "{p}");
+    // ──────────────── 作用域档位（与扩展 resolvePermissionMode 同步） ────────────────
+
+    fn target(sid: Option<&str>, cwd: Option<&str>) -> ScopeTarget {
+        ScopeTarget {
+            session_id: sid.map(str::to_string),
+            cwd: cwd.map(str::to_string),
+            remote: false,
         }
-        // 抽查两条最容易抄错的（含 `\s-` 锚定，缺了就误吃 --verbose）。
-        assert_eq!(
-            rules[0]["pattern"],
-            "\\brm\\b.*(\\s-(?:[a-zA-Z]*r)|--recursive)"
+    }
+
+    #[test]
+    fn project_key_matches_the_extensions_normalization() {
+        // 反斜杠 → 正斜杠、去尾斜杠；扩展只在 win32 转小写。两侧任何一处不同，
+        // 就会造出「UI 说本项目已收紧、实际按全局放行」。
+        let key = normalize_project_key("D:\\Project\\Helix\\");
+        assert!(!key.contains('\\'), "反斜杠必须折成正斜杠: {key}");
+        assert!(!key.ends_with('/'), "尾斜杠必须去掉: {key}");
+        if cfg!(windows) {
+            assert_eq!(key, "d:/project/helix", "Windows 上大小写不敏感");
+            // 同一项目的两种拼法归一到同一个键 —— 覆盖表去重全靠这条。
+            assert_eq!(normalize_project_key("d:/project/helix"), key);
+        } else {
+            assert_eq!(key, "D:/Project/Helix", "非 Windows 保留大小写");
+        }
+    }
+
+    #[test]
+    fn effective_mode_priority_is_session_then_project_then_global() {
+        let block = json!({
+            "mode": "auto",
+            "enabled": true,
+            "modeByProject": { "d:/project/helix": "strict" },
+            "modeBySession": { "sid-1": "yolo" },
+        });
+        // 会话覆盖最优先，并且盖住同项目的项目覆盖。
+        let hit = resolve_effective_mode(&block, Some("sid-1"), Some("D:\\Project\\Helix"));
+        assert_eq!((hit.0.as_str(), hit.1), ("yolo", "session"));
+        assert_eq!(hit.2.as_deref(), Some("sid-1"));
+        // 别的会话落回项目档：存的键与 pi 报来的 cwd 拼法不同也算命中（两侧都归一）。
+        let hit = resolve_effective_mode(&block, Some("sid-2"), Some("D:/Project/Helix/"));
+        assert_eq!((hit.0.as_str(), hit.1), ("strict", "project"));
+        assert_eq!(hit.2.as_deref(), Some("d:/project/helix"));
+        // 没有目录就跳过项目档，只会落到全局。
+        let hit = resolve_effective_mode(&block, None, None);
+        assert_eq!((hit.0.as_str(), hit.1), ("auto", "global"));
+        // `remote://…` 虚拟键不参与本地解析（它永远命不中 pi 报来的真实 cwd）。
+        let hit = resolve_effective_mode(&block, None, Some("remote://box/D:/Project/Helix"));
+        assert_eq!(hit.1, "global");
+    }
+
+    #[test]
+    fn unparsable_modes_are_skipped_not_invented() {
+        // 覆盖表里的坏值：扩展逐条丢弃，这里也必须当作不存在 —— 否则 Helix 写出
+        // 一份扩展不消费的表，UI 显示「已收紧」而判定里根本没有。
+        let block = json!({
+            "mode": "auto",
+            "modeByProject": { "d:/p": "approve", "d:/q": "strict" },
+            "modeBySession": { "s1": "ALLOW" },
+        });
+        assert_eq!(resolve_effective_mode(&block, Some("s1"), Some("d:/q")).0, "strict");
+        assert_eq!(resolve_effective_mode(&block, Some("s1"), None).0, "auto");
+        assert_eq!(resolve_effective_mode(&block, None, Some("d:/p")).0, "auto");
+
+        // 全局 mode 认不出 ⇒ 扩展回落它的 DEFAULT_CONFIG.mode = yolo（实际全放行）。
+        // 显示必须跟到同一个值，并把「这不是你选的档，是文件里的值认不出来」摆出来。
+        let view = permission_mode_view(
+            &json!({ "mode": "approve" }),
+            &target(None, None),
+            std::path::Path::new("settings.json"),
         );
-        assert_eq!(rules[6]["pattern"], "\\bgit\\s+clean\\b.*(\\s-(?:[a-zA-Z]*f)|--force)");
+        assert_eq!(view["extension_mode"], "yolo");
+        assert_eq!(view["mode"], "full");
+        assert_eq!(view["global"]["unparsable"], true);
+    }
+
+    #[test]
+    fn master_switch_off_reports_no_gate_at_all() {
+        // enabled=false 时扩展连覆盖表都不跑。生效档必须直接报「完全访问」，
+        // 否则又是「卡片写本项目询问审批、工具照样跑」。
+        let block = json!({
+            "mode": "auto",
+            "enabled": false,
+            "modeByProject": { "d:/p": "strict" },
+        });
+        let view = permission_mode_view(
+            &block,
+            &target(None, Some("D:\\p")),
+            std::path::Path::new("settings.json"),
+        );
+        assert_eq!(view["extension_mode"], "yolo");
+        assert_eq!(view["effective"]["source"], "disabled");
+        assert_eq!(view["override_active"], false);
+        assert_eq!(view["enabled"], false);
+        // 那一格本身仍然如实报出来（它确实在文件里，只是当前不生效）。
+        assert_eq!(view["project"]["extension_mode"], "strict");
+    }
+
+    #[test]
+    fn scope_write_touches_only_its_own_cell() {
+        let mut cfg = json!({
+            "mode": "auto",
+            "enabled": true,
+            "approvalTimeoutSec": 90,
+            "classifier": { "enabled": false, "model": "deepseek" },
+            "userRules": [{ "id": "user-1", "tool": "bash", "pattern": "git push *", "action": "deny", "source": "user" }],
+            "modeByProject": { "D:\\Other\\Proj": "yolo", "d:/project/helix": "auto" },
+        });
+        let rules_before = cfg["userRules"].clone();
+        let project_before = cfg["modeByProject"].clone();
+        let prev = apply_scope_mode(&mut cfg, Scope::Project, "d:/project/helix", "strict");
+        assert_eq!(prev.as_deref(), Some("auto"));
+        assert_eq!(cfg["modeByProject"]["d:/project/helix"], "strict");
+        // 归一后同键的旧拼法被换掉：同一项目留两条不同档位，两侧迭代顺序就是掷硬币。
+        assert_eq!(cfg["modeByProject"].as_object().unwrap().len(), 2);
+        assert_eq!(
+            cfg["modeByProject"]["D:\\Other\\Proj"],
+            project_before["D:\\Other\\Proj"]
+        );
+        // 其余字段逐字留下：全局档、超时、classifier、userRules 都不该被一个下拉抹掉。
+        assert_eq!(cfg["mode"], "auto");
+        assert_eq!(cfg["approvalTimeoutSec"], 90);
+        assert_eq!(cfg["classifier"]["model"], "deepseek");
+        assert_eq!(cfg["userRules"], rules_before);
+        // 写档即启用：enabled=false 会让整张覆盖表失效，不能写成不生效的状态。
+        assert_eq!(cfg["enabled"], true);
+    }
+
+    #[test]
+    fn session_write_keeps_global_cell_and_prunes_dead_sessions() {
+        let mut cfg = json!({ "mode": "yolo", "enabled": false });
+        let prev = apply_scope_mode(&mut cfg, Scope::Session, "s1", "strict");
+        assert_eq!(prev, None);
+        assert_eq!(cfg["modeBySession"]["s1"], "strict");
+        assert_eq!(cfg["mode"], "yolo", "scoped 写入不能顺手改全局档");
+        assert_eq!(cfg["enabled"], true, "总开关关着，这条覆盖根本不跑");
+
+        cfg["modeBySession"]["dead"] = json!("auto");
+        let pruned = prune_session_overrides(&mut cfg, |sid| sid == "s1");
+        assert_eq!(pruned, vec!["dead".to_string()]);
+        assert_eq!(cfg["modeBySession"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn clear_removes_every_spelling_of_the_project() {
+        let mut cfg = json!({
+            "modeByProject": { "D:\\P\\Helix": "strict", "d:/p/helix": "yolo", "d:/other": "auto" },
+        });
+        let removed = remove_scope_override(&mut cfg, Scope::Project, "d:/p/helix");
+        assert_eq!(removed.len(), 2, "手改出来的同项目拼法要一并清掉，否则「清了还在」");
+        assert_eq!(cfg["modeByProject"].as_object().unwrap().len(), 1);
+        assert_eq!(cfg["modeByProject"]["d:/other"], "auto");
+        // 清不存在的键 / 不存在的表：返回空，不报错（幂等）。
+        assert!(remove_scope_override(&mut cfg, Scope::Project, "d:/none").is_empty());
+        assert!(remove_scope_override(&mut cfg, Scope::Session, "s1").is_empty());
+    }
+
+    #[test]
+    fn default_block_seeds_both_override_tables() {
+        // permission 键缺失时起的形状要带空覆盖表：扩展读空表与读不到等价，
+        // 但稳定形状便于用户手改，也让「清除后还剩什么」有确定答案。
+        let cfg = default_permission_block();
+        assert_eq!(cfg["modeByProject"], json!({}));
+        assert_eq!(cfg["modeBySession"], json!({}));
+        assert_eq!(resolve_effective_mode(&cfg, Some("s1"), Some("d:/p")).0, "auto");
     }
 }

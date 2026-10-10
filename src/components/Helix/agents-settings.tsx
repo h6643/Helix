@@ -379,7 +379,6 @@ export function AgentsSettings() {
     toolDescriptionMode?: "full" | "compact" | "custom";
     worktreeIsolation?: boolean;
     maxConcurrent?: number;
-    maxSubagentDepth?: number;
     disableDefaultAgents?: boolean;
   };
   const [saSettings, setSaSettings] = useState<SubagentSettings>({});
@@ -873,20 +872,6 @@ export function AgentsSettings() {
                   max={64}
                   onCommit={(v) =>
                     setSaSettings((s) => ({ ...s, maxConcurrent: v }))
-                  }
-                />
-              </SettingRow>
-
-              <SettingRow
-                label="最大嵌套深度"
-                hint="子智能体再派生子智能体的层数上限。"
-              >
-                <NumberField
-                  value={saSettings.maxSubagentDepth ?? 1}
-                  min={1}
-                  max={16}
-                  onCommit={(v) =>
-                    setSaSettings((s) => ({ ...s, maxSubagentDepth: v }))
                   }
                 />
               </SettingRow>

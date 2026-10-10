@@ -691,6 +691,14 @@ export function RightSidebar() {
                   useHelixStore.getState().focusBylineInput();
                   setPlusMenuOpen(false);
                 }}
+                onOpenPr={() => {
+                  useHelixStore.getState().togglePrPanel();
+                  setPlusMenuOpen(false);
+                }}
+                onOpenDiagnostics={() => {
+                  useHelixStore.getState().toggleDiagnosticsPanel();
+                  setPlusMenuOpen(false);
+                }}
               />
             </div>
           </div>,

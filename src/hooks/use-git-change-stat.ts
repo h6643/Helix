@@ -14,7 +14,7 @@ interface GitChangeFile {
   binary: boolean;
 }
 
-export interface GitChangeStat {
+interface GitChangeStat {
   added: number;
   removed: number;
   files: GitChangeFile[];

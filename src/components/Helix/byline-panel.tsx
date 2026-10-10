@@ -14,7 +14,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadSessionMap } from "@/lib/session-map";
 import { useHelixStore } from "@/stores/helix-store";
-import type { ApprovalMode } from "@/stores/helix-types";
+import type { ApprovalMode, PermissionTier } from "@/stores/helix-types";
 import {
   APPROVAL_MODE_ITEMS,
   approvalModeOf,
@@ -155,8 +155,10 @@ export function BylinePanel() {
   const uploadFileInputRef = useRef<HTMLInputElement>(null);
   const bylineFocusSignal = useHelixStore((s) => s.bylineFocusSignal);
   // ── 旁路会话的两条轴（与主线同款语义）──────────────────────────────
-  // 权限档：全局一档，真相是 pi-permission 的配置文件，这里只是回读缓存，
-  // 所以旁路改了全局跟着变（扩展不区分会话，做不出「按会话的权限档」）。
+  // 权限档：真相是 pi-permission 的 settings.json，这里只是回读缓存。档可按
+  // 全局 / 本项目 / 本会话覆盖，写入层沿用主输入框选定的那一格（同一份 store
+  // 事实，旁路不另设选择器）；身份取**主线这条对话**的 sid + 目录 —— 旁路问答
+  // 是它的一个分支，用户眼里的「本会话」就是眼前这条对话。
   // plan：按会话那一轴，写旁路自己的 cid（btw- 前缀）。每轮 run 前
   // agent-flow-panel 的 handleRun 会把合成值经 session/set_mode 送到该会话的
   // pi 实例（网关按 session_id 路由），所以这里只写状态、不另发 RPC。
@@ -294,6 +296,21 @@ export function BylinePanel() {
       sessionMapCacheRef.current = new Map();
     }
     return sessionMapCacheRef.current;
+  };
+
+  /**
+   * 旁路这里改权限档，写的是**主线这条对话**的身份：旁路问答是它的一个分支，
+   * 用户眼里的「本会话」就是眼前这条对话，不是 `btw-` 那条内部会话。
+   * 落哪一层（全局 / 本项目 / 本会话）沿用主输入框选定的那一格 —— 作用域选择器
+   * 只做在那一处，两个面板共用同一条 store 事实。
+   */
+  const writePermissionTier = async (tier: PermissionTier) => {
+    await ensureSessionMap();
+    const st = useHelixStore.getState();
+    await setPermissionMode(tier, {
+      sessionId: sessionMapCacheRef.current.get(mainCid)?.sid ?? null,
+      cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? null,
+    });
   };
 
   // 输入 /compact 前缀时预热磁盘映射（惰性，不阻塞打字）。
@@ -706,11 +723,13 @@ export function BylinePanel() {
                             setPlanModeForSession(btwCid, true);
                             return;
                           }
-                          // 权限档写的是扩展配置 = **全局**生效。旁路和主线共用
-                          // 同一档，不会出现「主界面自动审批、旁路完全访问」——
-                          // 那个分裂本来就不可能存在，pi-permission 只读一个文件。
+                          // 权限档：写的是 pi-permission 的 settings.json，落在
+                          // 主输入框选定的那一格（全局/本项目/本会话）。旁路与
+                          // 主线共用同一份 store 事实，所以不会出现「主界面自动
+                          // 审批、旁路完全访问」—— 那本来就不可能存在，扩展只读
+                          // 一个文件，闸门用的就是这张表解析出的生效档。
                           setPlanModeForSession(btwCid, false);
-                          void setPermissionMode(mode.id);
+                          void writePermissionTier(mode.id);
                         }}
                         className={`w-full px-3 py-1.5 flex items-start gap-2 text-left hover:bg-muted/60 transition-colors ${
                           active ? "text-foreground" : "text-muted-foreground"

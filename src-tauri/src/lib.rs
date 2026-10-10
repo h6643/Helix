@@ -4,12 +4,16 @@ mod app;
 mod approval_policy;
 mod background_tasks;
 mod browser_webview;
+mod browser_import;
 mod config;
 mod delegations;
 mod desktop_notify;
+mod diagnostics;
+mod exec;
 mod fs;
 mod gateway;
 mod git;
+mod github;
 mod helix;
 mod hooks;
 mod mcp;
@@ -50,6 +54,21 @@ use crate::state::{AppState, APP_HANDLE};
 use std::sync::Arc;
 use tauri::Emitter;
 
+/// 把主窗口唤回前台（托盘左键、托盘菜单、二次启动共用这一条路径）。
+///
+/// 为什么收成一个函数：浏览器子窗口是独立 HWND，`main.hide()` 不会跟着收起
+/// （见 browser_webview::set_pages_visible），所以「显示主窗」这件事必须连带把
+/// 页面放回来。与其在 5 处 `show()` 各记一遍，不如只有一个出口。
+fn show_main_window(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    crate::browser_webview::set_pages_visible(app, true);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = Arc::new(AppState::default());
@@ -62,12 +81,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // A second Helix process was launched. Instead of opening another
             // window, focus the already-running one (mirror tray "show").
-            use tauri::Manager;
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .manage(app_state.clone())
         .setup(move |app| {
@@ -180,12 +194,7 @@ pub fn run() {
                     ) {
                         return;
                     }
-                    use tauri::Manager;
-                    if let Some(window) = tray.app_handle().get_webview_window("main") {
-                        let _ = window.unminimize();
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(tray.app_handle());
                 })
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "quit" => {
@@ -196,28 +205,14 @@ pub fn run() {
                         }
                         app.exit(0);
                     }
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.unminimize();
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
+                    "show" => show_main_window(app),
                     "new" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.unminimize();
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                            let _ = app.emit("tray:new-conversation", ());
-                        }
+                        show_main_window(app);
+                        let _ = app.emit("tray:new-conversation", ());
                     }
                     "recent" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.unminimize();
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                            let _ = app.emit("tray:show-recent", ());
-                        }
+                        show_main_window(app);
+                        let _ = app.emit("tray:show-recent", ());
                     }
                     _ => {}
                 })
@@ -240,9 +235,21 @@ pub fn run() {
                     }
                 }
                 WindowEvent::CloseRequested { api, .. } => {
-                    // Minimize to tray instead of closing.
-                    let _ = window.hide();
-                    api.prevent_close();
+                    // 只有主窗口的「关闭」是收进托盘。浏览器子窗口不拦：它们必须
+                    // 真的销毁，否则 `browser_webview_close` 变成「隐藏」，每关一个
+                    // 标签留一个活 WebView2（隐藏的那片还浮在桌面上看不见）。
+                    if window.label() == "main" {
+                        // 子窗口是独立 HWND，hide 主窗不会带走它们（图二那个
+                        // 「Helix 关了、网页还在」就是这里漏的）。
+                        crate::browser_webview::set_pages_visible(window.app_handle(), false);
+                        let _ = window.hide();
+                        api.prevent_close();
+                    }
+                }
+                WindowEvent::Destroyed => {
+                    if window.label() != "main" {
+                        crate::browser_webview::forget_window(window.label());
+                    }
                 }
                 _ => {}
             }
@@ -263,14 +270,20 @@ pub fn run() {
             helix::helix_set_config_key_value,
             helix::helix_approval_respond,
             // 审批档位 ⇄ pi-permission 扩展配置（真正阻断工具执行的那一层）
+            // 档位可按全局 / 项目 / 会话覆盖，覆盖表就在这份 settings.json 里，
+            // 由扩展自己解析 —— 面板显示的档与拦工具的档是同一个返回值。
             approval_policy::helix_get_permission_mode,
             approval_policy::helix_set_permission_mode,
+            approval_policy::helix_clear_permission_override,
             approval_policy::helix_set_approval_timeout_sec,
-            // 用户规则（settings.json → permission.userRules）可视化编辑
+            // 用户规则（settings.json → permission.userRules）读写口
             approval_policy::helix_get_permission_rules,
             approval_policy::helix_set_permission_rules,
+            // 系统通知开关（config.yaml → notifications: 块）+ 跳转系统通知设置
+            desktop_notify::helix_notification_config,
+            desktop_notify::helix_set_notification_config,
+            desktop_notify::helix_open_notification_settings,
             // embedded sidebar browser
-            helix::open_browser_url,
             helix::poll_browser_requests,
             helix::browser_write_result,
             helix::helix_set_model,
@@ -280,6 +293,7 @@ pub fn run() {
             helix::helix_remove_memory_entry,
             helix::helix_memory_overview,
             helix::helix_set_memory_enabled,
+            helix::helix_delete_memory,
             helix::helix_memory_config,
             helix::helix_set_memory_config,
             helix::helix_codemode_config,
@@ -318,10 +332,9 @@ pub fn run() {
             vision::vision_describe,
             image_model::image_config_list,
             image_model::image_config_save,
-            // 联网搜索（web-access 扩展的 web_search: 配置块 + 连通性测试）
+            // 联网搜索（web-access 扩展的 web_search: 配置块）
             web_search::web_search_config_list,
             web_search::web_search_config_save,
-            web_search::web_search_test,
             // SSH connections
             ssh::ssh_connect,
             // 一键远程连接（agent 远程跑）
@@ -376,6 +389,12 @@ pub fn run() {
             browser_webview::browser_webview_eval,
             browser_webview::browser_webview_screenshot,
             browser_webview::browser_webview_close,
+            browser_webview::browser_webview_focus,
+            browser_webview::browser_storage_usage,
+            browser_webview::browser_clear_data,
+            browser_webview::browser_read_upload_file,
+            browser_import::browser_import_detect,
+            browser_import::browser_import_passwords,
             // git
             git::status,
             git::diff,
@@ -400,6 +419,14 @@ pub fn run() {
             git::push,
             git::pull,
             git::fetch,
+            // github pr
+            github::gh_status,
+            github::gh_repo,
+            github::pr_create,
+            github::pr_list,
+            // diagnostics（跑项目自带的类型检查/lint）
+            diagnostics::diagnostics_detect,
+            diagnostics::diagnostics_run,
             // app
             app::get_info,
             app::get_sessions_dir,
@@ -426,6 +453,7 @@ pub fn run() {
             helix::pi_list_installed,
             helix::pi_set_package_enabled,
             helix::pi_get_available_models,
+            helix::pi_read_custom_providers,
             helix::pi_set_thinking_level_all,
             // 渠道中心：一次性 pi RPC 进程执行 pi-connect 的 /connect 命令
             pi_connect::pi_connect_query,

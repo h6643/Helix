@@ -16,7 +16,7 @@ export type SessionMapEntry = {
   sids?: string[];
 };
 
-export const SESSION_MAP_KEY = "conversationSessions";
+const SESSION_MAP_KEY = "conversationSessions";
 
 /**
  * 一个 entry 里**所有还能用的**后端 sid，新→旧。
@@ -56,7 +56,7 @@ export function sidCandidates(entry: SessionMapEntry | undefined): string[] {
  * 所以 `epoch` 变新会让下一次 handleRun 走 resume 重新验证这个 sid——这正是
  * "想作废这个 live 会话"时唯一正确的做法。
  */
-export function mergeSessionMapEntry(
+function mergeSessionMapEntry(
   disk: SessionMapEntry | undefined,
   incoming: SessionMapEntry,
   cid?: string,
@@ -171,7 +171,7 @@ export function ensureSessionMapLoaded(): Promise<Map<string, SessionMapEntry>> 
 }
 
 /** 磁盘写入后调用：memoized 结果作废，下一次 await 重新读盘。 */
-export function invalidateSessionMapCache(): void {
+function invalidateSessionMapCache(): void {
   loadPromise = null;
 }
 

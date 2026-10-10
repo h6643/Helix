@@ -198,6 +198,10 @@ struct PendingUI {
     /// pi-permission 的 rpc 审批弹窗（select）。只有它会被自动作废 —— 见
     /// [`evict_settled_permission_asks`]。
     permission: bool,
+    /// 这条审批弹窗正挡在 `prepareToolCall` 里的哪个工具调用（只有
+    /// `permission == true` 才记，见 [`PiInstance::preparing_tool`]）。用户答完
+    /// 的那一刻就是那次调用真正开跑的时刻。
+    blocking_tool: Option<String>,
 }
 
 /// pi-permission rpc 审批弹窗标题首行（approval.ts `formatTitle`，选项固定为
@@ -282,6 +286,12 @@ fn evict_settled_permission_asks(instance: &PiInstance, reason: &str) {
         .unwrap()
         .clone()
         .unwrap_or_else(|| instance.key());
+    log_spawn_diag(&format!(
+        "evict_permission_asks sid={} reason={} ids={}",
+        sid,
+        reason,
+        ids.join(",")
+    ));
     for id in ids {
         emit_helix_event(
             "session/update",
@@ -314,6 +324,12 @@ pub struct PiInstance {
     /// 决定 `spawn_process` 走哪条通道 —— 双通道的关键：**不能**再看全局
     /// `pi.remote_rpc` 是否配置，否则隧道一开，本地项目的对话也会被搬到远端去跑。
     remote: AtomicBool,
+    /// 本实例被 Helix 自己 `kill()` 过（重启清场 / idle reaper / 弃用备件）。
+    /// kill() 和 reader 的死亡簿记都会清 pending，于是 in-flight 请求拿到的
+    /// 断连在文本上与「子进程崩了」完全一样 —— 冷启动重试分支靠文本判断，
+    /// 没有这一位就会把一次正常清场当成崩溃去重生子进程（约 12s 白等），远程
+    /// 实例上还会误触发 30s 的 `mark_remote_down` 冷却。`spawn_process` 复位。
+    killed_by_us: AtomicBool,
     writer: Mutex<Option<mpsc::Sender<String>>>,
     /// pi command ids → pending responders.
     pending: Mutex<HashMap<String, PendingRequest>>,
@@ -343,6 +359,15 @@ pub struct PiInstance {
     /// carries them, but tool_execution_end does not — needed there to
     /// synthesize a patch for `write` (pi's write result has no details).
     exec_tool_args: Mutex<HashMap<String, Value>>,
+    /// 此刻正卡在 `prepareToolCall` 里的那个**非嵌套**工具调用 id。
+    ///
+    /// 依据：pi 对每条调用先发 `tool_execution_start` 再 await prepare，且
+    /// start/prepare 严格串行按序（推理与出处同
+    /// [`evict_settled_permission_asks`]）。所以审批弹窗到达时「最后一个 start 的
+    /// 那条」就是被它挡住的那条 —— 网关据此把「用户答完」精确记到某个 toolCall 上，
+    /// 前端才好把工具计时起点从「卡片出现」挪到「真正开跑」。
+    /// 嵌套调用（codemode `ctx.executeTool`，带 parentToolCallId）不更新这里。
+    preparing_tool: Mutex<Option<String>>,
     /// `write` 工具**覆盖前**的文件内容：toolCallId → 旧内容（`Some(None)` = 当时
     /// 文件不存在）。在 tool_execution_start（文件还没被写）抓取。
     ///
@@ -450,6 +475,7 @@ impl PiInstance {
             key: Mutex::new(key),
             cwd: Mutex::new(cwd),
             remote: AtomicBool::new(remote),
+            killed_by_us: AtomicBool::new(false),
             writer: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             child: Mutex::new(None),
@@ -460,6 +486,7 @@ impl PiInstance {
             turn_debt: AtomicU64::new(0),
             tool_args: Mutex::new(HashMap::new()),
             exec_tool_args: Mutex::new(HashMap::new()),
+            preparing_tool: Mutex::new(None),
             exec_file_prior: Mutex::new(HashMap::new()),
             context_window: Mutex::new(None),
             current_model: Mutex::new(None),
@@ -570,8 +597,16 @@ impl PiInstance {
         let message = rx.recv_timeout(timeout).map_err(|e| match e {
             mpsc::RecvTimeoutError::Disconnected => {
                 let now_gen = self.generation.load(Ordering::SeqCst);
+                // 我们自己杀的（清场/reaper/弃用备件）不是崩溃：报成 "process
+                // exited" 会让 spawn_instance 的重试分支去重生一个刚被判了死刑的
+                // 子进程。见 `killed_by_us`。
+                let cause = if self.killed_by_us.load(Ordering::SeqCst) {
+                    "killed by Helix"
+                } else {
+                    "process exited"
+                };
                 format!(
-                    "pi request {cmd} failed: process exited (no response channel) [waited {}ms, submit_gen={} now_gen={}]",
+                    "pi request {cmd} failed: {cause} (no response channel) [waited {}ms, submit_gen={} now_gen={}]",
                     start.elapsed().as_millis(),
                     submit_gen,
                     now_gen
@@ -594,6 +629,9 @@ impl PiInstance {
     /// respawn lands in the same project and can restore the session.
     fn kill(&self) {
         log_spawn_diag(&format!("kill({}): entry", self.key()));
+        // 最先置位：下面的 pending.clear() 和 reader 的死亡簿记都会让 in-flight
+        // 请求断连，那才是 `killed_by_us` 唯一要回答的问题。
+        self.killed_by_us.store(true, Ordering::SeqCst);
         // C: release an armed turn waiter BEFORE the child dies.
         //
         // 顺序是承重结构，不是风格问题：`child.kill()` 会让 stdout 立刻 EOF，
@@ -649,6 +687,7 @@ impl PiInstance {
         self.exec_tool_args.lock().unwrap().clear();
         self.exec_file_prior.lock().unwrap().clear();
         self.executing_tools.lock().unwrap().clear();
+        *self.preparing_tool.lock().unwrap() = None;
         self.initialized.store(false, Ordering::SeqCst);
         self.streaming.store(false, Ordering::SeqCst);
         log_spawn_diag(&format!("kill({}): exit", self.key()));
@@ -1401,14 +1440,34 @@ fn spawn_instance(
         // Respawn + retry ONCE — a second failure is a genuine crash loop
         // (bad config, leaked sibling holding the SQLite lock, …) and is
         // surfaced as an error rather than looped.
+        //
+        // 只有真崩溃才重试。Helix 自己在这 12s 窗口里清场（restart_overlapping
+        // 的「交接后清场」会杀 INSTANCES 里所有非主实例，而在飞的 spare 此刻已经
+        // 注册进 INSTANCES、还没进 WARM_SPARES；reaper / kill_all 同理）报的是
+        // "killed by Helix"，走下面的通用分支直接失败 —— 重生一个刚被自己判死
+        // 的子进程只是白等，而且在远程实例上会连带触发 30s 冷却。清场方自己会
+        // 再 rearm，池子不会因此空着。
         match instance.request_sync("get_state", Value::Null, HANDSHAKE_TIMEOUT) {
             Err(e) if e.contains("process exited") => {
                 let reason = e.clone();
                 eprintln!("[pi agent] get_state failed ({e}); respawning and retrying once");
+                log_spawn_diag(&format!(
+                    "spawn_instance({}): get_state transient death ({reason}) — retrying once",
+                    key,
+                ));
                 instance.kill();
                 spawn_process(&instance, state)?;
+                let retry_start = std::time::Instant::now();
                 match instance.request_sync("get_state", Value::Null, HANDSHAKE_TIMEOUT) {
                     Ok(data) => {
+                        // 重试成功以前什么都不落 —— 初始失败只有一条 eprintln 到
+                        // 控制台，release 构建里直接丢，事后完全无法复盘是哪一端
+                        // 断的。
+                        log_spawn_diag(&format!(
+                            "spawn_instance({}): get_state retry OK ({}ms)",
+                            key,
+                            retry_start.elapsed().as_millis()
+                        ));
                         instance.stamp_session_from_state(Some(&data));
                         instance.initialized.store(true, Ordering::SeqCst);
                         return Ok(Arc::clone(&instance));
@@ -1549,6 +1608,13 @@ fn spawn_remote(
         }
         // 远程 child 没有 exit code，仅通知死亡簿记（若 gen 未变）。
         if instance_clone.generation.load(Ordering::SeqCst) == generation {
+            // 本地 reader 有 "child exited" / "stdout EOF" 两条落盘记录，远程这条
+            // 原先一条都没有 —— 远程握手秒失败（"process exited"）事后无从区分
+            // 隧道断、远端 pi 起不来、还是远端把连接关了。
+            log_spawn_diag(&format!(
+                "remote connection closed: gen={generation} key={}",
+                instance_clone.key()
+            ));
             instance_clone.initialized.store(false, Ordering::SeqCst);
             *instance_clone.writer.lock().unwrap() = None;
             instance_clone.pending.lock().unwrap().clear();
@@ -1573,6 +1639,9 @@ fn spawn_remote(
 fn spawn_process(instance: &Arc<PiInstance>, state: &Arc<AppState>) -> Result<(), String> {
     let _generation = instance.generation.fetch_add(1, Ordering::SeqCst) + 1;
     instance.kill();
+    // 复位必须在 kill() **之后**：kill 自己会把这一位置起来。从这里起，
+    // request_sync 看到的断连才只可能是新子进程的事。
+    instance.killed_by_us.store(false, Ordering::SeqCst);
     log_spawn_diag(&format!(
         "spawn_process({}): kill done, resolving pi cli -> {}",
         instance.key(),
@@ -3303,7 +3372,11 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             // carries no session).
             let instance =
                 routed_instance_or_ui_owner(&params, &approval_id, &state).await?;
-            let PendingUI { method: ui_method, .. } = instance
+            let PendingUI {
+                method: ui_method,
+                blocking_tool,
+                ..
+            } = instance
                 .ui_requests
                 .lock()
                 .unwrap()
@@ -3350,9 +3423,28 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             let Some(writer) = instance.writer.lock().unwrap().clone() else {
                 return Err("pi agent stdin closed".into());
             };
+            let unblocked_at = now_ms();
             writer
                 .send(line)
                 .map_err(|_| "pi agent stdin closed".to_string())?;
+            // 用户答完审批 = 这条工具调用的 prepare 返回，它从这一刻才真正开跑。
+            // 前端把那张卡片的计时起点挪到这里，否则「等用户点批准」的那几分钟全
+            // 算进了工具耗时（卡片转了 3 分钟，其实两分半是在等人）。
+            // AI 抢先判定那一路不经过这里（pi 侧静默 abort 弹窗，宿主收不到任何
+            // 回应），拿不到确切时刻 ⇒ 干脆不报，也不拿作废时刻去猜。
+            if let Some(tool_call_id) = blocking_tool {
+                emit_helix_event(
+                    "session/update",
+                    &json!({
+                        "session_id": instance.current_session_id(),
+                        "update": {
+                            "sessionUpdate": "tool_prepare_unblocked",
+                            "toolCallId": tool_call_id,
+                            "at": unblocked_at,
+                        },
+                    }),
+                );
+            }
             Ok(json!({ "ok": true }))
         }
         // pi's RPC surface has no MCP introspection or hot-reload. Return the
@@ -5408,6 +5500,11 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 .unwrap_or("tool");
             let args = message.get("args").cloned().unwrap_or(Value::Null);
             if !tool_call_id.is_empty() {
+                if !nested {
+                    // 这条调用马上就要进 prepareToolCall（审批弹窗在它里面跑）。
+                    *instance.preparing_tool.lock().unwrap() =
+                        Some(tool_call_id.clone());
+                }
                 if args.is_object() {
                     instance
                         .exec_tool_args
@@ -5706,6 +5803,13 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 .get("toolName")
                 .and_then(Value::as_str)
                 .unwrap_or("tool");
+            // 它已经跑完，不再是「可能还卡在 prepare 里」的那条了。
+            {
+                let mut preparing = instance.preparing_tool.lock().unwrap();
+                if preparing.as_deref() == Some(tool_call_id.as_str()) {
+                    *preparing = None;
+                }
+            }
             let is_error = message
                 .get("isError")
                 .and_then(Value::as_bool)
@@ -6027,39 +6131,6 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     }
                 }
             }
-            // rpiv-todo extension (@juicesharp/rpiv-todo): every `todo` tool
-            // call returns the full task list in `result.details.tasks`.
-            // Forward it as a structured `todo_list` update so the renderer
-            // can render the real list instead of guessing from chat text.
-            if tool_name == "todo" {
-                let tasks = message.pointer("/result/details/tasks");
-                if let Some(tasks) = tasks.and_then(Value::as_array) {
-                    let todos: Vec<Value> = tasks
-                        .iter()
-                        .filter(|t| t.get("subject").and_then(Value::as_str).is_some())
-                        .map(|t| {
-                            json!({
-                                "id": t.get("id").map(|v| v.to_string()),
-                                "content": t.get("subject").and_then(Value::as_str).unwrap_or(""),
-                                "status": t.get("status").and_then(Value::as_str).unwrap_or("pending"),
-                                "activeForm": t.get("activeForm").and_then(Value::as_str),
-                            })
-                        })
-                        .collect();
-                    // Always emit when the array is present — an empty
-                    // list (action: clear) must collapse the renderer panel.
-                    emit_helix_event(
-                        "session/update",
-                        &json!({
-                            "session_id": sid(),
-                            "update": {
-                                "sessionUpdate": "todo_list",
-                                "todos": todos,
-                            },
-                        }),
-                    );
-                }
-            }
         }
         "agent_settled" => {
             // Turn 结束 ⇒ 不存在未返回的工具钩子：仍挂着的审批弹窗都是竞速
@@ -6121,11 +6192,23 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 );
                 // 人不在前台时的收尾信号：出错优先报错，否则报完成（摘要取正文开头）。
                 if !fatal_error.is_empty() {
-                    crate::desktop_notify::notify_unfocused("任务出错", &fatal_error);
+                    crate::desktop_notify::notify(
+                        crate::desktop_notify::Scene::TurnEnd,
+                        "任务出错",
+                        &fatal_error,
+                    );
                 } else if !final_text.is_empty() {
-                    crate::desktop_notify::notify_unfocused("任务完成", &final_text);
+                    crate::desktop_notify::notify(
+                        crate::desktop_notify::Scene::TurnEnd,
+                        "任务完成",
+                        &final_text,
+                    );
                 } else {
-                    crate::desktop_notify::notify_unfocused("任务完成", "回合已结束");
+                    crate::desktop_notify::notify(
+                        crate::desktop_notify::Scene::TurnEnd,
+                        "任务完成",
+                        "回合已结束",
+                    );
                 }
             }
             // Settle the waiter. The guard must be DROPPED before calling
@@ -6209,6 +6292,18 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 .get("method")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            // 审批/反问链路的**到达点**留痕。pi 的 ui 请求是阻塞式的：扩展在等
+            // 回应，而前端一旦没把卡片显示出来（订阅者缺席、归属判错、事件在半路
+            // 被丢），事后从 UI 上完全看不出请求到过网关。release 构建没有 stderr，
+            // 这条 `~/.pi/agent/helix-recover.log` 就是唯一凭据 —— 配上
+            // evict_settled_permission_asks 的作废留痕，能区分「网关没收到」
+            // 「收到了但前端没显示」「收到了但被竞速作废」三种失败形态。
+            log_spawn_diag(&format!(
+                "ui_request sid={} method={} id={}",
+                sid(),
+                ui_method,
+                request_id
+            ));
             match ui_method {
                 // confirm = a yes/no gate → keep the approval dialog path
                 // (Helix's ApprovalDialog maps choice to confirmed/denied).
@@ -6218,6 +6313,10 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         PendingUI {
                             method: ui_method.to_string(),
                             permission: false,
+                            // confirm 是命令式门禁（subagents 的「Overwrite/Delete
+                            // agent」这类），不是工具 prepare 里的审批，挡不住任何
+                            // toolCall ⇒ 不记，否则会把别人的工具计时挪错。
+                            blocking_tool: None,
                         },
                     );
                     UI_REQUEST_OWNERS.lock().unwrap().insert(
@@ -6246,7 +6345,11 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             },
                         }),
                     );
-                    crate::desktop_notify::notify_unfocused("需要确认", &dialog_toast_body(title));
+                    crate::desktop_notify::notify(
+                        crate::desktop_notify::Scene::Approval,
+                        "需要确认",
+                        &dialog_toast_body(title),
+                    );
                 }
                 // select/input/editor = free-form user interaction → the
                 // clarify bar (bottom floating input with optional choices),
@@ -6261,11 +6364,33 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         ui_method,
                         message.get("title").and_then(Value::as_str),
                     );
+                    if permission {
+                        // pi-permission 的竞速审批弹窗：它带 approvalTimeoutSec
+                        // （默认 300s），到点扩展侧 fail-closed 自动拒绝。用户
+                        // 看到的「工具跑了 4 分多钟自己拒了、弹窗根本没出现」
+                        // 就是这条请求没有被前端认领 —— 单独留痕便于和
+                        // evict_permission_asks / 前端的 enqueue 日志对齐时间线。
+                        log_spawn_diag(&format!(
+                            "permission_ask sid={} id={}",
+                            sid(),
+                            request_id
+                        ));
+                    }
+                    // 只有 pi-permission 的审批弹窗真的挡在某个工具调用的 prepare
+                    // 里；其它 select/input/editor 是模型在等用户回答
+                    // （ask_user_question 那一类），「等用户」就是那件活本身，
+                    // 挪计时等于把真实耗时抹掉。先取再锁 ui_requests，不套锁。
+                    let blocking_tool = if permission {
+                        instance.preparing_tool.lock().unwrap().clone()
+                    } else {
+                        None
+                    };
                     instance.ui_requests.lock().unwrap().insert(
                         request_id.clone(),
                         PendingUI {
                             method: ui_method.to_string(),
                             permission,
+                            blocking_tool,
                         },
                     );
                     UI_REQUEST_OWNERS.lock().unwrap().insert(
@@ -6312,8 +6437,12 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             },
                         }),
                     );
-                    let toast_title = if permission { "需要审批" } else { "需要你的回答" };
-                    crate::desktop_notify::notify_unfocused(toast_title, &dialog_toast_body(&question));
+                    let (scene, toast_title) = if permission {
+                        (crate::desktop_notify::Scene::Approval, "需要审批")
+                    } else {
+                        (crate::desktop_notify::Scene::Clarify, "需要你的回答")
+                    };
+                    crate::desktop_notify::notify(scene, toast_title, &dialog_toast_body(&question));
                 }
                 // 已知的 fire-and-forget 方法（不阻塞模型）：surface as warning。
                 "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text" | "status" => {
@@ -6339,6 +6468,7 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         PendingUI {
                             method: ui_method.to_string(),
                             permission: false,
+                            blocking_tool: None,
                         },
                     );
                     UI_REQUEST_OWNERS.lock().unwrap().insert(
@@ -6374,7 +6504,11 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                             },
                         }),
                     );
-                    crate::desktop_notify::notify_unfocused("需要你的回答", &dialog_toast_body(&question));
+                    crate::desktop_notify::notify(
+                        crate::desktop_notify::Scene::Clarify,
+                        "需要你的回答",
+                        &dialog_toast_body(&question),
+                    );
                 }
             }
         }
@@ -6834,6 +6968,64 @@ fn remote_session_dir(session_id: &str) -> Option<String> {
     REMOTE_SESSIONS.lock().unwrap().get(session_id).cloned()
 }
 
+// ──────────────────────── 审批档作用域解析（给 approval_policy 用） ────────────────────────
+//
+// settings.json 的 `modeBySession` / `modeByProject` 由 pi-permission 扩展按
+// 「pi 报来的 sid / ctx.cwd」解析。Helix 要显示同一条会话的生效档，就得用同一个
+// 身份去查表；而这些身份只活在网关（实例表、REMOTE_SESSIONS、jsonl 头）里，
+// 所以这里开三个只读小口，绝不 spawn / restore —— 读个档位不该把进程拉起来。
+
+/// 这条会话是远程的吗（跑在远端的 pi 上）？
+///
+/// 两个来源任一即算：`REMOTE_SESSIONS`（落盘的 per-session 记录，实例被回收后
+/// 仍然认得）+ 活实例的 `remote` 标志（前端还没记下目录的极早期窗口）。
+pub(crate) fn session_is_remote(session_id: &str) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    if remote_session_dir(session_id).is_some() {
+        return true;
+    }
+    INSTANCES
+        .lock()
+        .unwrap()
+        .get(session_id)
+        .map(|i| i.remote.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// 正在跑的实例报告的 cwd（**只查现有实例，不 spawn**）。
+pub(crate) fn peek_session_cwd(session_id: &str) -> Option<String> {
+    if session_id.is_empty() {
+        return None;
+    }
+    let instance = INSTANCES.lock().unwrap().get(session_id).cloned()?;
+    let cwd = instance.cwd.lock().unwrap().clone()?;
+    (!cwd.is_empty()).then_some(cwd)
+}
+
+/// 会话 jsonl 头里记的 cwd（实例已回收时的来源；O(1)，只读首行）。
+pub(crate) fn session_jsonl_cwd(session_id: &str) -> Option<String> {
+    let file = find_session_file(session_id)?;
+    read_session_cwd(&file)
+}
+
+/// `modeBySession` 的条目还算活着吗？—— 本机有 jsonl / 实例还在跑 / 被记为远程
+/// 会话，任一即活。三个都不是就说明这条对话已经不在了，覆盖条目可以回收
+/// （否则那张表只会随会话数无界增长）。
+pub(crate) fn session_override_alive(session_id: &str) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    if remote_session_dir(session_id).is_some() {
+        return true;
+    }
+    if INSTANCES.lock().unwrap().contains_key(session_id) {
+        return true;
+    }
+    find_session_file(session_id).is_some()
+}
+
 /// 远程传输：连一条 TCP，握手行下发**本实例**的远端 cwd，然后把 socket 拆成读/写两半。
 ///
 /// 读一半、写一半各一个 handle，第三个专给 `ChildHandle::Remote` 做 shutdown。
@@ -6917,6 +7109,7 @@ mod tests {
         PendingUI {
             method: method.into(),
             permission,
+            blocking_tool: None,
         }
     }
 

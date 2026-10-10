@@ -13,7 +13,7 @@ const fetchingProviderModels = new Set<string>();
  *  真实请求走扩展自己的本地 shim）。pi 的模型快照里按它识别「渠道 provider」：
  *  这些 provider 不在 Helix 的 profiles/models.json 里，凭据由扩展管理，前端
  *  只做展示与按会话的 set_model 透传。 */
-const PI_CHANNEL_BASE_URL = "http://127.0.0.1:0/v1";
+export const PI_CHANNEL_BASE_URL = "http://127.0.0.1:0/v1";
 
 /** 渠道 provider 的显示名（pi 注册 id → 界面名）。未知 id 回落原 id。 */
 const PI_CHANNEL_NAMES: Record<string, string> = {
@@ -292,6 +292,11 @@ export const createApiConfigSlice: StateCreator<
         { id, name, config, models, modelContextWindows, modelReasonings },
       ],
     }));
+    // 名单不再为空 → 解除「用户自己删光了」的意图标记，让冷启动的空列表自愈
+    // 重新武装（万一下一次丢失又是瞬时读失败造成的，还能从 pi 的配置救回来）。
+    import("@/lib/persist").then(({ persistence }) => {
+      persistence.saveSetting("profilesClearedByUser", false);
+    });
     return id;
   },
   updateApiProfileConfig: (
@@ -320,7 +325,7 @@ export const createApiConfigSlice: StateCreator<
         p.id === id ? { ...p, name } : p,
       ),
     })),
-  removeApiProfile: (id) =>
+  removeApiProfile: (id) => {
     set((state) => {
       const target = state.apiProfiles.find((p) => p.id === id);
       const baseUrl = target?.config?.baseUrl;
@@ -351,7 +356,15 @@ export const createApiConfigSlice: StateCreator<
         activeProviderId:
           state.activeProviderId === id ? null : state.activeProviderId,
       };
-    }),
+    });
+    // 用户主动删掉最后一个 profile：记下意图。冷启动的「空列表自愈」靠它区分
+    // 「自己删光」和「被一次瞬时读失败写空」，否则删掉的供应商会在下次启动复活。
+    if (get().apiProfiles.length === 0) {
+      import("@/lib/persist").then(({ persistence }) => {
+        persistence.saveSetting("profilesClearedByUser", true);
+      });
+    }
+  },
   setActiveProfile: (id) => set({ activeProfileId: id }),
 
   // ── Multi-provider actions ──

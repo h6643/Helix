@@ -10,7 +10,7 @@
  *
  * 主对话专属的交互（搜索高亮）通过 props 传 boolean；旁路面板传全 false 即可。
  */
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import React from "react";
 import {
   Check,
@@ -33,6 +33,7 @@ import {
 import { HelixMarkdown } from "./helix-markdown";
 import { FileChangeSummary } from "./file-change-summary";
 import { InlineToolGroup, summarizeGroupDiff } from "./inline-tool-group";
+import { formatDurationSeconds } from "@/lib/format";
 import { formatMergedSummary, isSubAgentTool } from "@/lib/tool-merge";
 
 // ── 过程块工具（与 agent-flow-panel 原有实现完全一致，两边共用一份）─────────
@@ -269,6 +270,19 @@ export function mergeThinkingContents(contents: string[]): string {
   return merged;
 }
 
+// 本段思考的耗时（秒）：计时挂在 thinking 块上（见 StreamingResponseBlock），
+// 一个思考段通常就是一个块；旧快照/旁路草稿没有这两个字段时返回 0，徽标随之
+// 不渲染 —— 宁可不显示，也不拿消息级总时长冒充「这段思考花了多久」。
+export function thinkingSegmentDurationS(
+  blocks: Array<{ type: string; duration_s?: number }>,
+): number {
+  let seconds = 0;
+  for (const b of blocks) {
+    if (b.type === "thinking") seconds += b.duration_s ?? 0;
+  }
+  return seconds;
+}
+
 const ThinkGlyph = ({ active = false }: { active?: boolean }) => (
   <span
     className={`think-glyph shrink-0${active ? " think-glyph-active" : ""}`}
@@ -289,6 +303,7 @@ export const ThinkingFold = React.memo(function ThinkingFold({
   active = false,
   streaming = false,
   status,
+  durationS,
   searchOpen,
   searchQuery,
   isSearchActive,
@@ -298,6 +313,7 @@ export const ThinkingFold = React.memo(function ThinkingFold({
   active?: boolean;
   streaming?: boolean;
   status?: string;
+  durationS?: number;
   searchOpen: boolean;
   searchQuery: string;
   isSearchActive: boolean;
@@ -330,6 +346,11 @@ export const ThinkingFold = React.memo(function ThinkingFold({
   const open = userOpen;
   const bodyRef = React.useRef<HTMLDivElement | null>(null);
 
+  // 思考不足 3 秒就不报具体秒数，标题直接说「思考了一会」：一两秒的思考显示成
+  // 「1.2s」像在比拼耗时，读者只会盯住那个数字，而它想表达的其实是"没过脑子"。
+  const briefThink =
+    !active && durationS != null && durationS > 0 && durationS < 3;
+
   // 流式思考（active）时 body 受 max-h 限高 + 滚轮，增量内容要把视图钉到底部，
   // 否则用户只能看到最开头的旧文本、看不到模型正在写的最新思考。
   React.useEffect(() => {
@@ -349,6 +370,8 @@ export const ThinkingFold = React.memo(function ThinkingFold({
         className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors"
       >
         <ThinkGlyph active={active} />
+        {/* 状态标题只在 active（这段思考还在跑）时才有意义：结束的思考必须回到
+            「思考 / 思考了一会」，否则转录中间会挂着一排假的「思考中」。 */}
         <span
           className={`select-none ${
             active
@@ -357,11 +380,33 @@ export const ThinkingFold = React.memo(function ThinkingFold({
           }`}
           style={{ fontSize: fontSize + 2 }}
         >
-          {kaomojiStatus ? `思考中 ${kaomojiStatus}` : active ? "思考中" : "思考"}
+          {active && kaomojiStatus
+            ? `思考中 ${kaomojiStatus}`
+            : active
+              ? "思考中"
+              : briefThink
+                ? "思考了一会"
+                : "思考"}
         </span>
         {active && summary && (
           <span className="text-foreground/30 truncate max-w-[60%]" style={{ fontSize }}>
             {summary}
+          </span>
+        )}
+        {/* 与工具组标签同一条规则（见 ToolStreamFold 的 durationIsLive）：还在长
+            的计时常驻 —— 「正在思考多久」是实时进度，藏起来就等于没有；定格后
+            归入历史数字，默认不显示、指针移到这一行才出现（opacity 而非移除，
+            位置留着免得悬停时抖动）。 */}
+        {durationS != null && durationS > 0 && !briefThink && (
+          <span
+            className={`ml-auto tabular-nums shrink-0 transition-opacity ${
+              active
+                ? "text-foreground/45"
+                : "text-foreground/25 opacity-0 group-hover/think:opacity-100"
+            }`}
+            style={{ fontSize: fontSize - 1 }}
+          >
+            {formatDurationSeconds(durationS)}
           </span>
         )}
         {status && !active && (
@@ -399,9 +444,10 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
   forceFold?: boolean;
   isRunning?: boolean;
 }) {
-  const { names, total, subagentSteps } = useMemo(() => {
+  const { names, total, subagentSteps, timedSteps } = useMemo(() => {
     const ns: string[] = [];
     const sa: ExecutionStep[] = [];
+    const ts: ExecutionStep[] = [];
     let all = 0;
     for (const b of blocks) {
       if (b.type !== "tool_group" || !b.steps) continue;
@@ -413,11 +459,43 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
           continue;
         }
         ns.push(s.toolName || "");
+        ts.push(s);
       }
     }
-    return { names: ns, total: all, subagentSteps: sa };
+    return { names: ns, total: all, subagentSteps: sa, timedSteps: ts };
   }, [blocks]);
   const diff = useMemo(() => summarizeGroupDiff(blocks), [blocks]);
+  // 工具耗时只出现在这一行标签上，卡片上不再逐个显示：一轮里挂一排零碎数字看不出
+  // 任何规律，「这一段工具花了多久」才是有用的那个数。
+  const [, setTimingTick] = useState(0);
+  useEffect(() => {
+    if (!isRunning) return;
+    const t = setInterval(() => setTimingTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [isRunning]);
+  // 取时间区间的长度，而不是把各步骤的 duration_s 相加：pi 对同一条消息里的多个
+  // 工具调用默认**并行执行**（agent-loop.js executeToolCallsParallel，`toolExecution`
+  // 缺省 "parallel"，且没有内置工具声明 executionMode:"sequential"），两条各跑 90 秒
+  // 的并行命令求和会报成 3 分钟，而用户只等了 90 秒。串行时区间长度与求和等价。
+  let spanStart = Infinity;
+  let spanEnd = -Infinity;
+  for (const s of timedSteps) {
+    if (s.startedAt == null) continue;
+    // 未收尾的步骤终点跟着表针走，数字随执行增长、不必等工具收尾；跑完仍未收尾
+    // （停止/掉事件）的按 startedAt 收口，不让它无限拉长这一段。
+    const end =
+      s.duration_s == null && isRunning
+        ? Date.now()
+        : (s.finishedAt ?? s.startedAt);
+    if (s.startedAt < spanStart) spanStart = s.startedAt;
+    if (end > spanEnd) spanEnd = end;
+  }
+  const totalDurationS =
+    spanStart === Infinity ? 0 : Math.max(0, (spanEnd - spanStart) / 1000);
+  // 这一行的数字还在长（本折叠里有未收尾的工具）才常驻；一旦定格就归入「历史
+  // 数字」，与 ThinkingFold 的耗时同样默认隐藏、悬停才出现。
+  const durationIsLive =
+    isRunning && timedSteps.some((s) => s.duration_s == null && s.startedAt);
   // 子代理执行独立行：始终可见，不进折叠摘要。子代理是高层动作（派发了
   // 什么、跑完没有），合并进「子代理 · 2 子代理」会把用户最关心的信息埋掉。
   const hoisted =
@@ -440,32 +518,63 @@ export const ToolStreamFold = React.memo(function ToolStreamFold({
     if (total > 0) return <>{hoisted}</>;
     return <>{children}</>;
   }
-  if (total <= 1 && !forceFold) return <>{children}</>;
   const summary = formatMergedSummary(names);
-  return (
-    <>
-      {hoisted}
-      <details className="group/details">
-        <summary className="cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
+  // 标签右端这一条带子同时容纳「总耗时」与「+N −n」，两者都靠右对齐。
+  const rightBand =
+    totalDurationS > 0 || diff.added > 0 || diff.removed > 0 ? (
+      <span
+        className="ml-auto shrink-0 flex items-center gap-1.5 tabular-nums"
+        style={{ fontSize }}
+      >
+        {totalDurationS > 0 && (
+          <span
+            className={`text-muted-foreground/70 ${
+              durationIsLive
+                ? ""
+                : "opacity-0 group-hover/tfold:opacity-100 transition-opacity"
+            }`}
+          >
+            {formatDurationSeconds(totalDurationS)}
+          </span>
+        )}
+        {diff.added > 0 && (
+          <span className="text-emerald-500/70">+{diff.added}</span>
+        )}
+        {diff.removed > 0 && (
+          <span className="text-rose-500/70">−{diff.removed}</span>
+        )}
+      </span>
+    ) : null;
+  // 单个工具不折叠（不该为一张卡藏起内容），但标签行照旧渲染：耗时只有这一个
+  // 归属处，持久化轮次少了这行就会「刷新一次时间就没了」。
+  if (total <= 1 && !forceFold) {
+    return (
+      <>
+        <div className="group/tfold -mx-1.5 px-1.5 flex items-center gap-1.5">
           <span
             className="text-foreground/40 font-normal select-none truncate"
             style={{ fontSize }}
           >
             {summary || `${total} 个操作`}
           </span>
-          {(diff.added > 0 || diff.removed > 0) && (
-            <span
-              className="ml-auto shrink-0 tabular-nums flex items-center gap-1"
-              style={{ fontSize }}
-            >
-              {diff.added > 0 && (
-                <span className="text-emerald-500/70">+{diff.added}</span>
-              )}
-              {diff.removed > 0 && (
-                <span className="text-rose-500/70">−{diff.removed}</span>
-              )}
-            </span>
-          )}
+          {rightBand}
+        </div>
+        <div className="mt-1">{children}</div>
+      </>
+    );
+  }
+  return (
+    <>
+      {hoisted}
+      <details className="group/details">
+        <summary className="group/tfold cursor-pointer hover:bg-muted/10 -mx-1.5 px-1.5 rounded-md flex items-center gap-1.5 list-none transition-colors">
+          <span
+            className="text-foreground/40 font-normal select-none truncate"
+            style={{ fontSize }}
+          >
+            {summary || `${total} 个操作`}
+          </span>
+          {rightBand}
         </summary>
         <div className="mt-1">{children}</div>
       </details>
@@ -645,7 +754,6 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
   );
   const messageDuration = msg.duration ?? msg.thinkingTime;
   const isStreaming = msg.isStreaming === true;
-
   return (
     <div
       data-message-id={msg.id}
@@ -725,6 +833,9 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                   processBlocks[processBlocks.length - 1];
                 const thinkingActiveNow =
                   lastProcessBlock?.type === "thinking";
+                // 本轮总耗时：运行中由流式区顶部的「工作中 Ns」实时显示，完成后
+                // 这张卡不再常驻数字（一排历史轮次各挂一个耗时只是噪声），鼠标
+                // 移到卡上时才浮现。
                 const processDuration =
                   !isStreaming && (messageDuration ?? 0) > 0
                     ? formatDuration(messageDuration ?? 0)
@@ -747,7 +858,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                                 fontSize={fontSize}
                               />
                               {processDuration ? (
-                                <span className="tabular-nums text-foreground/25">
+                                <span className="tabular-nums text-foreground/25 opacity-0 transition-opacity group-hover/details:opacity-100">
                                   {processDuration}
                                 </span>
                               ) : null}
@@ -760,6 +871,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                               content={reasoning}
                               fontSize={fontSize}
                               active={isStreaming}
+                              durationS={msg.thinkingTime}
                               searchOpen={searchOpen}
                               searchQuery={searchQuery}
                               isSearchActive={isSearchActive}
@@ -799,6 +911,9 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                                       isNewestSegment
                                     }
                                     streaming={isStreaming && isNewestSegment}
+                                    durationS={thinkingSegmentDurationS(
+                                      seg.blocks,
+                                    )}
                                     searchOpen={searchOpen}
                                     searchQuery={searchQuery}
                                     isSearchActive={isSearchActive}
@@ -948,6 +1063,9 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                                     isStreaming && thinkingActiveNow && isLastTrail
                                   }
                                   streaming={isStreaming && isLastTrail}
+                                  durationS={thinkingSegmentDurationS(
+                                    seg.blocks,
+                                  )}
                                   searchOpen={searchOpen}
                                   searchQuery={searchQuery}
                                   isSearchActive={isSearchActive}
@@ -1069,6 +1187,7 @@ export const TranscriptMessage = React.memo(function TranscriptMessage({
                                       key={i}
                                       content={c}
                                       fontSize={fontSize}
+                                      durationS={b.duration_s}
                                       searchOpen={searchOpen}
                                       searchQuery={searchQuery}
                                       isSearchActive={isSearchActive}

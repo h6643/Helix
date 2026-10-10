@@ -1,7 +1,6 @@
 ﻿"use client";
 
 import {
-  X,
   Search,
   Trash2,
   Puzzle,
@@ -12,6 +11,7 @@ import {
   Check,
   Wrench,
   ChevronDown,
+  RefreshCw,
 } from "lucide-react";
 import React, {
   useState,
@@ -144,14 +144,100 @@ export function SkillPanel({}: SkillPanelProps) {
 
   // ── Plugins ──
   // 插件更新检查：piCheckUpdates 一次拿回全部 npm 插件的最新版本，
-  // 有更新的卡片在开关右侧显示「更新」按钮。
+  // 有更新的卡片在开关右侧显示「更新」按钮。列表首次加载后自动查一次
+  // （后台跑，不阻塞列表渲染）；点头部按钮 = 手动复查，反馈更完整。
   const [latestMap, setLatestMap] = useState<Record<string, string>>({});
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
   // 点击「更新」按钮后弹确认框：name → {installed, latest}
   const [updateFound, setUpdateFound] = useState<{
     name: string;
     installed: string;
     latest: string;
   } | null>(null);
+
+  const checkUpdates = useCallback(async (manual: boolean) => {
+    const api = helixApi();
+    if (!api?.piCheckUpdates) {
+      // 静默返回会让按钮「点了没反应」——必须给出可诊断的反馈。
+      if (manual) {
+        useHelixStore.getState().showToast({
+          type: "error",
+          title: "检查更新失败",
+          description: "当前后端不支持 piCheckUpdates",
+        });
+      }
+      return;
+    }
+    setCheckingUpdates(true);
+    try {
+      const res = await api.piCheckUpdates();
+      const packages: {
+        name: string;
+        installed: string;
+        latest: string | null;
+        hasUpdate?: boolean;
+      }[] = Array.isArray(res?.packages) ? res.packages : [];
+      const map: Record<string, string> = {};
+      const outdated: string[] = [];
+      let failed = 0;
+      for (const p of packages) {
+        if (p.latest) map[p.name] = p.latest;
+        else failed++;
+        if (p.hasUpdate)
+          outdated.push(`${p.name} v${p.installed} → v${p.latest}`);
+      }
+      setLatestMap(map);
+      const showToast = useHelixStore.getState().showToast;
+      if (outdated.length > 0) {
+        showToast({
+          type: "info",
+          title: `${outdated.length} 个插件可更新`,
+          description:
+            outdated.slice(0, 3).join("\n") +
+            (outdated.length > 3 ? `\n…等 ${outdated.length} 个` : ""),
+          duration: 10000,
+        });
+      } else if (manual) {
+        // 手动检查才给「结果类」反馈；自动检查只在有更新时打扰用户。
+        if (failed > 0) {
+          showToast({
+            type: "error",
+            title: "部分插件查询失败",
+            description: `${failed}/${packages.length} 个包没能从 npm 拿到最新版本（网络问题），稍后再试`,
+          });
+        } else if (packages.length > 0) {
+          showToast({
+            type: "success",
+            title: "插件已是最新",
+            description: `已检查 ${packages.length} 个 npm 插件`,
+          });
+        } else {
+          showToast({
+            type: "info",
+            title: "没有可检查的插件",
+            description: "仅本地扩展不走 npm，无法检查更新",
+          });
+        }
+      } else if (failed > 0 && packages.length === failed) {
+        // 自动检查全军覆没时也提醒一次，避免「更新按钮从不出现」无从诊断。
+        showToast({
+          type: "error",
+          title: "插件更新检查失败",
+          description: "无法连接 npm registry，可点右上角刷新按钮重试",
+        });
+      }
+    } catch (e) {
+      if (manual) {
+        useHelixStore.getState().showToast({
+          type: "error",
+          title: "检查更新失败",
+          description: e instanceof Error ? e.message : String(e),
+        });
+      }
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }, []);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
@@ -170,14 +256,16 @@ export function SkillPanel({}: SkillPanelProps) {
           return true;
         }),
       );
-      // 插件更新检查已禁用
+      // 版本比对结果跟随列表：清掉旧的，再后台自动查一轮（有更新的卡片
+      // 会亮出「更新」按钮；全军覆没时 checkUpdates 会弹错误提示）。
       setLatestMap({});
+      void checkUpdates(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [checkUpdates]);
 
   // 拉 pi.dev 官方目录。
   //
@@ -468,10 +556,9 @@ export function SkillPanel({}: SkillPanelProps) {
 
   // ── Render helpers ──
   const renderItem = (item: InstalledItem, idx: number) => {
-    const meta = typeLabels[item.type] ?? typeLabels.extension;
     // 有可用更新的 npm 插件：在开关右侧显示「更新」按钮（打开确认弹窗）。
     const updateName = item.packageName ?? item.name;
-    const latest = latestMap[updateName];
+    const latest = latestMap[updateName] ?? latestMap[item.name];
     const hasUpdate =
       item.source === "pi-npm" &&
       !!item.version &&
@@ -695,6 +782,21 @@ export function SkillPanel({}: SkillPanelProps) {
             插件中心
           </h1>
           <div className="flex items-center gap-1">
+            {activeTab === "plugins" && !showBrowse && (
+              <button
+                onClick={() => void checkUpdates(true)}
+                disabled={checkingUpdates}
+                className="mr-2 p-1.5 rounded hover:bg-accent/60 transition-colors text-muted-foreground hover:text-foreground disabled:opacity-50"
+                data-tip="检查更新"
+                data-tip-side="left"
+              >
+                {checkingUpdates ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-4" />
+                )}
+              </button>
+            )}
             {activeTab === "plugins" && (
               <button
                 onClick={() => setShowBrowse(!showBrowse)}

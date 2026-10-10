@@ -79,6 +79,8 @@ export interface ExecutionStep {
   taskId?: string;
   finishReason?: string;
   status?: "running" | "completed" | "failed" | "waiting";
+  // 单工具计时（工具卡右端徽标读 duration_s）：startedAt = tool_call 事件建卡
+  // 时刻，finishedAt/duration_s = tool_result 到达时回写。
   startedAt?: number;
   finishedAt?: number;
   duration_s?: number;
@@ -94,7 +96,15 @@ export interface ExecutionStep {
 // Streaming response blocks for the currently-running assistant reply.
 export type StreamingResponseBlock =
   | { type: "text"; content: string }
-  | { type: "thinking"; content: string }
+  // 思考块的计时：startedAt = 本阶段首个 thinking 事件（ms epoch），
+  // duration_s = 该阶段已持续的秒数，每个 thinking 分片刷新一次，阶段边界
+  // （工具/正文落块）后不再更新 ⇒ 落盘即该段思考的实际耗时。
+  | {
+      type: "thinking";
+      content: string;
+      startedAt?: number;
+      duration_s?: number;
+    }
   | { type: "tool_group"; steps: ExecutionStep[] }
   | { type: "file_change"; changes: PendingChange[] };
 
@@ -167,12 +177,7 @@ export interface ChatMessage {
    * 撤销只剩逐文件这条路（不给虚假的安全感）。
    */
   runSnapshotId?: string;
-  blocks?: Array<
-    | { type: "text"; content: string }
-    | { type: "thinking"; content: string }
-    | { type: "tool_group"; steps: ExecutionStep[] }
-    | { type: "file_change"; changes: PendingChange[] }
-  >;
+  blocks?: StreamingResponseBlock[];
 }
 
 export interface EditorTab {
@@ -225,6 +230,22 @@ export interface PendingChange {
   undoUnsafe?: boolean;
 }
 
+/**
+ * 「页面交给人」的接管态。唯一一份，存在 store 里同时驱动两端：执行器据此锁住
+ * 写操作（agent 别在人类打字时踩页面），侧栏据此显示横幅与「我已完成」。
+ * 三个事实只由一处写入，所以不会出现「横幅还在但工具没锁」这种分裂。
+ */
+export interface BrowserHandoff {
+  /** 被交出去的那条浏览器页 id（切页/关页即失效）。 */
+  pageId: string;
+  /** 为什么要人工介入，原样显示在横幅上。 */
+  reason: string;
+  /** 登录成功的判据，供 browser_check_login 探针使用；缺省时只认「我已完成」。 */
+  expect?: { selector?: string; urlIncludes?: string };
+  /** 接管开始时刻（ms epoch），TTL 兜底从它算。 */
+  since: number;
+}
+
 type ApiProvider = string;
 type AgentEngine = "helix";
 
@@ -238,13 +259,17 @@ export type ReasoningEffortLevel =
  * **两条正交的轴**，别把它们当一维梯队看：
  *
  * - 权限档 `PermissionTier`（`ask` / `auto` / `full`）—— 决定「工具调用要不要
- *   先问」，而且**全局只有一档**：它是 `@zhushanwen/pi-permission` 的配置
- *   （`settings.json` 顶层 `permission` 键），那个扩展只读一处，不区分会话。
- *   所以前端必须把它当「外部真相的缓存」：唯一写路径是
+ *   先问」。它是 `@zhushanwen/pi-permission` 的配置（`settings.json` 顶层
+ *   `permission` 键），前端只是**那份文件当前生效值的缓存**：唯一写路径是
  *   `helix_set_permission_mode`，唯一读路径是 `helix_get_permission_mode`，
  *   并且**不再落 IndexedDB** —— 落一份自己的副本就制造第二条真相，历史教训
  *   是「设置显示完全访问、实际照样弹窗」。
  *   映射：`ask → strict`、`auto → auto`、`full → yolo`。
+ *   2026-10-10 起可按**项目 / 会话**覆盖：同一份文件里多两张表
+ *   （`modeByProject` / `modeBySession`），由扩展自己按「会话 → 项目 → 全局」
+ *   解析。生效档与来源都从同一次读里拿（见 `PermissionScopeInfo`），前端不
+ *   再自持「哪一档属于哪条会话」的状态 —— 那正是旧 `approvalModeBySession`
+ *   的病根：文件里没有它，闸门里也没有它，只有界面有。
  * - `plan` —— 走 pi-plan-mode 扩展（`/plan start`），模型只产出方案，用户批准
  *   后才切回执行。**不碰权限档**，且**按会话**：它是 pi 实例级状态（网关
  *   `PiInstance.plan_mode`），实例没了它就没了，所以同样不落盘。
@@ -257,9 +282,167 @@ export type ReasoningEffortLevel =
  */
 export type PermissionTier = "ask" | "auto" | "full";
 
+/**
+ * 归一磁盘 / IPC 里收到的权限档名。
+ *
+ * `strict` / `yolo` 是 pi-permission 扩展自己的档位名，
+ * `default` / `accept_edits` / `dont_ask` 是磁盘上可能残留的 Helix 旧值
+ * （Python serve-gateway 时代自造，pi 路径下从不生效）。
+ * 上游扩展另有 `approve` 档（本机补丁版已删，重装会回来），Helix 不提供也不认它。
+ *
+ * 认不出来返回 `undefined` —— 表示「这次读到的东西不可信，保留上一次缓存」，
+ * 绝不因为解析失败就把 UI 上的档位改掉（那会让显示与实际再度分裂）。
+ * 全项目只有这一个归一函数：后端已经映射过一层，前端这层只兜历史值。
+ */
+export function normalizePermissionTier(v: unknown): PermissionTier | undefined {
+  if (v === "ask" || v === "strict") return "ask";
+  if (v === "full" || v === "yolo" || v === "dont_ask") return "full";
+  if (v === "auto" || v === "default" || v === "accept_edits") return "auto";
+  return undefined;
+}
+
+/** 档位的写入层：全局兜底 / 按项目 / 按会话（会话最优先）。 */
+export type PermissionScopeId = "global" | "project" | "session";
+
+/**
+ * 生效档是被哪一层决定的。`disabled` = 扩展总开关（`enabled=false`）被关掉，
+ * 此刻连覆盖表都不跑，实际全放行 —— 显示必须跟到这个事实。
+ */
+export type PermissionScopeSource = PermissionScopeId | "disabled";
+
+/**
+ * `helix_get_permission_mode` 的作用域视图（后端把三份格子 + 生效档一起算好，
+ * 前端不再自己拼优先级 —— 拼错一次就是一次「显示与闸门分叉」）。
+ */
+export interface PermissionScopeInfo {
+  /** 生效档（Helix 档位名）。 */
+  effective: PermissionTier;
+  /** 生效档来自哪一层。 */
+  source: PermissionScopeSource;
+  /** 全局那格写的值；文件里认不出来时为 null（见 `globalUnparsable`）。 */
+  global: PermissionTier | null;
+  /** 本项目那格（无覆盖 = null）。 */
+  project: PermissionTier | null;
+  /** 本会话那格（无覆盖 = null）。 */
+  session: PermissionTier | null;
+  /** 这条会话跑在远端：本机的档与覆盖表都不作用于它。 */
+  remote: boolean;
+  /** 扩展总开关。 */
+  enabled: boolean;
+  /** 文件里的全局 mode 认不出（Helix 从不写这种值；手改 / 上游新增档位名）。 */
+  globalUnparsable: boolean;
+}
+
+/** 作用域身份：面板把当前那条流的后端 sid 与工作目录一起交给读/写。 */
+export interface PermissionScopeTarget {
+  sessionId?: string | null;
+  cwd?: string | null;
+}
+
+/**
+ * 后端 `permission_mode_view` 里这一层用得上的那几格。
+ * 写成结构化最小形状，免得 `src/types/electron.d.ts` 反过来依赖本文件。
+ */
+interface PermissionModeViewLike {
+  ok?: boolean;
+  mode?: string | null;
+  enabled?: boolean;
+  effective?: { source?: unknown } | null;
+  global?: { mode?: unknown; unparsable?: unknown } | null;
+  session?: { mode?: unknown } | null;
+  project?: { mode?: unknown } | null;
+  scope?: { remote?: unknown } | null;
+}
+
+/** 把后端视图归一成 `PermissionScopeInfo`；视图不可信时返回 null。 */
+export function permissionScopeInfoFrom(
+  res: PermissionModeViewLike | null | undefined,
+): PermissionScopeInfo | null {
+  if (!res || res.ok !== true) return null;
+  const cell = (
+    v: { mode?: unknown } | null | undefined,
+  ): PermissionTier | null => (v && normalizePermissionTier(v.mode)) || null;
+  const effective = normalizePermissionTier(res.mode);
+  if (!effective) return null;
+  const source = res.effective?.source;
+  return {
+    effective,
+    // 认不出的来源按 global：全局本就是兜底那一层，不会比未知更乐观。
+    source:
+      source === "session" ||
+      source === "project" ||
+      source === "global" ||
+      source === "disabled"
+        ? source
+        : "global",
+    global: cell(res.global),
+    project: cell(res.project),
+    session: cell(res.session),
+    remote: !!res.scope?.remote,
+    enabled: res.enabled !== false,
+    globalUnparsable: res.global?.unparsable === true,
+  };
+}
+
+
+/**
+ * 作用域选择器的三格。下拉与旁路面板共用，文案只写一次。
+ * 优先级：本会话 > 本项目 > 全局（与扩展 resolvePermissionMode 同序）。
+ */
+export const PERMISSION_SCOPE_ITEMS: ReadonlyArray<{
+  id: PermissionScopeId;
+  title: string;
+  desc: string;
+}> = [
+  {
+    id: "global",
+    title: "全局",
+    desc: "所有对话的默认档；没有项目/会话覆盖时就是它生效",
+  },
+  {
+    id: "project",
+    title: "本项目",
+    desc: "只影响当前项目目录下的对话，盖过全局",
+  },
+  {
+    id: "session",
+    title: "本会话",
+    desc: "只影响这条对话，优先级最高",
+  },
+];
+
+/**
+ * 生效档来自哪一层 → 芯片上的小字。全局是常态，不占位（返回 null）。
+ * 远程会话单独说明：本机的档与覆盖表都不作用于跑在远端的 pi。
+ */
+export function permissionScopeLabelOf(
+  info: PermissionScopeInfo | null,
+): string | null {
+  if (!info) return null;
+  if (!info.enabled) return "扩展已关闭";
+  if (info.remote) return "远程会话";
+  if (info.source === "session") return "本会话";
+  if (info.source === "project") return "本项目";
+  return null;
+}
+
+/**
+ * 某一层**自己**那格现在的值（没覆盖 = null）。
+ *
+ * 下拉的勾要打在写入层那一格上，而不是生效档：否则选了「本会话」却看见全局的
+ * 档被勾着，用户会以为本会话已经设过它 —— 一格一值这件事只有这一处解释。
+ */
+export function permissionTierOfLayer(
+  info: PermissionScopeInfo | null,
+  scope: PermissionScopeId,
+): PermissionTier | null {
+  if (!info) return null;
+  if (scope === "global") return info.global;
+  return scope === "project" ? info.project : info.session;
+}
+
 /** UI 下拉的值域 = 权限档 ∪ plan 轴；由两条轴合成，不是存储状态。 */
 export type ApprovalMode = PermissionTier | "plan";
-
 /**
  * 两条轴 → 下拉/芯片显示的那一个值：plan 优先（它意味着「现在只做只读规划」，
  * 权限档此刻用不上）。合成规则只有这一处，组件里不要再各写一份
@@ -424,6 +607,19 @@ export interface ScheduledTask {
    *  按动作路由到专用通道（渠道签到 = pi_connect 一次性桥）。缺省/null =
    *  普通 agent 任务。 */
   action?: string | null;
+  /**
+   * 会话模式，对齐 Codex 的 Scheduled Task / Scheduled Message：
+   * - "fresh"（缺省）= 每次运行开一条新对话，跑完即焚。适合「每天早上汇总
+   *   邮件」—— 明天的汇总不需要记得今天的汇总。
+   * - "reuse" = 每次运行回到同一条对话。适合轮询类（「每 30 分钟检查这个
+   *   PR，处理新评论」）—— 这次检查依赖上次检查的结论。
+   * 判据：如果明天跑这次任务，它需要之前的对话吗？需要 → reuse。
+   */
+  sessionMode?: "fresh" | "reuse";
+  /** 最近一次运行使用的 session_id（仅供 UI 展示/排查，不是复用依据）。 */
+  sessionId?: string | null;
+  /** 累计运行次数。 */
+  runCount?: number;
   enabled: boolean;
   lastRunAt: number | null;
   nextRunAt: number | null;
@@ -439,21 +635,9 @@ export interface ToolCallEntry {
 }
 
 /**
- * A single task item in Helix's in-session todo list (emitted via
- * `session/update` with a todo/plan-style `sessionUpdate` name, or via the
- * `todo_write` tool result). `status` mirrors Helix's own states.
- */
-export interface HelixTodo {
-  id: string;
-  content: string;
-  status: "pending" | "in_progress" | "completed" | "cancelled";
-  activeForm?: string;
-}
-
-/**
  * 一条结构化计划步骤（来自 plan.md 的列表项，解析见 src/lib/plan-parse.ts）。
- * 比 HelixTodo 语义更窄：只有三态、无 id/activeForm——它描述的是“计划里写
- * 了什么步骤 + 当前做到哪一步”，供工作面板「执行计划」区块渲染。
+ * 只有三态、无 id/activeForm——它描述的是“计划里写了什么步骤 + 当前做到哪
+ * 一步”，供工作面板「执行计划」区块渲染。
  */
 export interface PlanStep {
   text: string;

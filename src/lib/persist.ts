@@ -8,6 +8,27 @@ import type { PendingChange } from "@/stores/helix-types";
 const DB_NAME = "helix-db";
 const DB_VERSION = 5;
 
+/**
+ * 存「供应商 profile 数组」的键。它们的 `config.apiKey` 混在结构里，读写必须走
+ * 同一套加解密 —— 包括冷启动 self-heal 覆写前留的那份 `apiProfilesBackup` 快照：
+ * 漏掉它等于把用户密钥明文写进 IndexedDB。
+ */
+const PROFILE_LIST_KEYS = new Set(["apiProfiles", "apiProfilesBackup"]);
+
+/**
+ * 「当前正打开的会话 id」的取数钩子，由 helix-store 在 store 建好后注入。
+ * 不直接 import store：persist 已被 store 静态引用，反向 import 会成模块环。
+ * 默认恒返回 null —— 没注入时退化成「不盖章」，lastViewedAt 保持原有值，
+ * 最多让自动归档保守一点（少归档），不会写坏数据。
+ */
+let getCurrentSessionId: () => string | null = () => null;
+
+export function setPersistCurrentSessionGetter(
+  fn: () => string | null,
+): void {
+  getCurrentSessionId = fn;
+}
+
 interface PersistedMemory {
   id: string;
   content: string;
@@ -116,6 +137,12 @@ export interface PersistedSession {
    *  can sort by this for a fixed order that doesn't reshuffle on click. */
   createdAt?: number;
   isArchived?: boolean;
+  /** 最后一次「打开这个任务」的时刻。自动归档用它判「无未读」：最后一条消息
+   *  晚于本值 = 跑完的结果没人看过 → 不进归档候选。
+   *  与 savedAt 的区别要说清：savedAt 是「最后被使用」（消息时间，打开不算），
+   *  lastViewedAt 是「最后被看过」（打开就算）。两者一起才分得开「旧且已读」和
+   *  「旧但没人看」。老数据没这字段 → 由 saveSession 在下次打开时补写。 */
+  lastViewedAt?: number;
   /** 全局置顶：侧边栏顶部独立「置顶」分组。 */
   isPinned?: boolean;
   /**
@@ -440,7 +467,7 @@ export const persistence = {
         }),
       );
     }
-    if (key === "apiProfiles" && Array.isArray(value)) {
+    if (PROFILE_LIST_KEYS.has(key) && Array.isArray(value)) {
       toStore = await Promise.all(
         (value as Array<{ config?: Record<string, unknown> }>).map(
           async (p) => {
@@ -499,7 +526,7 @@ export const persistence = {
         }),
       )) as T;
     }
-    if (key === "apiProfiles" && Array.isArray(value)) {
+    if (PROFILE_LIST_KEYS.has(key) && Array.isArray(value)) {
       value = (await Promise.all(
         (value as Array<{ config?: Record<string, unknown> }>).map(
           async (p) => {
@@ -568,6 +595,7 @@ export const persistence = {
     label?: string;
     workDir?: string | null;
     isArchived?: boolean;
+    lastViewedAt?: number;
     parentSessionId?: string;
     forkedFromMessageId?: string;
     branchName?: string;
@@ -575,7 +603,9 @@ export const persistence = {
     const db = await openDB();
     const now = Date.now();
     const id = data.id || "session-" + now;
-    const { label: dataLabel, ...rest } = data;
+    // lastViewedAt 要从 rest 剔出来：下面 `...rest` 在显式字段之后展开，不剔就
+    // 会把这里算好的盖章值盖掉（调用方一般不传这字段，传了则显式值优先）。
+    const { label: dataLabel, lastViewedAt: dataLastViewedAt, ...rest } = data;
     // Preserve createdAt / isArchived for existing sessions (so switching/
     // loading/re-saving never reshuffles the sidebar nor resurrects an
     // archived conversation); assign them only when first created.
@@ -609,6 +639,16 @@ export const persistence = {
       // （切换会话/发消息/flushSessionPersist 的 put 整体替换）都会把用户
       // 归档的会话覆盖回未归档，导致归档对话「过后又自动恢复」。
       isArchived: data.isArchived ?? existing?.isArchived ?? false,
+      // 「被看过」只在一条路径上盖章：保存的就是当前正打开的会话。发消息、切会话、
+      // 后台持久化、重命名全部经过 saveSession，所以这一处就够，不必每个调用点补；
+      // 反过来，后台会话（正在跑但不是用户看着的那个）落盘不会算「已读」。
+      // 兜底顺序：显式传入 > 本次是打开态则盖到 now > 沿用旧值 > 新建时用创建时间
+      // （新建即打开，等同于已读，不然刚建的任务会被当成「有未读」永不归档）。
+      lastViewedAt:
+        dataLastViewedAt ??
+        (getCurrentSessionId() === id ? now : undefined) ??
+        existing?.lastViewedAt ??
+        createdAt,
       ...rest,
       chatMessages: rest.chatMessages.map((m) => ({
         ...m,
@@ -844,14 +884,29 @@ export const persistence = {
     const toArchive = sessions.filter(
       (s) => s.workDir === workDir && !s.isArchived,
     );
+    return this.archiveSessionsByIds(toArchive.map((s) => s.id));
+  },
+
+  /** 按 id 批量归档（已是归档态的跳过）。自动归档扫描用。 */
+  async archiveSessionsByIds(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
     const db = await openDB();
-    for (const s of toArchive) {
+    let n = 0;
+    for (const id of ids) {
+      const s = await tx<PersistedSession | undefined>(
+        db,
+        "sessions",
+        "readonly",
+        (store) => store.get(id),
+      );
+      if (!s || s.isArchived) continue;
       s.isArchived = true;
-      // 批量归档不是"使用"——不动 savedAt。
+      // 归档不是"使用"——不动 savedAt。
       await tx(db, "sessions", "readwrite", (store) => store.put(s));
       this.sessionCachePut(s);
+      n++;
     }
-    return toArchive.length;
+    return n;
   },
 
   // --- Notes ---

@@ -1,13 +1,26 @@
 ﻿"use client";
 
 import { AlertTriangle, Check, Loader2, Pencil } from "lucide-react";
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
+import {
+  allowAlwaysLabel,
+  deriveAllowPrefix,
+  parsePermissionAsk,
+  PERM_APPROVE_ANSWER,
+  PERM_DENY_ANSWER,
+} from "@/lib/permission-allow";
 import type { ApprovalLevel } from "@/stores/helix-types";
 
 export interface ApprovalRequest {
   id: string;
   sessionId?: string;
+  /**
+   * 发起这条请求的 **pi 后端 session id**（事件自带的 `session_id`，不是前端对话 id）。
+   * 回应必须按它路由（网关 `routed_instance_or_ui_owner` 严格按 sid 找实例），
+   * 所以卡片自己带着它 —— 归属判定只管「显示在哪个视图」，不再决定回给谁。
+   */
+  sid?: string;
   toolName: string;
   params: Record<string, unknown>;
   command?: string;
@@ -212,19 +225,62 @@ interface ClarifyRequest {
   choices: string[] | null;
   /** 审批卡到期时刻（ms epoch）；缺省/null = 普通 clarify，不显示倒计时 */
   expiresAt?: number | null;
+  /**
+   * pi-permission 审批卡（网关只在 permission==true 时附 approvalTimeoutSec）。
+   * true 时渲染 once/always/reject 三选项（替代扩展的英文 choices 原文），
+   * always 经 onApproveAlways 记会话级放行；需要父组件提供 onApproveAlways。
+   */
+  isPermission?: boolean;
 }
 
 interface ClarifyBarProps {
   request: ClarifyRequest;
   onRespond: (requestId: string, answer: string) => void;
+  /** 审批卡「本会话始终允许」：父组件登记会话放行后代答 Approve (once)。 */
+  onApproveAlways?: (requestId: string) => void;
 }
 
-export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
+/** 统一的选项行：普通 clarify 是 choices 原文；审批卡是 once/always/reject。 */
+interface ClarifyOption {
+  label: string;
+  /** 非 always 时回给扩展的应答原文 */
+  answer?: string;
+  always?: boolean;
+}
+
+export function ClarifyBar({
+  request,
+  onRespond,
+  onApproveAlways,
+}: ClarifyBarProps) {
   const [freeText, setFreeText] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const choices = request.choices || [];
+  // 审批卡（pi-permission）且父组件接了 onApproveAlways → 三选项模式；
+  // 否则保持原样渲染扩展 choices（strict 档/旧事件路径的兜底）。
+  const permAsk = useMemo(
+    () =>
+      request.isPermission && onApproveAlways
+        ? parsePermissionAsk(request.question)
+        : null,
+    [request.isPermission, request.question, onApproveAlways],
+  );
+  const permPrefix = permAsk ? deriveAllowPrefix(permAsk.command) : "";
+  const options: ClarifyOption[] = useMemo(
+    () =>
+      permAsk
+        ? [
+            { label: "允许", answer: PERM_APPROVE_ANSWER },
+            {
+              label: allowAlwaysLabel(permAsk.tool, permPrefix),
+              always: true,
+            },
+            { label: "拒绝", answer: PERM_DENY_ANSWER },
+          ]
+        : (request.choices || []).map((c) => ({ label: c, answer: c })),
+    [permAsk, permPrefix, request.choices],
+  );
   const [selectedIdx, setSelectedIdx] = useState<number | null>(
-    choices.length > 0 ? 0 : null,
+    options.length > 0 ? 0 : null,
   );
   // 审批卡倒计时（1s 一格）：expiresAt 由面板按网关附带的 approvalTimeoutSec
   // 算出。归零只是显示层面的镜到点；实际 fail-closed 拒绝在扩展侧同一时刻
@@ -250,35 +306,60 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
     [request.id, onRespond, submitting],
   );
 
+  const submitOption = useCallback(
+    (opt: ClarifyOption | undefined) => {
+      if (!opt || submitting) return;
+      if (opt.always) {
+        setSubmitting(true);
+        onApproveAlways?.(request.id);
+        return;
+      }
+      if (opt.answer) submit(opt.answer);
+    },
+    [request.id, onApproveAlways, submit, submitting],
+  );
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // 在输入框里打字不劫持数字键/Esc（自由回答仍然可用）。
+      const inField = !!(
+        e.target instanceof HTMLElement &&
+        e.target.closest("input, textarea")
+      );
+      if (!inField && permAsk && (e.key === "Escape" || e.key === "1" || e.key === "2" || e.key === "3")) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === "Escape") submitOption(options[2]);
+        else submitOption(options[Number(e.key) - 1]);
+        return;
+      }
       if (e.key === "ArrowUp") {
         e.preventDefault();
         setSelectedIdx((i) => {
-          if (choices.length === 0) return null;
+          if (options.length === 0) return null;
           if (i === null) return 0;
           return i > 0 ? i - 1 : 0;
         });
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
         setSelectedIdx((i) => {
-          if (choices.length === 0) return null;
-          if (i === null) return choices.length - 1;
-          return i < choices.length - 1 ? i + 1 : choices.length - 1;
+          if (options.length === 0) return null;
+          if (i === null) return options.length - 1;
+          return i < options.length - 1 ? i + 1 : options.length - 1;
         });
       } else if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         e.stopPropagation();
         if (freeText.trim()) {
           submit(freeText);
-        } else if (selectedIdx !== null && choices[selectedIdx]) {
-          submit(choices[selectedIdx]);
+        } else if (selectedIdx !== null && options[selectedIdx]) {
+          submitOption(options[selectedIdx]);
         }
       }
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [choices, freeText, selectedIdx, submit]);
+  }, [options, permAsk, freeText, selectedIdx, submit, submitOption]);
 
   return (
     <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 w-full px-5 pointer-events-none">
@@ -311,15 +392,15 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
           {request.question || "模型需要你的选择"}
         </div>
 
-        {choices.length > 0 && (
+        {options.length > 0 && (
           <div className="flex flex-col gap-1.5 mb-2 max-h-40 overflow-y-auto pr-0.5">
-            {choices.map((c, idx) => {
+            {options.map((opt, idx) => {
               const isSel = selectedIdx === idx;
               return (
                 <button
-                  key={c}
+                  key={opt.label}
                   type="button"
-                  onClick={() => submit(c)}
+                  onClick={() => submitOption(opt)}
                   onMouseEnter={() => setSelectedIdx(idx)}
                   disabled={submitting}
                   className={
@@ -340,7 +421,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
                     {idx + 1}
                   </span>
                   <span className="text-[calc(var(--helix-transcript-size)*0.9286)] truncate">
-                    {c}
+                    {opt.label}
                   </span>
                 </button>
               );
@@ -352,7 +433,7 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
             value={freeText}
             onChange={(e) => setFreeText(e.target.value)}
             disabled={submitting}
-            placeholder={choices.length ? "或输入其他回答…" : "输入回答…"}
+            placeholder={options.length ? "或输入其他回答…" : "输入回答…"}
             className="flex-1 h-9 px-3 rounded-lg bg-background/60 border border-border/50 text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground disabled:opacity-50"
           />
           <Button
@@ -370,7 +451,9 @@ export function ClarifyBar({ request, onRespond }: ClarifyBarProps) {
         </div>
 
         <div className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/60 text-center mt-2">
-          内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · Enter 确认 · 也可自由输入
+          {permAsk
+            ? "内容由 AI 生成，请核实重要信息 · 1 允许 · 2 会话放行 · 3/Esc 拒绝 · 也可自由输入"
+            : "内容由 AI 生成，请核实重要信息 · ↑↓ 选择 · Enter 确认 · 也可自由输入"}
         </div>
       </div>
     </div>
