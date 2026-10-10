@@ -101,6 +101,13 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 /// COMPRESS_RPC_TIMEOUT_MS (360s, serve-gateway.ts) for the trailing
 /// get_session_stats / get_messages round-trips in session.compress.
 const COMPACT_RPC_TIMEOUT: Duration = Duration::from_secs(300);
+/// pi 的 **in-run 自动压缩**（`compaction_start` → `compaction_end`，发生在两
+/// 次 assistant 调用之间）本身就是一次完整的 LLM 摘要调用，期间主事件流必然
+/// 零帧。压缩窗口内不能按「模型流卡死」中止回合 —— 大上下文正常压缩超过
+/// STREAM_SILENCE_TIMEOUT 是常态，这和前端 90s 空闲检测误砍是同一类 bug。
+/// 上界取 2x COMPACT_RPC_TIMEOUT：`compaction_end` 真在传输中丢了时，回合仍然
+/// 能按 STREAM_SILENCE_TIMEOUT 收敛，而不是挂到 PROMPT_TIMEOUT（一小时）。
+const COMPACTION_GUARD_MS: u64 = 600_000;
 /// Handshake (get_state on a fresh spawn) allowance. pi answers get_state
 /// only after ALL extensions finish initializing; heavyweight extensions
 /// (e.g. the memory extension's SQLite backfill) may legitimately block for
@@ -420,6 +427,9 @@ pub struct PiInstance {
     /// wedged model stream (no events at all) from legitimate long tool
     /// runs / user-pending UI cards.
     last_event_ms: AtomicU64,
+    /// pi 正在做 in-run 上下文压缩的截止时刻（ms epoch），0 = 没在压缩。
+    /// 见 `COMPACTION_GUARD_MS` 与 `emit_pi_event` 的 compaction 分支。
+    compaction_guard_until_ms: AtomicU64,
     /// Tool calls currently EXECUTING (tool_execution_start without its
     /// matching end). Long-running tools legitimately produce no stream
     /// events, so the watchdog must not fire while this is non-empty.
@@ -499,6 +509,7 @@ impl PiInstance {
             last_active_ms: AtomicU64::new(now_ms()),
             plan_mode: Mutex::new(false),
             last_event_ms: AtomicU64::new(now_ms()),
+            compaction_guard_until_ms: AtomicU64::new(0),
             executing_tools: Mutex::new(std::collections::HashSet::new()),
             last_assistant_text: Mutex::new(String::new()),
             last_assistant_thinking: Mutex::new(String::new()),
@@ -536,6 +547,13 @@ impl PiInstance {
     /// refreshes last_event_ms on EVERY pi line, including bash
     /// execution updates.
     fn stream_wedged(&self) -> bool {
+        // 压缩期间的静默是合法的（见 COMPACTION_GUARD_MS），但窗口有上界：
+        // 过了截止时刻就照旧按事件静默判卡死，丢掉 compaction_end 的回合不会
+        // 永久挂着。
+        let guard = self.compaction_guard_until_ms.load(Ordering::SeqCst);
+        if guard != 0 && now_ms() < guard {
+            return false;
+        }
         now_ms().saturating_sub(self.last_event_ms.load(Ordering::SeqCst))
             >= STREAM_SILENCE_TIMEOUT.as_millis() as u64
     }
@@ -3751,39 +3769,79 @@ fn restore_session_instance(
     // Free-tier upstreams (tokenrouter glm-5.3-free) silently DROP requests
     // whose restored context exceeds the model window: no error, no stream,
     // the turn never settles while pi stays healthy — the user sees an
-    // eternal "工作中". pi's own compact RPC can't rescue this (its
-    // summarization call replays the same oversized context and hangs the
-    // same way), so the rescue is a LOCAL jsonl trim: keep the header + the
-    // records of the most recent complete turns and switch to the trimmed
-    // copy. O(file), no model involved, sub-second. Best-effort — on any
-    // failure the session restores with the original oversized context.
+    // eternal "工作中". Rescue is opencode-style, same single jsonl:
+    //   1. pi's own `compact` RPC (LLM summary → compaction record appended
+    //      to the same file, pi reloads it in place). Best-effort with the
+    //      standard compaction timeout.
+    //   2. When compact itself hits the hanging upstream (it replays the
+    //      same oversized context), fall back to a LOCAL in-place cut:
+    //      same turn-boundary logic, written back into the original file.
+    // Neither path ever creates a `.trimmed.jsonl` twin.
     // 用「本会话自己那个模型」的窗口判断是否超限（与上下文环同一个解析口径，
     // 见 PiInstance::context_max）：用户给这个模型配了 1M，就不该按别处
     // 256k 的窗口把 300k 的会话裁掉。
     let session_window = instance.context_max(None);
-    if session_window > 0 {
-        let window = session_window;
-        let trimmed = trim_session_if_oversized(&session_file, window)?;
-        if let Some(trimmed_path) = trimmed {
-            log_spawn_diag(&format!(
-                "restore: sid={session_id} oversized ({window} window) → switching to trimmed copy"
-            ));
-            match instance.request_sync(
-                "switch_session",
-                json!({ "sessionPath": trimmed_path }),
-                HANDSHAKE_TIMEOUT,
-            ) {
-                Ok(_) => {
-                    if let Ok(fresh) = instance.request_sync("get_state", Value::Null, RPC_TIMEOUT)
-                    {
-                        instance.stamp_session_from_state(Some(&fresh));
+    if session_window > 0 && session_oversized(&session_file, session_window) {
+        log_spawn_diag(&format!(
+            "restore: sid={session_id} oversized (~{session_window} window) → in-place compaction"
+        ));
+        match instance.request_sync("compact", Value::Null, COMPACT_RPC_TIMEOUT) {
+            Ok(_) => {
+                // Same post-compact anchor refresh as the session.compress RPC:
+                // without it `last_context_used` keeps the pre-compaction peak,
+                // which wins the max() in the usage ring until the next call.
+                if let Ok(stats) =
+                    instance.request_sync("get_session_stats", Value::Null, RPC_TIMEOUT)
+                {
+                    let used = stats
+                        .get("contextUsage")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    if used > 0 {
+                        instance.set_last_context_used(used);
+                    } else {
+                        instance.reset_last_context_used();
                     }
                 }
-                Err(e) => {
-                    log_spawn_diag(&format!(
-                        "restore WARNING sid={session_id} oversized-session trim switch failed: {e}"
-                    ));
-                    eprintln!("[pi agent] oversized-session trim switch failed: {e}");
+                if let Ok(fresh) = instance.request_sync("get_state", Value::Null, RPC_TIMEOUT) {
+                    instance.stamp_session_from_state(Some(&fresh));
+                }
+            }
+            Err(e) => {
+                // compact hung/failed (the oversized-context replay the note
+                // above describes) → local cut, then reload pi from the same
+                // path so its in-memory transcript matches the rewritten file.
+                log_spawn_diag(&format!(
+                    "restore WARNING sid={session_id} compact failed ({e}) → in-place trim"
+                ));
+                eprintln!("[pi agent] compact failed, falling back to in-place trim: {e}");
+                match trim_session_in_place(&session_file, session_window) {
+                    Ok(true) => match instance.request_sync(
+                        "switch_session",
+                        json!({ "sessionPath": session_file }),
+                        HANDSHAKE_TIMEOUT,
+                    ) {
+                        Ok(_) => {
+                            if let Ok(fresh) =
+                                instance.request_sync("get_state", Value::Null, RPC_TIMEOUT)
+                            {
+                                instance.stamp_session_from_state(Some(&fresh));
+                            }
+                        }
+                        Err(e) => {
+                            log_spawn_diag(&format!(
+                                "restore WARNING sid={session_id} post-trim reload failed: {e}"
+                            ));
+                            eprintln!("[pi agent] post-trim reload failed: {e}");
+                        }
+                    },
+                    Ok(false) => {} // already fits / untrimmable — leave as is
+                    Err(e) => {
+                        log_spawn_diag(&format!(
+                            "restore WARNING sid={session_id} in-place trim failed: {e}"
+                        ));
+                        eprintln!("[pi agent] in-place trim failed: {e}");
+                    }
                 }
             }
         }
@@ -4030,21 +4088,41 @@ pub fn estimate_active_branch(lines: &[String]) -> (i64, Option<usize>, Option<u
     (tokens, start_line, compaction_idx)
 }
 
-/// Local rescue for restored sessions whose next-prompt context would blow
-/// past the model window (free-tier upstreams silently drop those — no
-/// error, no stream, eternal "工作中"). Walks turns backwards from the end
-/// accumulating estimated tokens, finds the newest user-message boundary
-/// that fits under `window - TRIM_MARGIN_TOKENS`, and writes a trimmed
-/// copy: header record + the kept records (the kept slice's first record
-/// has its parentId broken — pi's loader treats a chain start as a root).
-/// Returns the trimmed path, or None when the session already fits (or is
-/// untrimmable, e.g. a single huge turn). Never touches the original file.
-pub fn trim_session_if_oversized(
-    session_file: &str,
-    window: i64,
-) -> Result<Option<String>, String> {
+/// Estimate whether the session's active branch already exceeds the window
+/// budget (`window - TRIM_MARGIN_TOKENS`). Read-only — lets restore skip the
+/// compaction rescue entirely for sessions that already fit. Any read/parse
+/// failure means "not oversized": the session restores untouched.
+fn session_oversized(session_file: &str, window: i64) -> bool {
+    let Ok(raw) = std::fs::read_to_string(session_file) else {
+        return false;
+    };
+    let lines: Vec<String> = raw
+        .split('\n')
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    let (tokens, _, _) = estimate_active_branch(&lines);
+    tokens > window - TRIM_MARGIN_TOKENS
+}
+
+/// Local fallback for an oversized restored session whose pi-side compaction
+/// could not run (free-tier upstreams silently drop the summarization call —
+/// it replays the same oversized context and hangs). Walks the newest-first
+/// user-turn boundaries, finds the slice that fits under
+/// `window - TRIM_MARGIN_TOKENS`, and WRITES THE RESULT BACK INTO THE ORIGINAL
+/// jsonl — no `.trimmed.jsonl` twin (opencode-style single-file history).
+///
+/// Write protocol: full content first to `<file>.trim.tmp`, then copy over
+/// the original path. Never rename-replace: pi holds the file open with
+/// O_APPEND (libuv share mode allows the replace, but pi's handle would keep
+/// appending to the unlinked old stream and silently fork the history).
+/// Best-effort — on any failure the original file keeps its oversized
+/// content. Returns Ok(true) when the file was rewritten, Ok(false) when it
+/// already fits (or is untrimmable, e.g. a single huge turn).
+pub fn trim_session_in_place(session_file: &str, window: i64) -> Result<bool, String> {
     if window <= 0 {
-        return Ok(None);
+        return Ok(false);
     }
     let raw = std::fs::read_to_string(session_file).map_err(|e| e.to_string())?;
     let lines: Vec<String> = raw
@@ -4054,12 +4132,12 @@ pub fn trim_session_if_oversized(
         .map(str::to_string)
         .collect();
     if lines.len() < 2 {
-        return Ok(None);
+        return Ok(false);
     }
     let (tokens, _, latest_compaction_idx) = estimate_active_branch(&lines);
     let budget = window - TRIM_MARGIN_TOKENS;
     if tokens <= budget {
-        return Ok(None);
+        return Ok(false);
     }
     // Turn boundaries: indices of user-message records — a trim must cut at
     // one so the model gets whole turns (a user prompt + its replies).
@@ -4074,7 +4152,7 @@ pub fn trim_session_if_oversized(
         }
     }
     if user_turns.is_empty() {
-        return Ok(None); // nothing to cut at — a single oversized turn can't be rescued here
+        return Ok(false); // nothing to cut at — a single oversized turn can't be rescued here
     }
     // Walk turns newest-first; stop once the kept slice fits the budget.
     let mut keep_from: Option<usize> = None;
@@ -4098,11 +4176,11 @@ pub fn trim_session_if_oversized(
         keep_from = Some(turn_start);
     }
     let Some(keep_from) = keep_from else {
-        return Ok(None);
+        return Ok(false);
     };
     // If the cut lands after the latest compaction record, carry that record
-    // into the trimmed file — its summary is the only surviving memory of
-    // everything before the cut, and it costs only a couple thousand tokens.
+    // forward — its summary is the only surviving memory of everything before
+    // the cut, and it costs only a couple thousand tokens.
     let mut prefix_records: Vec<String> = Vec::new();
     if let Some(compaction_idx) = latest_compaction_idx {
         if compaction_idx < keep_from {
@@ -4137,27 +4215,17 @@ pub fn trim_session_if_oversized(
         }
         // Non-JSON (crash-truncated tail) is dropped.
     }
-    let trimmed_path = format!("{session_file}.trimmed.jsonl");
-    std::fs::write(&trimmed_path, out.join("\n") + "\n").map_err(|e| e.to_string())?;
+    let tmp_path = format!("{session_file}.trim.tmp");
+    std::fs::write(&tmp_path, out.join("\n") + "\n").map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::copy(&tmp_path, session_file) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.to_string());
+    }
+    let _ = std::fs::remove_file(&tmp_path);
     eprintln!(
-        "[pi agent] oversized session trimmed: ~{tokens} tokens > window {window}; kept ~{acc} tokens from record {keep_from} -> {trimmed_path}"
+        "[pi agent] oversized session trimmed in place: ~{tokens} tokens > window {window}; kept ~{acc} tokens from record {keep_from}"
     );
-    Ok(Some(trimmed_path))
-}
-
-/// The trimmed copy a restore may have switched this session onto. Returns
-/// the path only when it exists on disk (the instance may still be on the
-/// original file — no trim happened, or the copy was deleted).
-fn trimmed_path_for(session_file: &str) -> Option<String> {
-    let trimmed = format!("{session_file}.trimmed.jsonl");
-    std::path::Path::new(&trimmed).exists().then_some(trimmed)
-}
-
-/// Last-modified time for mtime comparisons; missing files count as epoch.
-fn mtime_of(path: &str) -> std::time::SystemTime {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(std::time::UNIX_EPOCH)
+    Ok(true)
 }
 
 /// touching any pi process — O(tail bytes), not O(session length). Used for
@@ -4599,13 +4667,11 @@ async fn routed_instance_or_ui_owner(
     instance_for_session(&owner_key, state).await
 }
 
-/// Read + active-branch estimate of the instance's live session jsonl. The
-/// trimmed file (if newer by mtime) is what pi is actually appending to, so
-/// mtime picks the live file even when a restore-time trim's switch failed and
-/// pi stayed on the original. Shared by the `context_breakdown` RPC and the
-/// per-message usage ring so both report the same "what the NEXT prompt will
-/// replay" figure instead of the last request's (often far smaller)
-/// `contextUsage`. Returns `(0, null, 0)` when the live file is unknown/unread.
+/// Read + active-branch estimate of the instance's live session jsonl.
+/// Shared by the `context_breakdown` RPC and the per-message usage ring so
+/// both report the same "what the NEXT prompt will replay" figure instead of
+/// the last request's (often far smaller) `contextUsage`. Returns
+/// `(0, null, 0)` when the live file is unknown/unread.
 /// The second return value is the per-kind breakdown as a JSON array (the same
 /// shape `context_breakdown` returns as `categories`) — or `Null` when no
 /// buckets were produced — so the usage ring can carry real categories instead
@@ -4624,10 +4690,7 @@ fn jsonl_active_branch_estimate(
     let Some(session_file) = cached_file.or_else(|| find_session_file(&sid)) else {
         return (0, None, 0);
     };
-    let estimate_target = trimmed_path_for(&session_file)
-        .filter(|t| mtime_of(t) >= mtime_of(&session_file))
-        .unwrap_or(session_file);
-    let Ok(raw) = std::fs::read_to_string(&estimate_target) else {
+    let Ok(raw) = std::fs::read_to_string(&session_file) else {
         return (0, None, 0);
     };
     let lines: Vec<String> = raw
@@ -6512,8 +6575,44 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 }
             }
         }
+        // pi 的 in-run 自动压缩：`_runAutoCompaction` 夹在两次 assistant 调用
+        // 之间，本身就是一次完整的 LLM 摘要调用，期间主事件流零帧。这两帧必须
+        // 落到前端 —— 前端的空闲检测把「已出内容 + 事件流静默」当成终结帧丢失
+        // 并合成 done，而 done 会退订事件流，于是压缩完继续输出的那一轮没人接
+        //（「压缩上下文后要手动继续」根因）。同一窗口也让本侧的 `stream_wedged`
+        // 让路，否则大上下文在 300s 就被中止回合。
+        "compaction_start" | "compaction_end" => {
+            if event_type == "compaction_start" {
+                instance
+                    .compaction_guard_until_ms
+                    .store(now_ms() + COMPACTION_GUARD_MS, Ordering::SeqCst);
+            } else {
+                instance.compaction_guard_until_ms.store(0, Ordering::SeqCst);
+            }
+            emit_helix_event(
+                "session/update",
+                &json!({
+                    "session_id": sid(),
+                    "update": {
+                        "sessionUpdate": event_type,
+                        "reason": message.get("reason").cloned().unwrap_or(Value::Null),
+                        "aborted": message.get("aborted").cloned().unwrap_or(Value::Null),
+                        "willRetry": message.get("willRetry").cloned().unwrap_or(Value::Null),
+                        "error": message.get("errorMessage").cloned().unwrap_or(Value::Null),
+                        "beforeTokens": message
+                            .pointer("/result/tokensBefore")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        "afterTokens": message
+                            .pointer("/result/estimatedTokensAfter")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    },
+                }),
+            );
+        }
         // Pass-through / ignore: agent_start, turn_start/end, message_start/end,
-        // queue_update, compaction_*, summarization_retry_*, bash_execution_update.
+        // queue_update, summarization_retry_*, bash_execution_update.
         _ => {}
     }
 }

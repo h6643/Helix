@@ -31,7 +31,7 @@ mod pi_gateway;
 #[doc(hidden)]
 pub mod pi_gateway_test_hooks {
     pub use crate::pi_gateway::{
-        estimate_active_branch, estimate_message_tokens, trim_session_if_oversized,
+        estimate_active_branch, estimate_message_tokens, trim_session_in_place,
         TRIM_MARGIN_TOKENS,
     };
 }
@@ -389,6 +389,7 @@ pub fn run() {
             browser_webview::browser_webview_eval,
             browser_webview::browser_webview_screenshot,
             browser_webview::browser_webview_close,
+            browser_webview::browser_webview_reap,
             browser_webview::browser_webview_focus,
             browser_webview::browser_storage_usage,
             browser_webview::browser_clear_data,

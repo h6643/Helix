@@ -112,8 +112,9 @@ export async function resumeSession(sid: string): Promise<ResumeResult> {
     //
     // 契约上 resume = "按这个 sid 把原会话恢复起来"：实例在网关里就是以这个
     // sid 注册的（map key 是路由键），所以后续所有 RPC 用请求值一定路由对。
-    // 后端给出别的值只说明它内部切了载体（如超窗会话的 `.trimmed.jsonl` 副
-    // 本），那属于实现细节，不该让前端的身份跟着漂移——那正是幽灵 sid 的入口。
+    // 后端给出别的值只说明它内部做了载体操作（超窗会话会在原地压缩/截断
+    // 后重载），那属于实现细节，不该让前端的身份跟着漂移——那正是幽灵
+    // sid 的入口。
     // 真要换 sid 的路径只有 session/new，它自己会 rebind。
     const returnedId = res?.session_id || res?.sessionID;
     if (returnedId && returnedId !== sid) {

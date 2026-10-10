@@ -1,5 +1,6 @@
 "use client";
 
+import { invoke } from "@tauri-apps/api/core";
 import { Globe, Maximize2, Minimize2, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -9,10 +10,18 @@ import { CodeEditorPanel } from "./code-editor-panel";
 import { DiffSidebarPanel } from "./diff-sidebar-panel";
 import { MoreActionsMenu } from "./more-actions-menu";
 import { BrowserToolbar, BrowserView } from "./preview-rail";
+import { TerminalPanel } from "./terminal-panel";
+import { isTauri } from "@/lib/tauri-bridge";
 import { cleanUrl, summarizeUrl } from "@/lib/url-utils";
 import { useHelixStore } from "@/stores/helix-store";
 
-type PageKind = "browser" | "code" | "diff" | "agent" | "byline";
+type PageKind =
+  | "browser"
+  | "code"
+  | "diff"
+  | "agent"
+  | "byline"
+  | "terminal";
 interface PanelPage {
   id: string;
   kind: PageKind;
@@ -72,12 +81,19 @@ function TabChip({
 }
 
 /** 面板行的固定顺序（也是「有哪几面」这一行的读法）。 */
-const PANEL_ORDER: PageKind[] = ["browser", "diff", "agent", "byline", "code"];
+const PANEL_ORDER: PageKind[] = [
+  "browser",
+  "diff",
+  "agent",
+  "byline",
+  "terminal",
+  "code",
+];
 
 /**
  * Right-hand sidebar as a two-level tabbed workspace. Three bands, top down:
  *  1. panel tabs — one per kind that is open (浏览器 / 更改 / 子 Agent / 旁路问答 /
- *     代码), plus the panel-level actions at the row's right end.
+ *     终端 / 代码), plus the panel-level actions at the row's right end.
  *  2. the browser toolbar — only when the 浏览器 panel is the active one.
  *  3. item tabs — the contents *of* the active panel: one per browser page, or
  *     one per open code file. Panels that hold a single item skip this band.
@@ -90,8 +106,6 @@ export function RightSidebar() {
   const previewRailUrl = useHelixStore((s) => s.previewRailUrl);
   const codeFullscreen = useHelixStore((s) => s.codeFullscreen);
   const toggleCodeFullscreen = useHelixStore((s) => s.toggleCodeFullscreen);
-  const toggleTerminal = useHelixStore((s) => s.toggleTerminal);
-  const isTerminalOpen = useHelixStore((s) => s.isTerminalOpen);
   const editorTabs = useHelixStore((s) => s.editorTabs);
   const activeEditorTabId = useHelixStore((s) => s.activeEditorTabId);
   const activeAgentView = useHelixStore((s) => s.activeAgentView);
@@ -102,6 +116,8 @@ export function RightSidebar() {
     if (tab === "agent") return [{ id: newPageId(), kind: "agent", url: "" }];
     if (tab === "byline")
       return [{ id: newPageId(), kind: "byline", url: "" }];
+    if (tab === "terminal")
+      return [{ id: newPageId(), kind: "terminal", url: "" }];
     if (tab === "browser")
       return [{ id: newPageId(), kind: "browser", url: start }];
     return [];
@@ -179,7 +195,9 @@ export function RightSidebar() {
             ? "agent"
             : tab === "byline"
               ? "byline"
-              : null;
+              : tab === "terminal"
+                ? "terminal"
+                : null;
     if (!kind) return;
     const existing = pagesRef.current.find((p) => p.kind === kind);
     if (existing) {
@@ -334,14 +352,30 @@ export function RightSidebar() {
     if (idx === -1) return;
     const next = pages.filter((p) => p.id !== id);
     setPages(next);
+    let nextActiveId = activePageId;
     if (id === activePageId) {
       if (next.length > 0) {
-        setActivePageId(next[Math.min(idx, next.length - 1)].id);
+        nextActiveId = next[Math.min(idx, next.length - 1)].id;
+        setActivePageId(nextActiveId);
       } else {
         // No browser/diff pages left — fall back to the code view if any files
         // are open, otherwise clear the active selection (shell shows).
+        nextActiveId = "";
         setActivePageId("");
       }
+    }
+    // `rightSidebarTab` 是「侧栏要看哪一面」的意图，`pages` 才是「有哪几面」的真相。
+    // 关掉某一面最后一条页之后 tab 会停在已经不存在的那一面，而「更多操作」的
+    // 入口写的是「tab 已经是这一面 → 只聚焦对应页」——没有页可聚焦就整件事看起来
+    // 没反应（终端 / 更改 / 子 Agent / 旁路问答这类单条目面板必现）。所以 tab 必须
+    // 跟着现实退位到真正落在屏幕上的那一面。
+    const currentTab = useHelixStore.getState().rightSidebarTab;
+    if (currentTab && !next.some((p) => p.kind === currentTab)) {
+      const landed = next.find((p) => p.id === nextActiveId);
+      // 页签全关光且没开文件时不动 tab：那由下面的收回 effect 统一处理，它还要
+      // 顺带退出代码全屏——这里直接 setTab(null) 会漏掉那一步（空白屏）。
+      if (landed) setTab(landed.kind);
+      else if (editorTabs.length > 0) setTab("code");
     }
   };
 
@@ -357,6 +391,17 @@ export function RightSidebar() {
         : pages.find((p) => p.kind === "browser");
     setBrowserPageId(target?.id ?? null);
   }, [pages, activePageId, setBrowserPageId]);
+
+  // 子窗口的生命周期是**进程级**的，`pages` 是内存态：整页重载（vite HMR 全量刷新 /
+  // Ctrl+R）之后旧窗口既没人关、也没人再同步矩形，就停在最后一次摆放的位置上，
+  // 桌面上凭空多出一张和侧栏并排的「网页」。所以 pages 一变就把名单外的窗口交回
+  // 后端销毁——首次挂载时 keep 为空，正好把上一轮遗留全部回收。正常关页时它和
+  // BrowserView 卸载时的 close 是同一件事，后端按登记幂等处理。
+  useEffect(() => {
+    if (!isTauri()) return;
+    const keep = pages.filter((p) => p.kind === "browser").map((p) => p.id);
+    void invoke("browser_webview_reap", { keep }).catch(() => {});
+  }, [pages]);
 
   // 侧边栏卸载（或 HMR 重载）时清空：不能让自动化拿到一条已经销毁的窗口 id。
   useEffect(
@@ -492,7 +537,9 @@ export function RightSidebar() {
           ? activeAgentView?.name || "子 Agent"
           : k === "byline"
             ? "旁路问答"
-            : "代码";
+            : k === "terminal"
+              ? "终端"
+              : "代码";
   const openKind = (k: PageKind) => {
     if (k === "code") {
       setActivePageId("");
@@ -528,7 +575,10 @@ export function RightSidebar() {
             onClose={
               // 单条目面板：关这个页签就是关这一面。浏览器 / 代码的关闭走第 3 行，
               // 在这里放 ✕ 会让人以为点一下会关掉所有网页页。
-              k === "diff" || k === "agent" || k === "byline"
+              k === "diff" ||
+              k === "agent" ||
+              k === "byline" ||
+              k === "terminal"
                 ? () => {
                     const target = pages.find((p) => p.kind === k);
                     if (target) closePage(target.id);
@@ -640,6 +690,16 @@ export function RightSidebar() {
                   {p.kind === "diff" && <DiffSidebarPanel />}
                   {p.kind === "agent" && <AgentWorkPanel />}
                   {p.kind === "byline" && <BylinePanel />}
+                  {/* 侧栏里的终端：与主区底部抽屉同一个组件，只是宿主可见性由
+                      「这一页是不是当前页」决定（切走只是隐藏，shell 与
+                      scrollback 留着；关掉页签才杀进程）。 */}
+                  {p.kind === "terminal" && (
+                    <TerminalPanel
+                      mode="side"
+                      active={isActive}
+                      onClose={() => closePage(p.id)}
+                    />
+                  )}
                 </div>
               );
             });
@@ -689,14 +749,6 @@ export function RightSidebar() {
                 onOpenByline={() => {
                   // 建页 / 激活 / 切 tab 由上面的 bylineFocusSignal effect 统一做。
                   useHelixStore.getState().focusBylineInput();
-                  setPlusMenuOpen(false);
-                }}
-                onOpenPr={() => {
-                  useHelixStore.getState().togglePrPanel();
-                  setPlusMenuOpen(false);
-                }}
-                onOpenDiagnostics={() => {
-                  useHelixStore.getState().toggleDiagnosticsPanel();
                   setPlusMenuOpen(false);
                 }}
               />

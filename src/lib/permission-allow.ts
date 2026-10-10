@@ -1,5 +1,5 @@
 /**
- * pi-permission 审批卡的 Tool/Command 解析 + 「本会话始终允许」的前缀派生与匹配。
+ * pi-permission 审批卡的 Tool/Command 解析 + 「本会话始终允许」的前缀派生（仅用于按钮文案）。
  *
  * pi-permission（RPC 模式）的审批弹窗经网关转成 clarify_request，question 是
  * 扩展 formatTitle 的多行文本：
@@ -9,14 +9,20 @@
  *   Reason: ...
  *   AI: risk=...（可选两行）
  *
- * 「始终允许」不是写进扩展的 userRules（那是永久规则，且只在 auto 档由扩展
- * 评估），而是前端会话级拦截：agent-flow-panel 在卡入队前查
- * sessionApprovalAllows，命中就直接代答。语义对齐 OpenCode 的 always：
- * 本会话有效、按模式放行、重启即清。
+ * 「本会话始终允许」的放行表现在**只有扩展一份**（[LOCAL PATCH 2026-10-10] 第三挡
+ * Approve (session)）：Helix 点按钮只是把该原文当应答回给扩展，后续同类调用扩展自己
+ * 命中表、根本不发起审批请求 → Helix 自然不弹卡。本文件的 deriveAllowPrefix 与扩展的
+ * session-allow.ts 逐字一致，仅用来在按钮上预览放行范围；前端不再自己存表（旧实现是
+ * 扩展只有两挡时的代职，且那张表不分会话会跨对话泄漏，已删）。
  */
 
 /** 扩展 requestRpc 的选项原文：choice.startsWith("Approve") → 放行，否则拒绝。 */
 export const PERM_APPROVE_ANSWER = "Approve (once)";
+/**
+ * 第三挡原文（扩展已原生支持；未补丁的旧扩展会因 startsWith("Approve") 把它当 once
+ * 批准 —— 降级为「本次放行」，不会误拒，故旧版扩展下也能安全使用）。
+ */
+export const PERM_APPROVE_SESSION_ANSWER = "Approve (session)";
 export const PERM_DENY_ANSWER = "Deny";
 
 export interface PermissionAskInfo {
@@ -37,7 +43,8 @@ export function parsePermissionAsk(question: string): PermissionAskInfo | null {
 }
 
 /**
- * 从命令派生会话放行前缀（对齐 OpenCode「always 白名单一条安全命令前缀」）：
+ * 从命令派生会话放行前缀（与扩展 session-allow.ts 的 deriveAllowPrefix 逐字对齐，
+ * 改这里必须同步改那里，否则按钮预览的宽窄与实际放行范围不一致）：
  *   "git status --porcelain" → "git status"（第二段是子命令才纳入）
  *   "rm -rf foo"             → "rm"（第二段是 flag，不纳入——按钮上显示 rm*，宽窄可见）
  *   "node"                   → "node"
@@ -52,13 +59,6 @@ export function deriveAllowPrefix(command?: string): string {
     return `${tokens[0]} ${tokens[1]}`;
   }
   return tokens[0];
-}
-
-/** 前缀命中：命令等于前缀，或前缀后紧跟空格（"git status" 命中 "git status -s"，不命中 "git stash"）。 */
-export function matchAllowPrefix(prefix: string, command?: string): boolean {
-  if (!prefix) return true;
-  if (!command) return false;
-  return command === prefix || command.startsWith(prefix + " ");
 }
 
 /** 审批卡按钮上的 always 文案：把将要放行的范围直接写给用户看。 */

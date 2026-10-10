@@ -227,8 +227,9 @@ interface ClarifyRequest {
   expiresAt?: number | null;
   /**
    * pi-permission 审批卡（网关只在 permission==true 时附 approvalTimeoutSec）。
-   * true 时渲染 once/always/reject 三选项（替代扩展的英文 choices 原文），
-   * always 经 onApproveAlways 记会话级放行；需要父组件提供 onApproveAlways。
+   * true 时渲染 once/session/reject 三选项（替代扩展的英文 choices 原文），
+   * session 挡经 onApproveAlways 回 Approve (session) 原文，落表在扩展侧；
+   * 需要父组件提供 onApproveAlways。
    */
   isPermission?: boolean;
 }
@@ -236,7 +237,7 @@ interface ClarifyRequest {
 interface ClarifyBarProps {
   request: ClarifyRequest;
   onRespond: (requestId: string, answer: string) => void;
-  /** 审批卡「本会话始终允许」：父组件登记会话放行后代答 Approve (once)。 */
+  /** 审批卡「本会话始终允许」：父组件代答 Approve (session)，放行表归扩展所有。 */
   onApproveAlways?: (requestId: string) => void;
 }
 

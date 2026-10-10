@@ -23,7 +23,91 @@ export function isSyntheticSubAgentToolRow(
   return n === "background" || n === "progress";
 }
 
+/** `SubagentWorkflow`：pi-subagents 扩展的工作流派发工具
+ *  （扩展侧 SUBAGENT_TOOL_NAMES.WORKFLOW 的字面值，改名要同步）。 */
+export const WORKFLOW_TOOL_NAME = "SubagentWorkflow";
+
+export interface WorkflowMetaInfo {
+  name?: string;
+  description?: string;
+  phases: string[];
+}
+
+/** 引号感知的平衡括号扫描：返回从 openAt 处 `{`/`[` 到其配对闭合符的切片（不含配对符）。 */
+function sliceBalanced(src: string, openAt: number): string | null {
+  const open = src[openAt];
+  const close = open === "{" ? "}" : open === "[" ? "]" : "";
+  if (!close) return null;
+  let depth = 0;
+  let quote = "";
+  for (let i = openAt; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return src.slice(openAt + 1, i);
+    }
+  }
+  return null;
+}
+
+/**
+ * 从工作流工具参数里的脚本文本抠出 `export const meta = {…}` 的
+ * name / description / phases 标题。
+ *
+ * 扩展强制 meta 是**纯字面量**（变量、函数调用、展开、模板插值都算非法，
+ * runtime 在脚本执行前读它），所以文本级扫描就足够，不需要也无法求值 ——
+ * 更重要的是绝不 eval 模型写的代码。
+ */
+export function parseWorkflowMeta(
+  params?: Record<string, unknown> | null,
+): WorkflowMetaInfo | null {
+  const script = params?.script;
+  if (typeof script !== "string" || !script.trim()) return null;
+  const decl = script.search(/export\s+const\s+meta\s*=/);
+  if (decl < 0) return null;
+  const braceAt = script.indexOf("{", decl);
+  if (braceAt < 0) return null;
+  const body = sliceBalanced(script, braceAt);
+  if (body == null) return null;
+  const quoted = (text: string, key: string) => {
+    const m = text.match(
+      new RegExp(`\\b${key}\\s*:\\s*(['"\`])([\\s\\S]*?)\\1`),
+    );
+    return m ? m[2].trim() : undefined;
+  };
+  // phases 之后的子对象里也可能带 name/detail 之类的键，标量字段只在它之前找。
+  const phasesAt = body.search(/\bphases\s*:\s*\[/);
+  const head = phasesAt < 0 ? body : body.slice(0, phasesAt);
+  const phasesBody =
+    phasesAt < 0 ? null : sliceBalanced(body, body.indexOf("[", phasesAt));
+  const phases: string[] = [];
+  if (phasesBody) {
+    const re = /\btitle\s*:\s*(['"`])([\s\S]*?)\1/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(phasesBody))) {
+      const t = m[2].trim();
+      if (t) phases.push(t);
+    }
+  }
+  return {
+    name: quoted(head, "name"),
+    description: quoted(head, "description"),
+    phases,
+  };
+}
+
 const TOOL_LABELS: Record<string, string> = {
+  SubagentWorkflow: "运行工作流",
   read_file: "读取文件",
   write_file: "写入文件",
   patch: "编辑文件",
@@ -156,6 +240,15 @@ export function getToolDisplayLabel(
   path?: string,
   params?: Record<string, unknown>,
 ): string {
+  // 工作流卡：标题显示脚本 meta 里的名字，而不是把整段脚本文本当摘要塞进标题
+  // （extractCommandSnippet 的键表里有 `script`，不特判就会得到 512KiB 代码墙）。
+  if (toolName === WORKFLOW_TOOL_NAME) {
+    const meta = parseWorkflowMeta(params);
+    const saved =
+      typeof params?.name === "string" ? params.name.trim() : "";
+    const wfName = meta?.name || saved;
+    return wfName ? `工作流 ${wfName}` : "派发工作流";
+  }
   // If toolName is a raw ACP-style string like "search: ..." or "read: src/...",
   // try to extract a clean label from it first.
   if (toolName && toolName !== "tool") {

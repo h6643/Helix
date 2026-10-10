@@ -265,11 +265,15 @@ export type ReasoningEffortLevel =
  *   并且**不再落 IndexedDB** —— 落一份自己的副本就制造第二条真相，历史教训
  *   是「设置显示完全访问、实际照样弹窗」。
  *   映射：`ask → strict`、`auto → auto`、`full → yolo`。
- *   2026-10-10 起可按**项目 / 会话**覆盖：同一份文件里多两张表
- *   （`modeByProject` / `modeBySession`），由扩展自己按「会话 → 项目 → 全局」
- *   解析。生效档与来源都从同一次读里拿（见 `PermissionScopeInfo`），前端不
- *   再自持「哪一档属于哪条会话」的状态 —— 那正是旧 `approvalModeBySession`
- *   的病根：文件里没有它，闸门里也没有它，只有界面有。
+ *   文件里另有 `modeByProject` / 全局 `mode` 两层（扩展按「会话 → 项目 → 全局」
+ *   解析），但 **Helix 的界面只写会话那一层**：档位只影响眼前这条对话，不同对话
+ *   可以各选各的。全局那格于是退化成「这条对话没设过档时的默认」，只有首次建
+ *   文件时 Helix 会落一次 auto。生效档与来源都从同一次读里拿（见
+ *   `PermissionScopeInfo`），前端不自持「哪一档属于哪条会话」的状态 —— 那正是
+ *   旧 `approvalModeBySession` 的病根：文件里没有它，闸门里也没有它，只有界面有。
+ *   唯一的例外是新对话还没建起来（拿不到 pi 会话 id）时选档：那一刻没有任何东西
+ *   能跑，值先记在内存（`pendingPermissionTier`），第一条消息发出、会话建好后
+ *   立刻写成上面那个会话覆盖再提交 prompt，芯片随后读的就是文件真相。
  * - `plan` —— 走 pi-plan-mode 扩展（`/plan start`），模型只产出方案，用户批准
  *   后才切回执行。**不碰权限档**，且**按会话**：它是 pi 实例级状态（网关
  *   `PiInstance.plan_mode`），实例没了它就没了，所以同样不落盘。
@@ -294,14 +298,21 @@ export type PermissionTier = "ask" | "auto" | "full";
  * 绝不因为解析失败就把 UI 上的档位改掉（那会让显示与实际再度分裂）。
  * 全项目只有这一个归一函数：后端已经映射过一层，前端这层只兜历史值。
  */
-export function normalizePermissionTier(v: unknown): PermissionTier | undefined {
+export function normalizePermissionTier(
+  v: unknown,
+): PermissionTier | undefined {
   if (v === "ask" || v === "strict") return "ask";
   if (v === "full" || v === "yolo" || v === "dont_ask") return "full";
   if (v === "auto" || v === "default" || v === "accept_edits") return "auto";
   return undefined;
 }
 
-/** 档位的写入层：全局兜底 / 按项目 / 按会话（会话最优先）。 */
+/**
+ * 配置里的三层（全局兜底 / 按项目 / 按会话，会话最优先）。
+ *
+ * 这是**文件的形状**，不是界面的形状：Helix 只写 `session`，另外两层留给扩展
+ * 配置本身与首次建文件时落下的默认值 —— 所以读路径仍要认得它们（`source`）。
+ */
 export type PermissionScopeId = "global" | "project" | "session";
 
 /**
@@ -311,18 +322,17 @@ export type PermissionScopeId = "global" | "project" | "session";
 export type PermissionScopeSource = PermissionScopeId | "disabled";
 
 /**
- * `helix_get_permission_mode` 的作用域视图（后端把三份格子 + 生效档一起算好，
- * 前端不再自己拼优先级 —— 拼错一次就是一次「显示与闸门分叉」）。
+ * `helix_get_permission_mode` 的作用域视图。配置里其实还留着全局/项目两层
+ * （扩展按「会话 → 项目 → 全局」解析，别的客户端手改也写得动），但 Helix 的
+ * 界面只有「本对话」一层：这里只取这一层用得上的三格 —— 生效档、本对话那格、
+ * 以及两个「此刻闸门其实不按档位走」的旗标。其余格子刻意不解析：前端多留一格
+ * 就多一处能显示却没人能改的状态，正是显示与门禁分叉的老形状。
  */
 export interface PermissionScopeInfo {
   /** 生效档（Helix 档位名）。 */
   effective: PermissionTier;
   /** 生效档来自哪一层。 */
   source: PermissionScopeSource;
-  /** 全局那格写的值；文件里认不出来时为 null（见 `globalUnparsable`）。 */
-  global: PermissionTier | null;
-  /** 本项目那格（无覆盖 = null）。 */
-  project: PermissionTier | null;
   /** 本会话那格（无覆盖 = null）。 */
   session: PermissionTier | null;
   /** 这条会话跑在远端：本机的档与覆盖表都不作用于它。 */
@@ -333,10 +343,16 @@ export interface PermissionScopeInfo {
   globalUnparsable: boolean;
 }
 
-/** 作用域身份：面板把当前那条流的后端 sid 与工作目录一起交给读/写。 */
+/**
+ * 作用域身份：面板把当前那条流的后端 sid 与工作目录一起交给读/写。
+ *
+ * `cid` 是 Helix 自己的对话 id，只在「还没有 sid」时用作暂存档位的键（见
+ * `PermissionTier` 那条轴的说明）；有 sid 时写的是文件，用不上它。
+ */
 export interface PermissionScopeTarget {
   sessionId?: string | null;
   cwd?: string | null;
+  cid?: string | null;
 }
 
 /**
@@ -348,9 +364,8 @@ interface PermissionModeViewLike {
   mode?: string | null;
   enabled?: boolean;
   effective?: { source?: unknown } | null;
-  global?: { mode?: unknown; unparsable?: unknown } | null;
+  global?: { unparsable?: unknown } | null;
   session?: { mode?: unknown } | null;
-  project?: { mode?: unknown } | null;
   scope?: { remote?: unknown } | null;
 }
 
@@ -375,8 +390,6 @@ export function permissionScopeInfoFrom(
       source === "disabled"
         ? source
         : "global",
-    global: cell(res.global),
-    project: cell(res.project),
     session: cell(res.session),
     remote: !!res.scope?.remote,
     enabled: res.enabled !== false,
@@ -384,36 +397,14 @@ export function permissionScopeInfoFrom(
   };
 }
 
-
 /**
- * 作用域选择器的三格。下拉与旁路面板共用，文案只写一次。
- * 优先级：本会话 > 本项目 > 全局（与扩展 resolvePermissionMode 同序）。
- */
-export const PERMISSION_SCOPE_ITEMS: ReadonlyArray<{
-  id: PermissionScopeId;
-  title: string;
-  desc: string;
-}> = [
-  {
-    id: "global",
-    title: "全局",
-    desc: "所有对话的默认档；没有项目/会话覆盖时就是它生效",
-  },
-  {
-    id: "project",
-    title: "本项目",
-    desc: "只影响当前项目目录下的对话，盖过全局",
-  },
-  {
-    id: "session",
-    title: "本会话",
-    desc: "只影响这条对话，优先级最高",
-  },
-];
-
-/**
- * 生效档来自哪一层 → 芯片上的小字。全局是常态，不占位（返回 null）。
- * 远程会话单独说明：本机的档与覆盖表都不作用于跑在远端的 pi。
+ * 芯片上的状态小字。
+ *
+ * 「本对话没选过档、当前显示的是配置默认（全局 / 项目层）」这种情况**不再标注**：
+ * 默认档就是 auto，且全局/项目两层 Helix 从不提供 UI 去写，标出来只会造成
+ * 「继承」这种看不懂又无处可点的噪音。本对话选过档（source === "session"）
+ * 同样是 null。
+ * 远程会话与扩展总开关必须保留：此刻本机的档根本不作用于闸门，不标就是骗人。
  */
 export function permissionScopeLabelOf(
   info: PermissionScopeInfo | null,
@@ -421,24 +412,7 @@ export function permissionScopeLabelOf(
   if (!info) return null;
   if (!info.enabled) return "扩展已关闭";
   if (info.remote) return "远程会话";
-  if (info.source === "session") return "本会话";
-  if (info.source === "project") return "本项目";
   return null;
-}
-
-/**
- * 某一层**自己**那格现在的值（没覆盖 = null）。
- *
- * 下拉的勾要打在写入层那一格上，而不是生效档：否则选了「本会话」却看见全局的
- * 档被勾着，用户会以为本会话已经设过它 —— 一格一值这件事只有这一处解释。
- */
-export function permissionTierOfLayer(
-  info: PermissionScopeInfo | null,
-  scope: PermissionScopeId,
-): PermissionTier | null {
-  if (!info) return null;
-  if (scope === "global") return info.global;
-  return scope === "project" ? info.project : info.session;
 }
 
 /** UI 下拉的值域 = 权限档 ∪ plan 轴；由两条轴合成，不是存储状态。 */
@@ -791,9 +765,9 @@ export const DEFAULT_SHORTCUTS: Record<string, CustomShortcutEntry> = {
  * 两档、旁路面板显示四档，用户在两个界面看到不同的东西。同一类「判定/清单
  * 写两份必然对不上」的分裂。
  *
- * 前三档是权限档：写 pi-permission 的 config，**全局一档、所有对话共用**
- * （扩展只读那一个文件，做不出按会话的权限档）。`plan` 是独立的一轴，
- * **按会话**生效；选中它不改权限档，选任一权限档则退出该会话的 plan。
+ * 前三档是权限档：写 pi-permission 的 settings.json，**只影响当前这条对话**
+ * （会话级覆盖那一格；没设过档时沿用文件里的默认档）。`plan` 是独立的一轴，
+ * 同样**按会话**生效；选中它不改权限档，选任一权限档则退出该会话的 plan。
  */
 export const APPROVAL_MODE_ITEMS: ReadonlyArray<{
   id: ApprovalMode;

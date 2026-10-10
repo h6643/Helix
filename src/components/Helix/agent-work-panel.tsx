@@ -317,7 +317,9 @@ export function AgentWorkPanel() {
           : "已停止";
 
   return (
-    <div className="flex flex-col h-full w-full min-h-0 min-w-0 bg-card">
+    // 不涂背景：这个面板只在右侧边栏里出现，侧栏的可见底色唯一由
+    // `.helix-sidebar-right` 那层 88% 蒙罩提供，这里再铺 bg-card 就是一块实色板。
+    <div className="flex flex-col h-full w-full min-h-0 min-w-0">
       <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3">
         {/* ── Prompt card ─────────────────────────────────────────────── */}
         {live && (

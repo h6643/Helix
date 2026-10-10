@@ -4,6 +4,10 @@ import { getToolLabel } from "./tool-display-utils";
 // （browser_read 先于 read、memory_read 先于 read、run_task 先于 run）。
 // 这是主对话区与子 Agent 工作面板共用的唯一权威定义，避免两套动词表漂移。
 const TOOL_STEP_RULES: Array<{ test: RegExp; verb: string; kind: string }> = [
+  // 工作流必须排在子代理规则之前：工具名 `SubagentWorkflow` 含 "subagent"，
+  // 会被下面那条 /subagent/ 抓走、并进「子代理」独立行（它不是子代理执行，
+  // 而是一次派发多个子代理的编排调用）。
+  { test: /subagentworkflow|_?workflow$/i, verb: "工作流", kind: "工作流" },
   { test: /^agent$|delegate|spawn_agent|sub_agent|subagent|get_sub_agent/i, verb: "子代理", kind: "子代理" },
   { test: /browser_navigate|browser_go|open_browser|navigate/i, verb: "浏览器", kind: "导航" },
   { test: /browser_click/i, verb: "浏览器", kind: "点击" },

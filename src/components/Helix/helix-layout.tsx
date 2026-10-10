@@ -2699,14 +2699,6 @@ export function HelixLayout() {
                                           storeActions.focusBylineInput();
                                           setBrowserMenuOpen(false);
                                         }}
-                                        onOpenPr={() => {
-                                          storeActions.togglePrPanel();
-                                          setBrowserMenuOpen(false);
-                                        }}
-                                        onOpenDiagnostics={() => {
-                                          storeActions.toggleDiagnosticsPanel();
-                                          setBrowserMenuOpen(false);
-                                        }}
                                       />
                                     </div>
                                   </div>,

@@ -3,7 +3,7 @@ name = "helix"
 default-run = "helix"
 version = "0.1.17"
 description = "Helix — AI coding assistant (Tauri rewrite of the Electron shell)"
-authors = ["hyt"]
+authors = ["ruowu"]
 edition = "2021"
 # tauri 2.11.5 自身声明 rustc ≥1.77.2，这里对齐（1.77 会让 MSRV 感知解析器
 # 拒绝任何稳定的 plugin-updater 版本）。

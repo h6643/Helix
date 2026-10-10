@@ -422,8 +422,10 @@ export interface ElectronAPI {
     }>;
     /** 审批档位 ⇄ pi-permission 扩展配置。前端下拉直写扩展的 settings.json，
      *  因为真正 block 工具执行的是扩展的 tool_call 钩子。
-     *  档位可分三层（全局 / 本项目 / 本会话），覆盖表也在同一个文件里，
-     *  由扩展自己按「会话 → 项目 → 全局」解析 —— 见 `PermissionModeView`。 */
+     *  文件里可分三层（全局 / 本项目 / 本会话），覆盖表也在同一个文件里，由扩展
+     *  自己按「会话 → 项目 → 全局」解析 —— 见 `PermissionModeView`。
+     *  **Helix 的界面只写 session 那一层**（档位只影响当前对话）；global 只在首次
+     *  建文件时由前端落一次默认档，project 那层界面已不再暴露。 */
     getPermissionMode: (scope?: PermissionScopeQuery) => Promise<PermissionModeView>;
     setPermissionMode: (
       mode: string,

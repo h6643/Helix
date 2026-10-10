@@ -39,7 +39,6 @@ import type {
   PermissionTier,
   BylineReply,
   PermissionScopeInfo,
-  PermissionScopeId,
   PermissionScopeTarget,
 } from "./helix-types";
 import {
@@ -63,8 +62,6 @@ function isSamePermissionView(
   return (
     a.effective === b.effective &&
     a.source === b.source &&
-    a.global === b.global &&
-    a.project === b.project &&
     a.session === b.session &&
     a.remote === b.remote &&
     a.enabled === b.enabled &&
@@ -116,10 +113,6 @@ import {
   createAgentSettingsSlice,
   type AgentSettingsSlice,
 } from "./slices/agent-settings-slice";
-import {
-  createApprovalAllowSlice,
-  type ApprovalAllowSlice,
-} from "./slices/approval-allow-slice";
 import {
   createApiConfigSlice,
   PI_CHANNEL_BASE_URL,
@@ -184,7 +177,6 @@ interface HelixState
     TerminalSlice,
     EditorSlice,
     AgentSettingsSlice,
-    ApprovalAllowSlice,
     PanelSlice,
     ApiConfigSlice,
     SkillSlice {
@@ -301,9 +293,23 @@ interface HelixState
   setBrowserHomeUrl: (url: string) => void;
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab: "browser" | "code" | "diff" | "agent" | "byline" | null;
+  rightSidebarTab:
+    | "browser"
+    | "code"
+    | "diff"
+    | "agent"
+    | "byline"
+    | "terminal"
+    | null;
   setRightSidebarTab: (
-    tab: "browser" | "code" | "diff" | "agent" | "byline" | null,
+    tab:
+      | "browser"
+      | "code"
+      | "diff"
+      | "agent"
+      | "byline"
+      | "terminal"
+      | null,
   ) => void;
   // 右侧栏的「子 Agent 工作内容」视图：点击工作面板里的某个 agent 时写入，
   // RightSidebar 据此渲染该 agent 的任务 / live 日志。null = 未选中。
@@ -328,14 +334,25 @@ interface HelixState
    * 不写 IndexedDB：那份副本没人读，只会变成第二条真相。
    */
   permissionMode: PermissionTier;
-  /** 最近一次成功读回的作用域视图（生效档 + 三层格子）；null = 还没读到过。 */
+  /** 最近一次成功读回的作用域视图（生效档 + 本对话那格）；null = 还没读到过。 */
   permissionScopeInfo: PermissionScopeInfo | null;
   /**
-   * 下拉这次要点到**哪一层**（默认 global）。这是 UI 偏好不是真相：真相只有
-   * settings.json，切会话时不改它，所以「在本项目都设严格」这件事能跨对话保持。
+   * 还没落盘的**本对话**档位：cid（草稿期用 `__draft__`）→ 档。
+   *
+   * 只服务一个时刻——这条对话还没有 pi 会话 id，因而没有可写的格子。此刻选档
+   * 既不能写全局（那会影响别的对话），也没有会话键可写，所以先记在这里；
+   * `handleRun` 一拿到 sid 就立刻写成会话覆盖并删掉这条（见 agent-flow-panel）。
+   * 与 `planModeBySession` 同构：内存影子、不落 IndexedDB，重启即清。
    */
-  permissionWriteScope: PermissionScopeId;
-  setPermissionWriteScope: (scope: PermissionScopeId) => void;
+  pendingPermissionTier: Record<string, PermissionTier>;
+  /** 记下一条「这条对话还没建起来时的选档」（setPermissionMode 的暂存分支用）。 */
+  setPendingPermissionTier: (cid: string, tier: PermissionTier) => void;
+  /**
+   * 取出并清掉某条对话尚未落盘的档位。`handleRun` 在拿到 sid、提交 prompt
+   * **之前**调它：那一刻闸门已经认得这个 sid，先落盘再开跑，第一轮工具就不会
+   * 按配置默认档放行（反过来先跑后写，就是「选了完全访问却照样弹窗」）。
+   */
+  takePendingPermissionTier: (cid: string) => PermissionTier | undefined;
   /**
    * 从扩展配置回读权限档。读不到时的显示必须说实话：扩展在文件缺失/坏 JSON 时
    * 一律跑它自己的 yolo 默认，所以按「完全访问」显示；文件还没人写过就先落下
@@ -344,15 +361,13 @@ interface HelixState
   syncPermissionMode: (
     target?: PermissionScopeTarget,
   ) => Promise<PermissionTier>;
-  /** 写权限档到扩展配置的某一层，成功后用回读结果更新缓存。 */
+  /**
+   * 写权限档。有 sid → 写扩展配置的「本会话」那一层（界面唯一暴露的层）；
+   * 没有 sid（新对话还没建起来）→ 记进 `pendingPermissionTier`，首轮 run 落盘。
+   */
   setPermissionMode: (
     v: PermissionTier,
-    opts?: PermissionScopeTarget & { scope?: PermissionScopeId },
-  ) => Promise<PermissionTier>;
-  /** 删掉某一层覆盖，回到「下一层说了算」。 */
-  clearPermissionOverride: (
-    scope: "project" | "session",
-    target?: PermissionScopeTarget,
+    opts?: PermissionScopeTarget,
   ) => Promise<PermissionTier>;
   /**
    * 审批卡超时秒数（settings.json permission.approvalTimeoutSec 的只读缓存，
@@ -1487,7 +1502,6 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   ...createTerminalSlice(set, get, store),
   ...createEditorSlice(set, get, store),
   ...createAgentSettingsSlice(set, get, store),
-  ...createApprovalAllowSlice(set, get, store),
   ...createPanelSlice(set, get, store),
   ...createApiConfigSlice(set, get, store),
   ...createSkillSlice(set, get, store),
@@ -1784,7 +1798,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   // 起步值只是首次回读完成前的占位；真相由 syncPermissionMode 从扩展配置读。
   permissionMode: "auto" as const,
   permissionScopeInfo: null,
-  permissionWriteScope: "global" as const,
+  pendingPermissionTier: {},
   // 审批卡超时默认 300s（扩展 DEFAULT_APPROVAL_TIMEOUT_SEC）。同样是只读缓存：
   // 真相在 settings.json permission.approvalTimeoutSec，写只走
   // setApprovalTimeoutSec。卡片倒计时不读这里（走网关事件的附带字段）。
@@ -2094,6 +2108,12 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           showPreviewRail: false,
           editorOpen: false,
         };
+      if (tab === "terminal")
+        return {
+          rightSidebarTab: "terminal",
+          showPreviewRail: false,
+          editorOpen: false,
+        };
       return {
         rightSidebarTab: null,
         showPreviewRail: false,
@@ -2124,6 +2144,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         if (res.exists === false) {
           // 还没有人写过这份文件：落下 Helix 的默认档 auto（只在有风险时问，
           // 比扩展自带的 yolo 保守），扩展热加载同一份文件 → 界面与实际同源。
+          // 这是 Helix 唯一一次写**全局**那一格（界面上没有这一层了）：它只服务
+          // 「这条对话没设过档时的默认」，此后所有选档都落本会话那格。
           // 直接写 IPC，不走 setPermissionMode —— 它失败时会回调进本函数，绕成死循环。
           try {
             const seeded = await helixApi()?.setPermissionMode?.("auto", {
@@ -2157,30 +2179,59 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     }
     return get().permissionMode;
   },
-  setPermissionWriteScope: (scope) =>
+  setPendingPermissionTier: (cid, tier) =>
     set((s) =>
-      s.permissionWriteScope === scope ? {} : { permissionWriteScope: scope },
+      s.pendingPermissionTier[cid] === tier
+        ? {}
+        : {
+            pendingPermissionTier: {
+              ...s.pendingPermissionTier,
+              [cid]: tier,
+            },
+          },
     ),
+  takePendingPermissionTier: (cid) => {
+    const cur = get().pendingPermissionTier;
+    const tier = cur[cid];
+    if (tier === undefined) return undefined;
+    const { [cid]: _dropped, ...rest } = cur;
+    set({ pendingPermissionTier: rest });
+    return tier;
+  },
   setPermissionMode: async (v, opts) => {
+    // 没有 sid = 这条对话还没建起来（新草稿），文件里没有属于它的格子，而此刻
+    // 也没有任何东西会跑到闸门前面。先记在内存，handleRun 拿到 sid 后落盘。
+    // 绝不因为「写不进会话层」就退回去改全局：那会让这条对话的选择渗到别的对话。
+    if (!opts?.sessionId) {
+      get().setPendingPermissionTier(opts?.cid ?? "__draft__", v);
+      return v;
+    }
     const api = helixApi();
     if (!api?.setPermissionMode) return get().permissionMode;
-    const scope = opts?.scope ?? get().permissionWriteScope;
+    const cid = opts.cid;
     try {
       const res = await api.setPermissionMode(v, {
-        scope,
-        sessionId: opts?.sessionId ?? null,
-        cwd: opts?.cwd ?? null,
+        // 界面只有「本对话」这一层可写；全局那格只是这条对话没设过档时的默认。
+        scope: "session",
+        sessionId: opts.sessionId,
+        cwd: opts.cwd ?? null,
       });
       if (res?.ok) {
+        // 文件已经收下这一档，内存里那条待落盘的记录就该没了——留着会在下轮
+        // run 又写一次，把用户之后在别处改的值盖回去。
+        if (cid && get().pendingPermissionTier[cid] !== undefined) {
+          const { [cid]: _dropped, ...rest } = get().pendingPermissionTier;
+          set({ pendingPermissionTier: rest });
+        }
         const info = permissionScopeInfoFrom(res);
         if (info) {
           set({ permissionMode: info.effective, permissionScopeInfo: info });
           return info.effective;
         }
       } else if (typeof res?.error === "string") {
-        // 后端**挡下了**这一写（远程会话、草稿还没有身份、配置坏 JSON）。
-        // 不是落盘故障，回读也读不出用户要的东西 —— 只把实话讲出来，档位显示
-        // 保持原值，绝不能停在用户刚点的那档。
+        // 后端**挡下了**这一写（远程会话、配置坏 JSON）。不是落盘故障，回读
+        // 也读不出用户要的东西 —— 只把实话讲出来，档位显示保持原值，绝不能停
+        // 在用户刚点的那档。
         get().showToast({
           type: "error",
           title: "审批档没改",
@@ -2194,33 +2245,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     // 写失败（权限/磁盘问题）时绝不能停在用户刚点的那档 —— 那正是「设置显示
     // 完全访问、实际照样弹窗」的反向版本。回读一次让 UI 说真话。
     return get().syncPermissionMode({
-      sessionId: opts?.sessionId ?? null,
-      cwd: opts?.cwd ?? null,
+      sessionId: opts.sessionId,
+      cwd: opts.cwd ?? null,
     });
-  },
-  clearPermissionOverride: async (scope, target) => {
-    const api = helixApi();
-    if (!api?.clearPermissionOverride) return get().permissionMode;
-    try {
-      const res = await api.clearPermissionOverride(scope, target);
-      if (res?.ok) {
-        const info = permissionScopeInfoFrom(res);
-        if (info) {
-          set({ permissionMode: info.effective, permissionScopeInfo: info });
-          return info.effective;
-        }
-      } else if (typeof res?.error === "string") {
-        get().showToast({
-          type: "error",
-          title: "覆盖没清掉",
-          description: res.error,
-        });
-        return get().permissionMode;
-      }
-    } catch {
-      /* 落盘失败：下面回读真相 */
-    }
-    return get().syncPermissionMode(target);
   },
   syncApprovalTimeoutSec: async () => {
     try {
@@ -3055,20 +3082,27 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   setCurrentSessionId: (id) =>
     set((state) => {
       if (!id) {
-        // 「新建对话」回到无 plan 的默认态：丢掉草稿期（DRAFT_SESSION_KEY）
-        // 选过的 plan，否则下一个新对话一上来就是只读规划态。
+        // 「新建对话」回到默认态：丢掉草稿期（DRAFT_SESSION_KEY）选过的 plan 与
+        // 待落盘的档位，否则下一个新对话一上来就是只读规划态 / 沿用上一条草稿
+        // 没发出去的那次选档。
         const planModeBySession = { ...state.planModeBySession };
         delete planModeBySession.__draft__;
+        const pendingPermissionTier = { ...state.pendingPermissionTier };
+        const hadDraftTier = pendingPermissionTier.__draft__ !== undefined;
+        delete pendingPermissionTier.__draft__;
         return {
           currentSessionId: id,
           activeSessionWorkDir: null,
           planModeBySession,
+          ...(hadDraftTier ? { pendingPermissionTier } : {}),
         };
       }
       // Skip if clicking the same session that's already loaded
       if (id === state.currentSessionId) return {};
       // plan 轴的草稿迁移：新对话分配出真 cid 时，把草稿期选的 plan 搬过去
-      //（与 modelBySession 同一约定）。权限档是全局的，没有按会话恢复一说。
+      //（与 modelBySession 同一约定）。待落盘的权限档**不在这里搬**：切到一条
+      // 已有对话时不该把草稿那次没发出去的选择算到它头上，只有 handleRun 为
+      // 草稿自己分配 cid 的那一刻才搬（见 agent-flow-panel 的草稿迁移段）。
       const planModeBySession = { ...state.planModeBySession };
       if (planModeBySession.__draft__ && !planModeBySession[id])
         planModeBySession[id] = true;

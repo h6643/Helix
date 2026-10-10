@@ -968,6 +968,50 @@ pub async fn browser_webview_close(app: AppHandle, page: String) -> Result<(), S
     Ok(())
 }
 
+/// 回收「前端已经不再拥有」的子窗口。
+///
+/// 为什么需要：子窗口的生命周期是**进程级**的（`BROWSER_WINDOWS` 是 static 登记
+/// 表），而「有哪几页」的真相 `pages` 存在 React 内存里。整页重载（vite HMR 的
+/// 全量刷新、Ctrl+R、崩溃重载）之后前端一条页都没有，旧窗口既没人再调
+/// `browser_webview_close`，也没人再推 `set_rect` —— 它就停在最后一次摆放的位置
+/// 上，桌面上凭空多出一张和侧栏并排的「网页」。重载还会让前端的页号计数器归零，
+/// 于是新 `pg-1` 复用旧 `pg-1` 那条窗口（`label_for` 命中 `by_page`），旧 `pg-2`
+/// 就成了永远没人认领的孤儿。
+///
+/// `keep` = 前端当前真正拥有的 page id 名单，名单外的一律真销毁（`close` 而不是
+/// hide，理由见 lib.rs `CloseRequested` 那段注释）。销毁后 `WindowEvent::Destroyed`
+/// 会走 `forget_window` 清登记；这里只负责发起关闭，登记没清掉时下次 reap 会重试。
+#[tauri::command]
+pub async fn browser_webview_reap(
+    app: AppHandle,
+    keep: Vec<String>,
+) -> Result<(), String> {
+    let stale: Vec<(String, String)> = {
+        let reg = registry();
+        match reg.as_ref() {
+            Some(r) => r
+                .by_page
+                .iter()
+                .filter(|(page, _)| !keep.contains(page))
+                .map(|(page, label)| (page.clone(), label.clone()))
+                .collect(),
+            None => return Ok(()),
+        }
+    };
+    for (page, label) in stale {
+        diag(&format!("reap    page={page} label={label} keep={}", keep.len()));
+        match app.get_webview_window(&label) {
+            Some(win) => {
+                let _ = win.close();
+            }
+            // 窗口早就不在了（被外部关掉 / 崩了）：登记得自己清掉，否则同一个
+            // page id 再次出现时会拿到一条不存在的 label。
+            None => forget_window(&label),
+        }
+    }
+    Ok(())
+}
+
 /// 把焦点交给浏览器子窗口（「交给人工验证」时用）。
 ///
 /// 子窗口是独立 HWND，但 OS 层面只有获得焦点的窗口才收键盘输入，所以人工登录必须

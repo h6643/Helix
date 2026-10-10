@@ -90,11 +90,7 @@ import {
 } from "@/lib/image-utils";
 import { debug } from "@/lib/logger";
 import { buildAcpMcpServers } from "@/lib/mcp";
-import {
-  deriveAllowPrefix,
-  parsePermissionAsk,
-  PERM_APPROVE_ANSWER,
-} from "@/lib/permission-allow";
+import { PERM_APPROVE_SESSION_ANSWER } from "@/lib/permission-allow";
 import {
   detectScheduledTasks,
   syncTaskToBackend,
@@ -171,9 +167,7 @@ import type { ApprovalLevel } from "@/stores/helix-types";
 import {
   APPROVAL_MODE_ITEMS,
   approvalModeOf,
-  PERMISSION_SCOPE_ITEMS,
   permissionScopeLabelOf,
-  permissionTierOfLayer,
   type PermissionScopeTarget,
 } from "@/stores/helix-types";
 import type { ChatMessage, PendingChange } from "@/stores/helix-types";
@@ -285,24 +279,18 @@ function classifyModelError(raw: string): { label: string; detail: string } {
   const head = msg.slice(0, 12).replace(/[^0-9]/g, "");
   const status = /^([1-5]\d\d)\b/.exec(flat)?.[1];
   // 404/401 这类错误体里常带别的数字，只在开头附近找状态码。
-  const code = status ?? (flat.slice(0, 80).match(/\b([45]\d\d)\b/)?.[1] ?? "");
+  const code = status ?? flat.slice(0, 80).match(/\b([45]\d\d)\b/)?.[1] ?? "";
 
   const detail =
-    flat.length > 300
-      ? flat.slice(0, 300).replace(/\s+$/, "") + "…"
-      : flat;
+    flat.length > 300 ? flat.slice(0, 300).replace(/\s+$/, "") + "…" : flat;
   const withDetail = (label: string): { label: string; detail: string } => ({
     label,
     detail: detail ? `${label}：${detail}` : label,
   });
 
   if (code) {
-    if (code === "400")
-      return withDetail(
-        "400 请求被拒绝",
-      );
-    if (code === "401" || code === "403")
-      return withDetail("401/403 凭据无效");
+    if (code === "400") return withDetail("400 请求被拒绝");
+    if (code === "401" || code === "403") return withDetail("401/403 凭据无效");
     if (code === "404") {
       // baseUrl 末尾已带 /v1 时，pi 再拼协议路径会变成 /v1/v1/…
       return /\/v\d+\/v\d+\//.test(flat)
@@ -312,10 +300,7 @@ function classifyModelError(raw: string): { label: string; detail: string } {
     if (code === "408") return withDetail("408 请求超时");
     if (code === "413") return withDetail("413 请求体过大");
     if (code === "422") return withDetail("422 参数校验失败");
-    if (code === "429")
-      return withDetail(
-        "429 触发限流",
-      );
+    if (code === "429") return withDetail("429 触发限流");
     if (code === "500") return withDetail("500 服务端错误");
     if (code === "502") return withDetail("502 网关错误");
     if (code === "503") return withDetail("503 服务暂不可用");
@@ -325,7 +310,8 @@ function classifyModelError(raw: string): { label: string; detail: string } {
   }
 
   const lower = flat.toLowerCase();
-  const hit = (re: RegExp, label: string) => (re.test(lower) ? withDetail(label) : null);
+  const hit = (re: RegExp, label: string) =>
+    re.test(lower) ? withDetail(label) : null;
 
   return (
     hit(
@@ -346,7 +332,10 @@ function classifyModelError(raw: string): { label: string; detail: string } {
       "请求超时",
     ) ??
     hit(/econnrefused|connection refused/, "连接被拒绝（服务未启动？）") ??
-    hit(/enotfound|getaddrinfo|dns|name or service not known/, "DNS 解析失败") ??
+    hit(
+      /enotfound|getaddrinfo|dns|name or service not known/,
+      "DNS 解析失败",
+    ) ??
     hit(/econnreset|socket hang up|connection reset/, "连接中断") ??
     hit(/network|fetch failed|failed to fetch/, "网络错误") ??
     hit(/stopReason: error/, "模型返回错误") ??
@@ -365,10 +354,13 @@ function rebindSessionSid(
   next: Omit<SessionMapEntry, "sids">,
 ) {
   const prev = map.get(cid);
-  const sids = new Set([...(prev?.sids || []), ...(prev ? [prev.sid] : []), next.sid]);
+  const sids = new Set([
+    ...(prev?.sids || []),
+    ...(prev ? [prev.sid] : []),
+    next.sid,
+  ]);
   map.set(cid, { ...next, sids: [...sids] });
 }
-
 
 // ── Diff capture from backend inline_diff ─────────────────────────────────
 // 「已修改」卡片的登记逻辑（路径推断 / 形态校验 / undoUnsafe / sids 去重）全部
@@ -466,7 +458,6 @@ async function fileToAttachment(file: File): Promise<FileAttachment> {
     path: (file as any).path,
   };
 }
-
 
 // Tool display utilities — extracted to lib/tool-display-utils.tsx
 
@@ -570,7 +561,9 @@ export function ReasoningEffortControl({
     setIsDragging(false);
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch { /* no-op */ }
+    } catch {
+      /* no-op */
+    }
   }, []);
 
   return (
@@ -794,14 +787,13 @@ export function AgentFlowPanel() {
   // without a session tag; the run loop attaches the conversation id while
   // handling them, so each conversation carries its own "限流重试中" without
   // clobbering parallel runs.
-  const sessionRetry = useHelixStore(
-    (s) => (currentSessionId ? s.sessionRetryNotices[currentSessionId] : undefined),
+  const sessionRetry = useHelixStore((s) =>
+    currentSessionId ? s.sessionRetryNotices[currentSessionId] : undefined,
   );
   // 重连中（连接断开 / 重试中）：思考标签统一显示「重连」，代替「思考中」。
   // 优先 per-session 记录（并行会话各自互不影响）；没有时退回全局 notice。
   const isReconnecting =
-    (sessionRetry?.phase === "error" ||
-      sessionRetry?.phase === "retrying") ??
+    (sessionRetry?.phase === "error" || sessionRetry?.phase === "retrying") ??
     (connectionNotice?.phase === "error" ||
       connectionNotice?.phase === "retrying");
   const [steps, setSteps] = useState<ExecutionStep[]>([]);
@@ -822,8 +814,7 @@ export function AgentFlowPanel() {
     const sid = st.currentSessionId;
     const users = st.chatMessages
       .filter(
-        (m) =>
-          (sid ? m.sessionId === sid : !m.sessionId) && m.role === "user",
+        (m) => (sid ? m.sessionId === sid : !m.sessionId) && m.role === "user",
       )
       .map((m) => (typeof m.content === "string" ? m.content : "").trim())
       .filter((t) => t && !t.startsWith("/"));
@@ -883,30 +874,30 @@ export function AgentFlowPanel() {
 
   // 审批相关的两条轴（详见 helix-types 的 ApprovalMode 文档）：
   // - 权限档 `permissionMode`：**这条对话的生效档**，从 pi-permission 的
-  //   settings.json 回读。覆盖表（本项目 / 本会话）也在同一份文件里、由扩展自己
-  //   按「会话 → 项目 → 全局」解析，所以前端只有缓存，不自持「哪条会话用哪档」。
+  //   settings.json 回读。界面只写「本对话」那一层（文件里另有项目/全局两层，
+  //   由扩展按「会话 → 项目 → 全局」解析），所以前端只有缓存。唯一例外是这条
+  //   对话还没建起来（没有 sid、没有格子可写）时的那次选档：先记在
+  //   `pendingPermissionTier`，第一条消息发出时落盘（见 handleRun 的 flush 段）。
   // - `plan`：按会话的独立轴（pi 实例级），只有下拉/批准会写它。
   // 芯片显示的是两者合成的那一个值。
   const permissionMode = useHelixStore((s) => s.permissionMode);
   const planModeBySession = useHelixStore((s) => s.planModeBySession);
   const setPermissionMode = useHelixStore((s) => s.setPermissionMode);
   const setPlanModeForSession = useHelixStore((s) => s.setPlanModeForSession);
-  // 作用域视图（生效档来自哪一层 + 三层格子）与写入层偏好。
+  // 作用域视图（生效档 + 本对话那格 + 远程/总开关旗标）。
   const permissionScopeInfo = useHelixStore((s) => s.permissionScopeInfo);
-  const permissionWriteScope = useHelixStore((s) => s.permissionWriteScope);
-  const setPermissionWriteScope = useHelixStore(
-    (s) => s.setPermissionWriteScope,
-  );
-  const clearPermissionOverride = useHelixStore(
-    (s) => s.clearPermissionOverride,
-  );
   // 芯片/下拉的查找键：与 modelBySession 同一约定（新对话未分配 id 时用草稿键）。
   const modeKey = currentSessionId ?? DRAFT_SESSION_KEY;
   const planOn = !!planModeBySession[modeKey];
-  const approvalMode = approvalModeOf(permissionMode, planOn);
+  // 还没落盘的那次选档优先于文件缓存：用户在这条草稿对话里点了什么，芯片就得
+  // 显示什么，否则下一次点开会话又回落到配置默认（表现为「选了却没反应」）。
+  const pendingTier = useHelixStore((s) => s.pendingPermissionTier[modeKey]);
+  const displayTier = pendingTier ?? permissionMode;
+  const approvalMode = approvalModeOf(displayTier, planOn);
   // 读写档位必须带上**这条对话**的身份（pi sid + 项目目录），否则读回来的只是
-  // 全局那格，而闸门用的是生效档 —— 显示与门禁分叉的老毛病。目录直接传存储里的
-  // 原值：远程键（remote://…）由后端按「不可入库」处理，前端不重复判一遍。
+  // 配置默认那一格，而闸门用的是生效档 —— 显示与门禁分叉的老毛病。目录直接传存储
+  // 里的原值：远程键（remote://…）由后端按「不可入库」处理，前端不重复判一遍。
+  // `cid` 只在 sid 还没有时当暂存键用（新对话选档，见 pendingPermissionTier）。
   const permissionTarget = useCallback((): PermissionScopeTarget => {
     const st = useHelixStore.getState();
     const sid = currentSessionId
@@ -915,6 +906,7 @@ export function AgentFlowPanel() {
     return {
       sessionId: sid ?? null,
       cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? null,
+      cid: currentSessionId ?? DRAFT_SESSION_KEY,
     };
   }, [currentSessionId]);
   // 压缩完成提示 divider（手动 /compact 与自动压缩都会写入，持久化显示，切会话时清空）
@@ -1020,7 +1012,8 @@ export function AgentFlowPanel() {
   // The session-switch effect mirrors on switch; this covers in-session mutations.
   const persistPendingAttachments = useCallback(
     (images: ImageAttachment[], files: FileAttachment[]) => {
-      const key = useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY;
+      const key =
+        useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY;
       const links = useHelixStore.getState().tabAttachments[key]?.links ?? [];
       useHelixStore.getState().setTabAttachments(key, images, files, links);
     },
@@ -1203,42 +1196,14 @@ export function AgentFlowPanel() {
         });
         return;
       }
-      // pi-permission 审批卡（auto 档）命中「本会话始终允许」→ 代答放行，不弹卡。
-      // 只在 auto 档拦截：strict 档的契约是每次都问，不因前端登记而静默放行。
-      // 代答失败（实例已销毁/请求已被作废）落入正常入队，用户仍可手动处理。
+      // pi-permission 审批卡。「本会话始终允许」的表归扩展所有（第三挡
+      // Approve (session)）：命中时扩展自己放行、根本不发起审批请求，这里
+      // 自然收不到卡 —— 旧版前端代答拦截（查本地表命中就吞请求）已删：
+      // 那是扩展只有 once/deny 两挡时的代职，且本地表不分会话会跨对话泄漏。
       const isPermissionAsk =
         kind === "clarify_request" &&
         typeof u.approvalTimeoutSec === "number" &&
         u.approvalTimeoutSec > 0;
-      if (isPermissionAsk) {
-        const ask = parsePermissionAsk(u.question || "");
-        if (
-          ask &&
-          useHelixStore.getState().permissionMode === "auto" &&
-          useHelixStore.getState().matchesSessionApprovalAllow(ask.tool, ask.command)
-        ) {
-          try {
-            await helixApi()!.send("clarify/respond", {
-              session_id: sid,
-              request_id: id,
-              answer: PERM_APPROVE_ANSWER,
-            });
-            debug("[HelixTrace] permission auto-approved by session allow", {
-              id,
-              eventSid: sid,
-              tool: ask.tool,
-              command: ask.command ?? "",
-            });
-            return;
-          } catch (err) {
-            debug("[HelixTrace] permission auto-approve failed, showing card", {
-              id,
-              eventSid: sid,
-              error: String(err),
-            });
-          }
-        }
-      }
       debug("[HelixTrace] user-request card enqueue", {
         kind,
         id,
@@ -1405,12 +1370,7 @@ export function AgentFlowPanel() {
     for (const k of Object.keys(next)) if (!(k in map)) next[k] = false;
     for (const k of Object.keys(map)) next[k] = true;
     setSessionPendingApproval(next);
-  }, [
-    approvalQueue,
-    clarifyQueue,
-    pendingTaskCreations,
-    currentSessionId,
-  ]);
+  }, [approvalQueue, clarifyQueue, pendingTaskCreations, currentSessionId]);
   // 切换会话 / 冷启动时重建当前会话的压缩提示 divider：先清空内存里残留的
   // 上一条（换会话后旧 notice 不该显示），再从持久化记录里回填该会话最近
   // 一次压缩（compression-records-slice 在 setCompressionNotice 时落盘）。
@@ -1498,7 +1458,9 @@ export function AgentFlowPanel() {
       bylineFinalizeRef.current.add(turnKey);
       const answer = normalizeAcpContent(
         st.chatMessages
-          .filter((m) => m.sessionId === rec.sessionId && m.role === "assistant")
+          .filter(
+            (m) => m.sessionId === rec.sessionId && m.role === "assistant",
+          )
           .pop()?.content ?? "",
       ).trim();
       // 本轮步骤/思考已随消息落盘，清掉草稿避免面板重渲旧内容。
@@ -1669,8 +1631,7 @@ export function AgentFlowPanel() {
     //     直接把 active 落到目标消息（见下方 setConversationSearchActive）。
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as
-        | { query?: string; messageId?: string }
-        | undefined;
+        { query?: string; messageId?: string } | undefined;
       openConversationSearch();
       if (detail?.query) {
         setConversationSearchQuery(detail.query);
@@ -1702,11 +1663,7 @@ export function AgentFlowPanel() {
       `[data-message-id="${conversationSearchActiveId}"]`,
     );
     el?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [
-    conversationSearchActiveId,
-    conversationSearchOpen,
-    searchMatches,
-  ]);
+  }, [conversationSearchActiveId, conversationSearchOpen, searchMatches]);
 
   // ── Fork branch info for current session ──────────────────────────────
   // 分支导航数据：当前会话的分叉元信息 + 可跳转的亲属会话（父 + 兄弟分支）。
@@ -1831,8 +1788,8 @@ export function AgentFlowPanel() {
   const isSessionBroken = useHelixStore(
     (s) => !!currentSessionId && s.brokenSessionIds.includes(currentSessionId),
   );
-  const brokenSessionReason = useHelixStore(
-    (s) => (currentSessionId ? s.brokenSessionReasons[currentSessionId] : null),
+  const brokenSessionReason = useHelixStore((s) =>
+    currentSessionId ? s.brokenSessionReasons[currentSessionId] : null,
   );
   // 覆盖面板（定时任务/技能）打开时，把聊天输入区降一级（z-20），避免
   // 和面板（z-30）争焦点；历史条/上下文指示器也在面板打开时隐藏（遮挡感）。
@@ -2014,7 +1971,9 @@ export function AgentFlowPanel() {
     helixSessionIdRef.current = helixSid;
     try {
       useGatewayStore.getState().setHelixSessionId(helixSid);
-    } catch { /* empty */}
+    } catch {
+      /* empty */
+    }
   }, [currentSessionId]);
 
   // Restore persisted per-conversation sessions on mount so the conversation→
@@ -2035,7 +1994,9 @@ export function AgentFlowPanel() {
         helixSessionIdRef.current = sid;
         try {
           useGatewayStore.getState().setHelixSessionId(sid);
-        } catch { /* empty */}
+        } catch {
+          /* empty */
+        }
       })
       .catch(() => {});
     return () => {
@@ -2061,13 +2022,13 @@ export function AgentFlowPanel() {
         if (cancelled) return;
         m.forEach((entry, cid) => sessionMapRef.current.set(cid, entry));
         const cid = useHelixStore.getState().currentSessionId;
-        const sid = cid
-          ? (sessionMapRef.current.get(cid)?.sid ?? null)
-          : null;
+        const sid = cid ? (sessionMapRef.current.get(cid)?.sid ?? null) : null;
         helixSessionIdRef.current = sid;
         try {
           useGatewayStore.getState().setHelixSessionId(sid);
-        } catch { /* empty */}
+        } catch {
+          /* empty */
+        }
       })
       .catch(() => {});
     return () => {
@@ -2130,11 +2091,7 @@ export function AgentFlowPanel() {
             title: resumeFailureTitle(r),
             description: resumeFailureDescription(r),
           });
-          debug(
-            "[HelixTrace] resume 失败（不静默）→:",
-            targetSid,
-            r,
-          );
+          debug("[HelixTrace] resume 失败（不静默）→:", targetSid, r);
         })();
       });
     } catch {
@@ -2143,7 +2100,9 @@ export function AgentFlowPanel() {
     return () => {
       try {
         unsub?.();
-      } catch { /* empty */}
+      } catch {
+        /* empty */
+      }
     };
   }, []);
   // 孤儿 usage 事件兜底：usage:prompt-complete 是上下文环（contextUsage）的唯一
@@ -2181,7 +2140,9 @@ export function AgentFlowPanel() {
         if (prev && prev.size === ctxMax && prev.used === ctxUsed) return;
         // 该对话没有活跃 run → ctxUsed 是权威终态（后端已取过 max），直接覆盖。
         // 走 max 会把压缩后的下降吃掉，让旁路对话的环停在压缩前高位。
-        useHelixStore.getState().setContextUsage(cid, ctxMax, ctxUsed, undefined, undefined, true);
+        useHelixStore
+          .getState()
+          .setContextUsage(cid, ctxMax, ctxUsed, undefined, undefined, true);
         useHelixStore.getState().clearEstimatedTokens(cid);
       });
     } catch (e) {
@@ -2190,7 +2151,9 @@ export function AgentFlowPanel() {
     return () => {
       try {
         unsubUsage?.();
-      } catch { /* empty */}
+      } catch {
+        /* empty */
+      }
     };
   }, []);
   // When an SSH connection is established, reload MCP tools for the active
@@ -2214,7 +2177,9 @@ export function AgentFlowPanel() {
     return () => {
       try {
         unsubSsh?.();
-      } catch { /* empty */}
+      } catch {
+        /* empty */
+      }
     };
   }, [currentSessionId]);
   // Resolve current git branch for the empty-state breadcrumb.
@@ -2303,30 +2268,47 @@ export function AgentFlowPanel() {
     for (const p of providers) {
       const models = new Set<string>();
       if (p.id && providerModels[p.id]?.length) {
-        providerModels[p.id].forEach((m) => { if (m) models.add(m); });
+        providerModels[p.id].forEach((m) => {
+          if (m) models.add(m);
+        });
       }
       if (p.models?.length) {
-        p.models.forEach((m) => { if (m) models.add(m); });
+        p.models.forEach((m) => {
+          if (m) models.add(m);
+        });
       }
       if (models.size > 0) {
-        providerGroups.push({ id: p.id, name: p.name || p.id, models: Array.from(models) });
+        providerGroups.push({
+          id: p.id,
+          name: p.name || p.id,
+          models: Array.from(models),
+        });
       }
     }
     if (apiConfig.model) {
-      const found = providerGroups.some((g) => g.models.includes(apiConfig.model));
+      const found = providerGroups.some((g) =>
+        g.models.includes(apiConfig.model),
+      );
       if (!found) {
         const pid = activeProvider?.id || apiConfig.provider || "custom";
         const existing = providerGroups.find((g) => g.id === pid);
         if (existing) {
           existing.models.push(apiConfig.model);
         } else {
-          providerGroups.push({ id: pid, name: activeProvider?.name || pid, models: [apiConfig.model] });
+          providerGroups.push({
+            id: pid,
+            name: activeProvider?.name || pid,
+            models: [apiConfig.model],
+          });
         }
       }
     }
     const result: { id: string; name: string; models: string[] }[] = [];
     for (const pg of providerGroups) {
-      if (pg.models.length <= 6) { result.push(pg); continue; }
+      if (pg.models.length <= 6) {
+        result.push(pg);
+        continue;
+      }
       const orgMap = new Map<string, string[]>();
       const noOrg: string[] = [];
       for (const m of pg.models) {
@@ -2343,7 +2325,8 @@ export function AgentFlowPanel() {
         for (const [org, orgModels] of orgMap) {
           result.push({ id: `${pg.id}/${org}`, name: org, models: orgModels });
         }
-        if (noOrg.length > 0) result.push({ id: pg.id, name: pg.name, models: noOrg });
+        if (noOrg.length > 0)
+          result.push({ id: pg.id, name: pg.name, models: noOrg });
       } else {
         result.push(pg);
       }
@@ -2450,7 +2433,11 @@ export function AgentFlowPanel() {
     if (!hasFetched) return;
     const fixed = allModels[0];
     if (current !== fixed) store.setActiveModel(fixed);
-  }, [activeProvider?.id, apiConfig.model, groupedModelList.map((g) => g.models.join("|")).join("~")]);
+  }, [
+    activeProvider?.id,
+    apiConfig.model,
+    groupedModelList.map((g) => g.models.join("|")).join("~"),
+  ]);
   // Shared tail for a model switch. Cancels the in-flight session, invalidates
   // the cached session id, then pushes the freshly-resolved config to the
   // backend. The ordering here is what prevents the swap-401: `cacheConfig`
@@ -2467,7 +2454,9 @@ export function AgentFlowPanel() {
     if (isElectron() && currentSid) {
       try {
         electronHelix.notify("session/cancel", { session_id: currentSid });
-      } catch { /* empty */}
+      } catch {
+        /* empty */
+      }
     }
     // 2) Invalidate the GLOBAL cached session id so the next prompt re-resolves
     //    against the new config.yaml. Do NOT delete this conversation's map
@@ -2572,35 +2561,37 @@ export function AgentFlowPanel() {
         const profile = st0.apiProfiles.find(
           (p) => p.config?.baseUrl === provider.baseUrl,
         );
-        void window.electron?.helix?.registerProviderModels({
-          provider: provider.name,
-          baseUrl: provider.baseUrl,
-          apiKey: provider.apiKey || profile?.config.apiKey || undefined,
-          // 不传 api：协议格式只由设置页维护。这里若把 profile 里可能过期的
-          // apiFormat（旧版 label/value 错位存下的 anthropic-messages）写回
-          // models.json，会把用户改成 openai-completions 的值再冲掉。
-          // contextWindow 必须按当前选中的 model 从 profile 的 modelContextWindows
-          // 查：旧代码直接拿 profile.config.contextWindow（= 第一个模型的窗口）
-          // 当成本模型的窗口写回，会把本模型自己的值覆盖成第一个模型的
-          // （"我之前填的上下文窗口被改掉"根因之一）。
-          // 查不到就不传（传 undefined）——后端只接受显式值，None 时保留
-          // models.json 里已有的窗口，不会拿 256_000 覆盖用户填过的值。
-          models: [
-            {
-              id: model,
-              contextWindow: profile?.modelContextWindows?.[model] ?? undefined,
-            },
-          ],
-        })?.catch((e) =>
-          console.warn("[Helix] registerProviderModels failed:", e),
-        );
+        void window.electron?.helix
+          ?.registerProviderModels({
+            provider: provider.name,
+            baseUrl: provider.baseUrl,
+            apiKey: provider.apiKey || profile?.config.apiKey || undefined,
+            // 不传 api：协议格式只由设置页维护。这里若把 profile 里可能过期的
+            // apiFormat（旧版 label/value 错位存下的 anthropic-messages）写回
+            // models.json，会把用户改成 openai-completions 的值再冲掉。
+            // contextWindow 必须按当前选中的 model 从 profile 的 modelContextWindows
+            // 查：旧代码直接拿 profile.config.contextWindow（= 第一个模型的窗口）
+            // 当成本模型的窗口写回，会把本模型自己的值覆盖成第一个模型的
+            // （"我之前填的上下文窗口被改掉"根因之一）。
+            // 查不到就不传（传 undefined）——后端只接受显式值，None 时保留
+            // models.json 里已有的窗口，不会拿 256_000 覆盖用户填过的值。
+            models: [
+              {
+                id: model,
+                contextWindow:
+                  profile?.modelContextWindows?.[model] ?? undefined,
+              },
+            ],
+          })
+          ?.catch((e) =>
+            console.warn("[Helix] registerProviderModels failed:", e),
+          );
       }
 
       setShowModelDropdown(false);
     },
     [],
   );
-
 
   // Model selector for the active provider only. Rendered in BOTH input-bar
   // layouts (empty-state and active-conversation) via this helper so the
@@ -2641,31 +2632,27 @@ export function AgentFlowPanel() {
             type="button"
             onClick={() => setShowModelDropdown(!showModelDropdown)}
             className="flex w-full items-center justify-between gap-2 min-w-0 px-2.5 py-1.5 h-7 bg-muted/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 transition-all duration-200 font-mono border border-border/30 hover:border-border/30"
-            data-tip={
-              (() => {
-                // 供应商必须跟「显示的模型」同源：本对话有专属模型时用
-                // 该覆盖值的 provider（选择时就已解析），只有回落全局默认时才用
-                // activeProvider——否则对话覆盖指向硅基流动、全局还停在
-                // shangtang 时，悬停会显示成 shangtang · 硅基流动的模型。
-                const rawTip =
-                  sessionModelOverride?.provider || activeProvider?.name;
-                // 渠道 provider 的覆盖值存的是 pi 注册 id（workbuddy1 等）：
-                // 悬停显示界面名（WorkBuddy），查不到就原样显示。
-                const tipProvider = rawTip
-                  ? (piChannelProviders.find((c) => c.id === rawTip)?.name ??
-                    rawTip)
-                  : undefined;
-                const base = tipProvider
-                  ? `${tipProvider} · ${displayName}`
-                  : displayName;
-                return base;
-              })()
-            }
+            data-tip={(() => {
+              // 供应商必须跟「显示的模型」同源：本对话有专属模型时用
+              // 该覆盖值的 provider（选择时就已解析），只有回落全局默认时才用
+              // activeProvider——否则对话覆盖指向硅基流动、全局还停在
+              // shangtang 时，悬停会显示成 shangtang · 硅基流动的模型。
+              const rawTip =
+                sessionModelOverride?.provider || activeProvider?.name;
+              // 渠道 provider 的覆盖值存的是 pi 注册 id（workbuddy1 等）：
+              // 悬停显示界面名（WorkBuddy），查不到就原样显示。
+              const tipProvider = rawTip
+                ? (piChannelProviders.find((c) => c.id === rawTip)?.name ??
+                  rawTip)
+                : undefined;
+              const base = tipProvider
+                ? `${tipProvider} · ${displayName}`
+                : displayName;
+              return base;
+            })()}
           >
             {/* 空间够就显示全名；工具条放不下时随 flex 收缩出省略号（…） */}
-            <span className="truncate min-w-0 text-left">
-              {displayName}
-            </span>
+            <span className="truncate min-w-0 text-left">{displayName}</span>
           </button>
           {showModelDropdown && (
             <div className="absolute bottom-full right-0 mb-2 w-44 overflow-visible rounded-xl border border-border/40 bg-card shadow-xl z-50 animate-scale-in">
@@ -2702,9 +2689,7 @@ export function AgentFlowPanel() {
                       >
                         <path d="m9 18 6-6-6-6" />
                       </svg>
-                      <div
-                        className="invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute right-full bottom-0 pr-1"
-                      >
+                      <div className="invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute right-full bottom-0 pr-1">
                         {/* 二级菜单**向上长**（bottom-0 锚在行底）且自带滚动。
                             原来用 top-0 向下长：面板贴着卡片底部，下面没有空间，
                             菜单下沿会被宿主的 `overflow-hidden` 卡片裁掉
@@ -2715,72 +2700,72 @@ export function AgentFlowPanel() {
                         <div
                           className={`${g.labels ? "w-64 max-w-[256px]" : "w-52 max-w-[208px]"} max-h-[min(360px,55vh)] overflow-y-auto overscroll-contain rounded-xl border border-border/40 bg-card shadow-xl z-50 py-1`}
                         >
-                        {g.models.length === 0 ? (
-                          <div className="px-3 py-3 text-center text-[length:var(--helix-transcript-size)*0.8571] text-foreground/40">
-                            该供应商暂无模型
-                          </div>
-                        ) : (
-                          g.models.map((m) => {
-                            // 渠道模型的 label 是扩展装饰过的 name（含倍率/促销
-                            // 后缀），比裸 id 更适合展示；id 仍做选中比较与路由键。
-                            const label = g.labels?.[m];
-                            const parts = label
-                              ? parseChannelModelLabel(label)
-                              : undefined;
-                            return (
-                              <button
-                                key={m}
-                                type="button"
-                                onClick={() => {
-                                  handleModelSelect(m, g.id);
-                                  setShowModelDropdown(false);
-                                }}
-                                className={`w-full flex items-center gap-1.5 px-2 py-1.5 text-left transition-colors rounded-lg hover:bg-muted/70`}
-                              >
-                                {parts ? (
-                                  <>
+                          {g.models.length === 0 ? (
+                            <div className="px-3 py-3 text-center text-[length:var(--helix-transcript-size)*0.8571] text-foreground/40">
+                              该供应商暂无模型
+                            </div>
+                          ) : (
+                            g.models.map((m) => {
+                              // 渠道模型的 label 是扩展装饰过的 name（含倍率/促销
+                              // 后缀），比裸 id 更适合展示；id 仍做选中比较与路由键。
+                              const label = g.labels?.[m];
+                              const parts = label
+                                ? parseChannelModelLabel(label)
+                                : undefined;
+                              return (
+                                <button
+                                  key={m}
+                                  type="button"
+                                  onClick={() => {
+                                    handleModelSelect(m, g.id);
+                                    setShowModelDropdown(false);
+                                  }}
+                                  className={`w-full flex items-center gap-1.5 px-2 py-1.5 text-left transition-colors rounded-lg hover:bg-muted/70`}
+                                >
+                                  {parts ? (
+                                    <>
+                                      <span
+                                        className="flex min-w-0 flex-1 items-baseline gap-1.5"
+                                        data-tip={m}
+                                      >
+                                        <span className="min-w-0 shrink truncate font-mono ui-text text-foreground">
+                                          {parts.name}
+                                        </span>
+                                        {parts.notes.length > 0 && (
+                                          <span className="min-w-0 shrink truncate text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
+                                            {parts.notes.join(" ")}
+                                          </span>
+                                        )}
+                                      </span>
+                                      {/* 固定宽度 + 右对齐：倍率成一列，名长名短都对得上 */}
+                                      <span className="w-11 shrink-0 text-right font-mono tabular-nums text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
+                                        {parts.factor}
+                                      </span>
+                                    </>
+                                  ) : (
                                     <span
-                                      className="flex min-w-0 flex-1 items-baseline gap-1.5"
+                                      className="min-w-0 flex-1 truncate font-mono ui-text text-foreground"
                                       data-tip={m}
                                     >
-                                      <span className="min-w-0 shrink truncate font-mono ui-text text-foreground">
-                                        {parts.name}
-                                      </span>
-                                      {parts.notes.length > 0 && (
-                                        <span className="min-w-0 shrink truncate text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/50">
-                                          {parts.notes.join(" ")}
-                                        </span>
-                                      )}
-                                    </span>
-                                    {/* 固定宽度 + 右对齐：倍率成一列，名长名短都对得上 */}
-                                    <span className="w-11 shrink-0 text-right font-mono tabular-nums text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
-                                      {parts.factor}
-                                    </span>
-                                  </>
-                                ) : (
-                                  <span
-                                    className="min-w-0 flex-1 truncate font-mono ui-text text-foreground"
-                                    data-tip={m}
-                                  >
-                                    {truncateModelLabel(m)}
-                                  </span>
-                                )}
-                                {/* 勾选位常驻（不选也占宽）：否则选中行的倍率列
-                                    会被图标挤偏，右对齐就不成立了。 */}
-                                <span className="flex w-3.5 shrink-0 items-center justify-center">
-                                  {m === currentModelId && (
-                                    <span
-                                      className="text-foreground/50"
-                                      data-tip="当前模型"
-                                    >
-                                      <Check className="size-3.5" />
+                                      {truncateModelLabel(m)}
                                     </span>
                                   )}
-                                </span>
-                              </button>
-                            );
-                          })
-                        )}
+                                  {/* 勾选位常驻（不选也占宽）：否则选中行的倍率列
+                                    会被图标挤偏，右对齐就不成立了。 */}
+                                  <span className="flex w-3.5 shrink-0 items-center justify-center">
+                                    {m === currentModelId && (
+                                      <span
+                                        className="text-foreground/50"
+                                        data-tip="当前模型"
+                                      >
+                                        <Check className="size-3.5" />
+                                      </span>
+                                    )}
+                                  </span>
+                                </button>
+                              );
+                            })
+                          )}
                         </div>
                       </div>
                     </div>
@@ -2896,8 +2881,12 @@ export function AgentFlowPanel() {
     });
     // 客户端内置命令优先：同名项（例如 pi 侧也注册了 /btw）不再重复出现在
     // 补全列表里，避免同一个名字给用户两个选项、行为还不一样。
-    const builtinNames = new Set(BUILTIN_COMMANDS.map((c) => c.name.toLowerCase()));
-    const skills = allSkills.filter((s) => !builtinNames.has(s.name.toLowerCase()));
+    const builtinNames = new Set(
+      BUILTIN_COMMANDS.map((c) => c.name.toLowerCase()),
+    );
+    const skills = allSkills.filter(
+      (s) => !builtinNames.has(s.name.toLowerCase()),
+    );
     return [...builtinCmds, ...skills];
   }, [allSkills, BUILTIN_COMMANDS]);
 
@@ -3121,7 +3110,8 @@ export function AgentFlowPanel() {
           : root.replace(/[/\\]+$/, "") + "/" + p;
         const parts = full.split(/[/\\]/);
         const name = parts[parts.length - 1];
-        if (name && !files.some((f) => f.path === full)) files.push({ name, path: full });
+        if (name && !files.some((f) => f.path === full))
+          files.push({ name, path: full });
       };
       try {
         // 优先 git status（改动过的文件最可能被引用）。显式传 cwd：后端状态机里的
@@ -3144,7 +3134,9 @@ export function AgentFlowPanel() {
             return;
           }
         }
-      } catch { /* 非 git 仓库 / git 不可用 → 走全树扫描 */ }
+      } catch {
+        /* 非 git 仓库 / git 不可用 → 走全树扫描 */
+      }
       try {
         // 兜底：扫描工作区全树。显式传绝对路径（同 file-tree-panel 的理由）。
         await window.electron.fs.allowRoot?.(root);
@@ -3161,7 +3153,9 @@ export function AgentFlowPanel() {
         }
         walk(tree, "");
         workspaceFilesRef.current = files;
-      } catch { /* 扫描失败：@ 候选保持为空 */ }
+      } catch {
+        /* 扫描失败：@ 候选保持为空 */
+      }
     })();
     return () => {
       cancelled = true;
@@ -3664,9 +3658,10 @@ export function AgentFlowPanel() {
       // 与渲染层 sessionMessages 同一规则（严格二选一）：DRAFT 键 → 无 sessionId
       // 的消息；否则 → 只取主线自己的。旧写法在主线分支里多带了 `!m.sessionId`，
       // 会把"新对话那屏"的消息当成主线历史喂进旁路转录。
-      const mainMessages = mainCid === DRAFT_SESSION_KEY
-        ? st.chatMessages.filter((m) => !m.sessionId)
-        : st.chatMessages.filter((m) => m.sessionId === mainCid);
+      const mainMessages =
+        mainCid === DRAFT_SESSION_KEY
+          ? st.chatMessages.filter((m) => !m.sessionId)
+          : st.chatMessages.filter((m) => m.sessionId === mainCid);
       const transcript = buildBtwTranscript(mainMessages);
       const bylineCid =
         "btw-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
@@ -3760,7 +3755,11 @@ export function AgentFlowPanel() {
         );
       }
       if (files.length === 0) return;
-      const res = await window.electron?.fs?.snapshotSave(runId, sessionId, files);
+      const res = await window.electron?.fs?.snapshotSave(
+        runId,
+        sessionId,
+        files,
+      );
       if (res?.ok) runSnapshotIdRef.current = runId;
     } catch {
       /* 快照失败不阻塞 run：回滚是可选能力，不能因此拦住用户发消息 */
@@ -3775,1839 +3774,1820 @@ export function AgentFlowPanel() {
   //  - prompt：直接给定 prompt 文本，不从输入框读；
   //  - silent：不清输入框、不置 isChatLoading（主线的发送按钮不该变停），
   //    也不给主线的上下文环估算 token。
-  const handleRun = useCallback(async (opts?: {
-    sessionId?: string;
-    prompt?: string;
-    silent?: boolean;
-    /** 发送后保留输入框原文（「立即发送」刷队列条目用，不清空用户正在打的字） */
-    keepInput?: boolean;
-  }) => {
-    const isBackground = !!opts?.sessionId;
-    // 本轮所属项目根（本机语义），开局就定下来：回合末尾再读 activeSessionWorkDir
-    // 可能已经被别的对话切走，检查会跑错仓库。
-    const runWorkDir = localProjectRoot(
-      useHelixStore.getState().activeSessionWorkDir ??
-        useHelixStore.getState().selectedWorkDir,
-    );
-    const currentInput = opts?.prompt ?? inputValueRef.current;
-    // 终端式输入历史：记录用户从输入框发送的文本（程序化 prompt / 斜杠命令除外）。
-    if (!opts?.prompt) pushInputHistory(currentInput);
-    const cmd = resolveCommand(currentInput.trim());
-    const baseTrimmed = currentInput.trim();
-    // Fold any web-link cards (picked from the in-app browser) into the text the
-    // agent receives, so they ride along without cluttering the input as raw URLs.
-    // 后台旁路提问不携带主线的链接卡片——那是主线会话自己的上下文。
-    const linkCards = isBackground
-      ? []
-      : useHelixStore.getState().tabAttachments[
-          currentSessionId ?? DRAFT_SESSION_KEY
-        ]?.links ?? [];
-    const linkSuffix = linkCards.length
-      ? "\n" +
-        linkCards
-          .map((l) => `链接: ${l.title ? `${l.title} (${l.url})` : l.url}`)
-          .join("\n")
-      : "";
-    // /review 是「提示词宏」而不是客户端动作：改写成审查正文后照常走发送路径。
-    // 另起一次 run 会和这一次抢 isChatLoading / 前端运行标记（并行对话保护那套），
-    // 所以在这里换正文、由同一个 run 发出去。
-    const reviewPrompt = rewriteReviewCommand(baseTrimmed);
-    const trimmed = (reviewPrompt ?? baseTrimmed) + linkSuffix;
-    if (
-      !baseTrimmed &&
-      pendingImages.length === 0 &&
-      pendingFiles.length === 0 &&
-      linkCards.length === 0
-    )
-      return;
-
-    // Lock isBusy to true BEFORE any async gap so the button NEVER flips
-    // back to "send" while the agent is in-flight (even if streamingDrafts
-    // temporarily loses its isAgentRunning flag due to session-id drift or
-    // a draft clear). Without this, the user sees the send button reappear,
-    // clicks it, and ACP receives a second prompt → "Queued (1 queued)" and
-    // the model gets interrupted mid-thought.
-    // 后台旁路提问不占主线的 isChatLoading：主线发送按钮不该变「停止」，
-    // 用户应能立刻在主线继续发消息。
-    // 入队判定用的忙态必须在这里读——下一行就会把 isChatLoading 置 true，
-    // 之后再读就永远是「忙」，会把空闲时的正常发送也错排进队列。
-    const busyBeforeSend =
-      isBusy ||
-      (isBackground && !!streamingDrafts[opts?.sessionId ?? ""]?.isAgentRunning);
-    if (!isBackground) useHelixStore.setState({ isChatLoading: true });
-    // Set estimated tokens while waiting for API response (shows ~Xk during request).
-    // A brand-new session has no baseline: previousUsed=0 + a short input would
-    // floor at 100 tokens, and the ring (safeTotal=1 when total=0) renders that
-    // as a full 100% circle — the "发送后显示 100% 使用" symptom. With no real
-    // baseline there is nothing worth showing; leave estimated unset so the
-    // ring stays in its empty state until the first real usage event lands.
-    const inputText = (currentInput || "").length;
-    const inputTokens = Math.ceil(inputText / 2); // rough estimate: ~2 chars per token
-    const previousUsed = currentSessionId
-      ? useHelixStore.getState().contextUsage[currentSessionId]?.used || 0
-      : 0;
-    const estimatedTokens = isBackground
-      ? undefined
-      : previousUsed > 0
-        ? Math.max(100, previousUsed + inputTokens)
-        : undefined;
-    // Note: activeSessionId is declared later in this function, so we can't use it here.
-    // We'll set the estimated token in the finally block instead.
-    // FIX: Store estimated tokens immediately so context ring shows ~Xk while loading
-    const tempSessionId = currentSessionId || "pending";
-    if (estimatedTokens !== undefined) {
-      useHelixStore
-        .getState()
-        .setEstimatedTokens(tempSessionId, estimatedTokens);
-    }
-
-    // --- Built-in slash commands (handled client-side, never sent to the backend) ---
-    const builtinMatch = baseTrimmed.match(/^\/(\S+)/);
-    if (builtinMatch) {
-      const builtin = BUILTIN_COMMANDS.find(
-        (c) => c.name === builtinMatch[1].toLowerCase(),
-      );
-      // review 不进这条早退分支：它的正文已经替换进 trimmed，继续往下当普通消息发。
-      if (builtin && builtin.action !== "review") {
-        setInputSynced("");
-        resetInputHeight();
-        switch (builtin.action) {
-          case "compact": {
-            // 忙标记/压缩/resume/写回/自愈逻辑在共享模块 runCompactCommand
-            // 里（旁路面板 /compact 走同一执行体，行为一字不差）；live 映射
-            // 传本组件的 sessionMapRef，兜底 sid 用本组件的 helixSessionIdRef。
-            // 成功后把 ref 对齐到压缩用的 sid（主对话后续 run 的兜底来源）。
-            void (async () => {
-              const r = await runCompactCommand(currentSessionId, {
-                sessionMap: sessionMapRef.current,
-                fallbackSid: helixSessionIdRef.current,
-              });
-              if (r === "ok" && currentSessionId) {
-                helixSessionIdRef.current =
-                  sessionMapRef.current.get(currentSessionId)?.sid ??
-                  helixSessionIdRef.current;
-              }
-            })();
-            break;
-          }
-          case "btw": {
-            // 旁路提问（自动）：后台另开一条轻量旁路会话，把「问题 + 压缩后的
-            // 主线转录」作为一条 prompt 直接发出去，答案实时显示在右侧边栏的
-            // 「旁路问答」面板里。主线上下文与视图完全不变（旁路是独立后端
-            // 会话，且不入左侧对话列表）。纯客户端动作，/btw 前缀绝不发给模型。
-            const question = baseTrimmed.slice(builtinMatch[0].length).trim();
-            // 裸 /btw 与 /btw <问题> 都先打开右侧「旁路问答」面板并聚焦它的
-            // 输入框——面板是这个命令的落点，不该只弹一个 toast。
-            useHelixStore.getState().setRightSidebarTab("byline");
-            useHelixStore.getState().focusBylineInput();
-            if (!question) {
-              // 裸 /btw：只打开面板，问题在面板输入框里输入（多轮追问也用它）。
-              break;
-            }
-            // /btw <问题>：当前主线已有开放的旁路会话 → 作为追问发进同一
-            // 条会话（多轮累积，保留上次的问答）；没有才新建。此前无条件
-            // 调 handleBtwQuestion 新建，每次 /btw 都把上一条旁路对话顶掉
-            // （面板只显示 bylineReplies[mainCid] 这一条）。
-            void handleBtwAsk(question);
-            break;
-          }
-        }
-        // Builtin commands are instant client-side operations — never leave the
-        // isChatLoading flag stuck true (it was set before this branch).
-        useHelixStore.setState({ isChatLoading: false });
-        return;
-      }
-    }
-
-    // If the CURRENT session is running AND receiving a new send, stop it first
-    // (toggle send/stop is per-session — other sessions keep running). A brand
-    // new conversation (currentSessionId === null) has no draft of its own, so
-    // it must NEVER stop another session's run; it always starts a fresh
-    // concurrent run instead.
-    // 独立的压缩闸门：忙标记按会话隔离（compressionBusyBySession），只拦当前
-    // 会话正在压缩的情况，其他会话的压缩不阻挡本会话发送。与下方的
-    // isAgentRunning（agent 流式输出中）是**两个不同状态**，互不复用、互不覆盖。
-    // 此前发送路径只认 isAgentRunning，压缩期间仍能发消息，会与后端
-    // session.compress 改写同一会话 transcript 产生竞态（新消息被卷走 /
-    // prompt 与 compress 交错）。这里独立拦截——不调用 handleStop，因为
-    // 压缩不占 running 槽位，无需"先停"，只拦住这一发即可。
-    if (
-      !isBackground &&
-      useHelixStore.getState().isSessionCompressionBusy(
-        currentSessionId ?? undefined,
-      )
-    ) {
-      storeActions.showToast({
-        type: "warning",
-        title: "上下文压缩中",
-        description: "正在压缩上下文，稍候即可继续发送",
-      });
-      return;
-    }
-
-    // ── 输入队列 ────────────────────────────────────────────────────────
-    // 本会话还在跑时，纯文本消息不再「先停再发」（那会掐掉正在跑的任务），
-    // 而是排进发送队列：任务结束后按 Enter 自动刷入，或在队列卡片上
-    // 「立即发送」。附件 / 链接卡片不排队——它们必须跟着这一发 prompt 一起
-    // 发出去，拆开会丢掉本轮的上下文，所以仍走原来的「先停再发」。
-    if (!isBackground && !cmd && !opts?.keepInput) {
-      const hasAttachments =
-        pendingImages.length > 0 ||
-        pendingFiles.length > 0 ||
-        linkCards.length > 0;
-      if (busyBeforeSend && baseTrimmed && !hasAttachments) {
-        useHelixStore.getState().enqueueInput(
-          currentSessionId ?? DRAFT_SESSION_KEY,
-          baseTrimmed,
-        );
-        setInputSynced("");
-        resetInputHeight();
-        // 上面已把 isChatLoading 置 true，但这次并没有真的发起 run，必须复位，
-        // 否则发送按钮会一直显示成「停止」。
-        useHelixStore.setState({ isChatLoading: false });
-        return;
-      }
-    }
-
-    // 后台旁路提问跑在自己的会话上，绝不能因为「主线正在跑」就 handleStop 掉
-    // 主线的 run（那是 toggle 语义，只对当前会话生效）。同理也不读主线的
-    // 草稿来判断忙闲——要查的是旁路会话自己的草稿。
-    const activeDraft = isBackground
-      ? streamingDrafts[opts!.sessionId!]
-      : currentSessionId
-        ? streamingDrafts[currentSessionId]
-        : undefined;
-    if (activeDraft?.isAgentRunning) {
-      handleStop((isBackground ? opts!.sessionId : currentSessionId) ?? undefined);
-      return;
-    }
-
-    // Check API key — serve 模式下密钥由后端托管，Helix 侧 apiConfig.apiKey
-    // 为空，跳过该门否则发送会被永久拦截（"发送按钮无效"）。
-    if (!hasApiKey && !isServeActive()) {
-      storeActions.toggleSettings("api");
-      return;
-    }
-
-    // 后台旁路提问不动主线的输入框（用户可能正在主线打字）；刷队列条目
-    // （keepInput）同样保留——那条文本已经发出去了，用户正在打的新字不动。
-    if (!isBackground && !opts?.keepInput) {
-      setInputSynced("");
-      resetInputHeight();
-    }
-    // 共享的 runStartedAtRef 只作计时兜底锚点；每会话的真实锚点在下方
-    // setStreamingDraft(startedAt) 里按会话记录（计时渲染优先读 draft）。
-    runStartedAtRef.current = Date.now();
-    debug("[HelixTrace] handleRun start", {
-      input: typeof trimmed === "string" ? trimmed.slice(0, 80) : trimmed,
-      currentSessionId,
-      pendingImages: pendingImages.length,
-      pendingFiles: pendingFiles.length,
-    });
-    let activeSessionId = opts?.sessionId ?? currentSessionId;
-    // ── Front-run guard for true concurrency ───────────────────────────────────
-    // Each concurrent run has its own backend session + queue, but the panel shares
-    // one set of UI states (responseBlocks/steps/streamThinking). Only the run
-    // whose conversation is currently focused may write them; background runs
-    // keep streaming to the backend without touching the shared UI. Declared here
-    // (before try) so both the pre-try resets and the finally block can use it.
-    const isFrontRun = () =>
-      useHelixStore.getState().currentSessionId === activeSessionId;
-    // ── Per-run streaming state (true concurrency) ───────────────────────────
-    // The component-level refs (textBufferRef, stepsRef, …) are shared across
-    // every handleRun invocation. With parallel runs that was fatal: a run
-    // started in another conversation wiped the focused run's buffers, the
-    // first `done` set the shared doneProcessedRef so later runs never
-    // committed, and the shared finally cleared the wrong draft — the "switched
-    // away and the old chat stopped" bug. Each run now shadows those refs with
-    // its OWN buffers; only the focused run pushes them into the UI via the
-    // isFrontRun()-guarded setters below, and each run persists its accumulated
-    // state to its own per-session draft (syncDraft) for switch-back.
-    const textBufferRef = { current: "" };
-    const thoughtBufferRef = { current: "" };
-    // 「思考阶段」基准：thoughtBufferRef 是**整个 run** 的累积缓冲（done 时还
-    // 要拿它当权威 reasoning 兜底，所以不能按阶段清空），但落块渲染需要的是
-    // **本阶段**的思考文本。否则 思考→工具→再思考 时，工具后的 thinking 块
-    // content 仍是 run 级全文，而 flushPending/mergeAdjacentThinking 只在相邻
-    // thinking 之间去重、不会跨 tool_group 合并 → 第二个思考折叠卡里会把第一
-    // 个折叠卡的正文再渲染一遍（"每轮思考都叠加了之前的思考"的根因）。
-    // 规则：每个非思考块（tool_group / text）落块即视为阶段边界，把基准推进
-    // 到当前缓冲长度；thinking 落块时只取 slice(基准)。
-    // 缓冲只在 run/done/error 时被清成 ""（永不变短），所以 slice 时用
-    // Math.min 兜住"基准 > 缓冲长度"的清空瞬间，无需在每个重置点同步重置基准。
-    const thinkingPhaseBaseRef = { current: 0 };
-    // 本阶段思考的**起点**（首个 thinking 事件的 ms epoch）。每个 thinking 分片
-    // 用它刷新所在块的 duration_s，所以卡片上的数字随流式增长、阶段结束即定格
-    // —— 那是「这段思考花了多久」，与 run 级 thinkingStartTimeRef（整轮第一条
-    // 思考）不是一回事。
-    const thinkingPhaseStartRef = { current: 0 };
-    const phaseThinkingText = () =>
-      thoughtBufferRef.current.slice(
-        Math.min(thinkingPhaseBaseRef.current, thoughtBufferRef.current.length),
-      );
-    // 非思考块落块 = 思考阶段边界。
-    const markThinkingPhaseBoundary = () => {
-      thinkingPhaseBaseRef.current = thoughtBufferRef.current.length;
-      thinkingPhaseStartRef.current = 0;
-    };
-    const lastStreamedTextRef = { current: "" };
-    const stepsRef = { current: [] as ExecutionStep[] };
-    const responseBlocksRef = { current: [] as ResponseBlock[] };
-    const streamThinkingRef = { current: "" };
-    const doneProcessedRef = { current: false };
-    const usageReceivedRef = { current: false };
-    const doneMsgIdRef = { current: null as string | null };
-    const pendingAssistantRowIdRef = { current: null as number | null };
-    const streamCappedRef = { current: false };
-    const thinkingCappedRef = { current: false };
-    // 本次运行的 provider 原始错误（pi `errorMessage`，经 session/complete
-    // 透传）。只在「run 结束但没有任何可见内容」时用来分类显示——正常回复
-    // 不该因为一次上游错误就把错误挂在正文里。
-    const runErrorRef = { current: "" };
-    const pendingTextRef = { current: null as string | null };
-    const pendingThinkingRef = { current: null as string | null };
-    const pendingBlocksRef = {
-      current: [] as Array<
-        | {
-            type: "thinking";
-            content: string;
-            startedAt?: number;
-            duration_s?: number;
-          }
-        | { type: "text"; content: string }
-        | { type: "tool_group"; steps: ExecutionStep[] }
-      >,
-    };
-    const rafPendingRef = { current: false };
-    const promptSentAtRef = { current: 0 };
-    const firstContentAtRef = { current: 0 };
-    const thinkingStartTimeRef = { current: 0 };
-    const thinkingDurationRef = { current: 0 };
-    const thoughtTokensRef = { current: 0 };
-    const outputTokensRef = { current: 0 };
-    const totalTokensRef = { current: 0 };
-    const synthDoneTimerRef = {
-      current: null as ReturnType<typeof setTimeout> | null,
-    };
-    const forceDoneTimerRef = {
-      current: null as ReturnType<typeof setTimeout> | null,
-    };
-    const startedAtRef = { current: 0 };
-    // 诊断标记：sid 过滤丢弃内容事件只记一次（见 onEvent 的过滤分支）。
-    const sidMismatchDebuggedRef = { current: false };
-    // 本次运行期间收集的文件改动，只在 done 时随最终消息一起提交，避免执行
-    // 过程中“改一个就冒一个”。
-    const runFileChangesRef = { current: [] as PendingChange[] };
-    // 语义化的 done 正文自愈：部分场景后端连发多条 done，前面已触发的 done 已把消息提交到
-    // chatMessages，此时用本次 done 自带正文（message.complete / run.completed 的 text，与
-    // state.db 持久化同源，字节完好）原地修正已提交消息，覆盖流式累积可能丢空白/换行的损坏。
-    // 只替换为原文，不猜补空格；归一化比较下 complete 更短（截断/中断）时则保留流式累积。
-    // ── blocks ↔ content 一致性自愈 ─────────────────────────────────────
-    // 渲染优先用 blocks；流式丢字（如 " Hel" 在传输中丢失）会让文本块比
-    // 权威正文少内容。把全部文本块收敛为单个权威文本块（挂第一个文本块
-    // 位置，thinking/工具卡不动），保证渲染文本与 content 一致。
-    // 无差异返回 null（调用方据此跳过重写）。
-    const reconcileBlocksText = (
-      blocks: NonNullable<ChatMessage["blocks"]>,
-      content: string,
-    ): NonNullable<ChatMessage["blocks"]> | null => {
-      if (!content.trim()) return null;
-      const blockText = blocks
-        .filter((b) => b.type === "text")
-        .map((b) => String(b.content || ""))
-        .join("");
-      if (normalizeForCompare(blockText) === normalizeForCompare(content)) {
-        return null;
-      }
-      const firstTextIdx = blocks.findIndex((b) => b.type === "text");
-      if (firstTextIdx < 0) return null;
-      const out: NonNullable<ChatMessage["blocks"]> = [];
-      blocks.forEach((b, i) => {
-        if (b.type === "text") {
-          if (i === firstTextIdx) {
-            out.push({ type: "text", content });
-          }
-        } else {
-          out.push(b);
-        }
-      });
-      return out;
-    };
-    const patchDoneMessage = (finalText: string) => {
-      const mid = doneMsgIdRef.current;
-      if (!mid || !finalText || !finalText.trim()) return;
-      const st = useHelixStore.getState();
-      const existing = st.chatMessages.find(
-        (m: { id: string }) => m.id === mid,
-      );
-      if (!existing) return;
-      const cur = existing.content || "";
-      if (cur === finalText) return;
-      const normCur = normalizeForCompare(cur);
-      const normFinal = normalizeForCompare(finalText);
-      if (
-        !cur.trim() ||
-        (normFinal.length >= normCur.length &&
-          (normFinal.includes(normCur) || normCur.includes(normFinal))) ||
-        // 中游分歧（流式丢字导致正文缺段，非包含关系）：后端 final_response
-        // 与 state.db 同源、字节完好，更长且高度相似时以它为准。
-        (normFinal.length >= normCur.length &&
-          normCur.length >= 8 &&
-          textSimilarityRatio(normCur, normFinal) >= 0.6)
-      ) {
-        st.updateChatMessage(mid, finalText);
-        // 正文自愈后，已提交的 blocks 若仍是缺字版本需一并收敛，
-        // 否则渲染（优先 blocks）继续显示缺字文本。
-        if (existing.blocks) {
-          const reconciled = reconcileBlocksText(existing.blocks, finalText);
-          if (reconciled) {
-            useHelixStore.setState((state) => ({
-              chatMessages: state.chatMessages.map((m) =>
-                m.id === mid ? { ...m, blocks: reconciled } : m,
-              ),
-            }));
-          }
-        }
-        debug("[HelixTrace] 权威全文自愈，已原地修正消息正文", {
-          len: cur.length,
-          to: finalText.length,
-        });
-      }
-    };
-    // 三个 setter 的共同契约：本 run 的私有累加器是**唯一真相**，React state
-    // 只是它在「前台」时的投影。旧写法把同一个 updater 再施加一次
-    // （setResponseBlocks(u)），等于让 state 长成第二份独立副本——任何外部
-    // `setResponseBlocks([])`（如 chatMessages 被清空的那个 effect）之后，
-    // state 从空数组重新累积，屏幕上就只剩「重置之后的第一块」，而 run 的累加器
-    // 与草稿仍是全的（"思考过程好端端地只剩一个思考中"的根因）。
-    const uiRB = (u: any) => {
-      responseBlocksRef.current =
-        typeof u === "function" ? u(responseBlocksRef.current) : u;
-      if (!isFrontRun()) return;
-      setResponseBlocks(responseBlocksRef.current);
-      liveStateOwnerRef.current = activeSessionId;
-    };
-    const uiSteps = (u: any) => {
-      stepsRef.current = typeof u === "function" ? u(stepsRef.current) : u;
-      if (!isFrontRun()) return;
-      setSteps(stepsRef.current);
-      liveStateOwnerRef.current = activeSessionId;
-    };
-    const uiST = (u: string) => {
-      streamThinkingRef.current = u;
-      if (!isFrontRun()) return;
-      setStreamThinking(streamThinkingRef.current);
-      liveStateOwnerRef.current = activeSessionId;
-    };
-    // Push this run's accumulated state into its own per-session draft so the
-    // streaming content survives switching away and back. Throttled to one
-    // store write per animation frame (same cost model as the old shared sync).
-    let draftSyncPending = false;
-    let runCompleted = false; // Guard: once finally sets this, stop writing isAgentRunning=true
-    const syncDraft = () => {
-      if (draftSyncPending) return;
-      draftSyncPending = true;
-      requestAnimationFrame(() => {
-        draftSyncPending = false;
-        // The run is over: the completed message is already committed to
-        // chatMessages, and finally already cleared the draft's responseBlocks.
-        // A straggler rAF must NOT re-populate the draft (that would re-render
-        // the blocks in the streaming area on top of the committed message →
-        // duplicate output). Skip the write entirely once runCompleted.
-        if (runCompleted) return;
-        setStreamingDraft(activeSessionId ?? "", {
-          isAgentRunning: true,
-          responseBlocks: responseBlocksRef.current,
-          steps: stepsRef.current,
-          streamThinking: streamThinkingRef.current,
-          textBuffer: textBufferRef.current,
-          thoughtBuffer: thoughtBufferRef.current,
-          startedAt: startedAtRef.current,
-          totalTokens: totalTokensRef.current,
-        });
-      });
-    };
-    // Per-run stream flush — merges this run's pending text/thinking blocks into
-    // its own responseBlocksRef and (when front) the live UI state.
-    // 把 pendingBlocksRef 中积压的分片（text / thinking / tool_group）按事件顺序
-    // 一次性提交到 uiRB。text/thinking 内部合并，tool_group 独立成块、保持顺序。
-    const flushPending = () => {
-      const blocks = pendingBlocksRef.current.splice(0);
-      if (!blocks.length) return;
-      const lastThinkingBlock = [...blocks]
-        .reverse()
-        .find((b) => b.type === "thinking");
-      uiRB((prev) => {
-        let next = prev;
-        for (const b of blocks) {
-          if (b.type === "tool_group") {
-            // 工具卡与其他块共用同一条有序提交队列，保持事件顺序，
-            // 不再被同步插入到句子主体与句末标点分片之间（修复"以 。开头"错位）。
-            next = [...next, { type: "tool_group", steps: b.steps }];
-            continue;
-          }
-          const last = next[next.length - 1];
-          if (b.type === "thinking") {
-            // 去重累积思考块：当累积 buffer（如 "1,2,3,4"）包含现有块的全文
-            // （如 "1,2,3"）时，替换它而不是在工具段之后追加重复内容。
-            // 纯追加会导致同一思考被渲染两遍（见思考输出累积 bug 分析）。
-            // 补充归一化相似度检测：后端累积重发时可能带微小差异。
-            const lastI = next.length - 1;
-            if (lastI >= 0 && next[lastI].type === "thinking") {
-              const prevC = String(next[lastI].content || "");
-              const curC = String(b.content || "");
-              const prevN = normalizeForCompare(prevC);
-              const curN = normalizeForCompare(curC);
-              // 计时随「本阶段」走：分片替换/追加都沿用 incoming 的起止，它才
-              // 是最新的一次思考事件时刻（旧块可能是上一帧的同阶段副本）。
-              const timing = {
-                startedAt: b.startedAt,
-                duration_s: b.duration_s,
-              };
-              if (curC.includes(prevC)) {
-                next = [
-                  ...next.slice(0, lastI),
-                  { type: "thinking", content: curC, ...timing },
-                ];
-              } else if (prevC.includes(curC)) {
-                // 旧块更长（极少见，可能是旧数据残留），保留旧的
-              } else if (
-                prevN.length >= 8 &&
-                curN.length >= 8 &&
-                textSimilarityRatio(prevN, curN) >= 0.7
-              ) {
-                // 归一化后高度相似：视为累积重发或改写，取更长的一份
-                next = [
-                  ...next.slice(0, lastI),
-                  {
-                    type: "thinking",
-                    content:
-                      curC.length >= prevC.length ? curC : prevC,
-                    ...timing,
-                  },
-                ];
-              } else {
-                // 无包含关系且相似度低：真正的独立思考段，保留原逻辑追加
-                next = [
-                  ...next,
-                  { type: "thinking", content: b.content, ...timing },
-                ];
-              }
-            } else {
-              next = [
-                ...next,
-                {
-                  type: "thinking",
-                  content: b.content,
-                  startedAt: b.startedAt,
-                  duration_s: b.duration_s,
-                },
-              ];
-            }
-          } else {
-            next =
-              last?.type === "text"
-                ? [
-                    ...next.slice(0, -1),
-                    { type: "text", content: last.content + b.content },
-                  ]
-                : [...next, { type: "text", content: b.content }];
-          }
-        }
-        return next;
-      });
-      if (lastThinkingBlock && lastThinkingBlock.type === "thinking")
-        uiST(lastThinkingBlock.content);
-      syncDraft();
-    };
-    const flushStreamRender = () => {
-      rafPendingRef.current = false;
-      debug("[HelixTrace] flush rAF", {
-        pending: pendingBlocksRef.current.length,
-        textLen: (textBufferRef.current || "").length,
-      });
-      flushPending();
-    };
-    const scheduleStreamRender = () => {
-      if (rafPendingRef.current) return;
-      rafPendingRef.current = true;
-      requestAnimationFrame(flushStreamRender);
-    };
-    // ──────────────────────────────────────────────────────────────────────────
-    doneProcessedRef.current = false;
-    if (!activeSessionId) {
-      activeSessionId =
-        "session-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6);
-      useHelixStore.getState().setCurrentSessionId(activeSessionId);
-      // 新对话归属当前项目：activeSessionWorkDir 从此始终反映「当前对话所属项目」
-      // （加载的项目外对话为 null），界面据此决定是否显示项目目录与分支。
-      //
-      // 草稿已有的值优先 —— 远程草稿（远程行「新建对话」）的项目是
-      // `remote://…` 虚拟键，而 selectedWorkDir 恒为本机路径/空。用 `?? selected`
-      // 覆盖会把远程草稿在发消息那一刻变成远程键丢失、进而落到本地项目。
-      useHelixStore.setState({
-        activeSessionWorkDir:
-          useHelixStore.getState().activeSessionWorkDir ??
+  const handleRun = useCallback(
+    async (opts?: {
+      sessionId?: string;
+      prompt?: string;
+      silent?: boolean;
+      /** 发送后保留输入框原文（「立即发送」刷队列条目用，不清空用户正在打的字） */
+      keepInput?: boolean;
+    }) => {
+      const isBackground = !!opts?.sessionId;
+      // 本轮所属项目根（本机语义），开局就定下来：回合末尾再读 activeSessionWorkDir
+      // 可能已经被别的对话切走，检查会跑错仓库。
+      const runWorkDir = localProjectRoot(
+        useHelixStore.getState().activeSessionWorkDir ??
           useHelixStore.getState().selectedWorkDir,
-      });
-      // 草稿期在输入框选过的模型（记在 DRAFT_SESSION_KEY 上）此刻立刻搬到新 cid：
-      // 否则 currentSessionId 一变成新 cid，模型芯片就会在「本对话覆盖值缺失」的
-      // 间隙回落到全局默认（表现为发消息后模型名闪成全局默认模型，过会再跳回）。
-      // 下方 set_model 重放段（每轮都跑）仍按 activeSessionId 优先命中，行为不变。
-      const draftModelOverride = useHelixStore
-        .getState()
-        .modelBySession[DRAFT_SESSION_KEY];
-      if (draftModelOverride?.model) {
+      );
+      const currentInput = opts?.prompt ?? inputValueRef.current;
+      // 终端式输入历史：记录用户从输入框发送的文本（程序化 prompt / 斜杠命令除外）。
+      if (!opts?.prompt) pushInputHistory(currentInput);
+      const cmd = resolveCommand(currentInput.trim());
+      const baseTrimmed = currentInput.trim();
+      // Fold any web-link cards (picked from the in-app browser) into the text the
+      // agent receives, so they ride along without cluttering the input as raw URLs.
+      // 后台旁路提问不携带主线的链接卡片——那是主线会话自己的上下文。
+      const linkCards = isBackground
+        ? []
+        : (useHelixStore.getState().tabAttachments[
+            currentSessionId ?? DRAFT_SESSION_KEY
+          ]?.links ?? []);
+      const linkSuffix = linkCards.length
+        ? "\n" +
+          linkCards
+            .map((l) => `链接: ${l.title ? `${l.title} (${l.url})` : l.url}`)
+            .join("\n")
+        : "";
+      // /review 是「提示词宏」而不是客户端动作：改写成审查正文后照常走发送路径。
+      // 另起一次 run 会和这一次抢 isChatLoading / 前端运行标记（并行对话保护那套），
+      // 所以在这里换正文、由同一个 run 发出去。
+      const reviewPrompt = rewriteReviewCommand(baseTrimmed);
+      const trimmed = (reviewPrompt ?? baseTrimmed) + linkSuffix;
+      if (
+        !baseTrimmed &&
+        pendingImages.length === 0 &&
+        pendingFiles.length === 0 &&
+        linkCards.length === 0
+      )
+        return;
+
+      // Lock isBusy to true BEFORE any async gap so the button NEVER flips
+      // back to "send" while the agent is in-flight (even if streamingDrafts
+      // temporarily loses its isAgentRunning flag due to session-id drift or
+      // a draft clear). Without this, the user sees the send button reappear,
+      // clicks it, and ACP receives a second prompt → "Queued (1 queued)" and
+      // the model gets interrupted mid-thought.
+      // 后台旁路提问不占主线的 isChatLoading：主线发送按钮不该变「停止」，
+      // 用户应能立刻在主线继续发消息。
+      // 入队判定用的忙态必须在这里读——下一行就会把 isChatLoading 置 true，
+      // 之后再读就永远是「忙」，会把空闲时的正常发送也错排进队列。
+      const busyBeforeSend =
+        isBusy ||
+        (isBackground &&
+          !!streamingDrafts[opts?.sessionId ?? ""]?.isAgentRunning);
+      if (!isBackground) useHelixStore.setState({ isChatLoading: true });
+      // Set estimated tokens while waiting for API response (shows ~Xk during request).
+      // A brand-new session has no baseline: previousUsed=0 + a short input would
+      // floor at 100 tokens, and the ring (safeTotal=1 when total=0) renders that
+      // as a full 100% circle — the "发送后显示 100% 使用" symptom. With no real
+      // baseline there is nothing worth showing; leave estimated unset so the
+      // ring stays in its empty state until the first real usage event lands.
+      const inputText = (currentInput || "").length;
+      const inputTokens = Math.ceil(inputText / 2); // rough estimate: ~2 chars per token
+      const previousUsed = currentSessionId
+        ? useHelixStore.getState().contextUsage[currentSessionId]?.used || 0
+        : 0;
+      const estimatedTokens = isBackground
+        ? undefined
+        : previousUsed > 0
+          ? Math.max(100, previousUsed + inputTokens)
+          : undefined;
+      // Note: activeSessionId is declared later in this function, so we can't use it here.
+      // We'll set the estimated token in the finally block instead.
+      // FIX: Store estimated tokens immediately so context ring shows ~Xk while loading
+      const tempSessionId = currentSessionId || "pending";
+      if (estimatedTokens !== undefined) {
         useHelixStore
           .getState()
-          .setModelForSession(activeSessionId, draftModelOverride);
-      }
-      useHelixStore.getState().persistToStorage();
-    }
-    runningSessionIdRef.current = activeSessionId;
-    startedAtRef.current = Date.now();
-    setStreamingDraft(activeSessionId!, {
-      isAgentRunning: true,
-      responseBlocks: [],
-      steps: [],
-      streamThinking: "",
-      textBuffer: "",
-      thoughtBuffer: "",
-      // 每会话计时锚点：并发 run 各自记录，切回后计时从本会话启动时刻
-      // 继续（计时渲染读 streamingDrafts[cid].startedAt，不再读共享 ref）。
-      startedAt: startedAtRef.current,
-      totalTokens: 0,
-    });
-    uiRB([]);
-    uiSteps([]);
-    stepsRef.current = [];
-    uiST("");
-    textBufferRef.current = "";
-    thoughtBufferRef.current = "";
-    lastStreamedTextRef.current = "";
-    streamCappedRef.current = false;
-    thinkingCappedRef.current = false;
-    runErrorRef.current = "";
-    thinkingStartTimeRef.current = 0;
-    thinkingDurationRef.current = 0;
-    promptSentAtRef.current = 0;
-    totalTokensRef.current = 0;
-    firstContentAtRef.current = 0;
-    usageReceivedRef.current = false;
-    // Add user message to store with images
-    const imagesSnapshot =
-      pendingImages.length > 0 ? [...pendingImages] : undefined;
-    const filesSnapshot =
-      pendingFiles.length > 0 ? [...pendingFiles] : undefined;
-
-    const storeState = useHelixStore.getState();
-    const newUserMsgId = storeState.addChatMessage({
-      role: "user",
-      content: trimmed,
-      images: imagesSnapshot,
-      files: filesSnapshot,
-      // 旁路会话（btw- 前缀）的消息挂在它自己的 cid 下：右侧「旁路问答」面板
-      // 按 sessionId === bylineCid 过滤出整段对话流渲染（追问也是同一会话）。
-      // 主线消息按 addChatMessage 默认规则挂 currentSessionId，不受影响。
-      sessionId:
-        activeSessionId && activeSessionId.startsWith("btw-")
-          ? activeSessionId
-          : currentSessionId ?? undefined,
-    });
-    setPendingImages([]);
-    setPendingFiles([]);
-    // Clear the web-link cards that rode along on this send, and mirror the
-    // empty composer into tabAttachments so a restart doesn't resurrect them.
-    if (linkCards.length > 0) {
-      for (const l of linkCards)
-        useHelixStore.getState().removeLinkAttachment(l.id);
-    }
-    useHelixStore
-      .getState()
-      .setTabAttachments(currentSessionId ?? DRAFT_SESSION_KEY, [], [], []);
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-    abortControllersRef.current.set(activeSessionId, controller);
-
-    let unsubscribe: (() => void) | null = null;
-    const queueDone = false;
-    let idleTimerRef: ReturnType<typeof setTimeout> | null = null;
-
-    try {
-      const isElectron =
-        typeof window !== "undefined" && !!window.electron?.isElectron;
-
-      if (!isElectron) {
-        throw new Error("当前环境无法连接后端，与 Electron 界面端通信失败");
+          .setEstimatedTokens(tempSessionId, estimatedTokens);
       }
 
-      // Config is synced by handleModelSelect (setConfig) and by handleProfileSelect
-      // (profile:cacheConfig) — both already restart the gateway if needed.  Calling
-      // setModel AGAIN here would race with those restarts and corrupt config.yaml.
-      // session/new will pick up whatever config.yaml has on disk, so skip it.
-
-      // Wait for the gateway to be ready only if it's actually disconnected.
-      // Do NOT wait for a fresh `gateway.ready` just because the epoch changed;
-      // that produced a 10s blind hang on every new conversation after a config
-      // change. Instead, keep the persisted SID and let the resume path below
-      // attempt directly. If the backend is still recycling, resume will fail
-      // cleanly and fall back to rebuilding from the local history.
-      const helixStore = useGatewayStore.getState();
-      const liveEpoch = helixStore.gatewayEpoch;
-      const epochStale = liveEpoch > sessionEpochRef.current;
-      // 旁路会话（btw- 前缀）不等待 gateway.ready：后台发问不应被「等网关 3s」
-      // 阻塞主线（用户此刻可能正要继续主线对话），且 gateway 通常已连上
-      // （主线的 run 证明它在跑）。若它真的断了，resume/session/new 路径会
-      // 报错并 toast，不至于整个 /btw 卡死。
-      if (
-        !helixStore.helixConnected &&
-        !activeSessionId?.startsWith("btw-")
-      ) {
-        // Keep the persisted SID here. Gateway restarts are recoverable, and
-        // the resume path below will either revive it or fall back cleanly.
-        await new Promise<boolean>((resolve) => {
-          const startEpoch = useGatewayStore.getState().gatewayEpoch;
-          const check = () => {
-            if (
-              useGatewayStore.getState().helixConnected &&
-              useGatewayStore.getState().gatewayEpoch > startEpoch
-            ) {
-              cleanup();
-              resolve(true);
-            }
-          };
-          const unsub = helixApi()!.onEvent((event: string) => {
-            if (event === "gateway.ready") {
-              cleanup();
-              resolve(true);
-            }
-          });
-          const cleanup = () => {
-            try {
-              unsub?.();
-            } catch { /* empty */}
-          };
-          check();
-          if (
-            !(
-              useGatewayStore.getState().helixConnected &&
-              useGatewayStore.getState().gatewayEpoch > startEpoch
-            )
-          ) {
-            setTimeout(() => {
-              cleanup();
-              resolve(useGatewayStore.getState().helixConnected);
-            }, 3000);
-          }
-        });
-      } else if (epochStale) {
-        // 2026-09-12 修复：不再整体删除映射。旧逻辑把持久化 sid 直接丢弃，
-        // 下一条消息必然 session/new 新建 sid（旧逻辑），且后端 pi_gateway
-        // 的 instance_for_session 会因 "no session file" 报错——用户感受是
-        // "重启后对话不可用"。保留映射，让下方 resume 分支尝试透明恢复。
-      }
-
-      // ── sessionMap 硬门槛 ────────────────────────────────────────────
-      // existing 必须在 await 之后才捕获。冷启动时 sessionMapRef 是空 Map，提前
-      // 捕获会拿到 undefined → 被当成"全新对话" → session/new 铸造空会话覆盖
-      // 映射，旧历史从此对不上（2026-09-20 01a0bce1 → 01a0befe）。语义是
-      // 「未加载 → 暂停等待」，不是「没加载好就 fallback 成空」；加载完成后
-      // sessionMap 才是可信事实源。
-      const sessionMap = await awaitSessionMap(sessionMapRef);
-
-      // Create a backend session if we don't already have one for THIS
-      // conversation. Sessions are keyed by conversationId so multiple
-      // conversations can run in parallel (each keeps its own backend session).
-      const myCid = activeSessionId;
-      let existing = sessionMap.get(myCid);
-
-      // ── 会话恢复阶梯（**永不判死**）───────────────────────────────────
-      // 不变量：只要这个对话还有本地历史，它就一定能继续用。sid 只是"接回原
-      // 后端会话"的凭据，凭据丢了 ≠ 对话死了——所以按可靠性从高到低逐级尝试，
-      // 最后一级是"用本地历史重建一个后端会话"，它保证阶梯一定有出口：
-      //   ① 现存 sid 且 epoch 仍是当前代 → 实例还活着，直接沿用（不付 resume 代价）
-      //   ② 本对话的历史 sid（entry.sids[]，rebindSessionSid 一直往里追加）
-      //   ③ 磁盘反向索引 conversation-index.json（conversation → sid）
-      //   ④ pi 磁盘扫描 + 首条用户消息指纹（session/latest_for_cwd）
-      //   ⑤ 重建：session/new + 回放最近若干轮本地历史 → 绑定新 sid，旧 sid 继续
-      //      留在 sids[]（子 Agent 磁盘清单按它归位）
-      // 以前这里只有 ①→③，且 ③ 的 RPC 在网关侧根本不存在（unknown method）→
-      // 于是"sid 被清空"必然落到"标记失效、永久不可用"。2026-09-22 早上 6 条
-      // 对话就是这么坏的，而它们的 jsonl 全都还在磁盘上。
-      let sessionId: string | null = null;
-      if (existing?.sid && !epochStale && existing.epoch === liveEpoch) {
-        sessionId = existing.sid; // ①
-      }
-
-      const adoptSid = (sid: string, how: string, storedId?: string) => {
-        rebindSessionSid(sessionMapRef.current, myCid, {
-          sid,
-          epoch: liveEpoch,
-          storedId: storedId ?? existing?.storedId,
-        });
-        persistSessionMap(sessionMapRef.current);
-        sessionEpochRef.current = liveEpoch;
-        // 接回来了 = 会话活着，清掉可能残留的 broken 标记（横幅随之消失）。
-        useHelixStore.getState().clearSessionBroken(myCid);
-        debug(`[HelixTrace] 会话恢复成功（${how}）→`, sid);
-      };
-
-      /** 逐个候选 resume：成功就采用；SESSION_GONE（文件真没了）换下一个；
-       *  其余（restore 失败 / 内部错误）是可重试故障，原样抛出、不永久化状态。
-       *  `tried` 跨级去重：同一个 sid 可能在 sids[]、磁盘索引、指纹候选里各出现
-       *  一次，而 resume 是重量级操作（要 spawn/claim 实例），不能重复付代价。 */
-      const tried = new Set<string>();
-      const tryResumeCandidates = async (
-        candidates: string[],
-        how: string,
-      ): Promise<void> => {
-        for (const cand of candidates) {
-          if (!cand || cand === sessionId || tried.has(cand)) continue;
-          tried.add(cand);
-          const r = await resumeSession(cand);
-          if (r.ok) {
-            sessionId = r.sessionId;
-            adoptSid(r.sessionId, how);
-            return;
-          }
-          if (isSessionGone(r)) continue;
-          throw new Error(resumeFailureMessage(r));
-        }
-      };
-
-      // ② 历史 sid + 现存 sid（新→旧）。epoch 新鲜时 ① 已经直接沿用了现存 sid，
-      //    这里只在它过期/缺失时才逐个 resume 验证——包括现存的那个，它的静态
-      //    值恰好排在候选列表最前（sidCandidates 把 live sid 算作最新）。
-      if (!sessionId && myCid) {
-        await tryResumeCandidates(sidCandidates(existing), "live/history-sid");
-      }
-      // ③ 磁盘反向索引
-      if (!sessionId && myCid) {
-        await tryResumeCandidates(
-          await lookupSessionSidsForConversation(myCid),
-          "disk-index",
+      // --- Built-in slash commands (handled client-side, never sent to the backend) ---
+      const builtinMatch = baseTrimmed.match(/^\/(\S+)/);
+      if (builtinMatch) {
+        const builtin = BUILTIN_COMMANDS.find(
+          (c) => c.name === builtinMatch[1].toLowerCase(),
         );
-      }
-
-      // 本地持久化记录：④ 的指纹与 ⑤ 的回放都要用。**只在凭据全丢时才读盘**
-      // （`loadSessions()` 要反序列化全部对话的转录，不能放在常规路径上）。
-      let localTurns: PersistedChatMessage[] = [];
-      let hasContent = false;
-      // ⑤ 也要用它：远程/本地通道的判定看**这条对话自己的** workDir，界面记的
-      // activeSessionWorkDir 在跨视图重建时可能是上一个会话留下的。
-      let record: PersistedSession | undefined;
-      if (!sessionId && myCid) {
-        const { persistence } = await import("@/lib/persist");
-        record = (await persistence.loadSessions()).find(
-          (s) => s.id === myCid,
-        );
-        localTurns = (record?.chatMessages ?? []).filter(
-          (m) => m.role === "user" || m.role === "assistant",
-        );
-        const firstUserText =
-          localTurns.find((m) => m.role === "user")?.content ?? "";
-        hasContent =
-          !!record &&
-          (localTurns.length > 0 ||
-            (record.tasks?.length ?? 0) > 0 ||
-            (record.checkpoints?.length ?? 0) > 0);
-
-        // ④ pi 磁盘扫描 + 首条用户消息指纹。指纹精确（同一对话/分叉共享），所以
-        //    必须跳过已被**别的**对话占用的 sid，否则会把别人的会话抢过来续写。
-        //    远程项目的 workDir 是 `remote://…` 虚拟键，本机磁盘上没有对应目录，
-        //    拿它当 cwd 去扫只会恒 miss —— 远程会话的 sid 归属由后端
-        //    conversation-index 管，不走这条本地指纹。
-        const rawCwd =
-          record?.workDir ??
-          useHelixStore.getState().activeSessionWorkDir ??
-          selectedWorkDir ??
-          undefined;
-        const cwd = isRemoteWorkDir(rawCwd) ? undefined : rawCwd;
-        if (!sessionId && cwd && firstUserText) {
-          try {
-            const r = (await helixApi()!.send("session/latest_for_cwd", {
-              cwd,
-              first_user_message: normalizeAcpContent(firstUserText).slice(
-                0,
-                400,
-              ),
-            })) as any;
-            const owned = new Set(
-              [...sessionMapRef.current.entries()]
-                .filter(([cid]) => cid !== myCid)
-                .map(([, e]) => e.sid)
-                .filter(Boolean),
-            );
-            const candidates = (
-              Array.isArray(r?.session_ids) ? r.session_ids : []
-            ).filter(
-              (s: unknown): s is string =>
-                typeof s === "string" && s.length > 0 && !owned.has(s),
-            );
-            await tryResumeCandidates(candidates, "cwd-fingerprint");
-          } catch (e) {
-            // 指纹找回是尽力而为：失败就走 ⑤ 重建，不阻断对话。
-            debug("[HelixTrace] cwd 指纹找回失败，继续重建", e);
-          }
-        }
-      }
-
-      if (!sessionId) {
-        // ⑤ 重建 / 真 Draft。无 SID ≠ 新对话：有本地历史就必须把历史回放进新
-        // 会话（否则用户看到的是一段有上下文、模型却从零开始的对话）。回放走
-        // session/new 的 messages（Rust 侧按轮数与字符预算裁剪）。
-        // 这**不是**"静默 session/new 顶替"：旧 sid 留在 sids[] 里，映射被
-        // rebindSessionSid 原地更新，历史一条都不会丢。
-        const seedMessages = hasContent
-          ? localTurns
-              .map((m) => ({
-                role: m.role,
-                content: normalizeAcpContent(m.content),
-              }))
-              .filter((m) => m.content.trim())
-              .slice(-40)
-          : [];
-        const st0 = useHelixStore.getState();
-        // 这条对话的项目身份，与上面 `rawCwd` 同一条链（落盘的 workDir 优先于
-        // 界面记的）。远程对话走重建时 activeSessionWorkDir 可能是上一个视图
-        // 留下的值，只读它会发错通道。
-        const ownWorkDir =
-          record?.workDir ??
-          st0.activeSessionWorkDir ??
-          st0.selectedWorkDir ??
-          null;
-        // 本对话属于远程项目吗？虚拟键 `remote://<机器>/<远端路径>` 只有前端认得
-        // （见 lib/remote-projects.ts），网关只吃「走哪条通道 + 远端绝对路径」。
-        const remoteKey = isRemoteWorkDir(ownWorkDir)
-          ? parseRemoteWorkDir(ownWorkDir)
-          : null;
-        const res = (await helixApi()!.send("session/new", {
-          mcpServers: buildAcpMcpServers(st0.mcpServers),
-          mode_id: approvalModeOf(
-            st0.permissionMode,
-            !!st0.planModeBySession[myCid],
-          ),
-          // 远程对话发 `remote_cwd`（远端机器上的绝对路径），**不发 cwd**：
-          // cwd 是本地语义，会被 join 到当前 work_dir 后面（Windows 下
-          // `remote://…` 的 `:` `/` 非法 → create_dir_all 报 os error 123）。
-          // 本地对话照旧只发 cwd —— 于是隧道开着时，本地项目的对话仍然在
-          // 本机 spawn 的 pi 里跑，不再被整体搬到远端。
-          ...(remoteKey
-            ? { remote_cwd: remoteKey.remotePath || "~" }
-            : { cwd: ownWorkDir ?? undefined }),
-          ...(seedMessages.length > 0 ? { messages: seedMessages } : {}),
-        })) as any;
-        sessionId =
-          res?.session_id ||
-          res?.sessionID ||
-          res?.threadId ||
-          (typeof res === "string" ? res : null);
-        if (!sessionId) {
-          throw new Error("无法创建会话：session/new 缺少 session_id");
-        }
-        const storedId =
-          (typeof res === "object" && res
-            ? (res as any)?.stored_session_id
-            : null) || undefined;
-        rebindSessionSid(sessionMapRef.current, myCid, {
-          sid: sessionId,
-          epoch: liveEpoch,
-          storedId: storedId ?? existing?.storedId,
-        });
-        persistSessionMap(sessionMapRef.current);
-        sessionEpochRef.current = liveEpoch;
-        useHelixStore.getState().clearSessionBroken(myCid);
-        // 新建/重建 = 全新后端会话，上下文占用从零开始。
-        useHelixStore.getState().setContextUsage(myCid, 0, 0, []);
-        if (seedMessages.length > 0) {
-          // 必须让用户知道"这不是原来那个后端会话了"——上下文是回放出来的
-          // 近似，比原会话短（只带最近若干轮）。
-          useHelixStore.getState().showToast({
-            type: "info",
-            title: "已重建后端会话",
-            description: `原会话凭据已不可恢复，已回放最近 ${seedMessages.length} 条本地历史继续对话。`,
-          });
-          debug(
-            "[HelixTrace] 凭据全丢，已用本地历史重建后端会话 →",
-            sessionId,
-          );
-        }
-      }
-      // 每轮都同步一次模式（不只是建会话时）：复用中的对话，它的 pi 实例留着
-      // 上次的 plan 状态，而上面的切会话 effect 只在焦点变化时跑；这里补一次，
-      // 芯片和后端实例在网关重启/漂移之后仍然一致。
-      // 两条轴各自解析：权限档回读扩展配置（真相在那个文件里，别的进程可能改过；
-      // 一次小 JSON 读取，代价可忽略），带**这条会话**的 sid + 目录，覆盖表才
-      // 参与解析；plan 按会话。
-      const runState = useHelixStore.getState();
-      const runTier = await runState.syncPermissionMode({
-        sessionId,
-        // 与快照同一目录链（落盘的 workDir 优先）：后台跑的不是焦点对话时，
-        // activeSessionWorkDir 可能是另一条对话的，不能用它盖掉这条会话的目录。
-        cwd:
-          record?.workDir ??
-          runState.activeSessionWorkDir ??
-          selectedWorkDir ??
-          null,
-      });
-      const runPlanOn = !!useHelixStore.getState().planModeBySession[
-        activeSessionId
-      ];
-      const runApprovalMode = approvalModeOf(runTier, runPlanOn);
-      try {
-        await helixApi()!.send("session/set_mode", {
-          session_id: sessionId,
-          mode_id: runApprovalMode,
-        });
-      } catch (e) {
-        console.warn("[Helix] set_mode(" + runApprovalMode + ") failed:", e);
-      }
-      // 按会话的模型覆盖：输入框模型下拉写主线对话的 cid，旁路面板写 btw-cid
-      // （两个 key 空间互不冲突，共用同一张表）。经网关透传 set_model 到该会话
-      // 的 pi 实例（带 session_id 即路由到对应实例），每轮重放一次，网关重启 /
-      // 实例回收后也能恢复。不改全局 config.yaml——全局默认仍由设置页管理。
-      // 草稿阶段（cid 未分配）选过的模型记在 DRAFT_SESSION_KEY 上，第一次
-      // handleRun 才分配出真 cid → 只查 activeSessionId 会漏掉它，该会话回落
-      // 全局默认（表现为"新对话选了模型却没生效"）。这里两键都查，命中草稿
-      // 键就搬到真 cid 上，后续轮次直接命中。
-      const modelOverrides = useHelixStore.getState().modelBySession;
-      const modelOverride =
-        modelOverrides?.[activeSessionId] ??
-        (activeSessionId !== DRAFT_SESSION_KEY
-          ? modelOverrides?.[DRAFT_SESSION_KEY]
-          : undefined);
-      if (
-        modelOverride?.model &&
-        activeSessionId !== DRAFT_SESSION_KEY &&
-        modelOverrides?.[DRAFT_SESSION_KEY]
-      ) {
-        useHelixStore
-          .getState()
-          .setModelForSession(activeSessionId, modelOverride);
-      }
-      if (modelOverride?.model) {
-        try {
-          await helixApi()!.send("set_model", {
-            session_id: sessionId,
-            provider: modelOverride.provider || undefined,
-            modelId: modelOverride.model,
-          });
-        } catch (e) {
-          console.warn(
-            "[Helix] set_model(" + modelOverride.model + ") failed:",
-            e,
-          );
-        }
-      }
-      // Only update the global ref / store if THIS run is the focused conversation.
-      // A background run must NOT overwrite the global — that would make Stop /
-      // model-switch target the wrong session.
-      if (isFrontRun()) {
-        helixSessionIdRef.current = sessionId;
-        try {
-          useGatewayStore.getState().setHelixSessionId(sessionId);
-        } catch {
-          /* store setHelixSessionId 不应抛错；防御性忽略 */
-        }
-      }
-
-      // Stop button -> ask the backend to cancel the current run.
-      // session/cancel is a backend *notification* (no response), so send it
-      // via notify (not send, which issues a request and gets "Method not found").
-      controller.signal.addEventListener("abort", () => {
-        if (sessionId) {
-          electronHelix.notify("session/cancel", { session_id: sessionId });
-        }
-        // 暂停/停止时绝不能让已流式输出的内容丢失。abort 不会让 ack-only 的
-        // session/prompt 拒绝，下面的 AbortError catch 永远不会触发，循环只是
-        // 在 queueDone=true 后正常 break，textBufferRef 未提交、草稿被 finally
-        // 清空 → 已生成的内容全部消失。这里把部分缓冲区作为合成 done 入队，
-        // 走正常 done 提交路径持久化为一条 assistant 消息（与 scheduleSynthDone
-        // 的兜底方式一致）。
-        const hasPartial =
-          (textBufferRef.current || "").trim() ||
-          (thoughtBufferRef.current || "").trim() ||
-          stepsRef.current.length > 0;
-        if (!queueDone && hasPartial) {
-          enqueue(
-            "data: " +
-              JSON.stringify({
-                type: "done",
-                content: textBufferRef.current || "",
-              }),
-          );
-        }
-        queueDone = true;
-        if (queueWaiter) {
-          const w = queueWaiter;
-          queueWaiter = null;
-          w();
-        }
-      });
-
-      // Tracks whether this run has already streamed real text/thinking, so a
-      // trailing session_info_update can be dropped quietly instead of as text.
-      let streamedContent = false;
-      // Translate backend notifications into the UI event shape the parser expects.
-      const mapHelixEvent = (method: string, params: any): any => {
-        if (method === "usage:prompt-complete") {
-          return {
-            type: "usage_prompt_complete",
-            usage: params?.usage || null,
-            // 归属键与事件时刻只由网��的 message_end（final:true）给出，必须透传。
-            model: params?.model || null,
-            at_ms: params?.at_ms || null,
-          };
-        }
-        if (method === "session/update") {
-          const u = params?.update || params;
-          const su = u?.sessionUpdate;
-          switch (su) {
-            case "agent_message_chunk":
-              return { type: "text", content: normalizeAcpContent(u.content) };
-            case "agent_thought_chunk":
-              return {
-                type: "thinking",
-                content: normalizeAcpContent(u.content),
-              };
-            case "tool_call": {
-              const title = typeof u.title === "string" ? u.title : "";
-              const kind = typeof u.kind === "string" ? u.kind : "";
-              const toolCallId =
-                typeof u.toolCallId === "string" ? u.toolCallId : "";
-              let args = u.rawInput;
-              if (typeof args === "string") {
-                try {
-                  args = JSON.parse(args);
-                } catch {
-                  /* keep raw */
-                }
-              }
-              return {
-                type: "tool_call",
-                toolName: title || "tool",
-                toolKind: kind,
-                toolCallId,
-                toolParams:
-                  args && typeof args === "object" ? args : { raw: args },
-              };
-            }
-            case "tool_call_chunk":
-              return {
-                type: "tool_result",
-                toolCallId:
-                  typeof u.toolCallId === "string" ? u.toolCallId : "",
-                toolName: "",
-                content: normalizeAcpContent(u.content),
-              };
-            case "tool_call_update": {
-              const tcId = typeof u.toolCallId === "string" ? u.toolCallId : "";
-              // Sub-agent root completion: update the parent delegate_task step status
-              if (tcId.startsWith("sa-") && tcId.endsWith("-root")) {
-                const status = u.status === "failed" ? "failed" : "completed";
-                const content = normalizeAcpContent(u.content);
-                uiSteps((prev) => {
-                  const next = [...prev];
-                  const endedAt = Date.now();
-                  for (let i = next.length - 1; i >= 0; i--) {
-                    if (
-                      next[i].type === "tool_call" &&
-                      next[i].toolName?.startsWith("SubAgent")
-                    ) {
-                      next[i] = {
-                        ...closeToolStep(next[i], status === "failed", endedAt),
-                        content: content || next[i].content,
-                      };
-                      break;
-                    }
-                  }
-                  return next;
+        // review 不进这条早退分支：它的正文已经替换进 trimmed，继续往下当普通消息发。
+        if (builtin && builtin.action !== "review") {
+          setInputSynced("");
+          resetInputHeight();
+          switch (builtin.action) {
+            case "compact": {
+              // 忙标记/压缩/resume/写回/自愈逻辑在共享模块 runCompactCommand
+              // 里（旁路面板 /compact 走同一执行体，行为一字不差）；live 映射
+              // 传本组件的 sessionMapRef，兜底 sid 用本组件的 helixSessionIdRef。
+              // 成功后把 ref 对齐到压缩用的 sid（主对话后续 run 的兜底来源）。
+              void (async () => {
+                const r = await runCompactCommand(currentSessionId, {
+                  sessionMap: sessionMapRef.current,
+                  fallbackSid: helixSessionIdRef.current,
                 });
-                return null;
-              }
-              // Streaming output delta: forward content to the latest tool_call step
-              if (u.status === "in_progress" && u.content) {
-                return {
-                  type: "tool_output_delta",
-                  toolCallId: tcId,
-                  content: normalizeAcpContent(u.content),
-                };
-              }
-              // pi 后端（pi_gateway.rs）的 toolcall_start 不带参数（rawInput
-              // 恒为 null），命令/文件路径要等 toolcall_end / tool_execution_start
-              // 才随本事件（status=in_progress + rawInput）到达。转发为参数补写
-              // 事件，让已创建的 tool_call 步骤补上 toolParams —— 否则命令类
-              // 卡片标题永远只有"执行 执行命令"，看不到具体命令。
-              if (u.status === "in_progress" && u.rawInput != null) {
-                return {
-                  type: "tool_args_update",
-                  toolCallId: tcId,
-                  toolName: u.toolName || u.title || "",
-                  rawInput: u.rawInput,
-                };
-              }
-              // 工具完成/失败：serve 模式下 tool.complete 走这里（status='completed'/'failed'），
-              // 没有独立的 tool_result 事件。必须转发为 tool_result，否则 tool_call
-              // 一直保持 running，卡片永远显示"执行"而不是"已执行"。
-              if (
-                u.status === "completed" ||
-                u.status === "failed" ||
-                u.status === "complete"
-              ) {
-                // pi 的 edit 类工具：真 diff 在 details.diff / details.patch
-                // （网关 tool_execution_end 只挑 diff 类字段转发），content
-                // 只是一句 "Successfully replaced N block(s)"。把 diff 拼进
-                // 结果文本，标题 +N −n 徽标与展开后的 Diff 卡片才有着落。
-                const d = (u as any).details as
-                  | Record<string, unknown>
-                  | undefined;
-                const diffText =
-                  typeof d?.diff === "string" && d.diff.trim() ? d.diff : "";
-                const patchText =
-                  typeof d?.patch === "string" && d.patch.trim() ? d.patch : "";
-                const diffPayload = diffText || patchText;
-                const baseText = normalizeAcpContent(u.content || "");
-                // toolCallId 必须透传：下游按 id 把结果挂回发起调用的那张
-                // 工具卡。丢掉 id 会退化为"填进第一个还没结果的组"——总结
-                // 两侧的工具并行执行、后启动的先完成时，结果就挂错组
-                // （表现为"总结后面的工具合并进了总结上面的工具组"）。
-                return {
-                  type: "tool_result",
-                  toolCallId: tcId,
-                  toolName: u.toolName || u.title || "",
-                  content: diffPayload
-                    ? `${baseText}\n${diffPayload}`
-                    : baseText,
-                  failed: u.status === "failed",
-                };
-              }
-              return null;
-            }
-            case "permission_request":
-            case "clarify_request":
-            case "clarify_settled":
-              // 审批 / 反问 / 作废由组件级的常驻订阅认领（见 onUserRequest）。
-              // 留在 run 循环里 = run 一退订就没人接，且入队前还要过「sid ==
-              // 本轮」过滤，别的会话（含旁路）的审批永远进不来。
-              return null;
-            case "tool_prepare_unblocked":
-              // 网关注射的 Helix 侧事件（不是 pi 发的）：审批答完 ⇒ 那条工具调用的
-              // prepare 返回了。只走 run 循环，因为它要改的是这个 run 私有的累加器。
-              return {
-                type: "tool_prepare_unblocked",
-                toolCallId: String(u?.toolCallId || ""),
-                at: Number(u?.at) || 0,
-              };
-            case "run_complete":
-              // 后端 run.completed / message.complete 携带完整正文(payload.text / output)。
-              // 优先采用它兜底——否则若 serve 后端只在完成时给正文(不发 message.delta 流),
-              // 仅用流式缓冲 textBufferRef.current 会拿到空值 → “只思考不输出”。
-              return {
-                type: "done",
-                content: u.content || textBufferRef.current,
-              };
-            case "usage_update":
-              return {
-                type: "usage_update",
-                size: Number(u.size) || 0,
-                used: Number(u.used) || 0,
-              };
-            case "available_commands_update":
-              // 已废弃：后端不再发送此事件
-              return null;
-            case "session_info_update": {
-              // 普通标题/元数据更新
-              // Backends sometimes carry errors, notices, or even the final
-              // reply inside session_info_update. We used to silently drop it
-              // (default: return null), which produced a blank UI with no clue.
-              // Now we ALWAYS dump the raw payload (no DEV gate — production
-              // builds strip import.meta.env, which is exactly why we went
-              // blind before) and surface any error/text we can find.
-              const rawSiup = (() => {
-                try {
-                  return JSON.stringify(u);
-                } catch {
-                  return String(u);
+                if (r === "ok" && currentSessionId) {
+                  helixSessionIdRef.current =
+                    sessionMapRef.current.get(currentSessionId)?.sid ??
+                    helixSessionIdRef.current;
                 }
               })();
-              const err = u.error || u.errorMessage || u.err;
-              if (err) {
-                return {
-                  type: "error",
-                  content: typeof err === "string" ? err : JSON.stringify(err),
-                };
-              }
-              if (u.status === "error" || u.status === "failed") {
-                const m =
-                  u.message ||
-                  u.reason ||
-                  u.detail ||
-                  (typeof u.content === "string" ? u.content : "");
-                return { type: "error", content: m || "会话返回错误状态" };
-              }
-              const msg =
-                typeof u.content === "string" && u.content.trim()
-                  ? u.content
-                  : typeof u.message === "string" && u.message.trim()
-                    ? u.message
-                    : typeof u.text === "string" && u.text.trim()
-                      ? u.text
-                      : null;
-              if (msg) return { type: "text", content: msg };
-              // Couldn't classify this as error/text. If the run already
-              // streamed real content, a stray session_info_update is just
-              // trailing metadata — drop it quietly (raw already logged).
-              // If it's the ONLY thing we got, surface the raw payload so the
-              // UI is never left blank and we can see what the backend said.
-              if (!streamedContent) {
-                return {
-                  type: "text",
-                  content:
-                    "⚠️ 该模型未返回文本流，网关仅回传了 session_info_update。原始内容：\n" +
-                    rawSiup.slice(0, 2000),
-                };
-              }
-              return null;
+              break;
             }
-            default:
-              return null;
+            case "btw": {
+              // 旁路提问（自动）：后台另开一条轻量旁路会话，把「问题 + 压缩后的
+              // 主线转录」作为一条 prompt 直接发出去，答案实时显示在右侧边栏的
+              // 「旁路问答」面板里。主线上下文与视图完全不变（旁路是独立后端
+              // 会话，且不入左侧对话列表）。纯客户端动作，/btw 前缀绝不发给模型。
+              const question = baseTrimmed.slice(builtinMatch[0].length).trim();
+              // 裸 /btw 与 /btw <问题> 都先打开右侧「旁路问答」面板并聚焦它的
+              // 输入框——面板是这个命令的落点，不该只弹一个 toast。
+              useHelixStore.getState().setRightSidebarTab("byline");
+              useHelixStore.getState().focusBylineInput();
+              if (!question) {
+                // 裸 /btw：只打开面板，问题在面板输入框里输入（多轮追问也用它）。
+                break;
+              }
+              // /btw <问题>：当前主线已有开放的旁路会话 → 作为追问发进同一
+              // 条会话（多轮累积，保留上次的问答）；没有才新建。此前无条件
+              // 调 handleBtwQuestion 新建，每次 /btw 都把上一条旁路对话顶掉
+              // （面板只显示 bylineReplies[mainCid] 这一条）。
+              void handleBtwAsk(question);
+              break;
+            }
+            case "pr": {
+              // PR / 诊断面板是铺满主区的覆盖层，命令只负责开合（再发一次即收起）。
+              useHelixStore.getState().togglePrPanel();
+              break;
+            }
+            case "diagnostics": {
+              useHelixStore.getState().toggleDiagnosticsPanel();
+              break;
+            }
           }
-        }
-        if (method === "session/complete" || method === "session/end") {
-          // 后端在 agent_settled 时取走 last_assistant_thinking 透传到
-          // reasoning 字段（pi_gateway.rs session/complete）。正常流式下本地
-          // thoughtBuffer 已有全文，优先用它；网关中途重启 / 事件丢失导致本地
-          // 缓冲为空时退回这份权威思考，否则「已完成」折叠卡里思考整段消失。
-          const remoteThinking =
-            typeof params?.reasoning === "string" ? params.reasoning : "";
-          // 上游 provider 的原始错误（`errorMessage`）。空正文 + 有错误时用它
-          // 分类显示，不再只有一句「模型未返回任何可见内容」。
-          runErrorRef.current =
-            typeof params?.error === "string" ? params.error : "";
-          return {
-            type: "done",
-            content: textBufferRef.current,
-            reasoning:
-              thoughtBufferRef.current || remoteThinking || undefined,
-          };
-        }
-        if (method === "error") {
-          return { type: "error", content: params?.message || "后端错误" };
-        }
-        return null;
-      };
-
-      // ── 子代理实时事件 → store.subAgents ──────────────────────────────
-      // serve 模式下后端把子任务进度以 subagent.* 事件中继到父会话（见
-      // tui_gateway/server.py _on_tool_progress 的 subagent.* 分支）。
-      // 这些事件经 serve-gateway.ts 的 default 分支原样透传，这里消费并写入
-      // store，让 DelegationsPanel 顶部的"实时"区能显示运行中的子任务。
-      // 磁盘 live 日志（delegation_live_log.py）仍由后端独立维护，作为兜底。
-      const handleSubagentEvent = (method: string, params: any): void => {
-        if (typeof params !== "object" || params === null) return;
-        const goal = typeof params.goal === "string" ? params.goal : "";
-        // 后端 subagent_id；缺失时退回 child_session_id 构造的稳定 id
-        const subagentId =
-          typeof params.subagent_id === "string" && params.subagent_id
-            ? params.subagent_id
-            : typeof params.child_session_id === "string" &&
-                params.child_session_id
-              ? `sa-${params.child_session_id}`
-              : null;
-        if (!subagentId) {
-          debug(
-            "[SubAgent] 事件缺少 subagent_id/child_session_id，跳过",
-            method,
-          );
+          // Builtin commands are instant client-side operations — never leave the
+          // isChatLoading flag stuck true (it was set before this branch).
+          useHelixStore.setState({ isChatLoading: false });
           return;
         }
-        const model = typeof params.model === "string" ? params.model : "";
-        const text = typeof params.text === "string" ? params.text : "";
+      }
 
-        if (method === "subagent.start") {
-          const existing = useHelixStore
-            .getState()
-            .subAgents.find((a) => a.id === subagentId);
-          if (existing) {
-            // 磁盘重建的卡片是终态（重启中断）；同一 id 的 Agent 工具再次
-            // 执行说明后端真在跑这个孩子 → 翻回 running。
-            if (existing.status !== "running") {
-              useHelixStore
-                .getState()
-                .reviveSubAgentForRun(subagentId, goal || text);
-            }
-            return; // 已存在（thinking 提前建过）——只补描述
-          }
+      // If the CURRENT session is running AND receiving a new send, stop it first
+      // (toggle send/stop is per-session — other sessions keep running). A brand
+      // new conversation (currentSessionId === null) has no draft of its own, so
+      // it must NEVER stop another session's run; it always starts a fresh
+      // concurrent run instead.
+      // 独立的压缩闸门：忙标记按会话隔离（compressionBusyBySession），只拦当前
+      // 会话正在压缩的情况，其他会话的压缩不阻挡本会话发送。与下方的
+      // isAgentRunning（agent 流式输出中）是**两个不同状态**，互不复用、互不覆盖。
+      // 此前发送路径只认 isAgentRunning，压缩期间仍能发消息，会与后端
+      // session.compress 改写同一会话 transcript 产生竞态（新消息被卷走 /
+      // prompt 与 compress 交错）。这里独立拦截——不调用 handleStop，因为
+      // 压缩不占 running 槽位，无需"先停"，只拦住这一发即可。
+      if (
+        !isBackground &&
+        useHelixStore
+          .getState()
+          .isSessionCompressionBusy(currentSessionId ?? undefined)
+      ) {
+        storeActions.showToast({
+          type: "warning",
+          title: "上下文压缩中",
+          description: "正在压缩上下文，稍候即可继续发送",
+        });
+        return;
+      }
+
+      // ── 输入队列 ────────────────────────────────────────────────────────
+      // 本会话还在跑时，纯文本消息不再「先停再发」（那会掐掉正在跑的任务），
+      // 而是排进发送队列：任务结束后按 Enter 自动刷入，或在队列卡片上
+      // 「立即发送」。附件 / 链接卡片不排队——它们必须跟着这一发 prompt 一起
+      // 发出去，拆开会丢掉本轮的上下文，所以仍走原来的「先停再发」。
+      if (!isBackground && !cmd && !opts?.keepInput) {
+        const hasAttachments =
+          pendingImages.length > 0 ||
+          pendingFiles.length > 0 ||
+          linkCards.length > 0;
+        if (busyBeforeSend && baseTrimmed && !hasAttachments) {
           useHelixStore
             .getState()
-            .spawnSubAgent(
-              model || "子代理",
-              goal || text || "执行子任务",
-              undefined,
-              subagentId,
-              myCid ?? undefined,
-              text || undefined,
-            );
+            .enqueueInput(currentSessionId ?? DRAFT_SESSION_KEY, baseTrimmed);
+          setInputSynced("");
+          resetInputHeight();
+          // 上面已把 isChatLoading 置 true，但这次并没有真的发起 run，必须复位，
+          // 否则发送按钮会一直显示成「停止」。
+          useHelixStore.setState({ isChatLoading: false });
           return;
         }
-        if (method === "subagent.thinking") {
-          const existing = useHelixStore
-            .getState()
-            .subAgents.some((a) => a.id === subagentId);
-          if (!existing) {
-            useHelixStore
-              .getState()
-              .spawnSubAgent(
-                model || "子代理",
-                goal || text || "思考中",
-                undefined,
-                subagentId,
-                myCid ?? undefined,
-              );
-          }
-          return;
+      }
+
+      // 后台旁路提问跑在自己的会话上，绝不能因为「主线正在跑」就 handleStop 掉
+      // 主线的 run（那是 toggle 语义，只对当前会话生效）。同理也不读主线的
+      // 草稿来判断忙闲——要查的是旁路会话自己的草稿。
+      const activeDraft = isBackground
+        ? streamingDrafts[opts!.sessionId!]
+        : currentSessionId
+          ? streamingDrafts[currentSessionId]
+          : undefined;
+      if (activeDraft?.isAgentRunning) {
+        handleStop(
+          (isBackground ? opts!.sessionId : currentSessionId) ?? undefined,
+        );
+        return;
+      }
+
+      // Check API key — serve 模式下密钥由后端托管，Helix 侧 apiConfig.apiKey
+      // 为空，跳过该门否则发送会被永久拦截（"发送按钮无效"）。
+      if (!hasApiKey && !isServeActive()) {
+        storeActions.toggleSettings("api");
+        return;
+      }
+
+      // 后台旁路提问不动主线的输入框（用户可能正在主线打字）；刷队列条目
+      // （keepInput）同样保留——那条文本已经发出去了，用户正在打的新字不动。
+      if (!isBackground && !opts?.keepInput) {
+        setInputSynced("");
+        resetInputHeight();
+      }
+      // 共享的 runStartedAtRef 只作计时兜底锚点；每会话的真实锚点在下方
+      // setStreamingDraft(startedAt) 里按会话记录（计时渲染优先读 draft）。
+      runStartedAtRef.current = Date.now();
+      debug("[HelixTrace] handleRun start", {
+        input: typeof trimmed === "string" ? trimmed.slice(0, 80) : trimmed,
+        currentSessionId,
+        pendingImages: pendingImages.length,
+        pendingFiles: pendingFiles.length,
+      });
+      let activeSessionId = opts?.sessionId ?? currentSessionId;
+      // ── Front-run guard for true concurrency ───────────────────────────────────
+      // Each concurrent run has its own backend session + queue, but the panel shares
+      // one set of UI states (responseBlocks/steps/streamThinking). Only the run
+      // whose conversation is currently focused may write them; background runs
+      // keep streaming to the backend without touching the shared UI. Declared here
+      // (before try) so both the pre-try resets and the finally block can use it.
+      const isFrontRun = () =>
+        useHelixStore.getState().currentSessionId === activeSessionId;
+      // ── Per-run streaming state (true concurrency) ───────────────────────────
+      // The component-level refs (textBufferRef, stepsRef, …) are shared across
+      // every handleRun invocation. With parallel runs that was fatal: a run
+      // started in another conversation wiped the focused run's buffers, the
+      // first `done` set the shared doneProcessedRef so later runs never
+      // committed, and the shared finally cleared the wrong draft — the "switched
+      // away and the old chat stopped" bug. Each run now shadows those refs with
+      // its OWN buffers; only the focused run pushes them into the UI via the
+      // isFrontRun()-guarded setters below, and each run persists its accumulated
+      // state to its own per-session draft (syncDraft) for switch-back.
+      const textBufferRef = { current: "" };
+      const thoughtBufferRef = { current: "" };
+      // 「思考阶段」基准：thoughtBufferRef 是**整个 run** 的累积缓冲（done 时还
+      // 要拿它当权威 reasoning 兜底，所以不能按阶段清空），但落块渲染需要的是
+      // **本阶段**的思考文本。否则 思考→工具→再思考 时，工具后的 thinking 块
+      // content 仍是 run 级全文，而 flushPending/mergeAdjacentThinking 只在相邻
+      // thinking 之间去重、不会跨 tool_group 合并 → 第二个思考折叠卡里会把第一
+      // 个折叠卡的正文再渲染一遍（"每轮思考都叠加了之前的思考"的根因）。
+      // 规则：每个非思考块（tool_group / text）落块即视为阶段边界，把基准推进
+      // 到当前缓冲长度；thinking 落块时只取 slice(基准)。
+      // 缓冲只在 run/done/error 时被清成 ""（永不变短），所以 slice 时用
+      // Math.min 兜住"基准 > 缓冲长度"的清空瞬间，无需在每个重置点同步重置基准。
+      const thinkingPhaseBaseRef = { current: 0 };
+      // 本阶段思考的**起点**（首个 thinking 事件的 ms epoch）。每个 thinking 分片
+      // 用它刷新所在块的 duration_s，所以卡片上的数字随流式增长、阶段结束即定格
+      // —— 那是「这段思考花了多久」，与 run 级 thinkingStartTimeRef（整轮第一条
+      // 思考）不是一回事。
+      const thinkingPhaseStartRef = { current: 0 };
+      const phaseThinkingText = () =>
+        thoughtBufferRef.current.slice(
+          Math.min(
+            thinkingPhaseBaseRef.current,
+            thoughtBufferRef.current.length,
+          ),
+        );
+      // 非思考块落块 = 思考阶段边界。
+      const markThinkingPhaseBoundary = () => {
+        thinkingPhaseBaseRef.current = thoughtBufferRef.current.length;
+        thinkingPhaseStartRef.current = 0;
+      };
+      const lastStreamedTextRef = { current: "" };
+      const stepsRef = { current: [] as ExecutionStep[] };
+      const responseBlocksRef = { current: [] as ResponseBlock[] };
+      const streamThinkingRef = { current: "" };
+      const doneProcessedRef = { current: false };
+      const usageReceivedRef = { current: false };
+      const doneMsgIdRef = { current: null as string | null };
+      const pendingAssistantRowIdRef = { current: null as number | null };
+      const streamCappedRef = { current: false };
+      const thinkingCappedRef = { current: false };
+      // 本次运行的 provider 原始错误（pi `errorMessage`，经 session/complete
+      // 透传）。只在「run 结束但没有任何可见内容」时用来分类显示——正常回复
+      // 不该因为一次上游错误就把错误挂在正文里。
+      const runErrorRef = { current: "" };
+      const pendingTextRef = { current: null as string | null };
+      const pendingThinkingRef = { current: null as string | null };
+      const pendingBlocksRef = {
+        current: [] as Array<
+          | {
+              type: "thinking";
+              content: string;
+              startedAt?: number;
+              duration_s?: number;
+            }
+          | { type: "text"; content: string }
+          | { type: "tool_group"; steps: ExecutionStep[] }
+        >,
+      };
+      const rafPendingRef = { current: false };
+      const promptSentAtRef = { current: 0 };
+      const firstContentAtRef = { current: 0 };
+      const thinkingStartTimeRef = { current: 0 };
+      const thinkingDurationRef = { current: 0 };
+      const thoughtTokensRef = { current: 0 };
+      const outputTokensRef = { current: 0 };
+      const totalTokensRef = { current: 0 };
+      const synthDoneTimerRef = {
+        current: null as ReturnType<typeof setTimeout> | null,
+      };
+      const forceDoneTimerRef = {
+        current: null as ReturnType<typeof setTimeout> | null,
+      };
+      const startedAtRef = { current: 0 };
+      // 诊断标记：sid 过滤丢弃内容事件只记一次（见 onEvent 的过滤分支）。
+      const sidMismatchDebuggedRef = { current: false };
+      // 本次运行期间收集的文件改动，只在 done 时随最终消息一起提交，避免执行
+      // 过程中“改一个就冒一个”。
+      const runFileChangesRef = { current: [] as PendingChange[] };
+      // 语义化的 done 正文自愈：部分场景后端连发多条 done，前面已触发的 done 已把消息提交到
+      // chatMessages，此时用本次 done 自带正文（message.complete / run.completed 的 text，与
+      // state.db 持久化同源，字节完好）原地修正已提交消息，覆盖流式累积可能丢空白/换行的损坏。
+      // 只替换为原文，不猜补空格；归一化比较下 complete 更短（截断/中断）时则保留流式累积。
+      // ── blocks ↔ content 一致性自愈 ─────────────────────────────────────
+      // 渲染优先用 blocks；流式丢字（如 " Hel" 在传输中丢失）会让文本块比
+      // 权威正文少内容。把全部文本块收敛为单个权威文本块（挂第一个文本块
+      // 位置，thinking/工具卡不动），保证渲染文本与 content 一致。
+      // 无差异返回 null（调用方据此跳过重写）。
+      const reconcileBlocksText = (
+        blocks: NonNullable<ChatMessage["blocks"]>,
+        content: string,
+      ): NonNullable<ChatMessage["blocks"]> | null => {
+        if (!content.trim()) return null;
+        const blockText = blocks
+          .filter((b) => b.type === "text")
+          .map((b) => String(b.content || ""))
+          .join("");
+        if (normalizeForCompare(blockText) === normalizeForCompare(content)) {
+          return null;
         }
-        if (method === "subagent.tool") {
-          const toolName =
-            typeof params.tool_name === "string" && params.tool_name
-              ? params.tool_name
-              : "tool";
-          // 后端 subagent.tool 只带 tool_preview（args 不进 payload）；优先用它
-          const preview =
-            typeof params.tool_preview === "string" && params.tool_preview
-              ? params.tool_preview
-              : text;
-          // 扩展在 streamUpdate 里带回的 agent_id（.output 转录文件名）：
-          // progress / 任意 subagent.tool 事件都可能携带，绑到卡片上。
-          if (typeof params.agent_id === "string" && params.agent_id) {
-            useHelixStore
-              .getState()
-              .setSubAgentAgentId(subagentId, params.agent_id);
+        const firstTextIdx = blocks.findIndex((b) => b.type === "text");
+        if (firstTextIdx < 0) return null;
+        const out: NonNullable<ChatMessage["blocks"]> = [];
+        blocks.forEach((b, i) => {
+          if (b.type === "text") {
+            if (i === firstTextIdx) {
+              out.push({ type: "text", content });
+            }
+          } else {
+            out.push(b);
           }
-          // progress 行是 "N tool uses…" 汇总通知，不是真实工具调用；
-          // background 是后台 spawn 确认行。两者都不计入 toolCalls，避免
-          // 卡片底部被大量重复进度消息刷屏。
-          if (toolName === "background" || toolName === "progress") {
-            return;
-          }
-          // 后端可能发送带 status 的完成事件（success/error），更新已有工具行状态
-          const toolStatus = typeof params.status === "string" ? params.status : "";
-          if (toolStatus === "success" || toolStatus === "error") {
-            useHelixStore
-              .getState()
-              .updateSubAgentToolCallStatus(subagentId, toolName, toolStatus);
-            return;
-          }
-          useHelixStore.getState().addSubAgentToolCall(subagentId, {
-            toolName,
-            params: preview.slice(0, 500),
-            status: "running",
-          });
-          return;
-        }
-        if (method === "subagent.complete") {
-          const status = typeof params.status === "string" ? params.status : "";
-          const summary =
-            typeof params.summary === "string" && params.summary
-              ? params.summary
-              : text;
-          const filesWritten = Array.isArray(params.files_written)
-            ? params.files_written.map((f: unknown) => String(f)).slice(0, 20)
-            : undefined;
-          // complete 可能比 start 后补带上 goal/prompt（Rust 终态路径）。若卡片
-          // 的 description 仍是占位（"思考中"/空）或 prompt 缺失，回填之。
-          const card = useHelixStore
-            .getState()
-            .subAgents.find((a) => a.id === subagentId);
-          if (card) {
-            const goalStr = goal || undefined;
-            const needsDesc =
-              !goalStr
-                ? false
-                : !card.description || card.description === "思考中";
-            const needsPrompt = !card.text && !!text;
-            if (needsDesc || needsPrompt) {
-              useHelixStore.setState((s) => ({
-                subAgents: s.subAgents.map((a) =>
-                  a.id === subagentId
-                    ? {
-                        ...a,
-                        ...(needsDesc && goalStr
-                          ? { description: goalStr, name: goalStr }
-                          : {}),
-                        ...(needsPrompt ? { text } : {}),
-                      }
-                    : a,
+        });
+        return out;
+      };
+      const patchDoneMessage = (finalText: string) => {
+        const mid = doneMsgIdRef.current;
+        if (!mid || !finalText || !finalText.trim()) return;
+        const st = useHelixStore.getState();
+        const existing = st.chatMessages.find(
+          (m: { id: string }) => m.id === mid,
+        );
+        if (!existing) return;
+        const cur = existing.content || "";
+        if (cur === finalText) return;
+        const normCur = normalizeForCompare(cur);
+        const normFinal = normalizeForCompare(finalText);
+        if (
+          !cur.trim() ||
+          (normFinal.length >= normCur.length &&
+            (normFinal.includes(normCur) || normCur.includes(normFinal))) ||
+          // 中游分歧（流式丢字导致正文缺段，非包含关系）：后端 final_response
+          // 与 state.db 同源、字节完好，更长且高度相似时以它为准。
+          (normFinal.length >= normCur.length &&
+            normCur.length >= 8 &&
+            textSimilarityRatio(normCur, normFinal) >= 0.6)
+        ) {
+          st.updateChatMessage(mid, finalText);
+          // 正文自愈后，已提交的 blocks 若仍是缺字版本需一并收敛，
+          // 否则渲染（优先 blocks）继续显示缺字文本。
+          if (existing.blocks) {
+            const reconciled = reconcileBlocksText(existing.blocks, finalText);
+            if (reconciled) {
+              useHelixStore.setState((state) => ({
+                chatMessages: state.chatMessages.map((m) =>
+                  m.id === mid ? { ...m, blocks: reconciled } : m,
                 ),
               }));
             }
           }
-          if (status === "failed" || status === "error") {
-            useHelixStore
-              .getState()
-              .failSubAgent(subagentId, summary || "子代理执行失败");
-          } else {
-            useHelixStore
-              .getState()
-              .completeSubAgent(subagentId, summary || undefined, filesWritten);
-          }
-          return;
+          debug("[HelixTrace] 权威全文自愈，已原地修正消息正文", {
+            len: cur.length,
+            to: finalText.length,
+          });
         }
-        // subagent.progress / subagent.text / 其它 → 忽略
       };
-
-      // Event-driven async queue — no polling. Producers push items and
-      // wake the consumer immediately via a resolver.
-      const queue: string[] = [];
-      let queueDone = false;
-      let queueWaiter: (() => void) | null = null;
-      function enqueue(item: string) {
-        queue.push(item);
-        if (queueWaiter) {
-          const w = queueWaiter;
-          queueWaiter = null;
-          w();
-        }
-      }
-
-      // Disconnect recovery — aligned with the official client: on a WS drop the
-      // run is NOT killed. The backend detaches the session (drop sentinel) and
-      // keeps executing (running sessions are never reaped — server.py
-      // _ws_session_is_orphaned returns False for running=True). serve-gateway
-      // reconnects and calls session.resume to re-bind the transport; the event
-      // stream resumes and run.completed lands normally. So a disconnect only
-      // shows a notice here — the run is ended only by the real completion, or
-      // by serve-gateway rejecting the prompt when resume fails for good.
-      function dequeue(): string | null {
-        return queue.length > 0 ? queue.shift()! : null;
-      }
-      async function waitForItem(): Promise<boolean> {
-        if (queue.length > 0 || queueDone) return true;
-        return new Promise<boolean>((resolve) => {
-          queueWaiter = () => resolve(true);
+      // 三个 setter 的共同契约：本 run 的私有累加器是**唯一真相**，React state
+      // 只是它在「前台」时的投影。旧写法把同一个 updater 再施加一次
+      // （setResponseBlocks(u)），等于让 state 长成第二份独立副本——任何外部
+      // `setResponseBlocks([])`（如 chatMessages 被清空的那个 effect）之后，
+      // state 从空数组重新累积，屏幕上就只剩「重置之后的第一块」，而 run 的累加器
+      // 与草稿仍是全的（"思考过程好端端地只剩一个思考中"的根因）。
+      const uiRB = (u: any) => {
+        responseBlocksRef.current =
+          typeof u === "function" ? u(responseBlocksRef.current) : u;
+        if (!isFrontRun()) return;
+        setResponseBlocks(responseBlocksRef.current);
+        liveStateOwnerRef.current = activeSessionId;
+      };
+      const uiSteps = (u: any) => {
+        stepsRef.current = typeof u === "function" ? u(stepsRef.current) : u;
+        if (!isFrontRun()) return;
+        setSteps(stepsRef.current);
+        liveStateOwnerRef.current = activeSessionId;
+      };
+      const uiST = (u: string) => {
+        streamThinkingRef.current = u;
+        if (!isFrontRun()) return;
+        setStreamThinking(streamThinkingRef.current);
+        liveStateOwnerRef.current = activeSessionId;
+      };
+      // Push this run's accumulated state into its own per-session draft so the
+      // streaming content survives switching away and back. Throttled to one
+      // store write per animation frame (same cost model as the old shared sync).
+      let draftSyncPending = false;
+      let runCompleted = false; // Guard: once finally sets this, stop writing isAgentRunning=true
+      const syncDraft = () => {
+        if (draftSyncPending) return;
+        draftSyncPending = true;
+        requestAnimationFrame(() => {
+          draftSyncPending = false;
+          // The run is over: the completed message is already committed to
+          // chatMessages, and finally already cleared the draft's responseBlocks.
+          // A straggler rAF must NOT re-populate the draft (that would re-render
+          // the blocks in the streaming area on top of the committed message →
+          // duplicate output). Skip the write entirely once runCompleted.
+          if (runCompleted) return;
+          setStreamingDraft(activeSessionId ?? "", {
+            isAgentRunning: true,
+            responseBlocks: responseBlocksRef.current,
+            steps: stepsRef.current,
+            streamThinking: streamThinkingRef.current,
+            textBuffer: textBufferRef.current,
+            thoughtBuffer: thoughtBufferRef.current,
+            startedAt: startedAtRef.current,
+            totalTokens: totalTokensRef.current,
+          });
         });
-      }
-
-      // 兜底 done 定时器。官方语义：run 的结束由后端权威事件驱动——
-      // message.complete / run.completed / run.cancelled / run.failed 在
-      // 每个 turn 结束时必然发射（server.py _emit("message.complete")，含
-      // error/interrupted 状态）。因此绝不设短空闲窗口：8s 兜底会在模型
-      // 停顿思考/provider 慢时误砍输出（此前的"自动中断"根因）。这里只留
-      // 一个超长保险，防止终结帧意外丢失导致 UI 永久卡在"正在思考"。
-      //
-      // 空闲检测定时器（idle detector）：当已收到内容但事件流长时间静默
-      // （15 秒无新事件）时，认为后端已结束但丢失了 session/complete 帧，
-      // 合成 done 让循环退出、按钮恢复为发送。仅在已收到内容后才激活
-      // （避免模型纯思考阶段误判）；有运行中工具时不触发（工具执行可能
-      // 静默数分钟）。这是比 5 分钟 synthDone 敏感得多的早期检测。
-      // 统一 Pending Work 判定（Idle = 没有任何 pending work，设计 #3/#6）：
-      //   - 模型在等用户应答（approval / clarify / sudo / secret / ask_user_question）
-      //   - 有运行中的工具调用
-      //   - 有运行中的子代理
-      // 只要还有 pending work，就绝不能把 Agent 判成 done。
-      const hasPendingWork = () => {
-        if (pendingUserRequestsRef.current > 0) return true;
-        if (
-          stepsRef.current.some(
-            (s) => s.type === "tool_call" && s.status === "running",
-          )
-        )
-          return true;
-        if (
+      };
+      // Per-run stream flush — merges this run's pending text/thinking blocks into
+      // its own responseBlocksRef and (when front) the live UI state.
+      // 把 pendingBlocksRef 中积压的分片（text / thinking / tool_group）按事件顺序
+      // 一次性提交到 uiRB。text/thinking 内部合并，tool_group 独立成块、保持顺序。
+      const flushPending = () => {
+        const blocks = pendingBlocksRef.current.splice(0);
+        if (!blocks.length) return;
+        const lastThinkingBlock = [...blocks]
+          .reverse()
+          .find((b) => b.type === "thinking");
+        uiRB((prev) => {
+          let next = prev;
+          for (const b of blocks) {
+            if (b.type === "tool_group") {
+              // 工具卡与其他块共用同一条有序提交队列，保持事件顺序，
+              // 不再被同步插入到句子主体与句末标点分片之间（修复"以 。开头"错位）。
+              next = [...next, { type: "tool_group", steps: b.steps }];
+              continue;
+            }
+            const last = next[next.length - 1];
+            if (b.type === "thinking") {
+              // 去重累积思考块：当累积 buffer（如 "1,2,3,4"）包含现有块的全文
+              // （如 "1,2,3"）时，替换它而不是在工具段之后追加重复内容。
+              // 纯追加会导致同一思考被渲染两遍（见思考输出累积 bug 分析）。
+              // 补充归一化相似度检测：后端累积重发时可能带微小差异。
+              const lastI = next.length - 1;
+              if (lastI >= 0 && next[lastI].type === "thinking") {
+                const prevC = String(next[lastI].content || "");
+                const curC = String(b.content || "");
+                const prevN = normalizeForCompare(prevC);
+                const curN = normalizeForCompare(curC);
+                // 计时随「本阶段」走：分片替换/追加都沿用 incoming 的起止，它才
+                // 是最新的一次思考事件时刻（旧块可能是上一帧的同阶段副本）。
+                const timing = {
+                  startedAt: b.startedAt,
+                  duration_s: b.duration_s,
+                };
+                if (curC.includes(prevC)) {
+                  next = [
+                    ...next.slice(0, lastI),
+                    { type: "thinking", content: curC, ...timing },
+                  ];
+                } else if (prevC.includes(curC)) {
+                  // 旧块更长（极少见，可能是旧数据残留），保留旧的
+                } else if (
+                  prevN.length >= 8 &&
+                  curN.length >= 8 &&
+                  textSimilarityRatio(prevN, curN) >= 0.7
+                ) {
+                  // 归一化后高度相似：视为累积重发或改写，取更长的一份
+                  next = [
+                    ...next.slice(0, lastI),
+                    {
+                      type: "thinking",
+                      content: curC.length >= prevC.length ? curC : prevC,
+                      ...timing,
+                    },
+                  ];
+                } else {
+                  // 无包含关系且相似度低：真正的独立思考段，保留原逻辑追加
+                  next = [
+                    ...next,
+                    { type: "thinking", content: b.content, ...timing },
+                  ];
+                }
+              } else {
+                next = [
+                  ...next,
+                  {
+                    type: "thinking",
+                    content: b.content,
+                    startedAt: b.startedAt,
+                    duration_s: b.duration_s,
+                  },
+                ];
+              }
+            } else {
+              next =
+                last?.type === "text"
+                  ? [
+                      ...next.slice(0, -1),
+                      { type: "text", content: last.content + b.content },
+                    ]
+                  : [...next, { type: "text", content: b.content }];
+            }
+          }
+          return next;
+        });
+        if (lastThinkingBlock && lastThinkingBlock.type === "thinking")
+          uiST(lastThinkingBlock.content);
+        syncDraft();
+      };
+      const flushStreamRender = () => {
+        rafPendingRef.current = false;
+        debug("[HelixTrace] flush rAF", {
+          pending: pendingBlocksRef.current.length,
+          textLen: (textBufferRef.current || "").length,
+        });
+        flushPending();
+      };
+      const scheduleStreamRender = () => {
+        if (rafPendingRef.current) return;
+        rafPendingRef.current = true;
+        requestAnimationFrame(flushStreamRender);
+      };
+      // ──────────────────────────────────────────────────────────────────────────
+      doneProcessedRef.current = false;
+      if (!activeSessionId) {
+        activeSessionId =
+          "session-" +
+          Date.now() +
+          "-" +
+          Math.random().toString(36).slice(2, 6);
+        useHelixStore.getState().setCurrentSessionId(activeSessionId);
+        // 新对话归属当前项目：activeSessionWorkDir 从此始终反映「当前对话所属项目」
+        // （加载的项目外对话为 null），界面据此决定是否显示项目目录与分支。
+        //
+        // 草稿已有的值优先 —— 远程草稿（远程行「新建对话」）的项目是
+        // `remote://…` 虚拟键，而 selectedWorkDir 恒为本机路径/空。用 `?? selected`
+        // 覆盖会把远程草稿在发消息那一刻变成远程键丢失、进而落到本地项目。
+        useHelixStore.setState({
+          activeSessionWorkDir:
+            useHelixStore.getState().activeSessionWorkDir ??
+            useHelixStore.getState().selectedWorkDir,
+        });
+        // 草稿期在输入框选过的模型（记在 DRAFT_SESSION_KEY 上）此刻立刻搬到新 cid：
+        // 否则 currentSessionId 一变成新 cid，模型芯片就会在「本对话覆盖值缺失」的
+        // 间隙回落到全局默认（表现为发消息后模型名闪成全局默认模型，过会再跳回）。
+        // 下方 set_model 重放段（每轮都跑）仍按 activeSessionId 优先命中，行为不变。
+        const draftModelOverride =
+          useHelixStore.getState().modelBySession[DRAFT_SESSION_KEY];
+        if (draftModelOverride?.model) {
           useHelixStore
             .getState()
-            .subAgents.some((a) => a.status === "running")
-        )
-          return true;
-        return false;
-      };
-
-      const scheduleSynthDone = (delay: number) => {
-        if (synthDoneTimerRef.current) {
-          clearTimeout(synthDoneTimerRef.current);
-          synthDoneTimerRef.current = null;
+            .setModelForSession(activeSessionId, draftModelOverride);
         }
-        // 有运行中的工具调用时（bash/长工具可能静默数分钟），再放宽到 30 分钟
-        // 极长兜底，避免工具执行间隙被误判结束。
-        const hasPendingTools = hasPendingWork();
-        const window = hasPendingTools ? 1800000 : delay;
-        debug("[HelixTrace] scheduleSynthDone", {
-          window,
-          delay,
-          queueDone,
-          textLen: textBufferRef.current?.length ?? 0,
-        });
-        synthDoneTimerRef.current = setTimeout(() => {
-          synthDoneTimerRef.current = null;
-          debug("[HelixTrace] synthDone fired", {
-            queueDone,
-            textLen: textBufferRef.current?.length ?? 0,
-            stepsLen: stepsRef.current.length,
+        // 草稿期选的审批档同样搬过来：芯片按新 cid 取值（不搬会在发消息那一刻闪回
+        // 配置默认），下面拿到 sid 后的落盘段也按这个键找。
+        const draftTier = useHelixStore
+          .getState()
+          .takePendingPermissionTier(DRAFT_SESSION_KEY);
+        if (draftTier) {
+          useHelixStore
+            .getState()
+            .setPendingPermissionTier(activeSessionId, draftTier);
+        }
+        useHelixStore.getState().persistToStorage();
+      }
+      runningSessionIdRef.current = activeSessionId;
+      startedAtRef.current = Date.now();
+      setStreamingDraft(activeSessionId!, {
+        isAgentRunning: true,
+        responseBlocks: [],
+        steps: [],
+        streamThinking: "",
+        textBuffer: "",
+        thoughtBuffer: "",
+        // 每会话计时锚点：并发 run 各自记录，切回后计时从本会话启动时刻
+        // 继续（计时渲染读 streamingDrafts[cid].startedAt，不再读共享 ref）。
+        startedAt: startedAtRef.current,
+        totalTokens: 0,
+      });
+      uiRB([]);
+      uiSteps([]);
+      stepsRef.current = [];
+      uiST("");
+      textBufferRef.current = "";
+      thoughtBufferRef.current = "";
+      lastStreamedTextRef.current = "";
+      streamCappedRef.current = false;
+      thinkingCappedRef.current = false;
+      runErrorRef.current = "";
+      thinkingStartTimeRef.current = 0;
+      thinkingDurationRef.current = 0;
+      promptSentAtRef.current = 0;
+      totalTokensRef.current = 0;
+      firstContentAtRef.current = 0;
+      usageReceivedRef.current = false;
+      // Add user message to store with images
+      const imagesSnapshot =
+        pendingImages.length > 0 ? [...pendingImages] : undefined;
+      const filesSnapshot =
+        pendingFiles.length > 0 ? [...pendingFiles] : undefined;
+
+      const storeState = useHelixStore.getState();
+      const newUserMsgId = storeState.addChatMessage({
+        role: "user",
+        content: trimmed,
+        images: imagesSnapshot,
+        files: filesSnapshot,
+        // 旁路会话（btw- 前缀）的消息挂在它自己的 cid 下：右侧「旁路问答」面板
+        // 按 sessionId === bylineCid 过滤出整段对话流渲染（追问也是同一会话）。
+        // 主线消息按 addChatMessage 默认规则挂 currentSessionId，不受影响。
+        sessionId:
+          activeSessionId && activeSessionId.startsWith("btw-")
+            ? activeSessionId
+            : (currentSessionId ?? undefined),
+      });
+      setPendingImages([]);
+      setPendingFiles([]);
+      // Clear the web-link cards that rode along on this send, and mirror the
+      // empty composer into tabAttachments so a restart doesn't resurrect them.
+      if (linkCards.length > 0) {
+        for (const l of linkCards)
+          useHelixStore.getState().removeLinkAttachment(l.id);
+      }
+      useHelixStore
+        .getState()
+        .setTabAttachments(currentSessionId ?? DRAFT_SESSION_KEY, [], [], []);
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+      abortControllersRef.current.set(activeSessionId, controller);
+
+      let unsubscribe: (() => void) | null = null;
+      const queueDone = false;
+      let idleTimerRef: ReturnType<typeof setTimeout> | null = null;
+
+      try {
+        const isElectron =
+          typeof window !== "undefined" && !!window.electron?.isElectron;
+
+        if (!isElectron) {
+          throw new Error("当前环境无法连接后端，与 Electron 界面端通信失败");
+        }
+
+        // Config is synced by handleModelSelect (setConfig) and by handleProfileSelect
+        // (profile:cacheConfig) — both already restart the gateway if needed.  Calling
+        // setModel AGAIN here would race with those restarts and corrupt config.yaml.
+        // session/new will pick up whatever config.yaml has on disk, so skip it.
+
+        // Wait for the gateway to be ready only if it's actually disconnected.
+        // Do NOT wait for a fresh `gateway.ready` just because the epoch changed;
+        // that produced a 10s blind hang on every new conversation after a config
+        // change. Instead, keep the persisted SID and let the resume path below
+        // attempt directly. If the backend is still recycling, resume will fail
+        // cleanly and fall back to rebuilding from the local history.
+        const helixStore = useGatewayStore.getState();
+        const liveEpoch = helixStore.gatewayEpoch;
+        const epochStale = liveEpoch > sessionEpochRef.current;
+        // 旁路会话（btw- 前缀）不等待 gateway.ready：后台发问不应被「等网关 3s」
+        // 阻塞主线（用户此刻可能正要继续主线对话），且 gateway 通常已连上
+        // （主线的 run 证明它在跑）。若它真的断了，resume/session/new 路径会
+        // 报错并 toast，不至于整个 /btw 卡死。
+        if (
+          !helixStore.helixConnected &&
+          !activeSessionId?.startsWith("btw-")
+        ) {
+          // Keep the persisted SID here. Gateway restarts are recoverable, and
+          // the resume path below will either revive it or fall back cleanly.
+          await new Promise<boolean>((resolve) => {
+            const startEpoch = useGatewayStore.getState().gatewayEpoch;
+            const check = () => {
+              if (
+                useGatewayStore.getState().helixConnected &&
+                useGatewayStore.getState().gatewayEpoch > startEpoch
+              ) {
+                cleanup();
+                resolve(true);
+              }
+            };
+            const unsub = helixApi()!.onEvent((event: string) => {
+              if (event === "gateway.ready") {
+                cleanup();
+                resolve(true);
+              }
+            });
+            const cleanup = () => {
+              try {
+                unsub?.();
+              } catch {
+                /* empty */
+              }
+            };
+            check();
+            if (!(
+              useGatewayStore.getState().helixConnected &&
+              useGatewayStore.getState().gatewayEpoch > startEpoch
+            )) {
+              setTimeout(() => {
+                cleanup();
+                resolve(useGatewayStore.getState().helixConnected);
+              }, 3000);
+            }
           });
-          // 模型在等用户点审批/clarify 卡片（extension_ui_request 未回应）时，
-          // 事件流必然静默——不是终结帧丢失，是流程合法停在用户身上。合成 done
-          // 会杀掉 run 循环并退订事件流，用户回来点击时模型继续输出却无人接收
-          //（"等我点完模型就停了"的根因）。重新武装等量兜底继续等；用户回应后
-          // 模型恢复输出，内容事件会把定时器重置回正常节奏。
-          if (hasPendingWork()) {
-            scheduleSynthDone(window);
-            return;
-          }
-          if (queueDone) return;
-          enqueue(
-            "data: " +
-              JSON.stringify({ type: "done", content: textBufferRef.current }),
-          );
-          queueDone = true;
-        }, window);
-      };
-
-      // ── 空闲检测定时器（idle detector）────────────────────────────────
-      // 当已收到内容但事件流静默超过 15 秒时，合成 done 让循环退出。
-      // 仅在 streamedContent=true 后激活；有运行中工具时不触发。
-      const IDLE_TIMEOUT_MS = 90_000;
-      const resetIdleTimer = () => {
-        if (idleTimerRef) {
-          clearTimeout(idleTimerRef);
-          idleTimerRef = null;
+        } else if (epochStale) {
+          // 2026-09-12 修复：不再整体删除映射。旧逻辑把持久化 sid 直接丢弃，
+          // 下一条消息必然 session/new 新建 sid（旧逻辑），且后端 pi_gateway
+          // 的 instance_for_session 会因 "no session file" 报错——用户感受是
+          // "重启后对话不可用"。保留映射，让下方 resume 分支尝试透明恢复。
         }
-        if (!streamedContent || queueDone) return;
-        if (hasPendingWork()) return;
-        idleTimerRef = setTimeout(() => {
-          idleTimerRef = null;
-          // 审批/clarify 待回应 = 事件流合法静默（模型停在用户点击上），不算空闲
-          // ——重新武装继续等，不合成 done（同 scheduleSynthDone 的处理）。
-          if (hasPendingWork()) {
-            resetIdleTimer();
-            return;
+
+        // ── sessionMap 硬门槛 ────────────────────────────────────────────
+        // existing 必须在 await 之后才捕获。冷启动时 sessionMapRef 是空 Map，提前
+        // 捕获会拿到 undefined → 被当成"全新对话" → session/new 铸造空会话覆盖
+        // 映射，旧历史从此对不上（2026-09-20 01a0bce1 → 01a0befe）。语义是
+        // 「未加载 → 暂停等待」，不是「没加载好就 fallback 成空」；加载完成后
+        // sessionMap 才是可信事实源。
+        const sessionMap = await awaitSessionMap(sessionMapRef);
+
+        // Create a backend session if we don't already have one for THIS
+        // conversation. Sessions are keyed by conversationId so multiple
+        // conversations can run in parallel (each keeps its own backend session).
+        const myCid = activeSessionId;
+        let existing = sessionMap.get(myCid);
+
+        // ── 会话恢复阶梯（**永不判死**）───────────────────────────────────
+        // 不变量：只要这个对话还有本地历史，它就一定能继续用。sid 只是"接回原
+        // 后端会话"的凭据，凭据丢了 ≠ 对话死了——所以按可靠性从高到低逐级尝试，
+        // 最后一级是"用本地历史重建一个后端会话"，它保证阶梯一定有出口：
+        //   ① 现存 sid 且 epoch 仍是当前代 → 实例还活着，直接沿用（不付 resume 代价）
+        //   ② 本对话的历史 sid（entry.sids[]，rebindSessionSid 一直往里追加）
+        //   ③ 磁盘反向索引 conversation-index.json（conversation → sid）
+        //   ④ pi 磁盘扫描 + 首条用户消息指纹（session/latest_for_cwd）
+        //   ⑤ 重建：session/new + 回放最近若干轮本地历史 → 绑定新 sid，旧 sid 继续
+        //      留在 sids[]（子 Agent 磁盘清单按它归位）
+        // 以前这里只有 ①→③，且 ③ 的 RPC 在网关侧根本不存在（unknown method）→
+        // 于是"sid 被清空"必然落到"标记失效、永久不可用"。2026-09-22 早上 6 条
+        // 对话就是这么坏的，而它们的 jsonl 全都还在磁盘上。
+        let sessionId: string | null = null;
+        if (existing?.sid && !epochStale && existing.epoch === liveEpoch) {
+          sessionId = existing.sid; // ①
+        }
+
+        const adoptSid = (sid: string, how: string, storedId?: string) => {
+          rebindSessionSid(sessionMapRef.current, myCid, {
+            sid,
+            epoch: liveEpoch,
+            storedId: storedId ?? existing?.storedId,
+          });
+          persistSessionMap(sessionMapRef.current);
+          sessionEpochRef.current = liveEpoch;
+          // 接回来了 = 会话活着，清掉可能残留的 broken 标记（横幅随之消失）。
+          useHelixStore.getState().clearSessionBroken(myCid);
+          debug(`[HelixTrace] 会话恢复成功（${how}）→`, sid);
+        };
+
+        /** 逐个候选 resume：成功就采用；SESSION_GONE（文件真没了）换下一个；
+         *  其余（restore 失败 / 内部错误）是可重试故障，原样抛出、不永久化状态。
+         *  `tried` 跨级去重：同一个 sid 可能在 sids[]、磁盘索引、指纹候选里各出现
+         *  一次，而 resume 是重量级操作（要 spawn/claim 实例），不能重复付代价。 */
+        const tried = new Set<string>();
+        const tryResumeCandidates = async (
+          candidates: string[],
+          how: string,
+        ): Promise<void> => {
+          for (const cand of candidates) {
+            if (!cand || cand === sessionId || tried.has(cand)) continue;
+            tried.add(cand);
+            const r = await resumeSession(cand);
+            if (r.ok) {
+              sessionId = r.sessionId;
+              adoptSid(r.sessionId, how);
+              return;
+            }
+            if (isSessionGone(r)) continue;
+            throw new Error(resumeFailureMessage(r));
           }
-          if (queueDone) return;
-          debug(
-            "[HelixTrace] idleDetector fired — no events for",
-            IDLE_TIMEOUT_MS,
-            "ms, synthesizing done",
-            {
-              textLen: textBufferRef.current?.length ?? 0,
-              reasoningLen: thoughtBufferRef.current?.length ?? 0,
-              stepsLen: stepsRef.current.length,
-              responseBlocksLen: responseBlocks.length,
-            },
+        };
+
+        // ② 历史 sid + 现存 sid（新→旧）。epoch 新鲜时 ① 已经直接沿用了现存 sid，
+        //    这里只在它过期/缺失时才逐个 resume 验证——包括现存的那个，它的静态
+        //    值恰好排在候选列表最前（sidCandidates 把 live sid 算作最新）。
+        if (!sessionId && myCid) {
+          await tryResumeCandidates(
+            sidCandidates(existing),
+            "live/history-sid",
           );
-          enqueue(
-            "data: " +
-              JSON.stringify({ type: "done", content: textBufferRef.current }),
+        }
+        // ③ 磁盘反向索引
+        if (!sessionId && myCid) {
+          await tryResumeCandidates(
+            await lookupSessionSidsForConversation(myCid),
+            "disk-index",
           );
+        }
+
+        // 本地持久化记录：④ 的指纹与 ⑤ 的回放都要用。**只在凭据全丢时才读盘**
+        // （`loadSessions()` 要反序列化全部对话的转录，不能放在常规路径上）。
+        let localTurns: PersistedChatMessage[] = [];
+        let hasContent = false;
+        // ⑤ 也要用它：远程/本地通道的判定看**这条对话自己的** workDir，界面记的
+        // activeSessionWorkDir 在跨视图重建时可能是上一个会话留下的。
+        let record: PersistedSession | undefined;
+        if (!sessionId && myCid) {
+          const { persistence } = await import("@/lib/persist");
+          record = (await persistence.loadSessions()).find(
+            (s) => s.id === myCid,
+          );
+          localTurns = (record?.chatMessages ?? []).filter(
+            (m) => m.role === "user" || m.role === "assistant",
+          );
+          const firstUserText =
+            localTurns.find((m) => m.role === "user")?.content ?? "";
+          hasContent =
+            !!record &&
+            (localTurns.length > 0 ||
+              (record.tasks?.length ?? 0) > 0 ||
+              (record.checkpoints?.length ?? 0) > 0);
+
+          // ④ pi 磁盘扫描 + 首条用户消息指纹。指纹精确（同一对话/分叉共享），所以
+          //    必须跳过已被**别的**对话占用的 sid，否则会把别人的会话抢过来续写。
+          //    远程项目的 workDir 是 `remote://…` 虚拟键，本机磁盘上没有对应目录，
+          //    拿它当 cwd 去扫只会恒 miss —— 远程会话的 sid 归属由后端
+          //    conversation-index 管，不走这条本地指纹。
+          const rawCwd =
+            record?.workDir ??
+            useHelixStore.getState().activeSessionWorkDir ??
+            selectedWorkDir ??
+            undefined;
+          const cwd = isRemoteWorkDir(rawCwd) ? undefined : rawCwd;
+          if (!sessionId && cwd && firstUserText) {
+            try {
+              const r = (await helixApi()!.send("session/latest_for_cwd", {
+                cwd,
+                first_user_message: normalizeAcpContent(firstUserText).slice(
+                  0,
+                  400,
+                ),
+              })) as any;
+              const owned = new Set(
+                [...sessionMapRef.current.entries()]
+                  .filter(([cid]) => cid !== myCid)
+                  .map(([, e]) => e.sid)
+                  .filter(Boolean),
+              );
+              const candidates = (
+                Array.isArray(r?.session_ids) ? r.session_ids : []
+              ).filter(
+                (s: unknown): s is string =>
+                  typeof s === "string" && s.length > 0 && !owned.has(s),
+              );
+              await tryResumeCandidates(candidates, "cwd-fingerprint");
+            } catch (e) {
+              // 指纹找回是尽力而为：失败就走 ⑤ 重建，不阻断对话。
+              debug("[HelixTrace] cwd 指纹找回失败，继续重建", e);
+            }
+          }
+        }
+
+        if (!sessionId) {
+          // ⑤ 重建 / 真 Draft。无 SID ≠ 新对话：有本地历史就必须把历史回放进新
+          // 会话（否则用户看到的是一段有上下文、模型却从零开始的对话）。回放走
+          // session/new 的 messages（Rust 侧按轮数与字符预算裁剪）。
+          // 这**不是**"静默 session/new 顶替"：旧 sid 留在 sids[] 里，映射被
+          // rebindSessionSid 原地更新，历史一条都不会丢。
+          const seedMessages = hasContent
+            ? localTurns
+                .map((m) => ({
+                  role: m.role,
+                  content: normalizeAcpContent(m.content),
+                }))
+                .filter((m) => m.content.trim())
+                .slice(-40)
+            : [];
+          const st0 = useHelixStore.getState();
+          // 这条对话的项目身份，与上面 `rawCwd` 同一条链（落盘的 workDir 优先于
+          // 界面记的）。远程对话走重建时 activeSessionWorkDir 可能是上一个视图
+          // 留下的值，只读它会发错通道。
+          const ownWorkDir =
+            record?.workDir ??
+            st0.activeSessionWorkDir ??
+            st0.selectedWorkDir ??
+            null;
+          // 本对话属于远程项目吗？虚拟键 `remote://<机器>/<远端路径>` 只有前端认得
+          // （见 lib/remote-projects.ts），网关只吃「走哪条通道 + 远端绝对路径」。
+          const remoteKey = isRemoteWorkDir(ownWorkDir)
+            ? parseRemoteWorkDir(ownWorkDir)
+            : null;
+          const res = (await helixApi()!.send("session/new", {
+            mcpServers: buildAcpMcpServers(st0.mcpServers),
+            mode_id: approvalModeOf(
+              st0.permissionMode,
+              !!st0.planModeBySession[myCid],
+            ),
+            // 远程对话发 `remote_cwd`（远端机器上的绝对路径），**不发 cwd**：
+            // cwd 是本地语义，会被 join 到当前 work_dir 后面（Windows 下
+            // `remote://…` 的 `:` `/` 非法 → create_dir_all 报 os error 123）。
+            // 本地对话照旧只发 cwd —— 于是隧道开着时，本地项目的对话仍然在
+            // 本机 spawn 的 pi 里跑，不再被整体搬到远端。
+            ...(remoteKey
+              ? { remote_cwd: remoteKey.remotePath || "~" }
+              : { cwd: ownWorkDir ?? undefined }),
+            ...(seedMessages.length > 0 ? { messages: seedMessages } : {}),
+          })) as any;
+          sessionId =
+            res?.session_id ||
+            res?.sessionID ||
+            res?.threadId ||
+            (typeof res === "string" ? res : null);
+          if (!sessionId) {
+            throw new Error("无法创建会话：session/new 缺少 session_id");
+          }
+          const storedId =
+            (typeof res === "object" && res
+              ? (res as any)?.stored_session_id
+              : null) || undefined;
+          rebindSessionSid(sessionMapRef.current, myCid, {
+            sid: sessionId,
+            epoch: liveEpoch,
+            storedId: storedId ?? existing?.storedId,
+          });
+          persistSessionMap(sessionMapRef.current);
+          sessionEpochRef.current = liveEpoch;
+          useHelixStore.getState().clearSessionBroken(myCid);
+          // 新建/重建 = 全新后端会话，上下文占用从零开始。
+          useHelixStore.getState().setContextUsage(myCid, 0, 0, []);
+          if (seedMessages.length > 0) {
+            // 必须让用户知道"这不是原来那个后端会话了"——上下文是回放出来的
+            // 近似，比原会话短（只带最近若干轮）。
+            useHelixStore.getState().showToast({
+              type: "info",
+              title: "已重建后端会话",
+              description: `原会话凭据已不可恢复，已回放最近 ${seedMessages.length} 条本地历史继续对话。`,
+            });
+            debug(
+              "[HelixTrace] 凭据全丢，已用本地历史重建后端会话 →",
+              sessionId,
+            );
+          }
+        }
+        // 还没落盘的选档（这条对话在草稿期被选过档）：sid 此刻已经有了，先写成
+        // 「本对话」覆盖再往下走。放在提交 prompt **之前**是硬要求——闸门按 sid 查
+        // 那张表，先跑后写就等于第一轮工具按配置默认放行（选了完全访问却照样弹窗）。
+        if (sessionId) {
+          const pendingTier = useHelixStore
+            .getState()
+            .takePendingPermissionTier(activeSessionId);
+          if (pendingTier) {
+            await useHelixStore.getState().setPermissionMode(pendingTier, {
+              sessionId,
+              cwd:
+                record?.workDir ??
+                useHelixStore.getState().activeSessionWorkDir ??
+                selectedWorkDir ??
+                null,
+              cid: activeSessionId,
+            });
+          }
+        }
+        // 每轮都同步一次模式（不只是建会话时）：复用中的对话，它的 pi 实例留着
+        // 上次的 plan 状态，而上面的切会话 effect 只在焦点变化时跑；这里补一次，
+        // 芯片和后端实例在网关重启/漂移之后仍然一致。
+        // 两条轴各自解析：权限档回读扩展配置（真相在那个文件里，别的进程可能改过；
+        // 一次小 JSON 读取，代价可忽略），带**这条会话**的 sid + 目录，覆盖表才
+        // 参与解析；plan 按会话。
+        const runState = useHelixStore.getState();
+        const runTier = await runState.syncPermissionMode({
+          sessionId,
+          // 与快照同一目录链（落盘的 workDir 优先）：后台跑的不是焦点对话时，
+          // activeSessionWorkDir 可能是另一条对话的，不能用它盖掉这条会话的目录。
+          cwd:
+            record?.workDir ??
+            runState.activeSessionWorkDir ??
+            selectedWorkDir ??
+            null,
+        });
+        const runPlanOn =
+          !!useHelixStore.getState().planModeBySession[activeSessionId];
+        const runApprovalMode = approvalModeOf(runTier, runPlanOn);
+        try {
+          await helixApi()!.send("session/set_mode", {
+            session_id: sessionId,
+            mode_id: runApprovalMode,
+          });
+        } catch (e) {
+          console.warn("[Helix] set_mode(" + runApprovalMode + ") failed:", e);
+        }
+        // 按会话的模型覆盖：输入框模型下拉写主线对话的 cid，旁路面板写 btw-cid
+        // （两个 key 空间互不冲突，共用同一张表）。经网关透传 set_model 到该会话
+        // 的 pi 实例（带 session_id 即路由到对应实例），每轮重放一次，网关重启 /
+        // 实例回收后也能恢复。不改全局 config.yaml——全局默认仍由设置页管理。
+        // 草稿阶段（cid 未分配）选过的模型记在 DRAFT_SESSION_KEY 上，第一次
+        // handleRun 才分配出真 cid → 只查 activeSessionId 会漏掉它，该会话回落
+        // 全局默认（表现为"新对话选了模型却没生效"）。这里两键都查，命中草稿
+        // 键就搬到真 cid 上，后续轮次直接命中。
+        const modelOverrides = useHelixStore.getState().modelBySession;
+        const modelOverride =
+          modelOverrides?.[activeSessionId] ??
+          (activeSessionId !== DRAFT_SESSION_KEY
+            ? modelOverrides?.[DRAFT_SESSION_KEY]
+            : undefined);
+        if (
+          modelOverride?.model &&
+          activeSessionId !== DRAFT_SESSION_KEY &&
+          modelOverrides?.[DRAFT_SESSION_KEY]
+        ) {
+          useHelixStore
+            .getState()
+            .setModelForSession(activeSessionId, modelOverride);
+        }
+        if (modelOverride?.model) {
+          try {
+            await helixApi()!.send("set_model", {
+              session_id: sessionId,
+              provider: modelOverride.provider || undefined,
+              modelId: modelOverride.model,
+            });
+          } catch (e) {
+            console.warn(
+              "[Helix] set_model(" + modelOverride.model + ") failed:",
+              e,
+            );
+          }
+        }
+        // Only update the global ref / store if THIS run is the focused conversation.
+        // A background run must NOT overwrite the global — that would make Stop /
+        // model-switch target the wrong session.
+        if (isFrontRun()) {
+          helixSessionIdRef.current = sessionId;
+          try {
+            useGatewayStore.getState().setHelixSessionId(sessionId);
+          } catch {
+            /* store setHelixSessionId 不应抛错；防御性忽略 */
+          }
+        }
+
+        // Stop button -> ask the backend to cancel the current run.
+        // session/cancel is a backend *notification* (no response), so send it
+        // via notify (not send, which issues a request and gets "Method not found").
+        controller.signal.addEventListener("abort", () => {
+          if (sessionId) {
+            electronHelix.notify("session/cancel", { session_id: sessionId });
+          }
+          // 暂停/停止时绝不能让已流式输出的内容丢失。abort 不会让 ack-only 的
+          // session/prompt 拒绝，下面的 AbortError catch 永远不会触发，循环只是
+          // 在 queueDone=true 后正常 break，textBufferRef 未提交、草稿被 finally
+          // 清空 → 已生成的内容全部消失。这里把部分缓冲区作为合成 done 入队，
+          // 走正常 done 提交路径持久化为一条 assistant 消息（与 scheduleSynthDone
+          // 的兜底方式一致）。
+          const hasPartial =
+            (textBufferRef.current || "").trim() ||
+            (thoughtBufferRef.current || "").trim() ||
+            stepsRef.current.length > 0;
+          // 诊断（暂停丢内容排查）：记录合成 done 是否被放行。跳过的两种原因
+          // （hasPartial=false —— 注意它没查 responseBlocks 的盲区在 blocksLen；
+          //  queueDone 已被真实/兜底 done 置真）都会在这里暴露。
+          debug("[HelixTrace] abort listener", {
+            textLen: (textBufferRef.current || "").length,
+            thoughtLen: (thoughtBufferRef.current || "").length,
+            stepsLen: stepsRef.current.length,
+            blocksLen: responseBlocksRef.current.length,
+            queueLen: queue.length,
+            queueDone,
+            hasPartial: !!hasPartial,
+            willEnqueue: !queueDone && !!hasPartial,
+          });
+          if (!queueDone && hasPartial) {
+            enqueue(
+              "data: " +
+                JSON.stringify({
+                  type: "done",
+                  content: textBufferRef.current || "",
+                  synthetic: "abort",
+                }),
+            );
+          }
           queueDone = true;
           if (queueWaiter) {
             const w = queueWaiter;
             queueWaiter = null;
             w();
           }
-        }, IDLE_TIMEOUT_MS);
-      };
+        });
 
-      // IMPORTANT: subscribe through helixApi() (the mode-aware facade), NOT
-      // window.electron.helix. In serve mode agent stream events (session/update,
-      // tool.*, message.*) arrive over the WS client inside serve-gateway.ts and
-      // never hit the IPC bridge — subscribing to the raw IPC onEvent left the
-      // run with "正在思考" forever (no tool cards, no text).
-      unsubscribe = helixApi()!.onEvent(async (method: string, params: any) => {
-        const mySid = sessionId;
-        // True-concurrency guard: this onEvent instance belongs to the run for
-        // `mySid`. Ignore events from any OTHER session so parallel runs don't
-        // cross-contaminate each other's queues. Global gateway-level events
-        // (gateway.*) carry no session_id and are intentionally NOT filtered.
-        if (params?.session_id && params.session_id !== mySid) {
-          // 诊断（每个 run 只记首条）：内容类事件被 sid 过滤掉时打出事件携带
-          // 的 sid 与本 run 预期的 sid。「整回合收不到流式事件」若在这里出现
-          // 且两者不同，说明网关给该实例盖的 session 戳与前端预期不一致——
-          // 并行 run 互滤是正常现象，所以只挑内容类事件、且只记一次。
-          const su = params?.update?.sessionUpdate;
-          if (
-            !sidMismatchDebuggedRef.current &&
-            (su === "agent_message_chunk" ||
-              su === "agent_thought_chunk" ||
-              su === "tool_call" ||
-              su === "tool_call_update")
-          ) {
-            sidMismatchDebuggedRef.current = true;
-            debug("[HelixTrace] content event filtered by sid mismatch", {
-              eventSid: params.session_id,
-              mySid,
-              method,
-              su,
-            });
+        // Tracks whether this run has already streamed real text/thinking, so a
+        // trailing session_info_update can be dropped quietly instead of as text.
+        let streamedContent = false;
+        // Translate backend notifications into the UI event shape the parser expects.
+        const mapHelixEvent = (method: string, params: any): any => {
+          if (method === "usage:prompt-complete") {
+            return {
+              type: "usage_prompt_complete",
+              usage: params?.usage || null,
+              // 归属键与事件时刻只由网��的 message_end（final:true）给出，必须透传。
+              model: params?.model || null,
+              at_ms: params?.at_ms || null,
+            };
           }
-          return;
-        }
-        const now = Date.now();
-        // Track time to first token on first meaningful event
-        if (
-          method === "session/update" &&
-          (params?.update?.sessionUpdate === "agent_message_chunk" ||
-            params?.update?.sessionUpdate === "agent_thought_chunk")
-        ) {
-          if (promptSentAtRef.current && !firstContentAtRef.current) {
-            firstContentAtRef.current = now;
-          }
-        }
-        try {
-          // WS 断连：对齐官方——run 不结束。后端把运行中的会话 detach 继续
-          // 执行（running 会话不会被 reap），serve-gateway 会重连并 session.resume
-          // 恢复事件流。这里只显示提示并重新武装超长兜底（断连/重连期间模型
-          // 可能仍在思考、无 delta；兜底已是 5 分钟级，不会像旧 8s 那样把恢复
-          // 中的 run 砍掉）。run 的收尾交给真实完成事件或 resume 失败的 reject。
-          if (method === "gateway.disconnected") {
-            scheduleSynthDone(300000);
-            useHelixStore.getState().setConnectionNotice({
-              phase: "error",
-              message: "与 Helix 网关连接已断开，正在尝试恢复…",
-              ts: Date.now(),
-            });
-            if (myCid) {
-              useHelixStore.getState().setSessionRetryNotice(myCid, {
-                phase: "error",
-                message: "与 Helix 网关连接已断开，正在尝试恢复…",
-                ts: Date.now(),
-              });
-            }
-            return;
-          }
-          // Reconnect completed (serve-gateway already re-ran session.resume).
-          // The event stream is about to resume — clear the notice.
-          if (method === "gateway.reconnected") {
-            useHelixStore.getState().setConnectionNotice({
-              phase: "recovered",
-              message: "连接已恢复",
-              ts: Date.now(),
-            });
-            setTimeout(
-              () => {
-                useHelixStore.getState().setConnectionNotice(null);
-                if (myCid) {
-                  useHelixStore.getState().setSessionRetryNotice(myCid, null);
+          if (method === "session/update") {
+            const u = params?.update || params;
+            const su = u?.sessionUpdate;
+            switch (su) {
+              case "agent_message_chunk":
+                return {
+                  type: "text",
+                  content: normalizeAcpContent(u.content),
+                };
+              case "agent_thought_chunk":
+                return {
+                  type: "thinking",
+                  content: normalizeAcpContent(u.content),
+                };
+              case "tool_call": {
+                const title = typeof u.title === "string" ? u.title : "";
+                const kind = typeof u.kind === "string" ? u.kind : "";
+                const toolCallId =
+                  typeof u.toolCallId === "string" ? u.toolCallId : "";
+                let args = u.rawInput;
+                if (typeof args === "string") {
+                  try {
+                    args = JSON.parse(args);
+                  } catch {
+                    /* keep raw */
+                  }
                 }
-              },
-              2000,
+                return {
+                  type: "tool_call",
+                  toolName: title || "tool",
+                  toolKind: kind,
+                  toolCallId,
+                  toolParams:
+                    args && typeof args === "object" ? args : { raw: args },
+                };
+              }
+              case "tool_call_chunk":
+                return {
+                  type: "tool_result",
+                  toolCallId:
+                    typeof u.toolCallId === "string" ? u.toolCallId : "",
+                  toolName: "",
+                  content: normalizeAcpContent(u.content),
+                };
+              case "tool_call_update": {
+                const tcId =
+                  typeof u.toolCallId === "string" ? u.toolCallId : "";
+                // Sub-agent root completion: update the parent delegate_task step status
+                if (tcId.startsWith("sa-") && tcId.endsWith("-root")) {
+                  const status = u.status === "failed" ? "failed" : "completed";
+                  const content = normalizeAcpContent(u.content);
+                  uiSteps((prev) => {
+                    const next = [...prev];
+                    const endedAt = Date.now();
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      if (
+                        next[i].type === "tool_call" &&
+                        next[i].toolName?.startsWith("SubAgent")
+                      ) {
+                        next[i] = {
+                          ...closeToolStep(
+                            next[i],
+                            status === "failed",
+                            endedAt,
+                          ),
+                          content: content || next[i].content,
+                        };
+                        break;
+                      }
+                    }
+                    return next;
+                  });
+                  return null;
+                }
+                // Streaming output delta: forward content to the latest tool_call step
+                if (u.status === "in_progress" && u.content) {
+                  return {
+                    type: "tool_output_delta",
+                    toolCallId: tcId,
+                    content: normalizeAcpContent(u.content),
+                  };
+                }
+                // pi 后端（pi_gateway.rs）的 toolcall_start 不带参数（rawInput
+                // 恒为 null），命令/文件路径要等 toolcall_end / tool_execution_start
+                // 才随本事件（status=in_progress + rawInput）到达。转发为参数补写
+                // 事件，让已创建的 tool_call 步骤补上 toolParams —— 否则命令类
+                // 卡片标题永远只有"执行 执行命令"，看不到具体命令。
+                if (u.status === "in_progress" && u.rawInput != null) {
+                  return {
+                    type: "tool_args_update",
+                    toolCallId: tcId,
+                    toolName: u.toolName || u.title || "",
+                    rawInput: u.rawInput,
+                  };
+                }
+                // 工具完成/失败：serve 模式下 tool.complete 走这里（status='completed'/'failed'），
+                // 没有独立的 tool_result 事件。必须转发为 tool_result，否则 tool_call
+                // 一直保持 running，卡片永远显示"执行"而不是"已执行"。
+                if (
+                  u.status === "completed" ||
+                  u.status === "failed" ||
+                  u.status === "complete"
+                ) {
+                  // pi 的 edit 类工具：真 diff 在 details.diff / details.patch
+                  // （网关 tool_execution_end 只挑 diff 类字段转发），content
+                  // 只是一句 "Successfully replaced N block(s)"。把 diff 拼进
+                  // 结果文本，标题 +N −n 徽标与展开后的 Diff 卡片才有着落。
+                  const d = (u as any).details as
+                    Record<string, unknown> | undefined;
+                  const diffText =
+                    typeof d?.diff === "string" && d.diff.trim() ? d.diff : "";
+                  const patchText =
+                    typeof d?.patch === "string" && d.patch.trim()
+                      ? d.patch
+                      : "";
+                  const diffPayload = diffText || patchText;
+                  const baseText = normalizeAcpContent(u.content || "");
+                  // toolCallId 必须透传：下游按 id 把结果挂回发起调用的那张
+                  // 工具卡。丢掉 id 会退化为"填进第一个还没结果的组"——总结
+                  // 两侧的工具并行执行、后启动的先完成时，结果就挂错组
+                  // （表现为"总结后面的工具合并进了总结上面的工具组"）。
+                  return {
+                    type: "tool_result",
+                    toolCallId: tcId,
+                    toolName: u.toolName || u.title || "",
+                    content: diffPayload
+                      ? `${baseText}\n${diffPayload}`
+                      : baseText,
+                    failed: u.status === "failed",
+                  };
+                }
+                return null;
+              }
+              case "permission_request":
+              case "clarify_request":
+              case "clarify_settled":
+                // 审批 / 反问 / 作废由组件级的常驻订阅认领（见 onUserRequest）。
+                // 留在 run 循环里 = run 一退订就没人接，且入队前还要过「sid ==
+                // 本轮」过滤，别的会话（含旁路）的审批永远进不来。
+                return null;
+              case "tool_prepare_unblocked":
+                // 网关注射的 Helix 侧事件（不是 pi 发的）：审批答完 ⇒ 那条工具调用的
+                // prepare 返回了。只走 run 循环，因为它要改的是这个 run 私有的累加器。
+                return {
+                  type: "tool_prepare_unblocked",
+                  toolCallId: String(u?.toolCallId || ""),
+                  at: Number(u?.at) || 0,
+                };
+              case "run_complete":
+                // 后端 run.completed / message.complete 携带完整正文(payload.text / output)。
+                // 优先采用它兜底——否则若 serve 后端只在完成时给正文(不发 message.delta 流),
+                // 仅用流式缓冲 textBufferRef.current 会拿到空值 → “只思考不输出”。
+                return {
+                  type: "done",
+                  content: u.content || textBufferRef.current,
+                };
+              case "usage_update":
+                return {
+                  type: "usage_update",
+                  size: Number(u.size) || 0,
+                  used: Number(u.used) || 0,
+                };
+              case "available_commands_update":
+                // 已废弃：后端不再发送此事件
+                return null;
+              case "session_info_update": {
+                // 普通标题/元数据更新
+                // Backends sometimes carry errors, notices, or even the final
+                // reply inside session_info_update. We used to silently drop it
+                // (default: return null), which produced a blank UI with no clue.
+                // Now we ALWAYS dump the raw payload (no DEV gate — production
+                // builds strip import.meta.env, which is exactly why we went
+                // blind before) and surface any error/text we can find.
+                const rawSiup = (() => {
+                  try {
+                    return JSON.stringify(u);
+                  } catch {
+                    return String(u);
+                  }
+                })();
+                const err = u.error || u.errorMessage || u.err;
+                if (err) {
+                  return {
+                    type: "error",
+                    content:
+                      typeof err === "string" ? err : JSON.stringify(err),
+                  };
+                }
+                if (u.status === "error" || u.status === "failed") {
+                  const m =
+                    u.message ||
+                    u.reason ||
+                    u.detail ||
+                    (typeof u.content === "string" ? u.content : "");
+                  return { type: "error", content: m || "会话返回错误状态" };
+                }
+                const msg =
+                  typeof u.content === "string" && u.content.trim()
+                    ? u.content
+                    : typeof u.message === "string" && u.message.trim()
+                      ? u.message
+                      : typeof u.text === "string" && u.text.trim()
+                        ? u.text
+                        : null;
+                if (msg) return { type: "text", content: msg };
+                // Couldn't classify this as error/text. If the run already
+                // streamed real content, a stray session_info_update is just
+                // trailing metadata — drop it quietly (raw already logged).
+                // If it's the ONLY thing we got, surface the raw payload so the
+                // UI is never left blank and we can see what the backend said.
+                if (!streamedContent) {
+                  return {
+                    type: "text",
+                    content:
+                      "⚠️ 该模型未返回文本流，网关仅回传了 session_info_update。原始内容：\n" +
+                      rawSiup.slice(0, 2000),
+                  };
+                }
+                return null;
+              }
+              default:
+                return null;
+            }
+          }
+          if (method === "session/complete" || method === "session/end") {
+            // 后端在 agent_settled 时取走 last_assistant_thinking 透传到
+            // reasoning 字段（pi_gateway.rs session/complete）。正常流式下本地
+            // thoughtBuffer 已有全文，优先用它；网关中途重启 / 事件丢失导致本地
+            // 缓冲为空时退回这份权威思考，否则「已完成」折叠卡里思考整段消失。
+            const remoteThinking =
+              typeof params?.reasoning === "string" ? params.reasoning : "";
+            // 上游 provider 的原始错误（`errorMessage`）。空正文 + 有错误时用它
+            // 分类显示，不再只有一句「模型未返回任何可见内容」。
+            runErrorRef.current =
+              typeof params?.error === "string" ? params.error : "";
+            return {
+              type: "done",
+              content: textBufferRef.current,
+              reasoning:
+                thoughtBufferRef.current || remoteThinking || undefined,
+            };
+          }
+          if (method === "error") {
+            return { type: "error", content: params?.message || "后端错误" };
+          }
+          return null;
+        };
+
+        // ── 子代理实时事件 → store.subAgents ──────────────────────────────
+        // serve 模式下后端把子任务进度以 subagent.* 事件中继到父会话（见
+        // tui_gateway/server.py _on_tool_progress 的 subagent.* 分支）。
+        // 这些事件经 serve-gateway.ts 的 default 分支原样透传，这里消费并写入
+        // store，让 DelegationsPanel 顶部的"实时"区能显示运行中的子任务。
+        // 磁盘 live 日志（delegation_live_log.py）仍由后端独立维护，作为兜底。
+        const handleSubagentEvent = (method: string, params: any): void => {
+          if (typeof params !== "object" || params === null) return;
+          const goal = typeof params.goal === "string" ? params.goal : "";
+          // 后端 subagent_id；缺失时退回 child_session_id 构造的稳定 id
+          const subagentId =
+            typeof params.subagent_id === "string" && params.subagent_id
+              ? params.subagent_id
+              : typeof params.child_session_id === "string" &&
+                  params.child_session_id
+                ? `sa-${params.child_session_id}`
+                : null;
+          if (!subagentId) {
+            debug(
+              "[SubAgent] 事件缺少 subagent_id/child_session_id，跳过",
+              method,
             );
             return;
           }
-          // serve-gateway 已不再主动驱逐并行会话；保留此分支仅作防御：
-          // 若未来后端在个别配置下真的回收/挤掉本 run 的会话，立即收尾，
-          // 避免静默挂到 5 分钟兜底。用户重发该消息即可在新会话上重新执行。
-          if (method === "session.evicted") {
-            debug("[HelixTrace] session.evicted →", params);
+          const model = typeof params.model === "string" ? params.model : "";
+          const text = typeof params.text === "string" ? params.text : "";
+
+          if (method === "subagent.start") {
+            const existing = useHelixStore
+              .getState()
+              .subAgents.find((a) => a.id === subagentId);
+            if (existing) {
+              // 磁盘重建的卡片是终态（重启中断）；同一 id 的 Agent 工具再次
+              // 执行说明后端真在跑这个孩子 → 翻回 running。
+              if (existing.status !== "running") {
+                useHelixStore
+                  .getState()
+                  .reviveSubAgentForRun(subagentId, goal || text);
+              }
+              return; // 已存在（thinking 提前建过）——只补描述
+            }
+            useHelixStore
+              .getState()
+              .spawnSubAgent(
+                model || "子代理",
+                goal || text || "执行子任务",
+                undefined,
+                subagentId,
+                myCid ?? undefined,
+                text || undefined,
+              );
+            return;
+          }
+          if (method === "subagent.thinking") {
+            const existing = useHelixStore
+              .getState()
+              .subAgents.some((a) => a.id === subagentId);
+            if (!existing) {
+              useHelixStore
+                .getState()
+                .spawnSubAgent(
+                  model || "子代理",
+                  goal || text || "思考中",
+                  undefined,
+                  subagentId,
+                  myCid ?? undefined,
+                );
+            }
+            return;
+          }
+          if (method === "subagent.tool") {
+            const toolName =
+              typeof params.tool_name === "string" && params.tool_name
+                ? params.tool_name
+                : "tool";
+            // 后端 subagent.tool 只带 tool_preview（args 不进 payload）；优先用它
+            const preview =
+              typeof params.tool_preview === "string" && params.tool_preview
+                ? params.tool_preview
+                : text;
+            // 扩展在 streamUpdate 里带回的 agent_id（.output 转录文件名）：
+            // progress / 任意 subagent.tool 事件都可能携带，绑到卡片上。
+            if (typeof params.agent_id === "string" && params.agent_id) {
+              useHelixStore
+                .getState()
+                .setSubAgentAgentId(subagentId, params.agent_id);
+            }
+            // progress 行是 "N tool uses…" 汇总通知，不是真实工具调用；
+            // background 是后台 spawn 确认行。两者都不计入 toolCalls，避免
+            // 卡片底部被大量重复进度消息刷屏。
+            if (toolName === "background" || toolName === "progress") {
+              return;
+            }
+            // 后端可能发送带 status 的完成事件（success/error），更新已有工具行状态
+            const toolStatus =
+              typeof params.status === "string" ? params.status : "";
+            if (toolStatus === "success" || toolStatus === "error") {
+              useHelixStore
+                .getState()
+                .updateSubAgentToolCallStatus(subagentId, toolName, toolStatus);
+              return;
+            }
+            useHelixStore.getState().addSubAgentToolCall(subagentId, {
+              toolName,
+              params: preview.slice(0, 500),
+              status: "running",
+            });
+            return;
+          }
+          if (method === "subagent.complete") {
+            const status =
+              typeof params.status === "string" ? params.status : "";
+            const summary =
+              typeof params.summary === "string" && params.summary
+                ? params.summary
+                : text;
+            const filesWritten = Array.isArray(params.files_written)
+              ? params.files_written.map((f: unknown) => String(f)).slice(0, 20)
+              : undefined;
+            // complete 可能比 start 后补带上 goal/prompt（Rust 终态路径）。若卡片
+            // 的 description 仍是占位（"思考中"/空）或 prompt 缺失，回填之。
+            const card = useHelixStore
+              .getState()
+              .subAgents.find((a) => a.id === subagentId);
+            if (card) {
+              const goalStr = goal || undefined;
+              const needsDesc = !goalStr
+                ? false
+                : !card.description || card.description === "思考中";
+              const needsPrompt = !card.text && !!text;
+              if (needsDesc || needsPrompt) {
+                useHelixStore.setState((s) => ({
+                  subAgents: s.subAgents.map((a) =>
+                    a.id === subagentId
+                      ? {
+                          ...a,
+                          ...(needsDesc && goalStr
+                            ? { description: goalStr, name: goalStr }
+                            : {}),
+                          ...(needsPrompt ? { text } : {}),
+                        }
+                      : a,
+                  ),
+                }));
+              }
+            }
+            if (status === "failed" || status === "error") {
+              useHelixStore
+                .getState()
+                .failSubAgent(subagentId, summary || "子代理执行失败");
+            } else {
+              useHelixStore
+                .getState()
+                .completeSubAgent(
+                  subagentId,
+                  summary || undefined,
+                  filesWritten,
+                );
+            }
+            return;
+          }
+          // subagent.progress / subagent.text / 其它 → 忽略
+        };
+
+        // Event-driven async queue — no polling. Producers push items and
+        // wake the consumer immediately via a resolver.
+        const queue: string[] = [];
+        let queueDone = false;
+        let queueWaiter: (() => void) | null = null;
+        function enqueue(item: string) {
+          queue.push(item);
+          if (queueWaiter) {
+            const w = queueWaiter;
+            queueWaiter = null;
+            w();
+          }
+        }
+
+        // Disconnect recovery — aligned with the official client: on a WS drop the
+        // run is NOT killed. The backend detaches the session (drop sentinel) and
+        // keeps executing (running sessions are never reaped — server.py
+        // _ws_session_is_orphaned returns False for running=True). serve-gateway
+        // reconnects and calls session.resume to re-bind the transport; the event
+        // stream resumes and run.completed lands normally. So a disconnect only
+        // shows a notice here — the run is ended only by the real completion, or
+        // by serve-gateway rejecting the prompt when resume fails for good.
+        function dequeue(): string | null {
+          return queue.length > 0 ? queue.shift()! : null;
+        }
+        async function waitForItem(): Promise<boolean> {
+          if (queue.length > 0 || queueDone) return true;
+          return new Promise<boolean>((resolve) => {
+            queueWaiter = () => resolve(true);
+          });
+        }
+
+        // 兜底 done 定时器。官方语义：run 的结束由后端权威事件驱动——
+        // message.complete / run.completed / run.cancelled / run.failed 在
+        // 每个 turn 结束时必然发射（server.py _emit("message.complete")，含
+        // error/interrupted 状态）。因此绝不设短空闲窗口：8s 兜底会在模型
+        // 停顿思考/provider 慢时误砍输出（此前的"自动中断"根因）。这里只留
+        // 一个超长保险，防止终结帧意外丢失导致 UI 永久卡在"正在思考"。
+        //
+        // 空闲检测定时器（idle detector）：当已收到内容但事件流长时间静默
+        // （15 秒无新事件）时，认为后端已结束但丢失了 session/complete 帧，
+        // 合成 done 让循环退出、按钮恢复为发送。仅在已收到内容后才激活
+        // （避免模型纯思考阶段误判）；有运行中工具时不触发（工具执行可能
+        // 静默数分钟）。这是比 5 分钟 synthDone 敏感得多的早期检测。
+        // 统一 Pending Work 判定（Idle = 没有任何 pending work，设计 #3/#6）：
+        //   - 模型在等用户应答（approval / clarify / sudo / secret / ask_user_question）
+        //   - 有运行中的工具调用
+        //   - 有运行中的子代理
+        // 只要还有 pending work，就绝不能把 Agent 判成 done。
+        const hasPendingWork = () => {
+          if (pendingUserRequestsRef.current > 0) return true;
+          if (
+            stepsRef.current.some(
+              (s) => s.type === "tool_call" && s.status === "running",
+            )
+          )
+            return true;
+          if (
+            useHelixStore
+              .getState()
+              .subAgents.some((a) => a.status === "running")
+          )
+            return true;
+          return false;
+        };
+
+        // ── in-run 上下文压缩窗口 ──────────────────────────────────────────
+        // pi 在两次 assistant 调用之间自发压缩上下文时，会做一次完整的 LLM
+        // 摘要调用：主事件流在此期间必然零帧。网关把 compaction_start/end 转发
+        // 成 session/update（pi_gateway.rs），这里据此把两个看门狗的静默窗口拉长
+        // 到压缩截止时刻。不做这件事的后果就是「压缩上下文后要手动继续」：90s
+        // 空闲检测把合法静默当成终结帧丢失，合成 done → 退订事件流 → pi 压缩完
+        // 继续输出却没人接收。
+        // 上界与 Rust 侧 COMPACTION_GUARD_MS 同值（600s）：compaction_end 真丢了
+        // 时照旧按 done 收尾，绝不因为"以为在压缩"而永久挂着。
+        const COMPACT_GUARD_MS = 600_000;
+        let compactDeadline = 0;
+        const compactionActive = () =>
+          compactDeadline > 0 && Date.now() < compactDeadline;
+
+        const scheduleSynthDone = (delay: number) => {
+          if (synthDoneTimerRef.current) {
+            clearTimeout(synthDoneTimerRef.current);
+            synthDoneTimerRef.current = null;
+          }
+          // 有运行中的工具调用时（bash/长工具可能静默数分钟），再放宽到 30 分钟
+          // 极长兜底，避免工具执行间隙被误判结束。
+          const hasPendingTools = hasPendingWork();
+          const window = hasPendingTools ? 1800000 : delay;
+          debug("[HelixTrace] scheduleSynthDone", {
+            window,
+            delay,
+            queueDone,
+            textLen: textBufferRef.current?.length ?? 0,
+          });
+          synthDoneTimerRef.current = setTimeout(() => {
+            synthDoneTimerRef.current = null;
+            debug("[HelixTrace] synthDone fired", {
+              queueDone,
+              textLen: textBufferRef.current?.length ?? 0,
+              stepsLen: stepsRef.current.length,
+            });
+            // 模型在等用户点审批/clarify 卡片（extension_ui_request 未回应）时，
+            // 事件流必然静默——不是终结帧丢失，是流程合法停在用户身上。合成 done
+            // 会杀掉 run 循环并退订事件流，用户回来点击时模型继续输出却无人接收
+            //（"等我点完模型就停了"的根因）。重新武装等量兜底继续等；用户回应后
+            // 模型恢复输出，内容事件会把定时器重置回正常节奏。
+            if (hasPendingWork()) {
+              scheduleSynthDone(window);
+              return;
+            }
+            // 压缩中：按原 delay 重排，不走 pending-work 的 30 分钟放宽——压缩
+            // 有明确上界（compactDeadline），到点仍无事件就该照常收尾。
+            if (compactionActive()) {
+              scheduleSynthDone(delay);
+              return;
+            }
+            if (queueDone) return;
             enqueue(
               "data: " +
                 JSON.stringify({
-                  type: "error",
-                  content:
-                    "后台会话被新的对话挤占，此任务已中断，请重发该消息以重新执行。",
+                  type: "done",
+                  content: textBufferRef.current,
                 }),
             );
             queueDone = true;
-            return;
+          }, window);
+        };
+
+        // ── 空闲检测定时器（idle detector）────────────────────────────────
+        // 当已收到内容但事件流静默超过 15 秒时，合成 done 让循环退出。
+        // 仅在 streamedContent=true 后激活；有运行中工具时不触发。
+        const IDLE_TIMEOUT_MS = 90_000;
+        const resetIdleTimer = () => {
+          if (idleTimerRef) {
+            clearTimeout(idleTimerRef);
+            idleTimerRef = null;
           }
-          // 主进程/serve-gateway 自动恢复了本 run 的会话（"session not found" →
-          // 重建并重放 prompt）。把 conversation→session 映射改绑到新 id，后续
-          // 消息与 RPC 使用新会话；事件流已按 WS 同序保证在新 id 下继续到达。
-          if (method === "gateway.sessionReplaced" && params?.newId) {
-            if (params?.oldId === sessionId) {
-              debug(
-                "[HelixTrace] 本 run 会话被替换 →",
-                params.oldId,
-                "→",
-                params.newId,
-              );
-              sessionId = params.newId;
-              rebindSessionSid(sessionMapRef.current, myCid, {
-                sid: params.newId,
-                epoch: useGatewayStore.getState().gatewayEpoch,
-              });
-              persistSessionMap(sessionMapRef.current);
+          if (!streamedContent || queueDone) return;
+          if (hasPendingWork()) return;
+          // 压缩中的静默合法、但上界明确：把空闲窗口收到 compactDeadline，到点
+          // 仍无事件就按原语义合成 done（compaction_end 丢了也不会永久挂着）。
+          const idleWindow = compactionActive()
+            ? Math.max(1000, compactDeadline - Date.now())
+            : IDLE_TIMEOUT_MS;
+          idleTimerRef = setTimeout(() => {
+            idleTimerRef = null;
+            // 审批/clarify 待回应 = 事件流合法静默（模型停在用户点击上），不算空闲
+            // ——重新武装继续等，不合成 done（同 scheduleSynthDone 的处理）。
+            if (hasPendingWork()) {
+              resetIdleTimer();
+              return;
             }
-          }
-          // When the backend starts retrying after an UPSTREAM API connection error,
-          // the ACP path clears the accumulated text/thinking buffers so the
-          // retry response replaces (not appends to) the partial content from
-          // the failed attempt. In serve mode this event originates from the
-          // gateway process's stderr (main.js), NOT a WS drop — the session is
-          // never rebuilt, so clearing buffers would discard already-streamed
-          // thinking/text. Only update the notice there.
-          if (method === "model/retry") {
-            const attempt = params?.attempt ?? 1;
-            const total = params?.total ?? 5;
-            const warningMessage =
-              typeof params?.message === "string"
-                ? params.message
-                : "上游连接不稳定，正在重连（第 " +
-                  attempt +
-                  "/" +
-                  total +
-                  " 次）…";
-            useHelixStore.getState().setConnectionNotice({
-              phase: "retrying",
-              attempt,
-              total,
-              message: warningMessage,
-              ts: Date.now(),
-            });
-            // Per-conversation copy — the global notice clobbers every parallel
-            // run, so the banner below reads the conversation-scoped record.
-            if (myCid) {
-              useHelixStore.getState().setSessionRetryNotice(myCid, {
-                phase: "retrying",
-                attempt,
-                total,
-                message: warningMessage,
-                ts: Date.now(),
-              });
+            if (compactionActive()) {
+              resetIdleTimer();
+              return;
             }
-            setTimeout(() => {
-              const st = useHelixStore.getState();
-              if (st.connectionNotice?.phase === "retrying") {
-                st.setConnectionNotice(null);
-              }
-              if (myCid && st.sessionRetryNotices[myCid]?.phase === "retrying") {
-                st.setSessionRetryNotice(myCid, null);
-              }
-            }, 30000);
-            return;
-          }
-          if (method === "model/warning") {
-            // 这条通道混了两类东西：扩展的 UI 播报（notify / setStatus /
-            // setWidget，网关统一映射到这里）和真实的模型告警。
-            // notify 是扩展主动对用户说话 → 落成对话流里的状态行；其余
-            // （setStatus 心跳、模型告警）仍只进调试日志，避免刷屏。
-            const raw = params?.raw as
-              | { method?: string; notifyType?: string }
-              | undefined;
-            const text =
-              typeof params?.message === "string" ? params.message : "";
-            if (raw?.method === "notify" && text) {
-              // pi-hermes-memory 的 session backfill 每次会话启动都会播报
-              // 「🧠 Session backfill complete: ...」例行状态，对用户无意义，
-              // 在前端直接静默（其余扩展播报照常展示）。
-              const notice = text.trim();
+            if (queueDone) return;
+            debug(
+              "[HelixTrace] idleDetector fired — no events for",
+              IDLE_TIMEOUT_MS,
+              "ms, synthesizing done",
+              {
+                textLen: textBufferRef.current?.length ?? 0,
+                reasoningLen: thoughtBufferRef.current?.length ?? 0,
+                stepsLen: stepsRef.current.length,
+                responseBlocksLen: responseBlocks.length,
+              },
+            );
+            enqueue(
+              "data: " +
+                JSON.stringify({
+                  type: "done",
+                  content: textBufferRef.current,
+                }),
+            );
+            queueDone = true;
+            if (queueWaiter) {
+              const w = queueWaiter;
+              queueWaiter = null;
+              w();
+            }
+          }, idleWindow);
+        };
+
+        // IMPORTANT: subscribe through helixApi() (the mode-aware facade), NOT
+        // window.electron.helix. In serve mode agent stream events (session/update,
+        // tool.*, message.*) arrive over the WS client inside serve-gateway.ts and
+        // never hit the IPC bridge — subscribing to the raw IPC onEvent left the
+        // run with "正在思考" forever (no tool cards, no text).
+        unsubscribe = helixApi()!.onEvent(
+          async (method: string, params: any) => {
+            const mySid = sessionId;
+            // True-concurrency guard: this onEvent instance belongs to the run for
+            // `mySid`. Ignore events from any OTHER session so parallel runs don't
+            // cross-contaminate each other's queues. Global gateway-level events
+            // (gateway.*) carry no session_id and are intentionally NOT filtered.
+            if (params?.session_id && params.session_id !== mySid) {
+              // 诊断（每个 run 只记首条）：内容类事件被 sid 过滤掉时打出事件携带
+              // 的 sid 与本 run 预期的 sid。「整回合收不到流式事件」若在这里出现
+              // 且两者不同，说明网关给该实例盖的 session 戳与前端预期不一致——
+              // 并行 run 互滤是正常现象，所以只挑内容类事件、且只记一次。
+              const su = params?.update?.sessionUpdate;
               if (
-                notice.startsWith("🧠 Session backfill") ||
-                notice.includes("Session backfill complete")
+                !sidMismatchDebuggedRef.current &&
+                (su === "agent_message_chunk" ||
+                  su === "agent_thought_chunk" ||
+                  su === "tool_call" ||
+                  su === "tool_call_update")
               ) {
+                sidMismatchDebuggedRef.current = true;
+                debug("[HelixTrace] content event filtered by sid mismatch", {
+                  eventSid: params.session_id,
+                  mySid,
+                  method,
+                  su,
+                });
+              }
+              return;
+            }
+            const now = Date.now();
+            // Track time to first token on first meaningful event
+            if (
+              method === "session/update" &&
+              (params?.update?.sessionUpdate === "agent_message_chunk" ||
+                params?.update?.sessionUpdate === "agent_thought_chunk")
+            ) {
+              if (promptSentAtRef.current && !firstContentAtRef.current) {
+                firstContentAtRef.current = now;
+              }
+            }
+            try {
+              // WS 断连：对齐官方——run 不结束。后端把运行中的会话 detach 继续
+              // 执行（running 会话不会被 reap），serve-gateway 会重连并 session.resume
+              // 恢复事件流。这里只显示提示并重新武装超长兜底（断连/重连期间模型
+              // 可能仍在思考、无 delta；兜底已是 5 分钟级，不会像旧 8s 那样把恢复
+              // 中的 run 砍掉）。run 的收尾交给真实完成事件或 resume 失败的 reject。
+              if (method === "gateway.disconnected") {
+                scheduleSynthDone(300000);
+                useHelixStore.getState().setConnectionNotice({
+                  phase: "error",
+                  message: "与 Helix 网关连接已断开，正在尝试恢复…",
+                  ts: Date.now(),
+                });
+                if (myCid) {
+                  useHelixStore.getState().setSessionRetryNotice(myCid, {
+                    phase: "error",
+                    message: "与 Helix 网关连接已断开，正在尝试恢复…",
+                    ts: Date.now(),
+                  });
+                }
                 return;
               }
-              setExtensionNotices((prev) =>
-                [...prev, { id: generateId(), ts: Date.now(), text }].slice(-20),
-              );
-            } else {
-              debug("[Helix] model warning:", params?.message ?? params);
-            }
-            return;
-          }
-          if (method === "gateway.retry") {
-            const phase = params?.phase as string | undefined;
-            if (isServeActive()) {
-              if (phase === "recovered") {
+              // Reconnect completed (serve-gateway already re-ran session.resume).
+              // The event stream is about to resume — clear the notice.
+              if (method === "gateway.reconnected") {
                 useHelixStore.getState().setConnectionNotice({
                   phase: "recovered",
                   message: "连接已恢复",
@@ -5619,1710 +5599,1657 @@ export function AgentFlowPanel() {
                     useHelixStore.getState().setSessionRetryNotice(myCid, null);
                   }
                 }, 2000);
-              } else {
+                return;
+              }
+              // serve-gateway 已不再主动驱逐并行会话；保留此分支仅作防御：
+              // 若未来后端在个别配置下真的回收/挤掉本 run 的会话，立即收尾，
+              // 避免静默挂到 5 分钟兜底。用户重发该消息即可在新会话上重新执行。
+              if (method === "session.evicted") {
+                debug("[HelixTrace] session.evicted →", params);
+                enqueue(
+                  "data: " +
+                    JSON.stringify({
+                      type: "error",
+                      content:
+                        "后台会话被新的对话挤占，此任务已中断，请重发该消息以重新执行。",
+                    }),
+                );
+                queueDone = true;
+                return;
+              }
+              // 主进程/serve-gateway 自动恢复了本 run 的会话（"session not found" →
+              // 重建并重放 prompt）。把 conversation→session 映射改绑到新 id，后续
+              // 消息与 RPC 使用新会话；事件流已按 WS 同序保证在新 id 下继续到达。
+              if (method === "gateway.sessionReplaced" && params?.newId) {
+                if (params?.oldId === sessionId) {
+                  debug(
+                    "[HelixTrace] 本 run 会话被替换 →",
+                    params.oldId,
+                    "→",
+                    params.newId,
+                  );
+                  sessionId = params.newId;
+                  rebindSessionSid(sessionMapRef.current, myCid, {
+                    sid: params.newId,
+                    epoch: useGatewayStore.getState().gatewayEpoch,
+                  });
+                  persistSessionMap(sessionMapRef.current);
+                }
+              }
+              // When the backend starts retrying after an UPSTREAM API connection error,
+              // the ACP path clears the accumulated text/thinking buffers so the
+              // retry response replaces (not appends to) the partial content from
+              // the failed attempt. In serve mode this event originates from the
+              // gateway process's stderr (main.js), NOT a WS drop — the session is
+              // never rebuilt, so clearing buffers would discard already-streamed
+              // thinking/text. Only update the notice there.
+              if (method === "model/retry") {
                 const attempt = params?.attempt ?? 1;
-                const total = params?.total ?? 4;
-                const serveMsg =
-                  "上游连接不稳定，正在重连（第 " +
-                  attempt +
-                  "/" +
-                  total +
-                  " 次）…";
+                const total = params?.total ?? 5;
+                const warningMessage =
+                  typeof params?.message === "string"
+                    ? params.message
+                    : "上游连接不稳定，正在重连（第 " +
+                      attempt +
+                      "/" +
+                      total +
+                      " 次）…";
                 useHelixStore.getState().setConnectionNotice({
                   phase: "retrying",
                   attempt,
                   total,
-                  message: serveMsg,
+                  message: warningMessage,
                   ts: Date.now(),
                 });
+                // Per-conversation copy — the global notice clobbers every parallel
+                // run, so the banner below reads the conversation-scoped record.
                 if (myCid) {
-                  useHelixStore
-                    .getState()
-                    .setSessionRetryNotice(myCid, {
-                      phase: "retrying",
-                      attempt,
-                      total,
-                      message: serveMsg,
-                      ts: Date.now(),
-                    });
+                  useHelixStore.getState().setSessionRetryNotice(myCid, {
+                    phase: "retrying",
+                    attempt,
+                    total,
+                    message: warningMessage,
+                    ts: Date.now(),
+                  });
                 }
                 setTimeout(() => {
                   const st = useHelixStore.getState();
                   if (st.connectionNotice?.phase === "retrying") {
                     st.setConnectionNotice(null);
                   }
-                  if (myCid && st.sessionRetryNotices[myCid]?.phase === "retrying") {
+                  if (
+                    myCid &&
+                    st.sessionRetryNotices[myCid]?.phase === "retrying"
+                  ) {
                     st.setSessionRetryNotice(myCid, null);
                   }
                 }, 30000);
+                return;
               }
-              return;
-            }
-            if (phase === "error") {
-              textBufferRef.current = "";
-              thoughtBufferRef.current = "";
-              // 缓冲被清空，阶段基准必须同步归零（否则重连后新思考会被 slice 掉）。
-              thinkingPhaseBaseRef.current = 0;
-              thinkingPhaseStartRef.current = 0;
-              lastStreamedTextRef.current = "";
-              streamCappedRef.current = false;
-              thinkingCappedRef.current = false;
-              pendingTextRef.current = "";
-              pendingThinkingRef.current = "";
-              pendingBlocksRef.current = [];
-              // Strip trailing thinking/text blocks so re-streamed content
-              // replaces (not appends to) the in-progress response blocks, preventing
-              // duplicate thinking/text output after reconnect.
-              uiRB((prev) => {
-                const nb = prev.slice();
-                while (nb.length > 0) {
-                  const last = nb[nb.length - 1];
-                  if (last.type === "thinking" || last.type === "text")
-                    nb.pop();
-                  else break;
+              if (method === "model/warning") {
+                // 这条通道混了两类东西：扩展的 UI 播报（notify / setStatus /
+                // setWidget，网关统一映射到这里）和真实的模型告警。
+                // notify 是扩展主动对用户说话 → 落成对话流里的状态行；其余
+                // （setStatus 心跳、模型告警）仍只进调试日志，避免刷屏。
+                const raw = params?.raw as
+                  { method?: string; notifyType?: string } | undefined;
+                const text =
+                  typeof params?.message === "string" ? params.message : "";
+                if (raw?.method === "notify" && text) {
+                  // pi-hermes-memory 的 session backfill 每次会话启动都会播报
+                  // 「🧠 Session backfill complete: ...」例行状态，对用户无意义，
+                  // 在前端直接静默（其余扩展播报照常展示）。
+                  const notice = text.trim();
+                  if (
+                    notice.startsWith("🧠 Session backfill") ||
+                    notice.includes("Session backfill complete")
+                  ) {
+                    return;
+                  }
+                  setExtensionNotices((prev) =>
+                    [...prev, { id: generateId(), ts: Date.now(), text }].slice(
+                      -20,
+                    ),
+                  );
+                } else {
+                  debug("[Helix] model warning:", params?.message ?? params);
                 }
-                return nb;
-              });
-              uiST("");
-              useHelixStore.getState().setConnectionNotice({
-                phase: "error",
-                message: "连接中断",
-                ts: Date.now(),
-              });
-              if (myCid) {
-                useHelixStore.getState().setSessionRetryNotice(myCid, {
-                  phase: "error",
-                  message: "连接中断",
-                  ts: Date.now(),
-                });
+                return;
               }
-            } else if (phase === "retrying") {
-              textBufferRef.current = "";
-              thoughtBufferRef.current = "";
-              // 缓冲被清空，阶段基准必须同步归零（否则重试后新思考会被 slice 掉）。
-              thinkingPhaseBaseRef.current = 0;
-              thinkingPhaseStartRef.current = 0;
-              lastStreamedTextRef.current = "";
-              streamCappedRef.current = false;
-              thinkingCappedRef.current = false;
-              pendingTextRef.current = "";
-              pendingThinkingRef.current = "";
-              pendingBlocksRef.current = [];
-              uiST("");
-              // Strip trailing thinking/text blocks so re-streamed content
-              // replaces (not appends to) the in-progress response blocks, preventing
-              // duplicate thinking/text output after reconnect.
-              uiRB((prev) => {
-                const nb = prev.slice();
-                while (nb.length > 0) {
-                  const last = nb[nb.length - 1];
-                  if (last.type === "thinking" || last.type === "text")
-                    nb.pop();
-                  else break;
+              if (method === "gateway.retry") {
+                const phase = params?.phase as string | undefined;
+                if (isServeActive()) {
+                  if (phase === "recovered") {
+                    useHelixStore.getState().setConnectionNotice({
+                      phase: "recovered",
+                      message: "连接已恢复",
+                      ts: Date.now(),
+                    });
+                    setTimeout(() => {
+                      useHelixStore.getState().setConnectionNotice(null);
+                      if (myCid) {
+                        useHelixStore
+                          .getState()
+                          .setSessionRetryNotice(myCid, null);
+                      }
+                    }, 2000);
+                  } else {
+                    const attempt = params?.attempt ?? 1;
+                    const total = params?.total ?? 4;
+                    const serveMsg =
+                      "上游连接不稳定，正在重连（第 " +
+                      attempt +
+                      "/" +
+                      total +
+                      " 次）…";
+                    useHelixStore.getState().setConnectionNotice({
+                      phase: "retrying",
+                      attempt,
+                      total,
+                      message: serveMsg,
+                      ts: Date.now(),
+                    });
+                    if (myCid) {
+                      useHelixStore.getState().setSessionRetryNotice(myCid, {
+                        phase: "retrying",
+                        attempt,
+                        total,
+                        message: serveMsg,
+                        ts: Date.now(),
+                      });
+                    }
+                    setTimeout(() => {
+                      const st = useHelixStore.getState();
+                      if (st.connectionNotice?.phase === "retrying") {
+                        st.setConnectionNotice(null);
+                      }
+                      if (
+                        myCid &&
+                        st.sessionRetryNotices[myCid]?.phase === "retrying"
+                      ) {
+                        st.setSessionRetryNotice(myCid, null);
+                      }
+                    }, 30000);
+                  }
+                  return;
                 }
-                return nb;
-              });
-              const attempt = params?.attempt ?? 1;
-              const total = params?.total ?? 4;
-              const acpRetryMsg =
-                "连接中断，正在重连... (" + attempt + "/" + total + ")";
-              useHelixStore.getState().setConnectionNotice({
-                phase: "retrying",
-                attempt,
-                total,
-                message: acpRetryMsg,
-                ts: Date.now(),
-              });
-              if (myCid) {
-                useHelixStore.getState().setSessionRetryNotice(myCid, {
-                  phase: "retrying",
-                  attempt,
-                  total,
-                  message: acpRetryMsg,
-                  ts: Date.now(),
-                });
+                if (phase === "error") {
+                  textBufferRef.current = "";
+                  thoughtBufferRef.current = "";
+                  // 缓冲被清空，阶段基准必须同步归零（否则重连后新思考会被 slice 掉）。
+                  thinkingPhaseBaseRef.current = 0;
+                  thinkingPhaseStartRef.current = 0;
+                  lastStreamedTextRef.current = "";
+                  streamCappedRef.current = false;
+                  thinkingCappedRef.current = false;
+                  pendingTextRef.current = "";
+                  pendingThinkingRef.current = "";
+                  pendingBlocksRef.current = [];
+                  // Strip trailing thinking/text blocks so re-streamed content
+                  // replaces (not appends to) the in-progress response blocks, preventing
+                  // duplicate thinking/text output after reconnect.
+                  uiRB((prev) => {
+                    const nb = prev.slice();
+                    while (nb.length > 0) {
+                      const last = nb[nb.length - 1];
+                      if (last.type === "thinking" || last.type === "text")
+                        nb.pop();
+                      else break;
+                    }
+                    return nb;
+                  });
+                  uiST("");
+                  useHelixStore.getState().setConnectionNotice({
+                    phase: "error",
+                    message: "连接中断",
+                    ts: Date.now(),
+                  });
+                  if (myCid) {
+                    useHelixStore.getState().setSessionRetryNotice(myCid, {
+                      phase: "error",
+                      message: "连接中断",
+                      ts: Date.now(),
+                    });
+                  }
+                } else if (phase === "retrying") {
+                  textBufferRef.current = "";
+                  thoughtBufferRef.current = "";
+                  // 缓冲被清空，阶段基准必须同步归零（否则重试后新思考会被 slice 掉）。
+                  thinkingPhaseBaseRef.current = 0;
+                  thinkingPhaseStartRef.current = 0;
+                  lastStreamedTextRef.current = "";
+                  streamCappedRef.current = false;
+                  thinkingCappedRef.current = false;
+                  pendingTextRef.current = "";
+                  pendingThinkingRef.current = "";
+                  pendingBlocksRef.current = [];
+                  uiST("");
+                  // Strip trailing thinking/text blocks so re-streamed content
+                  // replaces (not appends to) the in-progress response blocks, preventing
+                  // duplicate thinking/text output after reconnect.
+                  uiRB((prev) => {
+                    const nb = prev.slice();
+                    while (nb.length > 0) {
+                      const last = nb[nb.length - 1];
+                      if (last.type === "thinking" || last.type === "text")
+                        nb.pop();
+                      else break;
+                    }
+                    return nb;
+                  });
+                  const attempt = params?.attempt ?? 1;
+                  const total = params?.total ?? 4;
+                  const acpRetryMsg =
+                    "连接中断，正在重连... (" + attempt + "/" + total + ")";
+                  useHelixStore.getState().setConnectionNotice({
+                    phase: "retrying",
+                    attempt,
+                    total,
+                    message: acpRetryMsg,
+                    ts: Date.now(),
+                  });
+                  if (myCid) {
+                    useHelixStore.getState().setSessionRetryNotice(myCid, {
+                      phase: "retrying",
+                      attempt,
+                      total,
+                      message: acpRetryMsg,
+                      ts: Date.now(),
+                    });
+                  }
+                } else if (phase === "recovered") {
+                  useHelixStore.getState().setConnectionNotice({
+                    phase: "recovered",
+                    message: "连接已恢复",
+                    ts: Date.now(),
+                  });
+                  setTimeout(() => {
+                    useHelixStore.getState().setConnectionNotice(null);
+                    if (myCid) {
+                      useHelixStore
+                        .getState()
+                        .setSessionRetryNotice(myCid, null);
+                    }
+                  }, 2000);
+                }
+                // Safety: clear stale retrying notices after 30 seconds
+                if (phase === "retrying") {
+                  setTimeout(() => {
+                    const st = useHelixStore.getState();
+                    if (st.connectionNotice?.phase === "retrying") {
+                      st.setConnectionNotice(null);
+                    }
+                    if (
+                      myCid &&
+                      st.sessionRetryNotices[myCid]?.phase === "retrying"
+                    ) {
+                      st.setSessionRetryNotice(myCid, null);
+                    }
+                  }, 30000);
+                }
               }
-            } else if (phase === "recovered") {
-              useHelixStore.getState().setConnectionNotice({
-                phase: "recovered",
-                message: "连接已恢复",
-                ts: Date.now(),
-              });
-              setTimeout(() => {
-                useHelixStore.getState().setConnectionNotice(null);
-                if (myCid) {
+              const parsed = mapHelixEvent(method, params);
+              // 抓取后端 message.complete 透传的 row_id，落库时盖到 ChatMessage 上，供撤回同步后端用。
+              if (method === "message.complete") {
+                const rid = params?.row_id ?? params?.payload?.row_id;
+                if (rid != null) {
+                  const n =
+                    typeof rid === "string" ? parseInt(rid, 10) : Number(rid);
+                  if (!Number.isNaN(n)) pendingAssistantRowIdRef.current = n;
+                }
+              }
+              if (parsed) {
+                enqueue("data: " + JSON.stringify(parsed));
+              }
+              // 子代理（delegate_task）事件：实时写入 store.subAgents，
+              // 供 DelegationsPanel 顶部"实时"区渲染（磁盘 live 日志仍作兜底）。
+              // 这些事件携带父会话 sid，已通过上面的 true-concurrency 过滤。
+              if (
+                method === "subagent.start" ||
+                method === "subagent.thinking" ||
+                method === "subagent.tool" ||
+                method === "subagent.complete"
+              ) {
+                try {
+                  handleSubagentEvent(method, params);
+                } catch (e) {
+                  console.error("[Helix] subagent event handling error", e);
+                }
+              }
+              if (method === "session/update") {
+                const su =
+                  params?.update?.sessionUpdate || params?.update?.type || "";
+                // pi 的 in-run 自动压缩（网关把 compaction_start/end 转成这条
+                // session/update）。两件事：① 给本轮的看门狗划出压缩窗口，窗口内
+                // 事件流静默是合法的，绝不合成 done —— 合成就等于退订，压缩完继续
+                // 输出的那一轮没人接（「压缩上下文后要手动继续」根因）；② 复用对话
+                // 流已有的「压缩中…」动画行（compressionBusyBySession），让这几
+                // 十秒有可见反馈，而不是界面看着像冻住。
+                if (su === "compaction_start" || su === "compaction_end") {
+                  const busyKey =
+                    myCid ??
+                    useHelixStore.getState().currentSessionId ??
+                    DRAFT_SESSION_KEY;
+                  const st = useHelixStore.getState();
+                  if (su === "compaction_start") {
+                    compactDeadline = Date.now() + COMPACT_GUARD_MS;
+                    st.setCompressionBusyForSession(busyKey, true);
+                  } else {
+                    compactDeadline = 0;
+                    st.clearCompressionBusyForSession(busyKey);
+                    const u = params?.update;
+                    // 手动 /compact 有自己的分隔线（带压缩前后 token 对比），这里
+                    // 只补 in-run 自发压缩的可见提示。
+                    if (u && !u.aborted && u.reason !== "manual") {
+                      setAutoCompressNotices((prev) => {
+                        const last = prev[prev.length - 1];
+                        // 只挡同一时刻的重复帧；后续再压缩还要再提示一次。
+                        if (last && Date.now() - last.ts < 5000) return prev;
+                        return [
+                          ...prev,
+                          {
+                            id: generateId(),
+                            ts: Date.now(),
+                            text: "上下文已自动压缩",
+                          },
+                        ];
+                      });
+                    }
+                  }
+                  // 已 arm 的空闲定时器要按新窗口重排：压缩开始时拉长，结束时
+                  // 恢复正常的 90s 判定。
+                  resetIdleTimer();
+                }
+                // pi 计划模式扩展（@narumitw/pi-plan-mode）：模型调用
+                // plan_mode_complete 工具交出决策就绪的完整方案时，网关转发
+                // plan_complete。立刻弹“计划审批”浮条并展示真实 plan 工件，
+                // 不再等回合结束从聊天文本里猜。
+                if (su === "plan_complete") {
+                  const planText = String(params?.update?.plan ?? "");
+                  if (planText.trim()) {
+                    // 键用**本轮 run 的 cid**（myCid），和上面 run 结束时的兜底浮条
+                    // 同一口径：后台跑完的计划属于那条对话，切过去才显示。写
+                    // currentSessionId 会把别的对话的方案挂到当前对话上。
+                    const cid =
+                      myCid ?? useHelixStore.getState().currentSessionId;
+                    setPendingPlanReview({
+                      sessionId: cid ?? DRAFT_SESSION_KEY,
+                      content: planText,
+                    });
+                  }
+                }
+                // Diff capture —— 「已修改」汇总卡片的**唯一登记点**。
+                // pi 网关把真 diff 放在 `update.details.patch`（edit/write 白名单转发；
+                // write 的由网关在工具执行前读旧内容后合成），旧 ACP 放 `update.inlineDiff`。
+                // 两者都在 registerFileChangesFromToolUpdate 里按优先级处理；本文件不再
+                // 自己实现校验/路径推断 —— 那段逻辑 2026-09-22 整块丢失过一次，卡片因此静默消失。
+                if (su === "tool_call_update") {
+                  // 这条对话的项目根，与 ⑤ 的 `ownWorkDir` 同一条链（落盘的 workDir
+                  // 优先于界面记的）。两点差别：
+                  //   - 只在「本对话就是前台对话」时才用界面值。后台 run 读
+                  //     activeSessionWorkDir 会拿到**别的项目**的根，于是把自己的
+                  //     合法改动判成"项目外"滤掉 —— 比不过滤更糟。
+                  //   - 判不出来就传 null：远程对话（`remote://…` 没有本机前缀语义）
+                  //     和根未知的对话一律保守放行，宁可不滤也不丢卡片。
+                  const st = useHelixStore.getState();
+                  const isFront = !myCid || st.currentSessionId === myCid;
+                  const runRoot = localProjectRoot(
+                    record?.workDir ??
+                      (isFront
+                        ? (st.activeSessionWorkDir ?? st.selectedWorkDir)
+                        : null) ??
+                      null,
+                  );
+                  const registered = registerFileChangesFromToolUpdate(
+                    params?.update,
+                    {
+                      runChanges: runFileChangesRef.current,
+                      addPendingChange: storeActions.addPendingChange,
+                      afterRegister: syncDraft,
+                      projectRoot: runRoot,
+                    },
+                  );
+                  // 工作区的文件确实变了 → 让「更改」列表与右上角胶囊立刻重算，
+                  // 不必等它的 5s 轮询（hook 里 400ms 合并，一轮多次写不会各起一个 git）。
+                  if (registered) storeActions.bumpGitChangeRevision();
+                }
+              }
+              if (
+                parsed &&
+                parsed.type === "done" &&
+                doneProcessedRef.current
+              ) {
+                // 后续重复的 done 事件带权威正文时，就地修正已提交消息，避免最终文本缺字。
+                patchDoneMessage(
+                  typeof parsed.content === "string" ? parsed.content : "",
+                );
+              }
+              if (parsed && parsed.type === "done") {
+                queueDone = true;
+                if (idleTimerRef) {
+                  clearTimeout(idleTimerRef);
+                  idleTimerRef = null;
+                }
+              }
+              // 注意：error 事件不再在这里置 queueDone。error 分两类——终止性
+              // （prompt 通道关闭 / session.evicted，入队前已各自显式置位）和中游
+              // 可恢复（上游抖动、后端自动重试后流继续）。在这里一刀切置位会把
+              // 可恢复错误当终止处理，下游 error 分支随之清空思考/正文缓冲
+              // （"输出中思考突然清空又继续输出"的根因之一）。
+              if (
+                parsed &&
+                (parsed.type === "text" ||
+                  parsed.type === "thinking" ||
+                  parsed.type === "tool_call" ||
+                  parsed.type === "tool_result")
+              ) {
+                // 诊断：本 run 收到的首个内容事件。配合网关侧的 turn event 标记
+                // 二分「整回合无流式输出」——网关打了 turn event 而这里没打 =
+                // 丢在事件从网关到 run 的这一段。
+                if (!streamedContent) {
+                  debug("[HelixTrace] first streamed content arrived", {
+                    mySid: sessionId,
+                    type: parsed.type,
+                    method,
+                  });
+                }
+                streamedContent = true;
+                if (!firstContentAtRef.current)
+                  firstContentAtRef.current = Date.now();
+                scheduleSynthDone(300000);
+                resetIdleTimer(); // 重置空闲检测：有新内容 → 模型还在说，不判定结束
+              }
+              // A real text chunk (or tool result) means the gateway is delivering again →
+              // clear any transient "reconnecting" notice so it doesn't linger.
+              if (
+                parsed &&
+                (parsed.type === "text" || parsed.type === "tool_result")
+              ) {
+                const cur = useHelixStore.getState().connectionNotice;
+                if (cur && cur.phase !== "recovered") {
+                  useHelixStore.getState().setConnectionNotice(null);
+                }
+                const curSession = myCid
+                  ? useHelixStore.getState().sessionRetryNotices[myCid]
+                  : undefined;
+                if (curSession && curSession.phase !== "recovered") {
                   useHelixStore.getState().setSessionRetryNotice(myCid, null);
                 }
-              }, 2000);
-            }
-            // Safety: clear stale retrying notices after 30 seconds
-            if (phase === "retrying") {
-              setTimeout(() => {
-                const st = useHelixStore.getState();
-                if (st.connectionNotice?.phase === "retrying") {
-                  st.setConnectionNotice(null);
-                }
-                if (myCid && st.sessionRetryNotices[myCid]?.phase === "retrying") {
-                  st.setSessionRetryNotice(myCid, null);
-                }
-              }, 30000);
-            }
-          }
-          const parsed = mapHelixEvent(method, params);
-          // 抓取后端 message.complete 透传的 row_id，落库时盖到 ChatMessage 上，供撤回同步后端用。
-          if (method === "message.complete") {
-            const rid = params?.row_id ?? params?.payload?.row_id;
-            if (rid != null) {
-              const n =
-                typeof rid === "string" ? parseInt(rid, 10) : Number(rid);
-              if (!Number.isNaN(n)) pendingAssistantRowIdRef.current = n;
-            }
-          }
-          if (parsed) {
-            enqueue("data: " + JSON.stringify(parsed));
-          }
-          // 子代理（delegate_task）事件：实时写入 store.subAgents，
-          // 供 DelegationsPanel 顶部"实时"区渲染（磁盘 live 日志仍作兜底）。
-          // 这些事件携带父会话 sid，已通过上面的 true-concurrency 过滤。
-          if (
-            method === "subagent.start" ||
-            method === "subagent.thinking" ||
-            method === "subagent.tool" ||
-            method === "subagent.complete"
-          ) {
-            try {
-              handleSubagentEvent(method, params);
-            } catch (e) {
-              console.error("[Helix] subagent event handling error", e);
-            }
-          }
-          // 自动压缩实时提示：检测到压缩驱动的 session 轮转事件时，在对话流中插入一条居中状态行。
-          if (parsed && parsed.type === "auto_compressed") {
-            setAutoCompressNotices((prev) => {
-              const text = "上下文已自动压缩";
-              if (prev.some((n) => n.text === text)) return prev;
-              return [...prev, { id: generateId(), ts: Date.now(), text }];
-            });
-          }
-          if (method === "session/update") {
-            const su =
-              params?.update?.sessionUpdate || params?.update?.type || "";
-            // pi 计划模式扩展（@narumitw/pi-plan-mode）：模型调用
-            // plan_mode_complete 工具交出决策就绪的完整方案时，网关转发
-            // plan_complete。立刻弹“计划审批”浮条并展示真实 plan 工件，
-            // 不再等回合结束从聊天文本里猜。
-            if (su === "plan_complete") {
-              const planText = String(params?.update?.plan ?? "");
-              if (planText.trim()) {
-                // 键用**本轮 run 的 cid**（myCid），和上面 run 结束时的兜底浮条
-                // 同一口径：后台跑完的计划属于那条对话，切过去才显示。写
-                // currentSessionId 会把别的对话的方案挂到当前对话上。
-                const cid = myCid ?? useHelixStore.getState().currentSessionId;
-                setPendingPlanReview({
-                  sessionId: cid ?? DRAFT_SESSION_KEY,
-                  content: planText,
-                });
               }
-            }
-            // Diff capture —— 「已修改」汇总卡片的**唯一登记点**。
-            // pi 网关把真 diff 放在 `update.details.patch`（edit/write 白名单转发；
-            // write 的由网关在工具执行前读旧内容后合成），旧 ACP 放 `update.inlineDiff`。
-            // 两者都在 registerFileChangesFromToolUpdate 里按优先级处理；本文件不再
-            // 自己实现校验/路径推断 —— 那段逻辑 2026-09-22 整块丢失过一次，卡片因此静默消失。
-            if (su === "tool_call_update") {
-              // 这条对话的项目根，与 ⑤ 的 `ownWorkDir` 同一条链（落盘的 workDir
-              // 优先于界面记的）。两点差别：
-              //   - 只在「本对话就是前台对话」时才用界面值。后台 run 读
-              //     activeSessionWorkDir 会拿到**别的项目**的根，于是把自己的
-              //     合法改动判成"项目外"滤掉 —— 比不过滤更糟。
-              //   - 判不出来就传 null：远程对话（`remote://…` 没有本机前缀语义）
-              //     和根未知的对话一律保守放行，宁可不滤也不丢卡片。
-              const st = useHelixStore.getState();
-              const isFront = !myCid || st.currentSessionId === myCid;
-              const runRoot = localProjectRoot(
-                record?.workDir ??
-                  (isFront
-                    ? st.activeSessionWorkDir ?? st.selectedWorkDir
-                    : null) ??
-                  null,
-              );
-              const registered = registerFileChangesFromToolUpdate(
-                params?.update,
-                {
-                  runChanges: runFileChangesRef.current,
-                  addPendingChange: storeActions.addPendingChange,
-                  afterRegister: syncDraft,
-                  projectRoot: runRoot,
-                },
-              );
-              // 工作区的文件确实变了 → 让「更改」列表与右上角胶囊立刻重算，
-              // 不必等它的 5s 轮询（hook 里 400ms 合并，一轮多次写不会各起一个 git）。
-              if (registered) storeActions.bumpGitChangeRevision();
-            }
-          }
-          if (parsed && parsed.type === "done" && doneProcessedRef.current) {
-            // 后续重复的 done 事件带权威正文时，就地修正已提交消息，避免最终文本缺字。
-            patchDoneMessage(
-              typeof parsed.content === "string" ? parsed.content : "",
-            );
-          }
-          if (parsed && parsed.type === "done") {
-            queueDone = true;
-            if (idleTimerRef) {
-              clearTimeout(idleTimerRef);
-              idleTimerRef = null;
-            }
-          }
-          // 注意：error 事件不再在这里置 queueDone。error 分两类——终止性
-          // （prompt 通道关闭 / session.evicted，入队前已各自显式置位）和中游
-          // 可恢复（上游抖动、后端自动重试后流继续）。在这里一刀切置位会把
-          // 可恢复错误当终止处理，下游 error 分支随之清空思考/正文缓冲
-          // （"输出中思考突然清空又继续输出"的根因之一）。
-          if (
-            parsed &&
-            (parsed.type === "text" ||
-              parsed.type === "thinking" ||
-              parsed.type === "tool_call" ||
-              parsed.type === "tool_result")
-          ) {
-            // 诊断：本 run 收到的首个内容事件。配合网关侧的 turn event 标记
-            // 二分「整回合无流式输出」——网关打了 turn event 而这里没打 =
-            // 丢在事件从网关到 run 的这一段。
-            if (!streamedContent) {
-              debug("[HelixTrace] first streamed content arrived", {
-                mySid: sessionId,
-                type: parsed.type,
-                method,
-              });
-            }
-            streamedContent = true;
-            if (!firstContentAtRef.current)
-              firstContentAtRef.current = Date.now();
-            scheduleSynthDone(300000);
-            resetIdleTimer(); // 重置空闲检测：有新内容 → 模型还在说，不判定结束
-          }
-          // A real text chunk (or tool result) means the gateway is delivering again →
-          // clear any transient "reconnecting" notice so it doesn't linger.
-          if (
-            parsed &&
-            (parsed.type === "text" || parsed.type === "tool_result")
-          ) {
-            const cur = useHelixStore.getState().connectionNotice;
-            if (cur && cur.phase !== "recovered") {
-              useHelixStore.getState().setConnectionNotice(null);
-            }
-            const curSession = myCid
-              ? useHelixStore.getState().sessionRetryNotices[myCid]
-              : undefined;
-            if (curSession && curSession.phase !== "recovered") {
-              useHelixStore.getState().setSessionRetryNotice(myCid, null);
-            }
-          }
-        } catch (e) {
-          console.error("[Helix] event handling error", e);
-        }
-      });
-
-      // Build a multimodal prompt: image attachments + inline text files, then the
-      // user's text. Images are routed through the auxiliary vision model when one is
-      // configured (image → text description, so a text-only main model can still
-      // "see"); otherwise they pass through as native image_url blocks. The Rust
-      // gateway (`prompt_parts`) turns image_url data-URLs into pi ImageContent and
-      // concatenates the text blocks into the message.
-      const promptItems: Array<Record<string, any>> = [];
-      const allImages = [
-        ...(imagesSnapshot || []).map((i) => i.dataUrl).filter(Boolean),
-        ...(filesSnapshot || [])
-          .filter((f) => f.kind === "image" && f.dataUrl)
-          .map((f) => f.dataUrl as string),
-      ];
-      const visionApi = (window as any).electron?.vision;
-      // 视觉模型失败以前是静默回退：配置写错（例如把"显示名"当成 API 的 model
-      // code 填进去 → 1211 模型不存在）时，用户只看到主模型"不支持图片"，完全
-      // 不知道是配置问题。这里把失败原因收集起来，发完图给一条明确的提示。
-      const visionErrors: string[] = [];
-      const imageBlocks: Array<Record<string, any>> = await Promise.all(
-        allImages.map(async (url) => {
-          if (url && visionApi?.describe) {
-            try {
-              const desc = await visionApi.describe(url);
-              if (typeof desc === "string" && desc.trim()) {
-                return {
-                  type: "text",
-                  text: `[图片内容（视觉模型转述，供无法直接看图的模型参考）]\n${desc.trim()}`,
-                } as Record<string, any>;
-              }
-              visionErrors.push("视觉模型返回了空描述");
             } catch (e) {
-              // 视觉模型调用失败（未配置 / 鉴权失败 / 模型 code 写错）→ 回退原生 image_url
-              visionErrors.push(e instanceof Error ? e.message : String(e));
+              console.error("[Helix] event handling error", e);
             }
-          } else if (url) {
-            visionErrors.push("视觉模型接口不可用（window.electron.vision 缺失）");
-          }
-          return { type: "image_url", image_url: { url } } as Record<string, any>;
-        }),
-      );
-      if (visionErrors.length > 0) {
-        console.warn(
-          "[Helix] vision model unavailable, falling back to native image blocks:",
-          visionErrors,
+          },
         );
-        storeActions.showToast({
-          type: "warning",
-          title: "视觉模型调用失败，图片已按原生方式发送",
-          description: String(visionErrors[0]).slice(0, 200),
-        });
-      }
-      for (const block of imageBlocks) promptItems.push(block);
-      let fileContext = "";
-      for (const f of filesSnapshot || []) {
-        // 只要有可解码的文本内容就 inline，不依赖 kind（覆盖扩展名未识别的文本文件）
-        const hasText = f.base64
-          ? (() => {
+
+        // Build a multimodal prompt: image attachments + inline text files, then the
+        // user's text. Images are routed through the auxiliary vision model when one is
+        // configured (image → text description, so a text-only main model can still
+        // "see"); otherwise they pass through as native image_url blocks. The Rust
+        // gateway (`prompt_parts`) turns image_url data-URLs into pi ImageContent and
+        // concatenates the text blocks into the message.
+        const promptItems: Array<Record<string, any>> = [];
+        const allImages = [
+          ...(imagesSnapshot || []).map((i) => i.dataUrl).filter(Boolean),
+          ...(filesSnapshot || [])
+            .filter((f) => f.kind === "image" && f.dataUrl)
+            .map((f) => f.dataUrl as string),
+        ];
+        const visionApi = (window as any).electron?.vision;
+        // 视觉模型失败以前是静默回退：配置写错（例如把"显示名"当成 API 的 model
+        // code 填进去 → 1211 模型不存在）时，用户只看到主模型"不支持图片"，完全
+        // 不知道是配置问题。这里把失败原因收集起来，发完图给一条明确的提示。
+        const visionErrors: string[] = [];
+        const imageBlocks: Array<Record<string, any>> = await Promise.all(
+          allImages.map(async (url) => {
+            if (url && visionApi?.describe) {
               try {
-                decodeBase64Utf8(f.base64!);
-                return true;
-              } catch {
-                return false;
+                const desc = await visionApi.describe(url);
+                if (typeof desc === "string" && desc.trim()) {
+                  return {
+                    type: "text",
+                    text: `[图片内容（视觉模型转述，供无法直接看图的模型参考）]\n${desc.trim()}`,
+                  } as Record<string, any>;
+                }
+                visionErrors.push("视觉模型返回了空描述");
+              } catch (e) {
+                // 视觉模型调用失败（未配置 / 鉴权失败 / 模型 code 写错）→ 回退原生 image_url
+                visionErrors.push(e instanceof Error ? e.message : String(e));
               }
-            })()
-          : false;
-        if (hasText) {
-          const maxInline = 200 * 1024;
-          try {
-            const content = decodeBase64Utf8(f.base64!);
-            if (f.size && f.size > maxInline) {
-              const head = content.slice(0, maxInline);
-              const tail = f.path
-                ? ` 完整内容可用 Read 工具读取: ${f.path.replace(/\\/g, "/")}`
-                : "";
-              fileContext += `\n\n--- 文件 ${f.name} 的内容(前 ${formatBytes(maxInline)}) ---\n${head}\n...(内容较长已截断)${tail}`;
-            } else {
-              fileContext += `\n\n--- 文件 ${f.name} 的内容 ---\n${content}`;
+            } else if (url) {
+              visionErrors.push(
+                "视觉模型接口不可用（window.electron.vision 缺失）",
+              );
             }
-          } catch {
-            /* not text */
-          }
-        } else {
-          // 二进制或无法解码：仅给路径提示，依赖 Electron/Tauri 提供真实路径让模型 Read
-          fileContext += `\n\n[已附加文件: ${f.name} (${formatBytes(f.size)})]`;
-          if (f.path) {
-            const normalizedPath = f.path.replace(/\\/g, "/");
-            fileContext += ` 文件路径: ${normalizedPath}`;
+            return { type: "image_url", image_url: { url } } as Record<
+              string,
+              any
+            >;
+          }),
+        );
+        if (visionErrors.length > 0) {
+          console.warn(
+            "[Helix] vision model unavailable, falling back to native image blocks:",
+            visionErrors,
+          );
+          storeActions.showToast({
+            type: "warning",
+            title: "视觉模型调用失败，图片已按原生方式发送",
+            description: String(visionErrors[0]).slice(0, 200),
+          });
+        }
+        for (const block of imageBlocks) promptItems.push(block);
+        let fileContext = "";
+        for (const f of filesSnapshot || []) {
+          // 只要有可解码的文本内容就 inline，不依赖 kind（覆盖扩展名未识别的文本文件）
+          const hasText = f.base64
+            ? (() => {
+                try {
+                  decodeBase64Utf8(f.base64!);
+                  return true;
+                } catch {
+                  return false;
+                }
+              })()
+            : false;
+          if (hasText) {
+            const maxInline = 200 * 1024;
+            try {
+              const content = decodeBase64Utf8(f.base64!);
+              if (f.size && f.size > maxInline) {
+                const head = content.slice(0, maxInline);
+                const tail = f.path
+                  ? ` 完整内容可用 Read 工具读取: ${f.path.replace(/\\/g, "/")}`
+                  : "";
+                fileContext += `\n\n--- 文件 ${f.name} 的内容(前 ${formatBytes(maxInline)}) ---\n${head}\n...(内容较长已截断)${tail}`;
+              } else {
+                fileContext += `\n\n--- 文件 ${f.name} 的内容 ---\n${content}`;
+              }
+            } catch {
+              /* not text */
+            }
+          } else {
+            // 二进制或无法解码：仅给路径提示，依赖 Electron/Tauri 提供真实路径让模型 Read
+            fileContext += `\n\n[已附加文件: ${f.name} (${formatBytes(f.size)})]`;
+            if (f.path) {
+              const normalizedPath = f.path.replace(/\\/g, "/");
+              fileContext += ` 文件路径: ${normalizedPath}`;
+            }
           }
         }
-      }
-      const promptText = (trimmed + fileContext).trim() || trimmed;
-      // 计划模式（plan）：handleRun 被批准流程重新触发时（本会话的 plan 标记
-      // 已被清成 false），这里取 live store 而非闭包——避免闭包里还是旧的 plan
-      // 态，导致批准后仍带上只读前缀，模型继续只读规划不执行。
-      // plan 模式前缀明确告诉模型：只做只读分析、给出方案，不要改文件/跑命令；
-      // 用户批准后前缀消失，模型才真正动手。
-      const runIsPlan = !!useHelixStore.getState().planModeBySession[
-        activeSessionId
-      ];
-      const finalPromptText =
-        runIsPlan
+        const promptText = (trimmed + fileContext).trim() || trimmed;
+        // 计划模式（plan）：handleRun 被批准流程重新触发时（本会话的 plan 标记
+        // 已被清成 false），这里取 live store 而非闭包——避免闭包里还是旧的 plan
+        // 态，导致批准后仍带上只读前缀，模型继续只读规划不执行。
+        // plan 模式前缀明确告诉模型：只做只读分析、给出方案，不要改文件/跑命令；
+        // 用户批准后前缀消失，模型才真正动手。
+        const runIsPlan =
+          !!useHelixStore.getState().planModeBySession[activeSessionId];
+        const finalPromptText = runIsPlan
           ? `[计划模式] 请只做只读分析并给出可执行的实施计划，不要修改任何文件、不要执行任何命令，也不要在没有明确请求时下载或访问外部资源。请以清晰的步骤列出你的方案，供用户审阅批准后再执行。\n\n${promptText}`
           : promptText;
-      promptItems.push({ type: "text", text: finalPromptText });
+        promptItems.push({ type: "text", text: finalPromptText });
 
-      // Fire the prompt — events stream back via onEvent (don't await the promise itself).
-      // ACP expects prompt as a list of content blocks, not a plain string
-      promptSentAtRef.current = Date.now();
-      // 整轮快照：在 prompt 发出**之前**把「工作区里可能被改的文件」原样存一份。
-      // 为什么不是等 tool_call 再存：那时文件已经被改了，存到的是新内容。
-      // 为什么只存 git 视角下有改动的文件：全量扫树几十万文件读不动。未初始化
-      // git 的项目退化为没有快照——那条卡片的「撤销本轮」只剩逐文件反推这一条
-      // 路，不误导用户。
-      // sessionId 一起交给后端：快照按对话留最近 N 轮，全局计数会让一条活跃
-      // 对话把别的对话的还原数据挤掉。
-      void takeRunSnapshot(sessionId);
-      helixApi()!
-        .send("session/prompt", {
-          session_id: sessionId,
-          // Multimodal blocks: vision-model descriptions and/or native image_url
-          // for attachments, followed by the text block. Rust `prompt_parts`
-          // splits this back into (message, images) for pi.
-          prompt: promptItems,
-        })
-        .then((result: any) => {
-          // session/prompt is now ack-only (official model): result == {status:'streaming'}.
-          // Completion + usage are driven by events — run_complete → done (mapHelixEvent
-          // :1848), usage:prompt-complete → addSessionUsageStats (run loop :2791). Nothing
-          // to do on the ack itself except log it; do NOT synthesize `done` here.
-          debug("[HelixTrace] session/prompt ack", {
-            sessionId,
-            runningSessionId: runningSessionIdRef.current,
-            currentSessionId,
-            result,
-          });
-          // 防御性分支（当前后端不再返回新 session_id）：serve-gateway 的
-          // prompt.submit 已改为纯 ack（{status:"streaming"}），session not
-          // found 原样上抛、由本 run 的 catch 走权威 resume 检查判定 broken。
-          // 保留此分支防止后端将来重新引入透明换绑时前端漏处理。
-          if (result?.session_id && result.session_id !== sessionId) {
-            debug(
-              "[HelixTrace] session/prompt 会话被替换 →",
+        // Fire the prompt — events stream back via onEvent (don't await the promise itself).
+        // ACP expects prompt as a list of content blocks, not a plain string
+        promptSentAtRef.current = Date.now();
+        // 整轮快照：在 prompt 发出**之前**把「工作区里可能被改的文件」原样存一份。
+        // 为什么不是等 tool_call 再存：那时文件已经被改了，存到的是新内容。
+        // 为什么只存 git 视角下有改动的文件：全量扫树几十万文件读不动。未初始化
+        // git 的项目退化为没有快照——那条卡片的「撤销本轮」只剩逐文件反推这一条
+        // 路，不误导用户。
+        // sessionId 一起交给后端：快照按对话留最近 N 轮，全局计数会让一条活跃
+        // 对话把别的对话的还原数据挤掉。
+        void takeRunSnapshot(sessionId);
+        helixApi()!
+          .send("session/prompt", {
+            session_id: sessionId,
+            // Multimodal blocks: vision-model descriptions and/or native image_url
+            // for attachments, followed by the text block. Rust `prompt_parts`
+            // splits this back into (message, images) for pi.
+            prompt: promptItems,
+          })
+          .then((result: any) => {
+            // session/prompt is now ack-only (official model): result == {status:'streaming'}.
+            // Completion + usage are driven by events — run_complete → done (mapHelixEvent
+            // :1848), usage:prompt-complete → addSessionUsageStats (run loop :2791). Nothing
+            // to do on the ack itself except log it; do NOT synthesize `done` here.
+            debug("[HelixTrace] session/prompt ack", {
               sessionId,
-              "→",
-              result.session_id,
-            );
-            sessionId = result.session_id;
-            rebindSessionSid(sessionMapRef.current, myCid, {
-              sid: result.session_id,
-              epoch: useGatewayStore.getState().gatewayEpoch,
+              runningSessionId: runningSessionIdRef.current,
+              currentSessionId,
+              result,
             });
-            persistSessionMap(sessionMapRef.current);
-          }
-        })
-        .catch(async (err: any) => {
-          const errMsg: string =
-            (typeof err === "string" ? err : err?.message) || "请求失败";
-          console.error("[Helix] session/prompt error", err);
-
-          // prompt.submit 只面对**已经恢复的** active session，它自己不做任何
-          // 恢复/重建（恢复是统一 resumeSession 的职责）。所以后端回
-          // "session not found" 时不能直接判 broken——serve 模式下的
-          // "session not found" 指的是**内存里的 ui_session 丢了**（网关重启/
-          // 回收），持久化文件可能还在、可以再恢复。这里用一次**权威 resume
-          // 检查**来区分「会话真的没了」和「只是没 attach」，再决定要不要标
-          // broken。注意：这个 resume 只用于判定生命周期状态，**不会**重发
-          // prompt（那是 prompt.submit 的职责，保持单一）。
-          if (myCid && classifyResumeError(err).code === "SESSION_NOT_FOUND") {
-            const gone = await sessionFileGone(sessionId ?? "");
-            if (!gone) {
-              // 文件还在、刚被重新 attach：不是 broken，按可恢复中断处理。
+            // 防御性分支（当前后端不再返回新 session_id）：serve-gateway 的
+            // prompt.submit 已改为纯 ack（{status:"streaming"}），session not
+            // found 原样上抛、由本 run 的 catch 走权威 resume 检查判定 broken。
+            // 保留此分支防止后端将来重新引入透明换绑时前端漏处理。
+            if (result?.session_id && result.session_id !== sessionId) {
               debug(
-                "[HelixTrace] prompt not-found 但 resume 成功 → 非 broken:",
+                "[HelixTrace] session/prompt 会话被替换 →",
                 sessionId,
+                "→",
+                result.session_id,
               );
-            } else {
-              const hstore = useHelixStore.getState();
-              hstore.markSessionBroken(myCid, errMsg);
-              hstore.showToast({
-                type: "warning",
-                title: "后端会话已失效",
-                description: "该对话的后端会话文件不存在，已标记为失效，请新建对话",
+              sessionId = result.session_id;
+              rebindSessionSid(sessionMapRef.current, myCid, {
+                sid: result.session_id,
+                epoch: useGatewayStore.getState().gatewayEpoch,
               });
+              persistSessionMap(sessionMapRef.current);
+            }
+          })
+          .catch(async (err: any) => {
+            const errMsg: string =
+              (typeof err === "string" ? err : err?.message) || "请求失败";
+            console.error("[Helix] session/prompt error", err);
+
+            // prompt.submit 只面对**已经恢复的** active session，它自己不做任何
+            // 恢复/重建（恢复是统一 resumeSession 的职责）。所以后端回
+            // "session not found" 时不能直接判 broken——serve 模式下的
+            // "session not found" 指的是**内存里的 ui_session 丢了**（网关重启/
+            // 回收），持久化文件可能还在、可以再恢复。这里用一次**权威 resume
+            // 检查**来区分「会话真的没了」和「只是没 attach」，再决定要不要标
+            // broken。注意：这个 resume 只用于判定生命周期状态，**不会**重发
+            // prompt（那是 prompt.submit 的职责，保持单一）。
+            if (
+              myCid &&
+              classifyResumeError(err).code === "SESSION_NOT_FOUND"
+            ) {
+              const gone = await sessionFileGone(sessionId ?? "");
+              if (!gone) {
+                // 文件还在、刚被重新 attach：不是 broken，按可恢复中断处理。
+                debug(
+                  "[HelixTrace] prompt not-found 但 resume 成功 → 非 broken:",
+                  sessionId,
+                );
+              } else {
+                const hstore = useHelixStore.getState();
+                hstore.markSessionBroken(myCid, errMsg);
+                hstore.showToast({
+                  type: "warning",
+                  title: "后端会话已失效",
+                  description:
+                    "该对话的后端会话文件不存在，已标记为失效，请新建对话",
+                });
+                enqueue(
+                  "data: " +
+                    JSON.stringify({
+                      type: "error",
+                      content:
+                        "SESSION_NOT_FOUND: 后端会话文件不存在，已标记为失效，请新建对话",
+                    }),
+                );
+                queueDone = true;
+                return;
+              }
+            }
+            // B: 「可恢复的中断」识别——以下三种情形都说明 prompt 的等待方被
+            // 外部清掉了（网关 kill/respawn、切项目、会话 rebind），而**不是**
+            // 模型真的失败：
+            //   1. "pi turn event channel closed" —— turn_waiter 的 oneshot 被
+            //      裸 drop。唯一能裸 drop 的路径是子进程中途死掉（pi 子进程
+            //      退出/管道 EOF 时，读者线程的死亡簿记直接清掉 armed waiter，
+            //      不发结构标记）；kill() 路径反而会发 {cancelled:true}，
+            //      不会以这条错的形式出现；
+            //   2. errMsg / err 含 "cancelled" —— C 修后 kill() 发出的结构化
+            //      取消（后端把 session/prompt 结束为 {cancelled:true} 时
+            //      serve 层/前端可能转成带 cancel 字样的错误）；
+            //   3. 会话已 rebind（runningSessionIdRef !== myCid）——旧 session
+            //      的通道提前关闭，新 session 的事件流还在推。
+            // 这些情形下不能把 queueDone 置 true 杀掉事件队列，否则 UI 提前
+            // 显示"完成"而子 agent / 重连后的真实终结信号被丢弃。交给
+            // scheduleSynthDone(5min) 兜底 + 事件流的真实终结信号收尾。
+            const channelClosed = /turn event channel closed/i.test(errMsg);
+            const cancelled =
+              /cancel/i.test(errMsg) ||
+              (err &&
+                typeof err === "object" &&
+                ("cancelled" in err || err.cancelled));
+            const stillActive = runningSessionIdRef.current === myCid;
+            const recoverable = channelClosed || cancelled || !stillActive;
+            if (stillActive && !recoverable) {
               enqueue(
                 "data: " +
                   JSON.stringify({
                     type: "error",
-                    content: "SESSION_NOT_FOUND: 后端会话文件不存在，已标记为失效，请新建对话",
+                    content: errMsg,
                   }),
               );
               queueDone = true;
-              return;
-            }
-          }
-          // B: 「可恢复的中断」识别——以下三种情形都说明 prompt 的等待方被
-          // 外部清掉了（网关 kill/respawn、切项目、会话 rebind），而**不是**
-          // 模型真的失败：
-          //   1. "pi turn event channel closed" —— turn_waiter 的 oneshot 被
-          //      裸 drop。唯一能裸 drop 的路径是子进程中途死掉（pi 子进程
-          //      退出/管道 EOF 时，读者线程的死亡簿记直接清掉 armed waiter，
-          //      不发结构标记）；kill() 路径反而会发 {cancelled:true}，
-          //      不会以这条错的形式出现；
-          //   2. errMsg / err 含 "cancelled" —— C 修后 kill() 发出的结构化
-          //      取消（后端把 session/prompt 结束为 {cancelled:true} 时
-          //      serve 层/前端可能转成带 cancel 字样的错误）；
-          //   3. 会话已 rebind（runningSessionIdRef !== myCid）——旧 session
-          //      的通道提前关闭，新 session 的事件流还在推。
-          // 这些情形下不能把 queueDone 置 true 杀掉事件队列，否则 UI 提前
-          // 显示"完成"而子 agent / 重连后的真实终结信号被丢弃。交给
-          // scheduleSynthDone(5min) 兜底 + 事件流的真实终结信号收尾。
-          const channelClosed = /turn event channel closed/i.test(errMsg);
-          const cancelled =
-            /cancel/i.test(errMsg) ||
-            (err && typeof err === "object" && ("cancelled" in err || err.cancelled));
-          const stillActive = runningSessionIdRef.current === myCid;
-          const recoverable =
-            channelClosed || cancelled || !stillActive;
-          if (stillActive && !recoverable) {
-            enqueue(
-              "data: " +
-                JSON.stringify({
-                  type: "error",
-                  content: errMsg,
-                }),
-            );
-            queueDone = true;
-          } else {
-            // 可恢复中断：不杀事件队列。若会话仍是 active 且是通道关闭，
-            // 给用户一条轻量提示（非 error 卡死态），其余交给事件流/兜底。
-            if (stillActive && channelClosed) {
-              enqueue(
-                "data: " +
-                  JSON.stringify({
-                    type: "info",
-                    content:
-                      "连接中断，正在重连/恢复…（网关重启或会话切换导致）",
-                  }),
+            } else {
+              // 可恢复中断：不杀事件队列。若会话仍是 active 且是通道关闭，
+              // 给用户一条轻量提示（非 error 卡死态），其余交给事件流/兜底。
+              if (stillActive && channelClosed) {
+                enqueue(
+                  "data: " +
+                    JSON.stringify({
+                      type: "info",
+                      content:
+                        "连接中断，正在重连/恢复…（网关重启或会话切换导致）",
+                    }),
+                );
+              }
+              debug(
+                "[HelixTrace] session/prompt error is recoverable (channelClosed=" +
+                  channelClosed +
+                  ", cancelled=" +
+                  cancelled +
+                  ", stillActive=" +
+                  stillActive +
+                  "); keeping event queue open: " +
+                  errMsg,
               );
             }
-            debug(
-              "[HelixTrace] session/prompt error is recoverable (channelClosed=" +
-                channelClosed +
-                ", cancelled=" + cancelled +
-                ", stillActive=" + stillActive +
-                "); keeping event queue open: " + errMsg,
-            );
+          });
+
+        // 提交后立即武装超长兜底：即使后端迟迟不流式（agent 构建/纯思考），
+        // 也有保险；正常内容事件会不断重置它，真实终结事件到达则作废。
+        scheduleSynthDone(300000);
+
+        // Process the event queue using the existing UI parser (unchanged below).
+        while (true) {
+          const line = dequeue();
+          if (!line) {
+            if (queueDone) break;
+            await waitForItem();
+            continue;
           }
-        });
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6);
+            if (data === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(data);
 
-      // 提交后立即武装超长兜底：即使后端迟迟不流式（agent 构建/纯思考），
-      // 也有保险；正常内容事件会不断重置它，真实终结事件到达则作废。
-      scheduleSynthDone(300000);
+              if (parsed.type === "tool_call") {
+                const toolCallId = parsed.toolCallId || "";
+                const isSubAgentTool =
+                  typeof toolCallId === "string" &&
+                  toolCallId.startsWith("sa-");
 
-      // Process the event queue using the existing UI parser (unchanged below).
-      while (true) {
-        const line = dequeue();
-        if (!line) {
-          if (queueDone) break;
-          await waitForItem();
-          continue;
-        }
-        if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-          if (data === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(data);
-
-            if (parsed.type === "tool_call") {
-              const toolCallId = parsed.toolCallId || "";
-              const isSubAgentTool =
-                typeof toolCallId === "string" && toolCallId.startsWith("sa-");
-
-              // Sub-agent tool calls: append as sub-step to the last delegate_task step
-              if (isSubAgentTool) {
-                const saStartedAt = Date.now();
-                const subStep: ExecutionStep = {
-                  id: generateId(),
-                  type: "tool_call",
-                  content: getToolDisplayLabel(
-                    parsed.toolName,
-                    parsed.toolKind,
-                    undefined,
-                    parsed.toolParams,
-                  ),
-                  toolName: parsed.toolName,
-                  toolKind: parsed.toolKind,
-                  toolParams: parsed.toolParams,
-                  timestamp: saStartedAt,
-                  startedAt: saStartedAt,
-                };
-                uiSteps((prev) => {
-                  const next = [...prev];
-                  // Find the last delegate_task step (running)
-                  for (let i = next.length - 1; i >= 0; i--) {
-                    if (
-                      next[i].type === "tool_call" &&
-                      next[i].toolName?.startsWith("SubAgent")
-                    ) {
-                      next[i] = {
-                        ...next[i],
-                        subSteps: [...(next[i].subSteps || []), subStep],
-                      };
-                      break;
+                // Sub-agent tool calls: append as sub-step to the last delegate_task step
+                if (isSubAgentTool) {
+                  const saStartedAt = Date.now();
+                  const subStep: ExecutionStep = {
+                    id: generateId(),
+                    type: "tool_call",
+                    content: getToolDisplayLabel(
+                      parsed.toolName,
+                      parsed.toolKind,
+                      undefined,
+                      parsed.toolParams,
+                    ),
+                    toolName: parsed.toolName,
+                    toolKind: parsed.toolKind,
+                    toolParams: parsed.toolParams,
+                    timestamp: saStartedAt,
+                    startedAt: saStartedAt,
+                  };
+                  uiSteps((prev) => {
+                    const next = [...prev];
+                    // Find the last delegate_task step (running)
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      if (
+                        next[i].type === "tool_call" &&
+                        next[i].toolName?.startsWith("SubAgent")
+                      ) {
+                        next[i] = {
+                          ...next[i],
+                          subSteps: [...(next[i].subSteps || []), subStep],
+                        };
+                        break;
+                      }
                     }
-                  }
-                  return next;
-                });
-                return;
-              }
-
-              // Extract file paths from tool params to track directories
-              const params = parsed.toolParams || {};
-              const pathKeys = [
-                "path",
-                "file_path",
-                "filepath",
-                "filePath",
-                "file",
-                "filename",
-              ];
-              let filePath = "";
-              for (const k of pathKeys) {
-                if (params[k] && typeof params[k] === "string") {
-                  filePath = String(params[k]);
-                  break;
+                    return next;
+                  });
+                  return;
                 }
-              }
-              if (!filePath && params.raw && typeof params.raw === "string") {
-                try {
-                  const raw = JSON.parse(params.raw);
-                  for (const k of pathKeys) {
-                    if (raw[k] && typeof raw[k] === "string") {
-                      filePath = String(raw[k]);
-                      break;
-                    }
+
+                // Extract file paths from tool params to track directories
+                const params = parsed.toolParams || {};
+                const pathKeys = [
+                  "path",
+                  "file_path",
+                  "filepath",
+                  "filePath",
+                  "file",
+                  "filename",
+                ];
+                let filePath = "";
+                for (const k of pathKeys) {
+                  if (params[k] && typeof params[k] === "string") {
+                    filePath = String(params[k]);
+                    break;
                   }
-                } catch { /* empty */}
-              }
-              if (filePath) {
-                const dir =
-                  filePath
-                    .replace(/\\/g, "/")
-                    .split("/")
-                    .slice(0, -1)
-                    .join("/") || "/";
-                storeActions.addAccessedDirectory(dir);
-              } else if (params.command && typeof params.command === "string") {
-                // Track bash commands that reference paths
-                const match = params.command.match(
-                  /[`'"]?([\w/.-]+(?:\.\w+)+)[`'"]?/g,
-                );
-                if (match) {
-                  match.forEach((p) => {
-                    const dir = p
-                      .replace(/[`'"]/g, "")
+                }
+                if (!filePath && params.raw && typeof params.raw === "string") {
+                  try {
+                    const raw = JSON.parse(params.raw);
+                    for (const k of pathKeys) {
+                      if (raw[k] && typeof raw[k] === "string") {
+                        filePath = String(raw[k]);
+                        break;
+                      }
+                    }
+                  } catch {
+                    /* empty */
+                  }
+                }
+                if (filePath) {
+                  const dir =
+                    filePath
+                      .replace(/\\/g, "/")
                       .split("/")
                       .slice(0, -1)
-                      .join("/");
-                    if (dir) storeActions.addAccessedDirectory(dir);
-                  });
+                      .join("/") || "/";
+                  storeActions.addAccessedDirectory(dir);
+                } else if (
+                  params.command &&
+                  typeof params.command === "string"
+                ) {
+                  // Track bash commands that reference paths
+                  const match = params.command.match(
+                    /[`'"]?([\w/.-]+(?:\.\w+)+)[`'"]?/g,
+                  );
+                  if (match) {
+                    match.forEach((p) => {
+                      const dir = p
+                        .replace(/[`'"]/g, "")
+                        .split("/")
+                        .slice(0, -1)
+                        .join("/");
+                      if (dir) storeActions.addAccessedDirectory(dir);
+                    });
+                  }
                 }
-              }
-              const id = generateId();
-              const toolStartedAt = Date.now();
-              const isDelegateTask = parsed.toolName?.startsWith("Delegating");
-              // All tool_calls start as 'running' so the top status bar can surface
-              // "正在执行工具：read xxx / bash xxx". They'll be marked
-              // completed/failed when a matching tool_result or error arrives.
-              const step: ExecutionStep = {
-                id,
-                type: "tool_call",
-                // content 是实时输出缓冲（tool_output_delta 往里追加），绝不能
-                // 预填类目标签——否则参数为空的调用（如 API 报错中断）会在工具
-                // 卡运行中预览行把"执行命令"原样回显一遍。标题在渲染时由
-                // toolName/toolParams 现算（inline-tool-group 的 fallbackLabel）。
-                content: "",
-                toolName: parsed.toolName,
-                toolKind: parsed.toolKind,
-                toolCallId: toolCallId || undefined,
-                toolParams: params,
-                // 计时起点 = 卡片出现（tool_call 事件）那一刻，与用户看到的转圈
-                // 区间一致；tool_result 到达时 closeToolStep 收尾。
-                timestamp: toolStartedAt,
-                startedAt: toolStartedAt,
-                status: "running",
-                subSteps: isDelegateTask ? [] : undefined,
-              };
-              uiSteps((prev) => [...prev, step]);
-              storeActions.addExecutionStep({
-                type: "tool_call",
-                toolName: parsed.toolName,
-                toolKind: parsed.toolKind,
-                path: filePath || undefined,
-                toolParams: params,
-              });
+                const id = generateId();
+                const toolStartedAt = Date.now();
+                const isDelegateTask =
+                  parsed.toolName?.startsWith("Delegating");
+                // All tool_calls start as 'running' so the top status bar can surface
+                // "正在执行工具：read xxx / bash xxx". They'll be marked
+                // completed/failed when a matching tool_result or error arrives.
+                const step: ExecutionStep = {
+                  id,
+                  type: "tool_call",
+                  // content 是实时输出缓冲（tool_output_delta 往里追加），绝不能
+                  // 预填类目标签——否则参数为空的调用（如 API 报错中断）会在工具
+                  // 卡运行中预览行把"执行命令"原样回显一遍。标题在渲染时由
+                  // toolName/toolParams 现算（inline-tool-group 的 fallbackLabel）。
+                  content: "",
+                  toolName: parsed.toolName,
+                  toolKind: parsed.toolKind,
+                  toolCallId: toolCallId || undefined,
+                  toolParams: params,
+                  // 计时起点 = 卡片出现（tool_call 事件）那一刻，与用户看到的转圈
+                  // 区间一致；tool_result 到达时 closeToolStep 收尾。
+                  timestamp: toolStartedAt,
+                  startedAt: toolStartedAt,
+                  status: "running",
+                  subSteps: isDelegateTask ? [] : undefined,
+                };
+                uiSteps((prev) => [...prev, step]);
+                storeActions.addExecutionStep({
+                  type: "tool_call",
+                  toolName: parsed.toolName,
+                  toolKind: parsed.toolKind,
+                  path: filePath || undefined,
+                  toolParams: params,
+                });
 
-              // 修改文件时（write_file / patch）把改动写入 pendingChanges，
-              // 触发 DiffPreview 弹窗显示 diff（实现「修改文件时显示 diff」）。
-              // 注意：后端的 tool_call 事件里 toolName 是人类可读标题（如 "write: …"），
-              // 不是工具原始名，所以不能用 === 'write_file' 判断。后端把这两个文件工具
-              // 的 kind 都映射成 'edit'（见 acp_adapter/tools.py 的 TOOL_KIND_MAP），
-              // 因此用 toolKind==='edit' + 文件路径 + 内容参数来判定文件修改。
-              // 主路径是 tool.complete 的 inline_diff（见 onEvent 的 tool_call_update 分支）；
-              // 这里作为兜底：仅当参数里真的有编辑内容时使用。
-              if (filePath && parsed.toolKind === "edit") {
-                const p = params as Record<string, any>;
-                let oldContent = "";
-                let newContent = "";
-                const os = p.old_string ?? p.old_text;
-                const ns = p.new_string ?? p.new_text;
-                if (os !== undefined || ns !== undefined) {
-                  oldContent = String(os ?? "");
-                  newContent = String(ns ?? "");
-                } else if (p.content !== undefined) {
-                  newContent = String(p.content);
-                } else if (p.patch !== undefined) {
-                  newContent = String(p.patch);
+                // 修改文件时（write_file / patch）把改动写入 pendingChanges，
+                // 触发 DiffPreview 弹窗显示 diff（实现「修改文件时显示 diff」）。
+                // 注意：后端的 tool_call 事件里 toolName 是人类可读标题（如 "write: …"），
+                // 不是工具原始名，所以不能用 === 'write_file' 判断。后端把这两个文件工具
+                // 的 kind 都映射成 'edit'（见 acp_adapter/tools.py 的 TOOL_KIND_MAP），
+                // 因此用 toolKind==='edit' + 文件路径 + 内容参数来判定文件修改。
+                // 主路径是 tool.complete 的 inline_diff（见 onEvent 的 tool_call_update 分支）；
+                // 这里作为兜底：仅当参数里真的有编辑内容时使用。
+                if (filePath && parsed.toolKind === "edit") {
+                  const p = params as Record<string, any>;
+                  let oldContent = "";
+                  let newContent = "";
+                  const os = p.old_string ?? p.old_text;
+                  const ns = p.new_string ?? p.new_text;
+                  if (os !== undefined || ns !== undefined) {
+                    oldContent = String(os ?? "");
+                    newContent = String(ns ?? "");
+                  } else if (p.content !== undefined) {
+                    newContent = String(p.content);
+                  } else if (p.patch !== undefined) {
+                    newContent = String(p.patch);
+                  }
+                  if (oldContent || newContent) {
+                    const fileName = filePath.split(/[/\\]/).pop() || filePath;
+                    const changeId = storeActions.addPendingChange({
+                      fileId: filePath,
+                      fileName,
+                      filePath,
+                      oldContent,
+                      newContent,
+                      language: diffLanguageForPath(filePath),
+                    });
+                    runFileChangesRef.current.push({
+                      id: changeId,
+                      fileId: filePath,
+                      fileName,
+                      filePath,
+                      oldContent,
+                      newContent,
+                      language: diffLanguageForPath(filePath),
+                    });
+                  }
                 }
-                if (oldContent || newContent) {
-                  const fileName = filePath.split(/[/\\]/).pop() || filePath;
-                  const changeId = storeActions.addPendingChange({
-                    fileId: filePath,
-                    fileName,
-                    filePath,
-                    oldContent,
-                    newContent,
-                    language: diffLanguageForPath(filePath),
-                  });
-                  runFileChangesRef.current.push({
-                    id: changeId,
-                    fileId: filePath,
-                    fileName,
-                    filePath,
-                    oldContent,
-                    newContent,
-                    language: diffLanguageForPath(filePath),
-                  });
-                }
-              }
 
-              // 每个工具调用独立成块，不再与上一个 tool_group 合并，
-              // 这样连续多个工具调用也会各自独立、可与文本交叉显示。
-              // 改走 pendingBlocksRef 有序队列：与 text/thinking 分片共用同一次
-              // rAF 提交，使工具卡严格按事件顺序落在文本之间，避免被同步插入到
-              // 句子主体与句末标点分片之间、造成文本块以 "。" 开头的错位。
-              // 工具卡落块 = 思考阶段边界：此后的思考属于新阶段，不该再带上
-              // 工具之前那段思考（否则工具后的思考折叠卡会重复渲染前一段）。
-              markThinkingPhaseBoundary();
-              pendingBlocksRef.current.push({ type: "tool_group", steps: [step] });
-              scheduleStreamRender();
-            } else if (parsed.type === "thinking") {
-              const thinkingNow = Date.now();
-              if (!thinkingStartTimeRef.current)
-                thinkingStartTimeRef.current = thinkingNow;
-              if (!thinkingPhaseStartRef.current)
-                thinkingPhaseStartRef.current = thinkingNow;
-              const phaseStartedAt = thinkingPhaseStartRef.current;
-              const phaseDurationS = Math.max(
-                0,
-                (thinkingNow - phaseStartedAt) / 1000,
-              );
-              // 规整模型侧思考流自带的空行：连发的多个 \n 压成单个，
-              // 与正文侧的空白规整保持一致，避免思考块里渲染出大段空白。
-              const inc = normalizeAcpContent(parsed.content).replace(
-                /\n{3,}/g,
-                "\n\n",
-              );
-              const cur = thoughtBufferRef.current;
-              if (cur.length >= MAX_STREAM_CHARS) {
-                if (!thinkingCappedRef.current) {
-                  thinkingCappedRef.current = true;
-                  thoughtBufferRef.current = cur + "\n\n[思考过长，已截断]";
+                // 每个工具调用独立成块，不再与上一个 tool_group 合并，
+                // 这样连续多个工具调用也会各自独立、可与文本交叉显示。
+                // 改走 pendingBlocksRef 有序队列：与 text/thinking 分片共用同一次
+                // rAF 提交，使工具卡严格按事件顺序落在文本之间，避免被同步插入到
+                // 句子主体与句末标点分片之间、造成文本块以 "。" 开头的错位。
+                // 工具卡落块 = 思考阶段边界：此后的思考属于新阶段，不该再带上
+                // 工具之前那段思考（否则工具后的思考折叠卡会重复渲染前一段）。
+                markThinkingPhaseBoundary();
+                pendingBlocksRef.current.push({
+                  type: "tool_group",
+                  steps: [step],
+                });
+                scheduleStreamRender();
+              } else if (parsed.type === "thinking") {
+                const thinkingNow = Date.now();
+                if (!thinkingStartTimeRef.current)
+                  thinkingStartTimeRef.current = thinkingNow;
+                if (!thinkingPhaseStartRef.current)
+                  thinkingPhaseStartRef.current = thinkingNow;
+                const phaseStartedAt = thinkingPhaseStartRef.current;
+                const phaseDurationS = Math.max(
+                  0,
+                  (thinkingNow - phaseStartedAt) / 1000,
+                );
+                // 规整模型侧思考流自带的空行：连发的多个 \n 压成单个，
+                // 与正文侧的空白规整保持一致，避免思考块里渲染出大段空白。
+                const inc = normalizeAcpContent(parsed.content).replace(
+                  /\n{3,}/g,
+                  "\n\n",
+                );
+                const cur = thoughtBufferRef.current;
+                if (cur.length >= MAX_STREAM_CHARS) {
+                  if (!thinkingCappedRef.current) {
+                    thinkingCappedRef.current = true;
+                    thoughtBufferRef.current = cur + "\n\n[思考过长，已截断]";
+                  }
+                  pendingThinkingRef.current = thoughtBufferRef.current;
+                  pendingBlocksRef.current.push({
+                    type: "thinking",
+                    content: phaseThinkingText(),
+                    startedAt: phaseStartedAt,
+                    duration_s: phaseDurationS,
+                  });
+                  scheduleStreamRender();
+                  return;
                 }
+                const curTrim = cur.trim();
+                const incTrim = inc.trim();
+                let next: string;
+                if (incTrim.startsWith(curTrim)) {
+                  // 后端发来「完整累积文本」（超集）：替换而非追加。带长度守卫——
+                  // 若重发丢了空白（字节更少但归一化内容相同）不要覆盖已累积副本，
+                  // 空白丢失会破坏 Markdown 表格/加粗（"**加粗** 后"→"**加粗**后"）。
+                  next = inc.length >= cur.length ? inc : cur;
+                } else if (curTrim && curTrim.startsWith(incTrim)) {
+                  // 传入是已累积的子集（重试发了更短文本）：保留更完整的缓冲，避免截断。
+                  // `curTrim &&` 守卫：纯空白分片 trim 为 "" 时 startsWith("") 恒真会误删
+                  // 空白（粘连词/破表的根因），空白分片必须走追加。
+                  next = cur;
+                } else if (
+                  curTrim &&
+                  incTrim &&
+                  textSimilarityRatio(curTrim, incTrim) >= 0.6
+                ) {
+                  // 归一化后高度相似：后端全文重发微差版 / 模型改写。仅当传入达到
+                  // 「全文重发」尺度（≥ 累积一半）才替换——否则它只是与某段相关的
+                  // 独立新段落，替换会把已累积内容截断。
+                  if (inc.length >= cur.length * 0.5) {
+                    next = inc.length >= cur.length ? inc : cur;
+                  } else {
+                    next = cur + inc;
+                  }
+                } else {
+                  // 无重叠：直接拼接（避免全文重发时 500 字符上限漏判真实重叠而误判重复）。
+                  next = cur + inc;
+                }
+                thoughtBufferRef.current = next;
                 pendingThinkingRef.current = thoughtBufferRef.current;
                 pendingBlocksRef.current.push({
                   type: "thinking",
+                  // 只落「本阶段」文本（见 thinkingPhaseBaseRef 注释）：run 级累积
+                  // 缓冲仍完整保留在 thoughtBufferRef 里供 done 兜底，但块内容不能
+                  // 带上前几段思考，否则会跨工具重复渲染。
                   content: phaseThinkingText(),
                   startedAt: phaseStartedAt,
                   duration_s: phaseDurationS,
                 });
                 scheduleStreamRender();
-                return;
-              }
-              const curTrim = cur.trim();
-              const incTrim = inc.trim();
-              let next: string;
-              if (incTrim.startsWith(curTrim)) {
-                // 后端发来「完整累积文本」（超集）：替换而非追加。带长度守卫——
-                // 若重发丢了空白（字节更少但归一化内容相同）不要覆盖已累积副本，
-                // 空白丢失会破坏 Markdown 表格/加粗（"**加粗** 后"→"**加粗**后"）。
-                next = inc.length >= cur.length ? inc : cur;
-              } else if (curTrim && curTrim.startsWith(incTrim)) {
-                // 传入是已累积的子集（重试发了更短文本）：保留更完整的缓冲，避免截断。
-                // `curTrim &&` 守卫：纯空白分片 trim 为 "" 时 startsWith("") 恒真会误删
-                // 空白（粘连词/破表的根因），空白分片必须走追加。
-                next = cur;
-              } else if (
-                curTrim &&
-                incTrim &&
-                textSimilarityRatio(curTrim, incTrim) >= 0.6
-              ) {
-                // 归一化后高度相似：后端全文重发微差版 / 模型改写。仅当传入达到
-                // 「全文重发」尺度（≥ 累积一半）才替换——否则它只是与某段相关的
-                // 独立新段落，替换会把已累积内容截断。
-                if (inc.length >= cur.length * 0.5) {
-                  next = inc.length >= cur.length ? inc : cur;
-                } else {
-                  next = cur + inc;
-                }
-              } else {
-                // 无重叠：直接拼接（避免全文重发时 500 字符上限漏判真实重叠而误判重复）。
-                next = cur + inc;
-              }
-              thoughtBufferRef.current = next;
-              pendingThinkingRef.current = thoughtBufferRef.current;
-              pendingBlocksRef.current.push({
-                type: "thinking",
-                // 只落「本阶段」文本（见 thinkingPhaseBaseRef 注释）：run 级累积
-                // 缓冲仍完整保留在 thoughtBufferRef 里供 done 兜底，但块内容不能
-                // 带上前几段思考，否则会跨工具重复渲染。
-                content: phaseThinkingText(),
-                startedAt: phaseStartedAt,
-                duration_s: phaseDurationS,
-              });
-              scheduleStreamRender();
-            } else if (parsed.type === "reasoning") {
-              const id = generateId();
-              uiSteps((prev) => [
-                ...prev,
-                {
+              } else if (parsed.type === "reasoning") {
+                const id = generateId();
+                uiSteps((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    type: "reasoning",
+                    content: normalizeAcpContent(parsed.content),
+                    timestamp: Date.now(),
+                  },
+                ]);
+              } else if (parsed.type === "file_change") {
+                const id = generateId();
+                uiSteps((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    type: "file_change",
+                    content: parsed.content,
+                    fileChanges: parsed.fileChanges,
+                    timestamp: Date.now(),
+                  },
+                ]);
+              } else if (parsed.type === "tool_result") {
+                const id = generateId();
+                const resultCallId: string = parsed.toolCallId || "";
+                const toolFinishedAt = Date.now();
+                const step: ExecutionStep = {
                   id,
-                  type: "reasoning",
-                  content: normalizeAcpContent(parsed.content),
-                  timestamp: Date.now(),
-                },
-              ]);
-            } else if (parsed.type === "file_change") {
-              const id = generateId();
-              uiSteps((prev) => [
-                ...prev,
-                {
-                  id,
-                  type: "file_change",
+                  type: "tool_result",
+                  toolCallId: resultCallId || undefined,
                   content: parsed.content,
-                  fileChanges: parsed.fileChanges,
-                  timestamp: Date.now(),
-                },
-              ]);
-            } else if (parsed.type === "tool_result") {
-              const id = generateId();
-              const resultCallId: string = parsed.toolCallId || "";
-              const toolFinishedAt = Date.now();
-              const step: ExecutionStep = {
-                id,
-                type: "tool_result",
-                toolCallId: resultCallId || undefined,
-                content: parsed.content,
-                toolName: parsed.toolName,
-                timestamp: toolFinishedAt,
-              };
-              uiSteps((prev) => [...prev, step]);
-              storeActions.addExecutionStep({
-                type: "tool_result",
-                toolName: parsed.toolName,
-              });
-              // Mark the matching tool_call step as completed so the top status
-              // bar stops showing it in "正在执行工具". Prefer the exact
-              // toolCallId; fall back to the last unfinished tool_call (serial
-              // execution) when the event carries no id.
-              // closeToolStep 顺带写下 finishedAt/duration_s —— 折叠标签右端那一行
-              // 的墙上跨度就是拿这些端点算的（同批工具并行执行，耗时不能相加）。
-              uiSteps((prev) => {
-                const next = [...prev];
-                let marked = false;
-                if (resultCallId) {
-                  for (let i = next.length - 1; i >= 0; i--) {
-                    if (
-                      next[i].type === "tool_call" &&
-                      next[i].toolCallId === resultCallId &&
-                      next[i].status === "running"
-                    ) {
-                      next[i] = closeToolStep(next[i], false, toolFinishedAt);
-                      marked = true;
-                      break;
+                  toolName: parsed.toolName,
+                  timestamp: toolFinishedAt,
+                };
+                uiSteps((prev) => [...prev, step]);
+                storeActions.addExecutionStep({
+                  type: "tool_result",
+                  toolName: parsed.toolName,
+                });
+                // Mark the matching tool_call step as completed so the top status
+                // bar stops showing it in "正在执行工具". Prefer the exact
+                // toolCallId; fall back to the last unfinished tool_call (serial
+                // execution) when the event carries no id.
+                // closeToolStep 顺带写下 finishedAt/duration_s —— 折叠标签右端那一行
+                // 的墙上跨度就是拿这些端点算的（同批工具并行执行，耗时不能相加）。
+                uiSteps((prev) => {
+                  const next = [...prev];
+                  let marked = false;
+                  if (resultCallId) {
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      if (
+                        next[i].type === "tool_call" &&
+                        next[i].toolCallId === resultCallId &&
+                        next[i].status === "running"
+                      ) {
+                        next[i] = closeToolStep(next[i], false, toolFinishedAt);
+                        marked = true;
+                        break;
+                      }
                     }
                   }
-                }
-                if (!marked) {
-                  for (let i = next.length - 1; i >= 0; i--) {
-                    if (
-                      next[i].type === "tool_call" &&
-                      next[i].status === "running"
-                    ) {
-                      next[i] = closeToolStep(next[i], false, toolFinishedAt);
-                      break;
+                  if (!marked) {
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      if (
+                        next[i].type === "tool_call" &&
+                        next[i].status === "running"
+                      ) {
+                        next[i] = closeToolStep(next[i], false, toolFinishedAt);
+                        break;
+                      }
                     }
                   }
+                  return next;
+                });
+                // 结果块归属：优先按 toolCallId 精确找到发起调用的那个 tool_group
+                // （并行执行/慢工具时结果到达顺序 ≠ 调用顺序，位置匹配会把结果
+                // 挂进"思考总结"另一侧的组，表现成"总结后面的工具被合并到总结
+                // 上面的工具组"）。找不到 id 对应的组时退回旧行为：第一个尚未
+                // 收到结果的 tool_group（串行时即当前块）。
+                // 同时把该组中 status==='running' 的 tool_call 标记 completed/failed——
+                // 否则工具已完成但卡片仍显示"执行"（tool_group 块的状态只在
+                // 这里维护，done 分支只更新独立的 steps 数组，不动 responseBlocks）。
+                // 先把可能延迟提交（走 pendingBlocksRef + rAF）的工具卡落盘，
+                // 避免同批内 tool_result 早于工具卡渲染而被误判为"无匹配组"、
+                // 进而新建出与本应对应的工具卡脱节的结果块。
+                flushPending();
+                uiRB((prev) => {
+                  const matchStepIn = (b: (typeof prev)[number]) => {
+                    if (b.type !== "tool_group") return null;
+                    const targetId = resultCallId
+                      ? b.steps.find(
+                          (s) =>
+                            s.type === "tool_call" &&
+                            s.toolCallId === resultCallId,
+                        )
+                      : null;
+                    if (targetId) return targetId;
+                    return (
+                      b.steps.find(
+                        (s) => s.type === "tool_call" && s.status === "running",
+                      ) ?? null
+                    );
+                  };
+                  // id 精确匹配（事件带 id 且组里有对应 call）
+                  let idx = -1;
+                  if (resultCallId) {
+                    idx = prev.findIndex((b) => matchStepIn(b) !== null);
+                  }
+                  // 兜底：第一个尚未收到结果的组（旧行为，串行时即当前块）
+                  if (idx === -1) {
+                    idx = prev.findIndex((b) => {
+                      if (b.type !== "tool_group") return false;
+                      return !b.steps.some(
+                        (s) => s.type === "tool_result" || s.type === "error",
+                      );
+                    });
+                  }
+                  if (idx !== -1) {
+                    const cur = prev[idx] as Extract<
+                      ResponseBlock,
+                      { type: "tool_group" }
+                    >;
+                    const matchedCall = matchStepIn(cur);
+                    const nb = prev.slice();
+                    nb[idx] = {
+                      type: "tool_group",
+                      steps: [
+                        ...cur.steps.map((s) =>
+                          s.type === "tool_call" &&
+                          s.status === "running" &&
+                          // id 命中时只完成对应的那个 call；其余 running call
+                          // 属于别的工具，不能顺手标记（并行时会把别的工具
+                          // 的卡提前标完成）。
+                          (!matchedCall || s.id === matchedCall.id)
+                            ? closeToolStep(s, !!parsed.failed, toolFinishedAt)
+                            : s,
+                        ),
+                        step,
+                      ],
+                    };
+                    return nb;
+                  }
+                  return [...prev, { type: "tool_group", steps: [step] }];
+                });
+              } else if (parsed.type === "tool_prepare_unblocked") {
+                // 卡片建在 tool_execution_start 那一刻，而审批弹窗跑在那之后的
+                // prepareToolCall 里 ⇒ 不挪起点的话，「等用户点批准」的那几分钟会算成
+                // 工具自己的耗时（网关那侧记的就是这条卡片真正的起跑时刻）。
+                // 只往后挪**未收尾**的步骤：数字已经定格的不能被追溯改写。
+                const unblockedId: string = parsed.toolCallId || "";
+                const unblockedAt: number = parsed.at || 0;
+                if (unblockedId && unblockedAt) {
+                  const isTarget = (s: ExecutionStep) =>
+                    s.type === "tool_call" &&
+                    s.toolCallId === unblockedId &&
+                    s.duration_s == null &&
+                    s.startedAt != null &&
+                    s.startedAt < unblockedAt;
+                  uiSteps((prev: ExecutionStep[]) =>
+                    prev.some(isTarget)
+                      ? prev.map((s) =>
+                          isTarget(s) ? { ...s, startedAt: unblockedAt } : s,
+                        )
+                      : prev,
+                  );
+                  // 与 tool_result 分支同理：可能还在 pendingBlocksRef 里等 rAF，
+                  // 不落盘就改不到它对应的那个 tool_group。
+                  flushPending();
+                  uiRB((prev: ResponseBlock[]) =>
+                    prev.some(
+                      (b) => b.type === "tool_group" && b.steps.some(isTarget),
+                    )
+                      ? prev.map((b) =>
+                          b.type === "tool_group"
+                            ? {
+                                ...b,
+                                steps: b.steps.map((s) =>
+                                  isTarget(s)
+                                    ? { ...s, startedAt: unblockedAt }
+                                    : s,
+                                ),
+                              }
+                            : b,
+                        )
+                      : prev,
+                  );
                 }
-                return next;
-              });
-              // 结果块归属：优先按 toolCallId 精确找到发起调用的那个 tool_group
-              // （并行执行/慢工具时结果到达顺序 ≠ 调用顺序，位置匹配会把结果
-              // 挂进"思考总结"另一侧的组，表现成"总结后面的工具被合并到总结
-              // 上面的工具组"）。找不到 id 对应的组时退回旧行为：第一个尚未
-              // 收到结果的 tool_group（串行时即当前块）。
-              // 同时把该组中 status==='running' 的 tool_call 标记 completed/failed——
-              // 否则工具已完成但卡片仍显示"执行"（tool_group 块的状态只在
-              // 这里维护，done 分支只更新独立的 steps 数组，不动 responseBlocks）。
-              // 先把可能延迟提交（走 pendingBlocksRef + rAF）的工具卡落盘，
-              // 避免同批内 tool_result 早于工具卡渲染而被误判为"无匹配组"、
-              // 进而新建出与本应对应的工具卡脱节的结果块。
-              flushPending();
-              uiRB((prev) => {
-                const matchStepIn = (b: (typeof prev)[number]) => {
-                  if (b.type !== "tool_group") return null;
-                  const targetId = resultCallId
-                    ? b.steps.find(
+              } else if (parsed.type === "tool_output_delta") {
+                // Streaming output chunk from a running tool — append to the
+                // latest tool_call step's content so the user sees output in real time.
+                // 按 toolCallId 精确匹配（并行时 A 的输出流不能进 B 的卡）；
+                // 事件缺 id 时退回"最后一个运行中的工具"旧行为。
+                const delta = normalizeAcpContent(parsed.content);
+                if (!delta) return;
+                const deltaCallId: string = parsed.toolCallId || "";
+                uiSteps((prev) => {
+                  const next = [...prev];
+                  let matched = false;
+                  if (deltaCallId) {
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      if (
+                        next[i].type === "tool_call" &&
+                        next[i].toolCallId === deltaCallId &&
+                        next[i].status !== "completed" &&
+                        next[i].status !== "failed" &&
+                        !next[i].subSteps
+                      ) {
+                        next[i] = {
+                          ...next[i],
+                          content: (next[i].content || "") + delta,
+                        };
+                        matched = true;
+                        break;
+                      }
+                    }
+                  }
+                  if (!matched) {
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      if (
+                        next[i].type === "tool_call" &&
+                        next[i].status !== "completed" &&
+                        next[i].status !== "failed" &&
+                        !next[i].subSteps
+                      ) {
+                        next[i] = {
+                          ...next[i],
+                          content: (next[i].content || "") + delta,
+                        };
+                        break;
+                      }
+                    }
+                  }
+                  return next;
+                });
+                // Also append to the corresponding tool_group in responseBlocks
+                uiRB((prev) => {
+                  const findIn = (block: (typeof prev)[number]) => {
+                    if (block.type !== "tool_group") return null;
+                    const steps = [...block.steps].reverse();
+                    if (deltaCallId) {
+                      const byId = steps.find(
                         (s) =>
                           s.type === "tool_call" &&
-                          s.toolCallId === resultCallId,
-                      )
-                    : null;
-                  if (targetId) return targetId;
-                  return b.steps.find(
-                    (s) =>
-                      s.type === "tool_call" && s.status === "running",
-                  ) ?? null;
-                };
-                // id 精确匹配（事件带 id 且组里有对应 call）
-                let idx = -1;
-                if (resultCallId) {
-                  idx = prev.findIndex((b) => matchStepIn(b) !== null);
-                }
-                // 兜底：第一个尚未收到结果的组（旧行为，串行时即当前块）
-                if (idx === -1) {
-                  idx = prev.findIndex((b) => {
-                    if (b.type !== "tool_group") return false;
-                    return !b.steps.some(
-                      (s) => s.type === "tool_result" || s.type === "error",
-                    );
-                  });
-                }
-                if (idx !== -1) {
-                  const cur = prev[idx] as Extract<
-                    ResponseBlock,
-                    { type: "tool_group" }
-                  >;
-                  const matchedCall = matchStepIn(cur);
-                  const nb = prev.slice();
-                  nb[idx] = {
-                    type: "tool_group",
-                    steps: [
-                      ...cur.steps.map((s) =>
-                        s.type === "tool_call" &&
-                        s.status === "running" &&
-                        // id 命中时只完成对应的那个 call；其余 running call
-                        // 属于别的工具，不能顺手标记（并行时会把别的工具
-                        // 的卡提前标完成）。
-                        (!matchedCall || s.id === matchedCall.id)
-                          ? closeToolStep(
-                              s,
-                              !!parsed.failed,
-                              toolFinishedAt,
-                            )
-                          : s,
-                      ),
-                      step,
-                    ],
-                  };
-                  return nb;
-                }
-                return [...prev, { type: "tool_group", steps: [step] }];
-              });
-            } else if (parsed.type === "tool_prepare_unblocked") {
-              // 卡片建在 tool_execution_start 那一刻，而审批弹窗跑在那之后的
-              // prepareToolCall 里 ⇒ 不挪起点的话，「等用户点批准」的那几分钟会算成
-              // 工具自己的耗时（网关那侧记的就是这条卡片真正的起跑时刻）。
-              // 只往后挪**未收尾**的步骤：数字已经定格的不能被追溯改写。
-              const unblockedId: string = parsed.toolCallId || "";
-              const unblockedAt: number = parsed.at || 0;
-              if (unblockedId && unblockedAt) {
-                const isTarget = (s: ExecutionStep) =>
-                  s.type === "tool_call" &&
-                  s.toolCallId === unblockedId &&
-                  s.duration_s == null &&
-                  s.startedAt != null &&
-                  s.startedAt < unblockedAt;
-                uiSteps((prev: ExecutionStep[]) =>
-                  prev.some(isTarget)
-                    ? prev.map((s) =>
-                        isTarget(s) ? { ...s, startedAt: unblockedAt } : s,
-                      )
-                    : prev,
-                );
-                // 与 tool_result 分支同理：可能还在 pendingBlocksRef 里等 rAF，
-                // 不落盘就改不到它对应的那个 tool_group。
-                flushPending();
-                uiRB((prev: ResponseBlock[]) =>
-                  prev.some((b) => b.type === "tool_group" && b.steps.some(isTarget))
-                    ? prev.map((b) =>
-                        b.type === "tool_group"
-                          ? {
-                              ...b,
-                              steps: b.steps.map((s) =>
-                                isTarget(s)
-                                  ? { ...s, startedAt: unblockedAt }
-                                  : s,
-                              ),
-                            }
-                          : b,
-                      )
-                    : prev,
-                );
-              }
-            } else if (parsed.type === "tool_output_delta") {
-              // Streaming output chunk from a running tool — append to the
-              // latest tool_call step's content so the user sees output in real time.
-              // 按 toolCallId 精确匹配（并行时 A 的输出流不能进 B 的卡）；
-              // 事件缺 id 时退回"最后一个运行中的工具"旧行为。
-              const delta = normalizeAcpContent(parsed.content);
-              if (!delta) return;
-              const deltaCallId: string = parsed.toolCallId || "";
-              uiSteps((prev) => {
-                const next = [...prev];
-                let matched = false;
-                if (deltaCallId) {
-                  for (let i = next.length - 1; i >= 0; i--) {
-                    if (
-                      next[i].type === "tool_call" &&
-                      next[i].toolCallId === deltaCallId &&
-                      next[i].status !== "completed" &&
-                      next[i].status !== "failed" &&
-                      !next[i].subSteps
-                    ) {
-                      next[i] = {
-                        ...next[i],
-                        content: (next[i].content || "") + delta,
-                      };
-                      matched = true;
-                      break;
+                          s.toolCallId === deltaCallId &&
+                          s.status !== "completed" &&
+                          s.status !== "failed" &&
+                          !s.subSteps,
+                      );
+                      if (byId) return byId;
                     }
-                  }
-                }
-                if (!matched) {
-                  for (let i = next.length - 1; i >= 0; i--) {
-                    if (
-                      next[i].type === "tool_call" &&
-                      next[i].status !== "completed" &&
-                      next[i].status !== "failed" &&
-                      !next[i].subSteps
-                    ) {
-                      next[i] = {
-                        ...next[i],
-                        content: (next[i].content || "") + delta,
-                      };
-                      break;
-                    }
-                  }
-                }
-                return next;
-              });
-              // Also append to the corresponding tool_group in responseBlocks
-              uiRB((prev) => {
-                const findIn = (block: (typeof prev)[number]) => {
-                  if (block.type !== "tool_group") return null;
-                  const steps = [...block.steps].reverse();
-                  if (deltaCallId) {
-                    const byId = steps.find(
+                    return steps.find(
                       (s) =>
                         s.type === "tool_call" &&
-                        s.toolCallId === deltaCallId &&
                         s.status !== "completed" &&
                         s.status !== "failed" &&
                         !s.subSteps,
                     );
-                    if (byId) return byId;
-                  }
-                  return steps.find(
-                    (s) =>
-                      s.type === "tool_call" &&
-                      s.status !== "completed" &&
-                      s.status !== "failed" &&
-                      !s.subSteps,
-                  );
-                };
-                for (let i = prev.length - 1; i >= 0; i--) {
-                  const lastToolCall = findIn(prev[i]);
-                  if (lastToolCall) {
-                    const nb = prev.slice();
-                    nb[i] = {
-                      ...prev[i],
-                      steps: prev[i].steps.map((s) =>
-                        s.id === lastToolCall.id
-                          ? { ...s, content: (s.content || "") + delta }
-                          : s,
-                      ),
-                    };
-                    return nb;
-                  }
-                }
-                return prev;
-              });
-            } else if (parsed.type === "tool_args_update") {
-              // tool_call_update 携带的迟到参数补写（见 mapHelixEvent 的
-              // tool_args_update 分支）。合并进 steps 与 responseBlocks 中匹配
-              // toolCallId 的 tool_call 步骤的 toolParams —— 命令/文件路径随
-              // 后端 toolcall_end / tool_execution_start 才到，不补写则标题
-              // 一直停在"执行 执行命令"。
-              let args = parsed.rawInput;
-              if (typeof args === "string") {
-                try {
-                  args = JSON.parse(args);
-                } catch {
-                  /* keep raw string */
-                }
-              }
-              const mergedParams: Record<string, unknown> =
-                args && typeof args === "object" && !Array.isArray(args)
-                  ? (args as Record<string, unknown>)
-                  : { raw: args };
-              const tcId = parsed.toolCallId || "";
-              const mergeInto = (s: ExecutionStep): ExecutionStep =>
-                s.type !== "tool_call"
-                  ? s
-                  : {
-                      ...s,
-                      // 后端两次事件（toolcall_end、tool_execution_start）先后带
-                      // 同一份 args —— 已有 command/path 键时不再覆盖。
-                      toolParams: {
-                        ...mergedParams,
-                        ...(s.toolParams && Object.keys(s.toolParams).length
-                          ? s.toolParams
-                          : {}),
-                      },
-                      // start 事件的 title 只是工具名（"bash"），execution_start
-                      // 才带更准确的 toolName —— 保持非空即可。
-                      toolName: s.toolName || parsed.toolName || "",
-                    };
-              const matches = (s: ExecutionStep) =>
-                s.type === "tool_call" &&
-                ((tcId && s.toolCallId === tcId) ||
-                  (!tcId &&
-                    s.status === "running" &&
-                    !s.toolParams?.command &&
-                    !s.toolParams?.raw));
-              uiSteps((prev) => {
-                let hit = false;
-                const next = prev.map((s) => {
-                  if (!hit && matches(s)) {
-                    hit = true;
-                    return mergeInto(s);
-                  }
-                  return s;
-                });
-                // 未匹配到（id 缺失且无 running 空参步骤）→ 退化为补写最后一个
-                // tool_call 步骤，保证参数尽量不丢。
-                if (!hit && tcId === "") {
-                  for (let i = next.length - 1; i >= 0; i--) {
-                    if (next[i].type === "tool_call") {
-                      next[i] = mergeInto(next[i]);
-                      break;
+                  };
+                  for (let i = prev.length - 1; i >= 0; i--) {
+                    const lastToolCall = findIn(prev[i]);
+                    if (lastToolCall) {
+                      const nb = prev.slice();
+                      nb[i] = {
+                        ...prev[i],
+                        steps: prev[i].steps.map((s) =>
+                          s.id === lastToolCall.id
+                            ? { ...s, content: (s.content || "") + delta }
+                            : s,
+                        ),
+                      };
+                      return nb;
                     }
                   }
-                }
-                return next;
-              });
-              uiRB((prev) => {
-                const nb = prev.slice();
-                for (let i = nb.length - 1; i >= 0; i--) {
-                  const block = nb[i];
-                  if (block.type !== "tool_group") continue;
-                  const target = [...block.steps].reverse().find(matches);
-                  if (target) {
-                    nb[i] = {
-                      ...block,
-                      steps: block.steps.map((s) =>
-                        s.id === target.id ? mergeInto(s) : s,
-                      ),
-                    };
-                    return nb;
+                  return prev;
+                });
+              } else if (parsed.type === "tool_args_update") {
+                // tool_call_update 携带的迟到参数补写（见 mapHelixEvent 的
+                // tool_args_update 分支）。合并进 steps 与 responseBlocks 中匹配
+                // toolCallId 的 tool_call 步骤的 toolParams —— 命令/文件路径随
+                // 后端 toolcall_end / tool_execution_start 才到，不补写则标题
+                // 一直停在"执行 执行命令"。
+                let args = parsed.rawInput;
+                if (typeof args === "string") {
+                  try {
+                    args = JSON.parse(args);
+                  } catch {
+                    /* keep raw string */
                   }
                 }
-                return prev;
-              });
-              // pendingBlocksRef 里的 tool_group 尚未 flush 进 responseBlocks，
-              // uiRB 扫不到它 —— 若 tool_call（空参）与 tool_args_update 在同一
-              // 批 rAF 内到达（toolcall_end 与 tool_execution_start 紧跟，通常
-              // 就是同批），flush 会把创建时的空参 step 原样落块，参数补写永久
-              // 丢失，标题停在「执行 执行命令」。这里同步补写 pending 队列里的
-              // 同一步骤（同一块对象，flush 时自然带上参数）。
-              for (const b of pendingBlocksRef.current) {
-                if (b.type !== "tool_group") continue;
-                const idx = b.steps.findIndex(matches);
-                if (idx >= 0) b.steps[idx] = mergeInto(b.steps[idx]);
-              }
-            } else if (parsed.type === "text") {
-              // The backend streams the reply as word/token chunks and ALSO re-sends
-              // the full final_response as another agent_message_chunk at the
-              // end (acp.update_agent_message_text). If the incoming chunk is the
-              // complete text, replace instead of appending — kills duplication.
-              // Also detect retry-duplicated content: when the backend retries after an
-              // MCP failure, the model regenerates similar text which should
-              // replace (not append to) the existing buffer.
-              const incRaw = normalizeAcpContent(parsed.content);
-              const cur = textBufferRef.current;
-              const curTrim = cur.trim();
-              const incTrim = incRaw.trim();
-              if (cur.length >= MAX_STREAM_CHARS) {
-                if (!streamCappedRef.current) {
-                  streamCappedRef.current = true;
-                  const capped =
-                    cur + "\n\n[输出过长，已截断，剩余内容不再显示]";
-                  textBufferRef.current = capped;
-                  pendingTextRef.current = capped;
-                  const delta = capped.startsWith(lastStreamedTextRef.current)
-                    ? capped.slice(lastStreamedTextRef.current.length)
-                    : capped;
-                  lastStreamedTextRef.current = capped;
-                  // 正文落块 = 思考阶段边界（正文之后的思考是新阶段）。
-                  markThinkingPhaseBoundary();
-                  pendingBlocksRef.current.push({
-                    type: "text",
-                    content: delta,
+                const mergedParams: Record<string, unknown> =
+                  args && typeof args === "object" && !Array.isArray(args)
+                    ? (args as Record<string, unknown>)
+                    : { raw: args };
+                const tcId = parsed.toolCallId || "";
+                const mergeInto = (s: ExecutionStep): ExecutionStep =>
+                  s.type !== "tool_call"
+                    ? s
+                    : {
+                        ...s,
+                        // 后端两次事件（toolcall_end、tool_execution_start）先后带
+                        // 同一份 args —— 已有 command/path 键时不再覆盖。
+                        toolParams: {
+                          ...mergedParams,
+                          ...(s.toolParams && Object.keys(s.toolParams).length
+                            ? s.toolParams
+                            : {}),
+                        },
+                        // start 事件的 title 只是工具名（"bash"），execution_start
+                        // 才带更准确的 toolName —— 保持非空即可。
+                        toolName: s.toolName || parsed.toolName || "",
+                      };
+                const matches = (s: ExecutionStep) =>
+                  s.type === "tool_call" &&
+                  ((tcId && s.toolCallId === tcId) ||
+                    (!tcId &&
+                      s.status === "running" &&
+                      !s.toolParams?.command &&
+                      !s.toolParams?.raw));
+                uiSteps((prev) => {
+                  let hit = false;
+                  const next = prev.map((s) => {
+                    if (!hit && matches(s)) {
+                      hit = true;
+                      return mergeInto(s);
+                    }
+                    return s;
                   });
+                  // 未匹配到（id 缺失且无 running 空参步骤）→ 退化为补写最后一个
+                  // tool_call 步骤，保证参数尽量不丢。
+                  if (!hit && tcId === "") {
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      if (next[i].type === "tool_call") {
+                        next[i] = mergeInto(next[i]);
+                        break;
+                      }
+                    }
+                  }
+                  return next;
+                });
+                uiRB((prev) => {
+                  const nb = prev.slice();
+                  for (let i = nb.length - 1; i >= 0; i--) {
+                    const block = nb[i];
+                    if (block.type !== "tool_group") continue;
+                    const target = [...block.steps].reverse().find(matches);
+                    if (target) {
+                      nb[i] = {
+                        ...block,
+                        steps: block.steps.map((s) =>
+                          s.id === target.id ? mergeInto(s) : s,
+                        ),
+                      };
+                      return nb;
+                    }
+                  }
+                  return prev;
+                });
+                // pendingBlocksRef 里的 tool_group 尚未 flush 进 responseBlocks，
+                // uiRB 扫不到它 —— 若 tool_call（空参）与 tool_args_update 在同一
+                // 批 rAF 内到达（toolcall_end 与 tool_execution_start 紧跟，通常
+                // 就是同批），flush 会把创建时的空参 step 原样落块，参数补写永久
+                // 丢失，标题停在「执行 执行命令」。这里同步补写 pending 队列里的
+                // 同一步骤（同一块对象，flush 时自然带上参数）。
+                for (const b of pendingBlocksRef.current) {
+                  if (b.type !== "tool_group") continue;
+                  const idx = b.steps.findIndex(matches);
+                  if (idx >= 0) b.steps[idx] = mergeInto(b.steps[idx]);
                 }
-                scheduleStreamRender();
-                return;
-              }
-              let newText: string;
-              if (!curTrim) {
-                // 新内容以 ** 开头时，不能丢弃开头的 **（否则 Markdown 加粗不渲染）
-                // 保留原始内容；done 时权威全文自愈只修正 msg.content
-                newText = incRaw;
-              } else if (incTrim.startsWith(curTrim)) {
-                // New text is a superset of accumulated text (backend full resend).
-                // Guard: a resend that LOST whitespace (fewer bytes, same normalized
-                // content) must not clobber the accumulated copy — whitespace loss is
-                // what breaks markdown tables/strong ("**加粗** 后" → "**加粗**后").
-                newText = incRaw.length >= cur.length ? incRaw : cur;
-              } else if (incTrim && curTrim.startsWith(incTrim)) {
-                // Incoming is a subset of accumulated (retry sent shorter text) — keep the
-                // more complete accumulated buffer to avoid truncation.
-                // `incTrim &&` guard: a whitespace-only chunk trims to "" and
-                // curTrim.startsWith("") is ALWAYS true — that branch would silently
-                // DROP the whitespace (the root cause of glued words / broken tables
-                // in streamed markdown). Whitespace-only chunks must be appended.
-                newText = cur;
-              } else if (textSimilarityRatio(curTrim, incTrim) >= 0.6) {
-                // 归一化后高度相似：后端全文重发微差版 / 模型重试改写。
-                // 直接拼接会把同一内容写两遍（"输出重复两次"的根因）。
-                // 仅当传入文本达到"全文重发"尺度（≥累积文本一半）才替换——
-                // 否则它只是与某段相关的独立新段落，替换会把已累积内容截断。
-                if (incRaw.length >= cur.length * 0.5) {
+              } else if (parsed.type === "text") {
+                // The backend streams the reply as word/token chunks and ALSO re-sends
+                // the full final_response as another agent_message_chunk at the
+                // end (acp.update_agent_message_text). If the incoming chunk is the
+                // complete text, replace instead of appending — kills duplication.
+                // Also detect retry-duplicated content: when the backend retries after an
+                // MCP failure, the model regenerates similar text which should
+                // replace (not append to) the existing buffer.
+                const incRaw = normalizeAcpContent(parsed.content);
+                const cur = textBufferRef.current;
+                const curTrim = cur.trim();
+                const incTrim = incRaw.trim();
+                if (cur.length >= MAX_STREAM_CHARS) {
+                  if (!streamCappedRef.current) {
+                    streamCappedRef.current = true;
+                    const capped =
+                      cur + "\n\n[输出过长，已截断，剩余内容不再显示]";
+                    textBufferRef.current = capped;
+                    pendingTextRef.current = capped;
+                    const delta = capped.startsWith(lastStreamedTextRef.current)
+                      ? capped.slice(lastStreamedTextRef.current.length)
+                      : capped;
+                    lastStreamedTextRef.current = capped;
+                    // 正文落块 = 思考阶段边界（正文之后的思考是新阶段）。
+                    markThinkingPhaseBoundary();
+                    pendingBlocksRef.current.push({
+                      type: "text",
+                      content: delta,
+                    });
+                  }
+                  scheduleStreamRender();
+                  return;
+                }
+                let newText: string;
+                if (!curTrim) {
+                  // 新内容以 ** 开头时，不能丢弃开头的 **（否则 Markdown 加粗不渲染）
+                  // 保留原始内容；done 时权威全文自愈只修正 msg.content
+                  newText = incRaw;
+                } else if (incTrim.startsWith(curTrim)) {
+                  // New text is a superset of accumulated text (backend full resend).
+                  // Guard: a resend that LOST whitespace (fewer bytes, same normalized
+                  // content) must not clobber the accumulated copy — whitespace loss is
+                  // what breaks markdown tables/strong ("**加粗** 后" → "**加粗**后").
                   newText = incRaw.length >= cur.length ? incRaw : cur;
+                } else if (incTrim && curTrim.startsWith(incTrim)) {
+                  // Incoming is a subset of accumulated (retry sent shorter text) — keep the
+                  // more complete accumulated buffer to avoid truncation.
+                  // `incTrim &&` guard: a whitespace-only chunk trims to "" and
+                  // curTrim.startsWith("") is ALWAYS true — that branch would silently
+                  // DROP the whitespace (the root cause of glued words / broken tables
+                  // in streamed markdown). Whitespace-only chunks must be appended.
+                  newText = cur;
+                } else if (textSimilarityRatio(curTrim, incTrim) >= 0.6) {
+                  // 归一化后高度相似：后端全文重发微差版 / 模型重试改写。
+                  // 直接拼接会把同一内容写两遍（"输出重复两次"的根因）。
+                  // 仅当传入文本达到"全文重发"尺度（≥累积文本一半）才替换——
+                  // 否则它只是与某段相关的独立新段落，替换会把已累积内容截断。
+                  if (incRaw.length >= cur.length * 0.5) {
+                    newText = incRaw.length >= cur.length ? incRaw : cur;
+                  } else {
+                    newText = cur + incRaw;
+                  }
                 } else {
+                  // Simple append — no overlap scan (avoid false-positive duplication
+                  // on full resends when the 500-char cap misses the real overlap).
                   newText = cur + incRaw;
                 }
-              } else {
-                // Simple append — no overlap scan (avoid false-positive duplication
-                // on full resends when the 500-char cap misses the real overlap).
-                newText = cur + incRaw;
-              }
-              textBufferRef.current = newText;
-              pendingTextRef.current = newText;
+                textBufferRef.current = newText;
+                pendingTextRef.current = newText;
 
-              // If the model embeds its reasoning inside <think:ID>...</think:ID> tags
-              // instead of emitting a separate thinking stream, surface it as the thinking block.
-              let renderText = newText;
-              if (!thoughtBufferRef.current) {
-                const { content: cleaned, reasoning } =
-                  extractThinkTags(newText);
-                if (reasoning) {
-                  thoughtBufferRef.current = reasoning;
-                  pendingThinkingRef.current = reasoning;
-                  uiST(reasoning);
-                  // If all text was inside <think:ID> tags (e.g. DeepSeek-style
-                  // output), fall back to showing reasoning as visible content
-                  // rather than leaving the message empty.
-                  textBufferRef.current = cleaned || reasoning;
-                  renderText = cleaned || reasoning;
+                // If the model embeds its reasoning inside <think:ID>...</think:ID> tags
+                // instead of emitting a separate thinking stream, surface it as the thinking block.
+                let renderText = newText;
+                if (!thoughtBufferRef.current) {
+                  const { content: cleaned, reasoning } =
+                    extractThinkTags(newText);
+                  if (reasoning) {
+                    thoughtBufferRef.current = reasoning;
+                    pendingThinkingRef.current = reasoning;
+                    uiST(reasoning);
+                    // If all text was inside <think:ID> tags (e.g. DeepSeek-style
+                    // output), fall back to showing reasoning as visible content
+                    // rather than leaving the message empty.
+                    textBufferRef.current = cleaned || reasoning;
+                    renderText = cleaned || reasoning;
+                  }
                 }
-              }
-              pendingTextRef.current = renderText;
-              // ── 权威重发修正（blocks 自愈）────────────────────────────────
-              // 相似度替换分支用后端重发覆盖了缓冲、且新缓冲与 lastStreamed
-              // 有分歧（不是干净追加）时：已提交的文本块是带病版本（如流中
-              // 丢过 " Hel" → "确认ix..."），而缓冲已被修正为权威全文。若走
-              // 常规 delta 路径，修正会被近重复规则抑制（delta=""），blocks
-              // 永远缺字。这里把已提交的全部文本块收敛为单一权威文本块，
-              // 并同步收敛 pending 的文本分片。
-              const cleanAppend = renderText.startsWith(
-                lastStreamedTextRef.current,
-              );
-              const authoritativeReplace =
-                !cleanAppend &&
-                cur.length > 0 &&
-                newText === incRaw &&
-                incRaw !== cur &&
-                textSimilarityRatio(curTrim, incTrim) >= 0.6;
-              if (authoritativeReplace) {
-                // 直接重写已提交的文本块；pending 里的旧文本分片一并丢弃
-                // （修正重发覆盖了它们的全部内容，再拼接会双重渲染）。
-                uiRB((prev) => {
-                  const textIdxs: number[] = [];
-                  prev.forEach((b, i) => {
-                    if (b.type === "text") textIdxs.push(i);
-                  });
-                  if (textIdxs.length === 0) {
-                    return [...prev, { type: "text" as const, content: renderText }];
-                  }
-                  const nb = prev.slice();
-                  nb[textIdxs[0]] = { type: "text", content: renderText };
-                  for (let k = textIdxs.length - 1; k >= 1; k--) {
-                    nb.splice(textIdxs[k], 1);
-                  }
-                  return nb;
-                });
-                pendingBlocksRef.current = pendingBlocksRef.current.filter(
-                  (b) => b.type !== "text",
+                pendingTextRef.current = renderText;
+                // ── 权威重发修正（blocks 自愈）────────────────────────────────
+                // 相似度替换分支用后端重发覆盖了缓冲、且新缓冲与 lastStreamed
+                // 有分歧（不是干净追加）时：已提交的文本块是带病版本（如流中
+                // 丢过 " Hel" → "确认ix..."），而缓冲已被修正为权威全文。若走
+                // 常规 delta 路径，修正会被近重复规则抑制（delta=""），blocks
+                // 永远缺字。这里把已提交的全部文本块收敛为单一权威文本块，
+                // 并同步收敛 pending 的文本分片。
+                const cleanAppend = renderText.startsWith(
+                  lastStreamedTextRef.current,
                 );
-                lastStreamedTextRef.current = renderText;
-                // 正文落块 = 思考阶段边界（与常规路径一致）。
-                markThinkingPhaseBoundary();
-                scheduleStreamRender();
-                return;
-              }
-              let delta: string;
-              if (renderText.startsWith(lastStreamedTextRef.current)) {
-                delta = renderText.slice(lastStreamedTextRef.current.length);
-              } else if (lastStreamedTextRef.current) {
-                // Byte-different (rewritten) full-text resend: the model rebuilt
-                // the whole accumulated text with minor edits (spacing/case/
-                // punctuation) instead of appending. The older text is already
-                // on screen via the incremental blocks, so pushing the rewritten
-                // full text again would render the same paragraph twice
-                // ("正文重复" root cause). If the new text is close to the last
-                // streamed text and at full-message scale, only emit the tail
-                // delta that actually differs; if it's merely equal-or-a-subset,
-                // suppress it entirely.
-                const lastN = normalizeForCompare(lastStreamedTextRef.current);
-                const newN = normalizeForCompare(renderText);
-                if (
-                  lastN.length >= 8 &&
-                  newN.length >= 8 &&
-                  (newN === lastN ||
-                    lastN.includes(newN) ||
-                    newN.includes(lastN) ||
-                    (textSimilarityRatio(lastN, newN) >= 0.6 &&
-                      newN.length >= lastN.length * 0.5))
-                ) {
+                const authoritativeReplace =
+                  !cleanAppend &&
+                  cur.length > 0 &&
+                  newText === incRaw &&
+                  incRaw !== cur &&
+                  textSimilarityRatio(curTrim, incTrim) >= 0.6;
+                if (authoritativeReplace) {
+                  // 直接重写已提交的文本块；pending 里的旧文本分片一并丢弃
+                  // （修正重发覆盖了它们的全部内容，再拼接会双重渲染）。
+                  uiRB((prev) => {
+                    const textIdxs: number[] = [];
+                    prev.forEach((b, i) => {
+                      if (b.type === "text") textIdxs.push(i);
+                    });
+                    if (textIdxs.length === 0) {
+                      return [
+                        ...prev,
+                        { type: "text" as const, content: renderText },
+                      ];
+                    }
+                    const nb = prev.slice();
+                    nb[textIdxs[0]] = { type: "text", content: renderText };
+                    for (let k = textIdxs.length - 1; k >= 1; k--) {
+                      nb.splice(textIdxs[k], 1);
+                    }
+                    return nb;
+                  });
+                  pendingBlocksRef.current = pendingBlocksRef.current.filter(
+                    (b) => b.type !== "text",
+                  );
+                  lastStreamedTextRef.current = renderText;
+                  // 正文落块 = 思考阶段边界（与常规路径一致）。
+                  markThinkingPhaseBoundary();
+                  scheduleStreamRender();
+                  return;
+                }
+                let delta: string;
+                if (renderText.startsWith(lastStreamedTextRef.current)) {
+                  delta = renderText.slice(lastStreamedTextRef.current.length);
+                } else if (lastStreamedTextRef.current) {
+                  // Byte-different (rewritten) full-text resend: the model rebuilt
+                  // the whole accumulated text with minor edits (spacing/case/
+                  // punctuation) instead of appending. The older text is already
+                  // on screen via the incremental blocks, so pushing the rewritten
+                  // full text again would render the same paragraph twice
+                  // ("正文重复" root cause). If the new text is close to the last
+                  // streamed text and at full-message scale, only emit the tail
+                  // delta that actually differs; if it's merely equal-or-a-subset,
+                  // suppress it entirely.
+                  const lastN = normalizeForCompare(
+                    lastStreamedTextRef.current,
+                  );
+                  const newN = normalizeForCompare(renderText);
                   if (
-                    newN === lastN ||
-                    lastN.includes(newN) ||
-                    newN.includes(lastN)
+                    lastN.length >= 8 &&
+                    newN.length >= 8 &&
+                    (newN === lastN ||
+                      lastN.includes(newN) ||
+                      newN.includes(lastN) ||
+                      (textSimilarityRatio(lastN, newN) >= 0.6 &&
+                        newN.length >= lastN.length * 0.5))
                   ) {
-                    delta = "";
+                    if (
+                      newN === lastN ||
+                      lastN.includes(newN) ||
+                      newN.includes(lastN)
+                    ) {
+                      delta = "";
+                    } else {
+                      // Near-duplicate rewrite at full-message scale: the delta is
+                      // whatever this sentence introduced beyond the tail overlap;
+                      // fall back to a single trailing chunk of the new text that
+                      // isn't already shown (render-time normalize also collapses it).
+                      delta = renderText.slice(0, 0); // empty — the rewrite is visually identical enough that re-rendering the text would just duplicate it
+                    }
                   } else {
-                    // Near-duplicate rewrite at full-message scale: the delta is
-                    // whatever this sentence introduced beyond the tail overlap;
-                    // fall back to a single trailing chunk of the new text that
-                    // isn't already shown (render-time normalize also collapses it).
-                    delta = renderText.slice(0, 0); // empty — the rewrite is visually identical enough that re-rendering the text would just duplicate it
+                    delta = renderText;
                   }
                 } else {
                   delta = renderText;
                 }
-              } else {
-                delta = renderText;
-              }
-              lastStreamedTextRef.current = renderText;
-              // 正文落块 = 思考阶段边界（正文之后的思考是新阶段）。
-              markThinkingPhaseBoundary();
-              pendingBlocksRef.current.push({ type: "text", content: delta });
+                lastStreamedTextRef.current = renderText;
+                // 正文落块 = 思考阶段边界（正文之后的思考是新阶段）。
+                markThinkingPhaseBoundary();
+                pendingBlocksRef.current.push({ type: "text", content: delta });
 
-              scheduleStreamRender();
-            } else if (parsed.type === "done") {
-              if (doneProcessedRef.current) {
-                // 重复的 done 事件带权威正文时，就地修正已提交消息，避免最终文本缺字。
-                patchDoneMessage(
-                  typeof parsed.content === "string" ? parsed.content : "",
-                );
-                queueDone = true;
-                return;
-              }
-              // Wait for usage data if not received yet (max 500ms)
-              if (!usageReceivedRef.current) {
-                await new Promise((r) => setTimeout(r, 500));
-              }
-              doneProcessedRef.current = true;
-              // 关键修复:done 事件可能自带正文(parsed.content,来自后端 message.complete /
-              // run.completed 的 text)。当模型不流式发 message.delta 时 textBuffer 为空,
-              // 必须回退用事件自带正文,否则表现为"只思考不输出"。流式场景 textBuffer 已填满,
-              // 优先用它(避免 run_complete 自带内容截断已流出的全文)。
-              //
-              // 权威全文自愈:message.complete 的 text 来自后端 final_response,与 state.db
-              // 持久化同源(字节完好),而流式累积 textBuffer 可能因转发链间歇丢空白/换行而损坏
-              // (症状:"##当前实时验证\n\n" 黏成 "##当前实时验证")。若 complete 全文在归一化
-              // 比较下覆盖流式累积(相同、包含或更长),用权威全文替换——只替换为原文,不猜补
-              // 空格,所以绝不会改坏正常文本。仅当 complete 更短(可能为截断/中断)时保留流式累积。
-              let content = textBufferRef.current;
-              const finalText =
-                typeof parsed.content === "string" ? parsed.content : "";
-              if (!content.trim()) {
-                content = finalText;
-              } else if (finalText && finalText.trim()) {
-                const normBuf = normalizeForCompare(content);
-                const normFinal = normalizeForCompare(finalText);
-                if (
-                  normBuf &&
-                  normFinal &&
-                  normFinal.length >= normBuf.length &&
-                  (normFinal === normBuf ||
-                    normFinal.includes(normBuf) ||
-                    normBuf.includes(normFinal) ||
-                    // 中游分歧（流式丢字、非包含关系）：final_response 与
-                    // state.db 同源、字节完好，更长且高度相似时以它为准，
-                    // 否则流式丢的字（如 " Hel"）在渲染里永远缺失。
-                    (normBuf.length >= 8 &&
-                      textSimilarityRatio(normBuf, normFinal) >= 0.6))
-                ) {
-                  content = finalText;
-                }
-              }
-              // 思考正文优先取本地流式累积（thoughtBuffer），它随 thinking_delta
-              // 增量拼接最完整；本地为空（网关中途重启、事件丢失、只走了
-              // message.complete 的兜底通路）时退回事件透传的权威 reasoning。
-              let reasoning =
-                thoughtBufferRef.current ||
-                (typeof parsed.reasoning === "string"
-                  ? parsed.reasoning
-                  : "");
-              const completedSteps = stepsRef.current;
-              // done 可能和最后一个 text 分片同批到达（rAF 还没触发），
-              // 先把积压的 pending 块冲刷进 responseBlocksRef，再清空——
-              // 否则 finalBlocks 缺最后一段文本（"总结中途截断"的根因）。
-              flushPending();
-              textBufferRef.current = "";
-              thoughtBufferRef.current = "";
-              streamCappedRef.current = false;
-              thinkingCappedRef.current = false;
-              pendingTextRef.current = null;
-              pendingThinkingRef.current = null;
-              pendingBlocksRef.current = [];
-              rafPendingRef.current = false;
-              uiST("");
-              if (
-                content ||
-                reasoning ||
-                completedSteps.length > 0 ||
-                responseBlocksRef.current.length > 0
-              ) {
-                // Some models place reasoning inside <think:ID>...</think:ID> tags as part of the final text.
-                if (!reasoning) {
-                  const extracted = extractThinkTags(content);
-                  if (extracted.reasoning) {
-                    reasoning = extracted.reasoning;
-                    content = extracted.content || extracted.reasoning;
-                  }
-                }
-                // If the model only emitted thinking tokens and no visible text,
-                // surface the reasoning as the message content so the user sees
-                // something useful instead of a blank reply. 例外：暂停/停止时
-                //（无正文 + responseBlocks 里已有 thinking/tool 块）不把思考塞进
-                // 正文——保留 blocks 让已完成消息按折叠的「思考过程」渲染，而不是
-                // 所有思考过程平铺冒出来。
-                //
-                // 但**退化思考不能这么干**（2026-10-03 修）：小模型在 high 思考
-                // 预算下会陷进「Let me do it / Let me run」的自重复循环，整轮
-                // aborted + usage 0/0，一个 toolCall 都没发出来。把它提升成正文
-                // 会让用户看到 978 行自我催促，还以为那是模型的回答。改成给一句
-                // 明确的失败说明 + 保留折叠的思考过程（排查用）。
-                if (
-                  !content &&
-                  reasoning &&
-                  responseBlocksRef.current.length === 0
-                ) {
-                  if (isDegenerateReasoning(reasoning)) {
-                    content =
-                      "⚠️ 本轮没有产出任何内容：模型的思考陷入了重复循环（自说自话地宣布要调用工具，但始终没有真正调用），这一轮已被中断。\n\n" +
-                      "常见原因：思考级别过高而模型能力不足。可以把思考级别降到 中/低，或换一个模型后重试。\n\n" +
-                      "下方折叠的思考过程仅为便于排查，不是模型的回答。";
-                    // reasoning 有意**不清空**：留着让它按折叠的「思考过程」渲染。
-                  } else {
-                    content = reasoning;
-                    reasoning = "";
-                  }
-                }
-                // Detect scheduled-task declarations in AI output. Don't auto-create —
-                // collect them and show a confirm dialog so the user approves first.
-                const detected = detectScheduledTasks(content);
-                content = detected.cleaned;
-                if (detected.tasks.length > 0) {
-                  setPendingTaskCreations((prev) => [
-                    ...prev,
-                    ...detected.tasks.map((t) => ({
-                      ...t,
-                      // 归属本轮 run 的对话，不是「此刻谁在前台」（同审批队列）
-                      sessionId: myCid,
-                    })),
-                  ]);
-                }
-                const curState = useHelixStore.getState();
-                const endTs = Date.now();
-                const totalSecs = Math.max(
-                  0,
-                  Math.round((endTs - startedAtRef.current) / 1000),
-                );
-                let thinkingSecs = thinkingStartTimeRef.current
-                  ? Math.round((endTs - thinkingStartTimeRef.current) / 1000)
-                  : firstContentAtRef.current && promptSentAtRef.current
-                    ? Math.round(
-                        (firstContentAtRef.current - promptSentAtRef.current) /
-                          1000,
-                      )
-                    : 0;
-                // 极短思考（<0.5s 取整为 0）但有思考迹象时，至少记为 1s，避免"有思考却不显示"
-                if (
-                  thinkingSecs === 0 &&
-                  (thinkingStartTimeRef.current || firstContentAtRef.current)
-                )
-                  thinkingSecs = 1;
-                thinkingDurationRef.current = thinkingSecs;
-                let finalBlocks = responseBlocksRef.current.length
-                  ? responseBlocksRef.current
-                  : undefined;
-                if (
-                  finalBlocks &&
-                  content &&
-                  !finalBlocks.some((b) => b.type === "text")
-                ) {
-                  finalBlocks = [...finalBlocks, { type: "text", content }];
-                }
-                // 权威全文自愈（msg.content 侧）：流式转发链会间歇丢空白/换行，
-                // done 时 content 已被 finalText 修复；但 blocks 渲染路径优先于
-                // content，因此这里不重排/写回 text 块（旧版会把全部 text 合并钉到
-                // 末尾，破坏 思考→工具→文本 交替顺序），msg.blocks 保留流式时的原始
-                // 交替结构，渲染时直接用 normalizeTextBlocks 去重。若存在"整段无
-                // text 块"的情况（全部正文压在未冲刷的 pending 里、或模型只发工具
-                // 不发文本），上面的末位追加会把权威全文补进末尾。
-                // blocks ↔ content 一致性自愈：流式丢字（中间缺段、非包含关系）
-                // 时文本块比权威正文少内容——把全部文本块收敛为单个权威文本块
-                // （挂第一个文本块位置，thinking/工具卡不动），渲染文本与原文
-                // 对齐；无差异时不动（保留原始交替结构）。
-                if (finalBlocks && content) {
-                  const reconciled = reconcileBlocksText(finalBlocks, content);
-                  if (reconciled) finalBlocks = reconciled;
-                }
-                // 本次运行的文件改动统一挂在最终消息的 fileChanges 上，只由
-                // 回复末尾的"已修改"汇总卡片渲染，不混进流式过程块。
-                const runFileChanges = runFileChangesRef.current;
-                const byFile = new Map<string, PendingChange>();
-                for (const c of runFileChanges) byFile.set(c.fileId, c);
-                const fileChanges = [...byFile.values()];
-                // CRITICAL: clear streaming blocks BEFORE adding the completed
-                // message to chatMessages.  Zustand store writes can trigger a
-                // synchronous (or microtask) React re-render *before* our subsequent
-                // useState calls (setResponseBlocks etc.) are flushed.  If responseBlocks
-                // still holds tool_groups at that point, BOTH rendering paths show
-                // them simultaneously — TranscriptMessage (from sessionMessages) AND
-                // the streaming area (via displayResponseBlocks) — producing exact
-                // duplicates of every tool_group block.
-                uiRB([]);
-                const msgId = curState.addChatMessage({
-                  role: "assistant",
-                  content,
-                  reasoning: reasoning || undefined,
-                  steps: completedSteps.length ? completedSteps : undefined,
-                  fileChanges: fileChanges.length ? fileChanges : undefined,
-                  runSnapshotId: runSnapshotIdRef.current || undefined,
-                  blocks: finalBlocks,
-                  sessionId: activeSessionId,
-                  duration: totalSecs > 0 ? totalSecs : undefined,
-                  thoughtTokens: thoughtTokensRef.current || undefined,
-                  outputTokens: outputTokensRef.current || undefined,
-                  totalTokens: totalTokensRef.current || undefined,
-                  thinkingTime: thinkingDurationRef.current || undefined,
-                });
-                if (pendingAssistantRowIdRef.current != null) {
-                  curState.setChatMessageRowId(
-                    msgId,
-                    pendingAssistantRowIdRef.current,
-                  );
-                  pendingAssistantRowIdRef.current = null;
-                }
-                doneMsgIdRef.current = msgId;
-                // 后台 run（非当前前台会话）完成后立即把回复持久化到自己的
-                // session 记录：persistCurrentSessionNow 只保存前台会话，
-                // 若等 scheduleSessionPersist 的 200ms 节流或切会话时的
-                // flushSessionPersist，磁盘快照里不会有这条回复 ——
-                // navigateSession 用磁盘快照整体覆盖 chatMessages 时它就丢了
-                // （"切到后台对话看不到输出"根因，2026-08-19 修复）。
-                // persistSessionNow 按消息 id merge，幂等，fire-and-forget 即可。
-                if (activeSessionId) {
-                  useHelixStore.getState().persistSessionNow(activeSessionId);
-                }
-                thoughtTokensRef.current = 0;
-                outputTokensRef.current = 0;
-                thinkingStartTimeRef.current = 0;
-                thinkingDurationRef.current = 0;
-                curState.setChatMessageStreaming(msgId, false);
-                // 计划模式产出方案后必须停在人工审查：plan 是按会话那一轴，
-                // 所以查**本轮 run 的 cid**（后台跑的不是当前对话，读全局或
-                // currentSessionId 都会弹错会话的浮条）。用户点批准才退出 plan。
-                if (
-                  content &&
-                  !!useHelixStore.getState().planModeBySession[
-                    activeSessionId ?? DRAFT_SESSION_KEY
-                  ]
-                ) {
-                  const cid = activeSessionId;
-                  // 如果 plan_complete 事件已经用真实 plan 工件（plan_mode_complete
-                  // 工具的 args.plan）弹过浮条，这里就不再覆盖。
-                  setPendingPlanReview((prev) => {
-                    const key = cid ?? DRAFT_SESSION_KEY;
-                    return prev && prev.sessionId === key
-                      ? prev
-                      : { sessionId: key, content };
-                  });
-                }
-              } else {
-                // 防御性兜底：run 结束但无任何可见内容。注意：必须放在「有内容」
-                // 分支的 else 里——上一版误置于 if 内，导致每次成功运行都无条件
-                // 追加这条警告，模型有输出却仍显示。
-                //
-                // 不再只显示一句泛泛的话：provider 的原始错误已经随
-                // session/complete 透传过来，按状态码分类（400 / 401-403 / 404 /
-                // 408 / 413 / 422 / 429 / 5xx，以及上下文超限 / 额度不足 / 超时 /
-                // 连接 / DNS / 网络）。用户能直接看出该改 baseUrl、改凭据、
-                // 退避限流，还是等上游恢复。
-                const noOutputContent = runErrorRef.current
-                  ? `⚠️ 本轮运行已结束，模型未返回任何可见内容。\n\n${classifyModelError(runErrorRef.current).detail}`
-                  : "⚠️ 本轮运行已结束，但模型未返回任何可见内容。";
-                const st = useHelixStore.getState();
-                const mid = st.addChatMessage({
-                  role: "assistant",
-                  content: noOutputContent,
-                  sessionId: activeSessionId,
-                });
-                doneMsgIdRef.current = mid;
-                if (pendingAssistantRowIdRef.current != null) {
-                  st.setChatMessageRowId(mid, pendingAssistantRowIdRef.current);
-                  pendingAssistantRowIdRef.current = null;
-                }
-                st.setChatMessageStreaming(mid, false);
-              }
-              // The backend adapter only emits a `tool_call` (tool.started) event
-              // and NOT a matching completion/failure event (see backend
-              // _tool_progress: `if event_type != "tool.started": return`). So a
-              // tool_call step we created as `running` would otherwise stay stuck
-              // in "正在执行工具" forever. On done, flush any lingering running
-              // tool calls to completed so the status bar clears and the tool
-              // card shows a finished state.
-              uiSteps((prev) => {
-                const next = prev.map((s) =>
-                  s.type === "tool_call" && s.status === "running"
-                    ? { ...s, status: "completed" as const }
-                    : s,
-                );
-                return [
-                  ...next,
-                  {
-                    id: generateId(),
-                    type: "done",
-                    content: parsed.content,
-                    finishReason: parsed.finishReason,
-                    timestamp: Date.now(),
-                  },
-                ];
-              });
-            } else if (parsed.type === "error") {
-              // error 事件分两类，处理必须分开：
-              // ① 终止性（prompt 通道关闭 / session.evicted 等路径入队前已置
-              //    queueDone=true）→ run 到头，按原有逻辑清空并落盘收尾。
-              // ② 中游可恢复（上游抖动，后端自动重试后流继续）→ 绝不能清空
-              //    思考/正文缓冲和已落块的 thinking 卡（"正常输出中思考突然
-              //    清空、随后又继续输出"的根因）。内容原样保留，只记录错误
-              //    步骤，并把兜底定时器武装到 20s：重试后的内容事件会把它重新
-              //    武装回 300s；后端若真的不再输出，20s 后 synth-done 收尾。
-              if (!queueDone) {
-                debug("[HelixTrace] mid-run soft error — keep streaming", {
-                  content: String(parsed.content ?? "").slice(0, 200),
+                scheduleStreamRender();
+              } else if (parsed.type === "done") {
+                debug("[HelixTrace] done case entered", {
+                  synthetic: parsed.synthetic ?? null,
+                  doneProcessed: doneProcessedRef.current,
+                  usageReceived: usageReceivedRef.current,
                   textLen: textBufferRef.current?.length ?? 0,
-                  reasoningLen: thoughtBufferRef.current?.length ?? 0,
                 });
-                uiSteps((prev) => [
-                  ...prev,
-                  {
-                    id: generateId(),
-                    type: "error",
-                    content: parsed.content,
-                    timestamp: Date.now(),
-                  },
-                ]);
-                storeActions.addExecutionStep({ type: "error" });
-                scheduleSynthDone(20000);
-                resetIdleTimer();
-              } else {
-                const content = textBufferRef.current;
-                const reasoning = thoughtBufferRef.current;
-                const errorSteps = stepsRef.current;
+                if (doneProcessedRef.current) {
+                  // 重复的 done 事件带权威正文时，就地修正已提交消息，避免最终文本缺字。
+                  patchDoneMessage(
+                    typeof parsed.content === "string" ? parsed.content : "",
+                  );
+                  queueDone = true;
+                  return;
+                }
+                // Wait for usage data if not received yet (max 500ms)
+                if (!usageReceivedRef.current) {
+                  await new Promise((r) => setTimeout(r, 500));
+                }
+                doneProcessedRef.current = true;
+                // 关键修复:done 事件可能自带正文(parsed.content,来自后端 message.complete /
+                // run.completed 的 text)。当模型不流式发 message.delta 时 textBuffer 为空,
+                // 必须回退用事件自带正文,否则表现为"只思考不输出"。流式场景 textBuffer 已填满,
+                // 优先用它(避免 run_complete 自带内容截断已流出的全文)。
+                //
+                // 权威全文自愈:message.complete 的 text 来自后端 final_response,与 state.db
+                // 持久化同源(字节完好),而流式累积 textBuffer 可能因转发链间歇丢空白/换行而损坏
+                // (症状:"##当前实时验证\n\n" 黏成 "##当前实时验证")。若 complete 全文在归一化
+                // 比较下覆盖流式累积(相同、包含或更长),用权威全文替换——只替换为原文,不猜补
+                // 空格,所以绝不会改坏正常文本。仅当 complete 更短(可能为截断/中断)时保留流式累积。
+                let content = textBufferRef.current;
+                const finalText =
+                  typeof parsed.content === "string" ? parsed.content : "";
+                if (!content.trim()) {
+                  content = finalText;
+                } else if (finalText && finalText.trim()) {
+                  const normBuf = normalizeForCompare(content);
+                  const normFinal = normalizeForCompare(finalText);
+                  if (
+                    normBuf &&
+                    normFinal &&
+                    normFinal.length >= normBuf.length &&
+                    (normFinal === normBuf ||
+                      normFinal.includes(normBuf) ||
+                      normBuf.includes(normFinal) ||
+                      // 中游分歧（流式丢字、非包含关系）：final_response 与
+                      // state.db 同源、字节完好，更长且高度相似时以它为准，
+                      // 否则流式丢的字（如 " Hel"）在渲染里永远缺失。
+                      (normBuf.length >= 8 &&
+                        textSimilarityRatio(normBuf, normFinal) >= 0.6))
+                  ) {
+                    content = finalText;
+                  }
+                }
+                // 思考正文优先取本地流式累积（thoughtBuffer），它随 thinking_delta
+                // 增量拼接最完整；本地为空（网关中途重启、事件丢失、只走了
+                // message.complete 的兜底通路）时退回事件透传的权威 reasoning。
+                let reasoning =
+                  thoughtBufferRef.current ||
+                  (typeof parsed.reasoning === "string"
+                    ? parsed.reasoning
+                    : "");
+                const completedSteps = stepsRef.current;
+                // done 可能和最后一个 text 分片同批到达（rAF 还没触发），
+                // 先把积压的 pending 块冲刷进 responseBlocksRef，再清空——
+                // 否则 finalBlocks 缺最后一段文本（"总结中途截断"的根因）。
+                flushPending();
                 textBufferRef.current = "";
                 thoughtBufferRef.current = "";
                 streamCappedRef.current = false;
@@ -7332,555 +7259,875 @@ export function AgentFlowPanel() {
                 pendingBlocksRef.current = [];
                 rafPendingRef.current = false;
                 uiST("");
-                // Clear streaming blocks BEFORE adding to chatMessages — same race
-                // condition as the done path above (Zustand store write can trigger
-                // a re-render before React useState batches flush).
-                uiRB([]);
+                debug("[HelixTrace] done commit", {
+                  synthetic: parsed.synthetic ?? null,
+                  contentLen: content.length,
+                  reasoningLen: reasoning.length,
+                  stepsLen: completedSteps.length,
+                  blocksLen: responseBlocksRef.current.length,
+                  willCommit:
+                    !!content ||
+                    !!reasoning ||
+                    completedSteps.length > 0 ||
+                    responseBlocksRef.current.length > 0,
+                });
                 if (
                   content ||
                   reasoning ||
-                  errorSteps.length > 0 ||
-                  responseBlocks.length > 0
+                  completedSteps.length > 0 ||
+                  responseBlocksRef.current.length > 0
                 ) {
+                  // Some models place reasoning inside <think:ID>...</think:ID> tags as part of the final text.
+                  if (!reasoning) {
+                    const extracted = extractThinkTags(content);
+                    if (extracted.reasoning) {
+                      reasoning = extracted.reasoning;
+                      content = extracted.content || extracted.reasoning;
+                    }
+                  }
+                  // If the model only emitted thinking tokens and no visible text,
+                  // surface the reasoning as the message content so the user sees
+                  // something useful instead of a blank reply. 例外：暂停/停止时
+                  //（无正文 + responseBlocks 里已有 thinking/tool 块）不把思考塞进
+                  // 正文——保留 blocks 让已完成消息按折叠的「思考过程」渲染，而不是
+                  // 所有思考过程平铺冒出来。
+                  //
+                  // 但**退化思考不能这么干**（2026-10-03 修）：小模型在 high 思考
+                  // 预算下会陷进「Let me do it / Let me run」的自重复循环，整轮
+                  // aborted + usage 0/0，一个 toolCall 都没发出来。把它提升成正文
+                  // 会让用户看到 978 行自我催促，还以为那是模型的回答。改成给一句
+                  // 明确的失败说明 + 保留折叠的思考过程（排查用）。
+                  if (
+                    !content &&
+                    reasoning &&
+                    responseBlocksRef.current.length === 0
+                  ) {
+                    if (isDegenerateReasoning(reasoning)) {
+                      content =
+                        "⚠️ 本轮没有产出任何内容：模型的思考陷入了重复循环（自说自话地宣布要调用工具，但始终没有真正调用），这一轮已被中断。\n\n" +
+                        "常见原因：思考级别过高而模型能力不足。可以把思考级别降到 中/低，或换一个模型后重试。\n\n" +
+                        "下方折叠的思考过程仅为便于排查，不是模型的回答。";
+                      // reasoning 有意**不清空**：留着让它按折叠的「思考过程」渲染。
+                    } else {
+                      content = reasoning;
+                      reasoning = "";
+                    }
+                  }
+                  // Detect scheduled-task declarations in AI output. Don't auto-create —
+                  // collect them and show a confirm dialog so the user approves first.
+                  const detected = detectScheduledTasks(content);
+                  content = detected.cleaned;
+                  if (detected.tasks.length > 0) {
+                    setPendingTaskCreations((prev) => [
+                      ...prev,
+                      ...detected.tasks.map((t) => ({
+                        ...t,
+                        // 归属本轮 run 的对话，不是「此刻谁在前台」（同审批队列）
+                        sessionId: myCid,
+                      })),
+                    ]);
+                  }
                   const curState = useHelixStore.getState();
+                  const endTs = Date.now();
+                  const totalSecs = Math.max(
+                    0,
+                    Math.round((endTs - startedAtRef.current) / 1000),
+                  );
+                  let thinkingSecs = thinkingStartTimeRef.current
+                    ? Math.round((endTs - thinkingStartTimeRef.current) / 1000)
+                    : firstContentAtRef.current && promptSentAtRef.current
+                      ? Math.round(
+                          (firstContentAtRef.current -
+                            promptSentAtRef.current) /
+                            1000,
+                        )
+                      : 0;
+                  // 极短思考（<0.5s 取整为 0）但有思考迹象时，至少记为 1s，避免"有思考却不显示"
+                  if (
+                    thinkingSecs === 0 &&
+                    (thinkingStartTimeRef.current || firstContentAtRef.current)
+                  )
+                    thinkingSecs = 1;
+                  thinkingDurationRef.current = thinkingSecs;
+                  let finalBlocks = responseBlocksRef.current.length
+                    ? responseBlocksRef.current
+                    : undefined;
+                  if (
+                    finalBlocks &&
+                    content &&
+                    !finalBlocks.some((b) => b.type === "text")
+                  ) {
+                    finalBlocks = [...finalBlocks, { type: "text", content }];
+                  }
+                  // 权威全文自愈（msg.content 侧）：流式转发链会间歇丢空白/换行，
+                  // done 时 content 已被 finalText 修复；但 blocks 渲染路径优先于
+                  // content，因此这里不重排/写回 text 块（旧版会把全部 text 合并钉到
+                  // 末尾，破坏 思考→工具→文本 交替顺序），msg.blocks 保留流式时的原始
+                  // 交替结构，渲染时直接用 normalizeTextBlocks 去重。若存在"整段无
+                  // text 块"的情况（全部正文压在未冲刷的 pending 里、或模型只发工具
+                  // 不发文本），上面的末位追加会把权威全文补进末尾。
+                  // blocks ↔ content 一致性自愈：流式丢字（中间缺段、非包含关系）
+                  // 时文本块比权威正文少内容——把全部文本块收敛为单个权威文本块
+                  // （挂第一个文本块位置，thinking/工具卡不动），渲染文本与原文
+                  // 对齐；无差异时不动（保留原始交替结构）。
+                  if (finalBlocks && content) {
+                    const reconciled = reconcileBlocksText(
+                      finalBlocks,
+                      content,
+                    );
+                    if (reconciled) finalBlocks = reconciled;
+                  }
+                  // 本次运行的文件改动统一挂在最终消息的 fileChanges 上，只由
+                  // 回复末尾的"已修改"汇总卡片渲染，不混进流式过程块。
                   const runFileChanges = runFileChangesRef.current;
                   const byFile = new Map<string, PendingChange>();
                   for (const c of runFileChanges) byFile.set(c.fileId, c);
                   const fileChanges = [...byFile.values()];
+                  // CRITICAL: clear streaming blocks BEFORE adding the completed
+                  // message to chatMessages.  Zustand store writes can trigger a
+                  // synchronous (or microtask) React re-render *before* our subsequent
+                  // useState calls (setResponseBlocks etc.) are flushed.  If responseBlocks
+                  // still holds tool_groups at that point, BOTH rendering paths show
+                  // them simultaneously — TranscriptMessage (from sessionMessages) AND
+                  // the streaming area (via displayResponseBlocks) — producing exact
+                  // duplicates of every tool_group block.
+                  uiRB([]);
                   const msgId = curState.addChatMessage({
                     role: "assistant",
                     content,
                     reasoning: reasoning || undefined,
-                    steps: errorSteps.length ? errorSteps : undefined,
+                    steps: completedSteps.length ? completedSteps : undefined,
                     fileChanges: fileChanges.length ? fileChanges : undefined,
                     runSnapshotId: runSnapshotIdRef.current || undefined,
-                    blocks: responseBlocksRef.current.length
-                      ? responseBlocksRef.current
-                      : undefined,
+                    blocks: finalBlocks,
                     sessionId: activeSessionId,
+                    duration: totalSecs > 0 ? totalSecs : undefined,
+                    thoughtTokens: thoughtTokensRef.current || undefined,
+                    outputTokens: outputTokensRef.current || undefined,
+                    totalTokens: totalTokensRef.current || undefined,
+                    thinkingTime: thinkingDurationRef.current || undefined,
                   });
-                  curState.setChatMessageStreaming(msgId, false);
+                  if (pendingAssistantRowIdRef.current != null) {
+                    curState.setChatMessageRowId(
+                      msgId,
+                      pendingAssistantRowIdRef.current,
+                    );
+                    pendingAssistantRowIdRef.current = null;
+                  }
+                  doneMsgIdRef.current = msgId;
+                  debug("[HelixTrace] done committed", {
+                    msgId,
+                    contentLen: content.length,
+                    stepsLen: completedSteps.length,
+                    blocksLen: finalBlocks?.length ?? 0,
+                    runSid: activeSessionId ?? null,
+                    curSid: useHelixStore.getState().currentSessionId,
+                    totalMsgs: useHelixStore.getState().chatMessages.length,
+                    matchCount: useHelixStore
+                      .getState()
+                      .chatMessages.filter(
+                        (m) => m.sessionId === activeSessionId,
+                      ).length,
+                    isChatLoading: useHelixStore.getState().isChatLoading,
+                  });
+                  // 后台 run（非当前前台会话）完成后立即把回复持久化到自己的
+                  // session 记录：persistCurrentSessionNow 只保存前台会话，
+                  // 若等 scheduleSessionPersist 的 200ms 节流或切会话时的
+                  // flushSessionPersist，磁盘快照里不会有这条回复 ——
+                  // navigateSession 用磁盘快照整体覆盖 chatMessages 时它就丢了
+                  // （"切到后台对话看不到输出"根因，2026-08-19 修复）。
+                  // persistSessionNow 按消息 id merge，幂等，fire-and-forget 即可。
                   if (activeSessionId) {
                     useHelixStore.getState().persistSessionNow(activeSessionId);
                   }
-                } else if (parsed.content) {
-                  // Pure error with no streamed content — surface it as an assistant message
-                  const curState = useHelixStore.getState();
-                  const msgId = curState.addChatMessage({
+                  thoughtTokensRef.current = 0;
+                  outputTokensRef.current = 0;
+                  thinkingStartTimeRef.current = 0;
+                  thinkingDurationRef.current = 0;
+                  curState.setChatMessageStreaming(msgId, false);
+                  // 计划模式产出方案后必须停在人工审查：plan 是按会话那一轴，
+                  // 所以查**本轮 run 的 cid**（后台跑的不是当前对话，读全局或
+                  // currentSessionId 都会弹错会话的浮条）。用户点批准才退出 plan。
+                  if (
+                    content &&
+                    !!useHelixStore.getState().planModeBySession[
+                      activeSessionId ?? DRAFT_SESSION_KEY
+                    ]
+                  ) {
+                    const cid = activeSessionId;
+                    // 如果 plan_complete 事件已经用真实 plan 工件（plan_mode_complete
+                    // 工具的 args.plan）弹过浮条，这里就不再覆盖。
+                    setPendingPlanReview((prev) => {
+                      const key = cid ?? DRAFT_SESSION_KEY;
+                      return prev && prev.sessionId === key
+                        ? prev
+                        : { sessionId: key, content };
+                    });
+                  }
+                } else {
+                  // 防御性兜底：run 结束但无任何可见内容。注意：必须放在「有内容」
+                  // 分支的 else 里——上一版误置于 if 内，导致每次成功运行都无条件
+                  // 追加这条警告，模型有输出却仍显示。
+                  //
+                  // 不再只显示一句泛泛的话：provider 的原始错误已经随
+                  // session/complete 透传过来，按状态码分类（400 / 401-403 / 404 /
+                  // 408 / 413 / 422 / 429 / 5xx，以及上下文超限 / 额度不足 / 超时 /
+                  // 连接 / DNS / 网络）。用户能直接看出该改 baseUrl、改凭据、
+                  // 退避限流，还是等上游恢复。
+                  const noOutputContent = runErrorRef.current
+                    ? `⚠️ 本轮运行已结束，模型未返回任何可见内容。\n\n${classifyModelError(runErrorRef.current).detail}`
+                    : "⚠️ 本轮运行已结束，但模型未返回任何可见内容。";
+                  const st = useHelixStore.getState();
+                  const mid = st.addChatMessage({
                     role: "assistant",
-                    content: "⚠️ " + parsed.content,
+                    content: noOutputContent,
                     sessionId: activeSessionId,
                   });
-                  curState.setChatMessageStreaming(msgId, false);
-                  if (activeSessionId) {
-                    useHelixStore.getState().persistSessionNow(activeSessionId);
+                  doneMsgIdRef.current = mid;
+                  if (pendingAssistantRowIdRef.current != null) {
+                    st.setChatMessageRowId(
+                      mid,
+                      pendingAssistantRowIdRef.current,
+                    );
+                    pendingAssistantRowIdRef.current = null;
                   }
+                  st.setChatMessageStreaming(mid, false);
                 }
-                // Mark all running tool_calls as failed so they disappear from the
-                // "正在执行工具" status bar.
-                const errId = generateId();
+                // The backend adapter only emits a `tool_call` (tool.started) event
+                // and NOT a matching completion/failure event (see backend
+                // _tool_progress: `if event_type != "tool.started": return`). So a
+                // tool_call step we created as `running` would otherwise stay stuck
+                // in "正在执行工具" forever. On done, flush any lingering running
+                // tool calls to completed so the status bar clears and the tool
+                // card shows a finished state.
                 uiSteps((prev) => {
                   const next = prev.map((s) =>
                     s.type === "tool_call" && s.status === "running"
-                      ? { ...s, status: "failed" as const }
+                      ? { ...s, status: "completed" as const }
                       : s,
                   );
                   return [
                     ...next,
                     {
-                      id: errId,
-                      type: "error",
+                      id: generateId(),
+                      type: "done",
                       content: parsed.content,
+                      finishReason: parsed.finishReason,
                       timestamp: Date.now(),
                     },
                   ];
                 });
-                storeActions.addExecutionStep({ type: "error" });
-              }
-            } else if (parsed.type === "plan") {
-              const id = generateId();
-              uiSteps((prev) => [
-                ...prev,
-                {
-                  id,
-                  type: "plan",
-                  content: "模型已规划以下步骤",
-                  planText: parsed.planText || parsed.content,
-                  timestamp: Date.now(),
-                },
-              ]);
-              storeActions.addExecutionStep({ type: "plan" });
-            } else if (parsed.type === "task") {
-              const id = generateId();
-              uiSteps((prev) => [
-                ...prev,
-                {
-                  id,
-                  type: "task",
-                  content: parsed.content,
-                  taskLabel: parsed.taskLabel,
-                  taskId: parsed.taskId,
-                  timestamp: Date.now(),
-                },
-              ]);
-              storeActions.addExecutionStep({ type: "task" });
-            } else if (parsed.type === "compact") {
-              const id = generateId();
-              uiSteps((prev) => [
-                ...prev,
-                {
-                  id,
-                  type: "compact",
-                  content: parsed.content,
-                  timestamp: Date.now(),
-                },
-              ]);
-            } else if (parsed.type === "usage_prompt_complete") {
-              const u = parsed.usage;
-              if (u && typeof u === "object") {
-                // 计费只认 `final: true`（网关的 message_end，每条 assistant
-                // 消息恰好一次）。流式的 message_update 带的是同一条消息的**累计**
-                // usage，在 text_end/thinking_end/toolcall_end 各上报一次——把它
-                // 也累加会让每条消息被计2~3 次（实测 ×2.7~3.4）。
-                const isFinal = u.final === true;
-                // 归属用消息自带的 model；流式事件没有 model 字段，兜底顺序为
-                // 本会话覆盖 → 全局默认。旧代码恒用全局 apiConfig.model，于是所有
-                // 会话（哪怕跑的是会话级覆盖模型）的量都记到默认模型名下。
-                const store0 = useHelixStore.getState();
-                const model =
-                  (isFinal ? parsed.model : undefined) ||
-                  store0.modelBySession?.[activeSessionId ?? DRAFT_SESSION_KEY]
-                    ?.model ||
-                  store0.apiConfig.model ||
-                  "unknown";
-                if (isFinal) {
-                  useHelixStore.getState().addSessionUsageStats(model, {
-                    totalTokens: Number(u.totalTokens) || undefined,
-                    inputTokens: Number(u.inputTokens) || undefined,
-                    outputTokens: Number(u.outputTokens) || undefined,
-                    thoughtTokens: Number(u.thoughtTokens) || undefined,
-                    cachedReadTokens: Number(u.cachedReadTokens) || undefined,
-                    cachedWriteTokens: Number(u.cachedWriteTokens) || undefined,
-                    atMs: Number(parsed.at_ms) || undefined,
+              } else if (parsed.type === "error") {
+                // error 事件分两类，处理必须分开：
+                // ① 终止性（prompt 通道关闭 / session.evicted 等路径入队前已置
+                //    queueDone=true）→ run 到头，按原有逻辑清空并落盘收尾。
+                // ② 中游可恢复（上游抖动，后端自动重试后流继续）→ 绝不能清空
+                //    思考/正文缓冲和已落块的 thinking 卡（"正常输出中思考突然
+                //    清空、随后又继续输出"的根因）。内容原样保留，只记录错误
+                //    步骤，并把兜底定时器武装到 20s：重试后的内容事件会把它重新
+                //    武装回 300s；后端若真的不再输出，20s 后 synth-done 收尾。
+                if (!queueDone) {
+                  debug("[HelixTrace] mid-run soft error — keep streaming", {
+                    content: String(parsed.content ?? "").slice(0, 200),
+                    textLen: textBufferRef.current?.length ?? 0,
+                    reasoningLen: thoughtBufferRef.current?.length ?? 0,
                   });
+                  uiSteps((prev) => [
+                    ...prev,
+                    {
+                      id: generateId(),
+                      type: "error",
+                      content: parsed.content,
+                      timestamp: Date.now(),
+                    },
+                  ]);
+                  storeActions.addExecutionStep({ type: "error" });
+                  scheduleSynthDone(20000);
+                  resetIdleTimer();
+                } else {
+                  const content = textBufferRef.current;
+                  const reasoning = thoughtBufferRef.current;
+                  const errorSteps = stepsRef.current;
+                  textBufferRef.current = "";
+                  thoughtBufferRef.current = "";
+                  streamCappedRef.current = false;
+                  thinkingCappedRef.current = false;
+                  pendingTextRef.current = null;
+                  pendingThinkingRef.current = null;
+                  pendingBlocksRef.current = [];
+                  rafPendingRef.current = false;
+                  uiST("");
+                  // Clear streaming blocks BEFORE adding to chatMessages — same race
+                  // condition as the done path above (Zustand store write can trigger
+                  // a re-render before React useState batches flush).
+                  uiRB([]);
+                  if (
+                    content ||
+                    reasoning ||
+                    errorSteps.length > 0 ||
+                    responseBlocks.length > 0
+                  ) {
+                    const curState = useHelixStore.getState();
+                    const runFileChanges = runFileChangesRef.current;
+                    const byFile = new Map<string, PendingChange>();
+                    for (const c of runFileChanges) byFile.set(c.fileId, c);
+                    const fileChanges = [...byFile.values()];
+                    const msgId = curState.addChatMessage({
+                      role: "assistant",
+                      content,
+                      reasoning: reasoning || undefined,
+                      steps: errorSteps.length ? errorSteps : undefined,
+                      fileChanges: fileChanges.length ? fileChanges : undefined,
+                      runSnapshotId: runSnapshotIdRef.current || undefined,
+                      blocks: responseBlocksRef.current.length
+                        ? responseBlocksRef.current
+                        : undefined,
+                      sessionId: activeSessionId,
+                    });
+                    curState.setChatMessageStreaming(msgId, false);
+                    if (activeSessionId) {
+                      useHelixStore
+                        .getState()
+                        .persistSessionNow(activeSessionId);
+                    }
+                  } else if (parsed.content) {
+                    // Pure error with no streamed content — surface it as an assistant message
+                    const curState = useHelixStore.getState();
+                    const msgId = curState.addChatMessage({
+                      role: "assistant",
+                      content: "⚠️ " + parsed.content,
+                      sessionId: activeSessionId,
+                    });
+                    curState.setChatMessageStreaming(msgId, false);
+                    if (activeSessionId) {
+                      useHelixStore
+                        .getState()
+                        .persistSessionNow(activeSessionId);
+                    }
+                  }
+                  // Mark all running tool_calls as failed so they disappear from the
+                  // "正在执行工具" status bar.
+                  const errId = generateId();
+                  uiSteps((prev) => {
+                    const next = prev.map((s) =>
+                      s.type === "tool_call" && s.status === "running"
+                        ? { ...s, status: "failed" as const }
+                        : s,
+                    );
+                    return [
+                      ...next,
+                      {
+                        id: errId,
+                        type: "error",
+                        content: parsed.content,
+                        timestamp: Date.now(),
+                      },
+                    ];
+                  });
+                  storeActions.addExecutionStep({ type: "error" });
                 }
-                if (!usageReceivedRef.current) {
-                  usageReceivedRef.current = true;
-                }
-                if (isFinal) {
-                  thoughtTokensRef.current = Number(u.thoughtTokens) || 0;
-                  outputTokensRef.current = Number(u.outputTokens) || 0;
-                  totalTokensRef.current = Number(u.totalTokens) || 0;
-                }
-                // 只用后端 message.complete 携带的真实 context_used/context_max，
-                // 不再用客户端估算。无后端数据时上下文环显示空态。
-                // pi 口径：一次 run（带工具循环）产生多条 assistant 消息，每条
-                // usage 事件携带该次 LLM 调用的 totalTokens（含此前全部历史+缓存
-                // token）——它本身就是当时的上下文占用。因此每次事件都覆盖环读数
-                // （不是只吃第一条）：环在 run 期间持续跟着走，而非冻结到下一个
-                // 用户轮次。
-                const ctxMax = Number(u.context_max) || 0;
-                const ctxUsed = Number(u.context_used) || 0;
-                // 后端 in-turn 自动压缩对前端不可见（"上下文数量无故变小"根因）：
-                // 后端每次 usage 载荷携带 compressions 累计计数（server.py
-                // _get_usage → compression_count，mapUsage 的 ...u 原样透传）。
-                // 计数器相对上一轮快照增长 = 后端在工具循环中途自发压缩过 ——
-                // 用压缩前的环读数 → 本轮读数拼出 divider，让掉数字变得"有故"。
-                // 必须在 setContextUsage 覆盖快照之前取旧值。
-                const store = useHelixStore.getState();
-                const compressions = Number(u.compressions) || 0;
-                const prevCount = activeSessionId
-                  ? store.backendCompressionCounts?.[activeSessionId]
-                  : undefined;
-                const beforeTokens = activeSessionId
-                  ? store.contextUsage[activeSessionId]?.used
-                  : undefined;
-                if (ctxMax && ctxUsed && activeSessionId) {
-                  // Carry per-kind buckets (from jsonl active-branch estimate)
-                  // so the snapshot gets a real breakdown instead of the
-                  // aggregate "整体上下文占用" lump. `setContextUsage` merges
-                  // non-empty arrays; an empty/missing array falls through to
-                  // the prev snapshot's categories, which is safe.
-                  const cats: Array<{
-                    id: string;
-                    label: string;
-                    tokens: number;
-                    color: string;
-                    aggregate?: boolean;
-                  }> | undefined = Array.isArray(u.categories)
-                    ? u.categories
-                        .filter((c: any) => c && c.tokens > 0)
-                        .map((c: any) => ({
-                          id: String(c.id ?? ""),
-                          label: String(c.label ?? ""),
-                          tokens: Number(c.tokens) || 0,
-                          color: String(c.color ?? "var(--context-usage-conversation)"),
-                          ...(c.aggregate ? { aggregate: true } : {}),
-                        }))
+              } else if (parsed.type === "plan") {
+                const id = generateId();
+                uiSteps((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    type: "plan",
+                    content: "模型已规划以下步骤",
+                    planText: parsed.planText || parsed.content,
+                    timestamp: Date.now(),
+                  },
+                ]);
+                storeActions.addExecutionStep({ type: "plan" });
+              } else if (parsed.type === "task") {
+                const id = generateId();
+                uiSteps((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    type: "task",
+                    content: parsed.content,
+                    taskLabel: parsed.taskLabel,
+                    taskId: parsed.taskId,
+                    timestamp: Date.now(),
+                  },
+                ]);
+                storeActions.addExecutionStep({ type: "task" });
+              } else if (parsed.type === "compact") {
+                const id = generateId();
+                uiSteps((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    type: "compact",
+                    content: parsed.content,
+                    timestamp: Date.now(),
+                  },
+                ]);
+              } else if (parsed.type === "usage_prompt_complete") {
+                const u = parsed.usage;
+                if (u && typeof u === "object") {
+                  // 计费只认 `final: true`（网关的 message_end，每条 assistant
+                  // 消息恰好一次）。流式的 message_update 带的是同一条消息的**累计**
+                  // usage，在 text_end/thinking_end/toolcall_end 各上报一次——把它
+                  // 也累加会让每条消息被计2~3 次（实测 ×2.7~3.4）。
+                  const isFinal = u.final === true;
+                  // 归属用消息自带的 model；流式事件没有 model 字段，兜底顺序为
+                  // 本会话覆盖 → 全局默认。旧代码恒用全局 apiConfig.model，于是所有
+                  // 会话（哪怕跑的是会话级覆盖模型）的量都记到默认模型名下。
+                  const store0 = useHelixStore.getState();
+                  const model =
+                    (isFinal ? parsed.model : undefined) ||
+                    store0.modelBySession?.[
+                      activeSessionId ?? DRAFT_SESSION_KEY
+                    ]?.model ||
+                    store0.apiConfig.model ||
+                    "unknown";
+                  if (isFinal) {
+                    useHelixStore.getState().addSessionUsageStats(model, {
+                      totalTokens: Number(u.totalTokens) || undefined,
+                      inputTokens: Number(u.inputTokens) || undefined,
+                      outputTokens: Number(u.outputTokens) || undefined,
+                      thoughtTokens: Number(u.thoughtTokens) || undefined,
+                      cachedReadTokens: Number(u.cachedReadTokens) || undefined,
+                      cachedWriteTokens:
+                        Number(u.cachedWriteTokens) || undefined,
+                      atMs: Number(parsed.at_ms) || undefined,
+                    });
+                  }
+                  if (!usageReceivedRef.current) {
+                    usageReceivedRef.current = true;
+                  }
+                  if (isFinal) {
+                    thoughtTokensRef.current = Number(u.thoughtTokens) || 0;
+                    outputTokensRef.current = Number(u.outputTokens) || 0;
+                    totalTokensRef.current = Number(u.totalTokens) || 0;
+                  }
+                  // 只用后端 message.complete 携带的真实 context_used/context_max，
+                  // 不再用客户端估算。无后端数据时上下文环显示空态。
+                  // pi 口径：一次 run（带工具循环）产生多条 assistant 消息，每条
+                  // usage 事件携带该次 LLM 调用的 totalTokens（含此前全部历史+缓存
+                  // token）——它本身就是当时的上下文占用。因此每次事件都覆盖环读数
+                  // （不是只吃第一条）：环在 run 期间持续跟着走，而非冻结到下一个
+                  // 用户轮次。
+                  const ctxMax = Number(u.context_max) || 0;
+                  const ctxUsed = Number(u.context_used) || 0;
+                  // 后端 in-turn 自动压缩对前端不可见（"上下文数量无故变小"根因）：
+                  // 后端每次 usage 载荷携带 compressions 累计计数（server.py
+                  // _get_usage → compression_count，mapUsage 的 ...u 原样透传）。
+                  // 计数器相对上一轮快照增长 = 后端在工具循环中途自发压缩过 ——
+                  // 用压缩前的环读数 → 本轮读数拼出 divider，让掉数字变得"有故"。
+                  // 必须在 setContextUsage 覆盖快照之前取旧值。
+                  const store = useHelixStore.getState();
+                  const compressions = Number(u.compressions) || 0;
+                  const prevCount = activeSessionId
+                    ? store.backendCompressionCounts?.[activeSessionId]
                     : undefined;
-                  // 权威覆盖（authoritative）：后端 emit_usage 的 context_used 已经是
-                  // totalTokens / jsonl 活跃分支估算 / usage anchor 三者取 max 后的结果，
-                  // 代表「这条消息落地后下一条 prompt 的真实上下文」——不是流式增量
-                  // 中间态，可以直接覆盖。这里再套一层 max 只会吃掉压缩后的下降（环
-                  // 永久停在压缩前高位）；防抖动的理由（provider totalTokens 在工具
-                  // 循环内不单调）已由后端那个 max 兜住。
-                  const storeForUsage = useHelixStore.getState();
-                  storeForUsage.setContextUsage(
-                    activeSessionId,
-                    ctxMax,
-                    ctxUsed,
-                    cats,
-                    undefined,
-                    true,
-                  );
-                  // Clear estimated tokens once real usage arrives
-                  useHelixStore
-                    .getState()
-                    .clearEstimatedTokens(activeSessionId);
+                  const beforeTokens = activeSessionId
+                    ? store.contextUsage[activeSessionId]?.used
+                    : undefined;
+                  if (ctxMax && ctxUsed && activeSessionId) {
+                    // Carry per-kind buckets (from jsonl active-branch estimate)
+                    // so the snapshot gets a real breakdown instead of the
+                    // aggregate "整体上下文占用" lump. `setContextUsage` merges
+                    // non-empty arrays; an empty/missing array falls through to
+                    // the prev snapshot's categories, which is safe.
+                    const cats:
+                      | Array<{
+                          id: string;
+                          label: string;
+                          tokens: number;
+                          color: string;
+                          aggregate?: boolean;
+                        }>
+                      | undefined = Array.isArray(u.categories)
+                      ? u.categories
+                          .filter((c: any) => c && c.tokens > 0)
+                          .map((c: any) => ({
+                            id: String(c.id ?? ""),
+                            label: String(c.label ?? ""),
+                            tokens: Number(c.tokens) || 0,
+                            color: String(
+                              c.color ?? "var(--context-usage-conversation)",
+                            ),
+                            ...(c.aggregate ? { aggregate: true } : {}),
+                          }))
+                      : undefined;
+                    // 权威覆盖（authoritative）：后端 emit_usage 的 context_used 已经是
+                    // totalTokens / jsonl 活跃分支估算 / usage anchor 三者取 max 后的结果，
+                    // 代表「这条消息落地后下一条 prompt 的真实上下文」——不是流式增量
+                    // 中间态，可以直接覆盖。这里再套一层 max 只会吃掉压缩后的下降（环
+                    // 永久停在压缩前高位）；防抖动的理由（provider totalTokens 在工具
+                    // 循环内不单调）已由后端那个 max 兜住。
+                    const storeForUsage = useHelixStore.getState();
+                    storeForUsage.setContextUsage(
+                      activeSessionId,
+                      ctxMax,
+                      ctxUsed,
+                      cats,
+                      undefined,
+                      true,
+                    );
+                    // Clear estimated tokens once real usage arrives
+                    useHelixStore
+                      .getState()
+                      .clearEstimatedTokens(activeSessionId);
+                  }
+                  if (
+                    activeSessionId &&
+                    prevCount != null &&
+                    compressions > prevCount &&
+                    beforeTokens &&
+                    ctxUsed &&
+                    beforeTokens > ctxUsed
+                  ) {
+                    // 后端在工具循环中途自发压缩：上面那条已按 authoritative 写入
+                    // ctxUsed，这里只补分隔线，把这次掉数字变成「有故」。
+                    const chatMessages = useHelixStore.getState().chatMessages;
+                    const anchorMessage = [...chatMessages]
+                      .reverse()
+                      .find((message) => message.sessionId === activeSessionId);
+                    store.setCompressionNotice({
+                      ts: Date.now(),
+                      sessionId: activeSessionId,
+                      source: "auto",
+                      anchorMessageId: anchorMessage?.id,
+                      beforeTokens,
+                      afterTokens: ctxUsed,
+                    });
+                  }
+                  if (activeSessionId && compressions > 0) {
+                    store.setBackendCompressionCount(
+                      activeSessionId,
+                      compressions,
+                    );
+                  }
                 }
-                if (
-                  activeSessionId &&
-                  prevCount != null &&
-                  compressions > prevCount &&
-                  beforeTokens &&
-                  ctxUsed &&
-                  beforeTokens > ctxUsed
-                ) {
-                  // 后端在工具循环中途自发压缩：上面那条已按 authoritative 写入
-                  // ctxUsed，这里只补分隔线，把这次掉数字变成「有故」。
-                  const chatMessages = useHelixStore.getState().chatMessages;
-                  const anchorMessage = [...chatMessages]
-                    .reverse()
-                    .find((message) => message.sessionId === activeSessionId);
-                  store.setCompressionNotice({
-                    ts: Date.now(),
-                    sessionId: activeSessionId,
-                    source: "auto",
-                    anchorMessageId: anchorMessage?.id,
-                    beforeTokens,
-                    afterTokens: ctxUsed,
-                  });
-                }
-                if (activeSessionId && compressions > 0) {
-                  store.setBackendCompressionCount(
-                    activeSessionId,
-                    compressions,
-                  );
-                }
+              } else if (parsed.type === "available_commands") {
+                useHelixStore.getState().setAvailableCommands(parsed.commands);
               }
-            } else if (parsed.type === "available_commands") {
-              useHelixStore.getState().setAvailableCommands(parsed.commands);
+            } catch {
+              // skip non-JSON lines
             }
-          } catch {
-            // skip non-JSON lines
           }
         }
-      }
-    } catch (error) {
-      debug("[HelixTrace] handleRun catch", {
-        errorName: error instanceof Error ? error.name : "unknown",
-        errorMessage: error instanceof Error ? error.message : String(error),
-        errorStack: error instanceof Error ? error.stack : undefined,
-        currentSessionId,
-        runningSessionId: runningSessionIdRef.current,
-        textLen: textBufferRef.current?.length ?? 0,
-        reasoningLen: thoughtBufferRef.current?.length ?? 0,
-        stepsLen: stepsRef.current.length,
-        responseBlocksLen: responseBlocks.length,
-      });
-      if (error instanceof DOMException && error.name === "AbortError") {
-        // Save partial response before showing error
-        if (textBufferRef.current) {
-          const partialContent = textBufferRef.current;
-          const partialReasoning = thoughtBufferRef.current || undefined;
-          const msgId = useHelixStore.getState().addChatMessage({
-            role: "assistant",
-            content: partialContent + "\n\n*[执行已中断]*",
-            reasoning: partialReasoning,
-            sessionId: activeSessionId,
-          });
-          useHelixStore.getState().setChatMessageStreaming(msgId, false);
-        }
-        pendingTextRef.current = null;
-        pendingThinkingRef.current = null;
-        pendingBlocksRef.current = [];
-        rafPendingRef.current = false;
-        uiSteps((prev) => [
-          ...prev,
-          {
-            id: generateId(),
-            type: "error",
-            content: "用户取消了执行",
-            timestamp: Date.now(),
-          },
-        ]);
-      } else {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "连接失败，请检查网络和 API 设置";
-        uiSteps((prev) => [
-          ...prev,
-          {
-            id: generateId(),
-            type: "error",
-            content: message,
-            timestamp: Date.now(),
-          },
-        ]);
-        // Hard failure (not user abort):
-        // - Partial model output → commit it so context stays and the user can
-        //   keep chatting in this session (F2).
-        // - Nothing produced → withdraw the optimistic user message and put the
-        //   draft (text / images / files / link cards) back so one-click resend
-        //   works without retyping (F1).
-        if (textBufferRef.current) {
-          const mid = useHelixStore.getState().addChatMessage({
-            role: "assistant",
-            content: textBufferRef.current + `\n\n*[执行中断：${message}]*`,
-            reasoning: thoughtBufferRef.current || undefined,
-            sessionId: activeSessionId,
-          });
-          useHelixStore.getState().setChatMessageStreaming(mid, false);
-          storeActions.showToast({
-            type: "error",
-            title: "回复中断",
-            description: "已保留部分内容，可在本会话继续追问",
-          });
-        } else {
-          useHelixStore.getState().deleteMessage(newUserMsgId);
-          const shouldRestoreInput =
-            !isBackground && !opts?.keepInput && !!baseTrimmed;
-          if (shouldRestoreInput) {
-            setInputSynced(baseTrimmed);
-            resetInputHeight();
-            requestAnimationFrame(() => inputRef.current?.focus());
-          }
-          setPendingImages(imagesSnapshot ?? []);
-          setPendingFiles(filesSnapshot ?? []);
-          const attachKey = currentSessionId ?? DRAFT_SESSION_KEY;
-          useHelixStore.getState().setTabAttachments(
-            attachKey,
-            imagesSnapshot ?? [],
-            filesSnapshot ?? [],
-            linkCards,
-          );
-          storeActions.showToast({
-            type: "error",
-            title: "发送失败",
-            description: shouldRestoreInput
-              ? "内容已放回输入框，可直接重发"
-              : message,
-          });
-        }
-      }
-    } finally {
-      debug("[HelixTrace] handleRun finally ENTRY", {
-        reason: queueDone ? "queueDone" : "abort/error",
-        currentSessionId,
-        runningSessionId: runningSessionIdRef.current,
-        textLen: textBufferRef.current?.length ?? 0,
-        reasoningLen: thoughtBufferRef.current?.length ?? 0,
-        stepsLen: stepsRef.current.length,
-        responseBlocksLen: responseBlocks.length,
-      });
-      const reason = queueDone ? "queueDone" : "abort/error";
-      debug("[HelixTrace] handleRun finally", {
-        reason,
-        currentSessionId,
-        runningSessionId: runningSessionIdRef.current,
-        isRunningSession: currentSessionId === runningSessionIdRef.current,
-        textLen: textBufferRef.current?.length ?? 0,
-        reasoningLen: thoughtBufferRef.current?.length ?? 0,
-        stepsLen: stepsRef.current.length,
-        responseBlocksLen: responseBlocks.length,
-      });
-      // Always unsubscribe to prevent duplicate event handlers
-      try {
-        if (unsubscribe) unsubscribe();
-      } catch {
-        /* unsubscribe 不应抛错；忽略避免 finally 中断 */
-      }
-
-      // Cancel any pending synthetic-done timer so it can't fire after the run
-      // ended (e.g. on abort / unmount) and call setState on a dead context.
-      if (synthDoneTimerRef.current) {
-        clearTimeout(synthDoneTimerRef.current);
-        synthDoneTimerRef.current = null;
-      }
-      if (forceDoneTimerRef.current) {
-        clearTimeout(forceDoneTimerRef.current);
-        forceDoneTimerRef.current = null;
-      }
-      if (idleTimerRef) {
-        clearTimeout(idleTimerRef);
-        idleTimerRef = null;
-      } // 清理空闲检测定时器
-      // Seal the run: prevent any straggler rAF syncDraft callback from
-      // re-setting isAgentRunning=true after we mark it false below.
-      runCompleted = true;
-      const sid = activeSessionId;
-      if (sid) {
-        // Keep the estimated value until the provider's usage frame replaces it;
-        // clearing here could make the context ring briefly fall back to the old
-        // snapshot while the backend is still flushing usage_prompt_complete.
-        // Clear the draft's responseBlocks at the same time we drop isAgentRunning:
-        // the completed message was already committed to chatMessages (it renders
-        // via TranscriptMessage), so any blocks still sitting in the draft would
-        // make the streaming area render them a SECOND time — "输出重复两遍".
-        // The completed message carries its own finalBlocks, so the draft copy is
-        // redundant from this point on. Clearing here (instead of waiting for the
-        // setTimeout clearStreamingDraft) closes the window where both containers
-        // render the same blocks.
-        setStreamingDraft(sid, { isAgentRunning: false, responseBlocks: [] });
-        debug("[HelixTrace] handleRun finally setStreamingDraft false", {
-          sid,
-        });
-        // 旁路会话（btw- 前缀）：不清 draft——右侧「旁路问答」面板还要读
-        // streamingDrafts[bylineCid] 显示本轮的完整草稿（步骤/思考）。
-        // finalize effect 完成一轮后调 clearStreamingDraft 清掉；被中断
-        // （catch AbortError 路径）则保留给面板显示 partial 内容。
-        if (!sid.startsWith("btw-")) {
-          // 兜底落盘：正常完成路径 done/error 分支已 persistSessionNow，
-          // 这里覆盖 abort/异常退出等所有路径（幂等 merge，重复调用无害）。
-          // 后台 run 的用户消息与已提交回复只有这一条路径能进自己的 session 记录。
-          useHelixStore.getState().persistSessionNow(sid);
-          // 兜底捕获上下文分类：run 结束时 agent 已构建、分类数据权威。会话创建
-          // 瞬间的安静捕获（context-usage.tsx）必然拿到空分类（agent 未构建），
-          // 若只靠弹窗打开时捕获，没开过弹窗的会话重启后分类必丢
-          // （"重启后有的会消失"根因）。用 sessionMap 里最新的 sid
-          // （压缩轮换后仍指向当前后端会话），fire-and-forget 幂等。
-          captureContextBreakdown(sid, sessionMapRef.current.get(sid)?.sid);
-          // Once the reply is persisted, the draft is no longer needed; clear it
-          // on the next tick so any render this cycle still sees the final steps.
-          setTimeout(() => {
-            debug("[HelixTrace] handleRun finally clearStreamingDraft", { sid });
-            clearStreamingDraft(sid);
-          }, 0);
-        }
-      }
-      // This run is done. Only touch the shared "current run" bookkeeping when
-      // THIS run is the one the UI considers current — a parallel run in another
-      // conversation may still be streaming.
-      if (runningSessionIdRef.current === activeSessionId) {
-        runningSessionIdRef.current = null;
-        debug("[HelixTrace] handleRun finally BEFORE isChatLoading false", {
-          isChatLoading: useHelixStore.getState().isChatLoading,
-          currentSessionId,
-        });
-        useHelixStore.setState({ isChatLoading: false });
-        debug("[HelixTrace] handleRun finally AFTER isChatLoading false", {
-          isChatLoading: useHelixStore.getState().isChatLoading,
-          currentSessionId,
-        });
-      }
-      if (abortRef.current === controller) abortRef.current = null;
-      abortControllersRef.current.delete(activeSessionId);
-
-      // ── Post-run memory cleanup ─────────────────────────────────────────
-      // Release large buffers and state that were built up during the run.
-      // The final message was already persisted into chatMessages — the
-      // streaming buffers, steps, and response blocks are no longer needed.
-      // Without this, long conversations accumulate multi-MB of stale refs
-      // across turns, eventually blowing the V8 heap past 3 GB.
-      setTimeout(() => {
-        // Large text / reasoning buffers (can be multi-MB with tool output).
-        if (textBufferRef.current) textBufferRef.current = "";
-        thoughtBufferRef.current = "";
-        // Trim response blocks + execution steps back to empty (the store
-        // holds a separate truncated copy via addExecutionStep — this
-        // component-level state is a duplicate). Only clear the shared live
-        // state if THIS run still owns it — a parallel run may have taken over
-        // the front and its blocks must not be wiped.
-        if (liveStateOwnerRef.current === activeSessionId) {
-          setResponseBlocks([]);
-          setSteps([]);
-          setStreamThinking("");
-        }
-      }, 500); // after final render + persist are committed
-
-      // Diagnostic: if the button still shows busy after the run ended, the store
-      // is either set back to true later in this frame or something else is
-      // keeping `isRunning` true. Capture the next paint-time state too.
-      setTimeout(() => {
-        debug("[HelixTrace] postRun nextTick snapshot", {
+      } catch (error) {
+        debug("[HelixTrace] handleRun catch", {
+          errorName: error instanceof Error ? error.name : "unknown",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          errorStack: error instanceof Error ? error.stack : undefined,
           currentSessionId,
           runningSessionId: runningSessionIdRef.current,
-          isRunning,
-          isChatLoading: useHelixStore.getState().isChatLoading,
-          isBusy: isRunning || useHelixStore.getState().isChatLoading,
+          textLen: textBufferRef.current?.length ?? 0,
+          reasoningLen: thoughtBufferRef.current?.length ?? 0,
+          stepsLen: stepsRef.current.length,
+          responseBlocksLen: responseBlocks.length,
         });
-      }, 0);
-
-      // Git auto-commit/push after agent completes
-      if (isElectron() && sid) {
-        const { gitAutoCommit, gitAutoPush, gitCommitTemplate } =
-          useHelixStore.getState();
-        if (gitAutoCommit) {
-          try {
-            const stageResult = await window.electron.git.stage();
-            if (stageResult?.ok) {
-              const msg = gitCommitTemplate || "chore: auto-commit changes";
-              await window.electron.git.commit(msg);
-              if (gitAutoPush) {
-                await window.electron.git.push();
-              }
+        if (error instanceof DOMException && error.name === "AbortError") {
+          // Save partial response before showing error
+          if (textBufferRef.current) {
+            const partialContent = textBufferRef.current;
+            const partialReasoning = thoughtBufferRef.current || undefined;
+            const msgId = useHelixStore.getState().addChatMessage({
+              role: "assistant",
+              content: partialContent + "\n\n*[执行已中断]*",
+              reasoning: partialReasoning,
+              sessionId: activeSessionId,
+            });
+            useHelixStore.getState().setChatMessageStreaming(msgId, false);
+          }
+          pendingTextRef.current = null;
+          pendingThinkingRef.current = null;
+          pendingBlocksRef.current = [];
+          rafPendingRef.current = false;
+          uiSteps((prev) => [
+            ...prev,
+            {
+              id: generateId(),
+              type: "error",
+              content: "用户取消了执行",
+              timestamp: Date.now(),
+            },
+          ]);
+        } else {
+          const message =
+            error instanceof Error
+              ? error.message
+              : "连接失败，请检查网络和 API 设置";
+          uiSteps((prev) => [
+            ...prev,
+            {
+              id: generateId(),
+              type: "error",
+              content: message,
+              timestamp: Date.now(),
+            },
+          ]);
+          // Hard failure (not user abort):
+          // - Partial model output → commit it so context stays and the user can
+          //   keep chatting in this session (F2).
+          // - Nothing produced → withdraw the optimistic user message and put the
+          //   draft (text / images / files / link cards) back so one-click resend
+          //   works without retyping (F1).
+          if (textBufferRef.current) {
+            const mid = useHelixStore.getState().addChatMessage({
+              role: "assistant",
+              content: textBufferRef.current + `\n\n*[执行中断：${message}]*`,
+              reasoning: thoughtBufferRef.current || undefined,
+              sessionId: activeSessionId,
+            });
+            useHelixStore.getState().setChatMessageStreaming(mid, false);
+            storeActions.showToast({
+              type: "error",
+              title: "回复中断",
+              description: "已保留部分内容，可在本会话继续追问",
+            });
+          } else {
+            useHelixStore.getState().deleteMessage(newUserMsgId);
+            const shouldRestoreInput =
+              !isBackground && !opts?.keepInput && !!baseTrimmed;
+            if (shouldRestoreInput) {
+              setInputSynced(baseTrimmed);
+              resetInputHeight();
+              requestAnimationFrame(() => inputRef.current?.focus());
             }
-          } catch (e) {
-            console.error("[GitAutoCommit] Failed:", e);
+            setPendingImages(imagesSnapshot ?? []);
+            setPendingFiles(filesSnapshot ?? []);
+            const attachKey = currentSessionId ?? DRAFT_SESSION_KEY;
+            useHelixStore
+              .getState()
+              .setTabAttachments(
+                attachKey,
+                imagesSnapshot ?? [],
+                filesSnapshot ?? [],
+                linkCards,
+              );
+            storeActions.showToast({
+              type: "error",
+              title: "发送失败",
+              description: shouldRestoreInput
+                ? "内容已放回输入框，可直接重发"
+                : message,
+            });
           }
         }
-      }
+      } finally {
+        debug("[HelixTrace] handleRun finally ENTRY", {
+          reason: queueDone ? "queueDone" : "abort/error",
+          currentSessionId,
+          runningSessionId: runningSessionIdRef.current,
+          textLen: textBufferRef.current?.length ?? 0,
+          reasoningLen: thoughtBufferRef.current?.length ?? 0,
+          stepsLen: stepsRef.current.length,
+          responseBlocksLen: responseBlocks.length,
+        });
+        const reason = queueDone ? "queueDone" : "abort/error";
+        debug("[HelixTrace] handleRun finally", {
+          reason,
+          currentSessionId,
+          runningSessionId: runningSessionIdRef.current,
+          isRunningSession: currentSessionId === runningSessionIdRef.current,
+          textLen: textBufferRef.current?.length ?? 0,
+          reasoningLen: thoughtBufferRef.current?.length ?? 0,
+          stepsLen: stepsRef.current.length,
+          responseBlocksLen: responseBlocks.length,
+        });
+        // Always unsubscribe to prevent duplicate event handlers
+        try {
+          if (unsubscribe) unsubscribe();
+        } catch {
+          /* unsubscribe 不应抛错；忽略避免 finally 中断 */
+        }
 
-      // 回合结束自动诊断（「诊断」面板里的「每轮结束自动检查」）：跑项目自带的
-      // 类型检查/lint，结果缓存进 store，面板打开即见。
-      // fire-and-forget —— cargo check 可能几十秒，不能挡住后面的持久化。
-      // 后台旁路 run（/btw）不触发：它不动工作区，检查只会白跑一遍。
-      if (isElectron() && sid && !isBackground && !controller.signal.aborted) {
-        const { diagnosticsAfterRun } = useHelixStore.getState();
-        if (diagnosticsAfterRun && runWorkDir) {
-          void window.electron.diagnostics
-            ?.run({ cwd: runWorkDir })
-            .then((r) => {
-              const store = useHelixStore.getState();
-              if (r.ok && r.cwd) store.setLastDiagnostics(r.cwd, r);
-              const errors = r.counts?.errors ?? 0;
-              if (r.ok && errors > 0) {
-                store.showToast({
-                  type: "warning",
-                  title: `${r.label ?? "检查"}：${errors} 个错误`,
-                  description: "打开「诊断」查看，可一键交给 AI 修复",
-                  duration: 6000,
-                });
+        // Cancel any pending synthetic-done timer so it can't fire after the run
+        // ended (e.g. on abort / unmount) and call setState on a dead context.
+        if (synthDoneTimerRef.current) {
+          clearTimeout(synthDoneTimerRef.current);
+          synthDoneTimerRef.current = null;
+        }
+        if (forceDoneTimerRef.current) {
+          clearTimeout(forceDoneTimerRef.current);
+          forceDoneTimerRef.current = null;
+        }
+        if (idleTimerRef) {
+          clearTimeout(idleTimerRef);
+          idleTimerRef = null;
+        } // 清理空闲检测定时器
+        // Seal the run: prevent any straggler rAF syncDraft callback from
+        // re-setting isAgentRunning=true after we mark it false below.
+        runCompleted = true;
+        const sid = activeSessionId;
+        if (sid) {
+          // Keep the estimated value until the provider's usage frame replaces it;
+          // clearing here could make the context ring briefly fall back to the old
+          // snapshot while the backend is still flushing usage_prompt_complete.
+          // Clear the draft's responseBlocks at the same time we drop isAgentRunning:
+          // the completed message was already committed to chatMessages (it renders
+          // via TranscriptMessage), so any blocks still sitting in the draft would
+          // make the streaming area render them a SECOND time — "输出重复两遍".
+          // The completed message carries its own finalBlocks, so the draft copy is
+          // redundant from this point on. Clearing here (instead of waiting for the
+          // setTimeout clearStreamingDraft) closes the window where both containers
+          // render the same blocks.
+          setStreamingDraft(sid, { isAgentRunning: false, responseBlocks: [] });
+          debug("[HelixTrace] handleRun finally setStreamingDraft false", {
+            sid,
+          });
+          // 旁路会话（btw- 前缀）：不清 draft——右侧「旁路问答」面板还要读
+          // streamingDrafts[bylineCid] 显示本轮的完整草稿（步骤/思考）。
+          // finalize effect 完成一轮后调 clearStreamingDraft 清掉；被中断
+          // （catch AbortError 路径）则保留给面板显示 partial 内容。
+          if (!sid.startsWith("btw-")) {
+            // 兜底落盘：正常完成路径 done/error 分支已 persistSessionNow，
+            // 这里覆盖 abort/异常退出等所有路径（幂等 merge，重复调用无害）。
+            // 后台 run 的用户消息与已提交回复只有这一条路径能进自己的 session 记录。
+            useHelixStore.getState().persistSessionNow(sid);
+            // 兜底捕获上下文分类：run 结束时 agent 已构建、分类数据权威。会话创建
+            // 瞬间的安静捕获（context-usage.tsx）必然拿到空分类（agent 未构建），
+            // 若只靠弹窗打开时捕获，没开过弹窗的会话重启后分类必丢
+            // （"重启后有的会消失"根因）。用 sessionMap 里最新的 sid
+            // （压缩轮换后仍指向当前后端会话），fire-and-forget 幂等。
+            captureContextBreakdown(sid, sessionMapRef.current.get(sid)?.sid);
+            // Once the reply is persisted, the draft is no longer needed; clear it
+            // on the next tick so any render this cycle still sees the final steps.
+            setTimeout(() => {
+              debug("[HelixTrace] handleRun finally clearStreamingDraft", {
+                sid,
+              });
+              clearStreamingDraft(sid);
+            }, 0);
+          }
+        }
+        // This run is done. Only touch the shared "current run" bookkeeping when
+        // THIS run is the one the UI considers current — a parallel run in another
+        // conversation may still be streaming.
+        if (runningSessionIdRef.current === activeSessionId) {
+          runningSessionIdRef.current = null;
+          debug("[HelixTrace] handleRun finally BEFORE isChatLoading false", {
+            isChatLoading: useHelixStore.getState().isChatLoading,
+            currentSessionId,
+          });
+          useHelixStore.setState({ isChatLoading: false });
+          debug("[HelixTrace] handleRun finally AFTER isChatLoading false", {
+            isChatLoading: useHelixStore.getState().isChatLoading,
+            currentSessionId,
+          });
+        }
+        if (abortRef.current === controller) abortRef.current = null;
+        abortControllersRef.current.delete(activeSessionId);
+
+        // ── Post-run memory cleanup ─────────────────────────────────────────
+        // Release large buffers and state that were built up during the run.
+        // The final message was already persisted into chatMessages — the
+        // streaming buffers, steps, and response blocks are no longer needed.
+        // Without this, long conversations accumulate multi-MB of stale refs
+        // across turns, eventually blowing the V8 heap past 3 GB.
+        setTimeout(() => {
+          // Large text / reasoning buffers (can be multi-MB with tool output).
+          if (textBufferRef.current) textBufferRef.current = "";
+          thoughtBufferRef.current = "";
+          // Trim response blocks + execution steps back to empty (the store
+          // holds a separate truncated copy via addExecutionStep — this
+          // component-level state is a duplicate). Only clear the shared live
+          // state if THIS run still owns it — a parallel run may have taken over
+          // the front and its blocks must not be wiped.
+          if (liveStateOwnerRef.current === activeSessionId) {
+            setResponseBlocks([]);
+            setSteps([]);
+            setStreamThinking("");
+          }
+        }, 500); // after final render + persist are committed
+
+        // Diagnostic: if the button still shows busy after the run ended, the store
+        // is either set back to true later in this frame or something else is
+        // keeping `isRunning` true. Capture the next paint-time state too.
+        setTimeout(() => {
+          debug("[HelixTrace] postRun nextTick snapshot", {
+            currentSessionId,
+            runningSessionId: runningSessionIdRef.current,
+            isRunning,
+            isChatLoading: useHelixStore.getState().isChatLoading,
+            isBusy: isRunning || useHelixStore.getState().isChatLoading,
+          });
+        }, 0);
+
+        // Git auto-commit/push after agent completes
+        if (isElectron() && sid) {
+          const { gitAutoCommit, gitAutoPush, gitCommitTemplate } =
+            useHelixStore.getState();
+          if (gitAutoCommit) {
+            try {
+              const stageResult = await window.electron.git.stage();
+              if (stageResult?.ok) {
+                const msg = gitCommitTemplate || "chore: auto-commit changes";
+                await window.electron.git.commit(msg);
+                if (gitAutoPush) {
+                  await window.electron.git.push();
+                }
               }
-            })
-            .catch(() => {
-              // 检查跑不起来（工具缺失 / 超时）不值得打断对话
-            });
+            } catch (e) {
+              console.error("[GitAutoCommit] Failed:", e);
+            }
+          }
+        }
+
+        // 回合结束自动诊断（「诊断」面板里的「每轮结束自动检查」）：跑项目自带的
+        // 类型检查/lint，结果缓存进 store，面板打开即见。
+        // fire-and-forget —— cargo check 可能几十秒，不能挡住后面的持久化。
+        // 后台旁路 run（/btw）不触发：它不动工作区，检查只会白跑一遍。
+        if (
+          isElectron() &&
+          sid &&
+          !isBackground &&
+          !controller.signal.aborted
+        ) {
+          const { diagnosticsAfterRun } = useHelixStore.getState();
+          if (diagnosticsAfterRun && runWorkDir) {
+            void window.electron.diagnostics
+              ?.run({ cwd: runWorkDir })
+              .then((r) => {
+                const store = useHelixStore.getState();
+                if (r.ok && r.cwd) store.setLastDiagnostics(r.cwd, r);
+                const errors = r.counts?.errors ?? 0;
+                if (r.ok && errors > 0) {
+                  store.showToast({
+                    type: "warning",
+                    title: `${r.label ?? "检查"}：${errors} 个错误`,
+                    description:
+                      "发 /diagnostics 打开「诊断」查看，可一键交给 AI 修复",
+                    duration: 6000,
+                  });
+                }
+              })
+              .catch(() => {
+                // 检查跑不起来（工具缺失 / 超时）不值得打断对话
+              });
+          }
+        }
+
+        // Debounced full-session persist handles saving; mark as saved
+        if (!savedSessionRef.current) {
+          savedSessionRef.current = true;
+          storeActions.notifySessionSaved();
         }
       }
-
-      // Debounced full-session persist handles saving; mark as saved
-      if (!savedSessionRef.current) {
-        savedSessionRef.current = true;
-        storeActions.notifySessionSaved();
-      }
-    }
-  }, [
-    input,
-    hasApiKey,
-    currentSessionId,
-    handleBtwAsk,
-    setStreamingDraft,
-    clearStreamingDraft,
-    storeActions,
-    resolveCommand,
-    BUILTIN_COMMANDS,
-    setInputSynced,
-    handleStop,
-    streamingDrafts,
-    pushInputHistory,
-  ]);
+    },
+    [
+      input,
+      hasApiKey,
+      currentSessionId,
+      handleBtwAsk,
+      setStreamingDraft,
+      clearStreamingDraft,
+      storeActions,
+      resolveCommand,
+      BUILTIN_COMMANDS,
+      setInputSynced,
+      handleStop,
+      streamingDrafts,
+      pushInputHistory,
+    ],
+  );
 
   // External "send" trigger (Command Center / Review panel call injectAndSend,
   // which bumps requestSendSignal). Fires handleRun with the injected text.
@@ -7957,37 +8204,48 @@ export function AgentFlowPanel() {
   const pendingFlushRef = useRef<string | null>(null);
   const [flushTick, setFlushTick] = useState(0);
 
-  const saveQueueEdit = useCallback((id: string) => {
-    const text = editingQueueText.trim();
-    setEditingQueueId(null);
-    if (!text) {
-      useHelixStore.getState().dequeueInput(queueSessionKey, id);
-      return;
-    }
-    useHelixStore.getState().updateQueueItem(queueSessionKey, id, text);
-  }, [editingQueueText, queueSessionKey]);
+  const saveQueueEdit = useCallback(
+    (id: string) => {
+      const text = editingQueueText.trim();
+      setEditingQueueId(null);
+      if (!text) {
+        useHelixStore.getState().dequeueInput(queueSessionKey, id);
+        return;
+      }
+      useHelixStore.getState().updateQueueItem(queueSessionKey, id, text);
+    },
+    [editingQueueText, queueSessionKey],
+  );
 
   const cancelQueueEdit = useCallback(() => setEditingQueueId(null), []);
 
-  const flushQueueItem = useCallback((id: string) => {
-    const item = useHelixStore
-      .getState()
-      .inputQueue[queueSessionKey]
-      ?.find((i) => i.id === id);
-    if (!item) return;
-    useHelixStore.getState().dequeueInput(queueSessionKey, id);
-    if (editingQueueId === id) setEditingQueueId(null);
-    const prompt = item.text;
-    const st = useHelixStore.getState();
-    if (st.streamingDrafts[currentSessionId ?? ""]?.isAgentRunning) {
-      // 先停当前任务；handleStop 异步，稍等一拍再判忙重发。
-      handleStop();
-      pendingFlushRef.current = prompt;
-      window.setTimeout(() => setFlushTick((t) => t + 1), 250);
-    } else {
-      void handleRunRef.current({ prompt, keepInput: true });
-    }
-  }, [editingQueueId, queueSessionKey, handleStop, handleRunRef, currentSessionId]);
+  const flushQueueItem = useCallback(
+    (id: string) => {
+      const item = useHelixStore
+        .getState()
+        .inputQueue[queueSessionKey]?.find((i) => i.id === id);
+      if (!item) return;
+      useHelixStore.getState().dequeueInput(queueSessionKey, id);
+      if (editingQueueId === id) setEditingQueueId(null);
+      const prompt = item.text;
+      const st = useHelixStore.getState();
+      if (st.streamingDrafts[currentSessionId ?? ""]?.isAgentRunning) {
+        // 先停当前任务；handleStop 异步，稍等一拍再判忙重发。
+        handleStop();
+        pendingFlushRef.current = prompt;
+        window.setTimeout(() => setFlushTick((t) => t + 1), 250);
+      } else {
+        void handleRunRef.current({ prompt, keepInput: true });
+      }
+    },
+    [
+      editingQueueId,
+      queueSessionKey,
+      handleStop,
+      handleRunRef,
+      currentSessionId,
+    ],
+  );
 
   // 等待中的「立即发送」：run 一旦真正停下就把这条发出去。
   useEffect(() => {
@@ -8250,24 +8508,31 @@ export function AgentFlowPanel() {
   ]);
 
   // Turn a FileList (dropped or picked) into pending file attachments.
-  const addFiles = useCallback(async (fileList: FileList | File[]) => {
-    const files = Array.from(fileList);
-    if (files.length === 0) return;
-    const attachments = await Promise.all(
-      files.map((f) => fileToAttachment(f).catch(() => null)),
-    );
-    const valid = attachments.filter((a): a is FileAttachment => a !== null);
-    if (valid.length > 0) {
-      // Deduplicate by name + size to prevent duplicates
-      const existing = new Set(pendingFiles.map((f) => `${f.name}:${f.size}`));
-      const newOnes = valid.filter((f) => !existing.has(`${f.name}:${f.size}`));
-      if (newOnes.length > 0) {
-        const next = [...pendingFiles, ...newOnes];
-        setPendingFiles(next);
-        persistPendingAttachments(pendingImages, next);
+  const addFiles = useCallback(
+    async (fileList: FileList | File[]) => {
+      const files = Array.from(fileList);
+      if (files.length === 0) return;
+      const attachments = await Promise.all(
+        files.map((f) => fileToAttachment(f).catch(() => null)),
+      );
+      const valid = attachments.filter((a): a is FileAttachment => a !== null);
+      if (valid.length > 0) {
+        // Deduplicate by name + size to prevent duplicates
+        const existing = new Set(
+          pendingFiles.map((f) => `${f.name}:${f.size}`),
+        );
+        const newOnes = valid.filter(
+          (f) => !existing.has(`${f.name}:${f.size}`),
+        );
+        if (newOnes.length > 0) {
+          const next = [...pendingFiles, ...newOnes];
+          setPendingFiles(next);
+          persistPendingAttachments(pendingImages, next);
+        }
       }
-    }
-  }, [pendingImages, pendingFiles, persistPendingAttachments]);
+    },
+    [pendingImages, pendingFiles, persistPendingAttachments],
+  );
 
   const removePendingFile = useCallback(
     (id: string) => {
@@ -8299,8 +8564,8 @@ export function AgentFlowPanel() {
         const cid = ownerCid ?? useHelixStore.getState().currentSessionId;
         const sid =
           cardSid ||
-          ((cid && sessionMapRef.current.get(cid)?.sid) ||
-            helixSessionIdRef.current);
+          (cid && sessionMapRef.current.get(cid)?.sid) ||
+          helixSessionIdRef.current;
         if (sid) {
           // 旧 RPC 是 WS 里非对称的一对一 approve/deny（session/approve 需要 toolCallId）。
           // 新 RPC 用 approval.respond + choice: once/session/always/deny，把决定写回
@@ -8337,8 +8602,8 @@ export function AgentFlowPanel() {
         const cid = ownerCid ?? currentSessionId;
         const sid =
           cardSid ||
-          ((cid && sessionMapRef.current.get(cid)?.sid) ||
-            helixSessionIdRef.current);
+          (cid && sessionMapRef.current.get(cid)?.sid) ||
+          helixSessionIdRef.current;
         if (sid) {
           await helixApi()!.send("clarify/respond", {
             session_id: sid,
@@ -8360,29 +8625,16 @@ export function AgentFlowPanel() {
     [currentSessionId, bumpPendingUserRequests],
   );
 
-  // 审批卡「本会话始终允许」：从卡上解析 Tool/Command 派生前缀，登记会话级
-  // 放行（内存态，重启即清），然后对当前这张卡代答 Approve (once)。后续命中
-  // 同 tool+前缀的审批请求由 onUserRequest 入队前拦截，不再弹卡。
+  // 审批卡「本会话始终允许」：把第三挡原文（Approve (session)）当应答回给扩展，
+  // 前端**不存任何表** —— 落表/查表/后续同类调用不弹窗全在扩展侧（session-allow.ts，
+  // 按 sessionId 分格、进程退出即清、strict 档不参与）。未补丁的旧扩展会因
+  // startsWith("Approve") 把它降级成 once（本次放行，下轮照问），不会误拒。
   const handleClarifyApproveAlways = useCallback(
     (requestId: string) => {
       const card = clarifyQueueRef.current.find((r) => r.id === requestId);
-      const ask = card ? parsePermissionAsk(card.question) : null;
-      if (ask) {
-        const prefix = deriveAllowPrefix(ask.command);
-        useHelixStore.getState().addSessionApprovalAllow({
-          tool: ask.tool,
-          prefix,
-        });
-        useHelixStore.getState().showToast({
-          type: "success",
-          title: prefix
-            ? `本会话内已自动允许 ${prefix}*`
-            : `本会话内已自动允许 ${ask.tool} 的全部调用`,
-        });
-      }
       void handleClarifyRespond(
         requestId,
-        PERM_APPROVE_ANSWER,
+        PERM_APPROVE_SESSION_ANSWER,
         card?.sessionId,
         card?.sid,
       );
@@ -8469,8 +8721,8 @@ export function AgentFlowPanel() {
         const cid = req.sessionId ?? fallbackCid;
         const sid =
           req.sid ||
-          ((cid && sessionMapRef.current.get(cid)?.sid) ||
-            helixSessionIdRef.current);
+          (cid && sessionMapRef.current.get(cid)?.sid) ||
+          helixSessionIdRef.current;
         if (!sid) continue;
         // 新 RPC（2026-08-17 起后端弃用 session/approve）：approval.respond +
         // choice: once/session/always/deny，由 agent 侧状态机 resolve。
@@ -8565,134 +8817,128 @@ export function AgentFlowPanel() {
   const renderQueueList = () => {
     if (inputQueue.length === 0) return null;
     return (
-          <div className="mb-1.5 flex flex-col gap-1.5 max-h-48 overflow-y-auto">
-            {inputQueue.map((item) => {
-              const editing = editingQueueId === item.id;
-              return (
-                <div
-                  key={item.id}
-                  className="flex items-center gap-3 rounded-xl border border-border/30 bg-muted/20 px-3 py-2.5"
-                >
-                  <ListChecks className="size-4 shrink-0 text-muted-foreground/70" />
-                  {editing ? (
-                    <div className="flex-1 min-w-0">
-                      <textarea
-                        ref={editQueueRef}
-                        value={editingQueueText}
-                        onChange={(e) => {
-                          setEditingQueueText(e.target.value);
-                          const el = e.target;
-                          el.style.height = "auto";
-                          el.style.height =
-                            Math.min(el.scrollHeight, 140) + "px";
-                        }}
-                        onKeyDown={(e) => {
-                          e.stopPropagation();
-                          if (e.key === "Enter" && !e.shiftKey) {
-                            e.preventDefault();
-                            saveQueueEdit(item.id);
-                          } else if (e.key === "Escape") {
-                            e.preventDefault();
-                            cancelQueueEdit();
-                          }
-                        }}
-                        rows={1}
-                        className="w-full resize-none bg-transparent text-[length:var(--helix-transcript-size)] leading-[1.45] break-all overflow-y-auto max-h-[140px] caret-foreground"
-                      />
-                      <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50 mt-0.5">
-                        Enter 保存 · Esc 取消
-                      </p>
-                    </div>
-                  ) : (
-                    <p className="flex-1 min-w-0 text-[length:var(--helix-transcript-size)] whitespace-pre-wrap break-all line-clamp-3 text-foreground/90">
-                      {item.text}
-                    </p>
-                  )}
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    {editing ? (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => saveQueueEdit(item.id)}
-                          className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
-                        >
-                          <Check className="size-3" />
-                          保存
-                        </button>
-                        <button
-                          type="button"
-                          onClick={cancelQueueEdit}
-                          className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/40 bg-muted/30 text-muted-foreground hover:bg-muted/50 transition-colors"
-                        >
-                          <X className="size-3" />
-                          取消
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => flushQueueItem(item.id)}
-                        className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-orange-400/40 bg-orange-500/10 text-orange-500 hover:bg-orange-500/20 transition-colors"
-                      >
-                        <Send className="size-3" />
-                        立即发送
-                      </button>
-                    )}
-                    {!editing && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingQueueId(item.id);
-                          setEditingQueueText(item.text);
-                        }}
-                        className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/40 bg-muted/30 text-muted-foreground hover:bg-muted/50 transition-colors"
-                      >
-                        <Pencil className="size-3" />
-                        编辑
-                      </button>
-                    )}
+      <div className="mb-1.5 flex flex-col gap-1.5 max-h-48 overflow-y-auto">
+        {inputQueue.map((item) => {
+          const editing = editingQueueId === item.id;
+          return (
+            <div
+              key={item.id}
+              className="flex items-center gap-3 rounded-xl border border-border/30 bg-muted/20 px-3 py-2.5"
+            >
+              <ListChecks className="size-4 shrink-0 text-muted-foreground/70" />
+              {editing ? (
+                <div className="flex-1 min-w-0">
+                  <textarea
+                    ref={editQueueRef}
+                    value={editingQueueText}
+                    onChange={(e) => {
+                      setEditingQueueText(e.target.value);
+                      const el = e.target;
+                      el.style.height = "auto";
+                      el.style.height = Math.min(el.scrollHeight, 140) + "px";
+                    }}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        saveQueueEdit(item.id);
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelQueueEdit();
+                      }
+                    }}
+                    rows={1}
+                    className="w-full resize-none bg-transparent text-[length:var(--helix-transcript-size)] leading-[1.45] break-all overflow-y-auto max-h-[140px] caret-foreground"
+                  />
+                  <p className="text-[calc(var(--helix-transcript-size)*0.7143)] text-muted-foreground/50 mt-0.5">
+                    Enter 保存 · Esc 取消
+                  </p>
+                </div>
+              ) : (
+                <p className="flex-1 min-w-0 text-[length:var(--helix-transcript-size)] whitespace-pre-wrap break-all line-clamp-3 text-foreground/90">
+                  {item.text}
+                </p>
+              )}
+              <div className="flex shrink-0 items-center gap-1.5">
+                {editing ? (
+                  <>
                     <button
                       type="button"
-                      onClick={() => {
-                        if (editingQueueId === item.id) setEditingQueueId(null);
-                        storeActions.dequeueInput(queueSessionKey, item.id);
-                      }}
-                      className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/40 bg-muted/30 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+                      onClick={() => saveQueueEdit(item.id)}
+                      className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-primary/40 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
                     >
-                      <Trash2 className="size-3" />
-                      删除
+                      <Check className="size-3" />
+                      保存
                     </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                    <button
+                      type="button"
+                      onClick={cancelQueueEdit}
+                      className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/40 bg-muted/30 text-muted-foreground hover:bg-muted/50 transition-colors"
+                    >
+                      <X className="size-3" />
+                      取消
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => flushQueueItem(item.id)}
+                    className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-orange-400/40 bg-orange-500/10 text-orange-500 hover:bg-orange-500/20 transition-colors"
+                  >
+                    <Send className="size-3" />
+                    立即发送
+                  </button>
+                )}
+                {!editing && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingQueueId(item.id);
+                      setEditingQueueText(item.text);
+                    }}
+                    className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/40 bg-muted/30 text-muted-foreground hover:bg-muted/50 transition-colors"
+                  >
+                    <Pencil className="size-3" />
+                    编辑
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (editingQueueId === item.id) setEditingQueueId(null);
+                    storeActions.dequeueInput(queueSessionKey, item.id);
+                  }}
+                  className="flex items-center gap-1 h-7 px-2 rounded-lg text-[calc(var(--helix-transcript-size)*0.8571)] border border-border/40 bg-muted/30 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+                >
+                  <Trash2 className="size-3" />
+                  删除
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     );
   };
 
-
-  const renderChatInput = ({ isEmpty }: { isEmpty?: boolean } = {}) => {    const approvalModeButton = (
+  const renderChatInput = ({ isEmpty }: { isEmpty?: boolean } = {}) => {
+    const approvalModeButton = (
       <div className="relative min-w-0" ref={approvalModeDropdownRef}>
         <button
           type="button"
           onClick={() => setShowApprovalModeDropdown(!showApprovalModeDropdown)}
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ui-text-sm2 transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
-          data-tip={
-            planOn
-              ? "制定计划：只对本对话生效，选一个权限档即退出"
-              : `审批模式：${
-                  permissionScopeLabelOf(permissionScopeInfo) ?? "全局"
-                }生效，值来自 pi-permission 的配置（可按项目/会话覆盖）`
-          }
         >
           {(() => {
-            const cur = APPROVAL_MODE_ITEMS.find(
-              (m) => m.id === approvalMode,
-            );
+            const cur = APPROVAL_MODE_ITEMS.find((m) => m.id === approvalMode);
             const Icon = cur ? APPROVAL_MODE_ICONS[cur.icon] : null;
-            // 覆盖生效时把来源标在芯片上：用户看到的档位必须是**这条对话**真正
-            // 会用到的那一档，否则「本项目设了严格」在界面上完全看不出来。
-            const scopeTag = planOn ? null : permissionScopeLabelOf(permissionScopeInfo);
+            // 芯片上的档位必须是**这条对话**真正会用到的那一档：还没落盘的选档
+            // 标「待生效」；档位来自配置默认（本对话没选过）不再标注。
+            const scopeTag = planOn
+              ? null
+              : pendingTier
+                ? "待生效"
+                : permissionScopeLabelOf(permissionScopeInfo);
             return (
               <>
                 {Icon && <Icon className="size-3.5 shrink-0" />}
@@ -8710,47 +8956,15 @@ export function AgentFlowPanel() {
           <ChevronDown className="size-3" />
         </button>
         {showApprovalModeDropdown && (
-          <div className="absolute bottom-full left-0 mb-2 w-[300px] bg-card rounded-xl border border-border/40 shadow-xl py-1 z-50 animate-scale-in">
-            {/* 写到哪一层：全局 / 本项目 / 本会话（生效优先级反过来）。选的是
-                **写入目标**，不是当前生效值 —— 后者芯片上已经标出来了。 */}
-            <div className="px-3 pb-1.5 pt-0.5">
-              <div className="flex items-center gap-1">
-                {PERMISSION_SCOPE_ITEMS.map((item) => {
-                  const active = permissionWriteScope === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setPermissionWriteScope(item.id)}
-                      data-tip={item.desc}
-                      className={`flex-1 h-6 rounded-md ui-text-sm2 border transition-colors ${
-                        active
-                          ? "border-primary/40 bg-primary/10 text-primary"
-                          : "border-border/40 bg-muted/20 text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      {item.title}
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="mt-1 text-[calc(var(--helix-transcript-size)*0.78)] text-muted-foreground leading-snug">
-                {PERMISSION_SCOPE_ITEMS.find(
-                  (i) => i.id === permissionWriteScope,
-                )?.desc ?? ""}
-              </div>
-            </div>
+          <div className="absolute bottom-full left-0 mb-2 w-[260px] bg-card rounded-lg border border-border/40 shadow-xl py-0.5 z-50 animate-scale-in">
             {APPROVAL_MODE_ITEMS.map((mode) => {
               const Icon = APPROVAL_MODE_ICONS[mode.icon];
-              // plan 是按会话那一轴，勾选只看本会话；权限档勾的是**当前写入层**
-              // 自己的格子（全局格恒有值；项目/会话没覆盖时回落到显示生效档）。
+              // plan 是按会话那一轴，勾选只看本会话；权限档勾的是**这条对话会用到的
+              // 那一档**（含还没落盘的草稿选档）——只有一层可写，芯片与勾不会分叉。
               const active =
                 mode.id === "plan"
                   ? approvalMode === "plan"
-                  : (permissionTierOfLayer(
-                      permissionScopeInfo,
-                      permissionWriteScope,
-                    ) ?? permissionMode) === mode.id;
+                  : displayTier === mode.id;
               return (
                 <button
                   key={mode.id}
@@ -8778,9 +8992,9 @@ export function AgentFlowPanel() {
                       return;
                     }
                     // 权限档：唯一写路径是 pi-permission 的配置文件（阻断工具
-                    // 执行的是那个扩展的 tool_call 钩子，它只读这一个文件）。
-                    // 落在哪一层由上面的作用域选择器决定；写完 store 会回读，
-                    // 芯片显示的是文件里的生效档，不是「用户刚才点了什么」。
+                    // 执行的是那个扩展的 tool_call 钩子，它只读这一个文件），
+                    // 而且只写「本对话」那一层——别的对话不受影响。这条对话还没
+                    // 建起来时 store 会先记着，发出第一条消息时落盘（handleRun）。
                     void setPermissionMode(mode.id, permissionTarget());
                     // 选权限档 = 离开 plan：清本会话标记，并让网关补发 /plan exit
                     // 解锁写工具（本来不在 plan 时它是 no-op，所以不必多发）。
@@ -8801,88 +9015,29 @@ export function AgentFlowPanel() {
                       }
                     }
                   }}
-                  className={`w-full flex items-start gap-2.5 px-3 py-1.5 text-left hover:bg-muted transition-colors ${active ? "bg-primary/5" : ""}`}
+                  className={`w-full flex items-start gap-2 px-2 py-1 text-left hover:bg-muted transition-colors ${active ? "bg-primary/5" : ""}`}
                 >
-                  <div className="mt-0.5 shrink-0 w-6 h-6 rounded-full bg-muted flex items-center justify-center">
-                    <Icon className="size-3.5 text-foreground/70" />
+                  <div className="mt-0.5 shrink-0 w-5 h-5 rounded-full bg-muted flex items-center justify-center">
+                    <Icon className="size-3 text-foreground/70" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-foreground">
+                    <div className="ui-text-sm2 font-medium text-foreground leading-tight">
                       {mode.title}
                     </div>
-                    <div className="text-xs text-muted-foreground leading-relaxed">
+                    <div className="text-[calc(var(--helix-transcript-size)*0.78)] text-muted-foreground leading-snug">
                       {mode.desc}
                     </div>
                   </div>
                   {active && (
-                    <div className="mt-1 shrink-0">
-                      <Check className="size-4 text-primary" />
+                    <div className="mt-0.5 shrink-0">
+                      <Check className="size-3.5 text-primary" />
                     </div>
                   )}
                 </button>
               );
             })}
-            {/* 生效说明 + 覆盖回收。真相只有 settings.json 那一份，这里只是把
-                「哪一格在起作用」讲出来，并提供一键回到下一层。 */}
-            <div className="mt-1 px-3 py-1.5 border-t border-border/30 space-y-1">
-              <div className="text-[calc(var(--helix-transcript-size)*0.78)] text-muted-foreground leading-snug">
-                {permissionScopeInfo ? (
-                  <>
-                    本对话实际生效：
-                    <span className="text-foreground">
-                      {APPROVAL_MODE_ITEMS.find(
-                        (m) => m.id === permissionScopeInfo.effective,
-                      )?.title ?? permissionScopeInfo.effective}
-                    </span>
-                    {permissionScopeLabelOf(permissionScopeInfo)
-                      ? `（来自${permissionScopeLabelOf(permissionScopeInfo)}）`
-                      : "（全局）"}
-                    {permissionScopeInfo.globalUnparsable &&
-                      "；配置里的全局档认不出，扩展按全放行跑"}
-                  </>
-                ) : (
-                  "还没读到配置（打开下拉时会回读一次）"
-                )}
-              </div>
-              {conversationIsRemote && (
-                <div className="text-[calc(var(--helix-transcript-size)*0.78)] text-amber-600 leading-snug">
-                  这条对话在远端机器执行：它的 pi 读**远端**的配置，本机档位对它无效
-                </div>
-              )}
-              {(permissionScopeInfo?.project ||
-                permissionScopeInfo?.session) && (
-                <div className="flex items-center gap-1.5">
-                  {permissionScopeInfo?.project && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void clearPermissionOverride(
-                          "project",
-                          permissionTarget(),
-                        )
-                      }
-                      className="h-6 px-2 rounded-md ui-text-sm2 border border-border/40 bg-muted/20 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-                    >
-                      清除本项目
-                    </button>
-                  )}
-                  {permissionScopeInfo?.session && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void clearPermissionOverride(
-                          "session",
-                          permissionTarget(),
-                        )
-                      }
-                      className="h-6 px-2 rounded-md ui-text-sm2 border border-border/40 bg-muted/20 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-                    >
-                      清除本会话
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+            {/* 生效说明。真相只有 settings.json 那一份（外加这条草稿对话还没落盘
+                的那一次选档），这里只把「现在到底哪一档在管」讲出来。 */}
           </div>
         )}
       </div>
@@ -8914,9 +9069,7 @@ export function AgentFlowPanel() {
           <div className="flex items-start gap-2 px-4 py-2.5 border-b border-amber-500/20 bg-amber-500/5 text-amber-600 ui-text-sm2">
             <AlertTriangle className="size-3.5 mt-0.5 shrink-0" />
             <div className="min-w-0">
-              <div className="font-medium">
-                该对话已失效，无法继续对话
-              </div>
+              <div className="font-medium">该对话已失效，无法继续对话</div>
               <div className="opacity-80 break-all">
                 {brokenSessionReason
                   ? brokenSessionReason.slice(0, 160)
@@ -9158,37 +9311,37 @@ export function AgentFlowPanel() {
                 {filteredSkillsOnly.map((skill, index) => {
                   const flatIndex = filteredCommands.length + index;
                   return (
-                  <button
-                    key={skill.id}
-                    type="button"
-                    ref={
-                      flatIndex === selectedSkillIndex
-                        ? (el) => {
-                            if (el) el.scrollIntoView({ block: "nearest" });
-                          }
-                        : undefined
-                    }
-                    onClick={() => {
-                      handleSkillSelect(skill);
-                    }}
-                    className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
-                      flatIndex === selectedSkillIndex
-                        ? "bg-primary/10 text-primary"
-                        : "hover:bg-muted/30"
-                    }`}
-                  >
-                    <FileText className="size-4 text-foreground/40 shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block truncate">
-                        {skill.name}
-                      </span>
-                      {skill.description && (
-                        <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground block truncate">
-                          {skill.description}
+                    <button
+                      key={skill.id}
+                      type="button"
+                      ref={
+                        flatIndex === selectedSkillIndex
+                          ? (el) => {
+                              if (el) el.scrollIntoView({ block: "nearest" });
+                            }
+                          : undefined
+                      }
+                      onClick={() => {
+                        handleSkillSelect(skill);
+                      }}
+                      className={`w-full text-left px-3 py-2 transition-colors flex items-center gap-2.5 ${
+                        flatIndex === selectedSkillIndex
+                          ? "bg-primary/10 text-primary"
+                          : "hover:bg-muted/30"
+                      }`}
+                    >
+                      <FileText className="size-4 text-foreground/40 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <span className="text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground block truncate">
+                          {skill.name}
                         </span>
-                      )}
-                    </div>
-                  </button>
+                        {skill.description && (
+                          <span className="text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground block truncate">
+                            {skill.description}
+                          </span>
+                        )}
+                      </div>
+                    </button>
                   );
                 })}
               </>
@@ -9297,9 +9450,7 @@ export function AgentFlowPanel() {
                     pendingLinks.length === 0
                   }
                   className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center border border-border/60 bg-muted/40 hover:bg-muted/70 ${
-                    isBusy
-                      ? "text-foreground"
-                      : "text-foreground/40"
+                    isBusy ? "text-foreground" : "text-foreground/40"
                   }`}
                   data-tip={isBusy ? "停止" : "发送"}
                 >
@@ -9353,9 +9504,7 @@ export function AgentFlowPanel() {
                     pendingLinks.length === 0
                   }
                   className={`h-9 w-9 shrink-0 rounded-xl transition-all duration-200 flex items-center justify-center border border-border/60 bg-muted/40 hover:bg-muted/70 ${
-                    isBusy
-                      ? "text-foreground"
-                      : "text-foreground/40"
+                    isBusy ? "text-foreground" : "text-foreground/40"
                   }`}
                   data-tip={isBusy ? "停止" : "发送"}
                 >
@@ -9466,9 +9615,7 @@ export function AgentFlowPanel() {
                     服务器名）。 */}
                 <div className="flex items-center gap-1.5 mb-3 justify-start">
                   {renderProjectChip()}
-                  {!conversationIsRemote &&
-                    gitAvailable &&
-                    currentBranch && (
+                  {!conversationIsRemote && gitAvailable && currentBranch && (
                     <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[calc(var(--helix-transcript-size)*0.7857)] text-blue-600 dark:text-blue-400 bg-blue-500/10 shrink-0">
                       <GitBranch className="size-3" />
                       <span className="max-w-[120px] truncate">
@@ -9624,11 +9771,8 @@ export function AgentFlowPanel() {
                     {/* 分叉起点标记：本会话由某条消息分叉而来时，在该消息
                         上方放置标记（即"从哪条消息分的叉"的可视化 + 天然的
                         跳转锚点——标记本身就位于分叉点）。 */}
-                    {currentBranchInfo?.forkedFromMessageId ===
-                      item.msg.id && (
-                      <div
-                        className="flex items-center gap-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-blue-500/70 animate-scale-in"
-                      >
+                    {currentBranchInfo?.forkedFromMessageId === item.msg.id && (
+                      <div className="flex items-center gap-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-blue-500/70 animate-scale-in">
                         <div className="h-px flex-1 bg-blue-500/20" />
                         <div className="flex items-center gap-1.5 shrink-0">
                           <GitFork className="size-3 shrink-0" />
@@ -9646,10 +9790,10 @@ export function AgentFlowPanel() {
                       searchOpen={conversationSearchOpen}
                       searchQuery={conversationSearchQuery}
                       isSearchMatch={searchMatchIds.has(item.msg.id)}
-                      isSearchActive={item.msg.id === conversationSearchActiveId}
-                      onFork={(id) =>
-                        void storeActions.forkConversation(id)
+                      isSearchActive={
+                        item.msg.id === conversationSearchActiveId
                       }
+                      onFork={(id) => void storeActions.forkConversation(id)}
                       onUndo={
                         item.msg.role === "user" &&
                         displayMessages.reduce(
@@ -9682,11 +9826,12 @@ export function AgentFlowPanel() {
                         className="flex items-center gap-1.5 my-1 text-foreground/50"
                         style={{ fontSize: transcriptFontSize + 2 }}
                       >
-                        <span className="font-medium">{streamingActive ? "工作中" : "已结束"}</span>
+                        <span className="font-medium">
+                          {streamingActive ? "工作中" : "已结束"}
+                        </span>
                         {((currentSessionId
                           ? streamingDrafts[currentSessionId]?.startedAt
-                          : undefined) ||
-                          runStartedAtRef.current) > 0 && (
+                          : undefined) || runStartedAtRef.current) > 0 && (
                           <span className="tabular-nums text-foreground/35">
                             {formatDuration(elapsedSeconds)}
                           </span>
@@ -9776,7 +9921,8 @@ export function AgentFlowPanel() {
                           <>
                             <details
                               ref={(el) => {
-                                if (el && !el.hasAttribute("open")) el.open = true;
+                                if (el && !el.hasAttribute("open"))
+                                  el.open = true;
                               }}
                               className="my-2 group/details"
                             >
@@ -9823,7 +9969,8 @@ export function AgentFlowPanel() {
                                     // 成「思考」——用户看到的就是「思考中 在上面、思考 在
                                     // 下面」。脉冲必须跟着最新内容走。
                                     const isNewestSegment =
-                                      isLastSeg && trailingSegments.length === 0;
+                                      isLastSeg &&
+                                      trailingSegments.length === 0;
                                     return (
                                       <ThinkingFold
                                         key={si}
@@ -9834,7 +9981,9 @@ export function AgentFlowPanel() {
                                           thinkingActiveNow &&
                                           isNewestSegment
                                         }
-                                        streaming={streamingActive && isNewestSegment}
+                                        streaming={
+                                          streamingActive && isNewestSegment
+                                        }
                                         durationS={thinkingSegmentDurationS(
                                           seg.blocks,
                                         )}
@@ -9911,9 +10060,7 @@ export function AgentFlowPanel() {
                                                 {toolBlocks
                                                   .filter(
                                                     (tb) =>
-                                                      !(
-                                                        tb.steps ?? []
-                                                      ).every(
+                                                      !(tb.steps ?? []).every(
                                                         (s) =>
                                                           s.type !==
                                                             "tool_call" ||
@@ -10072,130 +10219,132 @@ export function AgentFlowPanel() {
                                   key={`trail-${si}`}
                                   className="my-2 space-y-1"
                                 >
-                                  {seg.kind === "thinking" ? (
-                                    (() => {
-                                      const c = mergeThinkingContents(
-                                        seg.blocks.map((b) =>
-                                          b.type === "thinking"
-                                            ? String(b.content || "")
-                                            : "",
-                                        ),
-                                      );
-                                      if (!c.trim()) return null;
-                                      // 尾段区里的思考：只有当它是**整条消息最新的
-                                      // 那一段**（最后一段尾段）且此刻真的在思考时才
-                                      // 脉冲——它才是「思考中」的归属者（卡片内那段
-                                      // 旧思考的脉冲已在上面被排除）。
-                                      const isLastTrail =
-                                        si === trailingSegments.length - 1;
-                                      return (
-                                        <ThinkingFold
-                                          content={c}
-                                          fontSize={transcriptFontSize}
-                                          active={
-                                            streamingActive &&
-                                            thinkingActiveNow &&
-                                            isLastTrail
-                                          }
-                                          streaming={streamingActive && isLastTrail}
-                                          durationS={thinkingSegmentDurationS(
-                                            seg.blocks,
-                                          )}
-                                          searchOpen={conversationSearchOpen}
-                                          searchQuery={conversationSearchQuery}
-                                          isSearchActive={false}
-                                        />
-                                      );
-                                    })()
-                                  ) : (
-                                    (() => {
-                                      const toolBlocks = seg.blocks.filter(
-                                        (b) => b.type === "tool_group",
-                                      );
-                                      return (
-                                        <>
-                                          {seg.blocks
-                                            .filter(
-                                              (b) => b.type !== "tool_group",
-                                            )
-                                            .map((b, i) => {
-                                              if (b.type === "text") {
-                                                return (
-                                                  <div
-                                                    key={i}
-                                                    style={{
-                                                      fontSize:
-                                                        transcriptFontSize,
-                                                    }}
-                                                  >
-                                                    {conversationSearchOpen &&
-                                                    conversationSearchQuery.trim() ? (
-                                                      <div className="whitespace-pre-wrap break-words">
-                                                        <HighlightText
+                                  {seg.kind === "thinking"
+                                    ? (() => {
+                                        const c = mergeThinkingContents(
+                                          seg.blocks.map((b) =>
+                                            b.type === "thinking"
+                                              ? String(b.content || "")
+                                              : "",
+                                          ),
+                                        );
+                                        if (!c.trim()) return null;
+                                        // 尾段区里的思考：只有当它是**整条消息最新的
+                                        // 那一段**（最后一段尾段）且此刻真的在思考时才
+                                        // 脉冲——它才是「思考中」的归属者（卡片内那段
+                                        // 旧思考的脉冲已在上面被排除）。
+                                        const isLastTrail =
+                                          si === trailingSegments.length - 1;
+                                        return (
+                                          <ThinkingFold
+                                            content={c}
+                                            fontSize={transcriptFontSize}
+                                            active={
+                                              streamingActive &&
+                                              thinkingActiveNow &&
+                                              isLastTrail
+                                            }
+                                            streaming={
+                                              streamingActive && isLastTrail
+                                            }
+                                            durationS={thinkingSegmentDurationS(
+                                              seg.blocks,
+                                            )}
+                                            searchOpen={conversationSearchOpen}
+                                            searchQuery={
+                                              conversationSearchQuery
+                                            }
+                                            isSearchActive={false}
+                                          />
+                                        );
+                                      })()
+                                    : (() => {
+                                        const toolBlocks = seg.blocks.filter(
+                                          (b) => b.type === "tool_group",
+                                        );
+                                        return (
+                                          <>
+                                            {seg.blocks
+                                              .filter(
+                                                (b) => b.type !== "tool_group",
+                                              )
+                                              .map((b, i) => {
+                                                if (b.type === "text") {
+                                                  return (
+                                                    <div
+                                                      key={i}
+                                                      style={{
+                                                        fontSize:
+                                                          transcriptFontSize,
+                                                      }}
+                                                    >
+                                                      {conversationSearchOpen &&
+                                                      conversationSearchQuery.trim() ? (
+                                                        <div className="whitespace-pre-wrap break-words">
+                                                          <HighlightText
+                                                            text={normalizeAcpContentRaw(
+                                                              b.content,
+                                                            )}
+                                                            query={
+                                                              conversationSearchQuery
+                                                            }
+                                                            active={false}
+                                                          />
+                                                        </div>
+                                                      ) : (
+                                                        <HelixMarkdown
                                                           text={normalizeAcpContentRaw(
                                                             b.content,
                                                           )}
-                                                          query={
-                                                            conversationSearchQuery
-                                                          }
-                                                          active={false}
                                                         />
-                                                      </div>
-                                                    ) : (
-                                                      <HelixMarkdown
-                                                        text={normalizeAcpContentRaw(
-                                                          b.content,
-                                                        )}
-                                                      />
-                                                    )}
-                                                  </div>
-                                                );
-                                              }
-                                              if (b.type === "file_change") {
-                                                return (
-                                                  <FileChangeSummary
-                                                    key={i}
-                                                    changes={b.changes}
-                                                  />
-                                                );
-                                              }
-                                              return null;
-                                            })}
-                                          {toolBlocks.length > 0 && (
-                                            <ToolStreamFold
-                                              blocks={toolBlocks}
-                                              fontSize={transcriptFontSize}
-                                              forceFold
-                                              isRunning={isRunning}
-                                            >
-                                              {toolBlocks
-                                                .filter(
-                                                  (tb) =>
-                                                    !(tb.steps ?? []).every(
-                                                      (s) =>
-                                                        s.type !==
-                                                          "tool_call" ||
-                                                        isSubAgentTool(
-                                                          s.toolName,
-                                                        ),
-                                                    ),
-                                                )
-                                                .map((tb, tbi) => (
-                                                  <InlineToolGroup
-                                                    key={`trail-tb-${tbi}`}
-                                                    steps={tb.steps}
-                                                    isRunning={isRunning}
-                                                    fontSize={
-                                                      transcriptFontSize
-                                                    }
-                                                  />
-                                                ))}
-                                            </ToolStreamFold>
-                                          )}
-                                        </>
-                                      );
-                                    })()
-                                  )}
+                                                      )}
+                                                    </div>
+                                                  );
+                                                }
+                                                if (b.type === "file_change") {
+                                                  return (
+                                                    <FileChangeSummary
+                                                      key={i}
+                                                      changes={b.changes}
+                                                    />
+                                                  );
+                                                }
+                                                return null;
+                                              })}
+                                            {toolBlocks.length > 0 && (
+                                              <ToolStreamFold
+                                                blocks={toolBlocks}
+                                                fontSize={transcriptFontSize}
+                                                forceFold
+                                                isRunning={isRunning}
+                                              >
+                                                {toolBlocks
+                                                  .filter(
+                                                    (tb) =>
+                                                      !(tb.steps ?? []).every(
+                                                        (s) =>
+                                                          s.type !==
+                                                            "tool_call" ||
+                                                          isSubAgentTool(
+                                                            s.toolName,
+                                                          ),
+                                                      ),
+                                                  )
+                                                  .map((tb, tbi) => (
+                                                    <InlineToolGroup
+                                                      key={`trail-tb-${tbi}`}
+                                                      steps={tb.steps}
+                                                      isRunning={isRunning}
+                                                      fontSize={
+                                                        transcriptFontSize
+                                                      }
+                                                    />
+                                                  ))}
+                                              </ToolStreamFold>
+                                            )}
+                                          </>
+                                        );
+                                      })()}
                                 </div>
                               ))}
                               {showStreamThinking && (
@@ -10283,14 +10432,16 @@ export function AgentFlowPanel() {
                 </div>
               )}
               {/* 执行中扫描线：跟在模型输出最底部 */}
-              {streamingActive && (
-                isReconnecting ? (
+              {streamingActive &&
+                (isReconnecting ? (
                   <div className="flex items-center gap-1.5 px-1 py-1 text-amber-500/90 text-xs">
                     <span className="shrink-0">
                       限流{" "}
                       <span className="tabular-nums opacity-80">
-                        {sessionRetry?.attempt ?? connectionNotice?.attempt ?? 1}/
-                        {sessionRetry?.total ?? connectionNotice?.total ?? 5}
+                        {sessionRetry?.attempt ??
+                          connectionNotice?.attempt ??
+                          1}
+                        /{sessionRetry?.total ?? connectionNotice?.total ?? 5}
                       </span>
                     </span>
                     <div className="h-0.5 flex-1 rounded-full overflow-hidden bg-amber-500/15">
@@ -10299,8 +10450,7 @@ export function AgentFlowPanel() {
                   </div>
                 ) : (
                   <div className="conversation-scan-line" />
-                )
-              )}
+                ))}
             </div>
           )}
         </div>
@@ -10400,9 +10550,7 @@ export function AgentFlowPanel() {
       {/* Scheduled task creation confirmation */}
       {pendingTaskCreations.some((t) => isPendingHere(t.sessionId)) && (
         <ScheduledTaskConfirm
-          tasks={pendingTaskCreations.filter((t) =>
-            isPendingHere(t.sessionId),
-          )}
+          tasks={pendingTaskCreations.filter((t) => isPendingHere(t.sessionId))}
           onConfirm={handleConfirmTasks}
           onDismiss={handleDismissTasks}
         />
@@ -10440,4 +10588,3 @@ export function AgentFlowPanel() {
     </div>
   );
 }
-

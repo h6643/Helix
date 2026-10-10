@@ -32,7 +32,9 @@ import { useHelixStore } from "@/stores/helix-store";
 export interface BuiltinCommand {
   name: string;
   description: string;
-  action: "compact" | "btw" | "init" | "review";
+  action: "compact" | "btw" | "review" | "pr" | "diagnostics";
+  /** 只在主对话提供的命令（打开的是全局面板，旁路面板里既不列出也不接住）。 */
+  mainOnly?: boolean;
 }
 
 export const BUILTIN_SLASH_COMMANDS: BuiltinCommand[] = [
@@ -48,15 +50,21 @@ export const BUILTIN_SLASH_COMMANDS: BuiltinCommand[] = [
     action: "btw",
   },
   {
-    // 初始化生成 pi.md
-    name: "init",
-    description: "初始化生成 pi.md",
-    action: "init",
-  },
-  {
     name: "review",
     description: "审查未提交的改动（只读，不改代码）",
     action: "review",
+  },
+  {
+    name: "pr",
+    description: "打开 PR 面板：推送分支并创建 PR",
+    action: "pr",
+    mainOnly: true,
+  },
+  {
+    name: "diagnostics",
+    description: "打开诊断面板：跑项目自带的类型检查/lint",
+    action: "diagnostics",
+    mainOnly: true,
   },
 ];
 

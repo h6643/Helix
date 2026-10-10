@@ -316,7 +316,21 @@ mod tests {
         if had_block {
             assert_eq!(added, 0, "已有块时不应加行");
         } else {
-            assert_eq!(added, 4, "应只追加 1 行父键 + 3 行子键");
+            // 4 = 1 行父键 + 3 行子键。以换行结尾的文件会再多 1 行：
+            // norm_lines 的 split('\n') 保留尾部空串，顶插 push 把它
+            // join 回成块前的空行（无害，也更可读），故 4/5 都合法。
+            assert!(
+                added == 4 || added == 5,
+                "应只追加 1 行父键 + 3 行子键（文件尾换行时允许 +1 空行），实得 {added}"
+            );
+            if added == 5 {
+                let lines: Vec<&str> = out.lines().collect();
+                let idx = lines
+                    .iter()
+                    .position(|l| *l == "notifications:")
+                    .expect("追加后必须有 notifications:");
+                assert!(idx > 0 && lines[idx - 1].is_empty(), "多出的应是块前空行");
+            }
         }
         let block = crate::config::read_yaml_block(&out, "notifications");
         assert_eq!(

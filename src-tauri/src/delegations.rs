@@ -700,8 +700,8 @@ mod tests {
         assert_eq!(encode_cwd(r"D:\Project\Helix"), "Project-Helix");
         assert_eq!(encode_cwd("D:/Project/Helix"), "Project-Helix");
         assert_eq!(
-            encode_cwd(r"C:\Users\hyt\.pi\agent\sessions"),
-            "Users-hyt-.pi-agent-sessions"
+            encode_cwd(r"C:\Users\someone\.pi\agent\sessions"),
+            "Users-someone-.pi-agent-sessions"
         );
         // POSIX paths: no drive prefix, keep the whole path.
         assert_eq!(encode_cwd("/home/user/proj"), "home-user-proj");

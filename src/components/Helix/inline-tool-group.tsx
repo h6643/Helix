@@ -9,6 +9,8 @@ import {
   getToolDisplayLabel,
   extractCommandSnippet,
   extractToolPath,
+  parseWorkflowMeta,
+  WORKFLOW_TOOL_NAME,
 } from "@/lib/tool-display-utils";
 import { useHelixStore } from "@/stores/helix-store";
 import type { ExecutionStep } from "@/stores/helix-store";
@@ -355,6 +357,7 @@ function toolVerb(toolName: string): string {
   )
     return "写入";
   if (name.includes("fetch") || name.includes("web")) return "获取网页";
+  if (name.includes("workflow")) return "派发";
   if (name.includes("memory")) return "读取记忆";
   if (name.includes("git")) return "查看";
   // bash / terminal / run / execute / default
@@ -444,11 +447,31 @@ function ToolCard({
   // 参数区和结果区再平铺一遍纯属冗余。约定是"只显示标题/动作就够了"。
   const isCompactTool =
     isCommandTool || /grep|search|glob|list/i.test(step.toolName || "");
+  // 工作流卡：参数里的 `script` 是模型写的整段编排程序（上限 512KiB），既不是
+  // 「输入」也不是结果，平铺进卡片就是一堵代码墙；它落盘后路径会在工具结果文本
+  // 里报出来（Script: …），要看脚本的人开那个文件即可。所以这里只留结构化字段。
+  const isWorkflowTool = step.toolName === WORKFLOW_TOOL_NAME;
+  const workflowMeta = isWorkflowTool ? parseWorkflowMeta(step.toolParams) : null;
+  // 运行编号（wf_…）只出现在工具返回的那条文本里一次，卡片想复用就得从结果里捞。
+  const workflowRunId = isWorkflowTool
+    ? results
+        .map(
+          (r) =>
+            /Task ID:\s*([A-Za-z0-9_-]+)/.exec(
+              normalizeAcpContent(r.content || ""),
+            )?.[1],
+        )
+        .find((v): v is string => Boolean(v)) ?? ""
+    : "";
   const visibleParamEntries = isCompactTool
     ? []
     : step.toolParams
       ? Object.entries(step.toolParams).filter(
-          ([, v]) => v !== null && v !== undefined && v !== "",
+          ([key, v]) =>
+            v !== null &&
+            v !== undefined &&
+            v !== "" &&
+            !(isWorkflowTool && key === "script"),
         )
       : [];
   const hasParams = !hasSubSteps && visibleParamEntries.length > 0;
@@ -675,6 +698,41 @@ function ToolCard({
           {running && step.content && (
             <div className="text-[0.85em] text-foreground/40 font-mono max-h-40 overflow-y-auto leading-relaxed whitespace-pre-wrap break-all">
               {stripAnsi(step.content.slice(-PREVIEW_TAIL_CHARS))}
+            </div>
+          )}
+          {/* 工作流：meta 里的真实结构（说明 + 阶段链）。这段程序是模型写的文本，
+              这里只做静态解析、绝不执行；阶段名取自 meta.phases[].title。 */}
+          {isWorkflowTool && workflowMeta && (
+            <div className="space-y-1">
+              {workflowMeta.description && (
+                <div className="text-[0.85em] text-foreground/60 leading-relaxed whitespace-pre-wrap break-all">
+                  {workflowMeta.description}
+                </div>
+              )}
+              {workflowMeta.phases.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1 text-[0.8em]">
+                  {workflowMeta.phases.map((title, pi) => (
+                    <React.Fragment key={pi}>
+                      {pi > 0 && (
+                        <span className="text-foreground/25" aria-hidden>
+                          →
+                        </span>
+                      )}
+                      <span className="rounded bg-muted/60 px-1.5 py-0.5 text-foreground/60">
+                        {pi + 1} {title}
+                      </span>
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
+              {/* 工具是立刻返回的，活还在后台跑，所以不写「已完成」。当前这份扩展
+                  实现不落盘工作流进度（journalPath 恒为 undefined），界面拿不到
+                  实时条数；完成时它会给模型发一条通知并触发新一轮对话，结果从那
+                  一轮起才可见。 */}
+              <div className="text-[0.78em] text-foreground/40">
+                后台执行中，本卡片不显示实时进度；完成时会触发新一轮对话带回结果
+                {workflowRunId ? ` · ${workflowRunId}` : ""}
+              </div>
             </div>
           )}
           {/* Sub-agent sub-steps */}

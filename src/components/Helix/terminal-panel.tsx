@@ -11,7 +11,24 @@ import "@xterm/xterm/css/xterm.css";
 
 interface TerminalPanelProps {
   onClose: () => void;
+  /**
+   * drawer = 主区底部的固定高度抽屉，开合看全局 `isTerminalOpen`（标题栏「终端」）。
+   * side = 右侧边栏里的一页，开合看宿主页签是不是当前页（「更多操作 → 终端」）。
+   * 两种宿主共用同一套 tab / PTY 逻辑，只是可见性与尺寸不同。
+   */
+  mode?: "drawer" | "side";
+  /** mode="side" 时由侧栏告知：这一页是不是当前页。 */
+  active?: boolean;
 }
+
+/**
+ * PTY 会话 id 的分配器。后端会话表按这个数字 id 键控，而抽屉与侧栏是**两个**
+ * TerminalPanel 实例——各自从 1 开始就会撞号：两边都有 id=1，第二个 `start`
+ * 覆盖第一个的会话，`onData` 的 `payload.id !== id` 过滤又会让两个实例同时
+ * 认领同一条输出（一边打字另一边跟着动）。全局递增一次到位。
+ */
+let _terminalSessionSeq = 0;
+const nextTerminalSessionId = () => ++_terminalSessionSeq;
 
 /** Windows `std::fs::canonicalize` returns verbatim `\\?\`-prefixed paths; strip
  *  the namespace prefix so the terminal prompt / cd commands stay clean. */
@@ -126,6 +143,8 @@ function terminalTheme() {
 interface TerminalTabViewProps {
   id: number;
   isActive: boolean;
+  /** 宿主面板此刻是否可见（抽屉看 isTerminalOpen，侧栏页看是不是当前页）。 */
+  hostVisible: boolean;
 }
 
 /**
@@ -144,9 +163,12 @@ function useConversationIsRemote(): boolean {
  * conversation switches and tab switches. The PTY is only spawned once the tab
  * first becomes visible, and is killed when the tab is closed.
  */
-function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
-  const { activeSessionWorkDir, isTerminalOpen } =
-    useHelixStore();
+function TerminalTabView({
+  id,
+  isActive,
+  hostVisible,
+}: TerminalTabViewProps) {
+  const { activeSessionWorkDir } = useHelixStore();
   const conversationIsRemote = useConversationIsRemote();
   // No-project conversations pin to ~/.pi/agent/workspace/default — the SAME dir the
   // gateway spawns their pi instance in. Resolved asynchronously from the
@@ -368,7 +390,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
   // has resolved. Hidden tabs have a 0-size container, so the shell is only
   // spawned once the tab shows AND we know the right cwd.
   useEffect(() => {
-    if (!isActive || !isTerminalOpen || conversationIsRemote) return;
+    if (!isActive || !hostVisible || conversationIsRemote) return;
     // Don't start yet if we still need the no-project default and haven't got it.
     if (!terminalCwd) return;
     const term = termRef.current;
@@ -406,7 +428,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
     });
     return () => cancelAnimationFrame(raf);
      
-  }, [id, isActive, isTerminalOpen, terminalCwd, conversationIsRemote]);
+  }, [id, isActive, hostVisible, terminalCwd, conversationIsRemote]);
 
   // Pipe backend output for THIS tab into its xterm instance.
   useEffect(() => {
@@ -422,7 +444,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
   // When the project directory changes, tell the running shell to cd there.
   // This keeps the terminal in sync with the conversation/project context.
   useEffect(() => {
-    if (!isActive || !isTerminalOpen || !terminalCwd) return;
+    if (!isActive || !hostVisible || !terminalCwd) return;
     const dir = stripVerbatimPrefix(terminalCwd);
     if (!dir) return;
     const isDriveRoot = /^[a-zA-Z]:[\\/]?$/.test(dir);
@@ -438,7 +460,7 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
     }
     electronTerminal.write(id, `cd "${safeDir}"\r\n`);
     lastCwdRef.current = dir;
-  }, [id, isActive, isTerminalOpen, terminalCwd]);
+  }, [id, isActive, hostVisible, terminalCwd]);
 
   return (
     <div className={`flex-1 min-h-0 flex flex-col ${isActive ? "" : "hidden"}`}>
@@ -463,27 +485,31 @@ function TerminalTabView({ id, isActive }: TerminalTabViewProps) {
   );
 }
 
-export function TerminalPanel({ onClose }: TerminalPanelProps) {
+export function TerminalPanel({
+  onClose,
+  mode = "drawer",
+  active = false,
+}: TerminalPanelProps) {
   const { selectedWorkDir, isTerminalOpen } = useHelixStore();
   // 云端对话下整个面板不显示，也不去建 tab（建了就会启动一个 cd 不进去的本机
   // shell）。已经开着的本地 shell 只是被藏起来，进程不动。
   const conversationIsRemote = useConversationIsRemote();
-  const visible = isTerminalOpen && !conversationIsRemote;
+  const visible =
+    (mode === "side" ? active : isTerminalOpen) && !conversationIsRemote;
   const [tabs, setTabs] = useState<{ id: number }[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
-  const nextIdRef = useRef(1);
 
   // Ensure at least one tab exists whenever the panel is open.
   useEffect(() => {
     if (visible && tabs.length === 0) {
-      const id = nextIdRef.current++;
+      const id = nextTerminalSessionId();
       setTabs([{ id }]);
       setActiveId(id);
     }
   }, [visible, tabs.length]);
 
   const addTab = useCallback(() => {
-    const id = nextIdRef.current++;
+    const id = nextTerminalSessionId();
     setTabs((prev) => [...prev, { id }]);
     setActiveId(id);
   }, []);
@@ -517,7 +543,16 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
       // helix-surface 提供与对话卡同一层 --surface-bg 底盘（背景图激活时
       // 88% 半透明、无背景图时实色 --card），保证终端"周围"不直接透出壁纸。
       // 不能删 relative：背景图是 absolute z-0，非定位后代会被整层盖住。
-      className={`helix-terminal-panel helix-surface relative shrink-0 h-64 flex flex-col border-t border-border/40 overflow-hidden ${visible ? "" : "hidden"}`}
+      //
+      // 但 side 模式**不能挂** helix-surface：侧栏的可见底色只由面板根
+      // `.helix-sidebar-right` 一层 88% 蒙罩提供（同 preview-rail 的规则）。
+      // 这里再铺一层就是 1-(0.12)² ≈ 98.6% —— 视觉上等于不透明，症状就是
+      // 他说的「侧边栏终端不透明」，跟设置外壳那条 double-veil 注释同一个坑。
+      className={`helix-terminal-panel relative flex flex-col overflow-hidden ${
+        mode === "side"
+          ? "flex-1 min-h-0 w-full"
+          : "helix-surface shrink-0 h-64 border-t border-border/40"
+      } ${visible ? "" : "hidden"}`}
     >
       {/* Tab bar — Windows Terminal style */}
       <div className="helix-terminal-tabbar flex items-center h-8 bg-muted shrink-0 select-none">
@@ -530,7 +565,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
               <div
                 key={tab.id}
                 onClick={() => setActiveId(tab.id)}
-                className={`flex items-center gap-2 h-full px-3 border-t-2 cursor-pointer whitespace-nowrap transition-colors ${isActive ? "bg-white/60 border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground hover:bg-white/30"}`}
+                className={`flex items-center gap-2 h-full px-3 border-t-2 cursor-pointer whitespace-nowrap transition-colors ${isActive ? "bg-primary/10 border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground hover:bg-primary/5"}`}
               >
                 <Terminal className="size-3.5" />
                 <span className="max-w-[140px] truncate text-[calc(var(--helix-transcript-size)*0.8571)]">
@@ -576,6 +611,7 @@ export function TerminalPanel({ onClose }: TerminalPanelProps) {
             key={tab.id}
             id={tab.id}
             isActive={tab.id === activeId}
+            hostVisible={visible}
           />
         ))}
       </div>

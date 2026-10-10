@@ -65,6 +65,7 @@ function ElapsedTicker({ startedAt }: { startedAt: number }) {
 
 // 输入 / 时显示的快捷命令提示条：与主对话同一份注册表
 // （BUILTIN_SLASH_COMMANDS），按已输前缀过滤；选中项 Enter 补全进输入框。
+// mainOnly 的命令（开全局面板那类）在这里不出现——旁路输入框没有它们的落点。
 function SlashHint({
   query,
   onSelect,
@@ -75,7 +76,7 @@ function SlashHint({
   const [sel, setSel] = useState(0);
   const q = query.toLowerCase();
   const items = BUILTIN_SLASH_COMMANDS.filter(
-    (c) => c.name.toLowerCase().startsWith(q),
+    (c) => !c.mainOnly && c.name.toLowerCase().startsWith(q),
   );
   useEffect(() => setSel(0), [q]);
   if (items.length === 0) return null;
@@ -155,10 +156,10 @@ export function BylinePanel() {
   const uploadFileInputRef = useRef<HTMLInputElement>(null);
   const bylineFocusSignal = useHelixStore((s) => s.bylineFocusSignal);
   // ── 旁路会话的两条轴（与主线同款语义）──────────────────────────────
-  // 权限档：真相是 pi-permission 的 settings.json，这里只是回读缓存。档可按
-  // 全局 / 本项目 / 本会话覆盖，写入层沿用主输入框选定的那一格（同一份 store
-  // 事实，旁路不另设选择器）；身份取**主线这条对话**的 sid + 目录 —— 旁路问答
-  // 是它的一个分支，用户眼里的「本会话」就是眼前这条对话。
+  // 权限档：真相是 pi-permission 的 settings.json，这里只是回读缓存。界面只写
+  // 「本对话」那一层，身份取**主线这条对话**的 sid —— 旁路问答是它的一个分支，
+  // 用户眼里的「本对话」就是眼前这条对话；主线还没建起来（没有 sid）时那次选档
+  // 先记在 store 的待落盘表里，同主输入框一个规则。
   // plan：按会话那一轴，写旁路自己的 cid（btw- 前缀）。每轮 run 前
   // agent-flow-panel 的 handleRun 会把合成值经 session/set_mode 送到该会话的
   // pi 实例（网关按 session_id 路由），所以这里只写状态、不另发 RPC。
@@ -214,12 +215,18 @@ export function BylinePanel() {
   const byCid = rec?.sessionId;
 
   // 工具条目标：覆盖值挂在旁路会话自己的 cid 上。还没有旁路会话时下拉
-  // 禁用（写入没有落点；首个问题仍用全局默认起会话）。
+  // 禁用（写入没有落点；首个问题仍用配置默认起会话）。
   const btwCid = byCid ?? null;
+  // 主线这条对话还没建起来时，那次选档还挂在待落盘表上——芯片要跟着它显示，
+  // 否则旁路上看到的档位和主输入框上那枚芯片不是同一个值。
+  const pendingTier = useHelixStore(
+    (s) => s.pendingPermissionTier[mainCid],
+  );
+  const displayTier = pendingTier ?? permissionMode;
   // 芯片显示的是两条轴合成的那一个值（plan 优先）。合成规则只在
   // helix-types 的 approvalModeOf 里写一次，两个面板共用。
   const effectiveMode: ApprovalMode = approvalModeOf(
-    permissionMode,
+    displayTier,
     !!btwCid && !!planModeBySession[btwCid],
   );
   const modelOverride = btwCid ? modelBySession[btwCid] : undefined;
@@ -299,10 +306,10 @@ export function BylinePanel() {
   };
 
   /**
-   * 旁路这里改权限档，写的是**主线这条对话**的身份：旁路问答是它的一个分支，
-   * 用户眼里的「本会话」就是眼前这条对话，不是 `btw-` 那条内部会话。
-   * 落哪一层（全局 / 本项目 / 本会话）沿用主输入框选定的那一格 —— 作用域选择器
-   * 只做在那一处，两个面板共用同一条 store 事实。
+   * 旁路这里改权限档，写的是**主线这条对话**的会话覆盖：旁路问答是它的一个分支，
+   * 用户眼里的「本对话」就是眼前这条对话，不是 `btw-` 那条内部会话。
+   * 主线还没建起来（没有 sid）时 store 会把这一档记进待落盘表，第一条消息发出时
+   * 落盘 —— 与主输入框那条路径同一个动作，两个面板不会各写一套。
    */
   const writePermissionTier = async (tier: PermissionTier) => {
     await ensureSessionMap();
@@ -310,6 +317,7 @@ export function BylinePanel() {
     await setPermissionMode(tier, {
       sessionId: sessionMapCacheRef.current.get(mainCid)?.sid ?? null,
       cwd: st.activeSessionWorkDir ?? st.selectedWorkDir ?? null,
+      cid: mainCid,
     });
   };
 
@@ -407,111 +415,6 @@ export function BylinePanel() {
           description:
             "这里已是旁路问答面板：直接在输入框输入问题（Enter 发送）即可，也可多轮追问。",
         });
-        return;
-      }
-      if (cmd?.action === "init") {
-        // /init 是项目级命令，从旁路面板发也行（与主对话同一套处理逻辑）。
-        setDraft("");
-        resetInputHeight();
-        const st = useHelixStore.getState();
-        const workDir = st.activeSessionWorkDir ?? st.selectedWorkDir;
-        if (!workDir) {
-          showToast({
-            type: "warning",
-            title: "未选择工作目录",
-            description: "请先选择一个项目目录再生成 pi.md",
-          });
-          return;
-        }
-        void (async () => {
-          try {
-            const pkg = await window.electron?.fs?.read?.(`${workDir}/package.json`);
-            const existingPi = await window.electron?.fs?.read?.(`${workDir}/pi.md`);
-            if (existingPi) {
-              showToast({
-                type: "warning",
-                title: "pi.md 已存在",
-                description: "该目录已存在 pi.md 文件，已跳过生成",
-              });
-              return;
-            }
-            let projectName = "";
-            let projectDesc = "";
-            let scripts: string[] = [];
-            let frameworks: string[] = [];
-            if (pkg) {
-              try {
-                const pkgObj = JSON.parse(pkg);
-                projectName = pkgObj.name || "";
-                projectDesc = pkgObj.description || "";
-                if (pkgObj.scripts && typeof pkgObj.scripts === "object") {
-                  scripts = Object.keys(pkgObj.scripts);
-                }
-                const deps = { ...(pkgObj.dependencies || {}), ...(pkgObj.devDependencies || {}) };
-                if (deps.next) frameworks.push("Next.js");
-                if (deps.vite) frameworks.push("Vite");
-                if (deps.react) frameworks.push("React");
-                if (deps.vue) frameworks.push("Vue");
-                if (deps.svelte) frameworks.push("Svelte");
-                if (deps.tailwindcss) frameworks.push("Tailwind CSS");
-                if (deps.typescript) frameworks.push("TypeScript");
-              } catch { /* empty */ }
-            }
-            const now = new Date().toISOString().split("T")[0];
-            const L: string[] = [];
-            L.push("# pi.md — " + (projectName || "项目"));
-            L.push("");
-            L.push("> 生成时间：" + now);
-            L.push("> 此文件由 /init 命令自动生成，供 AI 助手了解项目上下文。");
-            L.push("");
-            L.push("## 项目概览");
-            L.push("");
-            L.push(projectDesc ? "- " + projectDesc : "（请补充项目描述）");
-            L.push("");
-            L.push("## 技术栈");
-            L.push("");
-            frameworks.forEach((f) => L.push("- " + f));
-            if (!frameworks.length) L.push("（请补充技术栈）");
-            L.push("");
-            L.push("## 常用脚本");
-            L.push("");
-            scripts.forEach((s) => L.push("- `npm run " + s + "`"));
-            if (!scripts.length) L.push("（无脚本定义）");
-            L.push("");
-            L.push("## 项目结构");
-            L.push("");
-            L.push("```");
-            L.push(workDir + "/");
-            L.push("  ├── pi.md          ← 本文件");
-            L.push("  ├── package.json");
-            L.push("  └── src/");
-            L.push("```");
-            L.push("");
-            L.push("## 开发约定");
-            L.push("");
-            L.push("- 使用 Prettier 格式化代码");
-            L.push("- 提交前运行 lint");
-            L.push("- 遵循项目现有的代码风格");
-            L.push("");
-            L.push("## 注意事项");
-            L.push("");
-            L.push("- （请补充项目特定的注意事项）");
-            L.push("");
-            const piMd = L.join(String.fromCharCode(10));
-            await window.electron?.fs?.write?.(`${workDir}/pi.md`, piMd);
-            showToast({
-              type: "success",
-              title: "pi.md 已生成",
-              description: `已生成 ${workDir}/pi.md，请编辑补充项目特定信息`,
-            });
-          } catch (e) {
-            showToast({
-              type: "error",
-              title: "生成 pi.md 失败",
-              description: String(e),
-            });
-          }
-        })();
         return;
       }
     }
@@ -638,7 +541,7 @@ export function BylinePanel() {
           <div className="flex items-center justify-between px-2 pb-1.5 pt-0">
             {/* 会话级工具条：plan 与模型只作用于当前旁路会话（写 planModeBySession /
                 modelBySession 的 btw-cid 键，handleRun 每轮经 set_mode / set_model
-                透传到该会话的实例）；权限档是全局一档，写扩展配置。 */}
+                透传到该会话的实例）；权限档写的是主线那条对话在扩展配置里的格子。 */}
             <div className="relative min-w-0 flex items-center gap-1" ref={toolbarRef}>
               {/* 上传文件按钮 */}
               <button
@@ -668,7 +571,7 @@ export function BylinePanel() {
                     data-tip={
                       effectiveMode === "plan"
                         ? "制定计划：只对本旁路会话生效，选一个权限档即退出"
-                        : "审批模式：全局一档，所有对话共用（值来自 pi-permission 的配置）"
+                        : "审批模式：只对本旁路会话所属的那条对话生效（值来自 pi-permission 的配置）"
                     }
                     className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ui-text-sm2 transition-all duration-200 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/60"
                   >
@@ -723,11 +626,11 @@ export function BylinePanel() {
                             setPlanModeForSession(btwCid, true);
                             return;
                           }
-                          // 权限档：写的是 pi-permission 的 settings.json，落在
-                          // 主输入框选定的那一格（全局/本项目/本会话）。旁路与
-                          // 主线共用同一份 store 事实，所以不会出现「主界面自动
-                          // 审批、旁路完全访问」—— 那本来就不可能存在，扩展只读
-                          // 一个文件，闸门用的就是这张表解析出的生效档。
+                          // 权限档：写的是 pi-permission 的 settings.json 里属于
+                          // 主线那条对话的那一格（见 writePermissionTier）。旁路
+                          // 与主线共用同一格，所以不会出现「主界面自动审批、旁路
+                          // 完全访问」—— 那本来就不可能存在，扩展只读一个文件，
+                          // 闸门用的就是它解析出的生效档。
                           setPlanModeForSession(btwCid, false);
                           void writePermissionTier(mode.id);
                         }}

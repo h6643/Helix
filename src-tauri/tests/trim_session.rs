@@ -70,7 +70,7 @@ fn synthetic_estimate_branch_after_latest_compaction() {
 }
 
 #[test]
-fn synthetic_trim_produces_fitting_slice_with_null_root() {
+fn synthetic_trim_rewrites_original_in_place_with_null_root() {
     let window = 40000i64;
     let mut lines = Vec::new();
     for turn in 0..6 {
@@ -84,13 +84,28 @@ fn synthetic_trim_produces_fitting_slice_with_null_root() {
         ));
     }
     let tmp = std::env::temp_dir().join("helix_trim_test.jsonl");
+    // Leftovers from an older run (the retired .trimmed.jsonl twin era, and
+    // any crash-trimmed temp) would poison the must-not-exist assertions.
+    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(format!("{}.trimmed.jsonl", tmp.display()));
+    let _ = std::fs::remove_file(format!("{}.trim.tmp", tmp.display()));
     std::fs::write(&tmp, lines.join("\n") + "\n").unwrap();
-    let trimmed = hooks::trim_session_if_oversized(tmp.to_str().unwrap(), window).unwrap();
+    let trimmed =
+        hooks::trim_session_in_place(tmp.to_str().unwrap(), window).unwrap();
     assert!(
-        trimmed.is_some(),
-        "expected a trim for an oversized session"
+        trimmed,
+        "expected an in-place trim for an oversized session"
     );
-    let out = std::fs::read_to_string(trimmed.unwrap()).unwrap();
+    // Single-file history: the original path was rewritten, no twin exists.
+    assert!(
+        !std::path::Path::new(&format!("{}.trimmed.jsonl", tmp.display())).exists(),
+        "a .trimmed.jsonl twin must never be created"
+    );
+    assert!(
+        !std::path::Path::new(&format!("{}.trim.tmp", tmp.display())).exists(),
+        "the temp file must be cleaned up"
+    );
+    let out = std::fs::read_to_string(&tmp).unwrap();
     let out_lines: Vec<&str> = out.trim().split('\n').collect();
     assert!(out_lines.len() >= 3, "trimmed file too small");
     let first: serde_json::Value = serde_json::from_str(out_lines[1]).unwrap();
@@ -105,15 +120,19 @@ fn synthetic_trim_produces_fitting_slice_with_null_root() {
 }
 
 #[test]
-fn synthetic_trim_returns_none_when_fitting() {
+fn synthetic_trim_returns_false_when_fitting() {
     let lines = vec![
         rec("a", None, "user", 100),
         rec("b", Some("a"), "assistant", 100),
     ];
     let tmp = std::env::temp_dir().join("helix_trim_fit_test.jsonl");
     std::fs::write(&tmp, lines.join("\n") + "\n").unwrap();
-    let trimmed = hooks::trim_session_if_oversized(tmp.to_str().unwrap(), 128 * 1024).unwrap();
-    assert!(trimmed.is_none());
+    let trimmed =
+        hooks::trim_session_in_place(tmp.to_str().unwrap(), 128 * 1024).unwrap();
+    assert!(!trimmed, "a fitting session must not be rewritten");
+    // Original content untouched.
+    let out = std::fs::read_to_string(&tmp).unwrap();
+    assert_eq!(out.trim().split('\n').count(), 2);
     let _ = std::fs::remove_file(&tmp);
 }
 
