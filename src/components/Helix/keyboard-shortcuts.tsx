@@ -113,7 +113,11 @@ function createActionHandler(state: ReturnType<typeof useHelixStore.getState>) {
       window.dispatchEvent(new CustomEvent("helix:conversation-search")),
     "next-recent-chat": () => state.toggleSessionManager(),
     "prev-recent-chat": () => state.toggleSessionManager(),
-    "open-review": () => state.toggleCommandPalette(),
+    // 「右侧边栏」页（MoreActionsPage）那几张卡的快捷键版本：动作与卡片点击
+    // 完全同一套（卡片上的 kbd 读的也正是这几个 id），改键两边一起变。
+    "open-review": () => state.setRightSidebarTab("diff"),
+    "open-terminal": () => state.setRightSidebarTab("terminal"),
+    "open-browser": () => state.requestAddBrowserPage(),
     "force-reload": () => window.location.reload(),
     "new-window": () => window.open(window.location.href, "_blank"),
     "model-picker": () => state.toggleSettings("api"),

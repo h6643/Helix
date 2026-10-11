@@ -368,6 +368,7 @@ export const electronApp = {
     turnEndMode?: string;
     approvalEnabled?: boolean;
     clarifyEnabled?: boolean;
+    handoffEnabled?: boolean;
   } | null> {
     const api = getElectronAPI();
     if (api && typeof api.app.notificationConfig === "function") {
@@ -380,16 +381,35 @@ export const electronApp = {
     turnEndMode?: string;
     approvalEnabled?: boolean;
     clarifyEnabled?: boolean;
+    handoffEnabled?: boolean;
   }): Promise<{
     ok: boolean;
     turnEndMode?: string;
     approvalEnabled?: boolean;
     clarifyEnabled?: boolean;
+    handoffEnabled?: boolean;
     error?: string;
   } | null> {
     const api = getElectronAPI();
     if (api && typeof api.app.setNotificationConfig === "function") {
       return api.app.setNotificationConfig(updates);
+    }
+    return null;
+  },
+
+  /** 系统侧的通知开关（Windows 注册表）。浏览器模式下没有后端，返回 null 让设置页
+   *  显示「查不到」而不是假装一切正常。 */
+  async notificationStatus(): Promise<{
+    ok: boolean;
+    aumid?: string;
+    dev?: boolean;
+    systemEnabled?: boolean | null;
+    appEnabled?: boolean | null;
+    error?: string;
+  } | null> {
+    const api = getElectronAPI();
+    if (api && typeof api.app.notificationStatus === "function") {
+      return api.app.notificationStatus();
     }
     return null;
   },

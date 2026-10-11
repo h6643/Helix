@@ -163,7 +163,11 @@ export function GlobalTooltip() {
       ref={tipRef}
       role="tooltip"
       style={style}
-      className="pointer-events-none z-[9999] max-w-[min(420px,calc(100vw-16px))] whitespace-nowrap rounded-lg border border-border helix-popover-glass px-2 py-1 text-[10px] leading-relaxed text-foreground shadow-xl"
+      // `whitespace-pre-line`（而不是 nowrap）：盒子宽度有 420px 上限，长文本在
+      // nowrap 下会**溢出到圆角框外面**画出去（overflow 默认 visible），看起来像
+      // 渲染坏了。换行后长提示在框内折行，短提示仍然一行不变；下面的
+      // useLayoutEffect 按实际 offsetHeight 钳位，折高了自己会跟着缩回来。
+      className="pointer-events-none z-[9999] max-w-[min(420px,calc(100vw-16px))] whitespace-pre-line break-words rounded-lg border border-border helix-popover-glass px-2 py-1 text-[10px] leading-relaxed text-foreground shadow-xl"
     >
       {state.text}
     </div>,

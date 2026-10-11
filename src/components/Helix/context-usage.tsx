@@ -4,12 +4,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { captureContextBreakdown } from "@/lib/context-capture";
 import { helixApi } from "@/lib/electron-bridge";
 import { formatTokens, promptCacheHit } from "@/lib/format";
-import { debug } from "@/lib/logger";
 import { resolveBackendSid } from "@/lib/session-map";
-import {
-  resyncCurrentSessionFromBackend,
-  isCurrentSessionRenderBroken,
-} from "@/lib/session-resync";
 import { useHelixStore } from "@/stores/helix-store";
 
 // ---- Types ----
@@ -283,9 +278,7 @@ export function ContextUsageIndicator() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Auto-compaction: trigger when context usage exceeds 80% and setting is enabled
-  const autoCompactCooldownRef = useRef(false);
-
+  // ── Context breakdown fetch ─────────────────────────────────────────
   // Fetch context breakdown from backend via RPC
   const fetchContextData = useCallback(async () => {
     try {
@@ -312,144 +305,12 @@ export function ContextUsageIndicator() {
         // - 分类数据只要有就持久化（唯一来源，不写重启后必显示"暂无上下文分类数据"）。
         await captureContextBreakdown(currentSessionId, sessionId);
 
-        // Auto-compaction check (Helix Desktop style)
-        if (data.context_percent >= 80 && !autoCompactCooldownRef.current) {
-          const {
-            autoCompactContext,
-            showToast,
-            streamingDrafts,
-            isChatLoading,
-          } = useHelixStore.getState();
-          // Agent run-in-flight guard: the backend rejects session.compress with
-          // "session busy" while a turn is running (methods_session.py). Firing
-          // anyway burned the 60s cooldown on a doomed RPC and the empty catch
-          // made the failure invisible — "自动压缩没动画/没效果"根因。静默跳过
-          // （不消耗冷却）让 run 结束后的下一轮轮询真正触发压缩。
-          const runInFlight =
-            isChatLoading ||
-            Object.values(streamingDrafts || {}).some((d) => d?.isAgentRunning);
-          // 闸门按会话判断：后端压缩锁是每会话的，别的会话在压缩不该挡住本会话
-          // 的自动压缩（全局单值时会被误挡）。这里刻意沿用 UI 的当前会话键，
-          // 避免压缩动画/忙态写到了后端 sid、而界面读的是 currentSessionId。
-          const busySessionKey = currentSessionId || "__draft__";
-          if (
-            autoCompactContext &&
-            !useHelixStore.getState().compressionBusyBySession[busySessionKey] &&
-            !runInFlight
-          ) {
-            autoCompactCooldownRef.current = true;
-            // Cooldown: don't trigger again for 60 seconds
-            setTimeout(() => {
-              autoCompactCooldownRef.current = false;
-            }, 60_000);
-            // 与手动 /compact 共用 busy 标记：避免后端压缩锁冲突
-            useHelixStore
-              .getState()
-              .setCompressionBusyForSession(busySessionKey, true);
-            try {
-              const result = await helixApi()?.send("session.compress", {
-                session_id: sessionId,
-              });
-              if (result && typeof result === "object") {
-                const r = result as any;
-                if (r.status === "compressed" && Array.isArray(r.messages)) {
-                  let anchorMessageId: string | undefined;
-                  // 压缩只改**模型侧上下文**，不动用户看得见的历史。
-                  //
-                  // 旧实现把后端压缩后的列表（pi 的 get_messages = 摘要 + 保留的
-                  // 消息）整体替换当前会话的转录，于是所有被摘要掉的早期消息——
-                  // 包括用户自己发过的输入——在界面上凭空消失，和"用户发消息后，
-                  // 之前用户的输入就会自动消失"这类反馈完全没法区分。
-                  // 本地转录本来就是完整历史（IndexedDB / pi jsonl 都在），没有理由
-                  // 因为一次（常常是自动触发的）压缩就收缩。压缩的可见反馈交给下面的
-                  // compressionNotice 分隔线（带前后 token 对比）就够。
-                  // 这里只需要把锚点定到当前会话最后一条本地消息，让分隔线落在它后面。
-                  // ⚠️ 必须用**发起压缩时**读到的 currentSessionId（上面的外层局部变量），
-                  // 绝不能再从 store 里现场重读：session.compress 可能跑几十秒/几分钟，
-                  // 期间用户可能已切到别的对话，重读会拿到新会话——于是后端压缩了 A，
-                  // 提示卡/环写回/自愈却全落在 B 上（"压缩错乱跑到别的对话中"根因）。
-                  if (currentSessionId) {
-                    const local = useHelixStore
-                      .getState()
-                      .chatMessages.filter(
-                        (m) => m.sessionId === currentSessionId,
-                      );
-                    anchorMessageId =
-                      local.length > 0
-                        ? local[local.length - 1].id
-                        : undefined;
-                  }
-                  // 自动压缩提示卡片：transcript 顶部可关闭，8s 自动消失
-                  const afterTokens = Number(r.after_tokens) || undefined;
-                  useHelixStore.getState().setCompressionNotice({
-                    ts: Date.now(),
-                    sessionId: currentSessionId || "__draft__",
-                    source: "auto",
-                    anchorMessageId,
-                    removed: Number(r.removed) || undefined,
-                    beforeTokens: Number(r.before_tokens) || undefined,
-                    afterTokens,
-                    messageCount: Number(r.after_messages) || undefined,
-                  });
-                  // 权威写回环：同手动 /compact。压缩后的权威值必须绕开默认的
-                  // max 合并，否则自动压缩每次都显示成功、环却一动不动——
-                  // 而 context_percent 又按旧值算（后端已把 last_context_used
-                  // 重置，否则会反复踩 80% 闸门）。
-                  if (afterTokens && currentSessionId) {
-                    const prev = useHelixStore
-                      .getState()
-                      .contextUsage[currentSessionId];
-                    useHelixStore.getState().setContextUsage(
-                      currentSessionId,
-                      prev?.size || 0,
-                      afterTokens,
-                      undefined,
-                      undefined,
-                      true,
-                    );
-                  }
-                  // 自动自愈：若压缩回包异常导致当前会话仍为空，直接异步从后端拉
-                  // 权威历史覆盖，无需用户手动 /resync（"压缩后消息全空"兜底）。
-                  if (isCurrentSessionRenderBroken(currentSessionId)) {
-                    await resyncCurrentSessionFromBackend({
-                      sessionId: currentSessionId || "",
-                      showToast: true,
-                      toastMessage: "压缩后消息异常，已自动从后端恢复",
-                    });
-                  }
-                } else if (r.status === "aborted" || r.lock_held) {
-                  // 后端没执行压缩（中止/锁被占）：不显示"已压缩"提示，说明原因
-                  showToast({
-                    type: "warning",
-                    title: r.lock_held ? "压缩进行中" : "自动压缩已中止",
-                    description:
-                      r.message ||
-                      (r.status === "aborted"
-                        ? "后端中止了本次压缩"
-                        : "另一个压缩任务正在运行"),
-                  });
-                }
-              }
-              debug(
-                "[ContextUsage] auto-compaction triggered at",
-                data.context_percent.toFixed(1),
-                "%",
-              );
-            } catch (e) {
-              // 自动压缩失败（超时/后端拒绝）：必须有可见反馈，否则表现为
-              // "有动画但压缩没成功"——busy 一闪即逝，用户无从得知原因。
-              showToast({
-                type: "error",
-                title: "自动压缩失败",
-                description: String((e as Error)?.message ?? e),
-              });
-            } finally {
-              useHelixStore
-                .getState()
-                .clearCompressionBusyForSession(busySessionKey);
-            }
-          }
-        }
+        // 自动压缩决策已交给 pi：pi 在回合内做阈值压缩（压缩完
+        // agent.continue() 自动续跑任务，与 CLI 语义一致）。开关走
+        // set_auto_compaction（前端 autoCompactContext，helix-layout.tsx 里
+        // 有同步 effect）。旧的 80% 前端闸门在这里主动 session.compress，
+        // 而 pi 的手动 compact 首行就 abort 当前回合且永不续跑
+        //（“压缩后任务暂停”的根因），已停用。手动压缩用 /compact。
       }
     } catch {
       // Backend may not support this — degrade gracefully
@@ -458,16 +319,15 @@ export function ContextUsageIndicator() {
 
   // 打开弹层时查询，并在打开期间每 5s 刷新一次：后端 agent 可能刚构建完成，
   // 分类数据不会在会话创建瞬间就绪，只查一次容易永久停留在"暂无上下文分类数据"。
-  // 关闭时如果开启了自动压缩，也保持低频轮询，否则达到 80% 也不会被检测到。
+  // （自动压缩的决策已交给 pi 的回合内阈值压缩，这里不再为检测 80% 门槛
+  //  保持后台轮询；压缩发生时的可见反馈走 compaction 事件与压缩通知卡。）
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
-  const autoCompactContext = useHelixStore((s) => s.autoCompactContext);
   useEffect(() => {
-    if (!open && !(autoCompactContext && currentSessionId)) return;
+    if (!open) return;
     fetchContextData();
-    const interval = open ? 5000 : 15000;
-    const timer = setInterval(fetchContextData, interval);
+    const timer = setInterval(fetchContextData, 5000);
     return () => clearInterval(timer);
-  }, [open, autoCompactContext, currentSessionId, fetchContextData]);
+  }, [open, fetchContextData]);
 
   // Quietly capture the category breakdown once per new live Helix session and
   // persist it into the local snapshot — WITHOUT overriding the displayed ring

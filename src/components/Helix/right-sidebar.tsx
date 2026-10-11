@@ -3,12 +3,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Globe, Maximize2, Minimize2, Plus, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 import { AgentWorkPanel } from "./agent-work-panel";
 import { BylinePanel } from "./byline-panel";
 import { CodeEditorPanel } from "./code-editor-panel";
 import { DiffSidebarPanel } from "./diff-sidebar-panel";
-import { MoreActionsMenu } from "./more-actions-menu";
+import { MoreActionsPage } from "./more-actions-page";
 import { BrowserToolbar, BrowserView } from "./preview-rail";
 import { TerminalPanel } from "./terminal-panel";
 import { isTauri } from "@/lib/tauri-bridge";
@@ -21,7 +20,8 @@ type PageKind =
   | "diff"
   | "agent"
   | "byline"
-  | "terminal";
+  | "terminal"
+  | "more";
 interface PanelPage {
   id: string;
   kind: PageKind;
@@ -39,8 +39,10 @@ const newPageId = () => {
   return `pg-${++g.__helixPageSeq}`;
 };
 
-/** 一条页签的视觉。两级页签（面板行 / 条目行）共用它，包括「✕ 只在 hover 或激活时
- *  露出来」这条热区规则。 */
+/** 一条页签的视觉。两级页签（面板行 / 条目行）共用它，包括「✕ 默认完全隐藏、
+ *  只在 hover 这一条页签时才露出来」这条热区规则（激活态也不例外——否则每面都挂着
+ *  一个 ✕，看着像一堆关闭按钮）。选中态靠**底色高亮**表达，不画下划线（他明确要去掉
+ *  border-b 那条 primary 线）；两行各自的 `border-b border-border/20` 才是分隔线。 */
 function TabChip({
   label,
   tip,
@@ -60,7 +62,7 @@ function TabChip({
     <div
       onClick={onClick}
       data-tip={tip ?? label}
-      className={`group relative flex items-center gap-1.5 pl-3 pr-4 py-1.5 flex-1 min-w-0 max-w-[200px] rounded-t-md overflow-hidden cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] border-b-2 transition-colors ${active ? "bg-primary/10 border-primary text-foreground" : "bg-muted/40 border-transparent text-foreground/60 hover:bg-accent/50"}`}
+      className={`group relative flex items-center gap-1.5 pl-3 pr-4 py-1.5 flex-1 min-w-0 max-w-[200px] rounded-t-md overflow-hidden cursor-pointer text-[calc(var(--helix-transcript-size)*0.8571)] transition-colors ${active ? "bg-primary/15 text-foreground" : "bg-muted/40 text-foreground/60 hover:bg-accent/50"}`}
     >
       {icon}
       <span className="flex-1 min-w-0 truncate">{label}</span>
@@ -71,7 +73,7 @@ function TabChip({
             onClose();
           }}
           data-tip="关闭"
-          className={`absolute right-0.5 top-1/2 -translate-y-1/2 rounded p-0.5 transition-opacity ${active ? "opacity-60 hover:opacity-100 hover:text-destructive hover:bg-destructive/10" : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10"}`}
+          className="absolute right-0.5 top-1/2 -translate-y-1/2 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-60 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10"
         >
           <X className="size-3" />
         </button>
@@ -80,7 +82,11 @@ function TabChip({
   );
 }
 
-/** 面板行的固定顺序（也是「有哪几面」这一行的读法）。 */
+/** 面板行的固定顺序（也是「有哪几面」这一行的读法）。
+ *
+ *  `more`（标题栏「右侧边栏」/ 侧栏「＋」打开的那张卡片菜单页）**故意不在**这里：
+ *  它是一页菜单，不是一面要待着的工作台，所以它激活时面板行不出现「更多」便签 ——
+ *  便签行只说「有哪几面真正开着」，菜单页的收起走标题栏那个按钮（再点一次）。 */
 const PANEL_ORDER: PageKind[] = [
   "browser",
   "diff",
@@ -97,8 +103,10 @@ const PANEL_ORDER: PageKind[] = [
  *  2. the browser toolbar — only when the 浏览器 panel is the active one.
  *  3. item tabs — the contents *of* the active panel: one per browser page, or
  *     one per open code file. Panels that hold a single item skip this band.
- * Tabs in band 1 close a single-item panel outright; closing a browser page or
- * a file goes through band 3. The "+" menu creates a new page (browser / diff).
+ * Band 1's ✕ closes the whole face: for the browser that means every open web
+ * page at once, for a single-item panel it is that one page. Files close through
+ * band 3 (closing every editor tab could hit unsaved buffers, so 代码 has no ✕
+ * in band 1). The "+" menu creates a new page (browser / diff).
  */
 export function RightSidebar() {
   const tab = useHelixStore((s) => s.rightSidebarTab);
@@ -118,6 +126,7 @@ export function RightSidebar() {
       return [{ id: newPageId(), kind: "byline", url: "" }];
     if (tab === "terminal")
       return [{ id: newPageId(), kind: "terminal", url: "" }];
+    if (tab === "more") return [{ id: newPageId(), kind: "more", url: "" }];
     if (tab === "browser")
       return [{ id: newPageId(), kind: "browser", url: start }];
     return [];
@@ -143,24 +152,8 @@ export function RightSidebar() {
     return () => document.removeEventListener("keydown", onKey);
   }, [codeFullscreen, toggleCodeFullscreen]);
 
-  // "+" panel-switcher dropdown.
-  const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+  // "+" panel-switcher opens a dedicated sidebar page, not a dropdown.
   const titlePlusRef = useRef<HTMLButtonElement>(null);
-  const plusMenuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!plusMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (
-        titlePlusRef.current?.contains(target) ||
-        plusMenuRef.current?.contains(target)
-      )
-        return;
-      setPlusMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [plusMenuOpen]);
 
   const activePageIdRef = useRef(activePageId);
   activePageIdRef.current = activePageId;
@@ -197,7 +190,9 @@ export function RightSidebar() {
               ? "byline"
               : tab === "terminal"
                 ? "terminal"
-                : null;
+                : tab === "more"
+                  ? "more"
+                  : null;
     if (!kind) return;
     const existing = pagesRef.current.find((p) => p.kind === kind);
     if (existing) {
@@ -347,13 +342,15 @@ export function RightSidebar() {
   const updatePageUrl = (id: string, url: string) =>
     setPages((prev) => prev.map((p) => (p.id === id ? { ...p, url } : p)));
 
-  const closePage = (id: string) => {
-    const idx = pages.findIndex((p) => p.id === id);
-    if (idx === -1) return;
-    const next = pages.filter((p) => p.id !== id);
+  const closePages = (ids: string[]) => {
+    const gone = new Set(ids);
+    if (!pages.some((p) => gone.has(p.id))) return;
+    // 第一条被关页的下标：关掉当前页后，落点取"顶上来"的那一条。
+    const idx = pages.findIndex((p) => gone.has(p.id));
+    const next = pages.filter((p) => !gone.has(p.id));
     setPages(next);
     let nextActiveId = activePageId;
-    if (id === activePageId) {
+    if (gone.has(activePageId)) {
       if (next.length > 0) {
         nextActiveId = next[Math.min(idx, next.length - 1)].id;
         setActivePageId(nextActiveId);
@@ -378,6 +375,15 @@ export function RightSidebar() {
       else if (editorTabs.length > 0) setTab("code");
     }
   };
+
+  const closePage = (id: string) => closePages([id]);
+
+  /** 关掉「一整面」——面板行那个 ✕ 的语义。多条目面板（浏览器）一次关掉它的
+   *  全部网页页，单条目面板就是关掉那一条。必须走 `closePages` 一次算完：连着
+   *  调 N 次 `closePage` 每次都是从同一个旧 `pages` 算的，只有最后一次生效，
+   *  结果就是"点了关整面，只关掉一条"。 */
+  const closeKind = (kind: PageKind) =>
+    closePages(pages.filter((p) => p.kind === kind).map((p) => p.id));
 
   // 把「面板里那条网页页」投影到 store：agent 的浏览器工具用它找到要驱动的真窗口。
   // 优先当前激活的 browser 页，否则退回标签条里第一条 browser 页 —— 用户切到「更改」
@@ -548,6 +554,22 @@ export function RightSidebar() {
     const target = pages.find((p) => p.kind === k);
     if (target) setActivePageId(target.id);
   };
+  const openMoreActions = () => {
+    const target = pagesRef.current.find((p) => p.kind === "more");
+    if (target) {
+      activePageIdRef.current = target.id;
+      setActivePageId(target.id);
+      return;
+    }
+    const np: PanelPage = { id: newPageId(), kind: "more", url: "" };
+    activePageIdRef.current = np.id;
+    setPages((prev) => {
+      const next = [...prev, np];
+      pagesRef.current = next;
+      return next;
+    });
+    setActivePageId(np.id);
+  };
 
   return (
     <div
@@ -573,26 +595,20 @@ export function RightSidebar() {
             active={k === activeKind}
             onClick={() => openKind(k)}
             onClose={
-              // 单条目面板：关这个页签就是关这一面。浏览器 / 代码的关闭走第 3 行，
-              // 在这里放 ✕ 会让人以为点一下会关掉所有网页页。
-              k === "diff" ||
-              k === "agent" ||
-              k === "byline" ||
-              k === "terminal"
-                ? () => {
-                    const target = pages.find((p) => p.kind === k);
-                    if (target) closePage(target.id);
-                  }
-                : undefined
+              // 面板行的 ✕ = 关掉这一整面。浏览器是多条目面板，点一下一次关掉它的
+              // 全部网页页；单条目面板（更改 / 子 Agent / 旁路问答 / 终端）就是关掉
+              // 那一条。代码面不放 ✕：它不在 pages 里（面板行由 editorTabs 决定），
+              // 且一次关掉所有打开文件会撞上未保存缓冲区，关闭走第 3 行的文件页签。
+              k === "code" ? undefined : () => closeKind(k)
             }
           />
         ))}
-        {/* `self-center` 是必需的：整行按页签的视觉基线走 items-end（下划线要贴住
-            行底），按钮跟着沉底会歪。 */}
+        {/* `self-center` 是必需的：整行按页签的视觉基线走 items-end（页签坐在行底
+            那条分隔线上），按钮跟着沉底会歪。 */}
         <div className="ml-auto self-center flex items-center gap-0.5 shrink-0 pr-1">
           <button
             ref={titlePlusRef}
-            onClick={() => setPlusMenuOpen((v) => !v)}
+            onClick={openMoreActions}
             className="p-1.5 rounded text-foreground/50 hover:text-foreground hover:bg-accent/50 transition-colors shrink-0"
             data-tip="更多操作"
           >
@@ -700,6 +716,7 @@ export function RightSidebar() {
                       onClose={() => closePage(p.id)}
                     />
                   )}
+                  {p.kind === "more" && <MoreActionsPage />}
                 </div>
               );
             });
@@ -712,50 +729,6 @@ export function RightSidebar() {
         </div>
       </div>
 
-      {plusMenuOpen &&
-        typeof window !== "undefined" &&
-        createPortal(
-          <div
-            className="fixed z-[200]"
-            style={{
-              top:
-                (titlePlusRef.current?.getBoundingClientRect().bottom ?? 0) + 4,
-              right:
-                typeof window !== "undefined"
-                  ? window.innerWidth -
-                    (titlePlusRef.current?.getBoundingClientRect().right ?? 0)
-                  : 0,
-            }}
-          >
-            <div ref={plusMenuRef}>
-              <MoreActionsMenu
-                onToggleTab={(kind) => {
-                  // 已打开的页签再次点击 → 只聚焦对应页，不关闭、不收起侧边栏
-                  // （关闭走页签的 ✕）。尚未打开 → 打开。
-                  if (tab === kind) {
-                    const target = pagesRef.current.find(
-                      (p) => p.kind === kind,
-                    );
-                    if (target) setActivePageId(target.id);
-                  } else {
-                    setTab(kind);
-                  }
-                  setPlusMenuOpen(false);
-                }}
-                onAddBrowser={() => {
-                  useHelixStore.getState().requestAddBrowserPage();
-                  setPlusMenuOpen(false);
-                }}
-                onOpenByline={() => {
-                  // 建页 / 激活 / 切 tab 由上面的 bylineFocusSignal effect 统一做。
-                  useHelixStore.getState().focusBylineInput();
-                  setPlusMenuOpen(false);
-                }}
-              />
-            </div>
-          </div>,
-          document.body,
-        )}
     </div>
   );
 }

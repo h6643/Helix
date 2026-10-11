@@ -15,6 +15,37 @@ function genId(): string {
 }
 
 /**
+ * 网关自己发进 pi 会话的「转达」文本（子 agent 结果回填，前缀与 Rust 侧
+ * pi_gateway.rs 的 inject_text 一致——改那边必须同时改这里）。它是以 **user**
+ * 角色持久化的，但用户从没发过这句话：实时路径不会为它画用户气泡，重开时后端
+ * 历史里却有，于是一条系统转达会被显示成「我说的」。
+ *
+ * 两个口都用它：`mapBackendMessages`（新数据根本不进 store）与渲染层的
+ * `sessionMessages`（把这次修改之前已经落进本地历史/IDB 的旧记录也挡住）。
+ * 模型侧照旧看得见——那是 pi 自己的历史，本层只管界面；它紧随其后的那条
+ * assistant 汇报照常保留。
+ */
+const GATEWAY_NOTE_PREFIX = "【系统转达，非用户指令】";
+
+export function isGatewayNoteMessage(m: {
+  role?: unknown;
+  text?: unknown;
+  content?: unknown;
+}): boolean {
+  if (m.role !== "user") return false;
+  // 后端投影给的是 `text` 字符串，本地 ChatMessage 给的是 `content`（长消息会被
+  // 拆成 [{type:"text",text:…}] 块）——两种都要认，否则已经落进本地历史的那条
+  // 躲得过过滤，照样显示成「我说的」。
+  const raw = m.text ?? m.content;
+  const block = Array.isArray(raw) ? (raw[0] as { text?: unknown }) : undefined;
+  const text = typeof raw === "string" ? raw : block?.text;
+  return (
+    typeof text === "string" &&
+    text.trimStart().startsWith(GATEWAY_NOTE_PREFIX)
+  );
+}
+
+/**
  * Single source of truth for the backend → frontend message mapping. Every place
  * that ingests a backend message array (session.compress / session.resume / etc.)
  * MUST go through this — do not hand-roll the projection, or the call sites drift.
@@ -29,20 +60,22 @@ export function mapBackendMessages(
   sessionId: string,
 ): ChatMessage[] {
   if (!Array.isArray(msgs)) return [];
-  return msgs.map((m: any) => ({
-    id: m.id || m.row_id || genId(),
-    role: (m.role === "tool" ? "assistant" : m.role) as
-      "user" | "assistant" | "system",
-    content: m.text ?? m.content ?? "",
-    images: m.images,
-    timestamp: m.timestamp || Date.now(),
-    reasoning: m.reasoning ?? m.reasoning_content,
-    steps: m.steps,
-    rowId: m.row_id,
-    sessionId,
-    fileChanges: m.fileChanges,
-    blocks: m.blocks,
-  }));
+  return msgs
+    .filter((m: any) => !isGatewayNoteMessage(m))
+    .map((m: any) => ({
+      id: m.id || m.row_id || genId(),
+      role: (m.role === "tool" ? "assistant" : m.role) as
+        "user" | "assistant" | "system",
+      content: m.text ?? m.content ?? "",
+      images: m.images,
+      timestamp: m.timestamp || Date.now(),
+      reasoning: m.reasoning ?? m.reasoning_content,
+      steps: m.steps,
+      rowId: m.row_id,
+      sessionId,
+      fileChanges: m.fileChanges,
+      blocks: m.blocks,
+    }));
 }
 
 export interface ResyncOptions {

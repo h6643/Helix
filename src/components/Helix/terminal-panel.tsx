@@ -554,7 +554,8 @@ export function TerminalPanel({
           : "helix-surface shrink-0 h-64 border-t border-border/40"
       } ${visible ? "" : "hidden"}`}
     >
-      {/* Tab bar — Windows Terminal style */}
+      {/* Tab bar —— 整条条（含 tab）都吃 `bg-primary/*` 高亮：与右侧边栏的
+          TabChip 同规则，选中态靠**底色**表达，不画 border-t 那条线。 */}
       <div className="helix-terminal-tabbar flex items-center h-8 bg-muted shrink-0 select-none">
         <div className="flex items-center gap-1 px-1 h-full min-w-0 overflow-x-auto scrollbar-hide">
           {tabs.map((tab, i) => {
@@ -565,7 +566,7 @@ export function TerminalPanel({
               <div
                 key={tab.id}
                 onClick={() => setActiveId(tab.id)}
-                className={`flex items-center gap-2 h-full px-3 border-t-2 cursor-pointer whitespace-nowrap transition-colors ${isActive ? "bg-primary/10 border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground hover:bg-primary/5"}`}
+                className={`group flex items-center gap-2 h-full px-3 cursor-pointer whitespace-nowrap transition-colors ${isActive ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:bg-primary/5 hover:text-foreground"}`}
               >
                 <Terminal className="size-3.5" />
                 <span className="max-w-[140px] truncate text-[calc(var(--helix-transcript-size)*0.8571)]">
@@ -577,7 +578,7 @@ export function TerminalPanel({
                       e.stopPropagation();
                       closeTab(tab.id);
                     }}
-                    className="p-0.5 rounded text-muted-foreground/70 hover:text-foreground hover:bg-black/10 transition-colors"
+                    className="p-0.5 rounded text-muted-foreground/70 opacity-0 transition-opacity group-hover:opacity-60 hover:!opacity-100 hover:text-foreground hover:bg-black/10"
                     data-tip="关闭终端"
                   >
                     <X className="size-3" />

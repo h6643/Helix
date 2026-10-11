@@ -37,7 +37,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -108,6 +108,17 @@ const COMPACT_RPC_TIMEOUT: Duration = Duration::from_secs(300);
 /// 上界取 2x COMPACT_RPC_TIMEOUT：`compaction_end` 真在传输中丢了时，回合仍然
 /// 能按 STREAM_SILENCE_TIMEOUT 收敛，而不是挂到 PROMPT_TIMEOUT（一小时）。
 const COMPACTION_GUARD_MS: u64 = 600_000;
+/// 回合闸门的上界（见 `PiInstance::turn_gate_until_ms`）：中止失步的旧回合后，
+/// 旧回合的尾巴事件最多吞掉这么久。新回合的 `agent_start` 正常会在这之前到达并
+/// 立即开门；真丢了（或 pi 版本不认 `agent_start`），也绝不永久吞输出。
+const TURN_GATE_MS: u64 = 15_000;
+/// 武装状态的有效期：中止旧回合到用户真的发出下一条消息之间的空档。超过它就
+/// 作废（不能因为半小时前点过一次停止，就让下一条消息吞掉自己的开头）。
+const TURN_GATE_ARM_WINDOW_MS: u64 = 30_000;
+/// 失步中止后等 pi 自认空闲的预算（见 `session/prompt` 的 already-processing 分支）。
+/// abort 命令返回 ≠ 回合已收尾，`agent_end`/`agent_settled` 还在路上；不等就重发
+/// 会再次撞上 "already processing"。
+const DESYNC_SETTLE_BUDGET: Duration = Duration::from_secs(3);
 /// Handshake (get_state on a fresh spawn) allowance. pi answers get_state
 /// only after ALL extensions finish initializing; heavyweight extensions
 /// (e.g. the memory extension's SQLite backfill) may legitimately block for
@@ -132,6 +143,17 @@ const STREAM_SILENCE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How often turn-wait loops re-check the watchdog between PROMPT_TIMEOUT
 /// deadlines.
 const WATCHDOG_TICK: Duration = Duration::from_secs(30);
+
+/// 死循环护栏：同一条 (工具, 参数, 结果) 连续出现这么多次，就先给模型注一条
+/// 旁注（`LOOP_GUARD_NUDGE_AT`），再继续到 `LOOP_GUARD_ABORT_AT` 就停掉本轮。
+///
+/// 为什么两个看门狗都不管这类卡死：它们防的是「没有帧」，而死循环每一帧都
+/// 正常、每次工具都成功，只是**内容一模一样**。实测一例：同一个 node 抽取命令
+/// 连发 112 次、返回 1362 字符一字不差，111 次的思考开头都是「我要换个做法」。
+/// 近似确定性解码下「相同的上下文尾巴 ⇒ 相同的补全」，模型自己出不来 ——
+/// 必须由外部给它一个新尾巴，或替它停下。
+const LOOP_GUARD_NUDGE_AT: u32 = 3;
+const LOOP_GUARD_ABORT_AT: u32 = 6;
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -159,6 +181,18 @@ static WARM_SPARES: std::sync::LazyLock<Mutex<Vec<Arc<PiInstance>>>> =
 static LIFECYCLE_LOCK: std::sync::LazyLock<Mutex<()>> = std::sync::LazyLock::new(|| Mutex::new(()));
 /// How many spares to keep warm.
 const WARM_SPARE_COUNT: usize = 1;
+/// 已派发、还在握手的补热数量。池子里的备件要 17-27s 才出现，只比 `spares.len()`
+/// 会让每个并发调用都以为位子空着（见 `rearm_warm_spares`）。
+static SPARE_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// 归还一个补热位子；所有退出路径（含 panic 展开）都算。
+struct SpareReservation;
+
+impl Drop for SpareReservation {
+    fn drop(&mut self) {
+        SPARE_INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 /// Context-token safety margin below the model window for the restore-time
 /// trim: the trimmed session must leave room for the user's next prompt AND
 /// the model's reply, not merely squeeze under the window.
@@ -359,7 +393,14 @@ pub struct PiInstance {
     /// ("重启后旧对话一直不输出"). Each queued turn increments the debt;
     /// agent_settled consumes one before touching the waiter, so settles
     /// belonging to fire-and-forget turns never release a real turn.
+    /// 旁路回合同样占着这个实例，所以它是 `streaming` 的判据之一
+    /// （见 `sync_streaming_flag`），登记/注销都走 `begin_debt_turn`/`end_debt_turn`。
     turn_debt: AtomicU64,
+    /// 回合归属闸门（见 `arm_turn_gate` / `turn_gate_active`）：
+    /// `turn_gate_armed_until_ms` = 已请求闸门（中止了旧回合，下一条 prompt 来领），
+    /// `turn_gate_until_ms` = 本回合正在吞旧回合的残留事件。
+    turn_gate_armed_until_ms: AtomicU64,
+    turn_gate_until_ms: AtomicU64,
     /// Buffered tool-call argument deltas, toolCallId → args string.
     tool_args: Mutex<HashMap<String, String>>,
     /// Args of EXECUTING tools, toolCallId → parsed args. tool_execution_start
@@ -414,6 +455,8 @@ pub struct PiInstance {
     /// bookkeeping if its generation still matches.
     generation: AtomicU64,
     /// Turn in flight (prompt sent, agent_settled not seen) → never reap.
+    /// 由 `sync_streaming_flag` 按事实推导（未结算的 waiter 或仍欠的旁路回合），
+    /// 不是「刚收到一条 settle」就能写 false。
     streaming: AtomicBool,
     /// Last RPC activity (ms epoch) for idle reaping.
     last_active_ms: AtomicU64,
@@ -454,6 +497,28 @@ pub struct PiInstance {
     /// running, so the frontend card must stay "running" until the child's
     /// terminal event arrives (entry_appended subagents:record / started).
     subagents: Mutex<HashMap<String, SubAgentRecord>>,
+    /// 死循环护栏状态（见 [`LOOP_GUARD_NUDGE_AT`] 与 [`LoopGuard`]）。
+    loop_guard: Mutex<LoopGuard>,
+    /// 护栏判死时叫醒 `session/prompt` 等待循环。用 `notify_waiters`（不留许可）：
+    /// 上一回合没被叫醒的残留许可绝不能把下一回合当场判死。
+    loop_guard_wakeup: tokio::sync::Notify,
+}
+
+/// 「原地打转」计数：只看连续完全相同的工具调用指纹。
+///
+/// 序列**跨回合累计**，只有判死位是每个回合的：用户反复重发同一个词时，模型每轮
+/// 只重复一次调用也算打转（实测「读同一段代码 → 输出同一段 554 token 的分析」连发
+/// 4 轮，每轮内部都够不上阈值，整体却几个小时没动过）。
+#[derive(Default)]
+struct LoopGuard {
+    /// 上一条工具结果的指纹（0 = 还没记过）。
+    last_sig: u64,
+    /// 该指纹连续出现的次数。
+    streak: u32,
+    /// 这一段重复已经给过旁注了（不刷屏）。
+    nudged: bool,
+    /// 判死时的连续次数，0 = 没判过。等待循环取走它来收尾，回合开头复位。
+    tripped_streak: u32,
 }
 
 /// One live pi-subagents child tracked across its full lifecycle.
@@ -494,6 +559,8 @@ impl PiInstance {
             turn_waiter: Mutex::new(None),
             turn_cancelled: AtomicBool::new(false),
             turn_debt: AtomicU64::new(0),
+            turn_gate_armed_until_ms: AtomicU64::new(0),
+            turn_gate_until_ms: AtomicU64::new(0),
             tool_args: Mutex::new(HashMap::new()),
             exec_tool_args: Mutex::new(HashMap::new()),
             preparing_tool: Mutex::new(None),
@@ -515,6 +582,8 @@ impl PiInstance {
             last_assistant_thinking: Mutex::new(String::new()),
             last_assistant_error: Mutex::new(String::new()),
             subagents: Mutex::new(HashMap::new()),
+            loop_guard: Mutex::new(LoopGuard::default()),
+            loop_guard_wakeup: tokio::sync::Notify::new(),
         })
     }
 
@@ -541,6 +610,96 @@ impl PiInstance {
         self.last_active_ms.store(now_ms(), Ordering::SeqCst);
     }
 
+    /// 新一轮开始：只清「该停了」这一位 —— 它属于上一轮，没被等待循环取走就该作废，
+    /// 绝不能让用户刚发的新消息一上来就被判死。重复序列本身跨轮累计（见 [`LoopGuard`]）。
+    fn begin_turn_loop_guard(&self) {
+        self.loop_guard.lock().unwrap().tripped_streak = 0;
+    }
+
+    /// 护栏判死后收掉这一轮，收尾与卡死看门狗同一套（先开闸门再 abort，释放 waiter）。
+    /// 多一步 `clear_queue`：那条 steer 旁注可能还排在队列里，留着它会串进用户下一条
+    /// 消息那一轮，被模型当成用户又唠叨了一遍。
+    async fn abort_loop_guard_turn(&self, streak: u32) -> String {
+        self.arm_turn_gate();
+        let _ = self.request("clear_queue", Value::Null, RPC_TIMEOUT).await;
+        let _ = self.request("abort", Value::Null, RPC_TIMEOUT).await;
+        *self.turn_waiter.lock().unwrap() = None;
+        self.sync_streaming_flag();
+        format!("检测到死循环：同一个工具调用连续 {streak} 次、返回一字未变，已停止本轮。换做法（不同的命令/参数、别的文件）或换模型后再继续；只重发同一句话会给它同一个尾巴，转得回去。")
+    }
+
+    /// 记录一条工具结果，判断这条序列是否已在原地打转。
+    /// 返回 `Some(旁注文本)` = 此刻该给模型注一条 steer 旁注（换个新尾巴）；
+    /// 到判死阈值则记下 `tripped_streak`、叫醒等待循环并**清零计数**，
+    /// 让用户下一轮拿到一整份预算，而不是第一条调用就被上轮的余量当场判死。
+    fn observe_tool_outcome(&self, tool_name: &str, args: &Value, content: &Value) -> Option<String> {
+        let sig = tool_outcome_signature(tool_name, args, content);
+        let mut g = self.loop_guard.lock().unwrap();
+        if g.last_sig == sig {
+            g.streak += 1;
+        } else {
+            g.last_sig = sig;
+            g.streak = 1;
+            g.nudged = false;
+        }
+        if g.streak < LOOP_GUARD_NUDGE_AT {
+            return None;
+        }
+        if g.streak >= LOOP_GUARD_ABORT_AT {
+            g.tripped_streak = g.streak;
+            g.last_sig = 0;
+            g.streak = 0;
+            g.nudged = false;
+            drop(g);
+            self.loop_guard_wakeup.notify_waiters();
+            return None;
+        }
+        if g.nudged {
+            return None;
+        }
+        g.nudged = true;
+        let streak = g.streak;
+        drop(g);
+        Some(format!(
+            "【系统转达，非用户指令】你已经连续 {streak} 次发出**完全相同**的工具调用（{tool_name}：{}），\
+             每次拿到的结果也一字不差。这不是在推进任务。现在必须换一条路子：改用不同的命令或参数、\
+             去读别的文件、或者干脆停下来用两三句话告诉用户你卡在哪里、缺什么信息。\
+             不要重复上面这条调用，也不要把刚才那段分析再输出一遍。",
+            tool_args_hint(args)
+        ))
+    }
+
+    /// `streaming` 的唯一含义：**这个实例还有回合没跑完**（自己注册过、尚未结算的
+    /// `session/prompt`，或仍欠着的 fire-and-forget 回合）。收到一条 settle 不等于
+    /// 旗子该落 —— 那条 settle 可能属于种子历史 / `/plan arm` 这类旁路回合，用户
+    /// 真正那一轮此刻还排在后面。
+    ///
+    /// 为什么必须按事实推导而不是写死 false：这个旗子是 idle reaper（15 分钟无 RPC
+    /// 活动就 kill）和子代理回填闸门（`agent_settled` 的 `!streaming`）唯一的判据。
+    /// `last_active_ms` 只在发 RPC 时刷新，一个正常跑十几分钟的回合中间一条 RPC 都不
+    /// 发 —— 旗子被误落下，活着的子进程就会被当空闲回收掉。
+    fn sync_streaming_flag(&self) {
+        let outstanding = self.turn_debt.load(Ordering::SeqCst) > 0
+            || self.turn_waiter.lock().unwrap().is_some();
+        self.streaming.store(outstanding, Ordering::SeqCst);
+    }
+
+    /// 登记一个 fire-and-forget 回合（种子历史 / `/plan` arm / 子代理结果回填）。
+    /// 它没有 waiter，但照样占着这个实例，所以旗子必须跟着 debt 一起走 —— 只加
+    /// debt 不落旗子，这个旁路回合本身就没有任何保护，reaper 可以照样把它连同子
+    /// 进程一起回收。
+    fn begin_debt_turn(&self) {
+        self.turn_debt.fetch_add(1, Ordering::SeqCst);
+        self.sync_streaming_flag();
+    }
+
+    /// 注销一个旁路回合：它结算了（`agent_settled` 消费掉这条 debt），或者压根没
+    /// 发出去（发送失败）。两种情况都不会再有 settle 到来，debt 与旗子一起回落。
+    fn end_debt_turn(&self) {
+        self.turn_debt.fetch_sub(1, Ordering::SeqCst);
+        self.sync_streaming_flag();
+    }
+
     /// True when the model stream is considered wedged: the turn is
     /// unsettled, nothing is executing, and pi has been silent for
     /// STREAM_SILENCE_TIMEOUT. Long tool runs don't trip it — the reader
@@ -556,6 +715,53 @@ impl PiInstance {
         }
         now_ms().saturating_sub(self.last_event_ms.load(Ordering::SeqCst))
             >= STREAM_SILENCE_TIMEOUT.as_millis() as u64
+    }
+
+    /// 请求「下一条 prompt 到来前先吞掉旧回合的残留事件」。
+    ///
+    /// 为什么需要：中止 A 之后，A 的尾巴事件仍会继续到达，而它们带的是**同一个
+    /// session id** —— 前端按 sid 过滤（agent-flow-panel 的 run 循环）分不出来，
+    /// 于是 A 的续跑被渲染进 B 那一轮（「发新任务却看到它还在做旧任务」里「看见」
+    /// 的那一半）。更致命的是 A 的 `agent_settled` 会释放 B 已经注册的
+    /// turn_waiter，前端拿到一个空 done（"输出消失"）。
+    ///
+    /// 闸门只在**真的发过 abort**之后武装，调用点全在 `session/prompt` / `session/cancel`：
+    /// 用户 Stop、失步重发、卡死看门狗、`PROMPT_TIMEOUT` —— 常规回合不受影响。
+    fn arm_turn_gate(&self) {
+        self.turn_gate_armed_until_ms
+            .store(now_ms() + TURN_GATE_ARM_WINDOW_MS, Ordering::SeqCst);
+    }
+
+    /// 新回合注册 waiter 时领取闸门：上一轮被中止过 ⇒ 开始吞事件，直到本轮自己的
+    /// `agent_start`（见 `release_turn_gate`）或 `TURN_GATE_MS` 上界。返回是否领取。
+    fn claim_turn_gate(&self) -> bool {
+        let armed = self.turn_gate_armed_until_ms.swap(0, Ordering::SeqCst);
+        if armed <= now_ms() {
+            return false;
+        }
+        self.turn_gate_until_ms
+            .store(now_ms() + TURN_GATE_MS, Ordering::SeqCst);
+        eprintln!("[pi agent] turn gate claimed (stale turn was aborted) -> swallowing tail");
+        true
+    }
+
+    /// True while the gate still swallows events. Self-clears at the bound so a
+    /// lost `agent_start` can never permanently mute a turn.
+    fn turn_gate_active(&self) -> bool {
+        let until = self.turn_gate_until_ms.load(Ordering::SeqCst);
+        if until == 0 {
+            return false;
+        }
+        if now_ms() >= until {
+            self.turn_gate_until_ms.store(0, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// 闸门开门：本回合真正开始了（或这一轮已确认结束）。
+    fn release_turn_gate(&self) {
+        self.turn_gate_until_ms.store(0, Ordering::SeqCst);
     }
 
     /// Register a pending responder and send the frame. Shared by the async
@@ -707,6 +913,10 @@ impl PiInstance {
         self.executing_tools.lock().unwrap().clear();
         *self.preparing_tool.lock().unwrap() = None;
         self.initialized.store(false, Ordering::SeqCst);
+        // 子进程死了 ⇒ 它欠的每一条 settle 永远不会来。旁路回合的记账必须一起清零，
+        // 否则 `sync_streaming_flag` 会永远认为还有回合在跑（streaming 卡 true ⇒
+        // reaper 再也无权回收，旁路注入闸门也一直不开）。
+        self.turn_debt.store(0, Ordering::SeqCst);
         self.streaming.store(false, Ordering::SeqCst);
         log_spawn_diag(&format!("kill({}): exit", self.key()));
     }
@@ -827,52 +1037,21 @@ impl PiInstance {
         Ok(data)
     }
 
-    /// Send a prompt and await the turn's settle (agent_settled), with the
-    /// same indefinite-wait-while-UI-request-pending semantics as
-    /// session/prompt. No remaining callers since the seed-history path moved
-    /// to fire-and-forget (queued prompt) — kept for future sub-turn needs.
-    #[allow(dead_code)]
-    async fn request_turn(&self, message: &str) -> Result<Value, String> {
-        let (tx, mut rx) = tokio::sync::oneshot::channel();
-        self.turn_cancelled.store(false, Ordering::SeqCst);
-        *self.turn_waiter.lock().unwrap() = Some(TurnWaiter { tx });
-        self.streaming.store(true, Ordering::SeqCst);
-        let result = self
-            .request("prompt", json!({ "message": message }), RPC_TIMEOUT)
-            .await;
-        if result.is_err() {
-            *self.turn_waiter.lock().unwrap() = None;
-            self.streaming.store(false, Ordering::SeqCst);
-            return Err(result.unwrap_err());
-        }
-        let mut deadline = tokio::time::Instant::now() + PROMPT_TIMEOUT;
+    /// 轮询 pi 自报的 `isStreaming`，直到它承认上一轮已结束（预算
+    /// `DESYNC_SETTLE_BUDGET`）。abort 命令返回只代表命令被处理，`agent_end` /
+    /// `agent_settled` 还在收尾；不等就重发 prompt 会再撞一次 "already processing"。
+    async fn wait_until_idle(&self) -> bool {
+        let deadline = tokio::time::Instant::now() + DESYNC_SETTLE_BUDGET;
         loop {
-            let sleep = tokio::time::sleep_until(deadline);
-            tokio::select! {
-                result = &mut rx => {
-                    self.streaming.store(false, Ordering::SeqCst);
-                    return result.map_err(|_| "pi turn event channel closed".to_string());
-                }
-                _ = tokio::time::sleep(WATCHDOG_TICK) => {
-                    let pending_ui = self.ui_requests.lock().unwrap().len();
-                    let tools_running = self.executing_tools.lock().unwrap().len();
-                    if pending_ui == 0 && tools_running == 0 && self.stream_wedged() {
-                        let _ = self.request("abort", Value::Null, RPC_TIMEOUT).await;
-                        *self.turn_waiter.lock().unwrap() = None;
-                        self.streaming.store(false, Ordering::SeqCst);
-                        return Err("模型响应流中断（3 分钟无任何输出）".to_string());
-                    }
-                }
-                _ = sleep => {
-                    let pending_ui = self.ui_requests.lock().unwrap().len();
-                    if pending_ui == 0 {
-                        self.streaming.store(false, Ordering::SeqCst);
-                        return Err("pi turn timed out".to_string());
-                    }
-                    self.touch();
-                    deadline = tokio::time::Instant::now() + PROMPT_TIMEOUT;
+            if let Ok(state) = self.session_state().await {
+                if state.get("isStreaming").and_then(Value::as_bool) == Some(false) {
+                    return true;
                 }
             }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(80)).await;
         }
     }
 }
@@ -935,7 +1114,7 @@ fn classify_session_error(msg: &str) -> &'static str {
 /// unreproducible after the fact. Best-effort: IO errors are silently ignored
 /// (logging must never take the gateway down), and the file matches the
 /// session jsonl filenames' UTC clock so timestamps correlate directly.
-fn log_spawn_diag(message: &str) {
+pub(crate) fn log_spawn_diag(message: &str) {
     use std::io::Write;
     static LOG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let Ok(_guard) = LOG_LOCK.lock() else {
@@ -1307,10 +1486,16 @@ pub fn spawn(state: &Arc<AppState>) -> Result<(), String> {
     result
 }
 
-/// Refill the warm-spare pool in the background to WARM_SPARE_COUNT. Safe to
-/// call repeatedly; concurrent refills are deduped by checking pool size after
-/// the spawn completes. Spares whose dir no longer matches the global work
-/// dir are reaped (a work-dir switch orphaned them).
+/// Refill the warm-spare pool in the background to WARM_SPARE_COUNT.
+///
+/// 补热必须**先占位再动手**：一次握手要 17-27s（pi 冷启动实测，见 helix-recover.log
+/// 2026-10-11：`awaiting get_state` → `get_state OK` 普遍 17~20s），期间池子
+/// 一直是空的，所以只比 `spares.len()` 的话，每个并发调用都会各自起一个 pi 进程，
+/// 最后 N-1 个在握手完成后被「位子已满」判死 —— 白付冷启动、白占内存，还让
+/// 被清场打断的那几次打出 `warm spare spawn failed`。日志里 spare-29/spare-30
+/// 相差 2ms 成对起、spare-41/spare-43 相差 15ms 成对起，就是这个洞。
+/// Spares whose dir no longer matches the global work dir are reaped (a
+/// work-dir switch orphaned them).
 fn rearm_warm_spares(state: &Arc<AppState>) {
     {
         let global_dir = state
@@ -1328,17 +1513,25 @@ fn rearm_warm_spares(state: &Arc<AppState>) {
             }
             ok
         });
-        if spares.len() >= WARM_SPARE_COUNT {
+        // 位子（池 + 在途）算满就不补。占位与读池大小在同一把锁里做，
+        // 所以两个并发 rearm 不可能都认为自己该起一个。
+        let outstanding = spares.len() + SPARE_INFLIGHT.load(Ordering::SeqCst);
+        if outstanding >= WARM_SPARE_COUNT {
             return;
         }
+        SPARE_INFLIGHT.fetch_add(1, Ordering::SeqCst);
     }
     let state = Arc::clone(state);
+    // 在 `thread::spawn` 之前构造、再 move 进线程：起线程本身失败时也会随栈展开归还位子。
+    let reservation = SpareReservation;
     thread::spawn(move || {
+        let _reservation = reservation;
         let key = format!("spare-{}", REQUEST_ID.fetch_add(1, Ordering::SeqCst));
         // Spares follow the global work dir (cwd = None).
         match spawn_instance(key, None, false, &state) {
             Ok(instance) => {
-                // Another refill may have won the race — kill the loser.
+                // 清场/restart 可能在握手的这 20 秒里把池重新排过 —— 位子已被别人
+                // 占了就让出这个进程，别把它塞进池外当孤儿。
                 let mut spares = WARM_SPARES.lock().unwrap();
                 if spares.len() >= WARM_SPARE_COUNT {
                     drop(spares);
@@ -1405,6 +1598,44 @@ fn normalize_effort(level: &str) -> String {
     match level {
         "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => level.to_string(),
         _ => "medium".to_string(),
+    }
+}
+
+/// 自动压缩开关（pi 的 in-run 阈值压缩）：跟用户配置 agent.auto_compaction
+/// 走，缺省 true（与前端 store 的 autoCompactContext 默认值一致）。pi 会把它
+/// 持久化进自己的全局 settings（compaction.enabled），所以之后重新 spawn 的
+/// 实例也会继承上一次的值；这里负责在每次实例初始化时重放，保证两个来源
+/// 对齐（与 configured_effort 同一套路）。
+fn configured_auto_compaction() -> bool {
+    let path = crate::config::config_yaml_path();
+    let Ok(yaml) = std::fs::read_to_string(&path) else {
+        return true;
+    };
+    let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&yaml) else {
+        return true;
+    };
+    match v
+        .get("agent")
+        .and_then(|a| a.get("auto_compaction"))
+        .and_then(|b| b.as_bool())
+    {
+        Some(b) => b,
+        None => true,
+    }
+}
+
+/// 广播自动压缩开关给所有活的 pi 实例。用户改 autoCompactContext 设置时
+/// 由前端调用：pi 的回合内阈值压缩（压缩完 agent.continue() 续跑任务）
+/// 立即在所有打开的对话上跟手，pi 同时会把值写进自己的全局 settings，
+/// 新实例自动继承。
+pub fn set_auto_compaction_all(enabled: bool) {
+    let instances: Vec<Arc<PiInstance>> = INSTANCES.lock().unwrap().values().cloned().collect();
+    for inst in instances {
+        let _ = inst.request_sync(
+            "set_auto_compaction",
+            json!({ "enabled": enabled }),
+            RPC_TIMEOUT,
+        );
     }
 }
 
@@ -1532,6 +1763,15 @@ fn spawn_instance(
                         RPC_TIMEOUT,
                     );
                 }
+                // 自动压缩：把压缩决策交给 pi 的回合内阈值压缩——压缩完
+                // agent.continue() 继续任务（与 CLI 语义一致）。旧的 Helix
+                // 前端 80% 轮询走手动 compact，pi 的手动 compact 第一步就
+                // abort 当前回合且永不续跑，才是“压缩后任务暂停”的根因。
+                let _ = instance.request_sync(
+                    "set_auto_compaction",
+                    json!({ "enabled": configured_auto_compaction() }),
+                    RPC_TIMEOUT,
+                );
                 if instance.key().is_empty() {
                     emit_helix_event(
                         "gateway.ready",
@@ -2263,14 +2503,14 @@ async fn spawn_history_seed_turn(
         "history → new session: sid={session_id} seeded {len} chars of prior history",
         len = seed.len()
     ));
-    instance.turn_debt.fetch_add(1, Ordering::SeqCst);
+    instance.begin_debt_turn();
     if let Err(e) = instance
         .request("prompt", json!({ "message": seed }), RPC_TIMEOUT)
         .await
     {
         eprintln!("[pi agent] history seed turn failed: {e}");
         log_spawn_diag(&format!("history → new session: seed failed sid={session_id}: {e}"));
-        instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
+        instance.end_debt_turn();
     }
     seed.len()
 }
@@ -2495,13 +2735,13 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
             if initial_mode == "plan" {
                 // Fire-and-forget arm turn: register turn debt so its
                 // agent_settled is not mistaken for the real prompt's.
-                instance.turn_debt.fetch_add(1, Ordering::SeqCst);
+                instance.begin_debt_turn();
                 if let Err(e) = instance
                     .request("prompt", json!({ "message": "/plan start" }), RPC_TIMEOUT)
                     .await
                 {
                     eprintln!("[pi agent] /plan start failed: {e}");
-                    instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
+                    instance.end_debt_turn();
                 }
                 *instance.plan_mode.lock().unwrap() = true;
             }
@@ -2988,24 +3228,24 @@ pub async fn send(method: &str, params: Value) -> Result<Value, String> {
                     // its settle must not release a concurrent session/prompt
                     // waiter. set_mode is sent on EVERY run, so this can race
                     // with the run's own prompt even without a seed history.
-                    instance.turn_debt.fetch_add(1, Ordering::SeqCst);
+                    instance.begin_debt_turn();
                     if let Err(e) = instance
                         .request("prompt", json!({ "message": "/plan start" }), RPC_TIMEOUT)
                         .await
                     {
                         eprintln!("[pi agent] /plan start failed: {e}");
-                        instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
+                        instance.end_debt_turn();
                     }
                 }
                 *instance.plan_mode.lock().unwrap() = true;
             } else if prev_active && !plan_approved {
-                instance.turn_debt.fetch_add(1, Ordering::SeqCst);
+                instance.begin_debt_turn();
                 if let Err(e) = instance
                     .request("prompt", json!({ "message": "/plan exit" }), RPC_TIMEOUT)
                     .await
                 {
                     eprintln!("[pi agent] /plan exit failed: {e}");
-                    instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
+                    instance.end_debt_turn();
                 }
                 *instance.plan_mode.lock().unwrap() = false;
             }
@@ -3245,24 +3485,80 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             // never be missed (events arrive on the reader thread).
             let (tx, mut rx) = tokio::sync::oneshot::channel();
             instance.turn_cancelled.store(false, Ordering::SeqCst);
+            // 死循环护栏：只复位上一轮没被取走的判死位（重复序列本身跨轮累计）。
+            instance.begin_turn_loop_guard();
             *instance.turn_waiter.lock().unwrap() = Some(TurnWaiter { tx });
             instance.streaming.store(true, Ordering::SeqCst);
+            // 上一条消息之前中止过旧回合 ⇒ 本回合开头要先吞掉旧回合带同一 sid 的
+            // 尾巴事件；顺带清掉网关侧「工具仍在跑」的记账 —— 那些工具已随旧回合
+            // 一起死掉，留着会让卡死看门狗永久以为有工具在执行而不作为。
+            if instance.claim_turn_gate() {
+                instance.executing_tools.lock().unwrap().clear();
+            }
 
             let prompt_params = pi_params.clone();
+            // 调用方可以显式声明「本轮正忙时怎么办」：`streaming_behavior` =
+            // "followUp" / "steer" 时按声明排队（定时任务用它——它绝不能掐掉用户
+            // 正在跑的回合）；缺省即交互式发送，命中忙态就是失步，走下面的中止重发。
+            let declared_behavior = params
+                .get("streaming_behavior")
+                .and_then(Value::as_str)
+                .filter(|b| *b == "followUp" || *b == "steer")
+                .map(str::to_string);
             let result = instance.request("prompt", prompt_params, RPC_TIMEOUT).await;
             let result = match result {
                 Ok(data) => Ok(data),
-                Err(_first_error) => {
-                    // pi rejects prompts while it is mid-stream unless queued
-                    // — retry once as a steering message.
-                    let mut retried = pi_params.clone();
-                    retried["streamingBehavior"] = json!("steer");
-                    instance.request("prompt", retried, RPC_TIMEOUT).await
+                Err(first_error) => {
+                    if let Some(behavior) = &declared_behavior {
+                        let mut retried = pi_params.clone();
+                        retried["streamingBehavior"] = json!(behavior);
+                        instance.request("prompt", retried, RPC_TIMEOUT).await
+                    } else if first_error.contains("already processing") {
+                        // pi 只在一种情况下拒绝 prompt：上一回合还在它那儿跑。旧代码把
+                        // **任何**失败都重试成 `streamingBehavior:"steer"`，于是用户的新
+                        // 任务被塞进旧回合当插话（模型读完旁注照常把旧任务干完 = 「发新
+                        // 任务却继续做旧任务」），顺带把别的真错误也静默吞了。
+                        // Helix 没有「跑动中插话」这条 UI 路径（发送队列的「立即发送」=
+                        // 先停再发，见 agent-flow-panel flushQueueItem），所以命中这里
+                        // 只可能是失步：前端/网关已把旧回合当结束，pi 却还在 headless 跑。
+                        eprintln!(
+                            "[pi agent] prompt rejected (previous turn still live) \
+                             -> aborting stale turn before resending"
+                        );
+                        // 闸门必须在发 abort **之前**打开：abort 命令返回时旧回合的
+                        // `agent_settled` 可能已经到 reader 线程，而它要释放的是这条
+                        // 消息刚注册的 waiter（= 新回合空手收场）。这里 waiter 已注册，
+                        // 所以直接领取闸门，不等下一次注册。
+                        instance.arm_turn_gate();
+                        instance.claim_turn_gate();
+                        let _ = instance
+                            .request("clear_queue", Value::Null, RPC_TIMEOUT)
+                            .await;
+                        let _ = instance.request("abort", Value::Null, RPC_TIMEOUT).await;
+                        if instance.wait_until_idle().await {
+                            instance
+                                .request("prompt", pi_params.clone(), RPC_TIMEOUT)
+                                .await
+                        } else {
+                            // 停不住：作为 follow-up 排队，等旧回合真正结束后自成新一轮。
+                            // 绝不退回 "steer" —— 那正是把新任务降级成旁注的做法。
+                            eprintln!(
+                                "[pi agent] stale turn did not settle; delivering as followUp queue"
+                            );
+                            let mut retried = pi_params.clone();
+                            retried["streamingBehavior"] = json!("followUp");
+                            instance.request("prompt", retried, RPC_TIMEOUT).await
+                        }
+                    } else {
+                        *instance.turn_waiter.lock().unwrap() = None;
+                        instance.sync_streaming_flag();
+                        return Err(first_error);
+                    }
                 }
             };
             if result.is_err() {
                 *instance.turn_waiter.lock().unwrap() = None;
-                instance.streaming.store(false, Ordering::SeqCst);
+                instance.sync_streaming_flag();
                 return Err(result.unwrap_err());
             }
 
@@ -3287,7 +3583,7 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
                         // {process_exited:true}。裸 close 只剩"没人发就 drop"的
                         // 意外情形。
                         let v = result.map_err(|_| "pi turn event channel closed".to_string())?;
-                        instance.streaming.store(false, Ordering::SeqCst);
+                        instance.sync_streaming_flag();
                         if v.get("process_exited").and_then(Value::as_bool) == Some(true) {
                             // 子进程中途退出：这一轮不可能有终局，报明确原因（前端
                             // 按"可恢复中断"处理，等 respawn/重连，而不是当模型失败）。
@@ -3299,22 +3595,53 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
                         }
                         break v;
                     }
+                    _ = instance.loop_guard_wakeup.notified() => {
+                        // 护栏判死（reader 线程在 tool_execution_end 上点的火）。
+                        // notify_waiters 不留许可，所以没人接的时刻由下面的 30s tick 兜底。
+                        let tripped = {
+                            let mut g = instance.loop_guard.lock().unwrap();
+                            std::mem::take(&mut g.tripped_streak)
+                        };
+                        if tripped > 0 {
+                            return Err(instance.abort_loop_guard_turn(tripped).await);
+                        }
+                    }
                     _ = tokio::time::sleep(WATCHDOG_TICK) => {
                         let pending_ui = instance.ui_requests.lock().unwrap().len();
                         let tools_running = instance.executing_tools.lock().unwrap().len();
+                        // 用户在答审批卡时不算打转：那是模型在等人，不是在自己的圈里。
+                        let tripped = if pending_ui == 0 {
+                            let mut g = instance.loop_guard.lock().unwrap();
+                            std::mem::take(&mut g.tripped_streak)
+                        } else {
+                            0
+                        };
+                        if tripped > 0 {
+                            return Err(instance.abort_loop_guard_turn(tripped).await);
+                        }
                         if pending_ui == 0 && tools_running == 0 && instance.stream_wedged() {
+                            instance.arm_turn_gate();
                             let _ = instance
                                 .request("abort", Value::Null, RPC_TIMEOUT)
                                 .await;
                             *instance.turn_waiter.lock().unwrap() = None;
-                            instance.streaming.store(false, Ordering::SeqCst);
+                            instance.sync_streaming_flag();
                             return Err("模型响应流中断（3 分钟无任何输出）".to_string());
                         }
                     }
                     _ = sleep => {
                         let pending_ui = instance.ui_requests.lock().unwrap().len();
                         if pending_ui == 0 {
-                            instance.streaming.store(false, Ordering::SeqCst);
+                            // 这里返回 Err ⇒ 前端把这一轮当结束。只清本地旗子的话，pi
+                            // 仍在 headless 跑它，下一条用户消息就会撞上失步路径
+                            // （见上方 already-processing 分支）。宣告结束就必须真结束，
+                            // 和上面的卡死看门狗同一套收尾。
+                            instance.arm_turn_gate();
+                            let _ = instance
+                                .request("abort", Value::Null, RPC_TIMEOUT)
+                                .await;
+                            *instance.turn_waiter.lock().unwrap() = None;
+                            instance.sync_streaming_flag();
                             return Err("pi turn timed out".to_string());
                         }
                         // User still hasn't answered the card — keep waiting
@@ -3324,7 +3651,7 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
                     }
                 }
             };
-            instance.streaming.store(false, Ordering::SeqCst);
+            instance.sync_streaming_flag();
             // Ack-only contract: completion details arrive as events.
             Ok(json!({
                 "session_id": session_id,
@@ -3336,6 +3663,11 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             // Cancel targets whichever conversation the user stopped: route
             // by session_id when present, else the main instance.
             let instance = routed_instance(&params, &state).await?;
+            // 这一回合被判结束（Stop 按钮 / 前端合成 done）。被中止回合的尾巴事件
+            // 带的是同一个 session id，下一条消息的 run 循环分不出它们属于上一回合；
+            // 它迟到的 `agent_settled` 更会释放下一条消息的 waiter。闸门在这里武装，
+            // 由下一条 prompt 注册时领取（`claim_turn_gate`）。
+            instance.arm_turn_gate();
             // Clear queued steering/follow-ups first (mirrors the interactive
             // Esc behavior), then abort the running operation.
             let _ = instance
@@ -3355,7 +3687,7 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
             if let Some(waiter) = waiter {
                 let _ = waiter.tx.send(json!({ "cancelled": true }));
             }
-            instance.streaming.store(false, Ordering::SeqCst);
+            instance.sync_streaming_flag();
             emit_helix_event(
                 "session/update",
                 &json!({
@@ -3384,22 +3716,42 @@ describe_image 工具逐个分析（可附具体问题，如“读出图里的�
                 .get("choice")
                 .and_then(Value::as_str)
                 .unwrap_or("approve");
+            let respond_session = params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            // 应答到达网关的第一行留痕，和前端的 `ui_card respond` 配成一对：
+            // 「前端说它回了」和「网关真的收到了这条回」之间断掉过（审批卡挂到
+            // 超时自己拒），只有两端各记一行才能把断点夹出来。
+            log_spawn_diag(&format!(
+                "ui_card respond_recv id={} session={} choice={}",
+                approval_id, respond_session, choice
+            ));
             // Route by session_id when the frontend sent one (it always does
             // for approval.respond/clarify/respond); fall back to the
             // request-id → instance owner map (Tauri's helix_approval_respond
             // carries no session).
             let instance =
                 routed_instance_or_ui_owner(&params, &approval_id, &state).await?;
+            let pending = instance
+                .ui_requests
+                .lock()
+                .unwrap()
+                .remove(&approval_id);
+            if pending.is_none() {
+                // 这张卡在 Rust 侧早已被清（kill/重启/竞速作废），现在回的这一下
+                // 什么也解不开 —— 表现和「前端根本没答」完全一样：扩展挂满
+                // approvalTimeoutSec 后 fail-closed。
+                log_spawn_diag(&format!(
+                    "ui_card respond_unknown id={} session={}",
+                    approval_id, respond_session
+                ));
+            }
             let PendingUI {
                 method: ui_method,
                 blocking_tool,
                 ..
-            } = instance
-                .ui_requests
-                .lock()
-                .unwrap()
-                .remove(&approval_id)
-                .ok_or("Unknown pi UI request")?;
+            } = pending.ok_or("Unknown pi UI request")?;
             UI_REQUEST_OWNERS.lock().unwrap().remove(&approval_id);
             let denied = matches!(choice, "deny" | "cancel");
             // pi's extension_ui_response carries the answer fields at top
@@ -5029,11 +5381,49 @@ fn handle_line(instance: &Arc<PiInstance>, line: &str) {
     }
 }
 
+/// 子 agent 终态词表收敛。扩展自己发的是
+/// `queued | running | completed | steered | aborted | stopped | error`
+/// （subagents/src/types.ts:174；`steered` = 被转向之后正常收尾，照样带结果），
+/// **从来不存在 `"done"`**。Helix 下游只认三个词：`completed` / `failed` /
+/// `running` —— 前端 `subagent.complete` 按「非 failed 即成功」画卡，磁盘委派日志
+/// （delegations）与非后台工具返回路径（本文件 6509 附近）写的也是这三个。
+/// 所以别处一律比 `"completed"`，不要再引入第四个词。
+fn normalize_subagent_status(raw: &str) -> &'static str {
+    match raw {
+        "error" | "stopped" | "aborted" => "failed",
+        "queued" | "running" => "running",
+        // 扩展目前只会用 completed / steered 收尾；将来它新增别的终态词，
+        // 也按终态成功处理（与前端「非 failed 即成功」的画法一致）。
+        // 未知词打成 running 反而更糟：卡片会被回退成永久转圈。
+        _ => "completed",
+    }
+}
+
 /// Translate pi events into the Helix event surface the frontend consumes.
 /// Every event is stamped with THIS instance's session id — the frontend's
 /// run loop filters by session id, so parallel conversations only see their
 /// own events.
 fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) {
+    // 回合闸门（见 `PiInstance::arm_turn_gate`）：上一回合被中止过，它的尾巴事件带
+    // 的是**同一个 session id**，前端按 sid 过滤分不出来 ⇒ 在本回合自己的
+    // `agent_start` 到达之前，一律不把内容事件转出去。
+    // `agent_settled` 不在这里吞：它在自己的分支里带上下文判定（见该分支）。
+    if event_type == "agent_start" {
+        instance.release_turn_gate();
+        return;
+    }
+    if instance.turn_gate_active()
+        && matches!(
+            event_type,
+            "message_update"
+                | "tool_execution_start"
+                | "tool_execution_update"
+                | "tool_execution_end"
+        )
+    {
+        eprintln!("[pi agent] turn gate swallowed event: {event_type}");
+        return;
+    }
     let sid = || instance.current_session_id();
     match event_type {
         "message_end" => {
@@ -5138,12 +5528,9 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                // Extension statuses: done → completed; error / stopped /
-                // aborted → failed; anything still running never reaches here.
-                let status = match raw_status.as_str() {
-                    "error" | "stopped" | "aborted" => "failed".to_string(),
-                    other => other.to_string(),
-                };
+                // 收敛到 Helix 侧的三个词（completed / failed / running），
+                // 判据全部比这三个，见 `normalize_subagent_status`。
+                let status = normalize_subagent_status(&raw_status).to_string();
                 let summary = data
                     .get("result")
                     .and_then(Value::as_str)
@@ -5241,11 +5628,14 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 // Auto-return the child's successful result to the parent
                 // session: when the parent is idle and the child finished
                 // successfully, queue a follow-up prompt carrying the summary
-                // so the parent agent runs another turn instead of sitting
-                // idle. Gated on the extension's own status, the parent being
-                // idle (no in-flight turn), the instance still live, and a
-                // one-shot guard so a resume/re-arm can't re-inject.
-                if status == "done"
+                // so the parent tells the user about it (report-only — the text
+                // explicitly forbids resuming the old task). Gated on the
+                // normalized terminal status (`normalize_subagent_status` —
+                // 扩展从不报 "done"，此前这里比 "done" 等于门永远关着),
+                // the parent being idle (no in-flight
+                // turn), the instance still live, and a one-shot guard so a
+                // resume/re-arm can't re-inject.
+                if status == "completed"
                     && !summary.is_empty()
                     && instance.initialized.load(Ordering::SeqCst)
                     && !instance.streaming.load(Ordering::SeqCst)
@@ -5280,22 +5670,57 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                         let goal = rec_goal.clone();
                         let instance_clone = Arc::clone(instance);
                         let agent_id_clone = agent_id.clone();
-                        tokio::task::spawn(async move {
+                        // 这里跑在 reader 裸线程上（`thread::spawn`，无 Tokio 上下文），
+                        // `tokio::task::spawn` 会 panic 并把读线程一起带走 ⇒ pi 写 stdout
+                        // 拿到 EPIPE 直接崩。必须用 Tauri 的全局运行时派发。
+                        tauri::async_runtime::spawn(async move {
+                            // 这段文本会以 user 角色进入会话，模型把它当成"用户刚说的话"。
+                            // 原来结尾那句「请基于此结果继续」读起来就是一条新指令 ——
+                            // 后台子 agent 一交付，父会话自己开一轮把旧任务接着干完
+                            // （用户视角：我什么都没点，它又在跑刚才的事）。所以这里必须
+                            // ① 声明来源是系统转达、不是用户；② 把动作收窄到"转达结果"。
+                            // 前缀同时是界面识别符：src/lib/session-resync.ts 的
+                            // GATEWAY_NOTE_PREFIX 靠它把这条 user 记录从重开后的转录里
+                            // 剔除（否则系统转达会显示成「用户说的话」）——改前缀要两边一起改。
                             let inject_text = format!(
-                                "你派发的子 agent「{goal}」已完成。执行结果：\n{summary_text}\n请基于此结果继续。"
+                                "【系统转达，非用户指令】你此前派发的子 agent「{goal}」已完成，结果如下：\n\
+                                 {summary_text}\n\
+                                 请只用一到三句话把这条结果转达给用户，然后结束本轮。\
+                                 不要据此继续执行之前的任务，也不要开始任何新操作；\
+                                 若结果明显还需要后续动作，只列出建议，等用户明确指示后再做。"
                             );
                             // Fire-and-forget queued prompt: register turn debt so
                             // the resulting agent_settled consumes the debt instead
                             // of fabricating a session/complete for a user turn.
-                            instance_clone.turn_debt.fetch_add(1, Ordering::SeqCst);
-                            if let Err(e) = instance_clone
+                            instance_clone.begin_debt_turn();
+                            let first = instance_clone
                                 .request("prompt", json!({ "message": inject_text }), RPC_TIMEOUT)
-                                .await
-                            {
-                                eprintln!(
-                                    "[pi agent] subagent auto-inject failed for {agent_id_clone}: {e}"
-                                );
-                                instance_clone.turn_debt.fetch_sub(1, Ordering::SeqCst);
+                                .await;
+                            if let Err(e) = first {
+                                // 上面的空闲检查与这条 prompt 之间，用户可能刚好发出下一句。
+                                // 这时绝不能走「中止旧回合重发」（那是给用户交互发送用的），
+                                // 也绝不能降级成 steer —— 结果排到用户那一轮之后再自成新一轮。
+                                let busy = e.contains("already processing");
+                                let retried = if busy {
+                                    instance_clone
+                                        .request(
+                                            "prompt",
+                                            json!({
+                                                "message": inject_text,
+                                                "streamingBehavior": "followUp"
+                                            }),
+                                            RPC_TIMEOUT,
+                                        )
+                                        .await
+                                } else {
+                                    Err(e)
+                                };
+                                if let Err(e) = retried {
+                                    eprintln!(
+                                        "[pi agent] subagent auto-inject failed for {agent_id_clone}: {e}"
+                                    );
+                                    instance_clone.end_debt_turn();
+                                }
                             }
                         });
                     }
@@ -5894,6 +6319,35 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
                 .unwrap()
                 .remove(&tool_call_id)
                 .unwrap_or(Value::Null);
+            // 死循环护栏：连续同 (工具, 参数, 结果) ⇒ 先注一条 steer 旁注给模型一个新
+            // 尾巴，继续重复则由 `session/prompt` 的等待循环收掉这一轮。嵌套调用
+            // （codemode 的 ctx.executeTool、子 agent）不参与计数 —— 它们与外层交替
+            // 出现，会把外层这条连续序列打断成 1，护栏就永远看不见外层的打转。
+            if !nested {
+                if let Some(nudge_text) =
+                    instance.observe_tool_outcome(tool_name, &exec_args, &content)
+                {
+                    let nudge_instance = Arc::clone(instance);
+                    // 读 stdout 的线程是裸 `thread::spawn`（见 reader 启动处），这里
+                    // 没有 Tokio 运行时上下文；`tokio::task::spawn` 会 panic
+                    // （"there is no reactor running"），panic 又掐死读线程 ⇒ pi 那边
+                    // 写 stdout 拿到 EPIPE 整个崩掉。用 Tauri 的全局运行时派发。
+                    tauri::async_runtime::spawn(async move {
+                        // 只用 steer：旁注必须进**正在跑的这一回合**。绝不降级成
+                        // followUp —— 那要等这轮结束才生效，而这轮正是结束不了才需要它。
+                        let result = nudge_instance
+                            .request(
+                                "prompt",
+                                json!({ "message": nudge_text, "streamingBehavior": "steer" }),
+                                RPC_TIMEOUT,
+                            )
+                            .await;
+                        if let Err(e) = result {
+                            eprintln!("[pi agent] loop guard steer inject failed: {e}");
+                        }
+                    });
+                }
+            }
             // write 覆盖前的旧内容（execution_start 抓的）——同样只取一次，防泄漏。
             //   Some(None)  = 当时文件不存在（新建）
             //   Some(Some)  = 读到了旧内容
@@ -6199,6 +6653,15 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             // Turn 结束 ⇒ 不存在未返回的工具钩子：仍挂着的审批弹窗都是竞速
             // 输掉的僵尸（也覆盖「停止」残局），作废它们。
             evict_settled_permission_asks(instance, "turn_settled");
+            // 闸门还开着 ⇒ 这条 settle 属于**刚被中止的上一回合**（本回合自己的
+            // `agent_start` 会先开门）。它绝不能去释放下一条消息刚注册的
+            // turn_waiter，也不能发 session/complete —— 那会让新回合带着空正文收场
+            //（"输出消失"）。旧回合到此为止，闸门顺手开门。
+            if instance.turn_gate_active() {
+                instance.sync_streaming_flag();
+                instance.release_turn_gate();
+                return;
+            }
             // Turn (including queued steering/follow-ups) fully settled →
             // release the in-flight session/prompt waiter.
             let cancelled = instance.turn_cancelled.swap(false, Ordering::SeqCst);
@@ -6207,8 +6670,9 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
             // consume the debt and leave the real turn's waiter armed
             // (the real turn is still queued/running behind it).
             if instance.turn_debt.load(Ordering::SeqCst) > 0 {
-                instance.turn_debt.fetch_sub(1, Ordering::SeqCst);
-                instance.streaming.store(false, Ordering::SeqCst);
+                // 旗子按事实落不落：这一条 settle 属于旁路回合，用户那一轮的 waiter
+                // 还挂着 ⇒ 实例仍在忙（写死 false 会让 reaper 有权 kill 正在跑的子进程）。
+                instance.end_debt_turn();
                 return;
             }
             // Only a turn initiated by session/prompt registers a waiter.
@@ -6614,6 +7078,30 @@ fn emit_pi_event(instance: &Arc<PiInstance>, event_type: &str, message: &Value) 
         // Pass-through / ignore: agent_start, turn_start/end, message_start/end,
         // queue_update, summarization_retry_*, bash_execution_update.
         _ => {}
+    }
+}
+
+/// 工具结果的「原地打转」指纹：**逐字节相同**才算重复。这条护栏抓的是模型把同
+/// 一个调用连发几十次、返回一字不差（近似相同不算 —— 那说明它至少在改参数试）。
+fn tool_outcome_signature(tool_name: &str, args: &Value, content: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    tool_name.hash(&mut h);
+    args.to_string().hash(&mut h);
+    content.to_string().hash(&mut h);
+    h.finish()
+}
+
+/// 旁注里引用参数时只取前 160 字符：死循环的常见形态正是超长命令，整条回显会
+/// 把旁注本身变成新的上下文负担。
+fn tool_args_hint(args: &Value) -> String {
+    let s = args.to_string();
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(160).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
     }
 }
 
@@ -7238,4 +7726,69 @@ mod tests {
         assert!(!m.contains_key("a"));
         assert!(m.contains_key("b") && m.contains_key("c"));
     }
+
+    #[test]
+    fn loop_guard_nudges_then_trips_on_identical_tool_outcomes() {
+        let instance = PiInstance::new("test".into(), None, false);
+        let args = json!({ "command": "node -e probe" });
+        let result = json!("same output");
+        let other = json!("different output");
+
+        // 前两次不吭声（轮询类工具本来就可能连发两次一样的命令）。
+        assert!(instance
+            .observe_tool_outcome("bash", &args, &result)
+            .is_none());
+        assert!(instance
+            .observe_tool_outcome("bash", &args, &result)
+            .is_none());
+        // 第三次：给模型一个新尾巴。
+        let nudge = instance
+            .observe_tool_outcome("bash", &args, &result)
+            .expect("third identical outcome should nudge");
+        assert!(nudge.starts_with("【系统转达，非用户指令】"));
+        // 同一段重复只提醒一次。
+        assert!(instance
+            .observe_tool_outcome("bash", &args, &result)
+            .is_none());
+        assert!(instance
+            .observe_tool_outcome("bash", &args, &result)
+            .is_none());
+        // 第六次：判死，且计数清零 —— 下一轮拿一整份预算，不会被上轮余量当场掐掉。
+        assert!(instance
+            .observe_tool_outcome("bash", &args, &result)
+            .is_none());
+        {
+            let g = instance.loop_guard.lock().unwrap();
+            assert_eq!(g.tripped_streak, 6);
+            assert_eq!(g.streak, 0);
+        }
+        // 等待循环取走后，回合开头复位；换了结果就是另一条序列，从 1 重新数。
+        instance.begin_turn_loop_guard();
+        assert!(instance
+            .observe_tool_outcome("bash", &args, &other)
+            .is_none());
+        assert_eq!(instance.loop_guard.lock().unwrap().streak, 1);
+    }
+
+    #[test]
+    fn subagent_status_vocabulary_converges_to_three_tokens() {
+        // 扩展的终态词表（subagents/src/types.ts:174）里没有 "done"。
+        // 曾经回填门禁比的就是 `status == "done"` ⇒ 条件恒假，
+        // 子 agent 的结果永远不会转达给父会话。这里把词表钉住：
+        // 新增/改名的状态一律落成 completed，绝不落回 running
+        // （卡片会被打回永久转圈）。
+        for raw in ["completed", "steered", "done", "killed", ""] {
+            assert_eq!(normalize_subagent_status(raw), "completed");
+        }
+        for raw in ["error", "stopped", "aborted"] {
+            assert_eq!(normalize_subagent_status(raw), "failed");
+        }
+        for raw in ["queued", "running"] {
+            assert_eq!(normalize_subagent_status(raw), "running");
+        }
+        // 回填的唯一判据。
+        assert_eq!(normalize_subagent_status("completed"), "completed");
+        assert_ne!(normalize_subagent_status("error"), "completed");
+    }
 }
+

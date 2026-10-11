@@ -1294,6 +1294,75 @@ fn remove_tree(path: &std::path::Path) -> (u64, Vec<String>) {
     (freed, errors)
 }
 
+/// 「人工接管」的兜底时长（分钟）：`browser_handoff` 把页面交给人之后，侧栏那条
+/// 页的写操作最多锁多久。真相是 config.yaml 的 `browser.handoff_timeout_min`，
+/// 前端每次发起接管时现读 → 改完即生效，不用重启。
+///
+/// 上限 30 不是审美，而是一条跨语言的硬约束：内置扩展 `browser_handoff(wait=true)`
+/// 等结果文件的天花板写死在 `vendor/helix-browser.js` 的
+/// `HANDOFF_WAIT_CEILING_MS`（35 分钟）。配置值必须永远低于它，否则工具会比 Helix
+/// 前端先放弃，模型拿到的错误从「超时已解锁」变成最难懂的「前端没回话」。
+/// 动这里就要动那边。
+const HANDOFF_TIMEOUT_DEFAULT_MIN: u32 = 10;
+const HANDOFF_TIMEOUT_MAX_MIN: u32 = 30;
+
+/// 现读生效值（每次发起接管时调一次，所以设置页改完即生效）。
+pub fn handoff_timeout_min() -> u32 {
+    let yaml = std::fs::read_to_string(crate::config::config_yaml_path()).unwrap_or_default();
+    handoff_timeout_min_from(&yaml)
+}
+
+/// 从 config.yaml 正文算出生效分钟数。读不到 / 不是整数 / 越界一律回落默认 ——
+/// 一份写坏的配置不该让侧栏被永久锁死，也不该在浏览器链路里报错。
+fn handoff_timeout_min_from(yaml: &str) -> u32 {
+    let block = crate::config::read_yaml_block(yaml, "browser");
+    let raw = block
+        .get("handoff_timeout_min")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    match raw.trim().parse::<u32>() {
+        Ok(m) if (1..=HANDOFF_TIMEOUT_MAX_MIN).contains(&m) => m,
+        _ => HANDOFF_TIMEOUT_DEFAULT_MIN,
+    }
+}
+
+/// 读接管超时（设置页回显用）。
+#[tauri::command]
+pub fn browser_handoff_config() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "timeoutMin": handoff_timeout_min(),
+        "maxMin": HANDOFF_TIMEOUT_MAX_MIN,
+        "configPath": crate::config::config_yaml_path().to_string_lossy(),
+    })
+}
+
+/// 写接管超时。先校验再动文件，返回值里的 `timeoutMin` 是**回读到的生效值**
+/// （写失败时 UI 因此不会撒谎）。
+#[tauri::command]
+pub fn browser_set_handoff_config(updates: serde_json::Value) -> serde_json::Value {
+    let Some(raw) = updates.get("timeoutMin") else {
+        return serde_json::json!({ "ok": false, "error": "updates.timeoutMin 必填" });
+    };
+    // 只认整数：设置页只会传数字，在这里宽容等于把写坏的配置藏起来。
+    let Some(min) = raw.as_u64() else {
+        return serde_json::json!({ "ok": false, "error": "timeoutMin 必须是整数分钟" });
+    };
+    if !(1..=u64::from(HANDOFF_TIMEOUT_MAX_MIN)).contains(&min) {
+        return serde_json::json!({
+            "ok": false,
+            "error": format!("timeoutMin 要在 1..{} 分钟之间，收到: {min}", HANDOFF_TIMEOUT_MAX_MIN),
+        });
+    }
+    let path = crate::config::config_yaml_path();
+    let mut yaml = std::fs::read_to_string(&path).unwrap_or_default();
+    yaml = crate::config::set_yaml_key(&yaml, "browser.handoff_timeout_min", &serde_json::json!(min));
+    if let Err(e) = crate::config::atomic_write(&path, &yaml) {
+        return serde_json::json!({ "ok": false, "error": e.to_string() });
+    }
+    browser_handoff_config()
+}
+
 /// 内置浏览器的存储占用（设置页展示用）。
 #[tauri::command]
 pub async fn browser_storage_usage(app: AppHandle) -> Result<serde_json::Value, String> {
@@ -1426,6 +1495,38 @@ fn peel_json_string(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_timeout_falls_back_on_missing_and_unrecognized() {
+        assert_eq!(handoff_timeout_min_from(""), HANDOFF_TIMEOUT_DEFAULT_MIN);
+        assert_eq!(
+            handoff_timeout_min_from("browser:\n  handoff_timeout_min: 3\n"),
+            3
+        );
+        // 越界 / 非整数 / 负数都只是「这份配置我不认识」→ 回落默认，不报错。
+        for bad in ["0", "31", "abc", "-5", "1.5"] {
+            assert_eq!(
+                handoff_timeout_min_from(&format!(
+                    "browser:\n  handoff_timeout_min: {bad}\n"
+                )),
+                HANDOFF_TIMEOUT_DEFAULT_MIN,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn handoff_timeout_written_key_reads_back() {
+        // 写 → 读闭环：set_yaml_key 落的是裸整数，read_yaml_block 读成字符串，
+        // 解析必须还能认出来（与 notifications 那块同一个坑）。
+        let yaml = crate::config::set_yaml_key(
+            "model: keep-me\n",
+            "browser.handoff_timeout_min",
+            &serde_json::json!(25),
+        );
+        assert_eq!(handoff_timeout_min_from(&yaml), 25);
+        assert!(yaml.contains("model: keep-me"), "不该动别的键:\n{yaml}");
+    }
 
     #[test]
     fn rejects_non_http_urls() {

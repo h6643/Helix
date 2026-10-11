@@ -279,10 +279,14 @@ pub fn run() {
             // 用户规则（settings.json → permission.userRules）读写口
             approval_policy::helix_get_permission_rules,
             approval_policy::helix_set_permission_rules,
-            // 系统通知开关（config.yaml → notifications: 块）+ 跳转系统通知设置
+            // 系统通知开关（config.yaml → notifications: 块）
             desktop_notify::helix_notification_config,
             desktop_notify::helix_set_notification_config,
+            // 界面事件报上来的通知（人工接管），要不要弹仍由 desktop_notify 决定
+            desktop_notify::helix_notify_scene,
+            // 系统侧的开关：查注册表 + 一键跳到通知设置页
             desktop_notify::helix_open_notification_settings,
+            desktop_notify::helix_notification_status,
             // embedded sidebar browser
             helix::poll_browser_requests,
             helix::browser_write_result,
@@ -393,6 +397,9 @@ pub fn run() {
             browser_webview::browser_webview_focus,
             browser_webview::browser_storage_usage,
             browser_webview::browser_clear_data,
+            // 人工接管超时（config.yaml → browser.handoff_timeout_min）
+            browser_webview::browser_handoff_config,
+            browser_webview::browser_set_handoff_config,
             browser_webview::browser_read_upload_file,
             browser_import::browser_import_detect,
             browser_import::browser_import_passwords,
@@ -431,6 +438,7 @@ pub fn run() {
             // app
             app::get_info,
             app::get_sessions_dir,
+            app::helix_trace,
             app::get_workspace_default_dir,
             app::get_status,
             app::helix_update,
@@ -456,6 +464,7 @@ pub fn run() {
             helix::pi_get_available_models,
             helix::pi_read_custom_providers,
             helix::pi_set_thinking_level_all,
+            helix::pi_set_auto_compaction_all,
             // 渠道中心：一次性 pi RPC 进程执行 pi-connect 的 /connect 命令
             pi_connect::pi_connect_query,
             helix::pi_search_packages,

@@ -401,6 +401,10 @@ export function ClarifyBar({
                 <button
                   key={opt.label}
                   type="button"
+                  // 选项文本是单行截断的（下面的 `truncate`），ask_user_question 的
+                  // 选项常常一长句就被剪成「…」；悬停用全局 tooltip 看全文。
+                  // data-tip 由 `GlobalTooltip` 事件委托读取，不需要本地状态。
+                  data-tip={opt.label}
                   onClick={() => submitOption(opt)}
                   onMouseEnter={() => setSelectedIdx(idx)}
                   disabled={submitting}

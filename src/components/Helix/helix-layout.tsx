@@ -21,7 +21,8 @@ import {
   Circle,
   Loader2,
   XCircle,
-  MoreHorizontal,
+  // 右侧边栏菜单的入口图标（原「更多操作」⋯ 已改名「右侧边栏」）。
+  PanelRight,
   Users,
   ChevronRight,
   FilePlus,
@@ -155,7 +156,6 @@ const DelegationsPanel = lazy(() =>
 const RightSidebar = lazy(() =>
   import("./right-sidebar").then((m) => ({ default: m.RightSidebar })),
 );
-import { MoreActionsMenu } from "./more-actions-menu";
 import { useProviderStore } from "@/stores/slices/provider-store";
 
 // Local Suspense for the always-visible panel areas. Without a boundary the
@@ -375,8 +375,10 @@ export function HelixLayout() {
     const open = (url: string, quiet: boolean) => {
       if (!url) return;
       const s = useHelixStore.getState();
-      // 侧边栏正显示浏览器页 → 原地导航即可，什么都不用提示。
-      const browserVisible = s.rightSidebarTab === "browser";
+      // 侧边栏正显示浏览器页 → 原地导航即可，什么都不用提示。"正显示"要求
+      // tab 是 browser **且**没被收起（收起只翻 rightSidebarOpen，tab 会留着）。
+      const browserVisible =
+        s.rightSidebarTab === "browser" && s.rightSidebarOpen;
       if (!quiet && !browserVisible) {
         // 主动入口（消息里点链接 / __helixOpenBrowser / devtools）：拉出侧边栏
         // + 切到浏览器页签，这是用户明确的意图。
@@ -604,6 +606,10 @@ export function HelixLayout() {
     showSkillPanel ||
     showScheduledTasksPanel;
   const rightSidebarTab = useHelixStore((s) => s.rightSidebarTab);
+  const rightSidebarOpen = useHelixStore((s) => s.rightSidebarOpen);
+  // 侧栏的可见性 = 有一面 (tab) 且没被收起 (open)。两者拆开是为了「收起后再打开
+  // 回到原地」：收起只翻 open，tab 与侧栏里的 pages 原样留着。
+  const rightSidebarVisible = rightSidebarTab !== null && rightSidebarOpen;
   // 「旁路问答」面板本身是一段对话，浏览器/更改那一档 280~400px 的侧栏宽度装不下
   // 它的问题与回答：打开它时把右栏拉到当前窗口允许的最宽（rightSidebarCap），切走
   // 时恢复用户原本的宽度。宽度的写入者仍然只有「拖拽 + localStorage」，这里只是
@@ -664,7 +670,7 @@ export function HelixLayout() {
   const hasGlobalBg = Boolean(globalBgImage);
   const chatMessages = useHelixStore((s) => s.chatMessages);
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
-  // 新对话 / 计划 / 插件 视图下隐藏标题栏的「终端 / 更多操作」——这两项是
+  // 新对话 / 计划 / 插件 视图下隐藏标题栏的「终端 / 右侧边栏」——这两项是
   // 对话区操作：空会话、或被任意全屏面板（计划/插件/运行时/工作树/子 Agent）
   // 盖住聊天区时都没有意义。同时让面板头部只留窗口控制按钮那一段，避免互相压。
   const hideConversationActions =
@@ -1110,6 +1116,42 @@ export function HelixLayout() {
     };
   }, []);
 
+  // ── Auto-compaction: live-sync pi's in-run threshold compaction ──
+  // 压缩决策交给 pi：回合内阈值压缩，压缩完 agent.continue() 继续任务（与
+  // CLI 语义一致）。旧的前端 80% 闸门走手动 compact 会 abort 当前回合且永不
+  // 续跑（“压缩后任务暂停”的根因），已停用。开关变化时：写 config（Rust
+  // spawn 时重放 agent.auto_compaction）+ 广播所有活实例（pi 自身也持久化
+  // 该值，新实例继承）。serve 模式走同名 RPC。
+  const autoCompactTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!isElectron()) return;
+    const unsub = useHelixStore.subscribe((state, prevState) => {
+      if (state.autoCompactContext === prevState.autoCompactContext) return;
+      if (autoCompactTimer.current) clearTimeout(autoCompactTimer.current);
+      autoCompactTimer.current = setTimeout(() => {
+        const enabled = useHelixStore.getState().autoCompactContext;
+        pushConfigKeyValue("agent.auto_compaction", enabled);
+        if (isServeActive()) {
+          const gw = useGatewayStore.getState();
+          getServeClient()
+            ?.rpc("set_auto_compaction", {
+              enabled,
+              session_id: gw.helixSessionId,
+            })
+            .catch(() => {});
+        } else {
+          window.electron?.helix
+            ?.piSetAutoCompactionAll?.(enabled)
+            .catch?.(() => {});
+        }
+      }, 150);
+    });
+    return () => {
+      unsub();
+      if (autoCompactTimer.current) clearTimeout(autoCompactTimer.current);
+    };
+  }, []);
+
   // ── Bridge: helix-ui useProviderStore → Helix useHelixStore ───────────────
   // The user can switch the active model from the helix-ui ProviderSettings /
   // ModelSelector panels (which write to useProviderStore and push to Helix).
@@ -1447,11 +1489,6 @@ export function HelixLayout() {
     getCurrentVersion().then((v) => v && setAppVersion(v));
   }, []);
 
-  // Browser "more" menu state (the ••• button next to the browser toggle)
-  const [browserMenuOpen, setBrowserMenuOpen] = useState(false);
-  const browserMenuButtonRef = useRef<HTMLButtonElement>(null);
-  const browserMenuRef = useRef<HTMLDivElement>(null);
-
   const ZOOM_STEP = 0.1;
   const zoomIn = useCallback(() => {
     const current = parseFloat(document.documentElement.style.zoom || "1");
@@ -1515,23 +1552,6 @@ export function HelixLayout() {
     return () => document.removeEventListener("mousedown", handleMouseDown);
   }, [helpMenuOpen]);
 
-  // Click outside to close browser menu
-  useEffect(() => {
-    if (!browserMenuOpen) return;
-    const handleMouseDown = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (
-        browserMenuButtonRef.current?.contains(target) ||
-        browserMenuRef.current?.contains(target)
-      ) {
-        return;
-      }
-      setBrowserMenuOpen(false);
-    };
-    document.addEventListener("mousedown", handleMouseDown);
-    return () => document.removeEventListener("mousedown", handleMouseDown);
-  }, [browserMenuOpen]);
-
   // Window menu keyboard shortcuts
   useEffect(() => {
     const isInputFocused = (target: EventTarget | null) => {
@@ -1570,11 +1590,9 @@ export function HelixLayout() {
         setShowSidebarRef.current((v) => !v);
         return;
       }
-      if (!shift && !alt && e.key.toLowerCase() === "t") {
-        e.preventDefault();
-        (window as any).electron?.window?.newWindow();
-        return;
-      }
+      // Ctrl+T 不再是「新建窗口」——它现在是「打开内置浏览器」，动作和显示在
+      // 「右侧边栏」菜单里的那个 kbd 一起由 keyboard-shortcuts 的 open-browser
+      // 负责（改键后两边同时变）。新建窗口仍走 Ctrl+Shift+N / 窗口菜单。
       if (shift && !alt && e.code === "Equal") {
         e.preventDefault();
         zoomIn();
@@ -1750,9 +1768,14 @@ export function HelixLayout() {
       <RemoteConnectWizard />
 
       {/* Two-region layout: the titlebar and navigation sidebar form the left
-          region; the conversation/settings area owns the right region. */}
+          region; the conversation/settings area owns the right region.
+          `--solo`：侧栏隐藏时这条区域只剩 40px 高的标题栏画底，下面那条
+          SIDEBAR_COLLAPSED 宽的列没人覆盖 —— 背景图模式下由外壳自己补蒙罩
+          （globals.css 的 .helix-app-left-shell--solo）。 */}
       <div
-        className={`helix-app-left-shell flex flex-col overflow-hidden bg-card ${showSettings ? "hidden" : ""}`}
+        className={`helix-app-left-shell flex flex-col overflow-hidden bg-card ${
+          showSettings ? "hidden" : ""
+        } ${showSidebar ? "" : "helix-app-left-shell--solo"}`}
       >
         {/* Title bar — head of the left sidebar region. The whole bar is the
              window drag handle: the child buttons are covered by the
@@ -1875,9 +1898,13 @@ export function HelixLayout() {
                             return;
                           }
                           const pi = res.pi || {};
-                          const outdated = (res.packages || []).filter(
-                            (p: any) => p.hasUpdate,
-                          );
+                          const outdated = (res.packages || [])
+                            .filter(
+                              (p: any) =>
+                                p.name !== "@zhushanwen/pi-permission" &&
+                                p.hasUpdate,
+                            )
+                            .slice();
                           if (pi.hasUpdate && pi.latest) {
                             useHelixStore.getState().showToast({
                               type: "info",
@@ -2010,9 +2037,9 @@ export function HelixLayout() {
           whole left region above is hidden. Pinned to the window's top-right
           corner via the relative `helix-app-backdrop` root. */}
       {/* Unified top-right icon row: conversation actions (计划 / 子 Agent /
-          后台任务) + window controls (终端 / 更多操作 / min / max / close) all in
+          后台任务) + window controls (终端 / 右侧边栏 / min / max / close) all in
           ONE evenly-spaced flex. Conversation actions share the same gating as
-          终端/更多操作 — hidden in settings & full-screen panel modes. */}
+          终端/右侧边栏 — hidden in settings & full-screen panel modes. */}
       <div
         className="absolute top-[2px] right-2 z-40 h-10 flex items-center gap-3"
         data-tauri-drag-region="deep"
@@ -2499,14 +2526,29 @@ export function HelixLayout() {
                 <Terminal className="size-4" />
               </button>
             )}
+            {/* 「右侧边栏」是个开关：开着（不管当前停在哪一面）→ 收起，只翻
+                rightSidebarOpen，tab 与 pages 原样留着；关着 → 打开，回到收起前
+                那一面（浏览器 / 更改 / …），从没开过（tab 为 null）才落「更多」
+                那页卡片菜单。卡片菜单页在面板行里**没有便签**（见 right-sidebar
+                的 PANEL_ORDER：它是一页菜单，不是一面要待着的工作台）。
+                代码全屏时顺带退出：那种状态下侧栏是主区的全部内容，只收侧栏会留下
+                一整块空白。
+                状态一律现读：storeActions 是挂载时的快照。 */}
             <button
-              ref={browserMenuButtonRef}
-              onClick={() => setBrowserMenuOpen((v) => !v)}
+              onClick={() => {
+                const st = useHelixStore.getState();
+                if (st.codeFullscreen) st.toggleCodeFullscreen();
+                if (st.rightSidebarOpen && st.rightSidebarTab) {
+                  st.setRightSidebarOpen(false);
+                  return;
+                }
+                st.setRightSidebarTab(st.rightSidebarTab ?? "more");
+              }}
               data-tauri-drag-region="false"
-              className={`p-1.5 rounded-lg transition-colors ${browserMenuOpen ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
-              data-tip="更多操作"
+              className={`p-1.5 rounded-lg transition-colors ${rightSidebarVisible ? "text-primary bg-primary/10" : "text-foreground/50 hover:text-foreground hover:bg-accent/60"}`}
+              data-tip="右侧边栏"
             >
-              <MoreHorizontal className="size-4" />
+              <PanelRight className="size-4" />
             </button>
           </>
         )}
@@ -2655,56 +2697,6 @@ export function HelixLayout() {
                               className="flex-1 min-w-0 h-full"
                               data-tauri-drag-region="deep"
                             />
-                            <div className="flex items-center gap-1 shrink-0">
-                              {browserMenuOpen &&
-                                typeof window !== "undefined" &&
-                                createPortal(
-                                  <div
-                                    className="fixed z-[100]"
-                                    style={{
-                                      top:
-                                        (browserMenuButtonRef.current?.getBoundingClientRect()
-                                          .bottom ?? 0) + 4,
-                                      left: browserMenuButtonRef.current
-                                        ? Math.max(
-                                            8,
-                                            browserMenuButtonRef.current.getBoundingClientRect()
-                                              .right - 208,
-                                          )
-                                        : 0,
-                                    }}
-                                  >
-                                    <div ref={browserMenuRef}>
-                                      <MoreActionsMenu
-                                        onToggleTab={(kind) => {
-                                          if (rightSidebarTab !== kind)
-                                            storeActions.setRightSidebarTab(
-                                              kind,
-                                            );
-                                          setBrowserMenuOpen(false);
-                                        }}
-                                        onAddBrowser={() => {
-                                          storeActions.requestAddBrowserPage();
-                                          setBrowserMenuOpen(false);
-                                        }}
-                                        // 等价于裸 /btw：打开右侧「旁路问答」面板并
-                                        // 聚焦它的输入框（问题在面板里输入，多轮追问
-                                        // 也在面板里）。setTab 负责让侧栏可见；面板页
-                                        // 被 ✕ 关掉过时 tab 不变，那一页由 right-sidebar
-                                        // 的 bylineFocusSignal effect 补建。
-                                        onOpenByline={() => {
-                                          storeActions.setRightSidebarTab(
-                                            "byline",
-                                          );
-                                          storeActions.focusBylineInput();
-                                          setBrowserMenuOpen(false);
-                                        }}
-                                      />
-                                    </div>
-                                  </div>,
-                                  document.body,
-                                )}
-                            </div>
                           </div>
                         )}
                         <div className="flex-1 min-h-0 min-w-0 flex flex-col">
@@ -2734,11 +2726,11 @@ export function HelixLayout() {
             removes the "flash / white-screen on first open and on every tab
             switch". */}
                 <div
-                  className={`relative ${codeFullscreen ? "flex-1 min-w-0" : "shrink-0"} ${rightSidebarTab && !(showSkillPanel || showScheduledTasksPanel || showRuntimePanel || showWorktreePanel || showSubAgentPanel) ? "" : "hidden"}`}
+                  className={`relative ${codeFullscreen ? "flex-1 min-w-0" : "shrink-0"} ${rightSidebarVisible && !(showSkillPanel || showScheduledTasksPanel || showRuntimePanel || showWorktreePanel || showSubAgentPanel) ? "" : "hidden"}`}
                   style={
                     codeFullscreen
                       ? undefined
-                      : { width: rightSidebarTab ? rightSidebarWidth : 0 }
+                      : { width: rightSidebarVisible ? rightSidebarWidth : 0 }
                   }
                 >
                   {!codeFullscreen && (

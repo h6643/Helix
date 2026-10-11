@@ -887,7 +887,7 @@ pub fn helix_remove_memory_entry(target: String, text: String) -> Value {
 /// An object entry narrows what loads; when every resource array is empty
 /// the package is fully disabled (still installed on disk). A missing entry
 /// means the package was installed but removed from settings — also disabled.
-fn pi_packages_enabled_map() -> std::collections::HashMap<String, bool> {
+pub(crate) fn pi_packages_enabled_map() -> std::collections::HashMap<String, bool> {
     let mut map = std::collections::HashMap::new();
     let settings = crate::config::read_pi_settings();
     let empty = Vec::new();
@@ -1189,7 +1189,7 @@ pub async fn pi_list_installed() -> Result<Value, String> {
 /// control whether an auto-discovered local extension is loaded. Mirrors pi's
 /// `isEnabledByOverrides`: `!<glob>` excludes, `+<path>` force-includes,
 /// `-<path>` force-excludes; a path with no matching override defaults to on.
-fn pi_local_extension_patterns() -> Vec<String> {
+pub(crate) fn pi_local_extension_patterns() -> Vec<String> {
     let settings = crate::config::read_pi_settings();
     settings
         .get("extensions")
@@ -1202,6 +1202,64 @@ fn pi_local_extension_patterns() -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Is a local extension enabled, given every path it can be referenced by?
+///
+/// Lifts pi's `isEnabledByOverrides` precedence verbatim — `!glob` excludes,
+/// then `+path` force-includes, then `-path` force-excludes; no matching
+/// override → enabled. `candidates` carries the resource path plus its
+/// concrete entry files (a `!extensions/foo/**` glob must register on a
+/// directory row as well as on `extensions/foo/index.ts`).
+///
+/// Public to the crate because the 联网搜索 panel must answer the same question
+/// about `web-access` — see `web_search::extension_probe`.
+pub(crate) fn local_extension_enabled(candidates: &[String], patterns: &[String]) -> bool {
+    let mut excludes: Vec<&str> = Vec::new();
+    let mut force_includes: Vec<&str> = Vec::new();
+    let mut force_excludes: Vec<&str> = Vec::new();
+    for raw in patterns {
+        let body = raw
+            .trim_start_matches(['+', '-', '!'])
+            .trim_start_matches("./");
+        if body.is_empty() {
+            continue;
+        }
+        if let Some(rest) = raw.strip_prefix('!') {
+            excludes.push(rest);
+        } else if let Some(rest) = raw.strip_prefix('+') {
+            force_includes.push(rest);
+        } else if let Some(rest) = raw.strip_prefix('-') {
+            force_excludes.push(rest);
+        } else {
+            // Bare entries are explicit include paths — they add resources,
+            // they don't disable anything.
+            continue;
+        }
+    }
+    let hit = |body: &str, cand: &str| {
+        body == cand
+            || local_pattern_matches(body, cand)
+            || local_pattern_matches(
+                body,
+                std::path::Path::new(cand)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(""),
+            )
+    };
+    let any_hit = |list: &[&str]| candidates.iter().any(|c| list.iter().any(|p| hit(p, c)));
+    let mut enabled = true;
+    if any_hit(&excludes) {
+        enabled = false;
+    }
+    if any_hit(&force_includes) {
+        enabled = true;
+    }
+    if any_hit(&force_excludes) {
+        enabled = false;
+    }
+    enabled
 }
 
 /// Does `rel_path` (posix-style, relative to the agent dir) match a glob-ish
@@ -1268,8 +1326,9 @@ fn glob_match(pattern: &[char], text: &[char]) -> bool {
 fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &[String]) {
     let agent_dir = crate::paths::pi_agent_dir();
     // Enabled state for an auto-discovered local extension follows pi's
-    // `isEnabledByOverrides`: `!glob` excludes, `-path` force-excludes,
-    // `+path` force-includes; no matching override → enabled.
+    // `isEnabledByOverrides`; the rule itself lives in
+    // `local_extension_enabled`, shared with the web-search panel so the two
+    // surfaces can never disagree about whether an extension is on.
     let enabled_for = |abs_path: &std::path::Path, extra_rels: &[&str]| -> bool {
         let rel = abs_path
             .strip_prefix(&agent_dir)
@@ -1278,56 +1337,10 @@ fn scan_pi_extensions(dir: &std::path::Path, items: &mut Vec<Value>, patterns: &
         // All candidate paths this entry could be referenced by: the file/dir
         // itself, plus explicit extras (e.g. "<dir>/index.ts" for package dirs)
         // so a `!dir/**` disable pattern registers on the UI row too.
-        let candidates: Vec<String> = std::iter::once(rel.clone())
+        let candidates: Vec<String> = std::iter::once(rel)
             .chain(extra_rels.iter().map(|s| s.to_string()))
             .collect();
-        // Mirrors pi's isEnabledByOverrides precedence: `!glob` excludes,
-        // then `+path` force-includes, then `-path` force-excludes.
-        let mut excludes: Vec<&str> = Vec::new();
-        let mut force_includes: Vec<&str> = Vec::new();
-        let mut force_excludes: Vec<&str> = Vec::new();
-        for raw in patterns {
-            let body = raw
-                .trim_start_matches(['+', '-', '!'])
-                .trim_start_matches("./");
-            if body.is_empty() {
-                continue;
-            }
-            if let Some(rest) = raw.strip_prefix('!') {
-                excludes.push(rest);
-            } else if let Some(rest) = raw.strip_prefix('+') {
-                force_includes.push(rest);
-            } else if let Some(rest) = raw.strip_prefix('-') {
-                force_excludes.push(rest);
-            } else {
-                // Bare entries are explicit include paths — they add resources,
-                // they don't disable anything.
-                continue;
-            }
-        }
-        let hit = |body: &str, cand: &str| {
-            body == cand
-                || local_pattern_matches(body, cand)
-                || local_pattern_matches(
-                    body,
-                    std::path::Path::new(cand)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(""),
-                )
-        };
-        let any_hit = |list: &[&str]| candidates.iter().any(|c| list.iter().any(|p| hit(p, c)));
-        let mut enabled = true;
-        if any_hit(&excludes) {
-            enabled = false;
-        }
-        if any_hit(&force_includes) {
-            enabled = true;
-        }
-        if any_hit(&force_excludes) {
-            enabled = false;
-        }
-        enabled
+        local_extension_enabled(&candidates, patterns)
     };
 
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1925,6 +1938,14 @@ pub async fn pi_set_thinking_level_all(level: String) -> Result<Value, String> {
     Ok(json!({ "success": true }))
 }
 
+/// 自动压缩开关广播：pi 的回合内阈值压缩（压缩后 agent.continue() 续跑）。
+/// 用户改 autoCompactContext 设置时由前端调用；pi 自身会持久化该值，新实例继承。
+#[tauri::command]
+pub async fn pi_set_auto_compaction_all(enabled: bool) -> Result<Value, String> {
+    pi_gateway::set_auto_compaction_all(enabled);
+    Ok(json!({ "success": true }))
+}
+
 // (pi_get_state / pi_set_model / pi_set_thinking_level / pi_compact /
 // pi_get_session_stats removed — the renderer reaches the same data through
 // helix_status / helix_set_model (config-backed) / session.compress (which
@@ -2135,6 +2156,10 @@ pub async fn pi_check_updates() -> Result<Value, String> {
         .unwrap_or_default();
 
     for name in deps {
+        if name == "@zhushanwen/pi-permission" {
+            continue;
+        }
+
         let installed = std::fs::read_to_string(
             pi_npm_dir
                 .join("node_modules")

@@ -111,6 +111,9 @@ windows = { version = "0.61", features = [
     # 是一个单独的 feature，只开 Win32_System_Com 不会带进来。
     "Win32_System_Com_StructuredStorage",
     "Win32_System_IO",
+    # 读 HKCU 下的系统通知开关（ToastEnabled / 按 AUMID 的 Enabled），设置页要用它
+    # 回答「日志说弹了，我怎么没看见」。
+    "Win32_System_Registry",
     "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_Graphics_Dwm",

@@ -261,6 +261,8 @@ function buildTauriAPI(): ElectronAPI {
     notificationConfig: () => invoke("helix_notification_config"),
     setNotificationConfig: (updates: Record<string, unknown>) =>
       invoke("helix_set_notification_config", { updates }),
+    // 系统侧到底让不让弹（注册表两个开关）+ 一键跳到通知设置页
+    notificationStatus: () => invoke("helix_notification_status"),
     openNotificationSettings: () => invoke("helix_open_notification_settings"),
     // Poll pending pi-extension browser requests (emits helix:browser-request
     // events carrying the full request payload; navigate also emits the legacy
@@ -417,6 +419,9 @@ function buildTauriAPI(): ElectronAPI {
     piReadCustomProviders: () => invoke("pi_read_custom_providers"),
     piSetThinkingLevelAll: (level: string) =>
       invoke("pi_set_thinking_level_all", { level }),
+    // 自动压缩开关广播：pi 回合内阈值压缩（压缩后继续任务，与 CLI 一致）。
+    piSetAutoCompactionAll: (enabled: boolean) =>
+      invoke("pi_set_auto_compaction_all", { enabled }),
     // 渠道中心：一次性 pi RPC 进程执行 pi-connect 的 /connect（见 pi_connect.rs）。
     // checkin 会跟在一次 status 刷新后面（复用同一进程），results[0]/[1] 各自成段。
     piConnectQuery: (action: "status" | "checkin") =>

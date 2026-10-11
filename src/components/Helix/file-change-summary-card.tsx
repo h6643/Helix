@@ -4,6 +4,9 @@ import { FileCode, Undo2 } from "lucide-react";
 import React, { useMemo, useState } from "react";
 import { countDiffLines, firstChangedLineRange } from "./diff-preview";
 import { electronFS, getElectronAPI } from "@/lib/electron-bridge";
+// 项目外（`~/…`）的改动不进卡片：登记侧已经拦了，这里只兜住拦之前落盘的旧对话
+// （它们的 fileChanges 里存着 `~/.pi/agent/...`，点开来是 workDir 拼出来的假路径）。
+import { isHomeAnchoredPath } from "@/lib/run-file-changes";
 import { useHelixStore } from "@/stores/helix-store";
 import type { PendingChange } from "@/stores/helix-types";
 
@@ -67,7 +70,10 @@ export function FileChangeSummaryCard({
   const [undone, setUndone] = useState<Set<string>>(new Set());
   const [undoing, setUndoing] = useState(false);
   const visibleChanges = useMemo(
-    () => changes.filter((c) => !undone.has(c.fileId)),
+    () =>
+      changes.filter(
+        (c) => !undone.has(c.fileId) && !isHomeAnchoredPath(c.filePath),
+      ),
     [changes, undone],
   );
   const stats = useMemo(

@@ -20,7 +20,9 @@ export function HistoryStrip({
 }) {
   const chatMessages = useHelixStore((s) => s.chatMessages);
   const currentSessionId = useHelixStore((s) => s.currentSessionId);
-  const rightSidebarOpen = useHelixStore((s) => s.rightSidebarTab !== null);
+  const rightSidebarOpen = useHelixStore(
+    (s) => s.rightSidebarTab !== null && s.rightSidebarOpen,
+  );
   const [hovered, setHovered] = useState<string | null>(null);
   const [stripHover, setStripHover] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);

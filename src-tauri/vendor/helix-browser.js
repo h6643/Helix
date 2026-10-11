@@ -29,6 +29,13 @@ const REQ_DIR = join(homedir(), ".pi", "agent", "browser-requests");
 const MAX_KEEP = 50;
 /** 最长等待前端执行并回写结果的时间（read 可能要 page_fetch + 注入）。 */
 const RESULT_TIMEOUT_MS = 60_000;
+/** browser_handoff(wait=true) 的等待天花板。
+ *  前端那份接管超时是用户可调的（config.yaml `browser.handoff_timeout_min`，
+ *  上限 30 分钟，由 src-tauri/src/browser_webview.rs 的
+ *  HANDOFF_TIMEOUT_MAX_MIN 钳制），这里必须永远盖过它 —— 否则工具先放弃，
+ *  模型拿到的是「Helix 前端没回话」这种最难懂的假故障，而不是「超时已解锁」。
+ *  这是一对跨语言约束：动那边的上限就要动这里。 */
+const HANDOFF_WAIT_CEILING_MS = 35 * 60_000;
 const RESULT_POLL_MS = 120;
 /** 请求文件的 TTL：超过这个年龄的未消费请求说明 Helix 在前端不可用时
  *  留下了垃圾（它的轮询器只消费 *新鲜的* 请求），读之前清理掉，避免模型
@@ -77,7 +84,9 @@ function dropStale() {
   return dropped;
 }
 
-/** 发一个请求并等待前端执行结果（轮询 <reqId>.result.json）。 */
+/** 发一个请求并等待前端执行结果（轮询 <reqId>.result.json）。
+ *  `opts.timeoutMs` 缺省为 RESULT_TIMEOUT_MS；只有会合法静默很久的 op（接管
+ *  wait=true）才传更大的值 —— 静默本身不是故障，但等太久就是。 */
 async function request(op, opts = {}) {
   const url = (opts.url ?? "").trim();
   if (op === "navigate" && (!url.startsWith("http://") && !url.startsWith("https://"))) {
@@ -96,7 +105,8 @@ async function request(op, opts = {}) {
   );
   // 轮询结果文件（前端 Rust 命令 browser_write_result 写入）。
   const resultPath = join(REQ_DIR, `${reqId}.result.json`);
-  const deadline = Date.now() + RESULT_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? RESULT_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, RESULT_POLL_MS));
     if (!existsSync(resultPath)) continue;
@@ -108,7 +118,7 @@ async function request(op, opts = {}) {
       try { unlinkSync(resultPath); } catch { /* already gone */ }
     }
   }
-  return { ok: false, error: `浏览器请求超时（${op}）：Helix 前端 ${RESULT_TIMEOUT_MS / 1000}s 内未回写结果——Helix 可能没有运行（或前端未轮询请求队列），重试无用，请改用其他工具（如 web_search / 直接读文件）完成任务` };
+  return { ok: false, error: `浏览器请求超时（${op}）：Helix 前端 ${timeoutMs / 1000}s 内未回写结果——Helix 可能没有运行（或前端未轮询请求队列），重试无用，请改用其他工具（如 web_search / 直接读文件）完成任务` };
 }
 
 /** 工具描述前缀：说明执行环境与限制，模型据此决定用法。 */
@@ -118,8 +128,8 @@ const SNAPNOTE =
   "没有打开页面时 read/click/type 会直接报错。\n" +
   "read/click/type/press 注入脚本读写那条页的**实时 DOM**（SPA 渲染出来的内容读得到），" +
   "navigate/back/forward/refresh 直接作用于同一条窗口。每次导航会重新打一遍元素引用表。\n" +
-  "撞登录墙/验证码时：用 browser_handoff 把页面交给人工（那条页的写操作会锁，只读工具照常），" +
-  "然后继续做不依赖该页的工作，不要原地等。";
+  "撞登录墙/验证码时：用 browser_handoff 把页面交给人工（那条页的写操作会锁，只读工具照常）。" +
+  "默认它立刻返回，你要继续做不依赖该页的工作、别原地等；确实只能等它点完时传 wait=true 就地阻塞。";
 
 function registerTool(pi, tool) {
   pi.registerTool({
@@ -292,15 +302,30 @@ export default function register(pi) {
       "效果：右侧栏那条网页页会挂出「人工验证中 · 原因」横幅并把键盘焦点交给它，同时**锁住该页的写操作**" +
       "（navigate/click/type/press/hover/scroll/drag/eval/upload/back/forward/refresh 一律被拒绝，返回里会说明原因）；" +
       "browser_read / browser_screenshot / browser_wait 这类只读的仍然可用，你能看见进展。\n" +
-      "⚠ 这个工具**不等用户**：它立刻返回。拿到返回后必须继续做不依赖这个页面的工作" +
+      "两种模式，由 wait 决定：\n" +
+      "• wait=false（缺省，保持老行为）：它立刻返回。拿到返回后继续做不依赖这个页面的工作" +
       "（读代码、改文件、查别的站点、推进别的步骤），过一会儿再用 browser_check_login 回来看 —— " +
       "在这里停下来干等，就等于把整个任务卡死了。\n" +
-      "可选登记判据（selector 或 urlIncludes），之后 browser_check_login 会自动用它。" +
-      "用户点横幅上的「我已完成」会直接解锁；10 分钟无人响应则自动解锁（防止侧栏被永久锁死）。",
+      "• wait=true：就地阻塞，直到人工这一轮有了结论才返回，status 字段告诉你结论：\n" +
+      "  completed=判据成立（自动解锁，含用户做好了却忘记点「我已完成」、由到期那次补检查捞回来的情况）→ 继续任务；\n" +
+      "  done=用户点了「我已完成」→ 人说了算，立刻在这条页上继续任务；\n" +
+      "  timeout=等满接管超时（时长是用户在「设置 · 浏览器 · 人工接管超时」里配的）、判据仍未命中 →\n" +
+      "  **人工这一轮没有完成**：该页已解锁，但你要停止这条任务线，用 browser_read 看清卡点、如实告诉用户，\n" +
+      "  然后结束本轮等他指示。拿 done/timeout 之后再 sleep 轮询或原样重发 handoff，就是死循环的起手式。\n" +
+      "  只有「任务下一步确实必须依赖这个页面登录成功」才传 wait=true，否则用缺省模式去推进别的步骤。\n" +
+      "  wait=true 时务必同时登记判据（selector 或 urlIncludes）：到期那一趟靠它复查 —— 很多人做好了却忘记点\n" +
+      "  「我已完成」，没有判据就只能白等一场超时然后停下来。\n" +
+      "可选登记判据（selector 或 urlIncludes），wait=true 与 browser_check_login 都会自动用它。",
     params: {
       reason: {
         type: "string",
         description: "为什么要人工介入，原样显示在侧栏横幅上（如「需要 GitHub 登录并输验证码」）",
+      },
+      wait: {
+        type: "boolean",
+        description:
+          "默认 false=立刻返回、自己去干别的活；true=阻塞等人工给出结论（completed/done/timeout），" +
+          "仅在下一步非要这个页面登录成功时才传 true",
       },
       selector: {
         type: "string",
@@ -312,14 +337,18 @@ export default function register(pi) {
       },
     },
     required: ["reason"],
-    run: (p) =>
-      request("handoff", {
+    run: (p) => {
+      const wait = p?.wait === true;
+      return request("handoff", {
+        timeoutMs: wait ? HANDOFF_WAIT_CEILING_MS : undefined,
         params: {
           reason: String(p?.reason ?? ""),
+          wait,
           selector: p?.selector ? String(p.selector) : undefined,
           urlIncludes: p?.urlIncludes ? String(p.urlIncludes) : undefined,
         },
-      }),
+      });
+    },
   });
 
   registerTool(pi, {

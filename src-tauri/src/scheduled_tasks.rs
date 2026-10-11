@@ -146,7 +146,7 @@ fn now_iso() -> String {
 ///
 /// 本文件里多个路径都会 read-modify-write 同一份 jobs.json：poller 线程的
 /// poll_due_jobs（认领时前移 next_run_at）、mark_job_fired_in_jobs、
-/// record_job_session，以及派发到独立线程的渠道签到桥。它们各自
+/// record_job_session、increment_job_run_count，以及派发到独立线程的渠道签到桥。它们各自
 /// load_jobs() → 改一个字段 → atomic_write_jobs()，没有锁时后写的快照会
 /// 整份覆盖先写的修改 —— 最容易被静默吃掉的是 session_id（reuse 模式丢了
 /// 它就退化成每次新建对话，而且没有任何报错）。写路径全部包进这个锁。
@@ -1021,6 +1021,7 @@ fn dispatch_channel_checkin(job_id: &str, label: &str, due_ms: Option<i64>) {
                         &body,
                     );
                     mark_job_fired_in_jobs(&job_id);
+                    increment_job_run_count(&job_id);
                     eprintln!("[scheduled-events] channel checkin job {job_id} done: {body}");
                 }
                 Err(e) => {
@@ -1098,6 +1099,34 @@ fn mark_job_fired_in_jobs(job_id: &str) {
     data["updated_at"] = json!(now_iso());
     if let Err(e) = atomic_write_jobs(&data) {
         eprintln!("[scheduled-events] failed to update jobs.json: {e}");
+    }
+}
+
+/// 只累加 run_count 的写路径，给「跑了但没有会话」的任务用（渠道签到桥直接调
+/// 扩展、拿不到 session_id，因此走不成 `record_job_session`）。没有它时签到
+/// 天天在跑、UI 的执行次数却永远是 0。
+fn increment_job_run_count(job_id: &str) {
+    if job_id.is_empty() {
+        return;
+    }
+    let _guard = JOBS_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut data = load_jobs();
+    let jobs = match data.get_mut("jobs") {
+        Some(j) if j.is_array() => j.as_array_mut().unwrap(),
+        _ => return,
+    };
+    let Some(job) = jobs
+        .iter_mut()
+        .find(|j| j.get("id").and_then(Value::as_str) == Some(job_id))
+    else {
+        return;
+    };
+    let runs = job.get("run_count").and_then(Value::as_u64).unwrap_or(0);
+    job["run_count"] = json!(runs + 1);
+    job["updated_at"] = json!(now_iso());
+    data["updated_at"] = json!(now_iso());
+    if let Err(e) = atomic_write_jobs(&data) {
+        eprintln!("[scheduled-events] failed to bump run_count for {job_id}: {e}");
     }
 }
 

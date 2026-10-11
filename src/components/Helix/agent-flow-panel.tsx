@@ -88,7 +88,7 @@ import {
   blobToDataUrl,
   compressImage,
 } from "@/lib/image-utils";
-import { debug } from "@/lib/logger";
+import { debug, traceCard } from "@/lib/logger";
 import { buildAcpMcpServers } from "@/lib/mcp";
 import { PERM_APPROVE_SESSION_ANSWER } from "@/lib/permission-allow";
 import {
@@ -114,7 +114,7 @@ import {
   resumeSession,
   sessionFileGone,
 } from "@/lib/session-resume";
-import { mapBackendMessages } from "@/lib/session-resync";
+import { isGatewayNoteMessage } from "@/lib/session-resync";
 import {
   decodeBase64Utf8,
   extractThinkTags,
@@ -646,7 +646,7 @@ const SEED_MARKER = "（系统注入：以下是本次会话恢复的先前对�
 
 type DisplayItem =
   | { kind: "message"; msg: ChatMessage }
-  | { kind: "status"; id: string; text: string }
+  | { kind: "status"; id: string; text: string; emphasis?: "compress" }
   | { kind: "compressing"; id: string; text: string }
   | { kind: "divider"; id: string; text: string }
   | {
@@ -1088,7 +1088,16 @@ export function AgentFlowPanel() {
           !gatewaySettledRef.current.has(r.id),
       );
       if (expired.length === 0) return;
-      for (const r of expired) gatewaySettledRef.current.add(r.id);
+      // 到点出队也是「卡没了但没人回答」的一种（扩展侧同一时刻自己 fail-closed），
+      // 留痕才能和「被清空」「挂错对话」区分开。
+      for (const r of expired) {
+        gatewaySettledRef.current.add(r.id);
+        traceCard("card_expired", {
+          id: r.id,
+          owner: r.sessionId,
+          sid: r.sid,
+        });
+      }
       const ids = new Set(expired.map((r) => r.id));
       setClarifyQueue((prev) => prev.filter((r) => !ids.has(r.id)));
       bumpPendingUserRequests(-expired.length);
@@ -1153,18 +1162,14 @@ export function AgentFlowPanel() {
       );
       // 静默丢卡的三种形态都在这条日志里现形：没 id（无法回应）、作废早到
       // （见下方 settledBeforeArrival）、归属靠兜底。
-      debug("[HelixTrace] user-request event arrived", {
+      traceCard("arrived", {
         kind,
         id,
         eventSid: sid,
-        frontCid:
-          useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY,
+        view: useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY,
       });
       if (!id) {
-        debug("[HelixTrace] user-request event dropped: no request id", {
-          kind,
-          eventSid: sid,
-        });
+        traceCard("dropped_no_id", { kind, eventSid: sid });
         return;
       }
 
@@ -1177,7 +1182,7 @@ export function AgentFlowPanel() {
         // 集合直接丢弃，不会留下永远无人应答的僵尸卡。
         const hadCard = clarifyQueueRef.current.some((r) => r.id === id);
         gatewaySettledRef.current.add(id);
-        debug("[HelixTrace] user-request settled", {
+        traceCard("settled", {
           id,
           reason: typeof u?.reason === "string" ? u.reason : "",
           hadCard,
@@ -1190,10 +1195,7 @@ export function AgentFlowPanel() {
 
       const owner = await ownerOf(sid);
       if (kind === "clarify_request" && gatewaySettledRef.current.has(id)) {
-        debug("[HelixTrace] clarify card dropped: settled before arrival", {
-          id,
-          eventSid: sid,
-        });
+        traceCard("dropped_settled_first", { id, eventSid: sid });
         return;
       }
       // pi-permission 审批卡。「本会话始终允许」的表归扩展所有（第三挡
@@ -1204,13 +1206,16 @@ export function AgentFlowPanel() {
         kind === "clarify_request" &&
         typeof u.approvalTimeoutSec === "number" &&
         u.approvalTimeoutSec > 0;
-      debug("[HelixTrace] user-request card enqueue", {
+      traceCard("enqueue", {
         kind,
         id,
         eventSid: sid,
         ownerCid: owner.cid,
         via: owner.via,
+        view:
+          useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY,
         permission: isPermissionAsk,
+        timeoutSec: u.approvalTimeoutSec,
       });
       bumpPendingUserRequests(1);
       if (kind === "permission_request") {
@@ -1256,13 +1261,20 @@ export function AgentFlowPanel() {
     // null —— 挂不上就轮询到挂上为止（卸载时清掉）。
     let detach: (() => void) | null = null;
     let poll: ReturnType<typeof setInterval> | null = null;
+    const viewNow = () =>
+      useHelixStore.getState().currentSessionId ?? DRAFT_SESSION_KEY;
     const attach = () => {
       const api = helixApi();
       if (typeof api?.onEvent !== "function") return false;
       detach = api.onEvent(onUserRequest);
+      // 订阅窗口是这条链路最脆的一环：审批事件只在「消费者已挂上」的那一段时间里
+      // 会被认领，而网关不会重发还没被回答的请求。attach/detach 成对落盘之后，
+      // 「卡没弹」才能判断是不是正好落在卸载重挂的缝里（设置页、面板切换）。
+      traceCard("consumer_attach", { view: viewNow() });
       return true;
     };
     if (!attach()) {
+      traceCard("consumer_wait_bridge", { view: viewNow() });
       poll = setInterval(() => {
         if (attach() && poll) {
           clearInterval(poll);
@@ -1272,6 +1284,7 @@ export function AgentFlowPanel() {
     }
     return () => {
       if (poll) clearInterval(poll);
+      traceCard("consumer_detach", { view: viewNow() });
       detach?.();
     };
   }, [bumpPendingUserRequests]);
@@ -1282,6 +1295,17 @@ export function AgentFlowPanel() {
   const liveStateOwnerRef = useRef<string | null>(null);
   const uploadFileInputRef = useRef<HTMLInputElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  // 模型下拉 portal 到 body 后，面板不再位于 modelDropdownRef 内 ——
+  // 外点关闭需要同时检查这个 ref，否则点面板内部也会被当成"外部"关掉。
+  const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
+  // 弹层打开时量好的 fixed 定位（相对视口）。portal 到 body 是为了逃出
+  // 聊天卡片那串 overflow-hidden —— 右侧边栏打开后卡片变窄，内联 absolute
+  // 的一级/二级菜单会被卡片左缘裁掉（表现为菜单"被折叠"）。
+  const [modelDropdownPos, setModelDropdownPos] = useState<{
+    left: number;
+    bottom: number;
+    flyoutLeft: boolean;
+  } | null>(null);
   const approvalModeDropdownRef = useRef<HTMLDivElement>(null);
 
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
@@ -1358,6 +1382,70 @@ export function AgentFlowPanel() {
   ).length;
   const clarifyRequest =
     clarifyQueue.find((c) => isPendingHere(c.sessionId)) || null;
+  // 「卡片在队列里、但这个视图看不见」落盘。归属判错时卡片会一直躺着没人点，而
+  // pi 那边挂满 approvalTimeoutSec 自己 fail-closed 拒掉工具 —— 网关日志只剩
+  // 「转发了、没人答」，分不清是挂给了别的对话、还是被清空。每个 id 只报一次。
+  const cardVisibilityLoggedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const logOnce = (
+      id: string,
+      event: string,
+      fields: Record<string, unknown>,
+    ) => {
+      if (cardVisibilityLoggedRef.current.has(id)) return;
+      cardVisibilityLoggedRef.current.add(id);
+      traceCard(event, fields);
+    };
+    const isForeign = (owner?: string) =>
+      !!owner && owner !== approvalKey && owner !== bylineCid;
+    for (const c of clarifyQueue) {
+      if (isForeign(c.sessionId)) {
+        logOnce(c.id, "queued_not_here", {
+          kind: "clarify",
+          id: c.id,
+          owner: c.sessionId,
+          view: approvalKey,
+          sid: c.sid,
+        });
+      } else if (c.sessionId !== approvalKey && c.sessionId !== bylineCid) {
+        // 卡片没带归属（旧数据/兜底没写进 sessionId）：同样一张看不见的卡。
+        logOnce(c.id, "queued_no_owner", { kind: "clarify", id: c.id });
+      }
+    }
+    for (const r of approvalQueue) {
+      if (isForeign(r.sessionId)) {
+        logOnce(r.id, "queued_not_here", {
+          kind: "approval",
+          id: r.id,
+          owner: r.sessionId,
+          view: approvalKey,
+          sid: r.sid,
+        });
+      } else if (r.sessionId !== approvalKey && r.sessionId !== bylineCid) {
+        logOnce(r.id, "queued_no_owner", { kind: "approval", id: r.id });
+      }
+    }
+    // 同一对话第二条及以后的卡排在队首后面，要等队首被答掉/作废才看得见 —— 也记一行。
+    for (const list of [
+      clarifyQueue as Array<{ id: string; sessionId?: string }>,
+      approvalQueue as Array<{ id: string; sessionId?: string }>,
+    ]) {
+      const mine = list.filter((c) => isPendingHere(c.sessionId));
+      for (const c of mine.slice(1)) {
+        logOnce(c.id, "queued_behind_first", {
+          id: c.id,
+          owner: c.sessionId,
+          head: mine[0]?.id,
+        });
+      }
+    }
+  }, [
+    clarifyQueue,
+    approvalQueue,
+    approvalKey,
+    bylineCid,
+    isPendingHere,
+  ]);
   // 把每个会话的待确认状态同步到全局 store，供侧边栏标记
   useEffect(() => {
     const map: Record<string, boolean> = {};
@@ -1409,9 +1497,14 @@ export function AgentFlowPanel() {
     // 旧写法 `!m.sessionId || m.sessionId === currentSessionId` 让它们出现在**每一个**
     // 会话里：草稿消息（含旧 run 收尾时提交的那条）会漂到别的对话视图里，看起来
     // 像"消息自己跑过去了"。所以这里按"当前有没有会话"严格二选一。
+    //
+    // 网关转达文本（子 agent 结果回填）不是用户说的话，不能画成用户气泡。新数据
+    // 在 mapBackendMessages 就被剔除，这里挡的是这次修改之前已经落进本地历史/IDB
+    // 的旧记录。
+    const visible = chatMessages.filter((m) => !isGatewayNoteMessage(m));
     return currentSessionId
-      ? chatMessages.filter((m) => m.sessionId === currentSessionId)
-      : chatMessages.filter((m) => !m.sessionId);
+      ? visible.filter((m) => m.sessionId === currentSessionId)
+      : visible.filter((m) => !m.sessionId);
   }, [chatMessages, currentSessionId]);
 
   // ── /btw 旁路问答：每轮完成时落定记录 + 清掉该轮草稿 + toast ─────────────
@@ -1507,9 +1600,15 @@ export function AgentFlowPanel() {
       items.push({ kind: "message", msg: truncateMessage(sessionMessages[i]) });
       pushChanges(i);
     }
-    // 自动压缩事件以居中状态行的形式插入对话流末尾
+    // 自动压缩事件以居中状态行的形式插入对话流末尾（带 emphasis 标记，
+    // 渲染时用压缩专属的闪光动画，与扩展播报的普通状态行区分）。
     for (const notice of autoCompressNotices) {
-      items.push({ kind: "status", id: notice.id, text: notice.text });
+      items.push({
+        kind: "status",
+        id: notice.id,
+        text: notice.text,
+        emphasis: "compress",
+      });
     }
     // 扩展播报同样以居中状态行插入，紧跟在压缩提示之后。
     for (const notice of extensionNotices) {
@@ -2396,7 +2495,8 @@ export function AgentFlowPanel() {
     const handleClickOutside = (event: MouseEvent) => {
       if (
         modelDropdownRef.current &&
-        !modelDropdownRef.current.contains(event.target as Node)
+        !modelDropdownRef.current.contains(event.target as Node) &&
+        !modelDropdownPanelRef.current?.contains(event.target as Node)
       ) {
         setShowModelDropdown(false);
       }
@@ -2419,6 +2519,47 @@ export function AgentFlowPanel() {
         document.removeEventListener("mousedown", handleClickOutside);
     }
   }, [showModelDropdown, showApprovalModeDropdown, showFolderDropdown]);
+
+  // 模型下拉是 portal + fixed 定位：打开时按触发按钮的视口坐标算位置，
+  // 之后跟着 scroll/resize 重算（空态输入框在滚动容器里，会真滚走）。
+  // 打开的首帧位置在按钮 onClick 里同步算好（避免 useEffect 晚一帧闪现），
+  // 这里只负责后续跟随。
+  // 二级菜单默认向左开（right-full），左侧放不下时翻到右边，避免被
+  // 视口/卡片左缘裁掉。
+  useEffect(() => {
+    if (!showModelDropdown) return;
+    const PANEL_W = 176; // w-44
+    const FLYOUT_W = 264; // w-64 + pr-1
+    const update = () => {
+      const r = modelDropdownRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const left = Math.round(r.right - PANEL_W);
+      const bottom = Math.round(window.innerHeight - r.top + 8);
+      setModelDropdownPos((prev) => {
+        const next = {
+          left,
+          bottom,
+          flyoutLeft: left - FLYOUT_W >= 8,
+        };
+        if (
+          prev &&
+          prev.left === next.left &&
+          prev.bottom === next.bottom &&
+          prev.flyoutLeft === next.flyoutLeft
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    };
+    update();
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [showModelDropdown]);
 
   // The dropdown shows all providers' models grouped. If the current model
   // doesn't belong to any provider, snap to the first available model.
@@ -2630,7 +2771,26 @@ export function AgentFlowPanel() {
         <div className="relative min-w-0 max-w-[240px]" ref={modelDropdownRef}>
           <button
             type="button"
-            onClick={() => setShowModelDropdown(!showModelDropdown)}
+            onClick={() => {
+              // 打开前同步量一次位置，首帧就落在按钮正上方（见下方 effect
+              // 只负责之后的 scroll/resize 跟随）。
+              if (!showModelDropdown) {
+                const r = modelDropdownRef.current?.getBoundingClientRect();
+                if (r) {
+                  const PANEL_W = 176; // w-44
+                  const FLYOUT_W = 264; // w-64 + pr-1
+                  const left = Math.round(r.right - PANEL_W);
+                  setModelDropdownPos({
+                    left,
+                    bottom: Math.round(window.innerHeight - r.top + 8),
+                    flyoutLeft: left - FLYOUT_W >= 8,
+                  });
+                }
+              } else {
+                setModelDropdownPos(null);
+              }
+              setShowModelDropdown(!showModelDropdown);
+            }}
             className="flex w-full items-center justify-between gap-2 min-w-0 px-2.5 py-1.5 h-7 bg-muted/30 rounded-lg text-[calc(var(--helix-transcript-size)*0.9286)] text-foreground hover:bg-muted/30 transition-all duration-200 font-mono border border-border/30 hover:border-border/30"
             data-tip={(() => {
               // 供应商必须跟「显示的模型」同源：本对话有专属模型时用
@@ -2654,8 +2814,18 @@ export function AgentFlowPanel() {
             {/* 空间够就显示全名；工具条放不下时随 flex 收缩出省略号（…） */}
             <span className="truncate min-w-0 text-left">{displayName}</span>
           </button>
-          {showModelDropdown && (
-            <div className="absolute bottom-full right-0 mb-2 w-44 overflow-visible rounded-xl border border-border/40 bg-card shadow-xl z-50 animate-scale-in">
+          {showModelDropdown &&
+            modelDropdownPos &&
+            createPortal(
+              <div
+                ref={modelDropdownPanelRef}
+                style={{
+                  position: "fixed",
+                  left: modelDropdownPos.left,
+                  bottom: modelDropdownPos.bottom,
+                }}
+                className="w-44 overflow-visible rounded-xl border border-border/40 bg-card shadow-xl z-50 animate-scale-in"
+              >
               {/* 面板高度自适应 —— 不设 max-h，否则内部滚动容器会把弹出
                   的二级菜单裁掉（CSS spec：overflow-y:auto 会把
                   overflow-x:visible 强制变成 auto，产生裁剪）。 */}
@@ -2689,14 +2859,22 @@ export function AgentFlowPanel() {
                       >
                         <path d="m9 18 6-6-6-6" />
                       </svg>
-                      <div className="invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute right-full bottom-0 pr-1">
+                      <div
+                        className={`invisible opacity-0 group-hover:visible group-hover:opacity-100 transition-opacity duration-100 absolute bottom-0 ${
+                          modelDropdownPos?.flyoutLeft
+                            ? "right-full pr-1"
+                            : "left-full pl-1"
+                        }`}
+                      >
                         {/* 二级菜单**向上长**（bottom-0 锚在行底）且自带滚动。
                             原来用 top-0 向下长：面板贴着卡片底部，下面没有空间，
                             菜单下沿会被宿主的 `overflow-hidden` 卡片裁掉
                             （ helix-surface 是 overflow-hidden + 圆角），表现为
                             「最后几个模型看不见」。向上长正好落在输入区上方的空处，
                             max-h 兜底 + overflow-y-auto 保证再长的列表也只是滚动，
-                            不会溢出裁切。 */}
+                            不会溢出裁切。
+                            一级面板已 portal 到 body（fixed），卡片的 overflow
+                            不再能裁到它；这里 left/right 翻转只防视口左缘。 */}
                         <div
                           className={`${g.labels ? "w-64 max-w-[256px]" : "w-52 max-w-[208px]"} max-h-[min(360px,55vh)] overflow-y-auto overscroll-contain rounded-xl border border-border/40 bg-card shadow-xl z-50 py-1`}
                         >
@@ -2783,9 +2961,10 @@ export function AgentFlowPanel() {
                 >
                   管理模型
                 </button>
-              </div>
-            </div>
-          )}
+                </div>
+              </div>,
+              document.body,
+            )}
         </div>
       </>
     );
@@ -2822,6 +3001,15 @@ export function AgentFlowPanel() {
   // Reset when chat is cleared
   useEffect(() => {
     if (chatMessages.length === 0) {
+      // 这是「空消息列表」顺带清卡的口子：新建对话 / 切到一个还没有消息的对话 /
+      // 切换过程中那一帧空数组都会走到这里，而清的是**全部会话**的卡、且不回 pi。
+      // 留痕（含被抹掉的 id）才能事后认出这张卡不是网关吞的。
+      if (approvalQueue.length + clarifyQueue.length > 0) {
+        traceCard("wipe_empty_chat", {
+          clarify: clarifyQueue.map((r) => r.id).join(","),
+          approvals: approvalQueue.map((r) => r.id).join(","),
+        });
+      }
       setResponseBlocks([]);
       setSteps([]);
       setInputSynced("");
@@ -3304,6 +3492,13 @@ export function AgentFlowPanel() {
       }
       // 停止运行 = 用户放弃本回合：清掉该会话挂着的审批/clarify 卡片并同步计数，
       // 否则 pendingUserRequestsRef 残留正值，下一个 run 的兜底定时器永不武装。
+      if (approvalQueue.length + clarifyQueue.length > 0) {
+        traceCard("wipe_stop", {
+          cid: cid ?? "",
+          clarify: clarifyQueue.map((r) => r.id).join(","),
+          approvals: approvalQueue.map((r) => r.id).join(","),
+        });
+      }
       bumpPendingUserRequests(-approvalQueue.length - clarifyQueue.length);
       setApprovalQueue([]);
       setClarifyQueue([]);
@@ -3318,6 +3513,14 @@ export function AgentFlowPanel() {
           // explicit send here as a safety net. (interrupt === notify('session/cancel')
           // in main.js, so one call suffices.)
           electronHelix.notify("session/cancel", { session_id: sessionId });
+        } else {
+          // 卡清了、cancel 却没发出去（cid 查不到 sid）：pi 那一侧的回合还活着，
+          // 它挂着的审批弹窗会一路等到 approvalTimeoutSec 自己 fail-closed。
+          traceCard("stop_no_cancel", {
+            cid: cid ?? "",
+            sessionId: sessionId ?? "",
+            isElectron: isElectron(),
+          });
         }
       } catch (e) {
         console.error("[handleStop] Failed to interrupt:", e);
@@ -3878,6 +4081,13 @@ export function AgentFlowPanel() {
               // 里（旁路面板 /compact 走同一执行体，行为一字不差）；live 映射
               // 传本组件的 sessionMapRef，兜底 sid 用本组件的 helixSessionIdRef。
               // 成功后把 ref 对齐到压缩用的 sid（主对话后续 run 的兜底来源）。
+              //
+              // 必须先复位 isChatLoading 再进压缩体：handleRun 开头为「真发一轮」
+              // 置了 true，而 runCompactCommand 在第一个 await 之前**同步**读它做
+              // 忙闸门——不先清掉，它读到的就是这一发自己刚设的标记，主对话里
+              // /compact 永远回 "busy"（「正在处理中 / 当前对话正在运行」）。
+              // 下面 switch 之后的复位太晚，救不了这条同步路径。
+              useHelixStore.setState({ isChatLoading: false });
               void (async () => {
                 const r = await runCompactCommand(currentSessionId, {
                   sessionMap: sessionMapRef.current,
@@ -4546,6 +4756,18 @@ export function AgentFlowPanel() {
         // conversations can run in parallel (each keeps its own backend session).
         const myCid = activeSessionId;
         let existing = sessionMap.get(myCid);
+
+        // 这条 run 的**项目根**，在开跑的一刻钉住：发 prompt 时这条对话一定在前台，
+        // 此刻界面记的根对它必然正确。等到工具事件到达时再读 `activeSessionWorkDir`
+        // 就可能是**别的**对话的根（他切走让这条继续跑、或草稿对话在 run 中被换成真
+        // cid），旧代码于是不判（null ⇒ `changeBelongsToProject` 保守放行），「已修
+        // 改」卡片里就混进了工作区外的文件（2026-10-09 那条改 ~/.pi/agent/npm 下
+        // pi-permission 的 run）。远程的 `remote://…` 虚拟键没有本机前缀语义，
+        // `localProjectRoot` 把它判成 null，照旧放行。
+        const runStartRoot = localProjectRoot(
+          useHelixStore.getState().activeSessionWorkDir ??
+            useHelixStore.getState().selectedWorkDir,
+        );
 
         // ── 会话恢复阶梯（**永不判死**）───────────────────────────────────
         // 不变量：只要这个对话还有本地历史，它就一定能继续用。sid 只是"接回原
@@ -5450,6 +5672,12 @@ export function AgentFlowPanel() {
               return;
             }
             if (queueDone) return;
+            // 合成 done ⇒ 界面认为这一轮结束了。若不告诉后端，pi 仍在 headless
+            // 跑它（这条路径原本只退订事件流），下一条消息就会被塞进这一轮当插话
+            // ——「发新任务却继续做刚才的任务」。判它死就必须真让它死。
+            if (sessionId) {
+              electronHelix.notify("session/cancel", { session_id: sessionId });
+            }
             enqueue(
               "data: " +
                 JSON.stringify({
@@ -5490,6 +5718,11 @@ export function AgentFlowPanel() {
               return;
             }
             if (queueDone) return;
+            // 同 scheduleSynthDone：空闲兜底也意味着「前端判这一轮结束」，必须让
+            // 后端真的结束，否则 pi 的残留回合会吃掉下一条用户消息。
+            if (sessionId) {
+              electronHelix.notify("session/cancel", { session_id: sessionId });
+            }
             debug(
               "[HelixTrace] idleDetector fired — no events for",
               IDLE_TIMEOUT_MS,
@@ -5984,22 +6217,13 @@ export function AgentFlowPanel() {
                 // 两者都在 registerFileChangesFromToolUpdate 里按优先级处理；本文件不再
                 // 自己实现校验/路径推断 —— 那段逻辑 2026-09-22 整块丢失过一次，卡片因此静默消失。
                 if (su === "tool_call_update") {
-                  // 这条对话的项目根，与 ⑤ 的 `ownWorkDir` 同一条链（落盘的 workDir
-                  // 优先于界面记的）。两点差别：
-                  //   - 只在「本对话就是前台对话」时才用界面值。后台 run 读
-                  //     activeSessionWorkDir 会拿到**别的项目**的根，于是把自己的
-                  //     合法改动判成"项目外"滤掉 —— 比不过滤更糟。
-                  //   - 判不出来就传 null：远程对话（`remote://…` 没有本机前缀语义）
-                  //     和根未知的对话一律保守放行，宁可不滤也不丢卡片。
-                  const st = useHelixStore.getState();
-                  const isFront = !myCid || st.currentSessionId === myCid;
-                  const runRoot = localProjectRoot(
-                    record?.workDir ??
-                      (isFront
-                        ? (st.activeSessionWorkDir ?? st.selectedWorkDir)
-                        : null) ??
-                      null,
-                  );
+                  // 这条对话的项目根：落盘的 workDir（只有 ④/⑤ 找回路径会读到，常规
+                  // run 是 undefined）优先，其次用开跑一刻钉住的 `runStartRoot`。
+                  // 这里**不再**现读界面的 `activeSessionWorkDir`：那条 run 可能早已
+                  // 不在前台，读到的是别的项目的根（判根的唯一正确时机是 run 开始）。
+                  const runRoot = record?.workDir
+                    ? localProjectRoot(record.workDir)
+                    : runStartRoot;
                   const registered = registerFileChangesFromToolUpdate(
                     params?.update,
                     {
@@ -8567,6 +8791,12 @@ export function AgentFlowPanel() {
           (cid && sessionMapRef.current.get(cid)?.sid) ||
           helixSessionIdRef.current;
         if (sid) {
+          traceCard("approval_respond", {
+            id: approvalId,
+            sid,
+            cid: cid ?? "",
+            choice,
+          });
           // 旧 RPC 是 WS 里非对称的一对一 approve/deny（session/approve 需要 toolCallId）。
           // 新 RPC 用 approval.respond + choice: once/session/always/deny，把决定写回
           // 后端状态机后由 agent 侧 resolve。
@@ -8575,9 +8805,15 @@ export function AgentFlowPanel() {
             choice,
             request_id: approvalId,
           });
+        } else {
+          traceCard("approval_no_sid", { id: approvalId, cid: cid ?? "" });
         }
       } catch (err) {
         console.error("Approval error:", err);
+        traceCard("approval_respond_error", {
+          id: approvalId,
+          err: String(err).slice(0, 160),
+        });
         storeActions.showToast({
           type: "error",
           title: "审批提交失败",
@@ -8605,14 +8841,28 @@ export function AgentFlowPanel() {
           (cid && sessionMapRef.current.get(cid)?.sid) ||
           helixSessionIdRef.current;
         if (sid) {
+          traceCard("respond", {
+            id: requestId,
+            sid,
+            cid: cid ?? "",
+            answerLen: answer.trim().length,
+          });
           await helixApi()!.send("clarify/respond", {
             session_id: sid,
             request_id: requestId,
             answer,
           });
+        } else {
+          // 点了、卡出了队，但**一条应答都没发出去**（卡片没带 sid、映射也查不到）：
+          // 扩展那边照样挂到超时 fail-closed，表现和「弹窗根本没弹」一模一样。
+          traceCard("respond_no_sid", { id: requestId, cid: cid ?? "" });
         }
       } catch (err) {
         console.error("Clarify respond error:", err);
+        traceCard("respond_error", {
+          id: requestId,
+          err: String(err).slice(0, 160),
+        });
       } finally {
         setClarifyQueue((prev) => prev.filter((r) => r.id !== requestId));
         // 网关已作废这张卡（点击与竞速作废撞车）→ 计数在作废侧已减过，这里
@@ -9725,18 +9975,22 @@ export function AgentFlowPanel() {
                 item.kind === "status" ? (
                   <div
                     key={item.id}
-                    className="flex w-full items-center justify-center gap-1.5 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60"
+                    className={`flex w-full items-center justify-center gap-1.5 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] ${
+                      item.emphasis === "compress"
+                        ? "px-3 rounded-lg border border-transparent text-muted-foreground/80 animate-compress-flash"
+                        : "text-muted-foreground/60"
+                    }`}
                   >
                     <span className="whitespace-pre-wrap">{item.text}</span>
                   </div>
                 ) : item.kind === "compressing" ? (
                   <div
                     key={item.id}
-                    className="flex w-full items-center gap-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/70"
+                    className="flex w-full items-center gap-3 py-2.5 px-3 rounded-lg border border-transparent text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/80 animate-compress-breathe"
                   >
-                    <div className="h-px flex-1 bg-border/60" />
+                    <div className="h-px flex-1 bg-border/40" />
                     <svg
-                      className="size-3.5 animate-spin text-muted-foreground/70 shrink-0"
+                      className="size-3.5 animate-spin text-primary/80 shrink-0"
                       viewBox="0 0 24 24"
                       fill="none"
                       stroke="currentColor"
@@ -9747,13 +10001,17 @@ export function AgentFlowPanel() {
                         strokeLinecap="round"
                       />
                     </svg>
-                    <span className="shrink-0">{item.text}</span>
-                    <div className="h-px flex-1 bg-border/60" />
+                    <span className="shrink-0 font-medium">{item.text}</span>
+                    <div className="h-px flex-1 bg-border/40" />
                   </div>
                 ) : item.kind === "divider" ? (
                   <div
                     key={item.id}
-                    className="flex items-center gap-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60 animate-scale-in"
+                    className={`flex items-center gap-3 py-2 text-[calc(var(--helix-transcript-size)*0.7857)] text-muted-foreground/60 ${
+                      item.id.startsWith("compression-")
+                        ? "px-3 rounded-lg border border-transparent animate-compress-flash"
+                        : "animate-scale-in"
+                    }`}
                   >
                     <div className="h-px flex-1 bg-border/60" />
                     <span className="shrink-0">{item.text}</span>

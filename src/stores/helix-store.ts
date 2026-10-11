@@ -167,6 +167,81 @@ export type {
 };
 export { DEFAULT_SHORTCUTS };
 
+/** 右侧栏「停在哪一面」。null = 没有这一面（侧栏不可见，见 helix-layout 的 rightSidebarVisible）。 */
+export type RightSidebarTab =
+  | "browser"
+  | "code"
+  | "diff"
+  | "agent"
+  | "byline"
+  | "terminal"
+  | "more"
+  | null;
+
+/**
+ * 每一面对应的兄弟开关。侧栏、预览栏、代码编辑器是同一片区域的三个面，
+ * 切 tab 必须连带把它们对齐，否则会出现「tab=code 但 editorOpen=false」这种
+ * 半开状态。setRightSidebarTab 和会话切换后的恢复共用这一份定义。
+ */
+function rightSidebarTabEffects(
+  tab: RightSidebarTab,
+): Pick<
+  HelixState,
+  "rightSidebarTab" | "showPreviewRail" | "editorOpen"
+> {
+  switch (tab) {
+    case "browser":
+      return { rightSidebarTab: "browser", showPreviewRail: true, editorOpen: false };
+    case "code":
+      return { rightSidebarTab: "code", showPreviewRail: false, editorOpen: true };
+    case "diff":
+      return { rightSidebarTab: "diff", showPreviewRail: false, editorOpen: false };
+    case "agent":
+      return { rightSidebarTab: "agent", showPreviewRail: false, editorOpen: false };
+    case "byline":
+      return { rightSidebarTab: "byline", showPreviewRail: false, editorOpen: false };
+    case "terminal":
+      return { rightSidebarTab: "terminal", showPreviewRail: false, editorOpen: false };
+    case "more":
+      return { rightSidebarTab: "more", showPreviewRail: false, editorOpen: false };
+    default:
+      return { rightSidebarTab: null, showPreviewRail: false, editorOpen: false };
+  }
+}
+
+/**
+ * 会话切换时的侧栏交接：先把当前会话「停在哪一面」存进影子表，再把目标会话自己
+ * 那一面恢复出来。写在 store 里而不是切换入口，是因为列表点击这条主路径以前在
+ * 入口处无条件 `setRightSidebarTab(null)`，切走再切回来也要重新点开。
+ *
+ * 覆盖面：`setCurrentSessionId`（列表点击 / 程序化切会话）。不走这里的两处已知
+ * 例外——历史条前进/后退与 `clearChat` 直接写 `currentSessionId`，它们本来也不
+ * 收起侧栏，行为保持不变（代价是这两次切换不会把当时那一面记进表里）。
+ *
+ * 不恢复 `rightSidebarOpen`：收起是标题栏那一个全局开关，切对话不该替用户把它
+ * 翻开；恢复出来的那一面在下次点「打开侧栏」时原地回到。
+ *
+ * `nextId === null`（新建对话）只存不取：那一面还没有归属会话，保持现状才和这条
+ * 路径原来的行为一致（原来只有从列表点开对话才会收起）。
+ */
+function swapRightSidebarTab(
+  state: HelixState,
+  nextId: string | null,
+): Pick<HelixState, "rightSidebarTabBySession"> &
+  Partial<
+    Pick<HelixState, "rightSidebarTab" | "showPreviewRail" | "editorOpen">
+  > {
+  const bySession = { ...state.rightSidebarTabBySession };
+  if (state.currentSessionId)
+    bySession[state.currentSessionId] = state.rightSidebarTab;
+  if (!nextId) return { rightSidebarTabBySession: bySession };
+  const restored = bySession[nextId] ?? null;
+  return {
+    rightSidebarTabBySession: bySession,
+    ...rightSidebarTabEffects(restored),
+  };
+}
+
 interface HelixState
   extends
     GitSlice,
@@ -293,24 +368,24 @@ interface HelixState
   setBrowserHomeUrl: (url: string) => void;
 
   // Unified right sidebar (hosts the browser + code editor as switchable tabs)
-  rightSidebarTab:
-    | "browser"
-    | "code"
-    | "diff"
-    | "agent"
-    | "byline"
-    | "terminal"
-    | null;
-  setRightSidebarTab: (
-    tab:
-      | "browser"
-      | "code"
-      | "diff"
-      | "agent"
-      | "byline"
-      | "terminal"
-      | null,
-  ) => void;
+  rightSidebarTab: RightSidebarTab;
+  /**
+   * 「停在哪一面」按会话记住的影子表（`cid → tab`），与 `planModeBySession`
+   * 同一约定：内存态、不落 IndexedDB。切换对话时把当前会话的 tab 存进去、再把
+   * 目标会话那一面恢复出来，所以「切走再切回来」回到原样而不是要重新点开。
+   * 只记 tab；收起（`rightSidebarOpen`）是全局的一次开关，不按会话分。
+   */
+  rightSidebarTabBySession: Record<string, RightSidebarTab>;
+  /**
+   * 侧栏的**可见性**，与「停在哪一面」（rightSidebarTab）拆开：标题栏按钮收起
+   * 只翻这个开关，tab 与侧栏里的 pages 原样留着 —— 再点一次就回到收起前那一面
+   *（例如浏览器），而不是每次都落回「更多」菜单页。
+   * 任何把 tab 切到非 null 的动作（点链接 / 卡片 / 工作面板 …）都会把它置回
+   * true：「切到某一面」本身就等于「把侧栏打开」。
+   */
+  rightSidebarOpen: boolean;
+  setRightSidebarOpen: (open: boolean) => void;
+  setRightSidebarTab: (tab: RightSidebarTab) => void;
   // 右侧栏的「子 Agent 工作内容」视图：点击工作面板里的某个 agent 时写入，
   // RightSidebar 据此渲染该 agent 的任务 / live 日志。null = 未选中。
   activeAgentView: { id: string; name: string } | null;
@@ -1790,6 +1865,8 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   gitChangeRevision: 0,
   browserHomeUrl: "",
   rightSidebarTab: null,
+  rightSidebarTabBySession: {},
+  rightSidebarOpen: true,
   activeAgentView: null,
   directoryProjectDir: null,
   codeFullscreen: false,
@@ -2039,6 +2116,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
       return next === "browser"
         ? {
             rightSidebarTab: "browser",
+            rightSidebarOpen: true,
             showPreviewRail: true,
             editorOpen: false,
           }
@@ -2053,6 +2131,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         ? {
             showPreviewRail: true,
             rightSidebarTab: "browser",
+            rightSidebarOpen: true,
             editorOpen: false,
           }
         : {}),
@@ -2061,6 +2140,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
     set((s) => ({
       // 打开侧边栏 + 递增信号；right-sidebar 监听 browserAddSeq 新建页面。
       rightSidebarTab: "browser",
+      rightSidebarOpen: true,
       showPreviewRail: true,
       editorOpen: false,
       browserAddSeq: s.browserAddSeq + 1,
@@ -2078,52 +2158,17 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
   },
   setRightSidebarTab: (tab) =>
     set(() => {
-      if (tab === "browser")
-        return {
-          rightSidebarTab: "browser",
-          showPreviewRail: true,
-          editorOpen: false,
-        };
-      if (tab === "code")
-        return {
-          rightSidebarTab: "code",
-          showPreviewRail: false,
-          editorOpen: true,
-        };
-      if (tab === "diff")
-        return {
-          rightSidebarTab: "diff",
-          showPreviewRail: false,
-          editorOpen: false,
-        };
-      if (tab === "agent")
-        return {
-          rightSidebarTab: "agent",
-          showPreviewRail: false,
-          editorOpen: false,
-        };
-      if (tab === "byline")
-        return {
-          rightSidebarTab: "byline",
-          showPreviewRail: false,
-          editorOpen: false,
-        };
-      if (tab === "terminal")
-        return {
-          rightSidebarTab: "terminal",
-          showPreviewRail: false,
-          editorOpen: false,
-        };
-      return {
-        rightSidebarTab: null,
-        showPreviewRail: false,
-        editorOpen: false,
-      };
+      // 切到某一面 = 把侧栏打开。收起只走 setRightSidebarOpen(false)（标题栏
+      // 「右侧边栏」按钮），那时 tab 原样留着，用来记住收起前停在哪一面。
+      const base = rightSidebarTabEffects(tab);
+      return tab === null ? base : { ...base, rightSidebarOpen: true };
     }),
+  setRightSidebarOpen: (open) => set({ rightSidebarOpen: open }),
   openAgentView: (agent) =>
     set(() => ({
       activeAgentView: agent,
       rightSidebarTab: "agent",
+      rightSidebarOpen: true,
       showPreviewRail: false,
       editorOpen: false,
     })),
@@ -3095,6 +3140,9 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
           activeSessionWorkDir: null,
           planModeBySession,
           ...(hadDraftTier ? { pendingPermissionTier } : {}),
+          // 新建对话：把离开的那条会话停在哪一面记下来（切回去时原地恢复），
+          // 当前这一面保持原样——原来新建对话就不收起侧栏。
+          ...swapRightSidebarTab(state, null),
         };
       }
       // Skip if clicking the same session that's already loaded
@@ -3115,6 +3163,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         return {
           currentSessionId: id,
           planModeBySession,
+          ...swapRightSidebarTab(state, id),
         };
       }
       // Remove any forward history when navigating to a new session
@@ -3127,6 +3176,7 @@ export const useHelixStore = create<HelixState>()((set, get, store) => ({
         sessionHistory: newHistory,
         sessionHistoryIndex: newHistory.length - 1,
         planModeBySession,
+        ...swapRightSidebarTab(state, id),
       };
     }),
   navigateSession: async (direction, targetId) => {

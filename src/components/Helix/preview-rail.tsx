@@ -12,7 +12,7 @@ import {
   RotateCw,
 } from "lucide-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { capturePagePng } from "@/lib/browser-automation";
+import { capturePagePng, resolveHandoffByUser } from "@/lib/browser-automation";
 import { electronShell } from "@/lib/electron-bridge";
 import { isTauri } from "@/lib/tauri-bridge";
 import { cleanUrl, normalizeUrl, summarizeUrl } from "@/lib/url-utils";
@@ -331,12 +331,17 @@ export function BrowserToolbar({
       {handedOff && (
         <div className="flex items-center gap-2 px-2 py-1 border-b border-amber-500/20 bg-amber-500/10 text-[calc(var(--helix-transcript-size)*0.75)] text-amber-700 dark:text-amber-400">
           <span className="flex-1 min-w-0 truncate">
-            人工验证中 · 原因：{handedOff.reason}
+            {handedOff.waiting ? "Agent 停在这页等你 · " : "人工验证中 · "}
+            原因：{handedOff.reason}
           </span>
           <button
-            onClick={() => useHelixStore.getState().setBrowserHandoff(null)}
+            onClick={resolveHandoffByUser}
             className="shrink-0 px-2 py-0.5 rounded-md border border-amber-500/30 bg-amber-500/15 hover:bg-amber-500/25 transition-colors"
-            data-tip="解锁该页，让 Agent 继续操作它"
+            data-tip={
+              handedOff.waiting
+                ? "解锁该页；Agent 正停在这一步等，点完它立刻继续"
+                : "解锁该页，让 Agent 继续操作它"
+            }
           >
             我已完成
           </button>

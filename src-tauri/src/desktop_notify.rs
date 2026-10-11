@@ -8,6 +8,9 @@
 //!
 //!   - Scene::Approval / Scene::Clarify —— 审批、澄清弹窗到达
 //!     （pi_gateway 的 extension_ui_request 各分支）
+//!   - Scene::Handoff —— Agent 把侧栏浏览器页交给人工登录/验证
+//!     （前端 browser-automation 经 `helix_notify_scene` 报上来；这条事件只有
+//!     前端知道，pi 网关看不见）
 //!   - Scene::TurnEnd —— 回合结束 / 出错（pi_gateway 的 agent_settled）、
 //!     定时任务与渠道签到派发（scheduled_tasks）
 //!
@@ -25,6 +28,22 @@ pub enum Scene {
     Approval,
     /// 在等用户回答问题。
     Clarify,
+    /// 在等用户在侧栏浏览器上人工登录/过验证码。
+    Handoff,
+}
+
+impl Scene {
+    /// 严格解析：前端传来的场景字符串只认下面四个（与 config.yaml 的子键同名），
+    /// 未知值返回 None。
+    pub fn parse_exact(s: &str) -> Option<Self> {
+        match s {
+            "turn_end" => Some(Self::TurnEnd),
+            "approval" => Some(Self::Approval),
+            "clarify" => Some(Self::Clarify),
+            "handoff" => Some(Self::Handoff),
+            _ => None,
+        }
+    }
 }
 
 /// 「轮次完成通知」的三档。默认 `Unfocused`，与本模块改造前的行为一致。
@@ -55,12 +74,13 @@ impl TurnEndMode {
     }
 }
 
-/// 设置页里那三个开关的当前值。
+/// 设置页里那四个开关的当前值。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Prefs {
     pub turn_end: TurnEndMode,
     pub approval: bool,
     pub clarify: bool,
+    pub handoff: bool,
 }
 
 impl Prefs {
@@ -72,10 +92,11 @@ impl Prefs {
                 TurnEndMode::Unfocused => !focused,
                 TurnEndMode::Always => true,
             },
-            // 审批 / 等待回答只在人不在前台时提醒：卡片本身已经摆在界面上，
-            // 前台再弹一条 toast 只是重复噪音。
+            // 审批 / 等待回答 / 人工接管只在人不在前台时提醒：卡片或横幅本身已经
+            // 摆在界面上，前台再弹一条 toast 只是重复噪音。
             Scene::Approval => self.approval && !focused,
             Scene::Clarify => self.clarify && !focused,
+            Scene::Handoff => self.handoff && !focused,
         }
     }
 }
@@ -86,6 +107,7 @@ impl Default for Prefs {
             turn_end: TurnEndMode::Unfocused,
             approval: true,
             clarify: true,
+            handoff: true,
         }
     }
 }
@@ -104,6 +126,7 @@ pub fn prefs() -> Prefs {
             .unwrap_or(d.turn_end),
         approval: read_bool(&block, "approval", d.approval),
         clarify: read_bool(&block, "clarify", d.clarify),
+        handoff: read_bool(&block, "handoff", d.handoff),
     }
 }
 
@@ -115,27 +138,73 @@ fn read_bool(block: &serde_json::Map<String, Value>, key: &str, default: bool) -
     }
 }
 
-/// 按场景弹系统通知；开关关掉或不满足前台条件时静默跳过。
+/// 用户此刻是不是「正看着 Helix」：可见 + 未最小化 + 拿到焦点，三者同时成立。
+///
+/// 为什么不只信 `is_focused`：最小化和隐藏到托盘是「人走了」的两种主要形态，
+/// 而焦点查询偶尔会把焦点仍记在刚收起的窗口上（尤其是托盘 hide 之后），那样
+/// 两条路径下通知会被当成前台噪音丢掉。三条都要，宁可多弹不误关。
+///
+/// 第二个返回值是逐窗口原始状态位（`main[f=1,v=1,min=0] …`），只为诊断存在：
+/// 门判成前台、人却说自己不在时，只有这三位能指出是哪一位在撒谎（例如 hide
+/// 到托盘之后 `is_visible` 仍返回 true）。
+fn in_foreground(app: &tauri::AppHandle) -> (bool, String) {
+    let mut foreground = false;
+    let mut trace = String::new();
+    for (label, w) in app.webview_windows() {
+        let focused = w.is_focused().unwrap_or(false);
+        let visible = w.is_visible().unwrap_or(false);
+        let minimized = w.is_minimized().unwrap_or(false);
+        if !trace.is_empty() {
+            trace.push(' ');
+        }
+        trace.push_str(&format!(
+            "{label}[f={},v={},min={}]",
+            focused as u8, visible as u8, minimized as u8
+        ));
+        foreground |= focused && visible && !minimized;
+    }
+    (foreground, trace)
+}
+
+/// 按场景弹系统通知；开关关掉或用户正在前台时静默跳过。
+///
+/// 每个决定都落一行 `helix-recover.log`：不弹（连原因和当时的生效偏好一起）和
+/// 弹了但系统失败（连错误体）原本是同一种「什么都没发生」，没有这行日志就再也
+/// 分不开。日志本身失败照旧吞掉——通知链路绝不允许影响事件主链路。
 pub fn notify(scene: Scene, title: &str, body: &str) {
     let Some(app) = crate::state::APP_HANDLE.get() else {
+        crate::pi_gateway::log_spawn_diag(&format!(
+            "notify scene={scene:?} skipped=no_app_handle"
+        ));
         return;
     };
-    // 「前台」按全部 webview 窗口算（主窗 + 内置浏览器子窗），任一聚焦即视为
-    // 用户正看着 Helix。窗口最小化 / 隐藏到托盘时 is_focused 为 false → 照弹。
-    let focused = app
-        .webview_windows()
-        .values()
-        .any(|w| w.is_focused().unwrap_or(false));
-    if !prefs().allows(scene, focused) {
+    let (foreground, windows) = in_foreground(app);
+    let p = prefs();
+    if !p.allows(scene, foreground) {
+        crate::pi_gateway::log_spawn_diag(&format!(
+            "notify scene={scene:?} skipped=gate foreground={foreground} windows={windows} turn_end={} approval={} clarify={} handoff={}",
+            p.turn_end.as_str(),
+            p.approval,
+            p.clarify,
+            p.handoff,
+        ));
         return;
     }
     use tauri_plugin_notification::NotificationExt;
-    let _ = app
+    let shown = app
         .notification()
         .builder()
         .title(clip(title, 40))
         .body(clip(body, 180))
         .show();
+    match shown {
+        Ok(()) => crate::pi_gateway::log_spawn_diag(&format!(
+            "notify scene={scene:?} foreground={foreground} windows={windows} show=ok title=\"{title}\""
+        )),
+        Err(e) => crate::pi_gateway::log_spawn_diag(&format!(
+            "notify scene={scene:?} windows={windows} show=err {e:?}"
+        )),
+    }
 }
 
 /// 按字符截断（不会砍出半个 UTF-8 字符），超长补省略号。
@@ -157,6 +226,7 @@ fn config_json(p: Prefs) -> Value {
         "turnEndMode": p.turn_end.as_str(),
         "approvalEnabled": p.approval,
         "clarifyEnabled": p.clarify,
+        "handoffEnabled": p.handoff,
         "configPath": crate::config::config_yaml_path().to_string_lossy(),
     })
 }
@@ -168,9 +238,9 @@ pub fn helix_notification_config() -> Value {
 }
 
 /// 写通知偏好。前端键名 → yaml 子键：turnEndMode→turn_end、
-/// approvalEnabled→approval、clarifyEnabled→clarify。先全部校验再动文件，
-/// 一半写进去、一半被拒是最坏结果。返回值里的三个字段是**回读到的生效值**
-/// （写失败时 UI 因此不会撒谎）。
+/// approvalEnabled→approval、clarifyEnabled→clarify、handoffEnabled→handoff。
+/// 先全部校验再动文件，一半写进去、一半被拒是最坏结果。返回值里的四个字段是
+/// **回读到的生效值**（写失败时 UI 因此不会撒谎）。
 #[tauri::command]
 pub fn helix_set_notification_config(updates: Value) -> Value {
     let Some(obj) = updates.as_object() else {
@@ -186,6 +256,7 @@ pub fn helix_set_notification_config(updates: Value) -> Value {
     for (front_key, yaml_key) in [
         ("approvalEnabled", "approval"),
         ("clarifyEnabled", "clarify"),
+        ("handoffEnabled", "handoff"),
     ] {
         if let Some(v) = obj.get(front_key) {
             let Some(b) = v.as_bool() else {
@@ -210,6 +281,73 @@ pub fn helix_set_notification_config(updates: Value) -> Value {
     out
 }
 
+/// 前端报上来的一条通知（目前只有「人工接管」用得到：那条横幅只有界面知道，
+/// pi 网关看不见）。要不要弹仍然只由本模块的门决定 —— 调用方声明场景与文案，
+/// 不自判时机，所以前台噪音规则不会在各处界面代码里长歪。
+/// 做成 async：与网关那几个调用点保持同一条线程形态，窗口状态查询与 toast 都不
+/// 落在主线程上（碰窗口的那条老规矩）。
+#[tauri::command]
+pub async fn helix_notify_scene(scene: String, title: String, body: String) -> Value {
+    let Some(parsed) = Scene::parse_exact(&scene) else {
+        return json!({ "ok": false, "error": format!("未知的通知场景: {scene}") });
+    };
+    notify(parsed, &title, &body);
+    json!({ "ok": true })
+}
+
+/// dev 下 toast 实际带出去的身份：`tauri-plugin-notification` 不设 app_id 时，
+/// notify-rust 兜底用的就是这个 AUMID（`tauri-winrt-notification` 的
+/// `Toast::POWERSHELL_APP_ID`，逐字抄来）。注册表里它以反斜杠分段，落在
+/// `Notifications\Settings\` 下面。
+const POWERSHELL_AUMID: &str =
+    "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe";
+
+/// 这条 toast 会以谁的身份出现 —— 判断必须和插件里那段 `show()` 一字不差地同构：
+/// 它在 exe 目录以 `\target\debug` / `\target\release` 结尾时**不设** app_id。
+/// 所以 dev 下去查 `com.helix.desktop` 的开关是查一个根本没用上的身份，答案必然
+/// 对不上；这里跟着插件走，界面才能说真话。大小写也照插件：它用的是大小写敏感的
+/// `ends_with`。
+fn toast_aumid(exe_dir: &str, identifier: &str) -> String {
+    if exe_dir.ends_with("\\target\\debug") || exe_dir.ends_with("\\target\\release") {
+        POWERSHELL_AUMID.to_string()
+    } else {
+        identifier.to_string()
+    }
+}
+
+/// 读 HKCU 下的一个 DWORD。键或值不存在都返回 None —— Windows 只在用户**手动**
+/// 关掉时才写这个值，所以「查不到」的正确解释是「没人关过」，不是出错。
+#[cfg(windows)]
+fn hkcu_dword(subkey: &str, value: &str) -> Option<u32> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY, HKEY_CURRENT_USER, RRF_RT_DWORD,
+    };
+
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let sub = wide(subkey);
+    let val = wide(value);
+    let mut buf: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(sub.as_ptr()),
+            PCWSTR(val.as_ptr()),
+            RRF_RT_DWORD,
+            None,
+            Some(&mut buf as *mut u32 as *mut core::ffi::c_void),
+            Some(&mut size),
+        )
+    };
+    status.is_ok().then_some(buf)
+}
+
+#[cfg(not(windows))]
+fn hkcu_dword(_subkey: &str, _value: &str) -> Option<u32> {
+    None
+}
+
 /// 打开系统的通知设置页。Windows 走 ms-settings URI；其它系统没有可跳转的
 /// 通知面板，明说而不是默默开一个无关的窗口。
 #[tauri::command]
@@ -228,6 +366,39 @@ pub fn helix_open_notification_settings() -> Value {
         Ok(()) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),
     }
+}
+
+/// 系统侧到底让不让弹。界面拿它回答「日志写着 show=ok，我怎么没看见」：
+/// - `PushNotifications\ToastEnabled = 0` —— 系统的 toast 总闸被关了；
+/// - `Notifications\Settings\<AUMID>\Enabled = 0` —— 这一**个身份**被关了。
+/// 两处都缺省为开。`aumid` 一并回给界面，好让 dev 下把「查的是 PowerShell」这件事
+/// 说明白，而不是拿一个 Helix 的名字去冒充系统里的那一项。
+#[tauri::command]
+pub fn helix_notification_status(app: tauri::AppHandle) -> Value {
+    let exe_dir = tauri::utils::platform::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
+        .unwrap_or_default();
+    let aumid = toast_aumid(&exe_dir, &app.config().identifier);
+    let read = |subkey: &str, value: &str| match hkcu_dword(subkey, value) {
+        Some(v) => json!(v != 0),
+        None => Value::Null,
+    };
+    json!({
+        "ok": true,
+        "aumid": aumid,
+        "dev": aumid == POWERSHELL_AUMID,
+        "systemEnabled": read(
+            r"Software\Microsoft\Windows\CurrentVersion\PushNotifications",
+            "ToastEnabled",
+        ),
+        "appEnabled": read(
+            &format!(
+                r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\{aumid}"
+            ),
+            "Enabled",
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -257,17 +428,39 @@ mod tests {
     }
 
     #[test]
-    fn approval_and_clarify_are_gated_by_switch_and_focus() {
+    fn approval_clarify_and_handoff_are_gated_by_switch_and_focus() {
         let off = Prefs {
             approval: false,
             clarify: false,
+            handoff: false,
             ..Prefs::default()
         };
         assert!(!off.allows(Scene::Approval, false));
         assert!(!off.allows(Scene::Clarify, false));
+        assert!(!off.allows(Scene::Handoff, false));
         let on = Prefs::default();
         assert!(on.allows(Scene::Approval, false));
         assert!(!on.allows(Scene::Approval, true));
+        // 人工接管同样只在不前台时弹：横幅已经挂在侧栏上，前台再弹一条是重复噪音。
+        assert!(on.allows(Scene::Handoff, false));
+        assert!(!on.allows(Scene::Handoff, true));
+    }
+
+    #[test]
+    fn scene_names_round_trip_and_unknowns_are_rejected() {
+        for (raw, want) in [
+            ("turn_end", Scene::TurnEnd),
+            ("approval", Scene::Approval),
+            ("clarify", Scene::Clarify),
+            ("handoff", Scene::Handoff),
+        ] {
+            assert_eq!(Scene::parse_exact(raw), Some(want));
+        }
+        // 前端只能报这四个名字：拼错或报来别的东西一律拒绝，而不是悄悄落到某个
+        // 默认场景上 —— 那会让「哪个开关管着这条 toast」变得说不清。
+        for bad in ["", "Handoff", "hand off", "browser_handoff", "approval\n"] {
+            assert_eq!(Scene::parse_exact(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
@@ -351,5 +544,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dev_builds_report_the_powershell_identity_and_installed_ones_their_own() {
+        // 必须跟 tauri-plugin-notification 那段 ends_with 判断同构：查错身份的开关
+        // 比不查更糟 —— 界面会拿一个干净的答案替一个根本没用的身份背书。
+        assert_eq!(
+            toast_aumid(r"D:\Project\Helix\src-tauri\target\debug", "com.helix.desktop"),
+            POWERSHELL_AUMID
+        );
+        assert_eq!(
+            toast_aumid(r"D:\Project\Helix\src-tauri\target\release", "com.helix.desktop"),
+            POWERSHELL_AUMID
+        );
+        assert_eq!(
+            toast_aumid(r"C:\Program Files\Helix", "com.helix.desktop"),
+            "com.helix.desktop"
+        );
+        // 插件用的是大小写敏感的 ends_with，这里跟着一起敏感。
+        assert_eq!(
+            toast_aumid(r"D:\Project\Helix\Target\Debug", "com.helix.desktop"),
+            "com.helix.desktop"
+        );
     }
 }

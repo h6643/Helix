@@ -318,23 +318,37 @@ export interface ElectronAPI {
       turnEndMode?: string;
       approvalEnabled?: boolean;
       clarifyEnabled?: boolean;
+      handoffEnabled?: boolean;
       configPath?: string;
       error?: string;
     }>;
-    /** 只提交要改的键；返回体里的三个字段是回读到的**生效值**（写失败时 UI 不撒谎）。 */
+    /** 只提交要改的键；返回体里的四个字段是回读到的**生效值**（写失败时 UI 不撒谎）。 */
     setNotificationConfig: (updates: {
       turnEndMode?: string;
       approvalEnabled?: boolean;
       clarifyEnabled?: boolean;
+      handoffEnabled?: boolean;
     }) => Promise<{
       ok: boolean;
       turnEndMode?: string;
       approvalEnabled?: boolean;
       clarifyEnabled?: boolean;
+      handoffEnabled?: boolean;
       changed?: string[];
       error?: string;
     }>;
-    /** 跳到系统的通知设置页（Windows: ms-settings:notifications）。 */
+    /** 系统侧到底让不让弹。两个值都可能是 null = 注册表里没写过（Windows 只在用户
+     *  手动关掉时才写），缺省按「开」解释。`aumid` 是这条 toast 实际带出去的身份：
+     *  dev 下插件不设身份、系统兜底成 PowerShell，所以那时查的是 PowerShell 的开关。 */
+    notificationStatus: () => Promise<{
+      ok: boolean;
+      aumid?: string;
+      dev?: boolean;
+      systemEnabled?: boolean | null;
+      appEnabled?: boolean | null;
+      error?: string;
+    }>;
+    /** 跳到系统的通知设置页（Windows 走 ms-settings URI）。 */
     openNotificationSettings: () => Promise<{ ok: boolean; error?: string }>;
     /** Poll pending pi-extension browser requests (emits helix:browser-request
      *  events with the full payload; navigate also emits the legacy
@@ -638,6 +652,8 @@ export interface ElectronAPI {
       defaultModel: string;
     }>;
     piSetThinkingLevelAll: (level: string) => Promise<{ success: boolean }>;
+    /** 自动压缩开关广播：开启/关闭 pi 的回合内阈值压缩（压缩后继续任务）。 */
+    piSetAutoCompactionAll: (enabled: boolean) => Promise<{ success: boolean }>;
     /**
      * 渠道中心：一次性 pi RPC 进程执行 pi-connect 的 `/connect` 命令，
      * 返回扩展的 notify 文本（见 src-tauri/src/pi_connect.rs）。
@@ -988,8 +1004,19 @@ export interface ElectronAPI {
         }
       >;
       configPath?: string;
+      /** @deprecated 用 extensionStatus；保留是为了旧调用点不缺字段。 */
       extensionLoaded?: boolean;
+      /**
+       * web-access 扩展的装载四态（后端按 pi 的发现规则判：
+       * 目录自动发现 + `extensions` override，**不是**只看 packages）：
+       * - loaded：pi 会加载它（工具在跑）；
+       * - disabled：磁盘上有、但被扩展开关关掉 ⇒ 该去打开，不是去安装；
+       * - absent：确实没找到 ⇒ 该去安装；
+       * - unknown：连扩展根目录都读不到 ⇒ 不下结论，面板不报警。
+       */
+      extensionStatus?: "loaded" | "disabled" | "absent" | "unknown";
       extensionPackage?: string | null;
+      extensionKnown?: boolean;
       restartNeeded?: boolean;
       error?: string;
     }>;

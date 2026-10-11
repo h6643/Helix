@@ -59,6 +59,8 @@ export interface BrowserExecRequest {
     key?: string;
     /** handoff：为什么要交给人工（原样显示在侧栏横幅上）。 */
     reason?: string;
+    /** handoff：true=阻塞等人工出结论（completed/done/timeout），缺省 false=立刻回 ack。 */
+    wait?: boolean;
     /** handoff/check_login：登录成功的判据。缺省时只认用户点「我已完成」。 */
     urlIncludes?: string;
     /** drag 的终点。 */
@@ -120,8 +122,17 @@ export interface BrowserExecResult {
   image?: string;
   /** 视觉模型转述（配置了视觉模型时尽力而为，供非多模态主模型阅读）。 */
   description?: string;
-  /** handoff/check_login：接管回路的状态，模型据此决定继续干什么。 */
-  status?: "awaiting_user" | "cleared" | "still_waiting" | "no_handoff";
+  /** handoff/check_login：接管回路的状态，模型据此决定继续干什么。
+   *  awaiting_user=已交出、没等（wait=false）；completed=判据命中；done=用户点了
+   *  「我已完成」；timeout=等满接管时长仍没结论（此时也已解锁）。 */
+  status?:
+    | "awaiting_user"
+    | "cleared"
+    | "still_waiting"
+    | "no_handoff"
+    | "completed"
+    | "done"
+    | "timeout";
   /** handoff/check_login：给人读的一句结论（比让模型自己解析布尔值更不容易跑偏）。 */
   message?: string;
 }
@@ -917,10 +928,27 @@ async function doHistory(
 }
 
 /**
- * 「这页交给人了」的兜底时长。到期自动解锁 —— 用户走开了、忘了点「我已完成」，
- * 侧栏不该被永久锁死，模型也不该永远拿不到写权限。
+ * 「这页交给人了」的兜底时长来自用户在设置里配的
+ * `browser.handoff_timeout_min`（1..=30 分钟，Rust 侧
+ * `browser_webview::handoff_timeout_min` 负责钳制），每次接管开始时读一次现值 ——
+ * 用户改了下一条接管就生效，前端不再自己记一份。这条命令只在 Rust 侧不可用时
+ * 才会失败（那会儿整个浏览器工具都跑不通），留个兜底纯粹为了不把接管做成报错。
  */
-const HANDOFF_TTL_MS = 10 * 60_000;
+const HANDOFF_TIMEOUT_FALLBACK_MS = 10 * 60_000;
+
+/** wait=true 时问一次的间隔：判据探针只读一个 querySelector，代价比模型多等一轮便宜。 */
+const HANDOFF_WAIT_POLL_MS = 2_000;
+
+async function handoffTimeoutMs(): Promise<number> {
+  try {
+    const cfg = await invoke<{ timeoutMin?: number }>("browser_handoff_config");
+    const min = Number(cfg?.timeoutMin);
+    if (Number.isFinite(min) && min >= 1) return min * 60_000;
+  } catch {
+    /* 用兜底 */
+  }
+  return HANDOFF_TIMEOUT_FALLBACK_MS;
+}
 
 /**
  * 接管期间要挡住的写操作。人类正在那张页面上打字/拖验证码，agent 一次 navigate
@@ -955,24 +983,85 @@ function clearHandoff(): void {
 }
 
 /**
+ * 解锁「我这一条」接管。必须比对身份：到期定时器、等待循环和用户点击是三条独立的
+ * 解除路径，谁后到谁就可能面对一条已经换了的接管，无脑 clear 会把新那条连带解掉。
+ */
+function releaseHandoff(handoff: BrowserHandoff): void {
+  if (useHelixStore.getState().browserHandoff === handoff) clearHandoff();
+}
+
+/**
+ * 用户宣告「人工这一轮做完了」：把结论写进那条接管记录，再解锁。
+ * 必须写在记录上而不是只清 store —— `wait=true` 那一趟正拿着同一个引用等结论，
+ * 「记录消失」本身分不清是人点的还是超时自动清的。
+ */
+export function resolveHandoffByUser(): void {
+  const h = useHelixStore.getState().browserHandoff;
+  if (!h) return;
+  h.resolvedByUser = true;
+  clearHandoff();
+}
+
+/**
  * 当前页是否正处于人工接管中。
  * 按 pageId 精确匹配：接管那条页被切走/关掉之后，锁就自然失效（继续锁另一条页
- * 毫无道理）。顺带在这里做 TTL 兜底，这样即使定时器没跑到也不会留下僵尸锁。
+ * 毫无道理）。顺带在这里做到期兜底，这样即使定时器没跑到也不会留下僵尸锁。
  */
 function handoffOnCurrentPage(): BrowserHandoff | null {
   const st = useHelixStore.getState();
   const h = st.browserHandoff;
   if (!h) return null;
-  if (Date.now() - h.since >= HANDOFF_TTL_MS) {
+  if (Date.now() >= h.until) {
     clearHandoff();
     return null;
   }
   return h.pageId === st.browserPageId ? h : null;
 }
 
+/** 一条只读判据探针：页面上是否已经出现「登录成功」的标志。探针失败算未命中。 */
+async function loginProbe(
+  page: string,
+  selector: string,
+  urlIncludes: string,
+): Promise<{ url?: string; title?: string; found?: boolean; urlMatched?: boolean }> {
+  return evalInPage<{
+    url?: string;
+    title?: string;
+    found?: boolean;
+    urlMatched?: boolean;
+  }>(page, opScript("loginprobe", { selector, urlIncludes }), OP_TIMEOUT_MS);
+}
+
+/** 判据是否命中：两个判据各自非空才算数，任一命中即视为已登录。 */
+function criteriaMatched(
+  r: { found?: boolean; urlMatched?: boolean } | null,
+  selector: string,
+  urlIncludes: string,
+): boolean {
+  return Boolean((selector && r?.found) || (urlIncludes && r?.urlMatched));
+}
+
 /**
- * 把页面交给人：登记接管态 + 锁写操作 + 抢焦点，然后**立刻**回 ack。
- * 非阻塞是这条路径的全部意义 —— 不等用户，模型拿到 ack 就该去干别的活。
+ * 叫人回来点「我已完成」。这条事件只有界面知道（pi 网关看不见接管），所以由前端
+ * 报给 Rust 的门：弹不弹、前台要不要静音，规则全在 `desktop_notify` 里，这里只声明
+ * 场景和文案。任何失败都吞掉 —— 通知是锦上添花，绝不能让接管本身报错。
+ */
+async function notifyHandoff(reason: string): Promise<void> {
+  try {
+    await invoke("helix_notify_scene", {
+      scene: "handoff",
+      title: "Agent 在等你验证",
+      body: `侧栏浏览器需要你人工登录/验证：${reason}。点那条页上的「我已完成」，Agent 就继续。`,
+    });
+  } catch {
+    /* 非 Tauri 环境或命令缺失：没通知也照常接管 */
+  }
+}
+
+/**
+ * 把页面交给人：登记接管态 + 锁写操作 + 抢焦点。
+ * wait=false 时立刻回 ack（不等用户，模型拿到 ack 就去干别的活）；wait=true 时把
+ * 同一条接管等到出结论为止（见 waitForHandoff）。
  */
 async function doHandoff(
   params: BrowserExecRequest["params"],
@@ -989,20 +1078,33 @@ async function doHandoff(
         }
       : undefined;
 
-  useHelixStore.getState().setBrowserHandoff({
+  const timeoutMs = await handoffTimeoutMs();
+  const waiting = params?.wait === true;
+  const handoff: BrowserHandoff = {
     pageId: page,
     reason,
     expect,
-    since: Date.now(),
-  });
+    waiting,
+    until: Date.now() + timeoutMs,
+  };
+  useHelixStore.getState().setBrowserHandoff(handoff);
   if (handoffExpiry) clearTimeout(handoffExpiry);
-  handoffExpiry = setTimeout(clearHandoff, HANDOFF_TTL_MS);
+  // 到期只解自己这一条：用户点了「我已完成」之后 store 可能已经挂着下一条接管。
+  handoffExpiry = setTimeout(() => releaseHandoff(handoff), timeoutMs);
   // 把侧栏切到这条网页页，人才看得见横幅。刻意不碰 previewRailUrl：那会递增
   // navSeq，子窗口收到 open 就重新导航一次，把用户填了一半的表单冲掉。
   useHelixStore.getState().setRightSidebarTab("browser");
 
+  // 先报通知再抢焦点：`browser_webview_focus` 会把主窗 unminimize，那一刻起
+  // 「人不在」这个事实就再也读不出来了（前台判定必然为真，toast 必被门挡掉）。
+  // 所以要 await —— 并发发出去的话，命令在 Rust 侧的先后没有保证。
+  await notifyHandoff(reason);
+
   // 焦点抢不到不算失败：横幅已经在那儿了，用户看得见。
   await invoke("browser_webview_focus", { page }).catch(() => null);
+
+  if (waiting) return waitForHandoff(handoff);
+
   const p = await probePage(page).catch(() => null);
   return {
     ok: true,
@@ -1013,6 +1115,94 @@ async function doHandoff(
       ? `已把页面交给人工（原因：${reason}），该页的写操作已锁定，只读工具不受影响。现在先去做不依赖这个页面的工作，之后再调 browser_check_login（判据已登记：${expect.selector ?? expect.urlIncludes}）确认。`
       : `已把页面交给人工（原因：${reason}），该页的写操作已锁定，只读工具不受影响。现在先去做不依赖这个页面的工作；用户点侧栏的「我已完成」或验证页自己跳出登录墙之后，用 browser_read 确认。`,
   };
+}
+
+/**
+ * wait=true：就地等人工这一轮出结论。三条出口，按「人说了算」的顺序判：
+ * 1. 用户点了「我已完成」→ done，**立刻继续**（这一趟不探针：点完就该回话，
+ *    而判据探针最坏要等 15s 才失败）；
+ * 2. 判据命中 → completed，顺手解锁，继续；
+ * 3. 到期 → 先补查一次判据（很多人做好了却忘记点按钮，白做的活得捞回来）：命中就
+ *    completed 继续；仍未命中就是**没完成** → timeout，并明确叫停这条任务线。
+ * 这里的探测是只读探针，与串行队列里并发的写操作不互相踩（见 useBrowserAutomation
+ * 里为什么等待要绕开队列）。
+ */
+async function waitForHandoff(handoff: BrowserHandoff): Promise<BrowserExecResult> {
+  const page = handoff.pageId;
+  const selector = handoff.expect?.selector ?? "";
+  const urlIncludes = handoff.expect?.urlIncludes ?? "";
+  const hasCriteria = Boolean(selector || urlIncludes);
+  const minutes = Math.max(1, Math.round((handoff.until - Date.now()) / 60_000));
+
+  const probe = async () => {
+    if (!hasCriteria) return null;
+    return loginProbe(page, selector, urlIncludes).catch(() => null);
+  };
+
+  for (;;) {
+    // 侧栏再没有浏览器页（用户把那条页关掉 / 面板被收回）：等的对象已经不存在，
+    // 别让人再对着一条死页等到超时。
+    if (!useHelixStore.getState().browserPageId) {
+      releaseHandoff(handoff);
+      return {
+        ok: false,
+        error:
+          "接管的那条浏览器页已经不在侧栏里了，等待结束（该页的锁同时解除）。要让人工继续操作就得先把页面重新打开。",
+      };
+    }
+    // 人宣告完成 —— 这就是结论，立刻交回控制权让 Agent 继续。解锁已经由点击那一步
+    // 做过（resolveHandoffByUser），这里不能再 clearHandoff：store 里可能已经挂着
+    // 下一条接管了。
+    if (handoff.resolvedByUser) {
+      const p = await probePage(page).catch(() => null);
+      return {
+        ok: true,
+        status: "done",
+        url: p?.url,
+        title: p?.title,
+        message:
+          "用户点了「我已完成」，该页写操作已恢复 —— 立刻在这条页上接着把任务做下去。" +
+          "登录态是否真的进去了，用 browser_read 读一次页面就知道，别再等待、别再发 handoff。",
+      };
+    }
+    if (Date.now() >= handoff.until) {
+      // 到点这趟是「用户做好了却忘记点完成」的最后一道补偿：先查判据再下结论。
+      releaseHandoff(handoff);
+      const r = await probe();
+      if (criteriaMatched(r, selector, urlIncludes)) {
+        return {
+          ok: true,
+          status: "completed",
+          url: r?.url,
+          title: r?.title,
+          message: "验证已通过（到期补查判据命中），人工接管已解除，该页写操作恢复，可以继续。",
+        };
+      }
+      const p = await probePage(page).catch(() => null);
+      return {
+        ok: false,
+        status: "timeout",
+        url: p?.url,
+        title: p?.title,
+        error:
+          `等待人工接管 ${minutes} 分钟到期，判据${hasCriteria ? "仍未命中" : "没有登记、无从复查"} —— 人工这一轮没有完成。` +
+          "该页已解锁。到此为止：停止这条任务线，别再 sleep 轮询、别再发 handoff、别猜密码，" +
+          "用 browser_read 看一眼页面实际卡在哪，把情况如实告诉用户后结束本轮，等他指示。",
+      };
+    }
+    const r = await probe();
+    if (criteriaMatched(r, selector, urlIncludes)) {
+      releaseHandoff(handoff);
+      return {
+        ok: true,
+        status: "completed",
+        url: r?.url,
+        title: r?.title,
+        message: "验证已通过（判据命中），人工接管已解除，该页写操作恢复，可以继续。",
+      };
+    }
+    await sleep(HANDOFF_WAIT_POLL_MS);
+  }
 }
 
 /**
@@ -1035,18 +1225,8 @@ async function doCheckLogin(
         "browser_check_login 需要一个判据（selector=登录后的标志元素，或 urlIncludes=离开登录页的 URL 片段）；没有判据时请让用户点侧栏的「我已完成」解锁",
     };
   }
-  const r = await evalInPage<{
-    url?: string;
-    title?: string;
-    found?: boolean;
-    urlMatched?: boolean;
-  }>(
-    page,
-    opScript("loginprobe", { selector, urlIncludes }),
-    OP_TIMEOUT_MS,
-  );
-  const matched = (selector && r.found) || (urlIncludes && r.urlMatched);
-  if (matched) {
+  const r = await loginProbe(page, selector, urlIncludes);
+  if (criteriaMatched(r, selector, urlIncludes)) {
     if (active) clearHandoff();
     return {
       ok: true,
@@ -1276,23 +1456,34 @@ export function useBrowserAutomation() {
   const handleRequest = useCallback((req: BrowserExecRequest) => {
     if (!req.reqId) return;
     inFlightRef.current.add(req.reqId);
-    queueRef.current = queueRef.current
-      .then(async () => {
-        let result: BrowserExecResult;
-        try {
-          result = await dispatch(req);
-        } catch (e) {
-          result = { ok: false, error: errText(e) };
-        }
+    const run = async () => {
+      let result: BrowserExecResult;
+      try {
+        result = await dispatch(req);
+      } catch (e) {
+        result = { ok: false, error: errText(e) };
+      }
+      inFlightRef.current.delete(req.reqId);
+      // browser_screenshot：顺手让视觉模型把图转述成文字，原图一并回传，
+      // 多模态主模型可以直接看图。
+      if (result.ok && result.image) {
+        const desc = await describeImage(result.image);
+        if (desc) result = { ...result, description: desc };
+      }
+      await electronApp.browserWriteResult?.(req.reqId, result);
+    };
+    // 人工接管（wait=true）一等就是几分钟到半小时，绝不排队：它占着串行队列会把
+    // 其它会话/子代理的浏览器操作全饿死（那些请求在 pi 侧 60s 就超时了）。等待本身
+    // 只读判据，与队列里并发执行的写操作不构成踩踏。
+    if (req.op === "handoff" && req.params?.wait === true) {
+      void run().catch((e) => {
         inFlightRef.current.delete(req.reqId);
-        // browser_screenshot：顺手让视觉模型把图转述成文字，原图一并回传，
-        // 多模态主模型可以直接看图。
-        if (result.ok && result.image) {
-          const desc = await describeImage(result.image);
-          if (desc) result = { ...result, description: desc };
-        }
-        await electronApp.browserWriteResult?.(req.reqId, result);
-      })
+        console.warn("[Helix] 浏览器操作执行失败:", errText(e));
+      });
+      return;
+    }
+    queueRef.current = queueRef.current
+      .then(run)
       .catch((e) => {
         inFlightRef.current.delete(req.reqId);
         console.warn("[Helix] 浏览器操作执行失败:", errText(e));

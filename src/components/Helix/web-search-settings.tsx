@@ -14,6 +14,13 @@ import { useHelixStore } from "@/stores/helix-store";
  * Tavily 的 key。没有免 key 兜底 —— 扩展的 auto 就是「Tavily，否则报错」
  * （`search.ts`），所以「没配 key ⇒ 搜索必失败」是事实，状态词直接写在这一行上。
  *
+ * 横幅里的「扩展装没装」走后端 extensionStatus，判据是 **pi 自己的发现规则**
+ * （`~/.pi/agent/extensions/` 目录自动发现 + settings.json 顶层 `extensions`
+ * 的 +/−/! override），而不是 packages 列表：直接 clone 到 extensions 下的扩展
+ * 从来不出现在 packages 里，只看那份表就会把正在工作的工具报成「没装」（旧
+ * 版本的误报，已由 web_search.rs 的 extension_probe 修）。四态分开说：没装
+ * 去安装、被关着去打开、读不到就不提醒。
+ *
  * 没有「搜索引擎」可选：Helix 只支持 Tavily，扩展的 auto 与 tavily 在这里是同一条
  * 路，给一个只有一个选项的下拉就是骗控件。扩展自己还留着一条 perplexity 路由（靠
  * `PERPLEXITY_API_KEY` 环境变量或文件里的旧值生效），Helix 不配置它、也不再写
@@ -60,7 +67,11 @@ export function WebSearchSettings() {
   const [unmanagedProvider, setUnmanagedProvider] = useState("");
   const [tavily, setTavily] = useState<KeyState>(EMPTY_STATE);
   const [tavilyDraft, setTavilyDraft] = useState("");
-  const [extensionLoaded, setExtensionLoaded] = useState(true);
+  // 读回来之前按 unknown 处理：宁可不提醒，也不要先亮一下「没装」再灭。
+  const [extensionStatus, setExtensionStatus] = useState<
+    "loaded" | "disabled" | "absent" | "unknown"
+  >("unknown");
+  const [extensionPackage, setExtensionPackage] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -71,7 +82,14 @@ export function WebSearchSettings() {
       if (!r?.ok) return;
       setUnmanagedProvider(r.unmanagedSearchProvider ?? "");
       setTavily(r.secrets?.tavilyApiKey ?? EMPTY_STATE);
-      setExtensionLoaded(r.extensionLoaded ?? true);
+      // 新字段优先；旧后端只给 extensionLoaded 时退化成两态（不会比从前错得更多）。
+      setExtensionStatus(
+        r.extensionStatus ??
+          (r.extensionLoaded === false ? "absent" : "loaded"),
+      );
+      setExtensionPackage(
+        typeof r.extensionPackage === "string" ? r.extensionPackage : null,
+      );
     } catch (e) {
       console.error("[WebSearchSettings] load failed:", e);
     }
@@ -116,12 +134,23 @@ export function WebSearchSettings() {
 
   return (
     <SettingGroup>
-      {!extensionLoaded && (
+      {extensionStatus === "absent" && (
         <div className="px-4 py-3 ui-text-sm2 bg-amber-500/5 text-amber-700">
-          没在 pi 的 packages 里看到 web-access 扩展 —— 这里的 key 配好了也没有
+          没在 <span className="font-mono">~/.pi/agent/extensions</span> 里找到
+          web-access 扩展 —— 这里的 key 配好了也没有
           <span className="font-mono"> web_search </span>
           工具。到「扩展」页安装{" "}
           <span className="font-mono">pi-web-access</span>。
+        </div>
+      )}
+
+      {extensionStatus === "disabled" && (
+        <div className="px-4 py-3 ui-text-sm2 bg-amber-500/5 text-amber-700">
+          web-access 已经装了（
+          <span className="font-mono">{extensionPackage ?? "?"}</span>
+          ），但在「扩展」页被关着 ⇒ pi 不加载它，也就没有
+          <span className="font-mono"> web_search </span>
+          工具。去把它打开，不是重装。
         </div>
       )}
 

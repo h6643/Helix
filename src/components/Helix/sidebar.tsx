@@ -1087,10 +1087,9 @@ export function Sidebar({ onNewTask, collapsed = false }: SidebarProps) {
           }
         }
         useHelixStore.getState().setNoActiveConversation(false);
+        // 右侧栏「停在哪一面」由 setCurrentSessionId 按会话交接（存旧的、恢复目标
+        // 会话自己那一面），这里不再无条件收起。
         useHelixStore.getState().setCurrentSessionId(session.id);
-        // 切换对话时关闭右侧边栏：右侧面板（更改/代码/浏览器等）是上一个对话
-        // 的上下文，切到新对话后保留旧内容会造成误导，统一收起。
-        useHelixStore.getState().setRightSidebarTab(null);
         // Background resume warm-up: the backend's session instance may have
         // been reaped (idle) or never existed (app restart). Restoring it
         // costs spawn + switch_session (scales with conversation length —

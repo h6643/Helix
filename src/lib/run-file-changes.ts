@@ -179,6 +179,18 @@ function isAbsolutePath(p: string): boolean {
 }
 
 /**
+ * `~` / `~/x` / `~\x` —— pi 落盘前会把它展开成**用户主目录**，所以它压根不是
+ * "相对项目根的路径"。卡片只会拿 workDir 去拼它，拼出来的
+ * `D:\Project\Helix\~/.pi/agent/...` 既打不开也撤不动（2026-10-11 那条改
+ * `~/.pi/agent/extensions/pi-connect/` 的 run）。
+ *
+ * 判据不需要项目根，所以渲染侧也能用它兜住修法之前已经落盘的旧对话。
+ */
+export function isHomeAnchoredPath(p: string): boolean {
+  return p === "~" || /^~[/\\]/.test(p);
+}
+
+/**
  * 前缀比较用的归一：统一分隔符、压掉重复斜杠、**折叠 `.`/`..`**、去尾部分隔符。
  * 只有 Windows 盘符路径转小写 —— POSIX 大小写敏感，一律 toLowerCase 会把
  * `/home/A` 和 `/home/a` 判成同一个目录。
@@ -205,6 +217,13 @@ function normalizeForPrefix(p: string): string {
   return (head + parts.join("/")).replace(/\/+$/, "");
 }
 
+/** `absPath`（绝对路径）是否落在 `root` 之下，含根本身。 */
+function isUnderRoot(absPath: string, root: string): boolean {
+  const r = normalizeForPrefix(root);
+  const p = normalizeForPrefix(absPath);
+  return p === r || p.startsWith(r + "/");
+}
+
 /**
  * 这条改动算不算「本项目内的」。
  *
@@ -212,7 +231,10 @@ function normalizeForPrefix(p: string): string {
  * 去打项目外的路径、让一次项目内 git 重算被项目外的写入触发（真实症状：改完
  * `~/.pi/agent/settings.json` 里的审批配置也出现在卡片里）。
  *
- * - 相对路径 ⇒ 算在内：pi 的工具参数按会话 cwd 解析，那个 cwd 就是项目根。
+ * - `~/…` 形态 ⇒ **算在外**：pi 把它展开成用户主目录，与项目无关（见
+ *   `isHomeAnchoredPath`）。
+ * - 其余相对路径 ⇒ 按项目根解析后判断：pi 的工具参数按会话 cwd 解析，那个 cwd
+ *   就是项目根；写成 `../跳出根/` 的同样在项目外。
  * - 绝对路径 + 知道项目根 ⇒ 必须在根之下（含根本身）。
  * - 绝对路径 + 不知道根（远程对话的 `remote://…` 虚拟键、或还没选项目目录）⇒
  *   **保守放行**：拿本机前缀去比远端路径必然全不匹配，那会把用户真实的改动整条
@@ -222,11 +244,12 @@ function changeBelongsToProject(
   filePath: string,
   projectRoot: string | null | undefined,
 ): boolean {
-  if (!isAbsolutePath(filePath)) return true;
+  if (isHomeAnchoredPath(filePath)) return false;
   if (!projectRoot) return true;
-  const root = normalizeForPrefix(projectRoot);
-  const p = normalizeForPrefix(filePath);
-  return p === root || p.startsWith(root + "/");
+  return isUnderRoot(
+    isAbsolutePath(filePath) ? filePath : `${projectRoot}/${filePath}`,
+    projectRoot,
+  );
 }
 
 /**

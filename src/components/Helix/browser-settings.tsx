@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import {
   PageHeader,
+  NumberField,
   SettingGroup,
   SettingRow,
 } from "./settings-ui";
@@ -46,6 +47,15 @@ interface PasswordImportResult {
   failed?: number;
   total?: number;
   closed_windows?: number;
+}
+
+/** 人工接管超时（browser_handoff_config / browser_set_handoff_config）。
+ *  返回里的 `timeoutMin` 是回读到的生效值，所以界面不必自己记一份。 */
+interface HandoffConfig {
+  ok: boolean;
+  timeoutMin?: number;
+  maxMin?: number;
+  error?: string;
 }
 
 /** 清理范围，与后端 browser_clear_data 的 mode 一一对应。 */
@@ -136,6 +146,10 @@ export function BrowserSettingsPanel() {
   const [pwBusy, setPwBusy] = useState(false);
   const [pwResult, setPwResult] = useState<string | null>(null);
 
+  // 人工接管超时。
+  const [handoff, setHandoff] = useState<HandoffConfig | null>(null);
+  const [handoffMsg, setHandoffMsg] = useState<string | null>(null);
+
   const refresh = useCallback(() => {
     invoke<StorageUsage>("browser_storage_usage")
       .then(setUsage)
@@ -160,6 +174,31 @@ export function BrowserSettingsPanel() {
         }
       })
       .catch(() => setBrowsers([]));
+  }, []);
+
+  useEffect(() => {
+    invoke<HandoffConfig>("browser_handoff_config")
+      .then(setHandoff)
+      .catch((e: any) =>
+        setHandoff({ ok: false, error: e?.message ?? String(e) }),
+      );
+  }, []);
+
+  /** 保存接管超时：以后端回读的生效值刷新界面 —— 写失败时数字不会自己骗人。 */
+  const saveHandoffMin = useCallback(async (min: number) => {
+    setHandoffMsg(null);
+    try {
+      const res = await invoke<HandoffConfig>("browser_set_handoff_config", {
+        updates: { timeoutMin: min },
+      });
+      if (res.ok) {
+        setHandoff(res);
+      } else {
+        setHandoffMsg(`没保存：${res.error ?? "后端拒绝了该值"}`);
+      }
+    } catch (e: any) {
+      setHandoffMsg(`没保存：${e?.message ?? String(e)}`);
+    }
   }, []);
 
   const openDir = useCallback(async () => {
@@ -229,6 +268,14 @@ export function BrowserSettingsPanel() {
 
   const option = CLEAR_OPTIONS.find((o) => o.mode === pending);
 
+  // 只有后端回了生效值才渲染输入框：取值区间由 Rust 侧定义，界面不自己记一份。
+  const handoffCfg =
+    handoff?.ok &&
+    typeof handoff.timeoutMin === "number" &&
+    typeof handoff.maxMin === "number"
+      ? { value: handoff.timeoutMin, max: handoff.maxMin }
+      : null;
+
   return (
     <div className="flex-1 flex flex-col space-y-6">
       <PageHeader>浏览器</PageHeader>
@@ -280,7 +327,7 @@ export function BrowserSettingsPanel() {
           <>
             <SettingRow
               label="从本地浏览器导入"
-              hint="读取本机 Chrome / Edge 保存的网页密码，解密后直接写进内置浏览器的登录数据（WebView2）。导入时会先关闭已打开的浏览器页；密码只留在浏览器配置里，Helix 不做任何加密留存。新版 Chrome 的应用绑定加密条目无法读取，会自动跳过。"
+              hint="读取本机 Chrome / Edge 保存的网页密码，密码只留在浏览器配置里，Helix 不做任何加密留存。新版 Chrome 的应用绑定加密条目无法读取，会自动跳过。"
             >
               <div className="flex items-center gap-2">
                 <BrowserPills
@@ -310,6 +357,40 @@ export function BrowserSettingsPanel() {
             )}
           </>
         )}
+        </SettingGroup>
+      </div>
+
+      {/* 人工接管 */}
+      <div className="pt-1">
+        <div className="px-4 pt-3 pb-2">
+          <h4 className="ui-subtitle font-semibold text-foreground">人工接管</h4>
+        </div>
+        <SettingGroup>
+          {handoffCfg ? (
+            <SettingRow
+              label="接管超时"
+              hint={`Agent 把侧栏浏览器交给你登录/过验证码之后，这条页最长被锁住多久；上限 ${handoffCfg.max} 分钟。`}
+            >
+              <NumberField
+                value={handoffCfg.value}
+                min={1}
+                max={handoffCfg.max}
+                suffix="分钟"
+                onCommit={saveHandoffMin}
+              />
+            </SettingRow>
+          ) : (
+            <div className="px-4 py-3 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground/70">
+              {handoff
+                ? `读不到接管超时配置：${handoff.error ?? "后端没返回生效值"}`
+                : "加载中…"}
+            </div>
+          )}
+          {handoffMsg && (
+            <div className="px-4 py-2 text-[calc(var(--helix-transcript-size)*0.8571)] text-muted-foreground">
+              {handoffMsg}
+            </div>
+          )}
         </SettingGroup>
       </div>
 

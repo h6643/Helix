@@ -242,8 +242,17 @@ export interface BrowserHandoff {
   reason: string;
   /** 登录成功的判据，供 browser_check_login 探针使用；缺省时只认「我已完成」。 */
   expect?: { selector?: string; urlIncludes?: string };
-  /** 接管开始时刻（ms epoch），TTL 兜底从它算。 */
-  since: number;
+  /** browser_handoff(wait=true)：模型正停在这条接管上等结论。横幅据此多提一句
+   *  「点一下它就继续」，否则人不知道自己的一没点正在卡住一整轮。 */
+  waiting?: boolean;
+  /** 接管到期时刻（ms epoch）：到点自动解锁，也是 wait=true 那趟等待的死线。
+   *  时长来自用户在设置里配的 `browser.handoff_timeout_min`，接管开始时读一次
+   *  并固化在这里 —— 等待方与锁页方看同一个数，改设置不会影响进行中的接管。 */
+  until: number;
+  /** 用户点了「我已完成」。事实写在这条记录本身，等待方（`wait=true` 那一趟拿的是
+   *  同一个对象引用）据此把「人宣告完成」和「超时自动解锁」区分开 —— 只看 store 里
+   *  的记录消失是分不清这两件事的，曾经因此把超时误报成 done。 */
+  resolvedByUser?: boolean;
 }
 
 type ApiProvider = string;
@@ -692,7 +701,19 @@ export const DEFAULT_SHORTCUTS: Record<string, CustomShortcutEntry> = {
   "open-review": {
     keys: ["Ctrl", "Shift", "G"],
     action: "open-review",
-    description: "打开审查选项卡",
+    description: "打开审阅",
+  },
+  // 标题栏「右侧边栏」菜单里的三个入口：菜单项上显示的 kbd 读的就是这一份，
+  // 所以菜单显示的键和真正生效的键永远是同一个（改键只改这里一处）。
+  "open-browser": {
+    keys: ["Ctrl", "T"],
+    action: "open-browser",
+    description: "打开内置浏览器",
+  },
+  "open-terminal": {
+    keys: ["Ctrl", "Shift", "J"],
+    action: "open-terminal",
+    description: "打开右侧边栏终端",
   },
   "toggle-sidebar": {
     keys: ["Ctrl", "B"],
@@ -707,7 +728,7 @@ export const DEFAULT_SHORTCUTS: Record<string, CustomShortcutEntry> = {
   "toggle-terminal": {
     keys: ["Ctrl", "J"],
     action: "toggle-terminal",
-    description: "打开终端",
+    description: "打开终端（底部抽屉）",
   },
   "force-reload": {
     keys: ["Ctrl", "Shift", "R"],

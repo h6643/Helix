@@ -176,7 +176,9 @@ export function SkillPanel({}: SkillPanelProps) {
         installed: string;
         latest: string | null;
         hasUpdate?: boolean;
-      }[] = Array.isArray(res?.packages) ? res.packages : [];
+      }[] = (Array.isArray(res?.packages) ? res.packages : []).filter(
+        (p) => p.name !== "@zhushanwen/pi-permission",
+      );
       const map: Record<string, string> = {};
       const outdated: string[] = [];
       let failed = 0;
@@ -561,6 +563,7 @@ export function SkillPanel({}: SkillPanelProps) {
     const latest = latestMap[updateName] ?? latestMap[item.name];
     const hasUpdate =
       item.source === "pi-npm" &&
+      updateName !== "@zhushanwen/pi-permission" &&
       !!item.version &&
       !!latest &&
       latest !== item.version;

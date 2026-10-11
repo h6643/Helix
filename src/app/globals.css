@@ -860,6 +860,33 @@ button, [role="button"], a, input, textarea, select {
 .helix-app-backdrop.helix-app-bg-active .helix-app-left-shell {
   background: transparent;
 }
+/* 侧栏隐藏时（helix-layout 给外壳挂 --solo）：蒙罩改由外壳自己画，标题栏转透明。
+   标题栏只有 40px 高，侧栏一藏就没有任何元素覆盖它下面那条 48px 宽的列，外壳若
+   照旧透明会露出壁纸原色（一条深蓝竖带）。两者必须成对换：只给外壳补蒙罩会让
+   顶部 40px 叠成 88%×88%≈97.6%，在那条列上留一道横向接缝。
+   position: relative 是承重的（同 .helix-app-titlebar / .helix-sidebar）：外壳平时
+   是 static 且背景透明，看不出问题；一旦要画蒙罩，static 后代的背景整层会排在
+   absolute z-0 的背景图之下，蒙罩等于没画。 */
+.helix-app-backdrop.helix-app-bg-active .helix-app-left-shell--solo {
+  position: relative;
+  background: var(--surface-bg);
+}
+.helix-app-backdrop.helix-app-bg-active .helix-app-left-shell--solo .helix-app-titlebar {
+  background: transparent;
+}
+/* 侧栏在时标题栏的 border-right 与 .helix-sidebar 的那条首尾相接，是一根贯通的分隔线；
+   侧栏一藏就只剩 40px 高的短痕，整条删掉（不分有无背景图，两种模式下都只剩短痕）。
+   必须写在 .dark .helix-app-titlebar 之后：同权重靠树序胜出。 */
+.helix-app-left-shell--solo .helix-app-titlebar {
+  border-right: none;
+}
+/* 兜底必须写在上面的 --solo 主规则之后：@supports 不改层叠权重，同权重下树序后者胜出，
+   放进文件前部那个 @supports not 块里会被 --surface-bg 覆盖成死代码。 */
+@supports not (backdrop-filter: blur(1px)) {
+  .helix-app-backdrop.helix-app-bg-active .helix-app-left-shell--solo {
+    background: var(--card);
+  }
+}
 
 /* 终端面板与全局背景图的层叠关系（承重，别删 relative）：
    背景图是 absolute z-0 且树序最前的定位子元素，非定位后代的背景/内联内容
@@ -983,6 +1010,52 @@ input[type="number"] {
 
 .animate-scale-in {
   animation: scale-in 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 压缩反馈的明显视觉动画：
+   - helix-compress-flash：压缩完成（divider / 自动压缩状态行）挂载时滑入 +
+     一次主色高亮闪光，然后恢复静默。只跑一次（animation-fill-mode: forwards）。
+   - helix-compress-breathe：压缩进行中的呼吸脉冲，循环直到 busy 标记熄灭。 */
+@keyframes helix-compress-flash {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+    background-color: color-mix(in oklch, var(--primary) 30%, transparent);
+    border-color: color-mix(in oklch, var(--primary) 55%, transparent);
+    color: color-mix(in oklch, var(--primary) 80%, var(--foreground));
+  }
+  35% {
+    opacity: 1;
+    transform: translateY(0);
+    background-color: color-mix(in oklch, var(--primary) 14%, transparent);
+    border-color: color-mix(in oklch, var(--primary) 40%, transparent);
+    color: color-mix(in oklch, var(--primary) 45%, var(--foreground));
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    background-color: transparent;
+    border-color: transparent;
+    color: inherit;
+  }
+}
+.animate-compress-flash {
+  animation: helix-compress-flash 1.4s ease-out forwards;
+}
+
+@keyframes helix-compress-breathe {
+  0%,
+  100% {
+    background-color: color-mix(in oklch, var(--primary) 6%, transparent);
+    border-color: color-mix(in oklch, var(--primary) 20%, transparent);
+  }
+  50% {
+    background-color: color-mix(in oklch, var(--primary) 13%, transparent);
+    border-color: color-mix(in oklch, var(--primary) 36%, transparent);
+  }
+}
+.animate-compress-breathe {
+  animation: helix-compress-breathe 1.6s ease-in-out infinite;
 }
 
 /* Collapsible section smooth expand */

@@ -486,7 +486,10 @@ function ToolCard({
   // 也会按 break-all 自然折行成两三行，两种都会把时间线撑开。展开后回到全文。
   // 行尾不放文字入口（一行标题 + 省略号已经说明可点），所以被裁过的行必须自己
   // 可点，哪怕它还没有结果 —— 读取类没有结果面板，点开就是标题换成全文容器。
-  const clampTitle = !open;
+  // 命令类例外：展开后标题仍然只有 1 行。heredoc / 多行脚本能吃到整屏，铺在标题位
+  // 就把真正要看的结果顶出视野，而它并没有消失——⎿ 卡片首部本来就重复一遍 `$ 命令`
+  // 全文，标题再展开纯属同一件事做两遍。
+  const clampTitle = !open || isCommandTool;
   const expandable =
     (hasExpandableContent && (!isReadTool || hasImageResult)) ||
     (clampTitle && titleClipped);
@@ -506,6 +509,15 @@ function ToolCard({
             : undefined);
   const running = stepStatus === "running" && isRunning;
   const failed = stepStatus === "failed";
+  // 命令类的输出必须常驻、而且要在 ⎿ 边框里：以前它挂在标题下方当裸 monospace
+  // 文本，等于「一行标题 + 下面的卡片」这条规则在运行中失效（整屏结果没有容器，
+  // 和正文分不出来）。所以运行中/报错时不用点开也渲染面板，面板里就是那套
+  // 「输入卡 + 实时输出」，跟展开后完全同一份结构。
+  const forcePanel =
+    isCommandTool &&
+    ((running && !!step.content) ||
+      results.some((r) => r.type === "error"));
+  const panelVisible = expandable && (open || forcePanel);
   const action = toolActionText(step);
   // 动词固定不随状态变化("搜索/读取/执行"),完成态不再加"已"前缀——
   // 组折叠摘要已经表达完成语义,行内前缀"已/正在"切换只会让列宽抖动。
@@ -559,6 +571,12 @@ function ToolCard({
       .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
       .join("\n");
   })();
+  // 运行中的实时输出尾巴（tool_output_delta 往 step.content 里追加）。它和"输入"必须
+  // 合成同一张卡：分成两块就是"一张白卡 + 下面一堆没有容器的散字"，同一件事两种排版。
+  const liveTail =
+    running && step.content
+      ? stripAnsi(step.content.slice(-PREVIEW_TAIL_CHARS))
+      : "";
 
   return (
     <div className="group">
@@ -668,38 +686,51 @@ function ToolCard({
         })()}
       </button>
 
-      {/* 命令类不可展开：运行中的实时输出与失败错误直接外露在标题下，不依赖展开。 */}
-      {!canExpand && running && step.content && (
+      {/* 读取类不展开（canExpand=false），运行中的实时输出与失败错误直接外露在标题
+          下，不依赖展开。命令类走下面那张常驻面板，所以这里排除它——两处都渲染就是
+          同一段输出两份。 */}
+      {!canExpand && !isCommandTool && running && step.content && (
         <div className="ml-1 mt-1 text-[0.85em] text-foreground/40 font-mono max-h-40 overflow-y-auto leading-relaxed whitespace-pre-wrap break-all">
           {stripAnsi(step.content.slice(-PREVIEW_TAIL_CHARS))}
         </div>
       )}
-      {!canExpand && results.some((r) => r.type === "error") && (
-        <div className="ml-1 mt-1 flex items-start gap-1">
-          <div className="flex-1 min-w-0 text-[0.8em] text-red-500/80 font-mono whitespace-pre-wrap break-all leading-relaxed">
-            {results
-              .filter((r) => r.type === "error")
-              .map((r) =>
-                stripMktempNoise(
-                  stripEmoji(normalizeAcpContent(r.content || "")),
-                ),
-              )
-              .filter(Boolean)
-              .join("\n")}
-          </div>
-        </div>
-      )}
-
-      {expandable && open && (
-        <div className="tool-result-panel space-y-1.5">
-          {/* Streaming output preview — shown while tool is running.
-              tool.progress → tool_call_update(in_progress) → tool_output_delta 把
-              实时输出追加到 step.content（agent-flow-panel），这里显示它的末尾。 */}
-          {running && step.content && (
-            <div className="text-[0.85em] text-foreground/40 font-mono max-h-40 overflow-y-auto leading-relaxed whitespace-pre-wrap break-all">
-              {stripAnsi(step.content.slice(-PREVIEW_TAIL_CHARS))}
+      {!canExpand &&
+        !isCommandTool &&
+        results.some((r) => r.type === "error") && (
+          <div className="ml-1 mt-1 flex items-start gap-1">
+            <div className="flex-1 min-w-0 text-[0.8em] text-red-500/80 font-mono whitespace-pre-wrap break-all leading-relaxed">
+              {results
+                .filter((r) => r.type === "error")
+                .map((r) =>
+                  stripMktempNoise(
+                    stripEmoji(normalizeAcpContent(r.content || "")),
+                  ),
+                )
+                .filter(Boolean)
+                .join("\n")}
             </div>
-          )}
+          </div>
+        )}
+
+      {panelVisible && (
+        <div className="tool-result-panel space-y-1.5">
+          {/* 还没有结果（运行中 / 调用被中断 / 只剩 error 结果）：这一张卡就是"输入 +
+              实时输出"。命令类尤其必须靠它——标题永远只占一行，不渲染就没有任何地方
+              能看到整条命令。结果到达后改由下面的结果卡带 `$ 命令` 前缀，不再走这里。 */}
+          {(results.length === 0 ||
+            results.every((r) => r.type === "error")) &&
+            !!(headerText || liveTail) && (
+              <div className="helix-md">
+                <CodeCard
+                  language="text"
+                  code={[headerText, liveTail].filter(Boolean).join("\n\n")}
+                  showRunButton={false}
+                  showHeader={false}
+                  collapsible={false}
+                  className="!leading-snug !my-0"
+                />
+              </div>
+            )}
           {/* 工作流：meta 里的真实结构（说明 + 阶段链）。这段程序是模型写的文本，
               这里只做静态解析、绝不执行；阶段名取自 meta.phases[].title。 */}
           {isWorkflowTool && workflowMeta && (
@@ -768,9 +799,9 @@ function ToolCard({
               })()}
             </div>
           )}
-          {/* 参数与结果合并成同一张卡片：参数作为首部"输入"行，结果紧随其后。
-              外层 ⎿ 面板已带 bg-inset 底与折角线，内部只渲染一张代码卡。 */}
-          {(headerText || results.length > 0) && (
+          {/* 结果区：参数已经由上面那张「输入卡」或本卡首部的 headerText 行给出，
+              这里只列结果。外层 ⎿ 面板自带折角线与内嵌底色，内部只渲染代码卡。 */}
+          {results.length > 0 && (
             <div className="space-y-1.5 divide-y divide-border/20">
               {results.map((r, ri) => {
                 if (r.type === "error") {
@@ -857,22 +888,6 @@ function ToolCard({
                   </div>
                 );
               })}
-              {/* 仅有"输入"、暂无结果（运行中）：把输入单独渲染成一张卡，
-                  保持"始终一张卡"的视觉，避免空面板。命令类由上方实时输出预览覆盖。 */}
-              {results.length === 0 && headerText && !isCommandTool && (
-                <div className="pt-1.5">
-                  <div className="helix-md">
-                    <CodeCard
-                      language="text"
-                      code={headerText}
-                      showRunButton={false}
-                      showHeader={false}
-                      collapsible={false}
-                      className="!leading-snug !my-0"
-                    />
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>

@@ -582,6 +582,10 @@ export function ScheduledTasksPanel({}: ScheduledTasksPanelProps) {
           await helixApi()!.send("session/prompt", {
             session_id: helixSessionId,
             prompt: [{ type: "text", text: task.prompt }],
+            // 定时任务不是用户当下的那句话：主线正在跑时它必须**排队**等这一轮结束，
+            // 绝不能把用户正在跑的回合掐掉（缺省行为是「失步就中止旧回合重发」，
+            // 那是给交互式发送用的）。
+            streaming_behavior: "followUp",
           });
         } catch (e) {
           console.error("[ScheduledTask] Failed to dispatch to Helix:", e);

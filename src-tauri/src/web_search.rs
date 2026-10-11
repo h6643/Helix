@@ -106,20 +106,161 @@ fn env_name_for(raw: &str) -> Option<String> {
     Some(ident.to_string())
 }
 
-/// 装没装扩展：settings.json 的 `packages` 里有没有 `web-access` 那一条。
-/// 兼容三种写法：`extensions\web-access`、`extensions/web-access`、
-/// `npm:pi-web-access`。取不到就报 unknown（不是 false —— 读不到文件不等于没装）。
-fn extension_package_entry() -> Option<String> {
-    let root = crate::config::read_pi_settings();
-    let packages = root.get("packages").and_then(Value::as_array)?;
-    packages
+/// 装没装扩展：按 **pi 自己的发现规则**判断，而不是只看 settings.json 的 packages。
+///
+/// pi 加载用户级扩展有两条互不相干的通路（`core/package-manager.js`）：
+///
+/// 1. `collectAutoExtensionEntries(~/.pi/agent/extensions)` —— 目录里有
+///    `index.ts`/`index.js`，或其 package.json 声明了 `pi.extensions`，就自动
+///    加载，**完全不经过 packages 列表**（`package-manager.js` 的
+///    `addResources("extensions", collectAutoExtensionEntries(userDirs.extensions), …)`）；
+/// 2. `packages` 里的显式条目（`npm:pi-web-access`、`extensions/web-access`）。
+///
+/// 本机的 web-access 走的是第 1 条（目录直接 clone 在 `extensions/web-access`，
+/// package.json 里 `pi.extensions = ["./index.ts"]`，packages 列表里一个字节都没有）。
+/// 旧实现只查第 2 条，于是把它判成「没装」并挂出「这里的 key 配好了也没有
+/// web_search 工具」的横幅 —— 而工具明明正在跑。纯误报，修。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExtensionProbe {
+    /// 能不能判定。读不到扩展根目录时是 false —— 不等于没装。
+    known: bool,
+    /// pi 会不会加载它（发现 + 未被 override 关掉）。
+    loaded: bool,
+    /// 在哪发现的（人话，给横幅/排查用）；没发现时为空。
+    source: String,
+}
+
+/// 给面板的四态。横幅文案不能只拿「没装载」一个布尔：磁盘上已经有、只是被
+/// `settings.json 的 extensions` 关掉的扩展，让用户去「安装」是错建议 ——
+/// 他要按的是打开那个开关。未知态不报警（见 `web_search_config_list`）。
+fn extension_status_of(probe: &ExtensionProbe) -> &'static str {
+    if !probe.known {
+        "unknown"
+    } else if probe.loaded {
+        "loaded"
+    } else if probe.source.is_empty() {
+        "absent"
+    } else {
+        "disabled"
+    }
+}
+
+/// 目录名候选：本机 clone 下来叫 `web-access`，`pi install npm:` 的包名是
+/// `pi-web-access`，两种都得认。
+const EXTENSION_DIR_NAMES: [&str; 2] = ["web-access", "pi-web-access"];
+
+/// 判定一个目录是不是 pi 会自动加载的扩展包（镜像 `resolveExtensionEntries`：
+/// package.json 的 `pi.extensions` 优先，其次 `index.ts`/`index.js`）。
+/// 返回 pi 实际会加载的、相对该目录的入口文件名。
+fn discovered_extension_entry(dir: &std::path::Path) -> Option<Vec<String>> {
+    let pkg_json = dir.join("package.json");
+    if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+        if let Ok(pkg) = serde_json::from_str::<Value>(&content) {
+            if let Some(list) = pkg.pointer("/pi/extensions").and_then(Value::as_array) {
+                let mut hits = Vec::new();
+                for entry in list.iter().filter_map(Value::as_str) {
+                    // 只取入口文件名（去掉 `./` 与嵌套路径）：候选已经带上目录前缀，
+                    // 而 override 模式也是按 `extensions/<name>/<file>` 写的。
+                    let name = entry
+                        .trim_start_matches("./")
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    if !name.is_empty() && dir.join(&name).exists() {
+                        hits.push(name);
+                    }
+                }
+                if !hits.is_empty() {
+                    return Some(hits);
+                }
+            }
+        }
+    }
+    for index in ["index.ts", "index.js"] {
+        if dir.join(index).exists() {
+            return Some(vec![index.to_string()]);
+        }
+    }
+    None
+}
+
+/// 纯函数形态：把三个外部输入（扩展根目录、packages 表、override 模式）都收进来，
+/// 好让判定能脱开真实 home 目录被测。
+fn extension_probe(
+    ext_root: &std::path::Path,
+    packages: &[(String, bool)],
+    patterns: &[String],
+) -> ExtensionProbe {
+    // 第 1 条通路：自动发现。候选路径与 helix 的扩展列表行保持同一套
+    // （目录本身 + 它的入口文件），这样 `!extensions/web-access/**` 这类
+    // 关掉本地扩展的写法能被同一个规则命中。
+    if ext_root.is_dir() {
+        for name in EXTENSION_DIR_NAMES {
+            let dir = ext_root.join(name);
+            if dir.is_dir() {
+                if let Some(entries) = discovered_extension_entry(&dir) {
+                    let rel_dir = format!("extensions/{name}");
+                    let mut candidates = vec![rel_dir.clone()];
+                    candidates.extend(entries.iter().map(|e| format!("{rel_dir}/{e}")));
+                    return ExtensionProbe {
+                        known: true,
+                        loaded: crate::helix::local_extension_enabled(&candidates, patterns),
+                        source: rel_dir,
+                    };
+                }
+            }
+            // 单文件形态：extensions/web-access.ts|js。
+            for ext in ["ts", "js"] {
+                let file = ext_root.join(format!("{name}.{ext}"));
+                if file.is_file() {
+                    let rel = format!("extensions/{name}.{ext}");
+                    return ExtensionProbe {
+                        known: true,
+                        loaded: crate::helix::local_extension_enabled(&[rel.clone()], patterns),
+                        source: rel,
+                    };
+                }
+            }
+        }
+    }
+
+    // 第 2 条通路：packages 显式条目（兼容 `extensions\web-access`、
+    // `extensions/web-access`、`npm:pi-web-access` 三种写法）。bool 是启用态
+    // （对象形态把所有资源类型过滤成 [] 时为 false）。
+    if let Some((source, enabled)) = packages.iter().find(|(s, _)| {
+        let norm = s.replace('\\', "/").to_lowercase();
+        norm.ends_with("web-access") || norm.ends_with("pi-web-access")
+    }) {
+        return ExtensionProbe {
+            known: true,
+            loaded: *enabled,
+            source: source.clone(),
+        };
+    }
+
+    // 两条路都没有：只有当扩展根目录确实读得动时才敢下「没装」的结论。
+    ExtensionProbe {
+        known: ext_root.is_dir(),
+        loaded: false,
+        source: String::new(),
+    }
+}
+
+/// 收集真实输入并判定。扩展根目录不存在（用户从没装过任何东西）时返回
+/// `known: false`，面板因此不会对着一个空目录喊「没装」。
+fn extension_probe_from_disk() -> ExtensionProbe {
+    let agent_dir = crate::paths::pi_agent_dir();
+    let ext_root = agent_dir.join("extensions");
+    // packages 的启用态由 helix 的统一映射给出（字符串条目 = 启用；对象把所有
+    // 资源类型过滤成 [] = 停用）。
+    let packages_enabled = crate::helix::pi_packages_enabled_map();
+    let packages: Vec<(String, bool)> = packages_enabled
         .iter()
-        .filter_map(Value::as_str)
-        .find(|s| {
-            let norm = s.replace('\\', "/").to_lowercase();
-            norm.ends_with("web-access") || norm.ends_with("pi-web-access")
-        })
-        .map(|s| s.to_string())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let patterns = crate::helix::pi_local_extension_patterns();
+    extension_probe(&ext_root, &packages, &patterns)
 }
 
 #[tauri::command]
@@ -176,14 +317,18 @@ pub fn web_search_config_list() -> Value {
         );
     }
 
-    let entry = extension_package_entry();
+    let probe = extension_probe_from_disk();
     json!({
         "ok": true,
         "unmanagedSearchProvider": unmanaged_search_provider,
         "secrets": Value::Object(secrets),
         "configPath": crate::config::config_yaml_path().to_string_lossy(),
-        "extensionLoaded": entry.is_some(),
-        "extensionPackage": entry,
+        // 判不准（扩展根目录都读不到）时不喊「没装」：宁可不提醒，也不要对着
+        // 正在工作的工具说它不存在 —— 那正是这次误报的形态。
+        "extensionLoaded": !probe.known || probe.loaded,
+        "extensionStatus": extension_status_of(&probe),
+        "extensionPackage": if probe.source.is_empty() { Value::Null } else { json!(probe.source) },
+        "extensionKnown": probe.known,
         "restartNeeded": true,
     })
 }
@@ -285,4 +430,151 @@ mod tests {
         let raw = back.get("tavilyApiKey").and_then(Value::as_str).unwrap_or("");
         assert_eq!(classify_credential(raw), CredentialSource::None);
     }
+
+    // ── 扩展是否装载：必须按 pi 的发现规则判，不能只看 packages ──────────
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "helix-websearch-test-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 本机现状的回归用例：目录 clone 在 extensions/web-access，package.json
+    /// 声明了 pi.extensions，settings.json 的 packages 里一个字节都没有。
+    /// 旧实现把这种形态判成「没装」，横幅于是对着正在工作的工具喊不存在。
+    #[test]
+    fn auto_discovered_dir_counts_as_installed_even_with_empty_packages() {
+        let root = temp_root("auto-discovered");
+        let ext = root.join("extensions").join("web-access");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("index.ts"), "export default () => {}").unwrap();
+        std::fs::write(
+            ext.join("package.json"),
+            r#"{"name":"pi-web-access-lean","pi":{"extensions":["./index.ts"]}}"#,
+        )
+        .unwrap();
+
+        let probe = extension_probe(&root.join("extensions"), &[], &[]);
+        assert!(probe.known, "扩展根目录存在 ⇒ 可判");
+        assert!(probe.loaded, "自动发现即装载，与 packages 无关：{:?}", probe);
+        assert_eq!(probe.source, "extensions/web-access");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn disable_override_takes_it_back_off() {
+        let root = temp_root("disabled");
+        let ext = root.join("extensions").join("web-access");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("index.ts"), "export default () => {}").unwrap();
+
+        let patterns = vec!["!extensions/web-access/**".to_string()];
+        let probe = extension_probe(&root.join("extensions"), &[], &patterns);
+        assert!(probe.known);
+        assert!(!probe.loaded, "glob 关掉 ⇒ 没装载");
+
+        // 关掉的是别家时不能误伤。
+        let other = vec!["!extensions/pi-cron/**".to_string()];
+        assert!(extension_probe(&root.join("extensions"), &[], &other).loaded);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn npm_packages_entry_still_counts() {
+        let root = temp_root("packages-only");
+        // 扩展根目录不存在，只有 packages 条目 —— 旧行为要保住。
+        let probe = extension_probe(
+            &root.join("extensions"),
+            &[("npm:pi-web-access".to_string(), true)],
+            &[],
+        );
+        assert!(probe.loaded, "packages 条目仍然算装：{:?}", probe);
+        assert_eq!(probe.source, "npm:pi-web-access");
+
+        // 对象形态把所有资源过滤成 [] ⇒ 停用，要如实报。
+        let disabled = extension_probe(
+            &root.join("extensions"),
+            &[("npm:pi-web-access".to_string(), false)],
+            &[],
+        );
+        assert!(!disabled.loaded);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 读不到扩展根目录 ≠ 没装：known=false，面板不许下结论。
+    #[test]
+    fn unreadable_root_is_unknown_not_absent() {
+        let root = temp_root("no-ext-dir");
+        let probe = extension_probe(&root.join("extensions"), &[], &[]);
+        assert!(!probe.known, "目录不存在 ⇒ 不可判");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bare_index_dir_without_manifest_is_discovered() {
+        let root = temp_root("bare-index");
+        let ext = root.join("extensions").join("pi-web-access");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("index.js"), "export default () => {}").unwrap();
+        // 目录名两种写法都得认：pi install 的包名形态。
+        let probe = extension_probe(&root.join("extensions"), &[], &[]);
+        assert!(probe.loaded, "index.js + pi-web-access 目录名：{:?}", probe);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 四态划分要准确：磁盘上有但被关掉 = disabled（去打开），不是 absent（去安装）。
+    #[test]
+    fn distinguishes_disabled_from_absent() {
+        let root = temp_root("status-matrix");
+        let ext = root.join("extensions").join("web-access");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("index.ts"), "export default () => {}").unwrap();
+        let ext_root = root.join("extensions");
+
+        assert_eq!(
+            extension_status_of(&extension_probe(&ext_root, &[], &[])),
+            "loaded"
+        );
+        assert_eq!(
+            extension_status_of(&extension_probe(
+                &ext_root,
+                &[],
+                &["-extensions/web-access/index.ts".to_string()]
+            )),
+            "disabled",
+            "已存在只是被 override 关掉 ⇒ 不该喊去安装"
+        );
+        // packages 里有条目但被过滤成空 ⇒ 同样是 disabled。
+        assert_eq!(
+            extension_status_of(&extension_probe(
+                &root.join("nothing"),
+                &[("npm:pi-web-access".to_string(), false)],
+                &[]
+            )),
+            "disabled"
+        );
+        assert_eq!(
+            extension_status_of(&extension_probe(&root.join("nothing"), &[], &[])),
+            "unknown",
+            "读不到目录 ⇒ 不可判，不报警"
+        );
+        assert_eq!(
+            extension_status_of(&extension_probe(
+                &ext_root,
+                &[],
+                &["+extensions/other".to_string()]
+            )),
+            "loaded"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
+

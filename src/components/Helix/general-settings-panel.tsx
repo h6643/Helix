@@ -33,17 +33,41 @@ interface NotifyPrefs {
   turnEndMode: string;
   approvalEnabled: boolean;
   clarifyEnabled: boolean;
+  handoffEnabled: boolean;
 }
 
 const DEFAULT_NOTIFY_PREFS: NotifyPrefs = {
   turnEndMode: "unfocused",
   approvalEnabled: true,
   clarifyEnabled: true,
+  handoffEnabled: true,
 };
 
 /** 秒 → 展示文案（60 的倍数按分钟显示，其余按秒）。 */
 function formatApprovalTimeout(sec: number): string {
   return sec >= 60 && sec % 60 === 0 ? `${sec / 60} 分钟` : `${sec} 秒`;
+}
+
+/**
+ * 系统侧开关的一句话结论。两个值都可能是 null（注册表里没写过 = Windows 只在用户
+ * 手动关掉时才写），缺省按「开」解释 —— 所以「没查到」绝不能写成「已关闭」。
+ * dev 那半句是必须的：插件在 dev 下不给 toast 设身份，系统兜底成 PowerShell，
+ * 此时关掉的其实是 PowerShell 那一项，拿 Helix 的名字说话就是撒谎。
+ */
+function systemNotifyHint(s: {
+  ok: boolean;
+  dev?: boolean;
+  systemEnabled?: boolean | null;
+  appEnabled?: boolean | null;
+} | null): string {
+  if (!s?.ok) return "查不到系统侧的通知开关，点右边到设置里自己确认。";
+  if (s.systemEnabled === false)
+    return "系统已关闭弹窗通知（总开关），Helix 的提醒会被静默丢弃。";
+  if (s.appEnabled === false)
+    return s.dev
+      ? "系统已关闭 PowerShell 的通知 —— dev 下弹窗借它的身份发出，所以连带一起被关。"
+      : "系统已关闭 Helix 的通知，提醒会被静默丢弃。";
+  return "系统侧允许弹窗。";
 }
 
 export function GeneralSettingsPanel() {
@@ -195,6 +219,28 @@ export function GeneralSettingsPanel() {
     useState<NotifyPrefs>(DEFAULT_NOTIFY_PREFS);
   const [notifyBusy, setNotifyBusy] = useState(false);
 
+  // 系统侧（Windows）到底让不让弹。只读一次：它是操作系统的状态，不是本页能改的
+  // 东西，用户改完系统设置回到本页时重新进入即可看到新值。
+  const [sysNotify, setSysNotify] = useState<{
+    ok: boolean;
+    aumid?: string;
+    dev?: boolean;
+    systemEnabled?: boolean | null;
+    appEnabled?: boolean | null;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    electronApp
+      .notificationStatus()
+      .then((r) => {
+        if (!cancelled && r) setSysNotify(r);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // 常规面板的开关/选项改动即生效（无保存按钮），防抖写入 IndexedDB，
   // 避免设置项重启后丢失。
   const settingsPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(
@@ -263,17 +309,19 @@ export function GeneralSettingsPanel() {
     };
   }, []);
 
-  // 后端回包 → 显示副本（三个字段一次换掉，避免半新半旧）。
+  // 后端回包 → 显示副本（四个字段一次换掉，避免半新半旧）。
   function applyNotifyPrefs(r: {
     turnEndMode?: string;
     approvalEnabled?: boolean;
     clarifyEnabled?: boolean;
+    handoffEnabled?: boolean;
   }) {
     setNotifyPrefs({
       turnEndMode: r.turnEndMode ?? DEFAULT_NOTIFY_PREFS.turnEndMode,
       approvalEnabled:
         r.approvalEnabled ?? DEFAULT_NOTIFY_PREFS.approvalEnabled,
       clarifyEnabled: r.clarifyEnabled ?? DEFAULT_NOTIFY_PREFS.clarifyEnabled,
+      handoffEnabled: r.handoffEnabled ?? DEFAULT_NOTIFY_PREFS.handoffEnabled,
     });
   }
 
@@ -300,25 +348,6 @@ export function GeneralSettingsPanel() {
       });
     } finally {
       setNotifyBusy(false);
-    }
-  };
-
-  const openNotifySettings = async () => {
-    try {
-      const r = await electronApp.openNotificationSettings();
-      if (!r.ok) {
-        showToast({
-          type: "error",
-          title: "打不开系统通知设置",
-          description: r.error,
-        });
-      }
-    } catch (e) {
-      showToast({
-        type: "error",
-        title: "打不开系统通知设置",
-        description: String(e),
-      });
     }
   };
 
@@ -589,16 +618,44 @@ export function GeneralSettingsPanel() {
             />
           </SettingRow>
           <SettingRow
-            label="系统通知设置"
-            hint="收不到提醒时，到系统设置里确认 Helix 的通知权限（含专注助手）"
+            label="人工接管通知"
+            hint="Agent 把右侧栏浏览器页交给你登录/过验证码时显示系统通知；锁页时长在 设置 → 浏览器 → 人工接管 里配"
           >
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void openNotifySettings()}
+            <Toggle
+              enabled={notifyPrefs.handoffEnabled}
+              onToggle={() =>
+                void patchNotify({
+                  handoffEnabled: !notifyPrefs.handoffEnabled,
+                })
+              }
+            />
+          </SettingRow>
+          <SettingRow label="系统通知设置" hint={systemNotifyHint(sysNotify)}>
+            <button
+              type="button"
+              onClick={() =>
+                void electronApp
+                  .openNotificationSettings()
+                  .then((r) => {
+                    if (!r?.ok)
+                      showToast({
+                        type: "error",
+                        title: "打不开系统设置",
+                        description: r?.error,
+                      });
+                  })
+                  .catch((e) =>
+                    showToast({
+                      type: "error",
+                      title: "打不开系统设置",
+                      description: String(e),
+                    })
+                  )
+              }
+              className="rounded-md border border-border/50 px-2.5 py-1 text-xs text-foreground transition-colors hover:bg-muted"
             >
               打开系统设置
-            </Button>
+            </button>
           </SettingRow>
         </SettingGroup>
       </div>

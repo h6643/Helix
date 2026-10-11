@@ -204,6 +204,21 @@ pub fn get_sessions_dir() -> Value {
     json!({ "sessionsDir": crate::state::pi_sessions_dir().display().to_string() })
 }
 
+/// 前端把「审批 / 反问卡」的生命周期事件写进 `~/.pi/agent/helix-recover.log`。
+///
+/// 网关只能证明两件事：请求到达并转发了（`permission_ask`）、以及没人回答（后来
+/// 的 `evict_permission_asks`）。而卡在半路消失的位置只有前端知道 —— 一次
+/// 「弹窗根本没弹、工具 5 分钟后自己 fail-closed 拒了」的事后排查里，日志层面
+/// 「被停止清空」「被新建对话清空」「前端面板当时根本没挂载」「归属判给了别的
+/// 对话」四种形态完全一样。这条命令让它们各自留下一行。
+///
+/// 尽力而为：`log_spawn_diag` 自己吞掉所有 IO 失败，日志绝不参与交互。
+#[tauri::command]
+pub fn helix_trace(message: String) -> Value {
+    crate::pi_gateway::log_spawn_diag(&format!("frontend {message}"));
+    json!({ "success": true })
+}
+
 /// The no-project default work dir (`~/.pi/agent/workspace/default`).
 ///
 /// This MUST be the same dir the gateway uses as the spawn cwd for
